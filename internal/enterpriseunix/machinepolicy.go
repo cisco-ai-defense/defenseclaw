@@ -111,6 +111,16 @@ func (m *policyManager) enrolledHomes() []string {
 // eligible-accounts format: the enumerator's eligible accounts or the
 // guardian's VS Code Local accounts. An unreadable record is no homes.
 func (env *Env) accountHomes(recordPath string) []string {
+	homes := []string{}
+	for _, home := range env.canonicalAccountHomes(recordPath) {
+		homes = append(homes, env.P(home))
+	}
+	return homes
+}
+
+// canonicalAccountHomes is the homes of the accounts an eligible-accounts
+// record names, as the record spells them.
+func (env *Env) canonicalAccountHomes(recordPath string) []string {
 	data, err := readBounded(env.P(recordPath), maxInputBytes)
 	if err != nil {
 		return nil
@@ -123,10 +133,10 @@ func (env *Env) accountHomes(recordPath string) []string {
 	if json.Unmarshal(data, &record) != nil {
 		return nil
 	}
-	homes := []string{}
+	var homes []string
 	for _, account := range record.Accounts {
 		if home := strings.TrimSpace(account.Home); home != "" {
-			homes = append(homes, env.P(home))
+			homes = append(homes, home)
 		}
 	}
 	return homes

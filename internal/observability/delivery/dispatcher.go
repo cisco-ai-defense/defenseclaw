@@ -1044,6 +1044,10 @@ func (dispatcher *Dispatcher) release(payloads []Payload) {
 func (dispatcher *Dispatcher) abandonPending() {
 	dispatcher.queueMu.Lock()
 	dropped := len(dispatcher.pending)
+	// Count the drop before the queue charge falls, as release requires: a
+	// reader that finds the queue empty then also finds every abandoned record
+	// counted, which the shutdown loss count relies on (GAP-1096).
+	dispatcher.counters.dropped.Add(uint64(dropped))
 	for _, payload := range dispatcher.pending {
 		dispatcher.chargedItems--
 		dispatcher.chargedBytes -= payload.Size()
@@ -1051,7 +1055,6 @@ func (dispatcher *Dispatcher) abandonPending() {
 	dispatcher.pending = nil
 	dispatcher.queueMu.Unlock()
 	if dropped > 0 {
-		dispatcher.counters.dropped.Add(uint64(dropped))
 		dispatcher.completed.Add(uint64(dropped))
 		dispatcher.signalFlush()
 	}

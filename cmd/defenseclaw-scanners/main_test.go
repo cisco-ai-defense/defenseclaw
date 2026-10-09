@@ -40,6 +40,52 @@ func TestUnpackRefusesEscapingEntries(t *testing.T) {
 	}
 }
 
+// GAP-1063: a prepare stopped at its bound left its staging folder, and
+// every retry unpacked the whole runtime again, so a slow computer never
+// finished. The next unpack takes the folder over and writes only the files
+// that are missing or differ.
+func TestUnpackResumesAnInterruptedStaging(t *testing.T) {
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	for _, name := range []string{"python/python.exe", "python/Lib/a.py", "python/Lib/b.py"} {
+		f, _ := w.Create(name)
+		_, _ = f.Write([]byte("content of " + name))
+	}
+	_ = w.Close()
+	root := t.TempDir()
+	const sha = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	interrupted := filepath.Join(root, ".unpack-1111111111111111")
+	if err := os.MkdirAll(filepath.Join(interrupted, "python", "Lib"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{unpackMarker: sha, "python/python.exe": "content of python/python.exe", "python/Lib/a.py": "cut sho"} {
+		if err := os.WriteFile(filepath.Join(interrupted, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept := filepath.Join(interrupted, "python", "python.exe")
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(kept, old, old); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(root, ".unpack-2222222222222222")
+	if claimInterruptedUnpack(root, strings.Repeat("f", 64), staging) {
+		t.Fatal("claimed the staging folder of another archive")
+	}
+	if !claimInterruptedUnpack(root, sha, staging) {
+		t.Fatal("the interrupted staging folder was not taken over")
+	}
+	if err := unpack(buf.Bytes(), staging); err != nil {
+		t.Fatalf("resume the unpack: %v", err)
+	}
+	if err := verifyRuntime(staging, buf.Bytes()); err != nil {
+		t.Fatalf("resumed tree: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(staging, "python", "python.exe")); err != nil || !info.ModTime().Equal(old) {
+		t.Fatalf("a whole file was written again: %v", err)
+	}
+}
+
 // A folder that carries the public completion marker is not trusted:
 // prepare compares every archived file with the embedded archive.
 func TestVerifyRuntimeRejectsAChangedFile(t *testing.T) {

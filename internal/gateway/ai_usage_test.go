@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -339,11 +340,25 @@ func TestIDEPluginFiltersAndInstallHintKeepWindowsSpelling(t *testing.T) {
 		!ideFilterMatches("jetbrains", "jetbrains", "pycharm") {
 		t.Fatal("ide filter must match products, and families only when the family is not a product")
 	}
-	if !useridentity.AccountFilterMatches("dcad-alice", "S-1-5-21-1", `DCLAB\dcad-alice`) || useridentity.AccountFilterMatches("bob", "S-1-5-21-1", `DCLAB\dcad-alice`) {
+	if !useridentity.NewAccountFilter("dcad-alice").Matches("S-1-5-21-1", `DCLAB\dcad-alice`) || useridentity.NewAccountFilter("bob").Matches("S-1-5-21-1", `DCLAB\dcad-alice`) {
 		t.Fatal("user filter must accept the account name without its domain")
 	}
-	if !useridentity.AccountFilterMatches(`DCLAB\dcad-alice`, "S-1-5-21-1", "dcad-alice") || useridentity.AccountFilterMatches("bob", "S-1-5-21-1", "dcad-alice") {
-		t.Fatal("user filter must accept the account name with its domain")
+	// GAP-1080, GAP-0366: a qualified filter selects the account the OS
+	// resolves it to by its id, so rows that carry the bare name match it and
+	// the twin of the same bare name does not.
+	restore := profileExplainAccount
+	t.Cleanup(func() { profileExplainAccount = restore })
+	profileExplainAccount = func(name string) (string, string, error) {
+		if strings.EqualFold(name, "dcad-o4u1@dclab.test") {
+			return "94403992", "dcad-o4u1@dclab.test", nil
+		}
+		return "", "", errors.New("no such account")
+	}
+	for _, spelling := range []string{"dcad-o4u1@dclab.test", "DCAD-O4U1@DCLAB.TEST"} {
+		filter := useridentity.NewAccountFilter(spelling, adminViewAccountIDs(spelling)...)
+		if !filter.Matches("94403992", "dcad-o4u1") || filter.Matches("1008", "dcad-o4u1") {
+			t.Fatalf("user filter %q must select the account it names by its uid only", spelling)
+		}
 	}
 	hint := claimedInstallHint(map[string]interface{}{"transcript_path": `C:\Users\dcad-alice\altcfg\projects\p\s.jsonl`})
 	if hint != `C:\Users\dcad-alice\altcfg` {

@@ -106,6 +106,11 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output (it refuses to replace an existing file unless you pass `--force`, and reports how many lines it wrote) |
 | `audit findings` | The distinct scan findings that are current: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions (hook rules, the LLM guardrail) are not tracked here; use `alerts` or `audit export` for them |
 
+On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
+from an elevated administrator prompt. The `enrollment.accounts` field lists
+each account's connectors and their enrolled, pending or failed state.
+`enterprise hooks status` is the Linux and macOS guardian view.
+
 On a standalone host, hook decisions, rejected connector hooks, direct
 inspect-tool calls and refused hook-socket requests carry the verified
 account (`user.id`, `defenseclaw.user.name`); a refused request also names
@@ -145,6 +150,7 @@ The MDM wrapper scripts print the same document.
 | `policy` | The effective policy the host runs. `effective_digest` and `config_generation` say which config, `applied` says whether the running gateway reports it. Omitted when the lifecycle cannot compute it. See [Effective policy digest](#effective-policy-digest-and-config-generation) |
 | `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/enterprise/troubleshooting) |
 | `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the account running the command can identify it |
+| `destinations[]` | `status` only: each observability destination the installed `config.yaml` compiles to, with its `name`, `kind`, `enabled`, `preset`, `signals` and `redaction_profiles` (the effective profiles of its send routes, from the same compiler as `defenseclaw observability plan`). The human `status` prints one line per destination |
 
 A healthy `status` from a Linux host, trimmed to two of its eleven
 `services` entries and two of its `machine_policy` connectors:
@@ -187,7 +193,7 @@ A failed run sets `ok` to `false` and names each problem in `errors[]`. This
 `verify` ran without root, so it checked nothing and exited `1`. A `not_root`
 result leaves out every field that reports the deployment (`installed`,
 `installed_version`, `transaction_pending`, `services`, `readiness`,
-`inspection`, `machine_policy`, `enrollment`): a standard user cannot read the
+`inspection`, `machine_policy`, `enrollment`, `destinations`): a standard user cannot read the
 deployment record, and those fields would read as "not installed":
 
 ```json title="enterprise linux verify --json (failed, trimmed)"
@@ -686,7 +692,8 @@ before keep the old IDs. `status`, `verify` and the hooks are not affected.
 | MDM wrapper log | `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` |
 | Event log | The `DefenseClaw` event log, source **DefenseClaw Lifecycle** (table below). Only SYSTEM and Administrators can write it. A legacy copy of each event goes to the Application log, source **DefenseClaw Enterprise**, where any account can write under any source name; see [Windows](/docs/enterprise/windows#verify-the-install) |
 | Gateway log | `C:\ProgramData\Cisco\DefenseClaw\logs\gateway\gateway.log` |
-| Guardian log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log` |
+| Guardian and enumerator log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log`. The hook enumerator writes here too, each line prefixed `[hook-enumerator]`; its warnings about one account (an `include_user_email` warning, for example) name the account's SID |
+| Sensor helper log | `C:\ProgramData\Cisco\DefenseClaw\logs\sensor-helper\sensor-helper.log` |
 
 Standard users can read the files in `%WINDIR%\Logs\DefenseClaw`. Only SYSTEM
 and Administrators can write them. The lifecycle writes these logs and events

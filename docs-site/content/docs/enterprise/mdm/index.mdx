@@ -574,8 +574,10 @@ marker's other values: `Profile`, `InstallRoot`, `StateRoot`, `TrustMode`,
 
 With Claude Code enabled, a Windows host reports `security_complete: false`
 until an administrator attests that Claude Code runs DefenseClaw's managed
-hooks there: check it with `enterprise policy verify --live` in an enrolled
-user's session, then run Setup `/repair JSON=1 ATTESTCLAUDEEFFECTIVEPOLICY=1`
+hooks there: in an enrolled user's own session, have Claude Code make a tool
+call, then from an elevated prompt export the gateway's record with
+`defenseclaw audit export --connector claudecode -o <file>`. Once the record
+shows that call, run Setup `/repair JSON=1 ATTESTCLAUDEEFFECTIVEPOLICY=1`
 (see [Verify the install](/docs/enterprise/windows#verify-the-install)). The
 record is bound to the hashes of the installed Claude Code policy and hook
 binary, so every DefenseClaw upgrade makes it stale. Computers that run the

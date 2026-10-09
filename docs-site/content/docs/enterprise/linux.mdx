@@ -572,7 +572,9 @@ On a tarball host, `uninstall --purge` removes everything, including
 
 - **Upgrade.** Install the newer package with apt or dnf, or run `ensure`
   with the newer tarball. The lifecycle refuses an older release unless you
-  pass `--allow-downgrade`, and `rpm -U` refuses an older package. See
+  pass `--allow-downgrade`, and the package refuses an older package before it
+  replaces any file unless the rollback marker
+  `/var/lib/defenseclaw-enterprise/allow-downgrade` exists. See
   [Upgrade](/docs/enterprise/lifecycle#upgrade) and
   [Roll back](/docs/enterprise/lifecycle#roll-back). The first `ensure` of a
   new release migrates a `config_version: 8` config to 9 and keeps

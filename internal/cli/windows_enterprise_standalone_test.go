@@ -1045,6 +1045,24 @@ func strconvQuote(value string) string {
 	return string(body)
 }
 
+// GAP-1119: a repair that keeps an installed config.yaml which does not parse
+// says so in a sentence with the line, and names the Setup run that heals
+// it; the Go type the reader decodes into stays out of the message.
+func TestWindowsEnterpriseUnparseableInstalledConfigMessage(t *testing.T) {
+	stateRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(stateRoot, "etc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateRoot, "etc", "config.yaml"), []byte("this is not YAML, only a sentence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readWindowsEnterpriseConfiguredTrust("repair", &windowsEnterpriseLifecycleOptions{stateRoot: stateRoot})
+	if err == nil || !strings.Contains(err.Error(), "does not parse at line 1 (it holds text where a mapping of keys is expected)") ||
+		!strings.Contains(err.Error(), "/ensure CONFIG=<config.yaml> JSON=1") || strings.Contains(err.Error(), "struct {") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 // enterprise.trust in the supplied config is enforced for the standalone
 // profile: it fills unset flags, and a disagreement with a flag is refused.
 func TestWindowsEnterpriseConfigTrustIsApplied(t *testing.T) {

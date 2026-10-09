@@ -409,10 +409,10 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 			// A run that keeps the installed config cannot heal it; one given
 			// the config to install keeps this file aside (GAP-0948).
 			return windowsEnterpriseConfiguredTrust{}, fmt.Errorf(
-				"parse enterprise.trust in %s: %w; this installed config.yaml does not parse, so a run that keeps it cannot heal it: run %s /ensure CONFIG=<config.yaml> JSON=1 (or /repair CONFIG=) with the config to install, which keeps this file as rejected-config.yaml",
-				path, err, windowsEnterpriseStandaloneSetupName)
+				"the installed config.yaml (%s) does not parse %s, so a run that keeps it cannot heal it: run %s /ensure CONFIG=<config.yaml> JSON=1 (or /repair CONFIG=) first, with the config to install, which keeps this file as rejected-config.yaml",
+				path, windowsEnterpriseYAMLProblem(err), windowsEnterpriseStandaloneSetupName)
 		}
-		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("parse enterprise.trust in %s: %w", path, err)
+		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("the config %s does not parse %s; fix it and run again", path, windowsEnterpriseYAMLProblem(err))
 	}
 	configured := windowsEnterpriseConfiguredTrust{path: path}
 	switch mode := strings.ToLower(strings.TrimSpace(document.Enterprise.Trust.Mode)); mode {
@@ -433,6 +433,54 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		configured.allowedSigners = append(configured.allowedSigners, normalized)
 	}
 	return configured, nil
+}
+
+var (
+	windowsEnterpriseYAMLTypeEntry = regexp.MustCompile(`^line ([0-9]+): cannot unmarshal (!![a-z]+)`)
+	windowsEnterpriseYAMLLineEntry = regexp.MustCompile(`^(?:yaml: )?line ([0-9]+): (.+)$`)
+)
+
+// windowsEnterpriseYAMLProblem says in plain words where a config does not
+// parse: "at line N (...)". A type mismatch names the Go struct the reader
+// decodes into ("cannot unmarshal !!str ... into struct { Enterprise struct
+// ..."), which tells an administrator nothing (GAP-1119), so it says what the
+// line holds and what was expected instead; a syntax error keeps the
+// parser reason.
+func windowsEnterpriseYAMLProblem(err error) string {
+	message := strings.TrimSpace(err.Error())
+	var typeErr *yaml.TypeError
+	if errors.As(err, &typeErr) && len(typeErr.Errors) != 0 {
+		message = strings.TrimSpace(typeErr.Errors[0])
+		if match := windowsEnterpriseYAMLTypeEntry.FindStringSubmatch(message); match != nil {
+			want := "another kind of value"
+			if index := strings.LastIndex(message, " into "); index >= 0 {
+				want = windowsEnterpriseYAMLKind(strings.TrimSpace(message[index+len(" into "):]))
+			}
+			return fmt.Sprintf("at line %s (it holds %s where %s is expected)", match[1], windowsEnterpriseYAMLKind(match[2]), want)
+		}
+	}
+	if match := windowsEnterpriseYAMLLineEntry.FindStringSubmatch(message); match != nil {
+		return fmt.Sprintf("at line %s (%s)", match[1], match[2])
+	}
+	return "(" + strings.TrimPrefix(message, "yaml: ") + ")"
+}
+
+// windowsEnterpriseYAMLKind names a YAML tag or a Go destination type the
+// way the configuration guide does.
+func windowsEnterpriseYAMLKind(kind string) string {
+	switch {
+	case kind == "!!str" || kind == "string":
+		return "text"
+	case kind == "!!seq" || strings.HasPrefix(kind, "[]"):
+		return "a list"
+	case kind == "!!map" || strings.HasPrefix(kind, "struct") || strings.HasPrefix(kind, "map["):
+		return "a mapping of keys"
+	case kind == "!!bool" || kind == "bool":
+		return "true or false"
+	case kind == "!!int" || kind == "!!float" || strings.HasPrefix(kind, "int") || strings.HasPrefix(kind, "uint") || strings.HasPrefix(kind, "float"):
+		return "a number"
+	}
+	return "another kind of value"
 }
 
 func sameWindowsEnterpriseSignerSet(left, right []string) bool {

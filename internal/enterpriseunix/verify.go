@@ -916,6 +916,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeDeletedEnrolledAccounts()
 	l.describeDiscoveryHomeDirs()
 	l.describeIdentityRecords()
+	l.describeDestinations()
 	if record != nil {
 		l.describePerUserGateways(ctx)
 		l.describeAgentSessionsBeforeActivation(ctx, record)
@@ -1014,7 +1015,9 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		}
 		check := "Check SSSD or the domain controller"
 		if l.env.GOOS == "darwin" {
-			check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller"
+			check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller; once it answers, " +
+				"sudo dscacheutil -flushcache; sudo dsmemberutil flushcache makes Open Directory list the domain groups again " +
+				"(it can keep answering without them for 15 minutes or more)"
 		}
 		l.result.AddWarning(codeDirectoryLookups, message+". "+check+"; `"+
 			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")
@@ -1051,15 +1054,27 @@ const identityRecordsFreshFor = 30 * time.Minute
 func (l *lifecycle) describeIdentityRecords() {
 	env := l.env
 	dir := enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir))
-	oldest, stale := enterprisehooks.IdentitySpoolStale(dir, env.Now(), identityRecordsFreshFor)
+	oldest, key, stale := enterprisehooks.IdentitySpoolStale(dir, env.Now(), identityRecordsFreshFor)
 	if !stale {
 		return
 	}
-	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's oldest identity record was last written at %s by "+
-		"this host's clock (the clock was stepped, or the guardian has not refreshed them); records over an hour old are "+
-		"ignored, and accounts a guardrail profile assignment selects by UPN then get the default profile. The guardian "+
-		"rewrites them within about a minute of a clock step; if this persists, restart the hook guardian",
-		oldest.UTC().Format(time.RFC3339)))
+	// The guardian removes the record of an account it no longer publishes
+	// (GAP-1113), so a stale record is one it still publishes and could not
+	// refresh: name the account and where the guardian says why.
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's oldest identity record, of uid %s, was last written at %s by "+
+		"this host's clock: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
+		"running; records over an hour old are ignored, and accounts a guardrail profile assignment selects by UPN then get "+
+		"the default profile. The guardian rewrites them within about a minute of a clock step; if this persists, fix the "+
+		"lookup failure its log names for that uid (%s), or restart the hook guardian if it is not running",
+		key, oldest.UTC().Format(time.RFC3339), env.guardianLogHint()))
+}
+
+// guardianLogHint names where the hook guardian logs.
+func (e *Env) guardianLogHint() string {
+	if e.GOOS == "darwin" {
+		return filepath.Join(e.Layout.LogDir, "hook-guardian.err.log")
+	}
+	return "journalctl -u " + unitGuardian
 }
 
 // codeProfileAssignment warns that a guardrail profile assignment selects

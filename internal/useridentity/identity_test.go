@@ -135,21 +135,33 @@ func TestKeepQualifiedNamesKeepsThePasswdName(t *testing.T) {
 // filter still lists every domain's account of the name, and a Windows row,
 // which keeps the bare name next to the SID, still matches DOMAIN\name
 // (GAP-0366, GAP-0079).
-func TestAccountFilterMatchesQualifiedDomainExactly(t *testing.T) {
+// GAP-0366, GAP-1080: a qualified filter selects a row recorded with that
+// domain or the account the OS resolves it to, never a twin that shares the
+// bare name; a bare filter selects both twins.
+func TestAccountFilterSelectsOneTwinByQualifiedName(t *testing.T) {
+	const domainSID, localSID = "S-1-5-21-1-2-3-3997", "S-1-5-21-9-8-7-1130"
 	for _, tc := range []struct {
-		filter, id, name string
-		want             bool
+		filter   string
+		resolved []string
+		id, name string
+		want     bool
 	}{
-		{"eli-twin@dclab.test", "94403922", "eli-twin@dclab.test", true},
-		{"eli-twin@dclab.test", "1009", "eli-twin", false},
-		{`CORP\alice`, "70001", `OTHER\alice`, false},
-		{`CORP\alice`, "70002", `corp\alice`, true},
-		{"eli-twin", "1009", "eli-twin", true},
-		{"eli-twin", "94403922", "eli-twin@dclab.test", true},
-		{`DCLAB\dcad-alice`, "S-1-5-21-1-2-3-1104", "dcad-alice", true},
+		{"eli-twin@dclab.test", nil, "94403922", "eli-twin@dclab.test", true},
+		{"eli-twin@dclab.test", nil, "1009", "eli-twin", false},
+		{"ELI-TWIN@DCLAB.TEST", []string{"94403922"}, "94403922", "eli-twin", true},
+		{`CORP\alice`, nil, "70001", `OTHER\alice`, false},
+		{`CORP\alice`, nil, "70002", `corp\alice`, true},
+		{"eli-twin", nil, "1009", "eli-twin", true},
+		{"eli-twin", nil, "94403922", "eli-twin@dclab.test", true},
+		{`DCLAB\dcad-o4wd`, []string{domainSID}, domainSID, "dcad-o4wd", true},
+		{`DCLAB\dcad-o4wd`, []string{domainSID}, localSID, "dcad-o4wd", false},
+		{`.\dcad-o4wd`, []string{localSID}, domainSID, "dcad-o4wd", false},
+		{`DCLAB\dcad-o4wd`, nil, domainSID, "dcad-o4wd", false},
+		{"dcad-o4wd", nil, localSID, "dcad-o4wd", true},
+		{localSID, nil, localSID, "dcad-o4wd", true},
 	} {
-		if got := AccountFilterMatches(tc.filter, tc.id, tc.name); got != tc.want {
-			t.Errorf("AccountFilterMatches(%q, %q, %q) = %v, want %v", tc.filter, tc.id, tc.name, got, tc.want)
+		if got := NewAccountFilter(tc.filter, tc.resolved...).Matches(tc.id, tc.name); got != tc.want {
+			t.Errorf("filter %q (resolved %v) on %q %q = %v, want %v", tc.filter, tc.resolved, tc.id, tc.name, got, tc.want)
 		}
 	}
 }

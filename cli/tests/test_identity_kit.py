@@ -268,7 +268,7 @@ def test_entra_apply_validates_password_file_before_graph_write(tmp_path: Path) 
     assert writes == []
 
 
-def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> None:
+def test_entra_apply_creates_missing_group_after_wait(tmp_path: Path) -> None:
     entra = _load(ENTRA)
     plan = tmp_path / "tenant.json"
     plan.write_text('{"domain":"example.test","groups":[{"name":"new-team"}]}', encoding="ascii")
@@ -279,8 +279,9 @@ def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> No
             return ([{"verifiedDomains": [{"name": "example.test"}]}]
                     if "/organization?" in path else [])
 
-        def wait_for_named_object(self, _path):
-            raise AssertionError("missing group must be created without polling")
+        def wait_for_named_object(self, _path, headers):
+            assert headers == {"ConsistencyLevel": "eventual"}
+            return []
 
         def request(self, method, path, _body):
             calls.append((method, path))
@@ -292,6 +293,37 @@ def test_entra_apply_creates_missing_group_without_waiting(tmp_path: Path) -> No
     args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
     assert entra.cmd_apply(Graph(), args) == 0
     assert calls == [("POST", "/v1.0/groups")]
+
+
+def test_entra_apply_rerun_finds_group_after_index_lag(tmp_path: Path) -> None:
+    entra = _load(ENTRA)
+    plan = tmp_path / "tenant.json"
+    plan.write_text('{"domain":"example.test","groups":[{"name":"new-team"}]}', encoding="ascii")
+    calls = []
+
+    class Graph:
+        def get_all(self, path):
+            return ([{"verifiedDomains": [{"name": "example.test"}]}]
+                    if "/organization?" in path else [])
+
+        def wait_for_named_object(self, _path, headers):
+            assert headers == {"ConsistencyLevel": "eventual"}
+            return [{"id": "first-group-id", "displayName": "new-team", "securityEnabled": True}]
+
+        def request(self, method, path, _body):
+            calls.append((method, path))
+            raise AssertionError("a second group must not be created")
+
+    args = entra.build_parser().parse_args(["apply", "--config", str(plan), "--apply"])
+    assert entra.cmd_apply(Graph(), args) == 0
+    assert calls == []
+
+    class Twins:
+        def get_all(self, _path):
+            return [{"id": "first-group-id"}, {"id": "second-group-id"}]
+
+    with pytest.raises(entra.GraphError, match="first-group-id, second-group-id"):
+        entra.find_group(Twins(), "new-team")
 
 
 def test_entra_apply_checks_all_groups_before_creating_any(tmp_path: Path) -> None:
@@ -307,6 +339,9 @@ def test_entra_apply_checks_all_groups_before_creating_any(tmp_path: Path) -> No
                 return [{"verifiedDomains": [{"name": "example.test"}]}]
             if "existing-mail-group" in path:
                 return [{"id": "mail-id", "securityEnabled": False}]
+            return []
+
+        def wait_for_named_object(self, _path, _headers):
             return []
 
         def request(self, method, path, body):
@@ -1475,6 +1510,27 @@ def test_intune_expired_apple_push_certificate_fails_readiness(monkeypatch: pyte
     assert certificate["status"] == intune.FAIL
 
 
+def test_intune_remediation_refuses_exclusion_before_package_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    intune = _load(INTUNE)
+    monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [{"target": {"@odata.type": "#microsoft.graph.exclusionGroupAssignmentTarget",
+                                    "groupId": "group-1"}}]
+            return [{"id": "script-1"}]
+
+        def request(self, *_args):
+            raise AssertionError("exclusion must be refused before any tenant write")
+
+    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
+    with pytest.raises(SystemExit, match="group 'team' is an exclusion target.*remove the exclusion assignment"):
+        intune.cmd_remediation(Graph(), args)
+
+
 def test_intune_remediation_rerun_uploads_changed_default_scripts(monkeypatch: pytest.MonkeyPatch) -> None:
     intune = _load(INTUNE)
     writes = []
@@ -1500,14 +1556,16 @@ def test_intune_remediation_rerun_uploads_changed_default_scripts(monkeypatch: p
                         "remediationScriptContent": intune.b64(scripts["Remediate-Fix.ps1"])})]
 
 
-def test_intune_remediation_reenables_detection_only_assignment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_intune_remediation_does_not_repeat_tenant_detection_only_assignment(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     intune = _load(INTUNE)
     monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
     writes = []
     old = {"target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"},
            "runRemediationScript": False,
            "runSchedule": {"@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
-                           "interval": 1, "time": "03:00:00", "useUtc": False}}
+                           "interval": 1, "time": "03:00:00.0000000", "useUtc": False}}
 
     class Graph:
         def get_all(self, path):
@@ -1525,11 +1583,43 @@ def test_intune_remediation_reenables_detection_only_assignment(monkeypatch: pyt
             writes.append((method, path, body))
             return {}
 
+    args = intune.build_parser().parse_args(["remediation", "--group", "team", "--daily-at", "03:00", "--apply"])
+    assert intune.cmd_remediation(Graph(), args) == 0
+    assert writes == []
+    assert "unchanged (detection only: the tenant stored runRemediationScript=false" in capsys.readouterr().out
+
+
+def test_intune_remediation_reads_back_tenant_state_after_assign(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    intune = _load(INTUNE)
+    monkeypatch.setattr(intune, "read_script", lambda _path, _limit: b"script")
+    writes = []
+    schedule = {"@odata.type": "#microsoft.graph.deviceHealthScriptDailySchedule",
+                "interval": 1, "time": "02:00:00.0000000", "useUtc": False}
+    stored = {"target": {"@odata.type": intune.GROUP_TARGET, "groupId": "group-1"},
+              "runRemediationScript": False, "runSchedule": schedule}
+
+    class Graph:
+        def get_all(self, path):
+            if "/groups?" in path:
+                return [{"id": "group-1"}]
+            if "/assignments" in path:
+                return [stored] if writes else []
+            return [{"id": "script-1"}]
+
+        def get(self, _path):
+            return {"detectionScriptContent": intune.b64(b"script"),
+                    "remediationScriptContent": intune.b64(b"script")}
+
+        def request(self, method, path, body):
+            writes.append((method, path, body))
+            return {}
+
     args = intune.build_parser().parse_args(["remediation", "--group", "team", "--apply"])
     assert intune.cmd_remediation(Graph(), args) == 0
-    assert len(writes) == 1
     assert writes[0][2]["deviceHealthScriptAssignments"][0]["runRemediationScript"] is True
-    assert writes[0][2]["deviceHealthScriptAssignments"][0]["runSchedule"] == old["runSchedule"]
+    assert "assigned 'DefenseClaw Enterprise health' to group team (detection only:" in capsys.readouterr().out
 
 
 def test_intune_remove_assignment_preserves_exclusion() -> None:

@@ -152,8 +152,7 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			return
 		}
 		if err := installWindowsScannerRuntime(source, opts); err != nil {
-			result.AddWarning("scanner_runtime_unavailable",
-				"the skill, MCP and plugin scanners could not be installed, so installs are blocked until they are: "+err.Error())
+			result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 		}
 		result.Scanners = readWindowsScannerRuntime()
 	case "uninstall":
@@ -264,6 +263,7 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 	// against that record first (GAP-0311).
 	got, gotErr := windowsEnterpriseFileSHA256(target)
 	admitted, _ := managed.ReadScannerRuntimeAdmission(root)
+	copied := false
 	if gotErr != nil || got != want || admitted != want {
 		if err := admitWindowsScannerRuntimePayload(source, want, opts); err != nil {
 			return err
@@ -272,6 +272,7 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 			if err := copyWindowsScannerRuntime(source, target, root, want); err != nil {
 				return err
 			}
+			copied = true
 		}
 		if err := managed.WriteScannerRuntimeAdmission(root, want); err != nil {
 			return fmt.Errorf("record the admitted scanner runtime: %w", err)
@@ -283,9 +284,16 @@ func installWindowsScannerRuntime(source string, opts *windowsEnterpriseLifecycl
 	if err := managed.CheckScannerRuntimeAdmitted(root, target); err != nil {
 		return err
 	}
-	// prepare is a no-op once the runtime is unpacked; prune drops the
-	// runtimes earlier builds left.
-	for _, step := range []string{"prepare", "prune"} {
+	// prepare checks every file of an unpacked runtime against the archive
+	// and compiles what is not compiled; prune drops the runtimes earlier
+	// builds left. A copy has just prepared the same bytes under their
+	// temporary name, so it only prunes: a second prepare read the whole
+	// tree again, minutes on a slow disk (GAP-1063).
+	steps := []string{"prepare", "prune"}
+	if copied {
+		steps = steps[1:]
+	}
+	for _, step := range steps {
 		if err := runWindowsScannerRuntime(target, step); err != nil {
 			return err
 		}
@@ -380,10 +388,19 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 		}
 	}
 	if err != nil {
-		result.AddWarning("scanner_runtime_unavailable",
-			"the skill, MCP and plugin scanners could not be installed, so installs are blocked until they are: "+err.Error())
+		result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 	}
 	result.Scanners = readWindowsScannerRuntime()
+}
+
+// windowsScannerRuntimePrepareFailed is the error of a lifecycle run whose
+// scanner runtime step failed. The run fails: an ensure that hit the
+// prepare bound exited 0 with ok=true and a warning, and verify then failed
+// with every skill, MCP server and plugin install blocked (GAP-1063).
+func windowsScannerRuntimePrepareFailed(err error) string {
+	return "DefenseClaw is installed and its services run, but the skill, MCP and plugin scanner runtime could not be prepared (" +
+		err.Error() + "), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed) and verify fails; " +
+		"run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem to prepare it"
 }
 
 // windowsScannerProgress receives a scanner runtime step progress lines

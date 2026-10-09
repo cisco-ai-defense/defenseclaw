@@ -21,6 +21,7 @@ import (
 	"math"
 	"reflect"
 	"sync"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -115,6 +116,32 @@ type Runtime struct {
 	retention           *RetentionController
 	destinationObserver *safeDeliveryObserver
 	lifecycleMu         sync.Mutex
+	secureClient        bool
+	// shutdownLosses is what the first Close that found an active graph
+	// dropped or left unsent (GAP-1096); carried holds such losses of an
+	// earlier process, reported for the generation they were carried into.
+	shutdownLosses        []ShutdownLoss
+	shutdownLossesCounted bool
+	carried               carriedShutdownLosses
+	localWriteLost        *atomic.Uint64
+}
+
+// TakeLocalWriteLosses returns, and clears, how many log records failed their
+// mandatory SQLite append since the last call, so the gateway can store one
+// sqlite.write_failed record for them once writes resume (GAP-1100).
+func (runtime *Runtime) TakeLocalWriteLosses() uint64 {
+	if runtime == nil || runtime.localWriteLost == nil {
+		return 0
+	}
+	return runtime.localWriteLost.Swap(0)
+}
+
+// ReturnLocalWriteLosses gives back a count TakeLocalWriteLosses returned
+// when its sqlite.write_failed record could not be stored.
+func (runtime *Runtime) ReturnLocalWriteLosses(records uint64) {
+	if runtime != nil && runtime.localWriteLost != nil && records != 0 {
+		runtime.localWriteLost.Add(records)
+	}
 }
 
 // EmitContext is the exact immutable graph snapshot pinned for one Emit call.
@@ -217,11 +244,13 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 		graphOptions = *options.GraphOptions
 		graphOptions.Reporter = options.Reporter
 	}
+	lostWrites := &atomic.Uint64{}
 	factory := &localLogFactory{
 		store: options.Store, storePath: storePath,
 		engine: options.Engine, signer: options.Signer,
 		recordBuilder:  options.RecordBuilder,
 		healthReporter: options.EventHistoryHealthReporter,
+		lostWrites:     lostWrites,
 	}
 	destinationObserver := newSafeDeliveryObserver(options.DestinationObserver)
 	dispatchFactory := &destinationDispatchFactory{
@@ -267,7 +296,8 @@ func New(ctx context.Context, initial runtimegraph.Config, options Options) (*Ru
 	owned = true
 	return &Runtime{
 		manager: manager, store: options.Store, retention: options.RetentionController,
-		destinationObserver: destinationObserver,
+		destinationObserver: destinationObserver, secureClient: options.SecureClient,
+		localWriteLost: lostWrites,
 	}, nil
 }
 
@@ -640,6 +670,10 @@ func (runtime *Runtime) Close(ctx context.Context) error {
 	}
 	runtime.lifecycleMu.Lock()
 	defer runtime.lifecycleMu.Unlock()
+	var lossSources []shutdownLossSource
+	if !runtime.shutdownLossesCounted {
+		lossSources = runtime.beginShutdownLossCount(ctx)
+	}
 	var first error
 	if runtime.retention != nil {
 		if err := runtime.retention.stopRuntime(ctx); err != nil {
@@ -662,6 +696,10 @@ func (runtime *Runtime) Close(ctx context.Context) error {
 		if err := runtime.destinationObserver.Close(ctx); first == nil && err != nil {
 			first = &Error{code: ErrorShutdown}
 		}
+	}
+	if lossSources != nil {
+		runtime.shutdownLosses = countShutdownLosses(lossSources, shutdownLossSettle)
+		runtime.shutdownLossesCounted = true
 	}
 	return first
 }

@@ -4,6 +4,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -146,10 +147,17 @@ func TestHealthyNoopEnsureFromPackageClearsTheFailedPackageResult(t *testing.T) 
 	if !r.Noop {
 		t.Fatalf("ensure --from-package on a healthy host was not a no-op: %+v", r.Changes)
 	}
-	for _, path := range leftovers {
+	for _, path := range leftovers[1:] {
 		if exists(path) {
 			t.Fatalf("a healthy no-op ensure --from-package left %s", filepath.Base(path))
 		}
+	}
+	// The run records its own result in place of the failure (GAP-1116).
+	var recorded struct {
+		OK bool `json:"ok"`
+	}
+	if raw, err := os.ReadFile(leftovers[0]); err != nil || json.Unmarshal(raw, &recorded) != nil || !recorded.OK {
+		t.Fatalf("last-package-result.json after a healthy no-op ensure --from-package = %q (%v), want the ok result of this run", raw, err)
 	}
 }
 
@@ -200,5 +208,36 @@ func TestStatusWarnsThatTheLastPackageRunDidNotApply(t *testing.T) {
 		if !strings.Contains(got, "did not apply: apply_failed: create snapshot: no space left on device") || !strings.Contains(got, "--from-package`") {
 			t.Fatalf("%s does not warn about the refused package run: %q", action, got)
 		}
+	}
+}
+
+// GAP-1116: after a refused package apply an administrator applied the
+// package with `ensure --from-package --allow-downgrade`, the deployment
+// was healthy, and last-package-result.json still said ok: false for the
+// newer build. An ensure --from-package outside the install script now
+// records its own result there; the script's own run (--reason package)
+// leaves the file to the script.
+func TestEnsureFromPackageRecordsTheLastPackageResult(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	dir := h.env.P(h.env.Layout.LifecycleDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, lastPackageResultFile)
+	stale := `{"ok":false,"action":"ensure","installed_version":"1.0.1","errors":[{"code":"downgrade_refused","message":"payload version 1.0.0 is older than the installed 1.0.1"}]}`
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+	if data, _ := os.ReadFile(path); string(data) != stale {
+		t.Fatalf("the install script's own run rewrote its result file: %s", data)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, AllowDowngrade: true}))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(data); !strings.Contains(got, `"ok": true`) || !strings.Contains(got, `"installed_version": "1.0.0"`) || strings.Contains(got, "downgrade_refused") {
+		t.Fatalf("last-package-result.json after a successful ensure --from-package:\n%s", got)
 	}
 }

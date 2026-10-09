@@ -182,14 +182,14 @@ class Graph:
             next_path = page.get("@odata.nextLink")
         return items
 
-    def wait_for_named_object(self, path: str) -> list:
+    def wait_for_named_object(self, path: str, headers: dict[str, str] | None = None) -> list:
         """Before creating by name, allow a previous run's Graph index to catch up."""
         for _ in range(21):
-            found = self.get_all(path)
+            found = self.get_all(path, headers)
             if found:
                 return found
             time.sleep(3)
-        return self.get_all(path)
+        return self.get_all(path, headers)
 
     def get_after_create(self, path: str):
         """Read an object just created: Graph answers 404 for a few seconds."""
@@ -720,6 +720,17 @@ def cmd_remove_assignment(graph: Graph, args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------- remediation and macos-script
 
 
+def same_run_schedule(stored: dict, requested: dict) -> bool:
+    """Graph returns daily times with seven trailing fractional zeroes."""
+    for key, value in requested.items():
+        actual = stored.get(key)
+        if key == "time" and isinstance(actual, str):
+            actual = re.sub(r"\.0+$", "", actual)
+        if actual != value:
+            return False
+    return True
+
+
 def _upsert(graph: Graph, collection: str, name: str, body: dict, apply: bool, what: str,
             create_body: dict | None = None) -> str | None:
     """Create or update an object by display name. Returns its id (None in a preview that would create)."""
@@ -772,9 +783,25 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
     }
     collection = f"{BETA}/deviceManagement/deviceHealthScripts"
     group = group_by_name(graph, args.group) if args.group else None
+
+    def reject_exclusion(assignments: list[dict]) -> None:
+        for assignment in assignments:
+            target = assignment.get("target") or {}
+            if target.get("groupId") == group["id"] and target.get("@odata.type") != GROUP_TARGET:
+                raise SystemExit(
+                    f"error: group {args.group!r} is an exclusion target for {args.name!r}; "
+                    "remove the exclusion assignment in Intune first, then run remediation again"
+                )
+
+    if group:
+        scripts = graph.get_all(f"{collection}?$filter={odata_eq('displayName', args.name)}&$select=id")
+        if len(scripts) == 1:
+            assignments = graph.get_all(f"{collection}/{scripts[0]['id']}/assignments")
+            reject_exclusion(assignments)
     script_id = _upsert(graph, collection, args.name, body, args.apply, "Remediations package", create_body)
     if group:
         existing = graph.get_all(f"{collection}/{script_id}/assignments") if script_id else []
+        reject_exclusion(existing)
         kept = [a for a in existing if a.get("target", {}).get("groupId") != group["id"]]
         matching = [a for a in existing if a.get("target", {}).get("groupId") == group["id"]]
         if len(matching) > 1:
@@ -793,8 +820,16 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
             "runRemediationScript": True,
             "runSchedule": schedule,
         }
-        if matching and all(matching[0].get(key) == value for key, value in wanted.items()):
-            print(f"{args.name} assignment to {args.group}: unchanged")
+        same_schedule = matching and matching[0].get("target") == wanted["target"] and same_run_schedule(
+            matching[0].get("runSchedule") or {}, schedule
+        )
+        if same_schedule and matching[0].get("runRemediationScript") in (True, False):
+            detail = (
+                " (detection only: the tenant stored runRemediationScript=false; enable remediation "
+                "for this assignment in the Intune admin center)"
+                if matching[0]["runRemediationScript"] is False else ""
+            )
+            print(f"{args.name} assignment to {args.group}: unchanged{detail}")
         elif not args.apply or script_id is None:
             print(f"[plan] would assign {args.name!r} to group {args.group} with remediation enabled")
         else:
@@ -802,7 +837,29 @@ def cmd_remediation(graph: Graph, args: argparse.Namespace) -> int:
             graph.request(
                 "POST", f"{collection}/{script_id}/assign", {"deviceHealthScriptAssignments": keep + [wanted]}
             )
-            print(f"assigned {args.name!r} to group {args.group} with remediation enabled")
+            stored = None
+            for _ in range(5):
+                current = graph.get_all(f"{collection}/{script_id}/assignments")
+                stored = next(
+                    (item for item in current if (item.get("target") or {}).get("groupId") == group["id"]), None
+                )
+                if stored and same_run_schedule(stored.get("runSchedule") or {}, schedule):
+                    break
+                time.sleep(2)
+            if stored is None or not same_run_schedule(stored.get("runSchedule") or {}, schedule):
+                raise SystemExit(
+                    f"error: Intune did not return the assignment for {args.group!r}; check it in the admin center"
+                )
+            if stored.get("runRemediationScript") is False:
+                print(f"assigned {args.name!r} to group {args.group} (detection only: the tenant stored "
+                      "runRemediationScript=false; enable remediation for this assignment in the Intune admin center)")
+            elif stored.get("runRemediationScript") is True:
+                print(f"assigned {args.name!r} to group {args.group} with remediation enabled")
+            else:
+                raise SystemExit(
+                    f"error: Intune did not return runRemediationScript for {args.group!r}; "
+                    "check it in the admin center"
+                )
     if not args.apply:
         print("Nothing was changed. Run again with --apply to make these changes.")
     return 0

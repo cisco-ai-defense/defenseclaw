@@ -46,6 +46,9 @@ const (
 	runtimeArchiveName  = "payload/runtime.zip"
 	runtimeManifestName = "payload/runtime.json"
 	completeMarker      = ".complete"
+	// unpackMarker names, inside a staging folder, the archive SHA-256 the
+	// unpack in it belongs to.
+	unpackMarker = ".unpack-sha256"
 	// maxRuntimeBytes bounds what the embedded archive may expand to.
 	maxRuntimeBytes = 2 << 30
 )
@@ -328,9 +331,28 @@ func ensureRuntime(manifest runtimeManifest) (string, error) {
 		return "", err
 	}
 	staging := filepath.Join(root, ".unpack-"+hex.EncodeToString(suffix))
+	// A prepare stopped at its bound (or by Setup at TIMEOUTSECONDS) leaves
+	// its staging folder. The next one takes it over and writes only what is
+	// missing or differs, so the retries of a slow computer converge instead
+	// of each unpacking all of it again (GAP-1063). The published tree is
+	// still checked against the archive by prepare.
+	if !claimInterruptedUnpack(root, manifest.SHA256, staging) {
+		if err := os.MkdirAll(staging, 0o755); err != nil {
+			return "", notPreparedError(err)
+		}
+		if err := os.WriteFile(filepath.Join(staging, unpackMarker), []byte(manifest.SHA256), 0o644); err != nil {
+			_ = os.RemoveAll(staging)
+			return "", notPreparedError(err)
+		}
+	}
 	if err := unpack(archive, staging); err != nil {
+		// A failure is not a stop: start over next time.
 		_ = os.RemoveAll(staging)
 		return "", notPreparedError(err)
+	}
+	if err := os.Remove(filepath.Join(staging, unpackMarker)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		_ = os.RemoveAll(staging)
+		return "", err
 	}
 	if err := os.WriteFile(filepath.Join(staging, completeMarker), []byte(manifest.SHA256), 0o644); err != nil {
 		_ = os.RemoveAll(staging)
@@ -344,6 +366,34 @@ func ensureRuntime(manifest runtimeManifest) (string, error) {
 		return "", fmt.Errorf("publish scanner runtime: %w", err)
 	}
 	return dir, nil
+}
+
+// claimInterruptedUnpack renames to staging a folder an interrupted unpack
+// of the archive sha left in root, and reports whether it took one. The
+// rename claims it: a folder another prepare still writes cannot be renamed,
+// and two prepares never share one.
+func claimInterruptedUnpack(root, sha, staging string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".unpack-") {
+			continue
+		}
+		previous := filepath.Join(root, entry.Name())
+		if info, err := os.Lstat(previous); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		marker, err := os.ReadFile(filepath.Join(previous, unpackMarker))
+		if err != nil || strings.TrimSpace(string(marker)) != sha {
+			continue
+		}
+		if os.Rename(previous, staging) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // prepareRuntime is ensureRuntime plus a check that the unpacked tree is the
@@ -546,6 +596,20 @@ func unpack(archive []byte, dest string) error {
 }
 
 func writeEntry(file *zip.File, target string) error {
+	if info, err := os.Lstat(target); err == nil {
+		// A resumed unpack keeps a file the interrupted one wrote whole and
+		// replaces anything else at its name.
+		if info.Mode().IsRegular() && uint64(info.Size()) == file.UncompressedSize64 {
+			if want, err := entrySHA256(file); err == nil {
+				if got, err := fileSHA256(target); err == nil && got == want {
+					return nil
+				}
+			}
+		}
+		if err := os.Remove(target); err != nil {
+			return err
+		}
+	}
 	in, err := file.Open()
 	if err != nil {
 		return err

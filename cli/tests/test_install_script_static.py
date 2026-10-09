@@ -63,6 +63,23 @@ def test_scripts_parse_under_bash() -> None:
         subprocess.run([BASH, "-n", str(script)], check=True)
 
 
+def test_path_hint_is_copyable_with_spaced_home(tmp_path: Path) -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("ensure_path_hint() {")
+    function = text[start : text.index("\n}\n", start) + 3]
+    home = tmp_path / "a home with spaces"
+    home.mkdir()
+    bin_dir = home / ".local" / "bin"
+    result = subprocess.run(
+        [BASH, "-c", 'HOME="$1"; BIN_DIR="$2"; CALLER_PATH=/usr/bin; SHELL=/bin/zsh; '
+         "CYAN=; NC=; " + function + "\nensure_path_hint", "--", str(home), str(bin_dir)],
+        capture_output=True, text=True, check=True,
+    )
+    command = next(line.strip() for line in result.stdout.splitlines() if line.strip().startswith("echo "))
+    subprocess.run([BASH, "-c", command], check=True)
+    assert (home / ".zshrc").read_text().strip() == f'export PATH="{bin_dir}:$PATH"'
+
+
 @pytest.mark.skipif(not Path("/bin/bash").exists(), reason="system bash")
 def test_scripts_parse_under_system_bash() -> None:
     # macOS ships bash 3.2 as /bin/bash; the installer must stay compatible.
