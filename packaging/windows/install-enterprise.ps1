@@ -3132,6 +3132,8 @@ $bootstrapEnvironment = $null
 $result = $null
 $failureMessage = $null
 $exitCode = 0
+$lifecycleWarnings = @()
+$jsonWarnings = @()
 try {
     if ($DeferredConfig -and $Action -ne 'Install') {
         throw '-DeferredConfig is valid only with Install'
@@ -3308,7 +3310,16 @@ try {
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath
     }
-    $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
+    if ($Json) {
+        # ConsoleHost renders warning records on stdout. Capture advisories
+        # before the host renders them so both the CLI and Setup (which also
+        # combines child stderr) retain one machine-readable JSON document.
+        $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle `
+            @arguments -WarningAction SilentlyContinue -WarningVariable lifecycleWarnings
+    }
+    else {
+        $result = DefenseClawEnterprise\Invoke-DefenseClawEnterpriseLifecycle @arguments
+    }
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {
         $exitCode = 1
     }
@@ -3349,7 +3360,12 @@ finally {
             if ([string]::IsNullOrWhiteSpace($failureMessage)) {
                 # Leave the action's own exit code alone: tidying our temp tree
                 # is not part of its outcome, and ok:false already set the code.
-                Microsoft.PowerShell.Utility\Write-Warning -Message $cleanupDetail
+                if ($Json) {
+                    $jsonWarnings += $cleanupDetail
+                }
+                else {
+                    Microsoft.PowerShell.Utility\Write-Warning -Message $cleanupDetail
+                }
             }
             else {
                 $failureMessage += "; $cleanupDetail"
@@ -3359,15 +3375,38 @@ finally {
     }
 }
 
+if ($Json) {
+    foreach ($warning in @($lifecycleWarnings)) {
+        $jsonWarnings += [string]$warning
+    }
+    if ($jsonWarnings.Count -gt 0 -and $null -ne $result) {
+        $existingWarnings = $result.PSObject.Properties['warnings']
+        if ($null -ne $existingWarnings) {
+            $result.warnings = [string[]](@($existingWarnings.Value) + $jsonWarnings)
+        }
+        else {
+            $result.PSObject.Properties.Add(
+                [Management.Automation.PSNoteProperty]::new('warnings', [string[]]$jsonWarnings)
+            )
+        }
+    }
+}
+
 if (-not [string]::IsNullOrWhiteSpace($failureMessage)) {
     if ($Json) {
-        [pscustomobject]@{
+        $failureResult = [pscustomobject]@{
             schema_version = 1
             ok = $false
             action = $Action.ToLowerInvariant()
             error = $failureMessage
             errors = @($failureMessage)
-        } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress
+        }
+        if ($jsonWarnings.Count -gt 0) {
+            $failureResult.PSObject.Properties.Add(
+                [Management.Automation.PSNoteProperty]::new('warnings', [string[]]$jsonWarnings)
+            )
+        }
+        $failureResult | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress
     }
     else {
         Microsoft.PowerShell.Utility\Write-Error `
