@@ -153,9 +153,12 @@ decides the domain of an SSSD account from its uid, not from its name:
   account's name with the same SID, and SSSD maps the SID back to the same uid.
   The name is asked in the `domain\account` form, which SSSD looks up in that
   domain only. With fully qualified names (`alice@corp.example.com`, what
-  `realm join` writes) the domain is the one the name gives, which may be a
-  trusted domain below the joined one. With short names
-  (`use_fully_qualified_names = False`) each joined domain is asked. The SSSD
+  `realm join` writes) the domain is the one the name gives: the joined domain,
+  or a child domain below it that you list in
+  `ai_discovery.trusted_ad_child_domains`
+  ([Child domains of the joined realm](#child-domains-of-the-joined-realm)).
+  With short names (`use_fully_qualified_names = False`) each joined domain
+  and each listed child domain is asked. The SSSD
   domain must carry the name of the joined domain, as `realm join` names it
   (`[domain/corp.example.com]`), and keep the default AD or IPA name
   expression, which reads `domain\account`.
@@ -216,6 +219,55 @@ decides the domain of an SSSD account from its uid, not from its name:
   future, `status` and `verify` warn `identity_records_stale` and name that
   account's uid: the directory lookup for it keeps failing (the guardian's log
   says why), the guardian is not running, or the clock was stepped.
+
+#### Child domains of the joined realm
+
+An account of a child domain of the joined realm, such as
+`gail@emea.corp.example.com` on a host joined to `corp.example.com`, is
+verified only when you list its domain in
+`ai_discovery.trusted_ad_child_domains`. Nothing a per-user gateway can ask
+proves that a domain below the joined one is a trusted child: a plain LDAP
+domain configured next to the AD domain can carry a name below it and SIDs of
+its own, and DNS and `adcli` answers are not authenticated. So DefenseClaw
+fails closed:
+
+- **Not listed.** The account keeps its uid and account name but gets no
+  domain, realm, directory type or principal. No `users` entry that names its
+  principal or its qualified name selects it, and it gets the profile of a
+  `groups`, `connectors` or `agents` assignment it matches, or the default
+  profile.
+- **Listed.** When SSSD holds a user of the account's name with the account's
+  SID in the listed domain (asked as `emea.corp.example.com\gail`), the account
+  gets that domain, the realm `EMEA.CORP.EXAMPLE.COM`, the directory type of
+  the joined Active Directory realm and the principal
+  `gail@emea.corp.example.com`, so `users` assignments and profiles match it as
+  they match an account of the joined domain. A listed domain that is not below
+  a joined Active Directory realm trusts nothing.
+- **Empty list** (the default). Only accounts of the joined domain itself are
+  verified.
+
+```yaml title="config.yaml (the admin config on a managed host, ~/.defenseclaw/config.yaml per user)"
+ai_discovery:
+  trusted_ad_child_domains:
+    - emea.corp.example.com
+    - apac.corp.example.com
+```
+
+Each entry is a DNS domain of at least two labels, compared without regard to
+case and a trailing dot. `defenseclaw config validate` refuses a wildcard
+(`*.corp.example.com`), a NetBIOS name (`EMEA`), an account (`alice@...` or
+`EMEA\alice`) and an entry listed twice. The gateway applies a changed list
+at reload and looks every account up again; the guardian uses it at its next
+pass. List only domains of your forest that the domain controllers of the
+joined domain trust: a listed domain is trusted for every account SSSD holds
+in it.
+
+To see whether an account was trusted, run
+`defenseclaw guardrail profile explain --user gail@emea.corp.example.com --json`.
+For an account of a child domain that is not listed, `subject.domain`,
+`subject.directory` and `subject.principal` are empty, and the text output
+shows the account name with no realm. `defenseclaw config get
+ai_discovery.trusted_ad_child_domains` shows the configured list.
 
 A users assignment that names only a principal (`alice@CORP.EXAMPLE.COM`)
 matches an account only while it has that principal. Check it with
