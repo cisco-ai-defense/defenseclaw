@@ -1534,35 +1534,50 @@ func TestStandaloneGuardianCoversEligibleAccountsWithoutRows(t *testing.T) {
 	}
 }
 
-// GAP-0775: in the enumerator 3-cycle window a leaver, whose account no
-// longer resolves, failed enterprise hooks status with three red lines and
-// exit 1, while enterprise linux status and verify warned. Its failed row is
-// excused (reported as a warning); a failure of an account that still
-// resolves is not.
+// GAP-0775: a deleted local account may remain in the guardian state until
+// the enumerator drops it. An unavailable directory can give the same NSS
+// not-found answer for a logged-in account, so its failed row must stay red.
 func TestStandaloneUnixRemovedAccountRowIsExcused(t *testing.T) {
-	previousCfg := cfg
+	previousCfg, previousManifest := cfg, enterpriseHookManifest
+	previousLocal, previousDirectory := enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured
 	t.Cleanup(func() {
-		cfg = previousCfg
+		cfg, enterpriseHookManifest = previousCfg, previousManifest
+		enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured = previousLocal, previousDirectory
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
 	cfg = &config.Config{
 		DeploymentMode: managed.DeploymentModeManagedEnterprise,
 		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
 	}
+	enterpriseHookManifest = filepath.Join(t.TempDir(), "targets.yaml")
+	if err := enterprisehooks.SaveUnixEnumeratorState(enterpriseHookEnumeratorStatePath(enterpriseHookManifest),
+		&enterprisehooks.UnixEnumeratorState{Version: 1, Sources: map[string]string{"carol": "files"}}); err != nil {
+		t.Fatal(err)
+	}
+	enterpriseHooksEnumerateLocalAccounts = func(context.Context) (map[string]int, error) {
+		return map[string]int{"alice": 4242}, nil
+	}
+	enterpriseHooksEnumerateDirectoryConfigured = func() bool { return true }
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"alice": {Name: "alice", UID: 4242, GID: 4242},
 	}})
 	state := enterpriseHookGuardianState{FailureCount: 1, Results: []enterpriseHookReconcileRow{
-		{User: "alice", Connector: "claudecode", OK: true},
-		{User: "okta-carol", Connector: "claudecode", Error: `enterprise hooks: target account "okta-carol" does not exist: no such account`},
+		{User: "carol", Connector: "claudecode", Error: `enterprise hooks: target account "carol" does not exist: no such account`},
 	}}
 	if got := enterpriseHookRemovedAccountFailures(state); got != 1 {
-		t.Fatalf("a leaver row: excused = %d, want 1", got)
+		t.Fatalf("deleted local account: excused = %d, want 1", got)
 	}
-	state.FailureCount = 2
+	state.Results[0] = enterpriseHookReconcileRow{User: "okta-carol", Connector: "claudecode", Error: "enterprise hooks: hook config is group/other writable"}
+	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+		t.Fatalf("directory outage with failed hook: excused = %d, want 0", got)
+	}
+	state.Results[0].Error = `enterprise hooks: target account "okta-carol" does not exist: no such account`
+	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
+		t.Fatalf("directory outage with missing-account error: excused = %d, want 0", got)
+	}
 	state.Results[0] = enterpriseHookReconcileRow{User: "alice", Connector: "codex", Error: "enterprise hooks: hook config is group/other writable"}
 	if got := enterpriseHookRemovedAccountFailures(state); got != 0 {
-		t.Fatalf("a failure of an account that resolves: excused = %d, want 0", got)
+		t.Fatalf("account that resolves: excused = %d, want 0", got)
 	}
 }
 

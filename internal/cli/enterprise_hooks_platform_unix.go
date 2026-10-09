@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -29,26 +30,37 @@ func enterpriseHookDeferredTargetSessionAvailable(
 	return false, fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
 }
 
-// enterpriseHookRemovedAccountRow reports, on a standalone deployment only,
-// a guardian row whose account does not resolve: deleted (the enumerator
-// removes its rows after its definitive misses) or a directory that does not
-// answer for it. No one can start an agent as such an account, so status
-// reports the row as a warning instead of failing the host for the 3-cycle
-// window, as enterprise linux status and verify do (GAP-0775). Tests
-// replace it.
+// enterpriseHookRemovedAccountRow excuses a failed standalone row only when
+// reconciliation itself found the target missing and local account evidence
+// makes that absence definitive. NSS also returns not-found for directory
+// users while their provider is unavailable, so it cannot prove deletion.
 var enterpriseHookRemovedAccountRow = func(row enterpriseHookReconcileRow) bool {
 	user := strings.TrimSpace(row.User)
-	if cfg == nil || !cfg.StandaloneEnterprise() || user == "" {
+	if cfg == nil || !cfg.StandaloneEnterprise() || user == "" ||
+		!strings.HasPrefix(row.Error, "enterprise hooks: target account ") ||
+		!strings.HasSuffix(row.Error, ": "+errEnterpriseHookTargetNotFound.Error()) {
 		return false
 	}
-	_, err := enterprisehooks.StandaloneResolver().LookupUser(user)
-	return unixidentity.IsNotFound(err)
+	if _, err := enterprisehooks.StandaloneResolver().LookupUser(user); !unixidentity.IsNotFound(err) {
+		return false
+	}
+	local, err := enterpriseHooksEnumerateLocalAccounts(context.Background())
+	if err != nil {
+		return false
+	}
+	if _, present := local[user]; present {
+		return false
+	}
+	if !enterpriseHooksEnumerateDirectoryConfigured() {
+		return true
+	}
+	state := enterprisehooks.LoadUnixEnumeratorState(enterpriseHookEnumeratorStatePath(enterpriseHookManifest))
+	return state.Sources[user] == "files"
 }
 
-// enterpriseHookRemovedAccountNote follows each failure status and verify
-// report as a warning for an account that does not resolve.
-const enterpriseHookRemovedAccountNote = " (the account does not resolve: it was deleted, or the directory does not answer for it; " +
-	"the enumerator removes a deleted account's targets after 3 enumeration cycles and keeps them while the directory is unreachable)"
+// enterpriseHookRemovedAccountNote follows a failed row whose local account
+// was removed, while the enumerator has yet to drop its target.
+const enterpriseHookRemovedAccountNote = " (the local account was removed; the enumerator drops its targets after 3 enumeration cycles)"
 
 // enterpriseHookSignedOutAccount is the Windows standalone signed-out
 // account check; no unix row names one.
