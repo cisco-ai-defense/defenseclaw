@@ -57,9 +57,36 @@ func mcpServerRuntimeBlock(pe *enforce.PolicyEngine, toolName, connector, explic
 		return true, server, fmt.Sprintf("mcp server %q block check failed — failing closed: %v", server, err)
 	}
 	if blocked {
+		if note := mcpRuntimeDisableNote(pe, server, connector); note != "" {
+			return true, server, note
+		}
 		return true, server, fmt.Sprintf("mcp server %q is blocked", server)
 	}
 	return false, server, ""
+}
+
+// mcpRuntimeDisableNote says that a server is refused because its install
+// admission rejected it (a scan that failed or found a blocking finding), with
+// the journal's reason. A bare "is blocked" next to an asset-policy row that
+// allows the server in mode observe read as asset_policy blocking it
+// (GAP-0963). "" for an operator block, and on Secure Client, which keeps the
+// message of main (issue #1092).
+func mcpRuntimeDisableNote(pe *enforce.PolicyEngine, server, connector string) string {
+	if pe.SecureClient() {
+		return ""
+	}
+	if operator, err := pe.IsMCPBlockedForConnector(server, connector); err != nil || operator {
+		return ""
+	}
+	reason, disabled, err := pe.RuntimeDisableReason("mcp", server, connector)
+	if err != nil || !disabled {
+		return ""
+	}
+	note := fmt.Sprintf("mcp server %q is disabled because its install admission rejected it", server)
+	if reason = strings.TrimSpace(reason); reason != "" {
+		note += " (" + reason + ")"
+	}
+	return note + "; asset_policy.mode does not apply to admission verdicts"
 }
 
 // mcpServerDenied reports an operator block (asset_policy.mcp.denied) or a

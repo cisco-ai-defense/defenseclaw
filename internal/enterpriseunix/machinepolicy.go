@@ -395,6 +395,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		return nil
 	}
 	l.warnNoConnectorsEnabled(validated)
+	l.warnUnenforcedAssetPolicy(validated)
 	intended, err := env.MachinePolicy.Intended(validated.Loaded)
 	if err != nil {
 		r.AddWarning(codeMachinePolicy, err.Error())
@@ -653,6 +654,36 @@ func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 		"the enumerator found %d eligible %s, but config.yaml enables no connector the managed deployment protects in guardrail.connector or guardrail.connectors%s, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {}) and run `%s`",
 		len(record.Accounts), users, ignored, env.lifecycleCommand("ensure")))
 	r.SecurityComplete = false
+}
+
+// codeAssetPolicyNotEnforced names an asset_policy default deny or
+// registry_required that nothing on the host applies.
+const codeAssetPolicyNotEnforced = "asset_policy_not_enforced"
+
+// warnUnenforcedAssetPolicy reports an asset_policy default deny or
+// registry_required that blocks nothing: a managed Linux or macOS host runs
+// no install watcher for the users' skills, plugins and MCP servers, unless
+// gateway.watcher names folders, and the hooks apply only the denied lists
+// while runtime_detection is off. ensure, status and verify said nothing
+// and the administrator's deny-by-default was silently inert (GAP-0957).
+func (l *lifecycle) warnUnenforcedAssetPolicy(validated *validatedConfig) {
+	if validated == nil || validated.Loaded == nil {
+		return
+	}
+	watcher := validated.Loaded.Gateway.Watcher
+	watched := func(targetType string) bool {
+		switch targetType {
+		case "skill":
+			return watcher.Enabled && watcher.Skill.Enabled && len(watcher.Skill.Dirs) > 0
+		case "plugin":
+			return watcher.Enabled && watcher.Plugin.Enabled && len(watcher.Plugin.Dirs) > 0
+		default:
+			return false
+		}
+	}
+	for _, message := range validated.Loaded.UnenforcedAssetPolicyRules(watched) {
+		l.result.AddWarning(codeAssetPolicyNotEnforced, message)
+	}
 }
 
 // ignoredConnectorEntries lists the guardrail.connector and

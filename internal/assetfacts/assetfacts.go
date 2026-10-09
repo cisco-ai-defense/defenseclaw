@@ -54,7 +54,16 @@ type Facts struct {
 	Skills []Skill `json:"skills,omitempty"`
 	// MCP is the configuration of the MCP server the tool call names.
 	MCP *MCPServer `json:"mcp,omitempty"`
+	// MCPUnproven names the MCP server the tool call names when the agent
+	// loads its servers from a command-line source the hook could not read,
+	// so no definition of it can be proven (GAP-0954).
+	MCPUnproven string `json:"mcp_unproven,omitempty"`
 }
+
+// SourceCommandLine marks an MCP definition read from the agent's command
+// line (claude --mcp-config, codex -c mcp_servers.*), which takes precedence
+// over every config file the gateway can read.
+const SourceCommandLine = "command-line"
 
 // Skill is one skill folder and the name its SKILL.md frontmatter declares.
 type Skill struct {
@@ -69,6 +78,9 @@ type MCPServer struct {
 	Command   string   `json:"command,omitempty"`
 	Args      []string `json:"args,omitempty"`
 	Transport string   `json:"transport,omitempty"`
+	// Source is SourceCommandLine for a definition from the agent's command
+	// line, "" for one from its config files.
+	Source string `json:"source,omitempty"`
 }
 
 // Encode renders facts as a header value, or "" when there is nothing to
@@ -76,7 +88,7 @@ type MCPServer struct {
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -108,7 +120,7 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != ""
 }
 
 // DeclaredFor returns the names the facts say folder declares.
@@ -137,17 +149,30 @@ func bounded(facts Facts) Facts {
 			Name: clean(server.Name, maxNameBytes), URL: clean(server.URL, maxFieldBytes),
 			Command: clean(server.Command, maxFieldBytes), Transport: clean(server.Transport, 64),
 		}
+		lossy := out.URL != strings.TrimSpace(server.URL) || out.Command != strings.TrimSpace(server.Command) ||
+			out.Transport != strings.TrimSpace(server.Transport) || len(server.Args) > maxArgs
 		for _, arg := range server.Args {
 			if len(out.Args) == maxArgs {
 				break
 			}
 			out.Args = append(out.Args, clean(arg, maxFieldBytes))
+			lossy = lossy || out.Args[len(out.Args)-1] != strings.TrimSpace(arg)
+		}
+		commandLine := server.Source == SourceCommandLine
+		if commandLine {
+			out.Source = SourceCommandLine
 		}
 		facts.MCP = nil
-		if out.Name != "" && (out.URL != "" || out.Command != "") {
+		switch {
+		case out.Name != "" && (out.URL != "" || out.Command != "") && !(commandLine && lossy):
 			facts.MCP = &out
+		case commandLine && facts.MCPUnproven == "":
+			// A command-line definition that does not fit must not fall
+			// back to the config files the gateway reads.
+			facts.MCPUnproven = server.Name
 		}
 	}
+	facts.MCPUnproven = clean(facts.MCPUnproven, maxNameBytes)
 	return facts
 }
 

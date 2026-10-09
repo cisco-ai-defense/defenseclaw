@@ -115,9 +115,33 @@ func (a *APIServer) claudeStateUnreadableDecision(ctx context.Context, hookEvent
 }
 
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
-	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, req.ToolInput)
+	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
+}
+
+// codexMCPServerName is the MCP server a Codex tool call names, spelled as
+// the caller's Codex configures it. Codex shows hooks mcp__<server>__<tool>
+// with every character other than a letter, digit or underscore turned into
+// "_", so an approved acme-notes was looked up as acme_notes: refused as
+// unregistered, while a deny or a scan-verdict disable of a hyphenated server
+// missed it (GAP-0939, GAP-0462). It is resolved whatever asset_policy.enabled
+// says, because the lists and runtime disables always apply. "" when the call
+// names no server. Secure Client keeps main: only the payload field (#1092).
+func (a *APIServer) codexMCPServerName(ctx context.Context, req codexHookRequest) string {
+	explicit := strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")))
+	cfg := a.liveConfig()
+	if explicit != "" || cfg == nil || cfg.SecureClientIntegration() {
+		return explicit
+	}
+	server := serverFromMCPToolName(req.ToolName)
+	if !strings.Contains(server, "_") {
+		return server
+	}
+	if entry, ok := a.lookupCallerMCPServer(ctx, cfg, "codex", req.CWD, server); ok && strings.TrimSpace(entry.Name) != "" {
+		return strings.TrimSpace(entry.Name)
+	}
+	return server
 }
 
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
@@ -276,20 +300,23 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		return config.AssetPolicyDecision{}, false
 	}
 	probe = a.resolveMCPProbeEndpoint(ctx, cfg, connector, probe)
-	input := config.AssetPolicyInput{
-		TargetType:     "mcp",
-		Name:           probe.ServerName,
-		Connector:      connector,
-		URL:            probe.URL,
-		Command:        probe.Command,
-		Args:           probe.Args,
-		Transport:      probe.Transport,
-		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
+	decision, unproven := unprovenMCPDefinitionDecision(ctx, cfg, connector, probe)
+	if !unproven {
+		input := config.AssetPolicyInput{
+			TargetType:     "mcp",
+			Name:           probe.ServerName,
+			Connector:      connector,
+			URL:            probe.URL,
+			Command:        probe.Command,
+			Args:           probe.Args,
+			Transport:      probe.Transport,
+			RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
+		}
+		if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
+			return config.AssetPolicyDecision{}, false
+		}
+		decision = cfg.EvaluateAssetPolicy(input)
 	}
-	if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
-		return config.AssetPolicyDecision{}, false
-	}
-	decision := cfg.EvaluateAssetPolicy(input)
 	// when MCP.Default is "deny" and the asset
 	// policy is itself in action mode, an unknown terminal MCP
 	// command MUST NOT be silently downgraded to allow just
@@ -357,6 +384,12 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 	if !ok {
 		return probe
 	}
+	if !secureClient && strings.TrimSpace(entry.Name) != "" {
+		// The configured name, not the form the agent's tool name carries
+		// (acme_notes for acme-notes in Codex), is what the lists and the
+		// registry name (GAP-0939).
+		probe.ServerName = strings.TrimSpace(entry.Name)
+	}
 	probe.URL = strings.TrimSpace(entry.URL)
 	probe.Command = strings.TrimSpace(entry.Command)
 	probe.Args = entry.Args
@@ -364,18 +397,58 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 	return probe
 }
 
+// unprovenMCPDefinitionDecision refuses an MCP tool call whose server the
+// agent loads from a command-line source the standalone hook could not read
+// (claude --mcp-config, codex -c mcp_servers.*) when a rule decides on where
+// a server points: the server the call reaches cannot be proven, so the call
+// fails closed rather than being judged on a config file the agent ignores
+// (GAP-0954). A url, command or transport rule in the denied list applies in
+// every mode; one in the allowed list or the registry decides only under a
+// default deny or registry_required, in asset_policy.mode.
+func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	unproven := claimedAssetFactsFromContext(ctx).MCPUnproven
+	if unproven == "" || cfg == nil || cfg.SecureClientIntegration() || probe.Surface != "hook" ||
+		!config.SameMCPToolServer(connector, probe.ServerName, unproven) {
+		return config.AssetPolicyDecision{}, false
+	}
+	policy, _ := cfg.EffectiveAssetTypePolicy(connector, "mcp")
+	mode := config.AssetPolicyModeAction
+	if !rulesPinEndpoint(cfg.AssetPolicy.MCP.Denied) {
+		gated := cfg.AssetPolicy.Enabled && (policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
+		if !gated || !(rulesPinEndpoint(cfg.AssetPolicy.MCP.Allowed) || rulesPinEndpoint(policy.Registry)) {
+			return config.AssetPolicyDecision{}, false
+		}
+		mode = cfg.EffectiveAssetPolicyModeForConnector(connector)
+	}
+	decision := config.AssetPolicyDecision{
+		Enabled: true, Mode: mode, Action: "block", RawAction: "block",
+		Source: "mcp-definition-unproven", RegistryStatus: "unknown",
+		TargetType: "mcp", TargetName: probe.ServerName, Connector: connector, RuntimeSurface: "hook",
+		Reason: fmt.Sprintf("mcp %q: the agent loads its MCP servers from its command line (--mcp-config or -c mcp_servers) "+
+			"and that definition could not be read, so where the server points cannot be checked against asset_policy", probe.ServerName),
+	}
+	if !strings.EqualFold(mode, config.AssetPolicyModeAction) {
+		decision.Action, decision.WouldBlock = "allow", true
+	}
+	return decision, true
+}
+
+// rulesPinEndpoint reports whether a rule matches on where an MCP server
+// points or how it starts.
+func rulesPinEndpoint(rules []config.AssetPolicyRule) bool {
+	for _, rule := range rules {
+		if rule.URL != "" || rule.Command != "" || rule.Transport != "" || len(rule.ArgsPrefix) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // mcpListsPinEndpoint reports whether a denied or allowed MCP rule matches
 // on how a server starts (url, command, args_prefix, transport), which a
 // name-only probe needs resolving for.
 func mcpListsPinEndpoint(p config.AssetTypePolicy) bool {
-	for _, rules := range [][]config.AssetPolicyRule{p.Denied, p.Allowed} {
-		for _, rule := range rules {
-			if rule.URL != "" || rule.Command != "" || rule.Transport != "" || len(rule.ArgsPrefix) > 0 {
-				return true
-			}
-		}
-	}
-	return false
+	return rulesPinEndpoint(p.Denied) || rulesPinEndpoint(p.Allowed)
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {

@@ -266,7 +266,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Args:          toolArgs,
 			Direction:     "tool_call",
 			Connector:     "codex",
-			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
+			MCPServerName: a.codexMCPServerName(ctx, req),
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		var dialectHint actionfacts.Dialect

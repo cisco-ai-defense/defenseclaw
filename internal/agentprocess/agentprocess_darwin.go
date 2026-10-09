@@ -12,7 +12,9 @@ package agentprocess
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -47,6 +49,36 @@ func lookupSysctl(pid int) (Process, error) {
 		Start:  int64(start.Sec)*1_000_000 + int64(start.Usec),
 		Exited: info.Proc.P_stat == darwinZombie,
 	}, nil
+}
+
+// commandLine reads the arguments kern.procargs2 records: a 4-byte argument
+// count, the executable path, NUL padding, then the arguments, each ending
+// in NUL. macOS does not report another process's working directory here.
+func commandLine(pid int) ([]string, string, error) {
+	data, err := unix.SysctlRaw("kern.procargs2", pid)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(data) < 4 || len(data) > maxCommandLineBytes+4 {
+		return nil, "", fmt.Errorf("kern.procargs2 of process %d has %d bytes", pid, len(data))
+	}
+	argc := int(binary.LittleEndian.Uint32(data[:4]))
+	rest := data[4:]
+	end := bytes.IndexByte(rest, 0)
+	if end < 0 || argc <= 0 || argc > len(rest) {
+		return nil, "", fmt.Errorf("kern.procargs2 of process %d does not parse", pid)
+	}
+	rest = bytes.TrimLeft(rest[end:], "\x00")
+	args := make([]string, 0, argc)
+	for len(args) < argc {
+		end := bytes.IndexByte(rest, 0)
+		if end < 0 {
+			return nil, "", fmt.Errorf("kern.procargs2 of process %d is truncated", pid)
+		}
+		args = append(args, string(rest[:end]))
+		rest = rest[end+1:]
+	}
+	return args, "", nil
 }
 
 // executablePath reads the executable path kern.procargs2 records after its
