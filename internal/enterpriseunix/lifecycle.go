@@ -193,7 +193,7 @@ func uniqueMessages(messages []enterprisestatus.Message) []enterprisestatus.Mess
 }
 
 // run returns the specific failure exit code (0 for the generic one).
-func (l *lifecycle) run(ctx context.Context) int {
+func (l *lifecycle) run(ctx context.Context) (failure int) {
 	env, r := l.env, l.result
 	if !contains(Actions, l.opts.Action) {
 		r.AddError(codeInvalidArguments, fmt.Sprintf("unknown action %q", l.opts.Action))
@@ -236,6 +236,11 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return 0
 	}
 	defer lock.release()
+	if l.opts.FromPackage && l.opts.Reason != "package" {
+		// Recorded before the lock goes, so a package run that waits for it
+		// writes its own result after this one.
+		defer func() { l.recordPackageResult(failure) }()
+	}
 	if l.opts.Action == ActionUninstall {
 		// An uninstall leaves no lifecycle directory holding only its lock
 		// (a rerun, or the package preremove after an uninstall, found
@@ -1957,6 +1962,27 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		}
 	}
 	return lines
+}
+
+// recordPackageResult keeps the result of an `ensure --from-package` run
+// outside the package's own install script (an administrator finishing the
+// install or applying a rollback, the MDM wrapper) in
+// last-package-result.json, which the install script writes for its own
+// run. After a refused package apply the file kept ok: false for the newer
+// build while the deployment was healthy again (GAP-1116).
+func (l *lifecycle) recordPackageResult(failure int) {
+	env := l.env
+	result := *l.result
+	result.Warnings = uniqueMessages(result.Warnings)
+	result.Finish(env.GOOS, failure)
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return
+	}
+	path := filepath.Join(env.P(env.Layout.LifecycleDir), lastPackageResultFile)
+	if err := env.writeFileAtomic(path, append(data, '\n'), 0o600, rootOwner()); err != nil {
+		l.result.AddWarning(codeState, "could not record this run in "+filepath.Join(env.Layout.LifecycleDir, lastPackageResultFile)+": "+err.Error())
+	}
 }
 
 // refuseUnresolvedPerUserRows asks `enterprise hooks remove-all --check`,
