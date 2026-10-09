@@ -386,3 +386,40 @@ func TestUserPluginCapPreservesLaterInstallationBaseline(t *testing.T) {
 	}
 	t.Fatal("later installation baseline missing from the published inventory")
 }
+
+// A capped IDE scan cannot prove that an AI extension missing beyond the cap
+// was removed while the IDE inventory still retains that plugin.
+func TestPartialIDEInventoryKeepsEditorExtensionSignal(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".vscode", "extensions")
+	sig := AISignature{ID: "copilot", Name: "GitHub Copilot", Category: SignalSupportedConnector, ExtensionIDs: []string{"github.copilot"}}
+	svc := &ContinuousDiscoveryService{
+		opts:  AIDiscoveryOptions{IDEInventory: config.IDEInventoryAll, HomeDir: home},
+		store: NewAIStateStore(filepath.Join(t.TempDir(), "state.json")),
+	}
+	old := svc.signalFromValue(sig, SignalEditorExtension, "editor_extension", "github.copilot")
+	firstSeen := time.Now().Add(-time.Hour).UTC()
+	old.FirstSeen = firstSeen
+	prior := aiStateFile{Signals: map[string]aiStoredSignal{
+		old.Fingerprint: {AISignal: old, StoredEvidence: old.Evidence},
+	}}
+	index := newIDEAIIndex([]AISignature{sig})
+	complete := &IDEInventory{Scope: config.IDEInventoryAll}
+	plugin := ideplugins.Plugin{ID: "github.copilot", Enabled: ideplugins.EnabledOn}
+	install := ideplugins.Install{Family: ideplugins.FamilyVSCode, Product: "vscode", Root: root, Plugins: []ideplugins.Plugin{plugin}}
+	complete.add([]ideplugins.Install{install}, ideOwner{}, index, time.Now())
+	svc.ideBaseline = map[string]IDEPlugin{complete.Plugins[0].Fingerprint: complete.Plugins[0]}
+	install.Partial = true
+	install.Plugins = nil
+	partial := &IDEInventory{Scope: config.IDEInventoryAll}
+	partial.add([]ideplugins.Install{install}, ideOwner{}, index, time.Now())
+	stats := scanStats{ideInventory: partial, DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
+	report := svc.classifyAndPersist("partial", "test", time.Now(), nil, stats, prior, true)
+	if report.Summary.GoneSignals != 0 || report.Summary.ActiveSignals != 1 || len(report.Signals) != 1 ||
+		report.Signals[0].State != AIStateSeen || !report.Signals[0].FirstSeen.Equal(firstSeen) {
+		t.Fatalf("partial editor signals = %+v, summary = %+v", report.Signals, report.Summary)
+	}
+	if report.IDEInventory == nil || len(report.IDEInventory.Plugins) != 1 {
+		t.Fatalf("partial IDE inventory = %+v", report.IDEInventory)
+	}
+}
