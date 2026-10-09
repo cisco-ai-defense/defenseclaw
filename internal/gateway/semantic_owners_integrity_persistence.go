@@ -694,7 +694,9 @@ func integrityCommandMutatesPath(
 			actionfacts.OperationCopy,
 			actionfacts.OperationMove,
 			actionfacts.OperationConfigChange,
-		)
+		) || (strings.EqualFold(command.Program, "curl") ||
+			strings.EqualFold(command.Program, "curl.exe")) &&
+			hasAnyOperation(command, actionfacts.OperationFetch, actionfacts.OperationUpload)
 	case actionfacts.PathAccessAppend:
 		return hasAnyOperation(
 			command,
