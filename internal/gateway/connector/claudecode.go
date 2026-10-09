@@ -1344,6 +1344,13 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// spaces. Older shell-form commands are still recognized during migration.
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
+	if !opts.ManagedEnterprise {
+		// Refuse a link the gateway cannot inspect before any hook is
+		// written, so a refusal never leaves fail-closed hooks behind (GAP-1062).
+		if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
+			return fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err)
+		}
+	}
 
 	return withFileLock(settingsPath, func() error {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
@@ -1615,7 +1622,10 @@ type ClaudeCodeNativeOTLPProbe struct {
 // prevents a synthetic token-file request from masking a broken managed
 // settings credential.
 func LoadClaudeCodeNativeOTLPProbes() ([]ClaudeCodeNativeOTLPProbe, error) {
-	settingsPath := claudeCodeSettingsPath()
+	settingsPath, err := claudeCodeUserSettingsReadPath(claudeCodeSettingsPath())
+	if err != nil {
+		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
+	}
 	data, exists, err := readStableClaudeCodeSettingsFile(settingsPath)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
