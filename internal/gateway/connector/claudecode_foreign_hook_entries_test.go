@@ -225,7 +225,10 @@ func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T)
 		}
 		return 0, stderr.String()
 	}
-	if code, stderr := run(); code != 2 || !strings.Contains(stderr, "Rerun the DefenseClaw installer") {
+	// GAP-1079: after rm -rf ~/.defenseclaw the installer alone does not
+	// bring the hooks back; the sentence names the whole repair.
+	if code, stderr := run(); code != 2 ||
+		!strings.Contains(stderr, "Run the DefenseClaw installer, then defenseclaw quickstart") {
 		t.Fatalf("missing script: exit %d stderr %q, want a block (2) that names the repair", code, stderr)
 	}
 	if err := os.MkdirAll(filepath.Dir(script), 0o700); err != nil {
@@ -242,5 +245,41 @@ func TestClaudeCode_PerUserHookCommandFailsClosedWhenScriptMissing(t *testing.T)
 	oldHome, _ := claudeCodeHookInvocation(SetupOpts{}, "/home/old/.defenseclaw/hooks/claude-code-hook.sh")
 	if !hookUsesForeignDefenseClawClaudeCodeScript(map[string]interface{}{"command": oldHome}) {
 		t.Fatalf("an old-home guarded entry %q is not claimed for repair", oldHome)
+	}
+}
+
+// GAP-1091: Claude Code treats a hook it cannot spawn as a non-blocking error,
+// so a quarantined defenseclaw-hook.exe let every call through. Per-user
+// Windows Setup runs the launcher through cmd.exe, which blocks with exit 2
+// when it is missing; ownership and contract checks see the exec form it runs.
+func TestClaudeCodeWindowsLauncherGuardFailsClosedAndReadsAsExecForm(t *testing.T) {
+	launcher := `C:\Users\Ana Lima\.local\bin\defenseclaw-hook.exe`
+	command, args := claudeCodeWindowsHookInvocation(SetupOpts{}, launcher)
+	if !strings.EqualFold(filepath.Base(strings.ReplaceAll(command, `\`, "/")), "cmd.exe") {
+		t.Fatalf("per-user command = %q, want the system cmd.exe", command)
+	}
+	tail := strings.Join(args[len(args)-6:], " ")
+	if args[4] != launcher || args[6] != launcher || tail != "1>&2 & exit /b 2 )" {
+		t.Fatalf("guard argv = %q", args)
+	}
+	view, ok := claudeCodeExecView(map[string]interface{}{"type": "command", "command": command, "args": args}).(map[string]interface{})
+	if !ok || view["command"] != launcher || !hasClaudeCodeNativeExecArgs(view) {
+		t.Fatalf("guard view = %#v, want the exec form of %s", view, launcher)
+	}
+	if got := claudeCodeRecordedHookCommand(command, args); got != launcher {
+		t.Fatalf("recorded command = %q, want the launcher", got)
+	}
+
+	edited := append([]string(nil), args...)
+	edited[len(edited)-2] = "0"
+	hook := map[string]interface{}{"type": "command", "command": command, "args": edited}
+	if got := claudeCodeExecView(hook).(map[string]interface{}); got["command"] != command {
+		t.Fatal("an edited guard that exits 0 was read as the generated one")
+	}
+	if managed, _ := claudeCodeWindowsHookInvocation(SetupOpts{ManagedEnterprise: true}, launcher); managed != launcher {
+		t.Fatalf("managed command = %q, want the exec form its guardian restores", managed)
+	}
+	if plain, _ := claudeCodeWindowsHookInvocation(SetupOpts{}, `C:\Users\a%b\x.exe`); plain != `C:\Users\a%b\x.exe` {
+		t.Fatalf("a launcher path cmd.exe would expand kept the guard: %q", plain)
 	}
 }

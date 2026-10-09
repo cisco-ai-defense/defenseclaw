@@ -617,6 +617,13 @@ func TestOwnedHooksPresent_CodexRequiresTrustedCompleteContract(t *testing.T) {
 			}
 			mutateCodexConfig(t, configPath, mutate)
 			present, err := OwnedHooksPresent(conn, opts)
+			if strings.HasSuffix(name, "hooks-feature-disabled") {
+				// The user's switch is reported at once, not repaired (GAP-1094).
+				if present || err == nil || !strings.Contains(err.Error(), "codex features enable hooks") {
+					t.Fatalf("OwnedHooksPresent = %v, %v; want the turned-off error", present, err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("OwnedHooksPresent: %v", err)
 			}

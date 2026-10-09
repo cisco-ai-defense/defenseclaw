@@ -152,7 +152,38 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"{{end}}
 # Response-layer and transport-layer failures both respect FAIL_MODE;
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 
-fail_unreachable() {
+{{if and (not .Sandbox) (not .Managed)}}# claude_fail_closed_decision prints the JSON block decision for a prompt,
+# tool call or permission request that is blocked because the gateway did not
+# answer, with a plain sentence that names no internal file or shell syntax.
+# Per-user hooks only.
+claude_fail_closed_decision() {
+  local reason="" next="" event=""
+  # Managed hooks keep their own exit-2 contract and service wording.
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  if [ -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/gateway.stopped" ]; then
+    reason="DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
+  elif [ "$1" = "gateway unreachable" ] && next="$(defenseclaw_unreachable_next_step)" && [ -n "$next" ]; then
+    reason="DefenseClaw blocked this: ${next//\`/}."
+  else
+    reason="DefenseClaw blocked this because it could not reach its gateway (${1}). Run defenseclaw-gateway status to check it."
+  fi
+  event="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || return 1
+  case "$event" in
+    PreToolUse)
+      _dc_jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}' ;;
+    PermissionRequest)
+      _dc_jq -cn --arg r "$reason" \
+        '{hookSpecificOutput:{hookEventName:"PermissionRequest",decision:{behavior:"deny",message:$r}}}' ;;
+    UserPromptSubmit|UserPromptExpansion)
+      _dc_jq -cn --arg r "$reason" '{decision:"block",reason:$r}' ;;
+    *) return 1 ;;
+  esac
+}
+
+{{end}}fail_unreachable() {
   defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
 {{if .Sandbox}}  # Claude shows this line under the blocked step: a prompt hook blocks the
   # prompt, every other hook a tool call.
@@ -161,7 +192,16 @@ fail_unreachable() {
     *) defenseclaw_emit_unreachable_stderr "claude-code tool" "$1" ;;
   esac{{else}}  defenseclaw_emit_unreachable_stderr "claude-code tool" "$1"{{end}}
   if defenseclaw_should_fail_closed_on_unreachable; then
-    exit 2
+{{if and (not .Sandbox) (not .Managed)}}    # For an exit-2 block Claude Code prints the whole hook command line in
+    # front of the reason. A blocked prompt or tool call goes out as Claude's
+    # own JSON decision instead, which shows one plain sentence (GAP-1074);
+    # exit 2 stays the fallback when the JSON cannot be built.
+    local blocked=""
+    blocked="$(claude_fail_closed_decision "$1")" && [ -n "$blocked" ] && {
+      printf '%s\n' "$blocked"
+      exit 0
+    }
+{{end}}    exit 2
   fi
 {{if not .Sandbox}}  # Claude Code does not show stderr of a hook that exits 0: say on screen
   # that this account's gateway is down and how to start it again.

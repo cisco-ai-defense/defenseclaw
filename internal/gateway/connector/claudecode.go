@@ -1116,6 +1116,9 @@ func claudeCodeHandlerTargetsCurrentRuntime(handler map[string]interface{}, opts
 		return false
 	}
 	if runtime.GOOS == "windows" {
+		if view, ok := claudeCodeExecView(handler).(map[string]interface{}); ok {
+			handler = view
+		}
 		command, _ := handler["command"].(string)
 		expectedCommand := strings.TrimSpace(opts.HookExecutable)
 		if expectedCommand == "" {
@@ -1150,11 +1153,14 @@ func claudeCodeHookInvocation(opts SetupOpts, hookScript string) (string, []stri
 		if executable == "" {
 			executable = defenseclawHookBinary()
 		}
-		return executable, []string{"hook", "--connector", "claudecode"}
+		return claudeCodeWindowsHookInvocation(opts, executable)
 	}
 	command := posixHookCommandWord(hookCommand)
 	if shellHookSecureClientProfile(opts) {
 		return command, nil
+	}
+	if opts.ManagedEnterprise {
+		return claudeCodeMissingHookGuardWith(command, claudeCodeManagedMissingHookGuardMessage), nil
 	}
 	return claudeCodeMissingHookGuard(command), nil
 }
@@ -1165,8 +1171,21 @@ const claudeCodeMissingHookGuardSeparator = " || { rc=$?; "
 
 // claudeCodeMissingHookGuardMessage is what Claude Code shows when its
 // hook script cannot start. It must not name the script file:
-// doctor finds the registered script by that name in the command.
-const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook could not start " +
+// doctor finds the registered script by that name in the command. Claude
+// Code prints the whole command line in front of any exit-2 message, so the
+// sentence must hold whatever the reason: a missing script (the data folder
+// was deleted, the home moved) and an unreadable one alike, and the repair
+// it names must work after ~/.defenseclaw is gone, which the installer
+// alone does not do (GAP-1074, GAP-1079).
+const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook script is missing " +
+	"or cannot be run. Run the DefenseClaw installer, then defenseclaw quickstart, to repair it, " +
+	"or remove the DefenseClaw hooks from ~/.claude/settings.json."
+
+// claudeCodeManagedMissingHookGuardMessage is the managed-install sentence:
+// there the administrator's installer repairs the hooks, and quickstart does
+// not apply. Earlier per-user 1.0 builds wrote it too, so it is also
+// recognized as a generated guard until Setup rewrites the command.
+const claudeCodeManagedMissingHookGuardMessage = "DefenseClaw blocked this: its Claude Code hook could not start " +
 	"(the script is missing; was this account renamed or its home moved?). " +
 	"Rerun the DefenseClaw installer to repair it, or remove the DefenseClaw hooks from ~/.claude/settings.json."
 
@@ -1179,9 +1198,13 @@ const claudeCodeMissingHookGuardMessage = "DefenseClaw blocked this: its Claude 
 // The script path stays the first shell word, so ownership checks and doctor
 // still find it.
 func claudeCodeMissingHookGuard(command string) string {
+	return claudeCodeMissingHookGuardWith(command, claudeCodeMissingHookGuardMessage)
+}
+
+func claudeCodeMissingHookGuardWith(command, message string) string {
 	return command + claudeCodeMissingHookGuardSeparator +
 		`[ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || exit "$rc"; ` +
-		"echo '" + claudeCodeMissingHookGuardMessage + "' >&2; exit 2; }"
+		"echo '" + message + "' >&2; exit 2; }"
 }
 
 // claudeCodeUnguardedHookCommand removes only the exact generated guard,
@@ -1189,10 +1212,16 @@ func claudeCodeMissingHookGuard(command string) string {
 // that changes a blocking hook exit into success.
 func claudeCodeUnguardedHookCommand(command string) string {
 	index := strings.Index(command, claudeCodeMissingHookGuardSeparator)
-	if index <= 0 || command != claudeCodeMissingHookGuard(command[:index]) {
+	if index <= 0 {
 		return command
 	}
-	return command[:index]
+	if command == claudeCodeMissingHookGuard(command[:index]) {
+		return command[:index]
+	}
+	if command == claudeCodeMissingHookGuardWith(command[:index], claudeCodeManagedMissingHookGuardMessage) {
+		return command[:index]
+	}
+	return command
 }
 
 func claudeCodeManagedHookInvocation(opts SetupOpts, hookScript string) (string, []string) {
@@ -1344,6 +1373,13 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// spaces. Older shell-form commands are still recognized during migration.
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
+	if !opts.ManagedEnterprise {
+		// Refuse a link the gateway cannot inspect before any hook is
+		// written, so a refusal never leaves fail-closed hooks behind (GAP-1062).
+		if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
+			return fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err)
+		}
+	}
 
 	return withFileLock(settingsPath, func() error {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
@@ -1473,7 +1509,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 			// the exact Claude Code argv below, so another use of that executable is
 			// never removed by command alone. Recording the path lets a later Setup
 			// or Teardown recognize the prior launcher after an upgrade moves it.
-			backup.ManagedHookCommands = []string{hookCommand}
+			backup.ManagedHookCommands = []string{claudeCodeRecordedHookCommand(hookCommand, hookArgs)}
 			backupToSave = backup
 			transformed = append([]byte(nil), out...)
 			if exactBackupSafe {
@@ -1615,7 +1651,10 @@ type ClaudeCodeNativeOTLPProbe struct {
 // prevents a synthetic token-file request from masking a broken managed
 // settings credential.
 func LoadClaudeCodeNativeOTLPProbes() ([]ClaudeCodeNativeOTLPProbe, error) {
-	settingsPath := claudeCodeSettingsPath()
+	settingsPath, err := claudeCodeUserSettingsReadPath(claudeCodeSettingsPath())
+	if err != nil {
+		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
+	}
 	data, exists, err := readStableClaudeCodeSettingsFile(settingsPath)
 	if err != nil {
 		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
@@ -2430,7 +2469,7 @@ func isOwnedHook(hookEntry interface{}, hooksDir string) bool {
 }
 
 func isOwnedHookHandler(rawHook interface{}, hooksDir string) bool {
-	hook, ok := rawHook.(map[string]interface{})
+	hook, ok := claudeCodeExecView(rawHook).(map[string]interface{})
 	if !ok {
 		return false
 	}
@@ -2731,10 +2770,11 @@ func removeOwnedClaudeCodeHooks(
 		return nil, err
 	}
 	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
-		return isOwnedHookHandler(rawHook, hooksDir) ||
-			hookUsesTrackedClaudeCodeCommand(rawHook, managedCommands) ||
-			hookUsesLegacyClaudeCodeNativeCommand(rawHook) ||
-			hookUsesForeignDefenseClawClaudeCodeScript(rawHook)
+		hook := claudeCodeExecView(rawHook)
+		return isOwnedHookHandler(hook, hooksDir) ||
+			hookUsesTrackedClaudeCodeCommand(hook, managedCommands) ||
+			hookUsesLegacyClaudeCodeNativeCommand(hook) ||
+			hookUsesForeignDefenseClawClaudeCodeScript(hook)
 	}), nil
 }
 

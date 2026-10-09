@@ -346,6 +346,34 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             cfg = yaml.safe_load(fh)
         self.assertEqual(cfg["guardrail"]["connectors"]["hermes"]["mode"], "action")
 
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    def test_repeat_quickstart_without_mode_keeps_action(self, _gate):
+        # GAP-0979: a re-run without --mode switched action/closed back to observe/open.
+        atomic_write_private_bytes(
+            os.path.join(self.tmp_dir, "config.yaml"),
+            b"config_version: 8\n"
+            b"observability: {}\n"
+            b"claw:\n"
+            b"  mode: hermes\n"
+            b"guardrail:\n"
+            b"  enabled: true\n"
+            b"  connector: hermes\n"
+            b"  mode: observe\n"
+            b"  scanner_mode: local\n"
+            b"  connectors:\n"
+            b"    hermes:\n"
+            b"      mode: action\n",
+        )
+
+        result = self._invoke(["--connector", "hermes", "--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["profile"], "action")
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["connectors"]["hermes"]["mode"], "action")
+
     @patch("defenseclaw.bootstrap.agent_discovery.discover_agents")
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=False)
     def test_action_mode_trusted_path_downgrade_is_structured(self, _gate, mock_discover):

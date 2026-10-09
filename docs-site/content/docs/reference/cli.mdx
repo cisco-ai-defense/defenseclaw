@@ -1024,7 +1024,13 @@ are booleans, so `off`, `on`, `yes` and `no` are text and
 `defenseclaw config set ai_discovery.ide_inventory off` sets that enum value. `config unset` of a key that is not set says its default
 already applies, and exits `1` for a key that does not exist, such as a
 misspelled one. Neither command changes `config_version`: only
-`defenseclaw migrate` does.
+`defenseclaw migrate` does. Unsetting a whole connector entry, such as
+`guardrail.connectors.codex`, takes that connector out of the guardrail
+roster: the gateway removes its hooks and stops guarding it, and the command
+says so and names `defenseclaw setup <connector>` to guard it again. To pause
+a connector on purpose use `defenseclaw guardrail disable --connector
+<connector>`; to change one of its settings, name the key, for example
+`guardrail.connectors.codex.mode`.
 
 - **A list item or a whole value as JSON.** Quote a path that has brackets in
   your shell, and use `--json` for anything that is not a single scalar:

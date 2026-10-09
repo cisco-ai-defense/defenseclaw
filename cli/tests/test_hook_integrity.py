@@ -27,7 +27,12 @@ from types import SimpleNamespace
 
 import pytest
 from defenseclaw.commands.cmd_doctor import _check_hook_runtime_integrity, _DoctorResult
-from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, unrunnable_hook_problem
+from defenseclaw.hook_integrity import (
+    hook_registration_problems,
+    hook_runtime_problems,
+    repair_command,
+    unrunnable_hook_problem,
+)
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
@@ -325,3 +330,49 @@ def test_missing_hook_script_is_named_as_missing_with_one_repair(tmp_path):
     row = next(row for row in result.checks if row.get("label") == "Hook runtime files")
     assert row["detail"].count("doctor --fix") == 1
     assert _repair_display_tag("blocked") == "skip"
+
+
+def _agent_config(tmp_path, connector, name):
+    config = tmp_path / name
+    lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": [str(config)]}}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    return SimpleNamespace(data_dir=str(tmp_path)), config
+
+
+def test_claude_disable_all_hooks_is_degraded_with_its_own_repair(tmp_path, monkeypatch):
+    # GAP-1066/GAP-1067: the hooks stay registered but Claude Code runs none of them.
+    monkeypatch.chdir(tmp_path)
+    cfg, settings = _agent_config(tmp_path, "claudecode", "settings.json")
+    hooks = {"PreToolUse": [{"hooks": [{"type": "command", "command": "/x/.defenseclaw/hooks/claude-code-hook.sh"}]}]}
+    settings.write_text(json.dumps({"hooks": hooks}))
+    assert hook_registration_problems(cfg, "claudecode") == []
+
+    project = tmp_path / ".claude"
+    project.mkdir()
+    (project / "settings.local.json").write_text(json.dumps({"disableAllHooks": True}))
+    problems = hook_registration_problems(cfg, "claudecode")
+    assert problems and "disableAllHooks" in problems[0] and "settings.local.json" in problems[0]
+    assert unrunnable_hook_problem(cfg, "claudecode") == problems[0]
+    assert repair_command("claudecode", problems[0]).startswith("remove disableAllHooks from")
+
+
+def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
+    # GAP-1094: [features] hooks = false; GAP-1102: entries without a command.
+    from defenseclaw.commands.cmd_doctor import _check_codex_hooks
+
+    cfg, config = _agent_config(tmp_path, "codex", "config.toml")
+    (tmp_path / "hooks").mkdir()
+    (tmp_path / "hooks" / "codex-hook.sh").write_text("#!/bin/bash\n")
+    command = "/home/u/.defenseclaw/hooks/codex-hook.sh --event PreToolUse"
+    entry = "[[hooks.PreToolUse]]\nmatcher = '*'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ntimeout = 30\n"
+    config.write_text("[features]\nhooks = false\n" + entry + f"command = '{command}'\n")
+
+    r = _DoctorResult()
+    _check_codex_hooks(cfg, r, platform_name="posix", config_path=str(config))
+    row = next(check for check in r.checks if check["label"] == "Codex hooks")
+    assert row["status"] == "fail" and "turned off" in row["detail"]
+    assert "codex features enable hooks" in row["remediation"]
+
+    config.write_text(entry + entry + f"command = '{command}'\n")
+    problems = hook_registration_problems(cfg, "codex")
+    assert problems and "without a command" in problems[0] and "refuses to start" in problems[0]

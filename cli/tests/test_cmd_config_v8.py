@@ -415,6 +415,28 @@ def test_unset_validates_every_key_before_writing(tmp_path: Path, monkeypatch) -
     assert "Unset update.check, update.channel" not in mixed.output
 
 
+def test_unset_of_a_whole_connector_says_it_is_no_longer_guarded(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1021: a typo for guardrail.connectors.codex.mode dropped Codex silently.
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\n"
+        "guardrail:\n"
+        "  enabled: true\n"
+        "  connectors:\n"
+        "    claudecode: {mode: action}\n"
+        "    codex: {mode: action}\n"
+    )
+    with (
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+    ):
+        result = CliRunner().invoke(cmd_config.config_cmd, ["unset", "guardrail.connectors.codex"])
+    assert result.exit_code == 0, result.output
+    assert "Codex left the guardrail roster" in result.output
+    assert "defenseclaw setup codex --mode action" in result.output
+    assert "guardrail disable --connector codex" in result.output
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="the managed standalone layouts are Linux and macOS only")
 def test_config_path_uses_managed_vendor_policy_default(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "config.yaml"

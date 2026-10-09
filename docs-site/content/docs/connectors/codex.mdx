@@ -316,6 +316,21 @@ your own Codex configuration does not change.
 
 ## Troubleshooting
 
+- **Hooks turned off in Codex.** `codex features disable hooks` (or
+  `[features] hooks = false` in `~/.codex/config.toml`) keeps the DefenseClaw
+  entries but Codex runs none of them. DefenseClaw does not override your
+  switch: the gateway raises a guardrail-degraded alert at once,
+  `defenseclaw status` marks Codex DEGRADED, `defenseclaw guardrail status`
+  says Codex is not guarded and `defenseclaw doctor` fails the **Codex hooks**
+  row. Run `codex features enable hooks` and restart Codex.
+- **Codex will not start after you deleted hook lines.** Removing the
+  DefenseClaw `command` lines from `config.toml` by hand leaves
+  `[[hooks.*]]` entries without a command, and Codex refuses to load the file
+  ("missing field command"). The hook self-heal, `defenseclaw setup codex
+  --yes` and `defenseclaw doctor --fix` take those entries back; doctor names
+  them on the **Codex hooks** row. To stop guarding Codex on purpose, use
+  `defenseclaw guardrail disable --connector codex` instead of editing the
+  file.
 - **401 from the model right after you changed its key.** Codex keeps one
   shared app-server daemon running in the background, and that daemon keeps
   the environment it started with. After you rotate the provider key (for
@@ -352,10 +367,13 @@ your own Codex configuration does not change.
   your proxy. Codex sessions started before setup keep the old environment
   until you restart them. Uninstall and
   `defenseclaw guardrail disable --connector codex` remove only that block,
-  and the file too if setup created it. If a proxy variable is set and the
-  loopback is not covered, or the block is an older one without the
-  instance-metadata addresses, `defenseclaw doctor` shows a warning on the
-  **Codex telemetry proxy** row, with a one-line fix.
+  and the file too if setup created it. Codex applies the lines of `.env` in
+  order, so a later `NO_PROXY=...` line of your own replaces the block's value;
+  write it as `NO_PROXY="${NO_PROXY},.corp.example.com"` to keep the loopback.
+  If a proxy variable is set and the loopback is not covered (also after such
+  a later line), or the block is an older one without the instance-metadata
+  addresses, `defenseclaw doctor` shows a warning on the **Codex telemetry
+  proxy** row, with the line number and a one-line fix.
   On Windows, set it once for your account with
   `setx NO_PROXY 127.0.0.1,localhost,::1` and open a new terminal, or run
   `$env:NO_PROXY = "127.0.0.1,localhost,::1"` in the PowerShell session

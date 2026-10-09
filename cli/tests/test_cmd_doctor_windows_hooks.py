@@ -1042,6 +1042,30 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
 
+    def test_claude_launcher_guard_form_is_healthy_and_edits_are_not(self) -> None:
+        # GAP-1091: per-user Setup runs the launcher through cmd.exe so a
+        # missing launcher blocks; doctor must read it as the exec form it runs.
+        runtime = self._runtime()
+        processor = ntpath.join(os.environ.get("SystemRoot") or "C:\\Windows", "System32", "cmd.exe")
+        guard = [
+            "/d", "/c", "if", "exist", str(runtime), "(", str(runtime), "hook", "--connector", "claudecode", ")",
+            "else", "(", "echo", *doctor_hooks._CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
+        ]
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["command"] = processor
+            entries[0]["hooks"][0]["args"] = guard
+        config.write_text(json.dumps(document), encoding="utf-8")
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["args"] = [*guard[:-2], "0", ")"]
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self.assertNotEqual(self._validate("claudecode", config).state, "healthy")
+
     def test_claude_exec_form_rejects_malformed_args(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", str(runtime))

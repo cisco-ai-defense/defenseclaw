@@ -692,6 +692,50 @@ def _write_config_change(app: AppContext, changes: list, expect_sha256: str | No
     return True
 
 
+def _guarded_connector_modes(app: AppContext) -> dict[str, str]:
+    """Active connector -> its mode, read before a change."""
+    try:
+        from defenseclaw import policy_catalog
+
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+        return {
+            str(c): policy_catalog.mode_label(cfg.guardrail.effective_mode(str(c))) for c in cfg.active_connectors()
+        }
+    except Exception:  # noqa: BLE001 - the roster note is best effort
+        return {}
+
+
+def _left_roster_notes(parsed: list, before: dict[str, str]) -> list[str]:
+    """Say so when ``config unset guardrail.connectors.<C>`` dropped a guarded connector (GAP-1021).
+
+    The whole entry is the connector's place in the roster: the gateway tears
+    its hooks down and stops guarding it, which a typo for
+    ``guardrail.connectors.<C>.mode`` must not leave unsaid.
+    """
+    try:
+        after = set(str(c) for c in config_module.load().active_connectors())
+    except Exception:  # noqa: BLE001
+        return []
+    from defenseclaw.commands.cmd_guardrail import _connector_label
+    from defenseclaw.hook_integrity import setup_command
+
+    notes = []
+    for _key, parts in parsed:
+        if len(parts) != 3 or parts[:2] != ["guardrail", "connectors"]:
+            continue
+        name = str(parts[2])
+        if name not in before or name in after:
+            continue
+        label = _connector_label(name)
+        notes.append(
+            f"{label} left the guardrail roster: DefenseClaw no longer guards {label} and removes its hooks. "
+            f"To guard it again run: {setup_command(name)} --mode {before[name]}. To pause it on purpose use "
+            f"defenseclaw guardrail disable --connector {name}; to change one setting, name it "
+            f"(for example guardrail.connectors.{name}.mode)."
+        )
+    return notes
+
+
 def _refuse_config_version(parts: list) -> None:
     """config_version names the schema the file is written in; only the
     migration changes it. Relabelling a version 9 file as 8 made the next
@@ -791,7 +835,10 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
             if _is_destination_key(parts):
                 raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
             raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
+    roster = _guarded_connector_modes(app)
     if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
+        for note in _left_roster_notes(parsed, roster):
+            click.echo(note)
         return
     if len(keys) == 1:
         click.echo(f"{keys[0]} is not set in config.yaml; its default already applies.")

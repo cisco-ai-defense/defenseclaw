@@ -57,9 +57,23 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def repair_command(connector: str, problem: str) -> str:
-    """The step that repairs *problem*: the installer for a missing launcher, else setup."""
+class HookProblem(str):
+    """A problem sentence that carries the one step that repairs it."""
 
+    repair: str
+
+    def __new__(cls, text: str, repair: str) -> HookProblem:
+        problem = super().__new__(cls, text)
+        problem.repair = repair
+        return problem
+
+
+def repair_command(connector: str, problem: str) -> str:
+    """The step that repairs *problem*: its own step, the installer for a missing launcher, else setup."""
+
+    own = getattr(problem, "repair", "")
+    if own:
+        return own
     if problem.startswith(_LAUNCHER_PROBLEM_PREFIX):
         return LAUNCHER_REINSTALL_STEP
     return setup_command(connector)
@@ -300,7 +314,8 @@ def unrunnable_hook_problem(cfg: Any, connector: str) -> str:
     for problem in hook_runtime_problems(cfg, connector):
         if "cannot run it" in problem or "no longer exist" in problem:
             return problem
-    return ""
+    switched_off = agent_hook_switch_problems(cfg, connector)
+    return switched_off[0] if switched_off else ""
 
 
 _CONFIG_LIMIT = 2 * 1024 * 1024
@@ -356,24 +371,118 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
     from ``~/.claude/settings.json``), the agent runs unguarded; status says
     so instead of showing the connector as normal (GAP-1230). When the
     entries are there, their commands must also be ones the shell can run
-    (:func:`hook_command_problems`).
+    (:func:`hook_command_problems`). Per-user Windows gets the same check: a
+    Codex self-update left config.toml without hooks while ``guardrail mode
+    action`` reported success (GAP-1035).
     """
 
-    if _is_windows():
-        return hook_launcher_problems(cfg, connector)
+    windows = _is_windows()
+    if windows:
+        launcher = hook_launcher_problems(cfg, connector)
+        if launcher or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+            return launcher
     existing: list[Path] = []
     for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
                 continue
             if "defenseclaw" in _registration_text(path.read_text(encoding="utf-8", errors="replace")):
-                return hook_command_problems(cfg, connector)
+                commands = [] if windows else hook_command_problems(cfg, connector)
+                return commands or agent_hook_switch_problems(cfg, connector)
         except OSError:
             continue
         existing.append(path)
     if not existing:
-        return []
+        return agent_hook_switch_problems(cfg, connector)
     return [f"no DefenseClaw hooks are registered in {existing[0]}"]
+
+
+def _read_agent_config(path: Path) -> Any:
+    try:
+        if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
+            return None
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return tomllib.loads(text) if path.suffix == ".toml" else json.loads(text)
+    except (OSError, ValueError):
+        return None
+
+
+def _commandless_codex_handlers(document: Any) -> int:
+    """Codex hook handlers that have no command: Codex refuses to load the file."""
+
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return 0
+    count = 0
+    for event, groups in hooks.items():
+        if event == "state" or not isinstance(groups, list):
+            continue
+        for group in groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            for handler in handlers if isinstance(handlers, list) else []:
+                if (
+                    isinstance(handler, dict)
+                    and "command" not in handler
+                    and handler.get("type", "command") == "command"
+                ):
+                    count += 1
+    return count
+
+
+def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str | None = None) -> list[str]:
+    """Agent settings that stop the registered DefenseClaw hooks from running.
+
+    The hook entries can be intact while the agent runs none of them: Claude
+    Code with ``disableAllHooks`` (GAP-1066; in the settings of the project in
+    the current folder, GAP-1067) or Codex with ``[features] hooks = false``
+    (GAP-1094). Codex also refuses to start when hook entries have lost their
+    command, for example after hook lines were deleted by hand (GAP-1102).
+    Managed installs keep the hooks in machine policy that these settings
+    cannot turn off, so they are not checked here.
+    """
+
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        return []
+    problems: list[str] = []
+    if connector == "claudecode":
+        project = Path(workspace_dir or os.getcwd(), ".claude")
+        paths = [*_hook_config_paths(cfg, connector), project / "settings.local.json", project / "settings.json"]
+        for path in dict.fromkeys(paths):
+            document = _read_agent_config(path)
+            if isinstance(document, dict) and document.get("disableAllHooks") is True:
+                problems.append(
+                    HookProblem(
+                        f"Claude Code disableAllHooks is true in {path}, so Claude Code runs none of its hooks "
+                        "and DefenseClaw is not guarding its tool calls",
+                        f"remove disableAllHooks from {path} (or set it to false), then restart Claude Code",
+                    )
+                )
+                break
+    elif connector == "codex":
+        for path in _hook_config_paths(cfg, connector):
+            document = _read_agent_config(path)
+            if not isinstance(document, dict):
+                continue
+            features = document.get("features")
+            if isinstance(features, dict) and (features.get("hooks") is False or features.get("codex_hooks") is False):
+                problems.append(
+                    HookProblem(
+                        f"Codex hooks are turned off in {path} ([features] hooks = false), so Codex runs no hook "
+                        "and DefenseClaw is not guarding its tool calls",
+                        "run `codex features enable hooks`, then restart Codex",
+                    )
+                )
+            orphans = _commandless_codex_handlers(document)
+            if orphans:
+                noun = "entry" if orphans == 1 else "entries"
+                problems.append(
+                    HookProblem(
+                        f"{path} has {orphans} Codex hook {noun} without a command (left when hook lines were "
+                        "deleted), so Codex refuses to start",
+                        f"run `{setup_command(connector)} --yes`; it removes the entries without a command",
+                    )
+                )
+    return problems
 
 
 def _registered_commands(value: Any) -> list[str]:

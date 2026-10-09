@@ -1300,6 +1300,15 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 			for _, key := range []string{"hooks", "codex_hooks"} {
 				if rawEnabled, exists := features[key]; exists {
 					enabled, ok := rawEnabled.(bool)
+					if ok && !enabled && !opts.ManagedEnterprise && !codexUsesManagedHookLayer(opts) {
+						// The user turned Codex hooks off. Setup must not override
+						// that, so say it at once instead of attempting a repair
+						// that can only fail (GAP-1094).
+						return false, fmt.Errorf(
+							"Codex hooks are turned off in %s ([features] %s = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks",
+							userConfigPath, key,
+						)
+					}
 					if !ok || !enabled {
 						return false, nil
 					}
@@ -1336,6 +1345,11 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 	}
 	hooks, ok := cfg["hooks"].(map[string]interface{})
 	if !ok {
+		return false, nil
+	}
+	if !opts.ManagedEnterprise && !codexUsesManagedHookLayer(opts) && codexHasCommandlessHandlers(hooks) {
+		// Codex refuses to load a config.toml with a hook entry that has no
+		// command, so nothing is guarded until Setup removes it (GAP-1102).
 		return false, nil
 	}
 	var verifyErr error
@@ -2891,6 +2905,42 @@ func removeOwnedCodexHooksFromTOML(raw []byte, configPath, hooksDir string) ([]b
 	return out, true, nil
 }
 
+// codexCommandlessHandler reports a command hook entry without a command,
+// which Codex rejects ("missing field command") so that it does not start.
+func codexCommandlessHandler(rawHook interface{}) bool {
+	handler, ok := rawHook.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if _, hasCommand := handler["command"]; hasCommand {
+		return false
+	}
+	kind, hasType := handler["type"]
+	return !hasType || kind == "command"
+}
+
+func codexHasCommandlessHandlers(hooks map[string]interface{}) bool {
+	for eventType, rawGroups := range hooks {
+		groups, ok := rawGroups.([]interface{})
+		if eventType == "state" || !ok {
+			continue
+		}
+		for _, rawGroup := range groups {
+			group, ok := rawGroup.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			handlers, _ := group["hooks"].([]interface{})
+			for _, handler := range handlers {
+				if codexCommandlessHandler(handler) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func mergeOwnedCodexHooks(
 	hooks map[string]interface{},
 	configPath, hookScript, hooksDir string,
@@ -2942,8 +2992,12 @@ func mergeOwnedCodexHooks(
 		_, ok = managedCommands[command]
 		return ok
 	}
+	// A per-user hook entry left without its command (the DefenseClaw lines
+	// were deleted by hand) makes Codex refuse to start; take its slot
+	// instead of adding a second hook set next to it (GAP-1102).
+	replaceCommandless := writeTrustState && versioned && !opts.ManagedEnterprise
 	isManaged := func(rawHook interface{}) bool {
-		if isOwnedCodexHookHandler(rawHook, hooksDir) {
+		if isOwnedCodexHookHandler(rawHook, hooksDir) || (replaceCommandless && codexCommandlessHandler(rawHook)) {
 			return true
 		}
 		// A DefenseClaw handler whose script path was edited is replaced in
@@ -2992,7 +3046,8 @@ func mergeOwnedCodexHooks(
 				// positional trust. It is therefore safe to discard an accumulated
 				// predecessor even when a later reviewed contract changed only the
 				// generated matcher (for example SessionStart adding compact).
-				return len(handlers) == 1 && isInferredManaged(handlers[0])
+				return len(handlers) == 1 &&
+					(isInferredManaged(handlers[0]) || (replaceCommandless && codexCommandlessHandler(handlers[0])))
 			},
 		)
 		if err != nil {
@@ -3764,7 +3819,8 @@ func codexHookLocationsMatching(
 				continue
 			}
 			handler, ok := rawHandler.(map[string]interface{})
-			if !ok {
+			if !ok || codexCommandlessHandler(handler) {
+				// An entry without a command has no trust identity to remove.
 				continue
 			}
 			currentHash, err := codexCommandHookHashForPlatform(goos, eventKey, matcher, handler)

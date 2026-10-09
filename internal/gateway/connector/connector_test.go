@@ -1693,7 +1693,7 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 			entry, _ := rawEntry.(map[string]interface{})
 			commands, _ := entry["hooks"].([]interface{})
 			for _, rawCommand := range commands {
-				command, _ := rawCommand.(map[string]interface{})
+				command, _ := claudeCodeExecView(rawCommand).(map[string]interface{})
 				value, _ := command["command"].(string)
 				switch value {
 				case secondCommand:
@@ -2061,7 +2061,7 @@ func TestClaudeCode_SetupMigratesPreTrackingWindowsExecMatrixAfterBinaryMove(t *
 	for _, rawGroups := range settings["hooks"].(map[string]interface{}) {
 		for _, rawGroup := range rawGroups.([]interface{}) {
 			for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
-				handler := rawHandler.(map[string]interface{})
+				handler := claudeCodeExecView(rawHandler).(map[string]interface{})
 				switch handler["command"] {
 				case oldBinary:
 					oldCount++
@@ -2142,7 +2142,7 @@ func TestClaudeCode_SetupPreservesForeignSameBasenameExecHook(t *testing.T) {
 	for _, rawEntry := range entries {
 		entry := rawEntry.(map[string]interface{})
 		for _, rawHandler := range entry["hooks"].([]interface{}) {
-			handler := rawHandler.(map[string]interface{})
+			handler := claudeCodeExecView(rawHandler).(map[string]interface{})
 			switch handler["command"] {
 			case foreignCommand:
 				foreignCount++
@@ -2349,7 +2349,7 @@ func TestClaudeCode_SetupRefreshRemovesKnownPreUpgradeCommandWithoutClaimingRepo
 				t.Fatalf("hooks[%q][%d].hooks = %T, want array", eventType, entryIndex, entry["hooks"])
 			}
 			for hookIndex, rawHook := range rawHooks {
-				hook, ok := rawHook.(map[string]interface{})
+				hook, ok := claudeCodeExecView(rawHook).(map[string]interface{})
 				if !ok {
 					t.Fatalf("hooks[%q][%d].hooks[%d] = %T, want object", eventType, entryIndex, hookIndex, rawHook)
 				}
@@ -2730,11 +2730,17 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 	hooks := settings["hooks"].(map[string]interface{})
 	entries := hooks["PreToolUse"].([]interface{})
 	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	if got := handler["command"]; got != defenseclawHookBinaryOverride {
-		t.Fatalf("command = %q, want exact executable path %q", got, defenseclawHookBinaryOverride)
+	// Per-user Setup runs the launcher through cmd.exe so a missing launcher
+	// blocks (GAP-1091); the handler still reads as the exec form it runs.
+	if got := handler["command"]; got != claudeCodeWindowsCommandProcessor() {
+		t.Fatalf("command = %q, want %q", got, claudeCodeWindowsCommandProcessor())
+	}
+	view := claudeCodeExecView(handler).(map[string]interface{})
+	if got := view["command"]; got != defenseclawHookBinaryOverride {
+		t.Fatalf("launcher = %q, want exact executable path %q", got, defenseclawHookBinaryOverride)
 	}
 	wantArgs := []interface{}{"hook", "--connector", "claudecode"}
-	if got := handler["args"]; !reflect.DeepEqual(got, wantArgs) {
+	if got := view["args"]; !reflect.DeepEqual(got, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", got, wantArgs)
 	}
 	if _, present := handler["shell"]; present {
@@ -4723,6 +4729,92 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 	}
 	if _, ok := state[otherKey]; !ok {
 		t.Fatalf("unrelated trust entry removed with legacy state: %v", state)
+	}
+}
+
+// GAP-1094: `codex features disable hooks` leaves the DefenseClaw entries in
+// place but Codex runs none of them. Setup must not override the user's
+// switch, so the guard has to hear at once that hooks are off and how to turn
+// them back on, not attempt a repair that can only fail.
+func TestCodexOwnedHooksPresentNamesTurnedOffHooks(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if err := os.WriteFile(configPath, append(raw, []byte("\n[features]\nhooks = false\n")...), 0o600); err != nil {
+		t.Fatalf("turn hooks off: %v", err)
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if present || err == nil || !strings.Contains(err.Error(), "codex features enable hooks") {
+		t.Fatalf("OwnedHooksPresent = %v, %v; want an error naming codex features enable hooks", present, err)
+	}
+}
+
+// GAP-1102: deleting the DefenseClaw command lines from config.toml leaves
+// hook entries without a command, and Codex then refuses to start. Setup
+// (which the hook self-heal, setup codex and a gateway restart all run) takes
+// those slots back instead of adding a second hook set next to them.
+func TestCodexSetupReplacesHookEntriesLeftWithoutCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+	// Drop every hook command, as deleting the DefenseClaw lines by hand does;
+	// the rest of each entry (type, timeout, matcher) stays.
+	mutateCodexConfig(t, configPath, func(config map[string]interface{}) {
+		for event, rawGroups := range config["hooks"].(map[string]interface{}) {
+			groups, ok := rawGroups.([]interface{})
+			if event == "state" || !ok {
+				continue
+			}
+			for _, rawGroup := range groups {
+				for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
+					handler := rawHandler.(map[string]interface{})
+					delete(handler, "command")
+					delete(handler, "commandWindows")
+					delete(handler, "command_windows")
+				}
+			}
+		}
+	})
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("OwnedHooksPresent with command-less entries = %v, %v; want false so the guard repairs", present, err)
+	}
+
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	repairedRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read repaired config: %v", err)
+	}
+	repaired := map[string]interface{}{}
+	if err := toml.Unmarshal(repairedRaw, &repaired); err != nil {
+		t.Fatalf("parse repaired config: %v", err)
+	}
+	hooks := repaired["hooks"].(map[string]interface{})
+	if codexHasCommandlessHandlers(hooks) {
+		t.Fatalf("repaired config still has hook entries without a command:\n%s", repairedRaw)
+	}
+	if groups := hooks["PreToolUse"].([]interface{}); len(groups) != 1 {
+		t.Fatalf("PreToolUse has %d groups after repair, want 1:\n%s", len(groups), repairedRaw)
+	}
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
+		t.Fatalf("repaired hooks are not fully trusted: %v", err)
 	}
 }
 

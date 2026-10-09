@@ -1005,11 +1005,9 @@ def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
     if not problems:
         return ""
     step = repair_command(connector, problems[0])
-    return (
-        " — "
-        + ux._style("DEGRADED", fg="red", bold=True)
-        + ux.dim(f" ({problems[0]}; " + (step if step.startswith("run ") else f"run `{step}`") + ")")
-    )
+    if not (step.startswith("run ") or getattr(problems[0], "repair", "")):
+        step = f"run `{step}`"
+    return " — " + ux._style("DEGRADED", fg="red", bold=True) + ux.dim(f" ({problems[0]}; {step})")
 
 
 def _connectors_not_started(health: dict | None) -> set[str]:
