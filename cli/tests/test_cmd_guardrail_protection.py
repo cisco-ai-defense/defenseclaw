@@ -16,6 +16,7 @@ reloads hot, so these commands only write config (no rule files, no restart).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -160,6 +161,34 @@ def test_rule_and_suppress_wrappers(env) -> None:
     )
     assert _run(app, "rule", "disable", "SEC-AWS-KEY").exit_code == 0
     assert writes[-1][0] == [config_writer.Change("guardrail.rules.disable", ["OTHER-RULE", "SEC-AWS-KEY"])]
+
+
+def test_rule_severity_default_restores_profile_config_and_digest(env, monkeypatch) -> None:
+    app, _root, _writes = env
+    app.cfg.guardrail.profiles = {
+        "everyone-default": GuardrailProfile(connectors={"codex": PerConnectorGuardrailConfig()})
+    }
+    path = config_path_for_data_dir(app.cfg.data_dir)
+    original = (
+        b"config_version: 9\nguardrail:\n  profiles:\n    everyone-default:\n"
+        b"      connectors:\n        codex: {}\n"
+    )
+    path.write_bytes(original)
+    before_digest = hashlib.sha256(original).hexdigest()
+
+    def apply(changes, _actor, _reason, **_kwargs):
+        candidate, changed = config_writer._patch(path.read_bytes(), changes, str(path))
+        path.write_bytes(candidate)
+        return config_writer.WriteResult(generation=1, sha256=hashlib.sha256(candidate).hexdigest(), changed=changed)
+
+    monkeypatch.setattr(config_writer, "apply", apply)
+    for scope in ((), ("--connector", "codex")):
+        assert _run(app, "rule", "severity", "MARKER-RULE", "LOW", "--profile", "everyone-default", *scope).exit_code == 0
+        assert path.read_bytes() != original
+        result = _run(app, "rule", "severity", "MARKER-RULE", "default", "--profile", "everyone-default", *scope)
+        assert result.exit_code == 0, result.output
+        assert path.read_bytes() == original
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == before_digest
 
 
 def test_rule_enable_of_a_rule_the_pack_ships_on_only_drops_its_disable_entry(env) -> None:

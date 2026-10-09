@@ -4357,7 +4357,10 @@ def rule_severity_cmd(
     overrides = config_writer.parse_path(f"{_scope_key(connector_key, profile_name)}.rules.severity_overrides")
     key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
-    change = config_writer.Change(key, unset=True) if level == "DEFAULT" else config_writer.Change(key, level)
+    change = (
+        config_writer.Change(key, unset=True, prune_empty_to="rules")
+        if level == "DEFAULT" else config_writer.Change(key, level)
+    )
     _preflight_config_write(app)
     result = _write_guardrail_config(app, [change], f"guardrail rule severity {rule_id} {level}", _fail)
     scope_key = _scope_key(connector_key, profile_name)

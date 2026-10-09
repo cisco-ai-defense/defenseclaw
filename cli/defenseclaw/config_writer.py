@@ -154,6 +154,9 @@ class Change:
     path: str
     value: Any = None
     unset: bool = False
+    # For a rule override removal, discard empty severity_overrides and rules
+    # maps too. Stop at rules: an empty connector entry still means enabled.
+    prune_empty_to: str = ""
 
 
 @dataclass(frozen=True)
@@ -939,6 +942,12 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
         if change.unset:
             if before is _MISSING:
                 continue
+            if change.prune_empty_to:
+                while len(parts) > 1 and parts[-1] != change.prune_empty_to:
+                    parent = _lookup(document, parts[:-1])
+                    if not isinstance(parent, dict) or len(parent) != 1 or parts[-1] not in parent:
+                        break
+                    parts = parts[:-1]
             mutations.append(V8YAMLMutation.delete(parts))
         else:
             if before is not _MISSING and _same_config_value(before, change.value):
