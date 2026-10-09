@@ -179,18 +179,48 @@ func foldersDeclaringSkill(root, name string) []string {
 }
 
 // installedSkillFolders are the folders, in the skill roots the connector
-// loads from, that hold a skill named name (a SKILL.md in the folder).
-// Secure Client keeps main's lookup (issue #1092).
+// loads from, that hold a skill named name: a SKILL.md in the folder or,
+// where this gateway may not look, a folder the standalone hook found as the
+// user. A service-account gateway cannot traverse a 0700 home on Linux and
+// macOS, so a user skill typed as /name got the runtime-disable lookup only
+// and a skill on asset_policy.skill.denied ran (GAP-0968). A folder it may
+// not check that the hook did not report counts only when the denied list
+// names the skill (fail closed): a custom command keeps the runtime-disable
+// lookup. Secure Client keeps main's lookup (issue #1092).
 func (a *APIServer) installedSkillFolders(ctx context.Context, connector, cwd, name string) []string {
-	var folders []string
+	facts := claimedAssetFactsFromContext(ctx)
+	var folders, unseen []string
 	for _, dir := range a.skillSourcePaths(ctx, connector, cwd, skillRuntimeProbe{
 		TargetType: "skill", SkillName: name, Matched: true,
 	}) {
-		if info, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
+		info, err := os.Stat(filepath.Join(dir, "SKILL.md"))
+		switch {
+		case err == nil:
+			if info.Mode().IsRegular() {
+				folders = append(folders, dir)
+			}
+		case errors.Is(err, fs.ErrNotExist):
+			// No skill here: a custom command of that name.
+		case slices.ContainsFunc(facts.SkillDirs, func(c string) bool { return sameCleanPath(c, dir) }):
 			folders = append(folders, dir)
+		default:
+			unseen = append(unseen, dir)
 		}
 	}
-	return folders
+	if len(folders) > 0 || len(unseen) == 0 {
+		return folders
+	}
+	cfg := a.liveConfig()
+	for _, dir := range unseen {
+		verdict, _ := cfg.AssetListDecision(config.AssetPolicyInput{
+			TargetType: "skill", Name: name, DeclaredNames: facts.DeclaredFor(name),
+			Connector: connector, SourcePath: dir, RuntimeSurface: "prompt_expansion",
+		})
+		if verdict == config.AssetListDeny {
+			return unseen
+		}
+	}
+	return nil
 }
 
 // skillFolderAccessDecision blocks a tool call that reaches into the folder
