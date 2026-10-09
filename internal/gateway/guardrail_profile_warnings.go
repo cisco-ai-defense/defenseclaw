@@ -252,6 +252,7 @@ func (set *guardrailProfileSet) unknownGroupWarningsWith(exists func(context.Con
 			ctx, cancel := context.WithTimeout(context.Background(), profileGroupCheckBudget)
 			warnings := unknownAssignmentGroups(ctx, set.assignments, exists, qualify)
 			cancel()
+			warnings = append(warnings, spoolUPNAssignmentWarnings(set.assignments, time.Now())...)
 			failing := health().Failing > 0
 			if failing {
 				warnings = nil
