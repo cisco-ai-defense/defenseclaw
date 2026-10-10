@@ -153,6 +153,7 @@ func newHookCmd() *cobra.Command {
 	cmd.AddCommand(newHookSessionFactsCmd())
 	cmd.AddCommand(&cobra.Command{
 		Use: "resolve-writes", Hidden: true, Args: cobra.NoArgs,
+		Annotations: map[string]string{secureClientAbsentAnnotation: "true"},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			payload, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20+1))
 			if err != nil || len(payload) > 1<<20 {

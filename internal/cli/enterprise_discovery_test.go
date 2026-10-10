@@ -556,7 +556,7 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	root.AddCommand(hook)
 	secureClientHost = func() bool { return false }
 	keepCommandTreeOfMainOnSecureClient(root)
-	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || hook.Commands()[0].Name() != "session-facts" {
+	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || len(hook.Commands()) != 2 {
 		t.Fatalf("standalone groups have %d and %d commands, want the identity views and setup too", got, len(acpGroup.Commands()))
 	}
 	if len(policyGroup.Commands()) != 2 || len(scanGroup.Commands()) != 4 {
@@ -569,7 +569,7 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 		t.Fatalf("Secure Client group = %v, --user %q, want discovery only with the usage of main", got, discovery.Flag("user").Usage)
 	}
 	if len(hook.Commands()) != 0 {
-		t.Fatal("Secure Client retained hook session-facts")
+		t.Fatal("Secure Client retained hook session-facts or resolve-writes")
 	}
 	if got := acpGroup.Commands(); len(got) != 1 || got[0].Name() != "enroll" ||
 		!strings.HasSuffix(acpGroup.Long, "ACP runtime. The gateway never writes an editor profile or user home.") {
