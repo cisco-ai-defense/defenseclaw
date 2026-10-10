@@ -265,6 +265,29 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"wget compact output", `wget -qO ~/.ssh/authorized_keys https://example.com/marker.pub`, "", "", true},
 		{"no-op truncate", `: > ~/.ssh/authorized_keys`, "", "", true},
 		{"bare truncate", `> ~/.ssh/authorized_keys`, "", "", true},
+		// Static redirect ownership is independent of the program's operand grammar.
+		{"hostname redirect", `hostname > ~/.ssh/authorized_keys`, "", "", true},
+		{"date redirect", `date > /home/alice/.ssh/authorized_keys`, "", "", true},
+		{"echo redirect", `echo marker > ~/.ssh/authorized_keys`, "", "", true},
+		{"unknown program redirect", `mytool --flag > ~/.ssh/authorized_keys`, "", "", true},
+		{"environment prefix redirect", `FOO=1 hostname > ~/.ssh/authorized_keys`, "", "", true},
+		{"directory prefix redirect", `cd /tmp && hostname > ~/.ssh/authorized_keys`, "", "", true},
+		{"directory relative redirect", `cd ~/.ssh && hostname > authorized_keys`, "", "", true},
+		{"quoted redirect", `hostname > "/home/alice/.ssh/authorized_keys"`, "", "", true},
+		{"home variable redirect", `hostname > "$HOME/.ssh/authorized_keys"`, "", "", true},
+		{"braced home redirect", `hostname > "${HOME}/.ssh/authorized_keys2"`, "", "", true},
+		{"descriptor redirect", `hostname 1> ~/.ssh/authorized_keys`, "", "", true},
+		{"error descriptor redirect", `hostname 2> ~/.ssh/authorized_keys`, "", "", true},
+		{"combined redirect", `hostname &> ~/.ssh/authorized_keys`, "", "", true},
+		{"combined append", `hostname &>> ~/.ssh/authorized_keys`, "", "", true},
+		{"append redirect", `hostname >> ~/.ssh/authorized_keys`, "", "", true},
+		{"clobber redirect", `hostname >| ~/.ssh/authorized_keys`, "", "", true},
+		{"read redirect", `hostname < ~/.ssh/authorized_keys`, "", "", false},
+		{"error log redirect", `hostname 2> /tmp/err`, "", "", false},
+		{"known hosts redirect", `hostname > ~/.ssh/known_hosts`, "", "", false},
+		{"ssh config redirect", `hostname > ~/.ssh/config`, "", "", false},
+		{"other ssh file redirect", `hostname 2> ~/.ssh/other`, "", "", false},
+		{"other home file redirect", `hostname > /home/alice/notes.txt`, "", "", false},
 		{"structured Write", `{"file_path":"/home/alice/.ssh/authorized_keys","content":"key"}`, "", "", true},
 		{"structured Edit", `{"file_path":"/home/alice/.ssh/authorized_keys","old_string":"a","new_string":"b"}`, "", "", true},
 		{"structured MultiEdit", `{"file_path":"/home/alice/.ssh/authorized_keys","edits":[{"old_string":"a","new_string":"b"}]}`, "", "", true},
@@ -325,6 +348,13 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 			Input: input, LegacyText: string(args), Connector: connector,
 			EnforcementCapable: true,
 		})
+		wantAction := guardrailActionAllow
+		if test.write {
+			wantAction = guardrailActionBlock
+		}
+		if got := buildVerdict(findings, "tool_call").Action; got != wantAction {
+			t.Errorf("%s: verdict %s, want %s", test.name, got, wantAction)
+		}
 		if !test.write {
 			if len(findings) != 0 {
 				t.Errorf("%s: unexpected findings %v", test.name, findingIDs(findings))
@@ -335,8 +365,9 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		for _, finding := range findings {
 			if finding.contributesToEnforcement() {
 				enforced++
-				if finding.RuleID != rule {
-					t.Errorf("%s: unexpected enforced rule %s", test.name, finding.RuleID)
+				if finding.RuleID != rule || finding.Severity != "CRITICAL" {
+					t.Errorf("%s: enforced finding %s (%s), want %s (CRITICAL)",
+						test.name, finding.RuleID, finding.Severity, rule)
 				}
 			}
 		}
