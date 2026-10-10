@@ -492,20 +492,32 @@ var inventoryDACLAfterLinkCheck = func() {}
 // path must equal the requested child of the pinned profile even if a parent
 // was replaced with a junction after the path walk.
 func openInventoryDACLHandle(home, rel string) (windows.Handle, error) {
+	return openWindowsProfileChildNoFollow(home, rel, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+}
+
+// openWindowsProfileChildNoFollow opens home\rel with access and share as
+// the object itself, never what a reparse point names. It fails with
+// errInventoryDACLLink when an existing element below home is a reparse
+// point, or when the opened objects final path is not homes followed by
+// rel, which catches a parent swapped for a junction after the path walk.
+// The inventory grants and revokes and the ACP purge (GAP-1256) pin their
+// objects with it.
+func openWindowsProfileChildNoFollow(home, rel string, access, share uint32) (windows.Handle, error) {
 	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
 		return 0, err
 	}
 	inventoryDACLAfterLinkCheck()
-	open := func(path string, access uint32) (windows.Handle, error) {
+	open := func(path string, access, share uint32) (windows.Handle, error) {
 		ptr, err := winpath.UTF16Ptr(path)
 		if err != nil {
 			return 0, err
 		}
-		return windows.CreateFile(ptr, access,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		return windows.CreateFile(ptr, access, share, nil,
 			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	}
-	homeHandle, err := open(home, windows.FILE_READ_ATTRIBUTES)
+	homeHandle, err := open(home, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 	if err != nil {
 		return 0, err
 	}
@@ -518,7 +530,7 @@ func openInventoryDACLHandle(home, rel string) (windows.Handle, error) {
 		homeInfo.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		return 0, errInventoryDACLLink
 	}
-	target, err := open(filepath.Join(home, rel), windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC)
+	target, err := open(filepath.Join(home, rel), access, share)
 	if err != nil {
 		return 0, err
 	}
