@@ -650,7 +650,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if relative, err := filepath.Rel(facts.ActiveHome, target); err == nil {
 			underHome = relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 		}
-		if request.ResolvedWriteTargets != nil {
+		if request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" {
+			// A protected-home gateway cannot inspect the invoking user's
+			// linked targets. An incomplete client map cannot prove this
+			// write safe, so block it through the existing rule.
+			if request.ProtectedHomeHook || request.SkipLocalFilesystemResolution {
+				return true
+			}
+		} else if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
 			return present && canonicalSemanticPath(resolved) == active ||
 				underHome && (!present || resolved == "")

@@ -5,9 +5,11 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -163,5 +165,57 @@ func TestAuthorizedKeysSymlinkWriteStatementsAndClientResolution(t *testing.T) {
 	targets, ok = hookpaths.Decode(hookpaths.Resolve(payload))
 	if !ok || targets[homeLink] != keys {
 		t.Fatalf("hook client cmd target = %q, want %q; all=%v", targets[homeLink], keys, targets)
+	}
+}
+
+func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hook write targets")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	external := filepath.Join(root, "external")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), external} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(external, "linked.cfg")
+	if err := os.Symlink(keys, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	for _, count := range []int{31, 32, 40} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			writes := make([]string, 0, count+1)
+			for i := range count {
+				writes = append(writes, fmt.Sprintf("echo marker > %s", filepath.Join(external, fmt.Sprintf("benign-%02d", i))))
+			}
+			writes = append(writes, "echo marker >> "+link)
+			command := strings.Join(writes, "; ")
+			payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+			if !ok || targets[hookpaths.CWDKey] == "" {
+				t.Fatalf("hook evidence lost cwd or failed to decode: ok=%v", ok)
+			}
+			if count == 31 && targets[link] != keys {
+				t.Fatalf("final write resolved to %q, want %q", targets[link], keys)
+			}
+			if count > 31 && targets["\x00truncated"] != "1" {
+				t.Fatal("omitted write target was not marked as truncated")
+			}
+			input := actionfacts.Input{Tool: "Bash", Command: command, CWD: root, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			request := trustedActionRequest{Input: input, Connector: "codex", ProtectedHomeHook: true, ResolvedWriteTargets: targets}
+			if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
+				t.Fatal("protected linked write was allowed")
+			}
+		})
 	}
 }
