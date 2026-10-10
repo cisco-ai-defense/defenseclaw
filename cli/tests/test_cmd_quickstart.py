@@ -20,10 +20,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import click
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner, Result
 from defenseclaw.bootstrap import FirstRunReport, StepResult
+from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_quickstart import _require_operational_success, quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.file_permissions import atomic_write_private_bytes
@@ -55,6 +59,40 @@ def test_unwritable_claude_settings_has_actionable_quickstart_failure() -> None:
     next_section = "\n".join(report.next_commands)
     assert "in a minute" not in next_section
     assert "settings.json" in next_section and "writable" in next_section
+
+
+@pytest.mark.parametrize(
+    "mode, step, typed",
+    [("observe", "settings hooks", False), ("action", "otel env", False), ("observe", "settings hooks", True)],
+)
+def test_unwritable_claude_settings_setup_restart_names_file_and_rerun(
+    mode: str, step: str, typed: bool
+) -> None:
+    # The two gateway errors are from GAP-1064's live observe/action captures.
+    error = (
+        "Error: restart daemon readiness: gateway guardrail failed during startup: "
+        f"connector claudecode setup failed: claudecode {step}: "
+        "move compared config to tombstone: operation not permitted "
+        "(check /home/dcl-rv2f5c/.defenseclaw/gateway.log for errors)"
+    )
+    if typed:
+        error = error.replace(
+            "move compared config to tombstone: operation not permitted",
+            'connector config file "/home/custom/.claude/settings.json" cannot be written: operation not permitted',
+        )
+    root = click.Context(click.Group("defenseclaw"), info_name="defenseclaw")
+    setup = click.Context(click.Group("setup"), parent=root, info_name="setup")
+    command = click.Context(click.Command("claudecode"), parent=setup, info_name="claudecode")
+    command.params = {"mode": mode, "yes": True}
+    with command:
+        remedy = cmd_setup._setup_config_write_remedy(error)
+    assert remedy is not None
+    assert "Claude Code settings file" in remedy and "settings.json cannot be written" in remedy
+    if typed:
+        assert "/home/custom/.claude/settings.json" in remedy
+    assert "Make it writable or ask your administrator" in remedy
+    assert f"rerun defenseclaw setup claudecode --mode {mode} --yes" in remedy
+    assert "tombstone" not in remedy and "readiness" not in remedy
 
 
 class QuickstartProfileDefaultsTests(unittest.TestCase):

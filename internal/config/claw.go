@@ -410,6 +410,8 @@ func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([
 		return readMCPServersHermes()
 	case "cursor":
 		return readMCPServersCursor(workspaceDir)
+	case "kiro":
+		return readMCPServersKiro(workspaceDir)
 	case "devin":
 		return readMCPServersDevin(workspaceDir)
 	case "copilot":
@@ -1398,15 +1400,13 @@ func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, tru
 	return entries
 }
 
-// ReadMCPFromCodexUserConfigTOML reads a path that the caller has already
-// resolved as a Codex user-scope config. Only this provenance-aware entry point
-// can promote an exact built-in table shape to Bundled; project and generic
-// TOML readers intentionally leave the same name/URL scan-eligible.
 // ReadUserMCPServersForHome reads the user-scope MCP registries that
 // connectorName keeps under home, for a managed gateway that watches every
 // enrolled user: Codex's config.toml, Claude Code's .claude.json and
-// settings.json. Unreadable files are skipped; each entry carries the
-// connector. Other connectors list none.
+// settings.json, Devin's mcp_config.json in that user's roaming AppData
+// (GAP-1237) and Kiro's ~/.kiro/settings/mcp.json (GAP-1233). Unreadable
+// files are skipped; each entry carries the connector. Other connectors list
+// none.
 func ReadUserMCPServersForHome(connectorName, home string) []MCPServerEntry {
 	home = strings.TrimSpace(home)
 	if home == "" {
@@ -1425,6 +1425,14 @@ func ReadUserMCPServersForHome(connectorName, home string) []MCPServerEntry {
 		if e, err := readMCPFromClaudeSettings(filepath.Join(home, ".claude", "settings.json")); err == nil {
 			entries = append(entries, e...)
 		}
+	case "devin":
+		// The service's own %APPDATA% is not the user's: resolve the
+		// enrolled profile's.
+		if e, err := ReadMCPFromDevinConfig(filepath.Join(devinConfigHomeFor(home), "mcp_config.json")); err == nil {
+			entries = append(entries, e...)
+		}
+	case "kiro":
+		entries = readMCPServersKiroAt(home, "")
 	default:
 		return nil
 	}
@@ -1435,6 +1443,10 @@ func ReadUserMCPServersForHome(connectorName, home string) []MCPServerEntry {
 	return entries
 }
 
+// ReadMCPFromCodexUserConfigTOML reads a path that the caller has already
+// resolved as a Codex user-scope config. Only this provenance-aware entry point
+// can promote an exact built-in table shape to Bundled; project and generic
+// TOML readers intentionally leave the same name/URL scan-eligible.
 func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 	entries, err := readMCPFromCodexConfigTOML(path)
 	if err != nil {
@@ -1589,6 +1601,50 @@ func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {
 	return dedupMCPEntries(entries), nil
 }
 
+// Kiro keeps global and workspace MCP registrations in separate mcp.json
+// files. Keep both scopes, including same-name entries, so admission can
+// evaluate each registration independently.
+func readMCPServersKiro(workspaceDir string) ([]MCPServerEntry, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	return readMCPServersKiroAt(home, workspaceDir), nil
+}
+
+func readMCPServersKiroAt(home, workspaceDir string) []MCPServerEntry {
+	userPath := filepath.Join(home, ".kiro", "settings", "mcp.json")
+	paths := []struct{ path, scope, project string }{}
+	if workspace := strings.TrimSpace(workspaceDir); workspace != "" {
+		projectPath := filepath.Join(workspace, ".kiro", "settings", "mcp.json")
+		if projectReal, err := filepath.EvalSymlinks(projectPath); err == nil {
+			if userReal, err := filepath.EvalSymlinks(userPath); err == nil && projectReal == userReal {
+				projectPath = ""
+			}
+		} else if filepath.Clean(projectPath) == filepath.Clean(userPath) {
+			projectPath = ""
+		}
+		if projectPath != "" {
+			paths = append(paths, struct{ path, scope, project string }{projectPath, "project", filepath.Clean(workspace)})
+		}
+	}
+	paths = append(paths, struct{ path, scope, project string }{userPath, "user", ""})
+	var entries []MCPServerEntry
+	for _, source := range paths {
+		found, err := readMCPFromDotMCPJSON(source.path)
+		if err != nil {
+			continue
+		}
+		for _, entry := range found {
+			entry.Source = source.path
+			entry.SourceScope = source.scope
+			entry.Project = source.project
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
 const maxDevinInventoryConfigBytes int64 = 4 << 20
 
 // readMCPServersDevin reads Devin's canonical MCP registries in effective
@@ -1638,9 +1694,16 @@ func devinConfigHome() (string, error) {
 		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
 			return filepath.Join(filepath.Clean(appData), "devin"), nil
 		}
-		return filepath.Join(home, "AppData", "Roaming", "devin"), nil
 	}
-	return filepath.Join(home, ".config", "devin"), nil
+	return devinConfigHomeFor(home), nil
+}
+
+// devinConfigHomeFor is Devin's default user configuration root in home.
+func devinConfigHomeFor(home string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(home, "AppData", "Roaming", "devin")
+	}
+	return filepath.Join(home, ".config", "devin")
 }
 
 // ReadMCPFromDevinConfig reads one canonical Devin mcp_config.json file using
