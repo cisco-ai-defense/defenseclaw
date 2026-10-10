@@ -147,6 +147,10 @@ type InstallWatcher struct {
 	// lastAllowLists tracks changes that can revoke admission of unchanged
 	// skills and plugins (rescan goroutine only).
 	lastAllowLists string
+	// mcpUpgradeBaseline is the source digest of the 0.8.x config migration
+	// whose MCP servers the startup rescan baselines instead of admitting;
+	// empty when there is none or a cycle already did (rescan goroutine only).
+	mcpUpgradeBaseline string
 	// startupAdmitRoots are the skill and plugin roots that already held
 	// baselines when the startup rescan began (rescan goroutine only).
 	startupAdmitRoots map[InstallType][]string

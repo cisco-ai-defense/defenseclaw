@@ -242,7 +242,8 @@ def test_v8_config_runs_the_go_v9_step(
     def go_migrate(*, config_path: str, **_kwargs):
         calls.append(config_path)
         Path(config_path).write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
-        record = {"moved": [{"to": "update.check"}], "conflicts": [], "detection_only_rules": ["ACME-A", "ACME-B"]}
+        moved = [{"to": "update.check"}, {"to": "asset_policy.mcp.denied", "value": "bad-mcp"}]
+        record = {"moved": moved, "conflicts": [], "detection_only_rules": ["ACME-A", "ACME-B"]}
         return {"migrated": True, "record": record}
 
     monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
@@ -253,8 +254,11 @@ def test_v8_config_runs_the_go_v9_step(
     assert calls == [str(config)]
     assert result.applied == ["config_version 8 → 9"]
     assert result.to_config_version == 9
+    out = capsys.readouterr().out
     # GAP-1225: the upgrade names the custom rules that stopped blocking tool calls.
-    assert "2 custom rule(s) now detection-only for tool calls: ACME-A, ACME-B" in capsys.readouterr().out
+    assert "2 custom rule(s) now detection-only for tool calls: ACME-A, ACME-B" in out
+    # GAP-1227: the summary names the MCP servers the upgrade keeps blocked.
+    assert "MCP servers that stay blocked (asset_policy.mcp.denied): bad-mcp" in out
 
 
 def test_secure_client_config_stays_on_v8_without_a_migration(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:

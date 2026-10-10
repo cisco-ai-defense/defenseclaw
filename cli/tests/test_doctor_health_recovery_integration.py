@@ -768,6 +768,7 @@ def test_audit_store_moved_aside_by_the_gateway_is_reported(tmp_path) -> None:
     store, notice = result.checks
     assert store["status"] == "pass"
     assert notice["status"] == "warn" and notice["reason_code"] == "audit-db-moved-aside"
+    assert f"Older audit records stay in {moved}" in notice["detail"]
     assert f"sqlite3 {moved} .recover" in notice["detail"]
     assert "defenseclaw mcp list" in notice["detail"] and "kept the block/allow" not in notice["detail"]
 
