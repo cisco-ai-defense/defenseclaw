@@ -2378,8 +2378,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// binary they name still exists; administrator entries stay byte for
 	// byte (enterprisepolicy restores the recorded preimage or edits only
 	// DefenseClaw's own entries).
+	policyLeft := false
 	if policy, err := env.MachinePolicy.RemoveAll(); err != nil {
 		errs = append(errs, fmt.Errorf("remove machine policy: %w", err))
+		policyLeft = true
 	} else {
 		for _, state := range policy.States {
 			if state.Changed {
@@ -2392,17 +2394,26 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			stopUnit(unit)
 		}
 	}
-	if perUserLeft {
+	if perUserLeft || policyLeft {
 		disableKeptDefinitions()
-		// Some users' agents still name the hook binary. Removing it now
+		// Some users' agents, or vendor machine policy that could not be
+		// withdrawn (GAP-1321), still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
-		// exists, with nothing left to remove them: the binaries, the
-		// deployment record and the state stay, so a rerun of this uninstall
-		// removes the rest and ensure restores the deployment.
+		// exists, so the agents run without enforcement and nothing is left
+		// to remove them: the binaries, the deployment record and the state
+		// stay, so a rerun of this uninstall removes the rest and ensure
+		// restores the deployment.
 		if err := errors.Join(errs...); err != nil {
 			r.AddError(codeUninstall, err.Error())
 		}
-		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because the per-user hook registrations listed above still name them; fix each one and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
+		var holders []string
+		if perUserLeft {
+			holders = append(holders, "the per-user hook registrations listed above")
+		}
+		if policyLeft {
+			holders = append(holders, "the vendor machine policy entries that could not be removed (a read-only or immutable policy file, for example)")
+		}
+		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
 	// On Linux the deb/rpm removes its own files (the binaries, units and
