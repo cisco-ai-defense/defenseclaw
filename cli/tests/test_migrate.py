@@ -243,7 +243,12 @@ def test_v8_config_runs_the_go_v9_step(
         calls.append(config_path)
         Path(config_path).write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
         moved = [{"to": "update.check"}, {"to": "asset_policy.mcp.denied", "value": "bad-mcp"}]
-        record = {"moved": moved, "conflicts": [], "detection_only_rules": ["ACME-A", "ACME-B"]}
+        record = {
+            "moved": moved,
+            "conflicts": [],
+            "detection_only_rules": ["ACME-A", "ACME-B"],
+            "rule_file_merges": ["/p/acme-1.0: rules/b.yaml (category \"acme\") merged into rules/a.yaml; 2 rule(s) kept"],
+        }
         return {"migrated": True, "record": record}
 
     monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
@@ -257,6 +262,8 @@ def test_v8_config_runs_the_go_v9_step(
     out = capsys.readouterr().out
     # GAP-1225: the upgrade names the custom rules that stopped blocking tool calls.
     assert "2 custom rule(s) now detection-only for tool calls: ACME-A, ACME-B" in out
+    # GAP-1339: the summary says which rule files of one category were merged.
+    assert 'rule pack /p/acme-1.0: rules/b.yaml (category "acme") merged into rules/a.yaml; 2 rule(s) kept' in out
     # GAP-1227: the summary names the MCP servers the upgrade keeps blocked.
     assert "MCP servers that stay blocked (asset_policy.mcp.denied): bad-mcp" in out
 

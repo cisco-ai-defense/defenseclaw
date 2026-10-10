@@ -187,6 +187,12 @@ type RulePackRebase struct {
 	// still have none and only record a tool call's match, and Disabled the
 	// built-in rules the copy had removed.
 	Carried, Expressed, AlertOnly, Disabled []string
+	// Merged says, per rule file folded into another of its category, what
+	// was done ("rules/b.yaml (category \"acme\") merged into rules/a.yaml;
+	// 2 rule(s) kept"): 1.0 refuses two files of one category (GAP-1339).
+	Merged []string
+	// mergedAway holds the files Merged folded into another.
+	mergedAway map[string]bool
 }
 
 // PlanRulePackRebase returns the 1.0 copy of the custom pack in dir, a plan
@@ -202,7 +208,10 @@ func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
 		return nil, err
 	}
 	plan := &RulePackRebase{Files: files}
-	changed := false
+	if err := mergeDuplicateCategories(files, plan); err != nil {
+		return nil, err
+	}
+	changed := len(plan.Merged) > 0
 	for _, rel := range slices.Sorted(maps.Keys(files)) {
 		if path.Dir(rel) != "rules" || path.Ext(rel) != ".yaml" || rel == "rules/local-patterns.yaml" {
 			continue
@@ -284,14 +293,17 @@ func RebaseLoadedRulePack(dir string, source *RulePack) (*RulePack, error) {
 		return nil, err
 	}
 	rebased := *source
-	rebased.RuleFiles = append([]*RulesFileYAML(nil), source.RuleFiles...)
-	for i, original := range source.RuleFiles {
+	rebased.RuleFiles = make([]*RulesFileYAML, 0, len(source.RuleFiles))
+	for _, original := range source.RuleFiles {
 		rel, err := filepath.Rel(absDir, original.SourcePath)
 		if err != nil {
 			return nil, err
 		}
 		rel = filepath.ToSlash(rel)
 		data, ok := plan.Files[rel]
+		if !ok && plan.mergedAway[rel] {
+			continue // its rules are in the file of its category
+		}
 		if !ok {
 			return nil, fmt.Errorf("rebased rule pack is missing %s", rel)
 		}
@@ -300,13 +312,134 @@ func RebaseLoadedRulePack(dir string, source *RulePack) (*RulePack, error) {
 			return nil, err
 		}
 		parsed.SourcePath = original.SourcePath
-		rebased.RuleFiles[i] = &parsed
+		rebased.RuleFiles = append(rebased.RuleFiles, &parsed)
 	}
 	rebased.filesDigest = plan.Digest
 	if err := rebased.Validate(); err != nil {
 		return nil, err
 	}
 	return &rebased, nil
+}
+
+// mergeDuplicateCategories folds the rule files of a 0.8.x pack that share a
+// category into the first of them, in file-name order: 0.8.x took such a pack
+// (its gateway enforced only the last file of a category), 1.0 refuses it
+// (duplicate_category), and the category is what the 1.0 engine keys its
+// rules on (GAP-1339). Categories match trimmed and case-folded. The rules
+// move as YAML nodes, every field and comment kept; a moved rule whose ID the
+// file already has is dropped when it is the same rule and otherwise renamed
+// with the stem of the file it came from. A merge that can not be done safely
+// fails with the edit that makes the pack load.
+func mergeDuplicateCategories(files map[string][]byte, plan *RulePackRebase) error {
+	type ruleFile struct {
+		rel, category string
+		version       int
+		document      yaml.Node
+	}
+	groups := map[string][]*ruleFile{}
+	var order []string
+	for _, rel := range slices.Sorted(maps.Keys(files)) {
+		if path.Dir(rel) != "rules" || path.Ext(rel) != ".yaml" || rel == "rules/local-patterns.yaml" {
+			continue
+		}
+		var header struct {
+			Version  int    `yaml:"version"`
+			Category string `yaml:"category"`
+		}
+		file := &ruleFile{rel: rel}
+		if yaml.Unmarshal(files[rel], &header) != nil || yaml.Unmarshal(files[rel], &file.document) != nil {
+			continue // LoadRulePack reports it
+		}
+		key := strings.ToLower(strings.TrimSpace(header.Category))
+		if key == "" {
+			continue
+		}
+		file.category, file.version = strings.TrimSpace(header.Category), header.Version
+		if groups[key] == nil {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], file)
+	}
+	for _, key := range order {
+		group := groups[key]
+		if len(group) < 2 {
+			continue
+		}
+		target := group[0]
+		targetRules := yamlRulesSequence(&target.document)
+		ids := map[string]*yaml.Node{}
+		if targetRules != nil {
+			for _, item := range targetRules.Content {
+				ids[yamlScalarField(item, "id")] = item
+			}
+		}
+		for _, file := range group[1:] {
+			unsafe := func(reason string) error {
+				return fmt.Errorf("%s (category %q) can not be merged into %s, %s. Categories must be unique in "+
+					"1.0: move the rules of %s into %s and delete %s, then run the upgrade again",
+					file.rel, file.category, target.rel, reason, file.rel, target.rel, file.rel)
+			}
+			rules := yamlRulesSequence(&file.document)
+			switch {
+			case targetRules == nil || rules == nil:
+				return unsafe("as one of them has no rules list")
+			case file.version != target.version:
+				return unsafe(fmt.Sprintf("as their versions differ (%d and %d)", file.version, target.version))
+			case len(targetRules.Content)+len(rules.Content) > maxRulesPerFile:
+				return unsafe(fmt.Sprintf("which would then have more than %d rules", maxRulesPerFile))
+			}
+			if root := yamlDocumentRoot(&file.document); root.Kind == yaml.MappingNode {
+				for index := 0; index+1 < len(root.Content); index += 2 {
+					switch name := root.Content[index].Value; name {
+					case "version", "category", "rules":
+					default:
+						return unsafe(fmt.Sprintf("as it also sets %q", name))
+					}
+				}
+			}
+			kept, same := 0, 0
+			var renamed []string
+			for _, item := range rules.Content {
+				id := yamlScalarField(item, "id")
+				if existing := ids[id]; existing != nil && id != "" {
+					if yamlValuesEqual(item, true, existing, true) {
+						same++
+						continue
+					}
+					stem := strings.TrimSuffix(path.Base(file.rel), ".yaml")
+					fresh := id + "-" + stem
+					for suffix := 2; ids[fresh] != nil; suffix++ {
+						fresh = fmt.Sprintf("%s-%s-%d", id, stem, suffix)
+					}
+					setYAMLScalarField(item, "id", fresh, "!!str")
+					renamed = append(renamed, id+" is now "+fresh)
+					id = fresh
+				}
+				ids[id] = item
+				targetRules.Content = append(targetRules.Content, item)
+				kept++
+			}
+			line := fmt.Sprintf("%s (category %q) merged into %s; %d rule(s) kept", file.rel, file.category, target.rel, kept)
+			if same > 0 {
+				line += fmt.Sprintf(", %d identical one(s) were already there", same)
+			}
+			if len(renamed) > 0 {
+				line += fmt.Sprintf(" (renamed, as %s has the ID: %s)", target.rel, strings.Join(renamed, ", "))
+			}
+			plan.Merged = append(plan.Merged, line)
+			if plan.mergedAway == nil {
+				plan.mergedAway = map[string]bool{}
+			}
+			plan.mergedAway[file.rel] = true
+			delete(files, file.rel)
+		}
+		data, err := encodeRuleFile(&target.document)
+		if err != nil {
+			return fmt.Errorf("merge into %s: %w", target.rel, err)
+		}
+		files[target.rel] = data
+	}
+	return nil
 }
 
 // readRulePackTree reads every regular file under dir, within the loader's limits.
