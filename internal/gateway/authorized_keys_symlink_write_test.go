@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -86,7 +87,7 @@ func TestAuthorizedKeysSymlinkWriteStatementsAndClientResolution(t *testing.T) {
 	}{
 		{"existing link", "echo marker >> ./x.cfg", filepath.Join(home, ".ssh", "authorized_keys"), true},
 		{"home tilde link", "echo marker >> ~/proj/x.cfg", filepath.Join(home, ".ssh", "authorized_keys"), true},
-		{"resolution failed", "echo marker >> ./x.cfg", "", true},
+		{"resolution failed", "echo marker >> ./x.cfg", "", false},
 		{"regular file", "echo marker >> ./x.cfg", filepath.Join(cwd, "x.cfg"), false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -111,12 +112,12 @@ func TestAuthorizedKeysSymlinkWriteStatementsAndClientResolution(t *testing.T) {
 		}
 	})
 	for _, connector := range []string{"codex", "claudecode"} {
-		t.Run("older "+connector+" client cannot resolve home path", func(t *testing.T) {
+		t.Run("older "+connector+" client has no positive path proof", func(t *testing.T) {
 			input.Command = "echo marker >> ./missing.cfg"
 			facts := actionfacts.Analyze(input)
 			request := trustedActionRequest{Input: input, Connector: connector, ProtectedHomeHook: true}
-			if !trustedExistingAuthorizedKeysSymlinkWrite(request, facts) {
-				t.Fatal("missing client evidence for an unresolved home write was allowed")
+			if trustedExistingAuthorizedKeysSymlinkWrite(request, facts) {
+				t.Fatal("missing client evidence was treated as a protected write")
 			}
 		})
 	}
@@ -215,6 +216,67 @@ func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 			request := trustedActionRequest{Input: input, Connector: "codex", ProtectedHomeHook: true, ResolvedWriteTargets: targets}
 			if !trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
 				t.Fatal("protected linked write was allowed")
+			}
+		})
+	}
+}
+
+func TestClaudeWriteTargetMarkerRule(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell paths")
+	}
+	home := t.TempDir()
+	project := filepath.Join(home, "proj")
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{Home: home})
+	installToolCallCorpusProfileConnector(t, "claudecode", "default")
+	for _, row := range []struct {
+		name, command, cwd string
+		block              bool
+	}{
+		{"known hosts", "hostname > ~/.ssh/known_hosts", project, false},
+		{"ssh config", "hostname > ~/.ssh/config", project, false},
+		{"known hosts again", "date > ~/.ssh/known_hosts", project, false},
+		{"relative known hosts", "date > known_hosts", filepath.Join(home, ".ssh"), false},
+		{"project redirect", "echo hi > ~/proj/e1.txt", project, false},
+		{"absolute project", "hostname > " + filepath.Join(project, "h1.txt"), project, false},
+		{"project tee", "echo hi | tee ~/proj/t2.txt", project, false},
+		{"external redirect", "hostname > /tmp/x", project, false},
+		{"read keys", "hostname < ~/.ssh/authorized_keys", project, false},
+		{"keys redirect", "hostname > ~/.ssh/authorized_keys", project, true},
+		{"keys append", "uptime >> ~/.ssh/authorized_keys", project, true},
+		{"keys stderr append", "uptime 2>> ~/.ssh/authorized_keys", project, true},
+		{"empty command redirect", ": > ~/.ssh/authorized_keys", project, true},
+		{"true redirect", "true > ~/.ssh/authorized_keys", project, true},
+		{"absolute keys", "hostname > " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"normalized keys", "hostname > " + filepath.Join(project, "..", ".ssh", "authorized_keys"), project, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,
+				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+			targets := map[string]string{hookpaths.CWDKey: row.cwd, hookpaths.TruncatedKey: "1"}
+			if row.name == "external redirect" {
+				targets = map[string]string{hookpaths.CWDKey: row.cwd, "/tmp/x": "/tmp/x"}
+			}
+			findings := dispatchTrustedAction(ctx, trustedActionRequest{
+				Input: input, Connector: "claudecode", EnforcementCapable: true,
+				ResolvedWriteTargets: targets,
+			})
+			want := guardrailActionAllow
+			if row.block {
+				want = guardrailActionBlock
+			}
+			if got := buildVerdict(findings, "tool_call").Action; got != want {
+				t.Fatalf("verdict = %s, want %s; findings=%v", got, want, findingIDs(findings))
+			}
+			if row.block {
+				found := false
+				for _, finding := range findings {
+					found = found || finding.RuleID == "persistence.ssh_authorized_keys_command" &&
+						finding.Severity == "CRITICAL" && finding.contributesToEnforcement()
+				}
+				if !found {
+					t.Fatalf("protected redirect lacked enforced marker rule: %v", findingIDs(findings))
+				}
 			}
 		})
 	}
