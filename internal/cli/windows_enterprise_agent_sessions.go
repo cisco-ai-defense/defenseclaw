@@ -53,6 +53,10 @@ var (
 		return deployment.MetadataPath, true
 	}
 	windowsEnterpriseAgentProcesses = inventory.RunningWindowsAgentProcesses
+	// windowsEnterpriseActivationNow dates an activation when the change
+	// action finished, after the lifecycle installed the hooks: an agent
+	// started while they were being installed did not read them (GAP-1352).
+	windowsEnterpriseActivationNow = time.Now
 )
 
 // windowsEnterpriseStandaloneInstalled reports a standalone deployment that
@@ -86,10 +90,11 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 	activatePending := !opts.activationStartedAt.IsZero() && record.Pending && !opts.noStart &&
 		len(result.Errors) == 0 && result.Readiness.Gateway
 	writeRecord := firstInstall || activatePending
+	activatedAt := windowsEnterpriseActivationNow().UTC()
 	if writeRecord {
 		record.Pending = opts.noStart
 		if !opts.noStart {
-			activated = opts.activationStartedAt.UTC()
+			activated = activatedAt
 			record.ActivatedAt = activated.Format(time.RFC3339Nano)
 		}
 	}
@@ -130,7 +135,7 @@ func applyWindowsEnterpriseAgentSessions(result *enterprisestatus.Result, opts *
 					record.ConnectorActivatedAt = map[string]string{}
 				}
 				for name := range pending {
-					record.ConnectorActivatedAt[name] = opts.activationStartedAt.UTC().Format(time.RFC3339Nano)
+					record.ConnectorActivatedAt[name] = activatedAt.Format(time.RFC3339Nano)
 				}
 				record.PendingConnectors = nil
 			} else {

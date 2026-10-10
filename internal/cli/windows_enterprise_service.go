@@ -133,7 +133,8 @@ type windowsEnterpriseLifecycleOptions struct {
 	diagnostics []string
 	// activationStartedAt is when a standalone change action started, and
 	// installedBeforeRun whether a deployment was installed then: a run
-	// that installs one records its activation (GAP-0967).
+	// that installs one records its activation (GAP-0967), dated when the
+	// run finished (windowsEnterpriseActivationNow).
 	activationStartedAt     time.Time
 	installedBeforeRun      bool
 	previousConnectors      []string

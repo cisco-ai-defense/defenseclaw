@@ -53,12 +53,47 @@ func TestWindowsStandaloneNamesAgentSessionsStartedBeforeActivation(t *testing.T
 	}
 	ensure := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.0")
 	ensure.Installed = true
+	stubWindowsEnterpriseActivationNow(t, activated)
 	applyWindowsEnterpriseAgentSessions(ensure, &windowsEnterpriseLifecycleOptions{activationStartedAt: activated})
 	check(ensure)
 	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
 	status.Installed = true
 	applyWindowsEnterpriseAgentSessions(status, &windowsEnterpriseLifecycleOptions{})
 	check(status)
+}
+
+func stubWindowsEnterpriseActivationNow(t *testing.T, at time.Time) {
+	t.Helper()
+	previous := windowsEnterpriseActivationNow
+	t.Cleanup(func() { windowsEnterpriseActivationNow = previous })
+	windowsEnterpriseActivationNow = func() time.Time { return at }
+}
+
+// GAP-1352: an agent started after the install began but before it
+// installed the hooks never read them; the activation is dated when the
+// install finished, so that session is named too.
+func TestWindowsStandaloneNamesAgentSessionStartedDuringInstall(t *testing.T) {
+	metadata := filepath.Join(t.TempDir(), "deployment.json")
+	if err := os.WriteFile(metadata, []byte(`{"installed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 10, 8, 14, 0, 0, 0, time.UTC)
+	previousMetadata, previousProcesses := windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses
+	t.Cleanup(func() {
+		windowsEnterpriseActivationMetadata, windowsEnterpriseAgentProcesses = previousMetadata, previousProcesses
+	})
+	windowsEnterpriseActivationMetadata = func() (string, bool) { return metadata, true }
+	windowsEnterpriseAgentProcesses = func() ([]inventory.AgentProcess, error) {
+		return []inventory.AgentProcess{{PID: 41, Connector: "codex", User: `DCFC\dcw-std1`, StartedAt: started.Add(time.Minute)}}, nil
+	}
+	stubWindowsEnterpriseActivationNow(t, started.Add(5*time.Minute))
+	install := enterprisestatus.New("install", managed.ProfileStandalone, "windows", "1.0.0")
+	install.Installed = true
+	applyWindowsEnterpriseAgentSessions(install, &windowsEnterpriseLifecycleOptions{activationStartedAt: started})
+	if len(install.Warnings) != 1 || install.Warnings[0].Code != windowsAgentSessionsRestartCode ||
+		!strings.Contains(install.Warnings[0].Message, "codex (pid 41)") {
+		t.Fatalf("install warnings = %+v, want restart for the session started during the install", install.Warnings)
+	}
 }
 
 // A staged install must retain enough state for the first successful repair
@@ -90,6 +125,7 @@ func TestWindowsStandaloneStagedInstallRecordsActivationOnRepair(t *testing.T) {
 	repaired := enterprisestatus.New("repair", managed.ProfileStandalone, "windows", "1.0.0")
 	repaired.Installed = true
 	repaired.Readiness.Gateway = true
+	stubWindowsEnterpriseActivationNow(t, started.Add(2*time.Minute))
 	applyWindowsEnterpriseAgentSessions(repaired, &windowsEnterpriseLifecycleOptions{
 		activationStartedAt: started.Add(2 * time.Minute), installedBeforeRun: true,
 	})
@@ -129,10 +165,12 @@ func TestWindowsStandaloneUpgradeNamesNewConnectorSessions(t *testing.T) {
 	}
 	first := enterprisestatus.New("install", managed.ProfileStandalone, "windows", "1.0.0")
 	first.Installed = true
+	stubWindowsEnterpriseActivationNow(t, installedAt)
 	applyWindowsEnterpriseAgentSessions(first, &windowsEnterpriseLifecycleOptions{activationStartedAt: installedAt})
 	upgrade := enterprisestatus.New("upgrade", managed.ProfileStandalone, "windows", "1.0.0")
 	upgrade.Installed = true
 	upgrade.Readiness.Gateway = true
+	stubWindowsEnterpriseActivationNow(t, upgradedAt)
 	applyWindowsEnterpriseAgentSessions(upgrade, &windowsEnterpriseLifecycleOptions{
 		activationStartedAt: upgradedAt, installedBeforeRun: true,
 		previousConnectors: []string{"codex"}, previousConnectorsKnown: true,
