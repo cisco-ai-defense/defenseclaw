@@ -976,7 +976,11 @@ of a pending transaction, put the deployment's own permissions back on those
 folders, their files and the redaction correlation key once the services are
 stopped, before they record or restart anything. A key that another account
 can open is refused before any service is stopped, and the message names the
-path, the account and the `icacls` commands that remove it.
+path, the account and the `icacls` commands that remove it. Files whose own
+permissions shut out Administrators get the deployment's permissions back
+too. A runtime file the lifecycle cannot open at all keeps its permissions and
+is named in a `runtime_file_skipped` warning; the audit database and the
+redaction correlation key are never skipped.
 
 The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
 that it cannot prove DefenseClaw wrote: a file or folder it did not create,
