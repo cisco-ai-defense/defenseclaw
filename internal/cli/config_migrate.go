@@ -129,7 +129,7 @@ func rebaseRulePackForMigration(dir string) (*config.RulePackRebasePlan, error) 
 	return &config.RulePackRebasePlan{
 		Files: plan.Files, Digest: plan.Digest, Updated: plan.Updated,
 		Carried: plan.Carried, Expressed: plan.Expressed, AlertOnly: plan.AlertOnly, Disabled: plan.Disabled,
-		Merged: plan.Merged, Linked: plan.Linked, WholeArgument: plan.WholeArgument,
+		Merged: plan.Merged, Linked: plan.Linked, WholeArgument: plan.WholeArgument, Renamed: plan.Renamed,
 	}, nil
 }
 
@@ -318,6 +318,9 @@ func printConfigMigrateResult(cmd *cobra.Command, result *config.MigrateV9Result
 	}
 	for _, note := range r.Notes {
 		fmt.Fprintf(out, "  note     %s\n", note)
+	}
+	for _, line := range config.MigratedRuleLines(r) {
+		fmt.Fprintf(out, "  rule     %s\n", line)
 	}
 	if len(result.Written) > 0 {
 		fmt.Fprintf(out, "Wrote %s.\n", strings.Join(result.Written, ", "))

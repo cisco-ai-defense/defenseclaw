@@ -246,7 +246,10 @@ def test_v8_config_runs_the_go_v9_step(
         record = {
             "moved": moved,
             "conflicts": [],
-            "detection_only_rules": ["ACME-A", "ACME-B"],
+            "detection_only_rules": ["ACME-A", "ACME-B", "CUSTOM-CMD-SUDO"],
+            "expressed_rules": ["CUSTOM-CMD-RM-RF", "ACME-LIT"],
+            "whole_argument_rules": ["ACME-LIT"],
+            "renamed_rules": ["CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"],
             "rule_file_merges": ["/p/acme-1.0: rules/b.yaml (category \"acme\") merged into rules/a.yaml; 2 rule(s) kept"],
         }
         (data_dir / "migration-v9.json").write_text(json.dumps(record), encoding="utf-8")
@@ -289,7 +292,15 @@ def test_v8_config_runs_the_go_v9_step(
     assert result.to_config_version == 9
     out = capsys.readouterr().out
     # GAP-1225: the upgrade names the custom rules that stopped blocking tool calls.
-    assert "2 custom rule(s) now detection-only for tool calls: ACME-A, ACME-B" in out
+    assert "3 custom rule(s) now detection-only for tool calls: ACME-A, ACME-B, CUSTOM-CMD-SUDO" in out
+    # GAP-1314: an edited built-in is named by both IDs, with what it does now.
+    assert "3 rule(s) of your custom pack changed by the 1.0 upgrade" in out
+    assert (
+        "CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its "
+        "severity decides block or alert), with an expression derived from its literal pattern" in out
+    )
+    assert "ACME-LIT: blocks only a command argument equal to its literal" in out
+    assert "CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): alert-only" in out
     # GAP-1339: the summary says which rule files of one category were merged.
     assert 'rule pack /p/acme-1.0: rules/b.yaml (category "acme") merged into rules/a.yaml; 2 rule(s) kept' in out
     # GAP-1227: the summary names the MCP servers the upgrade keeps blocked.

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"testing"
 
@@ -211,6 +212,88 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		matched := slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == tc.rule && f.contributesToEnforcement() })
 		if blocked := matched && buildVerdict(findings, "tool_call").Action == guardrailActionBlock; blocked != tc.blocked {
 			t.Errorf("%s %s%s: blocked by %s = %v, want %v", tc.tool, tc.command, tc.args, tc.rule, blocked, tc.blocked)
+		}
+	}
+}
+
+// GAP-1314: a 0.8.x copy of the default pack whose operator changed the
+// CMD-RM-RF pattern to a marker blocked that marker on 0.8.x. The rebase gave
+// the rule a literal expression under the built-in ID, and the gateway's
+// semantic owner and match validation of CMD-RM-RF (recursive deletes only)
+// dropped every match of it. The edited rule now gets an ID of its own and
+// keeps the operator's title, so it blocks the marker, while the shipped
+// CMD-RM-RF still blocks a recursive delete of the root.
+func TestRebasedEditedBuiltinRuleBlocksUnderItsOwnID(t *testing.T) {
+	legacy, err := os.ReadFile(filepath.Join("..", "guardrail", "legacy08", "commands.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit := func(data []byte, id, pattern, rest string) []byte {
+		t.Helper()
+		block := regexp.MustCompile(`(?m)^  - id: ` + id + `\n    pattern: .*\n    title: .*\n    severity: .*\n`)
+		if !block.Match(data) {
+			t.Fatalf("no %s in the 0.8.x commands.yaml", id)
+		}
+		return block.ReplaceAllLiteral(data, []byte("  - id: "+id+"\n    pattern: "+pattern+"\n"+rest))
+	}
+	commands := edit(legacy, "CMD-RM-RF", "dccert-rmrf-marker", "    title: \"Operator marker\"\n    severity: CRITICAL\n")
+	commands = edit(commands, "CMD-ENV-DUMP", `'dccert\s+env'`, "    title: \"Operator env marker\"\n    severity: HIGH\n")
+	old := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(old, "rules", "commands.yaml"), commands, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := guardrail.PlanRulePackRebase(old)
+	if err != nil || plan == nil {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	if !slices.Equal(plan.Renamed, []string{"CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-ENV-DUMP -> CUSTOM-CMD-ENV-DUMP"}) ||
+		!slices.Equal(plan.Expressed, []string{"CUSTOM-CMD-RM-RF"}) || !slices.Equal(plan.AlertOnly, []string{"CUSTOM-CMD-ENV-DUMP"}) {
+		t.Fatalf("renamed %v expressed %v alert-only %v", plan.Renamed, plan.Expressed, plan.AlertOnly)
+	}
+	rebased := t.TempDir()
+	for rel, data := range plan.Files {
+		target := filepath.Join(rebased, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack, err := guardrail.LoadRulePack(rebased)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const connector = "rebase-edited-builtin"
+	if err := ApplyConnectorRulePackOverrides(connector, pack); err != nil {
+		t.Fatal(err)
+	}
+	defer RemoveConnectorRulePackOverrides(connector)
+	for _, tc := range []struct {
+		command, rule, title string
+		blocked              bool
+	}{
+		{command: "echo dccert-rmrf-marker", rule: "CUSTOM-CMD-RM-RF", title: "Operator marker", blocked: true},
+		{command: "rm -rf /", rule: "CMD-RM-RF", title: "Recursive force delete from critical root path", blocked: true},
+		{command: "echo hello"},
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: actionfacts.Input{
+				Tool: "Bash", Command: tc.command, CWD: "/home/alice/project",
+				ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX,
+			},
+			LegacyText: tc.command, Connector: connector, EnforcementCapable: true,
+		})
+		verdict := buildVerdict(findings, "tool_call")
+		matched := tc.rule == "" || slices.ContainsFunc(findings, func(f RuleFinding) bool {
+			return f.RuleID == tc.rule && f.Title == tc.title && f.contributesToEnforcement()
+		})
+		if blocked := verdict.Action == guardrailActionBlock; !matched || blocked != tc.blocked {
+			t.Errorf("%s: verdict %s (%s), want blocked %v by %s", tc.command, verdict.Action, verdict.Reason,
+				tc.blocked, tc.rule)
 		}
 	}
 }

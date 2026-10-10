@@ -71,8 +71,11 @@ func TestRebasePreservesBuiltInRuleEdits(t *testing.T) {
 
 // An edited 0.8.x pattern does not inherit the 1.0 expression, yet it blocked
 // on its own: a literal gets the expression it implies and any other pattern
-// is named alert-only, so the rule neither stops blocking nor goes unnamed
-// (GAP-1314).
+// is named alert-only, so the rule neither stops blocking nor goes unnamed.
+// Under the built-in ID the gateway's semantic owner of that rule dropped its
+// matches (CMD-RM-RF accepts only a recursive delete), so the edited rule
+// gets an ID of its own with the operator's fields, and the built-in keeps
+// its 1.0 version (GAP-1314).
 func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 	old, err := os.ReadFile(filepath.Join("legacy08", "commands.yaml"))
 	if err != nil {
@@ -82,14 +85,23 @@ func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 	if err := yaml.Unmarshal(old, &custom); err != nil {
 		t.Fatal(err)
 	}
-	for _, rule := range yamlRulesSequence(&custom).Content {
+	rules := yamlRulesSequence(&custom)
+	for _, rule := range rules.Content {
 		switch yamlScalarField(rule, "id") {
 		case "CMD-RM-RF":
 			setYAMLScalarField(rule, "pattern", "operator-marker", "!!str")
+			setYAMLScalarField(rule, "severity", "HIGH", "!!str")
+			setYAMLScalarField(rule, "title", "Operator marker", "!!str")
 		case "CMD-SUDO":
 			setYAMLScalarField(rule, "pattern", "operator-marker-[0-9]+", "!!str")
 		}
 	}
+	var added yaml.Node
+	if err := yaml.Unmarshal([]byte("id: CMD-ACME-NEW\npattern: acme-new-marker\ntitle: Acme\nseverity: CRITICAL\n"+
+		"confidence: 0.9\ntags: [marker]\n"), &added); err != nil {
+		t.Fatal(err)
+	}
+	rules.Content = append(rules.Content, added.Content[0])
 	var source bytes.Buffer
 	if err := yaml.NewEncoder(&source).Encode(&custom); err != nil {
 		t.Fatal(err)
@@ -103,27 +115,52 @@ func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var result RulesFileYAML
+	var shipped, result RulesFileYAML
+	if err := yaml.Unmarshal(index.defaultFiles["command"], &shipped); err != nil {
+		t.Fatal(err)
+	}
 	if err := yaml.Unmarshal(rebased, &result); err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
-		"CMD-RM-RF": literalRuleExpression("operator-marker", false, false, true),
-		"CMD-SUDO":  "",
+	shippedRule := func(id string) RuleDefYAML {
+		i := slices.IndexFunc(shipped.Rules, func(rule RuleDefYAML) bool { return rule.ID == id })
+		if i < 0 {
+			t.Fatalf("no shipped %s", id)
+		}
+		return shipped.Rules[i]
 	}
-	for _, rule := range result.Rules {
-		if expression, ok := want[rule.ID]; ok {
-			if rule.Expression != expression {
-				t.Fatalf("%s expression %q, want %q", rule.ID, rule.Expression, expression)
-			}
-			delete(want, rule.ID)
+	for _, tc := range []struct {
+		name string
+		want RuleDefYAML
+	}{
+		{"edited built-in keeps the shipped rule", shippedRule("CMD-RM-RF")},
+		{"edited pattern, severity and title carry over under an own ID", RuleDefYAML{ID: "CUSTOM-CMD-RM-RF",
+			Pattern: "operator-marker", Expression: literalRuleExpression("operator-marker", false, false, true),
+			Title: "Operator marker", Severity: "HIGH", Confidence: 0.95, Tags: []string{"destructive"}}},
+		{"non-literal edit stays alert-only under an own ID", RuleDefYAML{ID: "CUSTOM-CMD-SUDO",
+			Pattern: "operator-marker-[0-9]+", Title: shippedRule("CMD-SUDO").Title, Severity: shippedRule("CMD-SUDO").Severity,
+			Confidence: shippedRule("CMD-SUDO").Confidence, Tags: shippedRule("CMD-SUDO").Tags}},
+		{"unchanged built-in stays as shipped", shippedRule("CMD-MKFS")},
+		{"brand-new rule keeps its ID", RuleDefYAML{ID: "CMD-ACME-NEW", Pattern: "acme-new-marker",
+			Expression: literalRuleExpression("acme-new-marker", false, false, true), Title: "Acme", Severity: "CRITICAL",
+			Confidence: 0.9, Tags: []string{"marker"}}},
+	} {
+		i := slices.IndexFunc(result.Rules, func(rule RuleDefYAML) bool { return rule.ID == tc.want.ID })
+		if i < 0 {
+			t.Errorf("%s: no %s in the rebased file", tc.name, tc.want.ID)
+			continue
+		}
+		got := result.Rules[i]
+		if got.Pattern != tc.want.Pattern || got.Expression != tc.want.Expression || got.Title != tc.want.Title ||
+			got.Severity != tc.want.Severity || got.Confidence != tc.want.Confidence || !slices.Equal(got.Tags, tc.want.Tags) ||
+			(got.Enabled != nil && !*got.Enabled) {
+			t.Errorf("%s: got %+v, want %+v", tc.name, got, tc.want)
 		}
 	}
-	if len(want) != 0 {
-		t.Fatalf("rebased rules missing: %v", want)
-	}
-	if !slices.Equal(plan.Expressed, []string{"CMD-RM-RF"}) || !slices.Equal(plan.AlertOnly, []string{"CMD-SUDO"}) {
-		t.Fatalf("expressed %v alert-only %v", plan.Expressed, plan.AlertOnly)
+	if !slices.Equal(plan.Renamed, []string{"CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"}) ||
+		!slices.Equal(plan.Expressed, []string{"CUSTOM-CMD-RM-RF", "CMD-ACME-NEW"}) ||
+		!slices.Equal(plan.AlertOnly, []string{"CUSTOM-CMD-SUDO"}) || !slices.Equal(plan.Carried, []string{"CMD-ACME-NEW"}) {
+		t.Fatalf("renamed %v expressed %v alert-only %v carried %v", plan.Renamed, plan.Expressed, plan.AlertOnly, plan.Carried)
 	}
 }
 

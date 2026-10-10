@@ -184,15 +184,21 @@ type RulePackRebase struct {
 	Updated int
 	// Carried names the operator's own rules carried into rebuilt files,
 	// Expressed the operator's own rules, and the built-in rules whose
-	// pattern they changed, given an expression (a literal pattern, see
-	// literalRuleExpression), AlertOnly the enabled ones that still have
-	// none and only record a tool call's match, and Disabled the built-in
-	// rules the copy had removed.
+	// pattern they changed (by their Renamed ID), given an expression (a
+	// literal pattern, see literalRuleExpression), AlertOnly the enabled
+	// ones that still have none and only record a tool call's match, and
+	// Disabled the built-in rules the copy had removed.
 	Carried, Expressed, AlertOnly, Disabled []string
 	// WholeArgument names the Expressed rules that match only a command
 	// argument equal to their literal: the full form of the others did not
 	// fit the pack's semantic cost budget (semantic_catalog_cost_limit).
 	WholeArgument []string
+	// Renamed names each built-in rule the operator gave a pattern of their
+	// own and the ID it has in the 1.0 copy ("CMD-RM-RF -> CUSTOM-CMD-RM-RF"):
+	// the built-in ID keeps the shipped rule, whose semantic checks would
+	// drop the operator's matches (GAP-1314). Expressed and AlertOnly name
+	// the new ID.
+	Renamed []string
 	// Merged says, per rule file folded into another of its category, what
 	// was done ("rules/b.yaml (category \"acme\") merged into rules/a.yaml;
 	// 2 rule(s) kept"): 1.0 refuses two files of one category (GAP-1339).
@@ -655,18 +661,37 @@ func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebas
 			builtin[id] = item
 		}
 	}
-	present := map[string]bool{}
+	present, taken := map[string]bool{}, map[string]bool{}
+	for _, item := range slices.Concat(baseRules.Content, oldRules.Content) {
+		taken[yamlScalarField(item, "id")] = true
+	}
 	for _, item := range oldRules.Content {
 		id := yamlScalarField(item, "id")
 		present[id] = true
 		switch {
 		case builtin[id] != nil:
 			plan.Updated++
-			if preserveRuleEdits(builtin[id], item, legacyRules[id]) {
-				// The operator's own 0.8.x regex blocked on its own; derive
-				// its expression or name it as alert-only (GAP-1314).
-				expressOwnRule(builtin[id], plan)
+			edited := cloneYAMLNode(builtin[id])
+			if !preserveRuleEdits(edited, item, legacyRules[id]) || yamlRuleDisabled(edited) {
+				*builtin[id] = *edited
+				continue
 			}
+			// The operator's own 0.8.x regex blocked on its own. Under the
+			// built-in ID the gateway's semantic owner and match checks of
+			// that rule would drop every match (CMD-RM-RF accepts only a
+			// recursive delete), so it becomes a rule of the operator's own
+			// next to the shipped one, which keeps its 1.0 version
+			// (GAP-1314); its expression is derived or it is named
+			// alert-only.
+			ownID := operatorRuleID(id, taken)
+			taken[ownID] = true
+			setYAMLScalarField(edited, "id", ownID, "!!str")
+			edited.HeadComment = fmt.Sprintf("Your 0.8.x %s with its own pattern: renamed by the 1.0 upgrade; "+
+				"the shipped %s stays as it is.", id, id)
+			plan.Renamed = append(plan.Renamed, id+" -> "+ownID)
+			expressOwnRule(edited, plan)
+			at := slices.Index(baseRules.Content, builtin[id])
+			baseRules.Content = slices.Insert(baseRules.Content, at+1, edited)
 		case slices.Contains(default08RuleIDs[category], id):
 			plan.Updated++ // a 0.8.x rule 1.0 no longer ships
 		default:
@@ -734,6 +759,25 @@ func expressOwnRule(item *yaml.Node, plan *RulePackRebase) bool {
 	}
 	plan.AlertOnly = append(plan.AlertOnly, id)
 	return false
+}
+
+// operatorRuleID is the ID of a built-in rule the operator gave a pattern of
+// their own: CUSTOM-<ID>, with a -2, -3 suffix when the file has that ID.
+func operatorRuleID(id string, taken map[string]bool) string {
+	own := "CUSTOM-" + id
+	for suffix := 2; taken[own]; suffix++ {
+		own = fmt.Sprintf("CUSTOM-%s-%d", id, suffix)
+	}
+	return own
+}
+
+func cloneYAMLNode(node *yaml.Node) *yaml.Node {
+	clone := *node
+	clone.Content = make([]*yaml.Node, len(node.Content))
+	for i, child := range node.Content {
+		clone.Content[i] = cloneYAMLNode(child)
+	}
+	return &clone
 }
 
 func yamlRuleDisabled(item *yaml.Node) bool {

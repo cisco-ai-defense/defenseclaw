@@ -125,6 +125,9 @@ type RulePackRebasePlan struct {
 	Digest                                                  string
 	Updated                                                 int
 	Carried, Expressed, AlertOnly, Disabled, Merged, Linked []string
+	// Renamed says which built-in rules the operator gave a pattern of their
+	// own now have an ID of theirs ("CMD-RM-RF -> CUSTOM-CMD-RM-RF").
+	Renamed []string
 	// WholeArgument names the Expressed rules that match only a command
 	// argument equal to their literal (the pack's semantic cost budget had
 	// no room for the full form).
@@ -182,6 +185,16 @@ type MigrationRecord struct {
 	// category, which 1.0 refuses, were merged into one; the upgrade prints
 	// them (GAP-1339).
 	RuleFileMerges []string `json:"rule_file_merges,omitempty"`
+	// RenamedRules says which 0.8.x built-in rules the operator gave a
+	// pattern of their own were kept as rules of theirs under a new ID
+	// ("CMD-RM-RF -> CUSTOM-CMD-RM-RF"): the built-in ID keeps the shipped
+	// rule (GAP-1314). ExpressedRules names the operator's rules that got
+	// an expression from their literal pattern and still block, and
+	// WholeArgumentRules those of them that block only a command argument
+	// equal to the literal (GAP-1344). The upgrade and doctor print them.
+	RenamedRules       []string `json:"renamed_rules,omitempty"`
+	ExpressedRules     []string `json:"expressed_rules,omitempty"`
+	WholeArgumentRules []string `json:"whole_argument_rules,omitempty"`
 	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
 	// refuses to start (a command path or a program other than npx or uvx
 	// with a package). They keep running without a scan. The Python upgrade
@@ -2397,6 +2410,9 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 		target = fmt.Sprintf("%s-1.0-%d", clean, suffix)
 	}
 	m.rebasedPacks[target], m.rebasedFrom[clean], m.rebasedDigests[target] = plan.Files, target, plan.Digest
+	m.record.RenamedRules = append(m.record.RenamedRules, plan.Renamed...)
+	m.record.ExpressedRules = append(m.record.ExpressedRules, plan.Expressed...)
+	m.record.WholeArgumentRules = append(m.record.WholeArgumentRules, plan.WholeArgument...)
 	expressed := ""
 	if len(plan.Expressed) > 0 {
 		// GAP-1344: 0.8.x matched the literal anywhere in the tool call's
@@ -2428,6 +2444,13 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 		}
 		if len(plan.Carried) > 0 {
 			kept += fmt.Sprintf("; your own rules were carried over: %s", strings.Join(plan.Carried, ", "))
+		}
+		if len(plan.Renamed) > 0 {
+			// GAP-1314: under the built-in ID the gateway checks a match
+			// against the shipped rule's meaning and drops the operator's.
+			kept += fmt.Sprintf("; built-in rules you gave a pattern of your own are now rules of yours under a "+
+				"new ID, next to the shipped rule (%s): use the new ID in audit searches and suppressions",
+				strings.Join(plan.Renamed, ", "))
 		}
 		if expressed != "" {
 			kept += "; " + expressed
@@ -2462,6 +2485,42 @@ func (m *v9Migrator) noteDetectionOnly(pack string, ids []string) {
 	m.record.DetectionOnlyRules = append(m.record.DetectionOnlyRules, ids...)
 	m.note("%d custom rule(s) in %s now detection-only for tool calls: %s; add an expression, see policies/rules",
 		len(ids), pack, strings.Join(ids, ", "))
+}
+
+// MigratedRuleLines is one line per rule of the operator's that the rebase
+// of a custom pack changed: the rules that still block a tool call with an
+// expression derived from their literal pattern (and under which ID, for a
+// built-in rule they gave a pattern of their own, GAP-1314), the ones that
+// block only a command argument equal to the literal, and the alert-only
+// ones. `config migrate` prints them; the Python upgrade summary and doctor
+// read the same record fields.
+func MigratedRuleLines(r MigrationRecord) []string {
+	was := map[string]string{}
+	for _, renamed := range r.RenamedRules {
+		if old, own, ok := strings.Cut(renamed, " -> "); ok {
+			was[own] = old
+		}
+	}
+	name := func(id string) string {
+		if old := was[id]; old != "" {
+			return fmt.Sprintf("%s (your edited %s; %s is the shipped 1.0 rule)", id, old, old)
+		}
+		return id
+	}
+	var lines []string
+	for _, id := range r.ExpressedRules {
+		if slices.Contains(r.WholeArgumentRules, id) {
+			lines = append(lines, name(id)+": blocks only a command argument equal to its literal (the pack's "+
+				"semantic cost budget was full)")
+			continue
+		}
+		lines = append(lines, name(id)+": enforced as on 0.8.x (its severity decides block or alert), with an expression derived from its literal pattern")
+	}
+	for _, id := range r.DetectionOnlyRules {
+		lines = append(lines, name(id)+": alert-only for tool calls in 1.0 (its pattern is not a literal); "+
+			"add an expression to block")
+	}
+	return lines
 }
 
 // writeRebasedRulePack writes a rebased pack to dir, which must not exist:

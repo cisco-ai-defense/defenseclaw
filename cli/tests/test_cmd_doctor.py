@@ -177,6 +177,18 @@ class DoctorRetiredPolicyDataTests(unittest.TestCase):
         for leftover in ("data-sandbox.json", "firewall.rego", "audit.rego"):
             self.assertNotIn(leftover, detail)
 
+    def test_migrated_rules_name_a_renamed_built_in(self):
+        # GAP-1314: doctor names the rules the upgrade rebased, as the upgrade did.
+        from defenseclaw.commands import cmd_doctor
+
+        result = _DoctorResult()
+        cmd_doctor._check_migrated_rules(
+            {"expressed_rules": ["CUSTOM-CMD-RM-RF"], "renamed_rules": ["CMD-RM-RF -> CUSTOM-CMD-RM-RF"]}, result
+        )
+        check = result.checks[0]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x", check["detail"])
+
 
 class DoctorVirusTotalTests(unittest.TestCase):
     """GAP-1936: the VirusTotal row agrees with the credential row."""

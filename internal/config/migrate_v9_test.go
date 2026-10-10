@@ -672,7 +672,10 @@ func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
 		RebaseRulePack: func(string) (*RulePackRebasePlan, error) {
 			return &RulePackRebasePlan{
 				Files: map[string][]byte{"rules/commands.yaml": []byte("rebased\n")}, Digest: digest,
-				Updated: 26, Carried: []string{"CMD-ACME-MARKER"}, Expressed: []string{"CMD-ACME-MARKER"},
+				Updated: 26, Carried: []string{"CMD-ACME-MARKER"},
+				Expressed:     []string{"CUSTOM-CMD-RM-RF", "CMD-ACME-MARKER"},
+				WholeArgument: []string{"CMD-ACME-MARKER"}, AlertOnly: []string{"CUSTOM-CMD-SUDO"},
+				Renamed: []string{"CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-SUDO -> CUSTOM-CMD-SUDO"},
 			}, nil
 		},
 	})
@@ -685,8 +688,22 @@ func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
 	if data, err := os.ReadFile(filepath.Join(acme+"-1.0", "rules", "commands.yaml")); err != nil || string(data) != "rebased\n" {
 		t.Errorf("rebased pack file: %q, %v", data, err)
 	}
-	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "enforced nothing") }) {
-		t.Errorf("no note names the rebase: %q", result.Record.Notes)
+	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool {
+		return strings.Contains(note, "enforced nothing") && strings.Contains(note, "CMD-RM-RF -> CUSTOM-CMD-RM-RF")
+	}) {
+		t.Errorf("no note names the rebase and the renamed rules: %q", result.Record.Notes)
+	}
+	// GAP-1314: the upgrade output and doctor name every rule the rebase
+	// changed, and a renamed built-in by both of its IDs.
+	want := []string{
+		"CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its " +
+			"severity decides block or alert), with an expression derived from its literal pattern",
+		"CMD-ACME-MARKER: blocks only a command argument equal to its literal (the pack's semantic cost budget was full)",
+		"CUSTOM-CMD-SUDO (your edited CMD-SUDO; CMD-SUDO is the shipped 1.0 rule): alert-only for tool calls in 1.0 " +
+			"(its pattern is not a literal); add an expression to block",
+	}
+	if got := MigratedRuleLines(result.Record); !slices.Equal(got, want) {
+		t.Errorf("rule lines:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

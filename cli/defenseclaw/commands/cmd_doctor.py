@@ -10103,6 +10103,7 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     _check_unscannable_mcp(cfg, record, r)
     if record.get("acknowledged"):
         return
+    _check_migrated_rules(record, r)
     moved = len(record.get("moved") or [])
     conflicts = len(record.get("conflicts") or [])
     when = str(record.get("migrated_at") or "")[:10] or "an earlier upgrade"
@@ -10114,6 +10115,28 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
         check_id="doctor.config.migration-v9",
         reason_code="config-migrated-v9",
         remediation="Read the record, then run `defenseclaw-gateway config migrate --ack`",
+    )
+
+
+def _check_migrated_rules(record: dict, r: _DoctorResult) -> None:
+    """The rules of a custom pack the upgrade rebased (migration-v9.json),
+    as the upgrade printed them: a WARN while one blocks less than on 0.8.x
+    or now has an ID of its own (GAP-1314), until the record is read."""
+    from defenseclaw.migrations import migrated_rule_lines
+
+    lines = migrated_rule_lines(record)
+    if not lines:
+        return
+    attention = any(kind != "expressed" or " (your edited " in line for kind, line in lines)
+    _emit(
+        "warn" if attention else "pass",
+        "Migrated custom rules",
+        f"{len(lines)} rule(s) changed by the 1.0 upgrade: " + "; ".join(line for _, line in lines),
+        r=r,
+        check_id="doctor.config.migrated-rules",
+        reason_code="custom-rules-migrated",
+        remediation="Review the rules in the pinned 1.0 copy of the pack, then run "
+        "`defenseclaw-gateway config migrate --ack`",
     )
 
 

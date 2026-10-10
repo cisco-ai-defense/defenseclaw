@@ -376,6 +376,16 @@ that one instead:
   that match. The upgrade names these rules; when the pack's semantic cost
   budget has no room left, the remaining ones block only an argument equal to
   the literal, and the upgrade names those too;
+- a built-in rule whose `pattern` you changed is kept as a rule of yours under
+  an ID of its own, `CUSTOM-<ID>` (`CMD-RM-RF` becomes `CUSTOM-CMD-RM-RF`),
+  with your pattern, title, severity and other fields, and gets an expression
+  as above (or is named alert-only). The built-in ID keeps the shipped 1.0
+  rule: the gateway checks a match of a built-in ID against what the shipped
+  rule means (a `CMD-RM-RF` match counts only for a recursive delete of a
+  root folder), so your pattern would never block under it. Block messages
+  and audit rows name the new ID; use it in searches and suppressions. A
+  built-in rule you only retitled, turned off or gave another severity keeps
+  its ID;
 - rule files that share a category are merged into the first of them, in
   file-name order, and every rule is kept. 1.0 needs one file per category
   (0.8.x took several and enforced only the last one). Categories match
@@ -401,12 +411,27 @@ and the upgrade prints them on one line:
 ⚠ 2 custom rule(s) now detection-only for tool calls: ACME-SPACED, ACME-REGEX; add an expression, see policies/rules
 ```
 
+The upgrade also names, one per line, each rule that kept blocking under a
+new ID and each rule that blocks less than on 0.8.x
+(`defenseclaw-gateway config migrate` prints the same lines as `rule` lines):
+
+```text title="Upgrade output"
+⚠ 2 rule(s) of your custom pack changed by the 1.0 upgrade (see migration-v9.json):
+  - CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x (its severity decides block or alert), with an expression derived from its literal pattern
+  - ACME-MARKER-40: blocks only a command argument equal to its literal (the pack's semantic cost budget was full)
+```
+
+`defenseclaw doctor` shows these lines in its `Migrated custom rules` row
+until you mark the record as read with `defenseclaw-gateway config migrate --ack`.
+
 `defenseclaw doctor` warns about them until you give each an expression
 ([CEL rules](/docs/policies/cel/authoring)). A pack with nothing to rewrite is
 pinned as it is, and its rules are still named. The original folder is kept
 for a rollback to 0.8.x. The migration record (`migration-v9.json`) lists what
 moved, under `detection_only_rules` the rules that no longer block a tool
-call, and under `rule_file_merges` the merged rule files.
+call, under `rule_file_merges` the merged rule files, and under
+`renamed_rules`, `expressed_rules` and `whole_argument_rules` the rules
+named above.
 
 A custom pack that cannot be loaded stops the migration with an error that
 names the scope, so a pack you rely on is never dropped silently. So does a
@@ -717,6 +742,7 @@ Every run that writes also writes `migration-v9.json` next to `config.yaml`
 | `removed[]` | v8 keys dropped without a v9 value because nothing read them. |
 | `actions_rows_moved`, `actions_rows_ignored` | The `audit.db` rows moved, and (managed host) left in place. |
 | `notes[]` | Behaviour changes to read, such as the threshold note above. |
+| `renamed_rules[]`, `expressed_rules[]`, `whole_argument_rules[]`, `detection_only_rules[]` | The custom-pack rules the rebase changed: built-in rules you gave a pattern of your own and their new ID (`CMD-RM-RF -> CUSTOM-CMD-RM-RF`), the rules that still block with an expression derived from their literal pattern, the ones of those that block only a command argument equal to the literal, and the ones that only record tool-call matches. |
 | `unscannable_mcp[]` | The MCP servers a scan refuses to start: `name`, `connector`, `command`, the scanner's `reason`, the `runtime_effect` and the `fix` command. Written by `defenseclaw migrate` after the commit. |
 | `acknowledged` | Set by `--ack`. |
 

@@ -3423,6 +3423,15 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
                 f"{', '.join(detection_only)}; add an expression, see policies/rules",
                 indent="    ",
             )
+        # GAP-1314/GAP-1344: name each rule of the operator's the rebase kept
+        # blocking (a renamed built-in by both IDs), and the ones that block
+        # less than on 0.8.x.
+        changed = [line for kind, line in migrated_rule_lines(record) if kind != "alert-only" or " (your edited " in line]
+        if changed:
+            ux.warn(f"{len(changed)} rule(s) of your custom pack changed by the 1.0 upgrade (see migration-v9.json):",
+                    indent="    ")
+            for line in changed:
+                ux.warn(line, indent="      ", marker="-")
         # GAP-1339: 1.0 refuses two rule files of one category, which 0.8.x
         # took; the 1.0 copy of the pack merged them.
         for merge in record.get("rule_file_merges") or []:
@@ -3438,6 +3447,48 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
         if blocked:
             ctx.changes.append(f"MCP servers that stay blocked (asset_policy.mcp.denied): {', '.join(blocked)}")
         _note_unscannable_mcp(ctx, config_path, set(blocked))
+
+
+def migrated_rule_lines(record: dict) -> list[tuple[str, str]]:
+    """One ``(kind, line)`` per rule of the operator's the custom-pack rebase
+    changed, from migration-v9.json; the Go ``config.MigratedRuleLines`` prints
+    the same lines in ``config migrate``. ``kind`` is ``expressed`` (still
+    blocks, with an expression derived from its literal pattern),
+    ``whole-argument`` (blocks only a command argument equal to the literal)
+    or ``alert-only``. A built-in rule the operator gave a pattern of their own
+    is kept under an ID of theirs and named by both IDs (GAP-1314)."""
+
+    def strings(key: str) -> list[str]:
+        return [item for item in record.get(key) or [] if isinstance(item, str) and item.isprintable()]
+
+    was = {}
+    for renamed in strings("renamed_rules"):
+        old, sep, own = renamed.partition(" -> ")
+        if sep:
+            was[own] = old
+
+    def name(rule: str) -> str:
+        old = was.get(rule)
+        return f"{rule} (your edited {old}; {old} is the shipped 1.0 rule)" if old else rule
+
+    whole = set(strings("whole_argument_rules"))
+    lines = []
+    for rule in strings("expressed_rules"):
+        if rule in whole:
+            lines.append((
+                "whole-argument",
+                f"{name(rule)}: blocks only a command argument equal to its literal "
+                "(the pack's semantic cost budget was full)",
+            ))
+        else:
+            lines.append(("expressed", f"{name(rule)}: enforced as on 0.8.x (its severity decides block or alert), "
+                "with an expression derived from its literal pattern"))
+    for rule in strings("detection_only_rules"):
+        lines.append((
+            "alert-only",
+            f"{name(rule)}: alert-only for tool calls in 1.0 (its pattern is not a literal); add an expression to block",
+        ))
+    return lines
 
 
 def _note_unscannable_mcp(ctx: MigrationContext, config_path: str, blocked: set[str]) -> None:
