@@ -12,19 +12,66 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+func TestKiroOnlyWatcherRunsWithNoAssetDirectories(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Guardrail.Connector = "kiro"
+	cfg.Gateway.Watcher.Enabled = true
+	cfg.Watch.RescanEnabled = false
+	if !WatcherWatchesDirs(cfg) || !watcherStartupEnabled(cfg) {
+		t.Fatal("Kiro MCP discovery watcher must be enabled in the start banner")
+	}
+	store, err := audit.NewStore(filepath.Join(cfg.DataDir, "audit.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	s := &Sidecar{cfg: cfg, store: store, logger: audit.NewLogger(store), health: NewSidecarHealth()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.runWatcher(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+			t.Errorf("runWatcher: %v", err)
+		}
+	}()
+	deadline := time.After(5 * time.Second)
+	for s.installWatcher.Load() == nil {
+		select {
+		case <-deadline:
+			t.Fatal("Kiro-only watcher did not start")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if snap := s.health.Snapshot().Watcher; snap.State != StateRunning || snap.Details["idle"] != nil {
+		t.Fatalf("Kiro-only watcher health = %+v, want running", snap)
+	}
+}
+
 func TestRunWatcherWithoutConfiguredDirectoriesRemainsHealthy(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Claw.Mode = ""
+	cfg.Guardrail.Connector = ""
+	cfg.Guardrail.Connectors = nil
 	cfg.Gateway.Watcher.Enabled = true
 	cfg.Gateway.Watcher.Skill.Enabled = false
 	cfg.Gateway.Watcher.Plugin.Enabled = false

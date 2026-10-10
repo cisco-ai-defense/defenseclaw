@@ -331,6 +331,16 @@ your own Codex configuration does not change.
   them on the **Codex hooks** row. To stop guarding Codex on purpose, use
   `defenseclaw guardrail disable --connector codex` instead of editing the
   file.
+- **The notify entry was changed or deleted.** The top-level `notify` entry in
+  `config.toml` is DefenseClaw's turn-complete bridge. If it is removed or
+  points at another program (for example a renamed `defenseclaw-hook.exe`),
+  the hook self-heal writes it back about a second after the file changes
+  (500 ms debounce), or at the next 30-second check if the file event was
+  missed. A notifier you set yourself after setup is kept: DefenseClaw's bridge
+  still runs it, and teardown puts it back. When the gateway is not
+  running, `defenseclaw doctor` warns on the **Codex notify** row; run
+  `defenseclaw setup codex --yes`. Teardown also removes a DefenseClaw notify
+  entry whose program was renamed, so Codex never points at a deleted program.
 - **401 from the model right after you changed its key.** Codex keeps one
   shared app-server daemon running in the background, and that daemon keeps
   the environment it started with. After you rotate the provider key (for
