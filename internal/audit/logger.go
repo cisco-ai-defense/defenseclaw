@@ -215,6 +215,11 @@ type ScanCorrelation struct {
 	UserID     string
 	UserIDKind string
 	UserName   string
+
+	// JudgeModel names the LLM judge model on the scan summary row
+	// (scanner.ScanResult.JudgeModel). The install watcher sets it, so an
+	// auditor sees from the row that the judge ran (GAP-0575).
+	JudgeModel string
 }
 
 // LogScan persists the forensic scan rows and emits the canonical v8 finding,
@@ -831,6 +836,12 @@ func (l *Logger) LogAction(action, target, details string) error {
 // the zero value, which the auto-fill treats as "no override").
 func (l *Logger) LogActionCtx(ctx context.Context, action, target, details string) error {
 	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, "INFO")
+}
+
+// LogActionCtxSeverity is LogActionCtx with a caller-chosen severity, for an
+// action row that is an alert: the alert views list only rows above INFO.
+func (l *Logger) LogActionCtxSeverity(ctx context.Context, action, target, details, severity string) error {
+	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, severity)
 }
 
 // LogCLIAction is the canonical Python/operator CLI ingress. It retains the

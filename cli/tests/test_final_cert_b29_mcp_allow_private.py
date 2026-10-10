@@ -68,7 +68,7 @@ class TestMcpAllowPrivateHints(MCPCommandTestBase):
 
     def test_unblock_hint(self):
         self._serve_loop()
-        PolicyEngine(self.app.store).block_for_connector("mcp", "down", "codex", "x")
+        PolicyEngine(self.app.store, self.app.cfg).block_for_connector("mcp", "down", "codex", "x")
         result = self.invoke(["unblock", "down", "--connector", "codex"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn(

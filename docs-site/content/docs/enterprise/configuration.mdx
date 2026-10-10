@@ -47,6 +47,31 @@ write (`mdm_untrusted_input`); see [Deliver the config](/docs/enterprise/mdm#del
 installed copy and reapplies it when it differs. Do not edit the installed
 copy in place: ensure only compares the file you supply.
 
+## Files next to the config
+
+The source `config.yaml` is limited to 4 MiB (4,194,304 bytes) and 65,536
+parsed YAML nodes. An oversized or overly repetitive candidate is refused
+before it replaces the applied config.
+
+The config is the only file you write. The lifecycle keeps these records next
+to it. They are evidence of what was applied; nothing reads them back as policy,
+and you do not edit them:
+
+| File | What it holds |
+| --- | --- |
+| `config.generation.json` | The config generation: `generation`, `config_sha256`, `actor` (`lifecycle`, `migration`, or a user), `reason` and `written_at`. Every config write updates it |
+| `config.yaml.lock` | The lock every config writer takes |
+| `config.yaml.v8.bak` | The `config_version: 8` file the first migration replaced (root-only). Pass it as `--config` to go back to a release that reads version 8 |
+| `migration-v9.json` | What the migration moved, what conflicted and what it left out. `defenseclaw-gateway config migrate --config /etc/defenseclaw/config.yaml --ack` marks it read on Linux; on macOS use `--config /opt/cisco/defenseclaw/etc/config.yaml` |
+
+They sit in `/etc/defenseclaw` on Linux, `/opt/cisco/defenseclaw/etc` on macOS
+and `C:\ProgramData\Cisco\DefenseClaw\etc` on Windows. On Linux and macOS the
+lifecycle directory also holds `committed-config.yaml` (a copy of the last
+applied config), `rejected-config.yaml` (an in-place edit that was reverted) and
+`policy-state.json` (the last applied effective policy digest). See
+[What `ensure` does with the config](/docs/enterprise/lifecycle#what-ensure-does-with-the-config)
+and [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+
 ## Required keys
 
 Set these keys in every standalone config. On Linux and macOS the lifecycle
@@ -55,13 +80,13 @@ refuses conflicting values:
 
 | Key | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| `config_version` | `8` | `8` | `8` |
+| `config_version` | `9` (a `8` file is migrated) | `9` (a `8` file is migrated) | `9` (a `8` file is migrated) |
 | `deployment_mode` | `managed_enterprise` | `managed_enterprise` | `managed_enterprise` |
 | `enterprise.profile` | `standalone` | `standalone` | `standalone` |
 | `data_dir` | Exactly `/var/lib/defenseclaw`, or unset (the lifecycle then uses that path) | Exactly `/opt/cisco/defenseclaw/runtime`, or unset | Leave unset. The services set it. |
 | `gateway.api_bind` | `127.0.0.1`, or unset | `127.0.0.1`, or unset | `127.0.0.1`, or unset |
 | `gateway.api_port` | `18970`, or unset | `18970`, or unset | `18970`, or unset |
-| `guardrail.rule_pack_dir` | Unset, `""`, or a [custom pack](#custom-rule-packs) | Unset, `""`, or a [custom pack](#custom-rule-packs) | Unset, `""`, or a [custom pack](#custom-rule-packs) |
+| `guardrail.rule_pack` | Unset, a preset, or a [custom pack](#custom-rule-packs) | Unset, a preset, or a [custom pack](#custom-rule-packs) | Unset, a preset, or a [custom pack](#custom-rule-packs) |
 
 - **`enterprise.profile`.** Always set it. When it is unset, Windows and
   macOS resolve to the Secure Client profile, and the `enterprise policy`
@@ -79,9 +104,12 @@ refuses conflicting values:
 - **API listener.** The gateway API is `127.0.0.1:18970` on every OS. Every
   OS refuses any bind address other than `127.0.0.1`; Linux and macOS also
   refuse any other port.
-- **`guardrail.rule_pack_dir`.** Set it to `""` to select the rule packs
-  built into the gateway. A non-empty value names a rule-pack directory,
-  which only administrators may be able to write.
+- **`guardrail.rule_pack`.** A preset name (`default`, `strict`,
+  `permissive`) selects `<policy_dir>/guardrail/<name>`; any other name must
+  be a `guardrail.custom_packs` entry, a directory that only administrators
+  may be able to write, pinned by its digest. (`config_version: 8` named the
+  directory in `rule_pack_dir`; `ensure` migrates it, and a version 9 file
+  that sets `rule_pack_dir` is rejected.)
   - Linux and macOS: when you leave the key out, the gateway uses
     `<policy_dir>/guardrail/default` if you created that folder, and
     otherwise the default pack DefenseClaw ships
@@ -90,9 +118,8 @@ refuses conflicting values:
     a config that leaves the key out installs on a fresh host. The
     lifecycle records the pack the config resolves to: when you create
     `<policy_dir>/guardrail/default` later, the next `ensure` applies the
-    change and restarts the gateway with that pack. Setting
-    `rule_pack_dir` to the folder you want is clearer and has the same
-    effect. The lifecycle refuses a value that names a folder that does not
+    change and restarts the gateway with that pack. Naming the pack in
+    `rule_pack` is clearer and has the same effect. The lifecycle refuses a value that names a folder that does not
     exist, or one inside `data_dir`. See
     [Custom rule packs](#custom-rule-packs).
   - Windows: when you leave the key out, the gateway uses
@@ -150,9 +177,12 @@ version of the agent being installed for that user.
 
 <Callout type="warn" title="Leave an agent out entirely to leave it unprotected">
 On standalone enterprise hosts, `guardrail.connectors.<name>.enabled: false`
-disables the connector and removes its DefenseClaw machine policy. An empty
-connector entry (`{}`) enables it. To leave an agent unprotected, omit it from
-`guardrail.connectors` and `enterprise.machine_policy.connectors`, or set
+disables the connector and removes its DefenseClaw machine policy. For
+example, `guardrail.connectors.claudecode.enabled: false` removes Claude
+Code's machine policy and hooks as well as per-user enrollment, so Claude
+Code is then unprotected. An empty connector entry (`{}`) enables it. To
+leave an agent unprotected, omit it from `guardrail.connectors` and
+`enterprise.machine_policy.connectors`, or set
 `enterprise.machine_policy.connectors.<name>.ownership: "off"`. After applying
 a change, use `enterprise policy show` and `enterprise verify` to check which
 agents still have machine coverage.
@@ -160,6 +190,48 @@ agents still have machine coverage.
 
 The older single-agent key `guardrail.connector` also selects an agent.
 Use the map instead.
+
+## Policy in the config
+
+On managed standalone hosts, `guardrail.hook_fail_mode: open` does not
+override fail-closed gateway peer verification when the gateway is down.
+
+The config also holds the policy the gateway enforces. On a managed host these
+are the only places to change it: the local config tools refuse, and the
+lifecycle validates the whole file before it applies it. Every key here is a
+standard DefenseClaw key; the pages linked below describe it.
+
+| What | Keys | Details |
+| --- | --- | --- |
+| Severity thresholds | `guardrail.block_at` and `alert_at`, and the same keys under `guardrail.connectors.<name>`, `guardrail.profiles.<name>` and `guardrail.profiles.<name>.connectors.<name>` | The only threshold source. [Thresholds](/docs/policies/thresholds) |
+| Rules and rule packs | `guardrail.rules`, `guardrail.rule_pack`, `guardrail.custom_packs` | [Rules](/docs/policies/rules) and [Custom rule packs](#custom-rule-packs) below |
+| Block and allow lists | `asset_policy.skill`, `.mcp`, `.plugin` and `.tool`, with `denied` and `allowed` rules | The only block and allow list. [Admission](/docs/policies/admission) |
+| Admission of skills, MCP servers and plugins | `admission.skill`, `.mcp`, `.plugin` and `.defaults` | Scan on install and the action per severity. [Admission](/docs/policies/admission) |
+| Policy per user or group | `guardrail.profiles`, `guardrail.profile_assignments` and `guardrail.default_profile` | [Guardrail profiles at scale](/docs/guardrail/user-and-group-policies) |
+| Release source | `update.source` (an `https://` URL), `update.check`, `update.channel` | Changes where bytes are fetched, never who must have signed them. [Where releases come from](/docs/enterprise/rollout#where-releases-come-from) |
+
+For example, to block a skill and raise the blocking level of one agent:
+
+```yaml title="config.yaml (excerpt)"
+guardrail:
+  block_at: HIGH
+  alert_at: MEDIUM
+  connectors:
+    codex:
+      block_at: CRITICAL
+asset_policy:
+  skill:
+    denied:
+      - name: acme-unapproved-skill
+        reason: not approved
+```
+
+A threshold comes from the most specific place that sets it: profile
+connector, profile, `guardrail.connectors`, application protection, global,
+then the rule pack's default. The whole file is checked against the closed config schema: a key
+that does not exist, or that a version 9 file no longer accepts (for example
+`skill_actions`, `mcp_actions`, `plugin_actions` or `guardrail.rule_pack_dir`),
+fails validation and the host keeps its current config.
 
 ## Settings reference
 
@@ -174,6 +246,7 @@ acts on; a key without one applies on every OS.
 | `profile` | `standalone`, `secure_client`. Default: Linux: `standalone`. Windows and macOS: `secure_client` | Selects the profile. Must match the profile the services were installed with. Set `standalone`. |
 | `inspection.ai_defense.enabled` | `true`, `false`. Default: `false` | Adds Cisco AI Defense to the local engine. See [AI Defense key](/docs/enterprise/ai-defense-key). |
 | `inspection.ai_defense.credential` | A credential name: lowercase letters, digits and dashes, starting with a letter or digit, up to 63 characters. No default | Names the stored key. Required when `enabled` is `true`. |
+| `inspection.llm.credential` | A credential name, as above. No default | **Standalone.** Names the stored API key of the top-level `llm:` block. The LLM judge and the skill, MCP and plugin scanners take their key from it, never from `llm.api_key_env` or a `.env` file; a missing credential leaves them without a key. Store the key with `enterprise secret set`. The Secure Client profile refuses the key. See [Windows: add the LLM judge](/docs/enterprise/windows#5-add-the-llm-judge). |
 
 ### Enrollment
 
@@ -294,6 +367,15 @@ Claude Code, on Windows as elsewhere. See
 
 ## Custom rule packs
 
+Pattern-only custom rules alert on tool-call matches but can block matching
+prompts and content. To block a tool call, add a CEL expression over complete
+action facts, for example `tool_call_only: true` with
+`expression: f.commands.exists(c, c.argv_complete && c.program == 'pg_dump')`.
+`tool_call_only` alone does not make a regex match enforceable. The text
+`rulepack validate` command names each enabled `tool_call_only` rule you added
+that has no expression (shipped rules that use the same fallback are listed
+only next to yours); see [CEL rule authoring](/docs/policies/cel/authoring).
+
 The gateway ships three rule packs, `default`, `strict` and `permissive`,
 under `/opt/defenseclaw/share/policies/guardrail` on Linux and
 `/opt/cisco/defenseclaw/share/policies/guardrail` on macOS. To use your own
@@ -314,15 +396,24 @@ rules on Linux and macOS:
    source instead. The packages ship no copy before they install, so
    for a first install put the pack in place before the package (with your
    MDM, for example) or install with the built-in packs first and switch
-   `rule_pack_dir` afterwards. Keep every file and folder owned by root,
+   `rule_pack` afterwards. Keep every file and folder owned by root,
    not writable by group or others, and readable by the gateway (for example
    `0644` files in `0755` folders). The lifecycle refuses a pack inside
-   `data_dir`, which the gateway can write.
-2. **Name the folder for the block threshold you want.** The pack folder's
-   name selects the thresholds: `strict` blocks findings of MEDIUM severity
-   and above and alerts on LOW ones. `permissive` blocks only CRITICAL
-   findings and alerts on HIGH ones. Any other name, `default` included,
-   blocks CRITICAL findings and alerts on HIGH and MEDIUM ones.
+   `data_dir`, which the gateway can write. Before it changes anything it
+   also refuses a pack whose folder, a folder above it, or any folder or file
+   inside it is a symlink, is writable by group or others, has an ACL entry
+   that grants write, or belongs to an account other than root (a pack copied
+   with `cp -a` keeps its owner), and names the path and the reason. `status`
+   and `verify` report a pack in use that no longer passes these checks.
+2. **Choose the levels.** The pack's posture (its manifest's posture, else
+   its folder name) sets the default levels: `strict` blocks findings of
+   MEDIUM severity and above and alerts on LOW ones, `permissive` blocks only
+   CRITICAL findings and alerts on HIGH ones, and any other pack blocks
+   CRITICAL findings and alerts on MEDIUM and above. The manifest is part of
+   the pack's pin, so validate the pack again after you add or change it.
+   `guardrail.block_at` and
+   `alert_at` (or a connector's own) override them; see
+   [Thresholds](/docs/policies/thresholds).
 3. **Validate the pack** with the gateway's own loader:
 
    ```bash
@@ -334,21 +425,39 @@ rules on Linux and macOS:
    `defenseclaw` CLI, so `defenseclaw guardrail validate-pack` and
    `defenseclaw setup guardrail` from the
    [per-user workflow](/docs/policies/rulepack-validation) are not available.
-4. **Point the config at it** with `guardrail.rule_pack_dir` (or
-   `guardrail.connectors.<name>.rule_pack_dir` for one agent) and apply the
-   config with `ensure --config` or through your MDM. The lifecycle refuses
-   a `rule_pack_dir` that does not exist and restarts the services with the
-   new pack. If the gateway cannot load it, `ensure` fails and the previous
-   config stays in force.
+4. **Point the config at it.** Add the pack under `guardrail.custom_packs`
+   with its path and the `custom_packs pin` value `rulepack validate` prints
+   (`sha256:` and the digest of the pack's own files), select it with `guardrail.rule_pack` (or
+   `guardrail.connectors.<name>.rule_pack` for one agent), and apply the
+   config with `ensure --config` or through your MDM:
+
+   ```yaml
+   guardrail:
+     rule_pack: acme
+     custom_packs:
+       acme: {path: /etc/defenseclaw/policies/guardrail/acme, digest: "sha256:<digest>"}
+   ```
+
+   The lifecycle refuses a pack that does not exist or whose digest does not
+   match, and applies the new pack in the running gateway, without a restart:
+   adding, replacing or removing a `custom_packs` entry, or switching
+   `rule_pack`, raises the policy generation like any reloadable key. If the
+   gateway cannot load it, `ensure` fails and the previous config stays in
+   force.
+
+On Windows, give the pack its own folder (not `data_dir` or the staging
+folder), quote its path with single quotes, and pin the digest that Setup
+prints when it refuses a placeholder, before the first install, or that
+`defenseclaw-gateway.exe rulepack validate --dir <pack>` prints once
+DefenseClaw is installed; see
+[Write the config](/docs/enterprise/windows#2-write-the-config).
 
 To change a pack that is in use, the safest route is the same as for a new
-one: create the edited copy in a new folder that keeps the threshold name
-(for example `/etc/defenseclaw/policies/guardrail-v2/strict`), validate it,
-and switch `rule_pack_dir` to it, so `ensure` applies it with rollback. If
-you edit the files in place instead, validate them and
-[restart the managed gateway](/docs/enterprise/lifecycle#restart-the-managed-gateway):
-`ensure` does not track the files under `policies`, and the gateway reads
-the pack only when it starts.
+one: create the edited copy in a new folder (for example
+`/etc/defenseclaw/policies/guardrail/acme-v2`), validate it, and switch
+`rule_pack` and `custom_packs` to it, so `ensure` applies it with rollback.
+A pack edited in place no longer matches its pinned digest, so the gateway
+refuses it until you pin the new digest in the config.
 
 ## Network proxy
 
@@ -387,7 +496,7 @@ end. The gateway's other HTTPS clients take the proxy from `HTTPS_PROXY`,
 - The gateway reads `enterprise.network` only when it starts. A config
   reload that changes it is reported as restart-required, and the gateway
   keeps the previous proxy until it restarts. On Linux and macOS, a
-  lifecycle run that applies the changed config restarts the services.
+  lifecycle run that changes it restarts the gateway.
 - When `https_proxy` is empty, the AI Defense client and the telemetry
   exporters use the process environment's proxy variables (`HTTPS_PROXY`,
   `NO_PROXY`), if any.
@@ -460,8 +569,12 @@ enabled destination references is stored and passes the file checks in
 Otherwise it refuses the config, names the credential and the destination
 field, and keeps the running config. `enterprise secret remove` likewise
 refuses a credential that an enabled destination of the installed config
-still references, because the gateway could not start without it: remove
-the reference and apply the config first. To rotate a credential,
+still references, because the gateway could not start without it, and one
+that `enterprise.inspection.llm.credential` (or an enabled
+`enterprise.inspection.ai_defense.credential`) names, because the judge and
+the scanners would run without their key: remove the reference and apply the
+config first. On Windows, status and verify report `credential_missing`
+while the config names a credential that is not stored. To rotate a credential,
 run `enterprise secret set` again with the same name. Outside the standalone
 profile a credential reference never resolves, so a config with an enabled
 destination that uses one is refused.
@@ -489,7 +602,7 @@ does not block on policy verdicts. Change `guardrail.mode` to
   <Tab value="Linux">
 
 ```yaml title="/etc/defenseclaw/config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw          # must be exactly this path
 policy_dir: /etc/defenseclaw/policies
@@ -499,7 +612,6 @@ gateway:
 guardrail:
   enabled: true
   mode: observe                         # observe logs verdicts; action blocks
-  rule_pack_dir: ""                     # the built-in rule packs
   connectors:                           # the agents to protect
     codex: {}
     claudecode: {}
@@ -536,7 +648,7 @@ enterprise:
   <Tab value="macOS">
 
 ```yaml title="/opt/cisco/defenseclaw/etc/config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime    # must be exactly this path
 policy_dir: /opt/cisco/defenseclaw/etc/policies
@@ -546,7 +658,6 @@ gateway:
 guardrail:
   enabled: true
   mode: observe                             # observe logs verdicts; action blocks
-  rule_pack_dir: ""                         # the built-in rule packs
   connectors:                               # the agents to protect
     codex: {}
     claudecode: {}
@@ -583,7 +694,7 @@ enterprise:
   <Tab value="Windows">
 
 ```yaml title="config.yaml (Windows: the file you pass to ensure)"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 gateway:
   api_bind: 127.0.0.1
@@ -591,7 +702,6 @@ gateway:
 guardrail:
   enabled: true
   mode: observe                         # observe logs verdicts; action blocks
-  rule_pack_dir: ""                     # the built-in rule packs
   connectors:                           # the agents to protect
     codex: {}
     claudecode: {}

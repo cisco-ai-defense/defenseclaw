@@ -1,0 +1,236 @@
+//go:build windows
+
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
+
+// enterpriseHookQuarantinePoll is how often the guardian looks for requests.
+const enterpriseHookQuarantinePoll = time.Second
+
+// enterpriseHookQuarantineDeferredPoll is how often the guardian retries the
+// removals deferred until a signed-out user signs in again.
+const enterpriseHookQuarantineDeferredPoll = 5 * time.Second
+
+// startEnterpriseHookQuarantineRemovals answers the gateway's requests to
+// remove a quarantined skill or plugin from an enrolled user's folder, which
+// the gateway service may read but not delete in (GAP-0202). Standalone only:
+// the Secure Client profile keeps its own behaviour.
+func startEnterpriseHookQuarantineRemovals(ctx context.Context, errOut io.Writer) {
+	current := cfg
+	if current == nil || !current.StandaloneEnterprise() || current.SecureClientIntegration() {
+		return
+	}
+	guardianDir := managed.HookGuardianAuthorizationDir(current.DataDir)
+	channel := enforce.QuarantineRemovalChannelFor(current.DataDir, guardianDir)
+	go func() {
+		prepared := false
+		var lastDeferred time.Time
+		ticker := time.NewTicker(enterpriseHookQuarantinePoll)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if !prepared {
+				if err := os.MkdirAll(channel.ResultDir, 0o750); err == nil {
+					prepared = setEnterpriseHookGuardianStateOwnership(channel.ResultDir) == nil
+				}
+				if !prepared {
+					continue
+				}
+			}
+			channel.ServeOnce(func(request enforce.QuarantineRemovalRequest) error {
+				// Load the protected config for each request so watcher roots
+				// adopted after the guardian started apply (GAP-0491).
+				latest, loadErr := enterpriseHookQuarantineCurrentConfig(current)
+				if request.Kind == enforce.QuarantineRequestReadGrant {
+					err := loadErr
+					if err == nil {
+						err = grantEnrolledAssetRead(latest, request, enterprisehooks.GrantGatewayAssetRead)
+					}
+					outcome := "granted the gateway read access"
+					if err != nil {
+						outcome = "read grant refused: " + err.Error()
+					}
+					fmt.Fprintf(errOut, "[hook-guardian] %s %s: %s\n", request.TargetType, request.SourcePath, outcome)
+					return err
+				}
+				err := loadErr
+				if err == nil {
+					err = removeEnrolledRequestedAsset(latest, request, enterprisehooks.RemoveEnrolledUserAsset)
+				}
+				outcome := "removed"
+				if request.Kind == enforce.QuarantineRequestRemoveLink {
+					outcome = "removed the link; the folder it pointed to was not changed"
+				}
+				switch {
+				case errors.Is(err, enforce.ErrQuarantineRemovalDeferred):
+					outcome = "deferred: " + err.Error()
+				case err != nil:
+					outcome = "refused: " + err.Error()
+				}
+				fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: %s\n", request.TargetType, request.SourcePath, outcome)
+				return err
+			})
+			if time.Since(lastDeferred) >= enterpriseHookQuarantineDeferredPoll {
+				lastDeferred = time.Now()
+				channel.ServeDeferred(func(request enforce.QuarantineRemovalRequest) error {
+					err := retryEnterpriseHookQuarantineRemoval(current, request, func(latest *config.Config, request enforce.QuarantineRemovalRequest) error {
+						return removeEnrolledRequestedAsset(latest, request, enterprisehooks.RemoveEnrolledUserAssetInSession)
+					})
+					switch {
+					case err == nil:
+						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: removed now that the user is signed in\n", request.TargetType, request.SourcePath)
+					case !errors.Is(err, enforce.ErrQuarantineRemovalDeferred):
+						fmt.Fprintf(errOut, "[hook-guardian] quarantine %s %s: deferred removal retry pending: %v\n", request.TargetType, request.SourcePath, err)
+					}
+					return err
+				})
+			}
+		}
+	}()
+}
+
+// retryEnterpriseHookQuarantineRemoval rechecks a deferred request against
+// the current protected roots; a hot ensure may have moved quarantine_dir
+// since the request was first deferred.
+func retryEnterpriseHookQuarantineRemoval(startup *config.Config, request enforce.QuarantineRemovalRequest, remove func(*config.Config, enforce.QuarantineRemovalRequest) error) error {
+	latest, err := enterpriseHookQuarantineCurrentConfig(startup)
+	if err != nil {
+		return err
+	}
+	return remove(latest, request)
+}
+
+// enterpriseHookQuarantineCurrentConfig loads the protected config for each
+// request. The gateway may have adopted new watcher roots without restarting
+// the guardian; a failed load refuses removal rather than using stale roots.
+func enterpriseHookQuarantineCurrentConfig(startup *config.Config) (*config.Config, error) {
+	latest, err := enterpriseHooksWindowsConfigLoader()
+	if err != nil {
+		return nil, err
+	}
+	if latest == nil || !latest.StandaloneEnterprise() || latest.SecureClientIntegration() ||
+		!strings.EqualFold(filepath.Clean(latest.DataDir), filepath.Clean(startup.DataDir)) {
+		return nil, fmt.Errorf("protected enterprise config changed guardian identity")
+	}
+	return latest, nil
+}
+
+// removeEnrolledRequestedAsset checks a request against the enrolled users'
+// watched folders, and for a quarantined source against the quarantine
+// store, then removes the source, or the link a link removal names (never
+// what it points to, GAP-1188), as the user who owns that watched folder,
+// with remove. A signed-out user Windows gives no S4U logon for defers the
+// removal to the next sign-in.
+func removeEnrolledRequestedAsset(current *config.Config, request enforce.QuarantineRemovalRequest, remove func(sid, home, path string) error) error {
+	roots := guardianAssetRoots(current, request.SourcePath)
+	dirs := make([]string, 0, len(roots))
+	for _, root := range roots {
+		dirs = append(dirs, root.Dir)
+	}
+	var source, rootDir string
+	var err error
+	if request.Kind == enforce.QuarantineRequestRemoveLink {
+		source, rootDir, err = enforce.VerifyLinkRemoval(request, dirs)
+	} else {
+		source, rootDir, err = enforce.VerifyQuarantineRemoval(request, dirs, current.QuarantineDir)
+	}
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		if strings.EqualFold(filepath.Clean(root.Dir), filepath.Clean(rootDir)) {
+			err := remove(root.SID, root.Home, source)
+			if errors.Is(err, enterprisehooks.ErrEnrolledUserSignedOut) {
+				return fmt.Errorf("%w: %s", enforce.ErrQuarantineRemovalDeferred,
+					enterprisehooks.SignedOutRemovalReason(root.SID, filepath.Base(root.Home), err))
+			}
+			return err
+		}
+	}
+	return fmt.Errorf("no enrolled user owns %s", rootDir)
+}
+
+// grantEnrolledAssetRead checks a read grant request against the enrolled
+// users' watched folders and has grant give the gateway service read access
+// to the folder as the user who owns that watched folder (GAP-0825).
+func grantEnrolledAssetRead(current *config.Config, request enforce.QuarantineRemovalRequest, grant func(sid, home, path string) error) error {
+	// A hook registers a project skill folder itself (GAP-1356).
+	if project, ok := gateway.EnrolledProjectSkillRoot(current, request.SourcePath); ok &&
+		strings.EqualFold(filepath.Clean(project.Dir), filepath.Clean(strings.TrimSpace(request.SourcePath))) {
+		source, err := enforce.VerifyProjectSkillRootReadGrant(request, project.Dir, project.Home)
+		if err != nil {
+			return err
+		}
+		return grant(project.SID, project.Home, source)
+	}
+	roots := guardianAssetRoots(current, request.SourcePath)
+	dirs := make([]string, 0, len(roots))
+	for _, root := range roots {
+		dirs = append(dirs, root.Dir)
+	}
+	source, rootDir, err := enforce.VerifyAssetReadGrant(request, dirs)
+	if err != nil {
+		return err
+	}
+	for _, root := range roots {
+		if strings.EqualFold(filepath.Clean(root.Dir), filepath.Clean(rootDir)) {
+			return grant(root.SID, root.Home, source)
+		}
+	}
+	return fmt.Errorf("no enrolled user owns %s", rootDir)
+}
+
+// guardianAssetRoots are the watched folders a request about path may name:
+// the enrolled users' connector folders and, when path lies in one, the
+// project skill folder of an enrolled user that no link leads to, which the
+// gateway watches once a hook registered it (GAP-1356).
+func guardianAssetRoots(current *config.Config, path string) []gateway.EnrolledWatchRoot {
+	roots := enrolledWatchRootsForGuardian(current)
+	if project, ok := gateway.EnrolledProjectSkillRoot(current, path); ok &&
+		enforce.ValidateLinkFreeRoot(project.Dir, project.Home) == nil {
+		roots = append(roots, project)
+	}
+	return roots
+}
+
+// enrolledWatchRootsForGuardian resolves the enrolled watch roots while no
+// other goroutine of the guardian resolves connector paths for a user
+// (connector.WithUserHomeDir): those overrides are process-wide, and one in
+// the middle of the resolution dropped an Amp skills root, so the removal of
+// a quarantined Amp skill was refused as outside the watched folders
+// (GAP-0913).
+func enrolledWatchRootsForGuardian(current *config.Config) []gateway.EnrolledWatchRoot {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return gateway.EnrolledWatchRoots(current)
+	}
+	var roots []gateway.EnrolledWatchRoot
+	_ = connector.WithUserHomeDir(home, func() error {
+		roots = gateway.EnrolledWatchRoots(current)
+		return nil
+	})
+	return roots
+}

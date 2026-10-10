@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -540,9 +541,7 @@ func mergeRulePackCategories(
 				Tags:         append([]string(nil), r.Tags...),
 			})
 		}
-		if len(compiled) == 0 {
-			continue
-		}
+		// An explicitly disabled category replaces defaults with zero rules.
 		if i, ok := idx[rf.Category]; ok {
 			merged[i].Rules = compiled
 			overridden++
@@ -662,6 +661,43 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 	}
 	generation := snapshotRulePackGeneration(connector)
 	return scanRuleGeneration(generation, text, toolName, ruleScanOptions{})
+}
+
+// maxEntityMatchesPerRule bounds the matches counted for one rule in one result.
+const maxEntityMatchesPerRule = 1000
+
+// countRuleEntitiesFor counts distinct sensitive values matched by the
+// selected profile's entity rules in text. A value matched by two rules
+// or twice by one rule counts once. A findings list holds one entry
+// per rule, so it cannot say how many values a result carries.
+func countRuleEntitiesFor(ctx context.Context, connector, text string) int {
+	if text == "" || ManagedEnterpriseActive() {
+		return 0
+	}
+	generation := snapshotRulePackGenerationFor(ctx, connector)
+	if generation == nil {
+		return 0
+	}
+	options := ruleScanOptions{contentScope: ruleContentScopeUntrusted}
+	seen := make(map[string]struct{})
+	for categoryIndex := range generation.categories {
+		cat := &generation.categories[categoryIndex]
+		if cat.Name != "secret" && cat.Name != "enterprise-data" && cat.Name != "pii" {
+			continue
+		}
+		for ruleIndex := range cat.Rules {
+			rule := &cat.Rules[ruleIndex]
+			if rule.Pattern == nil || !options.allows(rule.ID, rule.ToolCallOnly) {
+				continue
+			}
+			for _, loc := range rule.Pattern.FindAllStringIndex(text, maxEntityMatchesPerRule) {
+				if match := text[loc[0]:loc[1]]; acceptedRuleMatchAt(rule.ID, text, match, loc[0], loc[1]) {
+					seen[match] = struct{}{}
+				}
+			}
+		}
+	}
+	return len(seen)
 }
 
 // scanContentRulesForConnector applies the content-only rule boundary used by

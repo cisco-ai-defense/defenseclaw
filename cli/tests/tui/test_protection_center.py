@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import string
 from types import SimpleNamespace
@@ -21,7 +20,6 @@ import pytest
 from defenseclaw.policy_catalog import ConnectorPack, ProtectionPack, RuleFamily, ScopePosture, ToolChain
 from defenseclaw.tui import policy_panel
 from defenseclaw.tui.policy_panel import (
-    composed_pack_path,
     hilt_change_modal,
     mode_change_modal,
     policy_threshold_modal,
@@ -169,6 +167,8 @@ def test_posture_is_the_default_view_and_rows_show_each_scopes_tool_call_levels(
     # codex's strict pack blocks MEDIUM+ and alerts on LOW+; the others use default levels.
     assert rows[1][2:5] == ("MEDIUM+", "LOW+", "HIGH+")
     assert rows[0][2:5] == ("CRITICAL", "MEDIUM+", "off")
+    # The header names the global scope's levels, which LLM traffic follows too.
+    assert model.headline().startswith("Global: blocks CRITICAL, alerts MEDIUM+")
     assert rows[1][6] == "1/5" and rows[0][6] == "0/5"
     widest = [max(len(c), *(len(r[i]) for r in rows)) for i, c in enumerate(columns)]
     assert sum(widest) + 2 * len(widest) <= 74
@@ -290,33 +290,29 @@ def test_consequence_modals_turn_red_only_when_protection_weakens() -> None:
     codex, global_row = model.scope_row("codex"), model.scope_row("")
     assert mode_change_modal(model, codex, "observe").actions[0].danger is True
     assert mode_change_modal(model, global_row, "action").actions[0].danger is False
-    # The Policies view's b / a: the policy's LLM-traffic levels.
+    # The Policies view's b / a: the policy's levels.
     assert policy_threshold_modal("block", "HIGH+", model.active_policy()).actions[0].danger is False
     loosen = policy_threshold_modal("block", "CRITICAL", STRICT)
     assert loosen.actions[0].danger is False  # not the active policy: nothing changes yet
+    assert any("-p strict" in line for line in loosen.details)
     strict_active = STRICT.__class__(**{**STRICT.__dict__, "active": True})
-    assert policy_threshold_modal("block", "CRITICAL", strict_active).actions[0].danger is True
+    live = policy_threshold_modal("block", "CRITICAL", strict_active)
+    assert live.actions[0].danger is True
+    # The active policy's level is the live one: no -p, which only saves a draft.
+    assert not any("-p " in line for line in live.details)
     assert hilt_change_modal(model, codex, "off").actions[0].danger is True
     assert hilt_change_modal(model, codex, "MEDIUM+").actions[0].danger is False
     database = model.protection_pack("database-destruction-protection")
     assert protection_change_modal(model, codex, database, False).actions[0].danger is True
     kubernetes = model.protection_pack("kubernetes-production-protection")
-    # claudecode's default pack keeps its levels in the composed folder.
-    assert protection_change_modal(model, model.scope_row("claudecode"), kubernetes, True).actions[0].danger is False
-    # codex's strict pack is composed into protected-codex/strict, so it keeps strict levels.
+    # Turning a pack on adds rules on top of the scope's pack; it never weakens it.
     assert protection_change_modal(model, codex, kubernetes, True).actions[0].danger is False
-    assert composed_pack_path(model, codex).endswith(os.path.join("protected-codex", "strict"))
-    # With no policy_dir the CLI composes under <data_dir>/policies; the preview says the same.
-    model.set_config(SimpleNamespace(policy_dir="", data_dir="/dc"))
-    assert composed_pack_path(model, codex) == os.path.join("/dc", "policies", "guardrail", "protected-codex", "strict")
 
 
 def test_global_changes_name_the_connectors_that_keep_their_own_setting() -> None:
     model = protection_model()
     global_row = model.scope_row("")
     assert any("codex" in line for line in mode_change_modal(model, global_row, "action").details)
-    kubernetes = model.protection_pack("kubernetes-production-protection")
-    assert any("codex" in line for line in protection_change_modal(model, global_row, kubernetes, True).details)
     assert any("claudecode" in line for line in hilt_change_modal(model, global_row, "HIGH+").details)
 
 
@@ -477,7 +473,7 @@ def test_read_catalog_survives_a_broken_protection_catalog(monkeypatch) -> None:
     monkeypatch.setattr(policy_catalog, "scope_postures", lambda cfg: list(POSTURES), raising=False)
     monkeypatch.setattr(policy_catalog, "protection_packs", lambda: list(PACKS), raising=False)
     monkeypatch.setattr(policy_catalog, "rule_families", lambda path: list(FAMILIES.get(path, ())), raising=False)
-    config = SimpleNamespace(policy_dir="", data_dir="", guardrail=SimpleNamespace(rule_pack_dir="", connectors={}))
+    config = SimpleNamespace(policy_dir="", data_dir="", guardrail=SimpleNamespace(rule_pack="", connectors={}))
     read = policy_panel.read_policy_catalog(config)
     assert read.posture_error == "tool-chains.json is unreadable"
     assert [row.scope for row in read.postures] == ["global", "codex", "claudecode"]
@@ -528,3 +524,20 @@ async def test_the_toggle_button_grows_to_fit_a_longer_label() -> None:
         await pilot.pause()
         # A button is its label plus one pad cell each side.
         assert app.query_one("#toggle", Button).size.width >= len("Turn off") + 2
+
+
+def test_secure_client_policy_view_uses_legacy_active_name(monkeypatch, tmp_path) -> None:
+    import json
+
+    from defenseclaw import policy_catalog
+    from defenseclaw.enforce import asset_lists
+
+    rego_dir = tmp_path / "rego"
+    rego_dir.mkdir()
+    (rego_dir / "data.json").write_text(json.dumps({"config": {"policy_name": "strict"}}), encoding="utf-8")
+    config = SimpleNamespace(policy_dir=str(tmp_path), guardrail=SimpleNamespace(), admission=None)
+    monkeypatch.setattr(asset_lists, "is_secure_client", lambda cfg: cfg is config)
+
+    read = policy_panel.read_policy_catalog(config)
+    assert {row.name for row in read.policies if row.active} == {"strict"}
+    assert policy_catalog.active_policy_name(tmp_path, config) == "strict"

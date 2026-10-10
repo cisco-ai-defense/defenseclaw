@@ -60,6 +60,8 @@ func snapshot() ([]Process, int, error) {
 	}
 
 	rows := make([]Process, 0, 256)
+	missingOwners := make(map[uint32]int)
+	facts := processFacts()
 	partial := 0
 	for {
 		row := Process{
@@ -67,9 +69,18 @@ func snapshot() ([]Process, int, error) {
 			PPID: int(entry.ParentProcessID),
 			Name: windows.UTF16ToString(entry.ExeFile[:]),
 		}
+		// The kernel list is read apart from the toolhelp snapshot; a pid
+		// whose parent differs between the two was recycled in between, and
+		// its facts belong to the other process.
+		if fact, ok := facts[entry.ProcessID]; ok && fact.ppid == entry.ParentProcessID {
+			row.SessionID, row.StartedAt = fact.session, fact.created
+		}
 		if row.PID > 0 {
 			if !enrich(&row) {
 				partial++
+			}
+			if row.UserSID == "" {
+				missingOwners[uint32(row.PID)] = len(rows)
 			}
 			rows = append(rows, row)
 		}
@@ -79,6 +90,16 @@ func snapshot() ([]Process, int, error) {
 				break
 			}
 			return rows, partial, fmt.Errorf("Process32Next: %w", err)
+		}
+	}
+	// WMI's process provider supplies the owner SID when this service cannot
+	// open another user's token. WTS process enumeration needs Administrators
+	// group membership to list another user's processes, which this service
+	// lacks; each row's session comes from the kernel's process list instead,
+	// and the sensor asks who is signed in to it (SessionUser).
+	if len(missingOwners) != 0 {
+		for pid, owner := range lookupWMIProcessOwners(missingOwners) {
+			rows[missingOwners[pid]].User, rows[missingOwners[pid]].UserSID = owner.name, owner.sid
 		}
 	}
 	return rows, partial, nil
@@ -106,13 +127,13 @@ func enrich(row *Process) bool {
 		defer windows.CloseHandle(process)
 		readTimes(process, row)
 		readMemory(process, row)
-		row.User = readUser(process)
+		row.User, row.UserSID = readUser(process)
 		return false
 	}
 	defer windows.CloseHandle(process)
 	readTimes(process, row)
 	readMemory(process, row)
-	row.User = readUser(process)
+	row.User, row.UserSID = readUser(process)
 	if cmdline, err := readCommandLine(process); err == nil {
 		row.Cmdline = cmdline
 	}
@@ -130,7 +151,7 @@ func readTimes(process windows.Handle, row *Process) {
 	row.CPUTime = time.Duration(ticks) * 100 * time.Nanosecond
 	// The creation time comes back from the same call, so the start instant
 	// that disambiguates a recycled pid costs nothing extra here.
-	if creation.Nanoseconds() > 0 {
+	if row.StartedAt.IsZero() && creation.Nanoseconds() > 0 {
 		row.StartedAt = time.Unix(0, creation.Nanoseconds())
 	}
 }
@@ -169,21 +190,32 @@ func readMemory(process windows.Handle, row *Process) {
 	row.RSSBytes = int64(counters.WorkingSetSize)
 }
 
-func readUser(process windows.Handle) string {
+func readUser(process windows.Handle) (string, string) {
 	var token windows.Token
 	if err := windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
-		return ""
+		return "", ""
 	}
 	defer token.Close()
 	user, err := token.GetTokenUser()
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	account, _, _, err := user.User.Sid.LookupAccount("")
+	return windowsOwner(user.User.Sid)
+}
+
+func windowsOwner(sid *windows.SID) (string, string) {
+	if sid == nil || !sid.IsValid() {
+		return "", ""
+	}
+	sidText := sid.String()
+	account, domain, _, err := sid.LookupAccount("")
 	if err != nil {
-		return ""
+		return sidText, sidText
 	}
-	return account
+	if domain != "" {
+		return domain + `\` + account, sidText
+	}
+	return account, sidText
 }
 
 // processBasicInformation mirrors PROCESS_BASIC_INFORMATION. Only PebBaseAddress

@@ -77,7 +77,7 @@ The flags above explicitly set: connector, mode, optional HITL, and optional rul
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/observability/redaction#verify-policy). |
-| Verify after setup | on | `--no-verify` |
+| Check the result | `defenseclaw doctor` | none: setup no longer runs its own connectivity check |
 
 See [the full flag reference](/docs/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
 
@@ -143,8 +143,10 @@ defenseclaw setup openclaw \
 ```
 
 Block MEDIUM and above, alert on LOW, and do not offer approval for findings
-that have already crossed the block threshold. Pair it with a reviewed
-first-party allow-list for additional containment.
+that have already crossed the block threshold. The policy also writes the
+matching [admission](/docs/policies/admission) settings, including
+`allow_list_bypass_scan: false`, so first-party skills and plugins are scanned
+too.
 
 </Tab>
 
@@ -211,7 +213,8 @@ A hash-checked backup of `openclaw.json` is stored before edits; teardown restor
 ## Transport coverage
 
 The plugin patches `globalThis.fetch`, Node `https.request`, `http.request` and
-`http.get`, and the global Undici dispatcher. A matching request is redirected
+`http.get`, the global Undici dispatcher, and the Undici copy that OpenClaw
+ships. A matching request is redirected
 through the guardrail proxy, where DefenseClaw can inspect its request and
 response. The match and passthrough boundaries are transport-specific:
 
@@ -221,6 +224,7 @@ response. The match and passthrough boundaries are transport-specific:
 | `https.request` | The destination is a known provider or its path has a recognized LLM suffix | Passes through and emits egress passthrough telemetry. |
 | `http.request` / `http.get` | Its non-safe destination has a recognized LLM path, including supported known or local-provider paths | Passes through without guaranteed passthrough telemetry. |
 | Undici global dispatcher | Its non-safe destination is a known provider or has a recognized LLM path | Passes through without guaranteed passthrough telemetry. |
+| Undici copy that OpenClaw ships | Same rule as the global dispatcher. OpenClaw sends its model requests through an SSRF-guarded fetch that gives Undici a dispatcher of its own, which skips every layer above | Passes through without guaranteed passthrough telemetry. |
 
 Raw sockets, custom transports, and libraries that bypass all patched entry
 points are outside this inspection boundary. An egress event proves that the
@@ -228,9 +232,13 @@ plugin observed a transport branch; it does not mean the request or response
 was proxied and inspected.
 
 OpenClaw ≥2026.6.8 is the release range that first required the undici
-dispatcher layer. `defenseclaw doctor` now fails the **OpenClaw
-interception** row when the plugin self-test cannot prove a rewrite onto
-`:4000`, even if `/health/liveliness` returns 200.
+dispatcher layers. `defenseclaw doctor` fails the **OpenClaw interception**
+row when the plugin self-test cannot prove a rewrite onto the guardrail proxy,
+even if `/health` returns 200. The gateway pairs each model call OpenClaw
+completes with a proxy hop of its own, so earlier proxied traffic never covers
+a later call. Doctor fails the row when the latest such call took no hop, and
+warns when an earlier one did not but the calls after it did. The counts start
+again when `defenseclaw-gateway` restarts.
 
 ## What the plugin does
 

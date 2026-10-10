@@ -130,8 +130,11 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 	})
 	enterprisehooks.SetStandaloneResolver(standaloneTestResolver{})
 	enterpriseHookCheckHome = func(home string, _ int) enterprisehooks.HomeCheck {
-		if home == "/home/carol" {
+		switch home {
+		case "/home/carol", "/home/gina":
 			return enterprisehooks.HomeCheck{State: enterprisehooks.HomePending}
+		case "/home/frank":
+			return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable}
 		}
 		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeUntrusted}
 	}
@@ -148,7 +151,13 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 		1001: {Account: enterpriseHookWorkerAccount{UID: 1001, GID: 1001, User: "alice", Home: "/home/alice"}},
 		1004: {Account: enterpriseHookWorkerAccount{UID: 1004, GID: 1004, User: "dave", Home: "/home/dave"}},
 	}
+	// Only manifest rows prove enrollment: an eligible account without one
+	// (frank, gina) may have only personal state and gets no purge
+	// (GAP-0495); alice is purged once.
 	notPurged := addEnterpriseHookStatePurges(jobs, resolveEnterpriseHookRemoveRows(manifest), map[int]bool{1004: true})
+	if jobs[1006] != nil || jobs[1007] != nil {
+		t.Fatalf("purge added accounts without a manifest row: %+v", jobs)
+	}
 	want := []string{
 		"bob: its home is not trusted",
 		"carol: its home is not available; rerun the purge when it is",
@@ -167,6 +176,9 @@ func TestAddEnterpriseHookStatePurgesListsAccountsItCannotPurge(t *testing.T) {
 	}
 	if purges != 1 || len(jobs[1004].Request.Targets) != 0 {
 		t.Fatalf("alice purges %d, dave targets %+v", purges, jobs[1004].Request.Targets)
+	}
+	if jobs[1006] != nil || jobs[1007] != nil {
+		t.Fatalf("unmanaged eligible accounts scheduled for purge: frank=%+v gina=%+v", jobs[1006], jobs[1007])
 	}
 }
 

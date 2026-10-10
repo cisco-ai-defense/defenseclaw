@@ -265,10 +265,7 @@ def _scan_one_connector(
         ux.echo(ux.dim(f"Scanning {label} inventory …"), err=True)
     inv = build_claw_aibom(app.cfg, live=True, categories=cats, connector=connector)
 
-    enrich_with_policy(
-        inv, app.store, app.cfg.skill_actions,
-        policy_dir=app.cfg.policy_dir, cfg=app.cfg,
-    )
+    enrich_with_policy(inv, app.store, cfg=app.cfg)
     result = claw_aibom_to_scan_result(inv, app.cfg)
 
     # The inventory sweep re-runs every ai_discovery.process_interval_s across

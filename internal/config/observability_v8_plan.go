@@ -70,12 +70,17 @@ type ObservabilityV8EffectiveLocal struct {
 }
 
 type ObservabilityV8EffectiveTracePolicy struct {
-	Sampler              string                             `json:"sampler"`
-	SamplerArg           string                             `json:"sampler_arg,omitempty"`
-	SemanticProfile      string                             `json:"semantic_profile"`
-	SemanticProfileLock  ObservabilityV8SemanticProfileLock `json:"semantic_profile_lock"`
-	CompatibilityAliases bool                               `json:"compatibility_aliases"`
-	Limits               ObservabilityV8TraceLimitsSource   `json:"limits"`
+	Sampler             string                             `json:"sampler"`
+	SamplerArg          string                             `json:"sampler_arg,omitempty"`
+	SemanticProfile     string                             `json:"semantic_profile"`
+	SemanticProfileLock ObservabilityV8SemanticProfileLock `json:"semantic_profile_lock"`
+	// CompatibilityAliases is the retired alias switch. Only the plan of a
+	// Secure Client source carries it, as on main: the plan digest stamps
+	// every local audit record (provenance.config_digest, content_hash), so
+	// Secure Client keeps the digest of main (issue #1092). The v8 provider
+	// and managed AI Defense destination also use it for legacy aliases.
+	CompatibilityAliases *bool                            `json:"compatibility_aliases,omitempty"`
+	Limits               ObservabilityV8TraceLimitsSource `json:"limits"`
 }
 
 type ObservabilityV8SemanticProfileLock struct {
@@ -200,6 +205,10 @@ type ObservabilityV8EffectiveDestination struct {
 	// managedAIDSourceContentHash is generation-local release metadata. It is
 	// intentionally absent from display/effective JSON and public plan digests.
 	managedAIDSourceContentHash string
+	// managedAIDDeploymentAliasesOff is set when the plan turns
+	// trace_policy.compatibility_aliases off. The switch is already part of
+	// the plan digest, so this needs no place in the reload identity.
+	managedAIDDeploymentAliasesOff bool
 }
 
 type ObservabilityV8Warning struct {
@@ -223,7 +232,8 @@ type ObservabilityV8Provenance struct {
 type ObservabilityV8EffectivePlan struct {
 	BucketCatalogVersion int `json:"bucket_catalog_version"`
 	// ResourceAttributes is the normalized registered-core plus custom resource
-	// map. Compatibility aliases are canonicalized before the plan is frozen.
+	// map. The retired deployment.environment spelling is canonicalized before
+	// the plan is frozen.
 	ResourceAttributes map[string]string `json:"resource_attributes"`
 	// ResourceAttributeEntries is the generated, sealed custom-only projection.
 	// Runtime builders combine it with typed registered-core inputs. It is

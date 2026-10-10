@@ -12,6 +12,7 @@
 // included in the docs page until the operator opens the creator.
 
 import type { OpaManifest, OpaResult } from '../types';
+import { withPolicyInput, type OpaData } from './data-projection';
 
 // Next.js basePath ("" or "/defenseclaw") gets baked into client bundles
 // via env.NEXT_PUBLIC_BASE_PATH in next.config — see how it's set there.
@@ -106,9 +107,10 @@ export async function evalEntrypoint(
  */
 export async function evalDomain(
   domain: string,
-  input: unknown,
-  data: unknown,
+  rawInput: unknown,
+  data: OpaData,
 ): Promise<OpaResult> {
+  const input = withPolicyInput(domain, rawInput, data);
   const verdictKey = pickVerdictEntrypoint(domain);
   const reasonKey = pickReasonEntrypoint(domain);
   const [verdict, reason] = await Promise.all([
@@ -122,18 +124,12 @@ export async function evalDomain(
   };
 }
 
-function pickVerdictEntrypoint(domain: string): string {
+export function pickVerdictEntrypoint(domain: string): string {
   switch (domain) {
     case 'admission':
       return 'defenseclaw/admission/verdict';
     case 'guardrail':
-      return 'defenseclaw/guardrail/severity';
-    case 'firewall':
-      return 'defenseclaw/firewall/action';
-    case 'audit':
-      return 'defenseclaw/audit/retain';
-    case 'skill_actions':
-      return 'defenseclaw/skill_actions/runtime_action';
+      return 'defenseclaw/guardrail/action';
     default:
       return `defenseclaw/${domain}/verdict`;
   }
@@ -145,12 +141,6 @@ function pickReasonEntrypoint(domain: string): string | null {
       return 'defenseclaw/admission/reason';
     case 'guardrail':
       return 'defenseclaw/guardrail/reason';
-    case 'firewall':
-      return 'defenseclaw/firewall/rule_name';
-    case 'audit':
-      return 'defenseclaw/audit/retain_reason';
-    case 'skill_actions':
-      return null;
     default:
       return null;
   }

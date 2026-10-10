@@ -11,12 +11,14 @@
 package gateway
 
 import (
+	"database/sql"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +66,8 @@ func TestManagedHookAuthorizerMatrix(t *testing.T) {
 		{name: "root denied", enrollment: config.EnterpriseEnrollmentConfig{Root: "deny"}, peer: root, connector: "codex", reason: managedHookReasonRootDenied},
 		{name: "exempt by name", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"carol"}}, peer: carol, connector: "hermes", allow: true, exempt: true},
 		{name: "exempt by uid", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"3001"}}, peer: carol, connector: "hermes", allow: true, exempt: true},
+		{name: "exempt user unverified extension refused", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"alice"}, UnverifiedVersions: "refuse"}, peer: alice, connector: "claudecode", surface: "extension", reason: managedHookReasonSurfaceUnverified},
+		{name: "exempt user refused ledger row refused", enrollment: config.EnterpriseEnrollmentConfig{ExemptUsers: []string{"carol"}, UnverifiedVersions: "refuse"}, peer: carol, connector: "codex", reason: managedHookReasonSurfaceUnverified},
 		{name: "unknown connector", peer: alice, connector: "", reason: managedHookReasonConnectorUnknown},
 		{name: "refuse denies a user whose only codex install is a refused surface", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: carol, connector: "codex", reason: managedHookReasonSurfaceUnverified},
 		{name: "refuse keeps inspecting other users", enrollment: config.EnterpriseEnrollmentConfig{UnverifiedVersions: "refuse"}, peer: bob, connector: "codex", allow: true},
@@ -202,5 +206,71 @@ func TestAcquireAPIListenerFailsClosedOnInheritedMismatch(t *testing.T) {
 	listener, err := api.acquireAPIListener(t.Context())
 	if err != nil || listener.Addr().String() != inheritedSocket.Addr().String() {
 		t.Fatalf("matching inherited listener: %v %v", listener, err)
+	}
+}
+
+// GAP-0188: a standard user holds no gateway token, so its refused policy write
+// reaches the managed audit store through the hook socket, attributed to the
+// kernel-verified peer. Only the registered refusal actions are accepted.
+func TestManagedHookSocketRecordsAStandardUsersRefusal(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	handler := api.managedHookPeerAuth(newManagedHookAuthorizer(config.EnterpriseEnrollmentConfig{}, nil, nil), api.managedHookSocketMux())
+	send := func(body string) int {
+		request := httptest.NewRequest(http.MethodPost, managedRefusalAuditPath, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-DefenseClaw-Client", "python-cli")
+		request = request.WithContext(withManagedHookPeer(request.Context(), managedHookPeer{UID: 508, Name: "dcm-p0e2"}))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response.Code
+	}
+	if code := send(`{"action":"skill-block","target":"p0-test-skill","details":"type=skill"}`); code != http.StatusNoContent {
+		t.Fatalf("refusal report: status %d", code)
+	}
+	for _, body := range []string{
+		`{"action":"scan","target":"x"}`,
+		`{"action":"skill-block","target":""}`,
+		`{"action":"skill-block","target":"x","actor":"root"}`,
+		`{"action":"skill-block","target":"x","details":"type=skill outcome=applied"}`,
+	} {
+		if code := send(body); code != http.StatusBadRequest {
+			t.Errorf("%s: status %d, want 400", body, code)
+		}
+	}
+	// GAP-0206: user text can not add the keys the gateway writes, and one
+	// account can not flood the store.
+	if code := send(`{"action":"action","target":"p0-forged","details":"command=x actor=uid:0 user=root outcome=applied"}`); code != http.StatusNoContent {
+		t.Fatalf("command refusal: status %d", code)
+	}
+	limited := 0
+	for range managedRefusalBurst {
+		if send(`{"action":"tool-block","target":"p0-flood"}`) == http.StatusTooManyRequests {
+			limited++
+		}
+	}
+	if limited == 0 {
+		t.Error("one account posted more than the burst without a 429")
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	var details string
+	if err := database.QueryRow(`SELECT COUNT(*), COALESCE(MAX(details), "") FROM audit_events WHERE action = "skill-block" AND target = "p0-test-skill"`).Scan(&count, &details); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || !strings.Contains(details, "outcome=refused reason=managed_device actor=uid:508 user=dcm-p0e2") {
+		t.Fatalf("refusal rows=%d details=%q", count, details)
+	}
+	if err := database.QueryRow(`SELECT COALESCE(MAX(details), "") FROM audit_events WHERE target = "p0-forged"`).Scan(&details); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(details, "actor=") != 1 || strings.Contains(details, "outcome=applied") {
+		t.Fatalf("forged keys reached the row: %q", details)
+	}
+	if err := database.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE action = "scan"`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("a rejected action must not be recorded: rows=%d err=%v", count, err)
 	}
 }

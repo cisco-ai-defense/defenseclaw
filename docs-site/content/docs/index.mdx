@@ -42,7 +42,9 @@ CRITICAL findings always block, with or without HITL.
 DefenseClaw has three parts: the `defenseclaw` CLI, which sets everything up and
 shows you what happened; the `defenseclaw-gateway` sidecar, which makes every
 decision and records it; and a connector for each agent, the hooks or plugin
-that send the agent's prompts and tool calls to the gateway.
+that send the agent's prompts and tool calls to the gateway. Every decision
+you make lives in one file, `~/.defenseclaw/config.yaml`
+([how that works](/docs/reference/source-of-truth)).
 [What is DefenseClaw?](/docs/get-started/what-is-defenseclaw) shows the
 architecture and explains what DefenseClaw doesn't protect against.
 

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -28,10 +29,14 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 const rulePackWireVersion = 1
+
+const rulePackLongIntro = `Inspect a guardrail rule pack without starting the gateway or reading its
+config. Administrators validate a custom pack with this command before`
 
 var safeRulePackWireCode = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
@@ -71,9 +76,13 @@ type rulePackWireResponse struct {
 var rulePackCmd = &cobra.Command{
 	Use:   "rulepack",
 	Short: "Inspect a guardrail rule pack without starting the gateway",
-	Long: `Inspect a guardrail rule pack without starting the gateway or reading its
-config. Administrators validate a custom pack with this command before
-pointing guardrail.rule_pack_dir at it.`,
+	Long: rulePackLongIntro + `
+registering it as guardrail.custom_packs.<name> (its path and the digest this
+command prints) and selecting it with guardrail.rule_pack.`,
+	// A Secure Client config stays on config_version 8, where rule_pack_dir
+	// names the pack, so it keeps the help of main (issue #1092, GAP-0270).
+	Annotations: map[string]string{secureClientLongAnnotation: rulePackLongIntro + `
+pointing guardrail.rule_pack_dir at it.`},
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil
 	},
@@ -178,6 +187,9 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 	if !rulePackValidateJSON {
 		var customerIDs, shippedIDs []string
 		for _, ruleFile := range rp.RuleFiles {
+			if ruleFile == nil {
+				continue
+			}
 			for _, rule := range ruleFile.Rules {
 				if rule.Enabled != nil && !*rule.Enabled || !rule.ToolCallOnly || rule.Expression != "" {
 					continue
@@ -192,7 +204,7 @@ func runRulePackValidate(cmd *cobra.Command, _ []string) error {
 		}
 		sort.Strings(customerIDs)
 		for _, id := range customerIDs {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: customer rule %s uses tool_call_only without an expression; it uses regex fallback\n", id)
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: customer rule %s uses tool_call_only without an expression; its tool-call pattern matches use the regex fallback, which is detection-only and cannot block\n", id)
 		}
 		if len(customerIDs) > 0 && len(shippedIDs) > 0 {
 			sort.Strings(shippedIDs)
@@ -209,12 +221,18 @@ func writeRulePackValidation(w io.Writer, response rulePackWireResponse, asJSON 
 		return encoder.Encode(response)
 	}
 	if response.Valid && response.Summary != nil {
+		if rulePackSecureClient() {
+			_, err := fmt.Fprintf(w, "valid rule pack: %d files, %d rules, digest %s\n",
+				response.Summary.RuleFileCount, response.Summary.RuleCount, response.Summary.Digest)
+			return err
+		}
 		_, err := fmt.Fprintf(
 			w,
-			"valid rule pack: %d files, %d rules, digest %s\n",
+			"valid rule pack: %d files, %d rules, digest %s\ncustom_packs pin: sha256:%s\n",
 			response.Summary.RuleFileCount,
 			response.Summary.RuleCount,
 			response.Summary.Digest,
+			response.Summary.FilesDigest,
 		)
 		return err
 	}
@@ -272,4 +290,11 @@ func safeRulePackWireText(value string, limit int, fallback string) string {
 		}
 	}
 	return value
+}
+
+// rulePackSecureClient checks the config source without starting the gateway.
+// An unreadable config keeps the ordinary standalone validation output.
+func rulePackSecureClient() bool {
+	raw, err := os.ReadFile(config.ConfigPath())
+	return err == nil && config.SecureClientSource(raw)
 }

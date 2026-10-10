@@ -283,3 +283,58 @@ func TestRollbackRelinksAcrossFilesystems(t *testing.T) {
 		}
 	}
 }
+
+// The CI upgrade gate's rollback drill: a root-owned, owner-only test fault
+// file fails an upgrade after its services start and the previous release
+// comes back. The same file owned by another account is ignored.
+func TestLifecycleTestFaultRollsBackOnlyWhenRootOwned(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	fault := filepath.Join(h.env.Layout.LifecycleDir, testFaultFileName)
+	writeHostFile(t, h, fault, testFaultAfterServices+"\n")
+	if err := os.Chmod(h.env.P(fault), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h.owners[h.env.P(fault)] = [2]int{1000, 1000}
+	r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("2.0.0")})
+	requireOK(t, r)
+	if !strings.Contains(messagesOf(r.Warnings, codeLifecycleTestFault), "not owned by root") {
+		t.Fatalf("a test fault file another account owns must be ignored with a warning: %+v", r.Warnings)
+	}
+
+	h.owners[h.env.P(fault)] = [2]int{0, 0}
+	r = h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("3.0.0")})
+	requireError(t, r, codeLifecycleTestFault)
+	if !hasWarning(r, codeLifecycleTestFault) || !hasWarning(r, codeRolledBack) {
+		t.Fatalf("expected the test fault warning and a rollback: %+v %+v", r.Errors, r.Warnings)
+	}
+	if got := h.read(filepath.Join(h.env.Layout.BinDir, binGateway)); got != "defenseclaw-gateway 2.0.0\n" {
+		t.Fatalf("the previous gateway was not restored: %q", got)
+	}
+}
+
+// GAP-0552: a pack copied with cp -a keeps a standard user's file owner;
+// that user could switch the pack's posture or break its digest for every
+// user. Every folder and file of the pack must be root's and not writable by
+// group or others.
+func TestRulePackTreeTrustRefusesAForeignOwnedOrWritableFile(t *testing.T) {
+	pack := t.TempDir()
+	manifest := filepath.Join(pack, "defenseclaw-pack.json")
+	if err := os.WriteFile(manifest, []byte(`{"posture":"strict"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	me := uint32(os.Getuid())
+	if err := rulePackTreeTrust(pack, func(uid uint32) bool { return uid == me }); err != nil {
+		t.Fatalf("a trusted pack was refused: %v", err)
+	}
+	if err := rulePackTreeTrust(pack, func(uid uint32) bool { return uid != me }); err == nil || !strings.Contains(err.Error(), " is owned by uid") {
+		t.Fatalf("a foreign-owned file was accepted: %v", err)
+	}
+	if err := os.Chmod(manifest, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := rulePackTreeTrust(pack, func(uid uint32) bool { return uid == me }); err == nil || !strings.Contains(err.Error(), "group/other writable") {
+		t.Fatalf("a writable file was accepted: %v", err)
+	}
+}

@@ -1,6 +1,6 @@
 ---
 title: Terminal UI (TUI)
-description: The DefenseClaw terminal UI — a keyboard-driven dashboard over the defenseclaw CLI. How to open it, a tour of the panels, the Policies panel for policies and rule packs, Setup, and the Sandboxes panel for OpenShell sandboxes.
+description: The DefenseClaw terminal UI — a keyboard-driven dashboard over the defenseclaw CLI. How to open it, a tour of the panels, the policy generation and digest it shows, block and allow actions, the Policies panel, Setup and the config editor, and the Sandboxes panel for OpenShell sandboxes.
 keywords:
   - DefenseClaw TUI
   - defenseclaw tui
@@ -11,6 +11,8 @@ keywords:
   - policy picker
   - rule pack
   - OpenShell sandbox wizard
+  - policy generation
+  - config editor
 ---
 
 The DefenseClaw **TUI** is a full-screen, keyboard-driven dashboard over the
@@ -34,18 +36,18 @@ have data to show.
 
 ## Panels
 
+On Overview, press `G` to start or restart the gateway and `z` to enable or run
+AI Discovery. The key row shows both actions at 80 columns.
+
 Switch panels with the number/letter key shown, from any panel (only an open
 Setup form or a `/` search box types digits and letters), or cycle with `Tab` /
-`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. On a narrow
-terminal every tab stays on screen: Overview, Alerts and Policies keep their
-names first, then as many other tabs as fit get a short name (`Inv`, `Log`),
-and the rest show only their key. Which tabs keep a name depends only on the
-terminal width and the unread counts, so switching panels changes only the tab
-you leave and the tab you open. Unread counts stay ahead of names (`8⁶⁴`), and
-some room stays free for the longest panel name when you open it. Below 80
-columns the tab you are on gets as much of its name as fits (`R Regis…`), ahead
-of the other tabs' unread counts; the Alerts count stays. Below about 68
-columns every tab shows only its key, and the panel title names the panel.
+`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name. At 80 columns, the tab strip keeps every panel's key on screen and spells out
+the current panel (for example, `1 Overview`); other tabs may show only their
+keys. The title below the strip names the current panel. Wider terminals add
+short or full names to other tabs as room allows. Unread counts stay visible
+on Alerts and, when space allows, on Logs and Activity; switching panels can
+change which other tabs have names. Below 80 columns the current panel may
+shorten to an ellipsis, and the panel title remains the full name.
 
 With two or more connectors set up, `m` filters Overview, Alerts, Audit, Logs,
 Skills, MCPs, Plugins, Tools and Inventory by connector. With one connector,
@@ -55,12 +57,12 @@ to filter.
 
 | Key | Panel | What it shows |
 | --- | --- | --- |
-| `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, at-a-glance health |
+| `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied policy generation and digest](#policy-generation-and-digest), at-a-glance health |
 | `2` | Alerts | Recent guardrail and hook alerts |
-| `3` | Skills | Scanned skill inventory |
-| `4` | MCPs | Scanned MCP servers |
-| `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others) |
-| `T` | Tools | The tool block/allow list (capital `T`; lowercase `t` is a panel key). To add the first rule, press `:` and type `tool block <tool-name> --connector <connector>` (or `tool allow`) |
+| `3` | Skills | Scanned skill inventory, with [block and allow actions](#block-and-allow-from-the-panels) |
+| `4` | MCPs | Scanned MCP servers, with block and allow actions |
+| `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others), with block and allow actions |
+| `T` | Tools | The tool block/allow list, which is `asset_policy.tool` in `config.yaml` (capital `T`; lowercase `t` is a panel key). To add the first rule, press `:` and type `tool block <tool-name> --connector <connector>` (or `tool allow`) |
 | `6` | Inventory | Combined inventory view, with sub-tabs for skills, plugins, MCPs, agents (including agent identities), tools, models, memory and [IDE plugins](#ide-plugins) |
 | `7` | Sandboxes | OpenShell sandboxes, their live activity feed, and the rare asks ([below](#sandboxes-panel)) |
 | `8` | Logs | Live gateway logs with filter presets. The view opens on the newest line and follows new lines until you move the cursor |
@@ -122,6 +124,55 @@ without showing any values. See the
 [Doctor cache reference](/docs/reference/configuration#doctor-cache) for the
 file format.
 
+### Policy generation and digest
+
+The status line at the bottom of every panel ends with the policy the running
+gateway applies. With the guardrail off it reads:
+
+```text
+● guardrail off · gen 10 · 8b19ede82344
+```
+
+With the guardrail on, the first part is the active policy and mode, for
+example `policy strict · action · gen 10 · 8b19ede82344`. `gen` is the
+gateway's policy generation: it goes up each time the gateway applies a changed
+`config.yaml`, and it restarts at 1 when the gateway starts. The hex is the
+first 12 characters of the effective policy digest, a SHA-256 over the
+configuration and the policy assets it names. It is the same pair that
+`defenseclaw status` prints on its Policy line and that `defenseclaw-gateway
+policy digest` computes from disk, so you can compare the three.
+
+A save from the TUI, a CLI command or a hand edit of `config.yaml` moves the
+number once the gateway has applied it. When the gateway rejects a change it
+keeps enforcing the previous generation, so the pair stays where it was; run
+`defenseclaw doctor`, whose Policy row names the reason. The status line is cut
+from the right on a narrow terminal. See
+[Policy generation and digest](/docs/reference/cli#policy-generation-and-digest)
+for the command output.
+
+### Block and allow from the panels
+
+On Skills (`3`), MCPs (`4`), Plugins (`5`) and Tools (`T`), the highlighted row
+takes `b` to block, `a` to allow and `u` to unblock; `o` opens the full action
+menu (scan, info, disable, enable, quarantine, restore and so on). Each key
+shows the command first and then runs the CLI, for example `defenseclaw skill
+block NAME`, `defenseclaw mcp allow NAME` or `defenseclaw tool block NAME
+--connector codex`. With a connector filter on (`m`), the row's actions carry
+`--connector` so they write that connector's entry rather than a global one.
+
+- `block`, `allow` and `unblock` write `asset_policy.<type>.denied` or
+  `.allowed` in `config.yaml` (Tools: `asset_policy.tool`) through the config
+  writer. The gateway applies the change on its own, with no restart, and the
+  row's Status changes on the next refresh. The action menu offers the verbs
+  that fit the row: a blocked row offers `u`, and a row with no entry offers
+  `b` and `a`.
+- `disable`, `enable`, `quarantine` and `restore` are runtime actions kept in
+  the audit database, not in `config.yaml`.
+- On a managed standalone device the three policy verbs fail with the message
+  `This device is managed: add it to asset_policy in the admin config (MDM or
+  management plane)`, which the TUI shows in the status line and in Activity.
+  Nothing changes. See [Admission and asset policy](/docs/policies/admission).
+
 ## Handy keys
 
 | Key | Action |
@@ -176,22 +227,30 @@ On **Opt-in packs**, `s` changes the scope and `Space` (or `Enter`) turns the
 highlighted pack on or off with `defenseclaw guardrail protection
 enable|disable NAME [--connector NAME]`. Turning a pack on tells DefenseClaw
 that the scope works against that kind of protected resource (for example a
-production database), so the confirm step says so; the pack is merged into a
-pack of its own under `~/.defenseclaw/policies/guardrail/protected-<scope>/`,
-checked with the rule-pack validator, and only then switched to. A global
-change lists connectors that keep their own pack.
+production database), so the confirm step says so. The command adds the pack's
+name to the scope's `guardrail.rules.protections` in `config.yaml`; the gateway
+layers it onto the scope's rule pack in memory when it applies the change, so
+no pack folder is written. A global change applies to every connector.
 
 Every change shows what it does first. The confirm step turns red and asks
 twice when protection gets weaker (for example action → observe, a higher block
-level, approval off, or an opt-in pack off). Mode, level, pack and opt-in
-changes restart a running gateway so they take effect (hook decisions read the
-configuration the gateway started with); a stopped gateway is never started.
+level, approval off, or an opt-in pack off). Each change is written to
+`config.yaml` through the config writer, and the running gateway applies mode,
+level, pack and opt-in changes on its own; a stopped gateway is never started.
+The gateway restarts only for a change that has to reach the installed hooks,
+such as a mode change that flips a connector's hook fail mode, or human
+approval (`h`). The status line's generation goes up once the gateway has
+applied the change.
 
-In the **Policies** view, `b` and `a` edit the highlighted named policy's own
-block and alert thresholds, which apply to LLM traffic through the guardrail
-proxy (`defenseclaw policy edit guardrail …`, which reloads the gateway).
-Overview's **Policy posture** reads, for example, `strict · block MEDIUM+ ·
-alert LOW+`, and the status line shows `policy <name> · <mode>`.
+In the **Policies** view, `b` and `a` change the highlighted policy's block and
+alert thresholds. For the active policy that is the live global level
+(`guardrail.block_at` / `alert_at`, the same as `defenseclaw guardrail
+block-at`); for any other policy it saves the preset until you activate it
+(`defenseclaw policy edit guardrail … -p NAME`). Pressing `Enter` on a policy
+activates it, which copies its admission actions, levels and Cisco trust level
+into `config.yaml`. Overview's **Policy posture** reads, for example, `strict ·
+block MEDIUM+ · alert LOW+`, and the status line shows `policy <name> ·
+<mode>` followed by the [generation and digest](#policy-generation-and-digest).
 
 ## Setup panel
 
@@ -206,8 +265,9 @@ terminals it becomes a one-line switcher (`←`/`→`). Each task shows its real
 state, such as `✓ on · observe`, `! not set` or `○ not set up`, and the pane
 beside it says what the task does, what is set now, what needs attention (with
 the fix) and what it runs. The line above sums up readiness (for example `7 ok
-· 3 need attention`); press `i` for every check and its fix command. The hint
-line and `?` list only the keys of the view you are in.
+· 3 need attention`); press `i` for the highlighted task's details,
+including its checks and any fix command. The hint line and `?` list only
+the keys of the view you are in.
 
 In a task form, `Enter` on a text field (or just start typing, or paste) opens
 a text box: `Enter` saves the value, `Esc` cancels, and `Ctrl+T` shows a hidden
@@ -219,6 +279,8 @@ the previous one succeeds.
 A successful run's result card hides itself after 8 seconds (its footer says
 so) and leaves the result on the status line; `q` or **Dismiss** clears it
 sooner. A failed run's card stays until you dismiss it.
+
+### The config editor
 
 Press `c` for the **config editor** (or `→` past the last group). On wide terminals its sections are listed
 on the left, grouped (Core, Protection, …), with the highlighted field's value
@@ -236,7 +298,47 @@ and help beside the table:
 
 Keys the TUI can't save show as read-only rows; their hint says where to change
 them (in `config.yaml`, or with `defenseclaw setup <connector>` for connector
-hooks). Only problems in fields you changed block a save.
+hooks). Only problems in fields you changed block a save. If `config.yaml`
+changes on disk while you edit, the editor says `Configuration refreshed from disk.`: unsaved fields are
+preserved, save merges the fields you edited, and `r` reloads the file.
+
+#### Saving goes through the config writer
+
+`S` opens **Review Config Changes**, which lists each changed key with its value
+before and after. Confirming writes `config.yaml` through the same config
+writer as `defenseclaw config set`: one file lock shared with the CLI and the
+gateway, the whole result checked before it is written, and a new entry in
+`config.generation.json` whose actor is `tui:<user>`. A value that fails the
+check is not written, and the editor shows `Config save failed: <reason>`.
+The dialog's button reads **Save**, and **Save and queue restart** only when a
+key you changed needs a restart; the restart banner appears for the same keys.
+
+What happens next depends on the keys you changed. The editor asks the writer
+which of them a running gateway can only apply after a restart (the
+[restart-required keys](/docs/reference/cli#restart-required-keys), such as a
+port, `guardrail.enabled` or a hook fail mode):
+
+| After you save | What the TUI shows | What to do |
+| --- | --- | --- |
+| Only keys the gateway applies on its own | `Config changes saved; the gateway applies them without a restart.` and, above the table, `Saved 18:21 UTC`. | Nothing. The status line's generation goes up when the gateway has applied it. |
+| A restart-required key | `Config changes saved. Restart the gateway (G) to apply them.`, an amber `Saved 18:22 UTC · Restart the gateway (G) to apply it` banner, and `G restart gateway` in the hint line. | Press `G`. It runs `defenseclaw-gateway restart`, and the banner clears once the gateway has restarted. Until then the gateway keeps the old value of that key and applies the rest. |
+| The gateway is not running | `Config changes saved; they apply when the gateway starts.` | Start it. |
+
+#### On a managed device
+
+On a managed standalone device the administrator owns `config.yaml`, so the
+editor cannot write it. The editor still opens and shows the values, but
+confirming a save is refused and nothing changes:
+
+```text
+Config save failed: This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device
+```
+
+The OpenShell Sandboxes section is read-only before you try (see
+[below](#sandbox-settings-in-the-config-editor)). The actions of the other
+panels run the CLI and are refused the same way; see
+[Managed devices](/docs/reference/cli#managed-devices-and-exit-code-3). Read-only
+views, such as the Policies posture, Alerts and Audit, keep working.
 
 ## Sandboxes panel
 

@@ -79,6 +79,88 @@ def _pin_claude_home(monkeypatch, home: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_claude_unset_only_changes_active_profile_and_rolls_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dc"))
+    active = tmp_path / "other-profile"
+    active.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(active))
+    default = tmp_path / ".claude.json"
+    state = active / ".claude.json"
+    legacy = active / "settings.json"
+    entry = {"mcpServers": {"demo": {"command": "inert-demo"}}}
+    original = json.dumps(entry).encode()
+    for target in (default, state, legacy):
+        target.write_bytes(original)
+
+    unset_mcp_server("claudecode", "demo")
+    assert default.read_bytes() == original
+    assert "demo" not in json.loads(state.read_bytes()).get("mcpServers", {})
+    assert "demo" not in json.loads(legacy.read_bytes()).get("mcpServers", {})
+
+    state.write_bytes(original)
+    legacy.write_bytes(original)
+    state.unlink()
+    try:
+        state.symlink_to(default)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    with pytest.raises(ValueError, match="symlink"):
+        unset_mcp_server("claudecode", "demo")
+    assert default.read_bytes() == original
+    assert legacy.read_bytes() == original
+
+    state.unlink()
+    state.write_bytes(original)
+
+    def failed_state_write(*_args):
+        # The state publish lands, then a later step fails: the rollback
+        # restores the file this command wrote.
+        with connector_paths._locked_claude_mcp_mutation(str(state)):
+            connector_paths._publish_claude_config_if_unchanged(str(state), original, b'{"mcpServers":{}}')
+        raise OSError("injected state write failure")
+
+    monkeypatch.setattr(connector_paths, "_unset_claudecode_mcp_server", failed_state_write)
+    with pytest.raises(OSError, match="injected"):
+        unset_mcp_server("claudecode", "demo")
+    assert state.read_bytes() == original
+    assert legacy.read_bytes() == original
+    assert default.read_bytes() == original
+
+
+def test_claude_unset_rollback_keeps_concurrent_profile_edits(tmp_path, monkeypatch):
+    # GAP-1378: a refused unset rolled the 0.8.x settings.json removal back
+    # over another writer's edits, and put the stale .claude.json back too.
+    _pin_claude_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dc"))
+    state = tmp_path / ".claude.json"
+    legacy = tmp_path / ".claude" / "settings.json"
+    legacy.parent.mkdir()
+    set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
+    legacy.write_text(json.dumps({"hooks": {}, "mcpServers": {"demo": {"command": "inert-old"}}}), encoding="utf-8")
+    changed = {"command": "inert-changed"}
+    real_remove = connector_paths._remove_claude_legacy_mcp_server
+
+    def remove_during_claude_edits(name):
+        removed = real_remove(name)
+        legacy.write_text(json.dumps({"hooks": {}, "mcpServers": {"demo": changed}}), encoding="utf-8")
+        live = json.loads(state.read_text(encoding="utf-8"))
+        live["mcpServers"].update(demo=changed, added={"command": "inert-added"})
+        state.write_text(json.dumps(live), encoding="utf-8")
+        return removed
+
+    monkeypatch.setattr(connector_paths, "_remove_claude_legacy_mcp_server", remove_during_claude_edits)
+    with pytest.raises(connector_paths.MCPServerNotRemovedError) as refused:
+        unset_mcp_server("claudecode", "demo")
+    assert json.loads(state.read_text(encoding="utf-8"))["mcpServers"] == {
+        "demo": changed,
+        "added": {"command": "inert-added"},
+    }
+    assert json.loads(legacy.read_text(encoding="utf-8"))["mcpServers"] == {"demo": changed}
+    assert str(legacy) in str(refused.value)
+
+
 class TestOpenClawDelegation:
     def test_set_calls_setter_with_dotted_path_and_json(self):
         calls: list[tuple[str, str]] = []
@@ -2565,29 +2647,24 @@ class TestHermesWrites:
             "- web\r\n"
             "# mcp_servers:\r\n"
             "#   example: {}\r\n"
-            "mcp:\r\n"
-            "  servers:\r\n"
-            "    old: {command: legacy-mcp}\r\n"
-        ).encode("utf-8")
+        ).encode()
         config.write_bytes(original)
 
         set_mcp_server("hermes", "deepwiki", {"url": "https://mcp.example.invalid/mcp"})
         set_mcp_server("hermes", "other", {"command": "inert-other"})
         text = config.read_bytes().decode("utf-8")
-        assert text.startswith(original.decode("utf-8").split("mcp:\r\n")[0])
+        assert text.startswith(original.decode("utf-8"))
         assert "\n" not in text.replace("\r\n", "")
         data = yaml.safe_load(text)
         assert data["mcp_servers"] == {
             "deepwiki": {"url": "https://mcp.example.invalid/mcp"},
             "other": {"command": "inert-other"},
         }
-        assert sorted(e.name for e in connector_paths.mcp_servers("hermes")) == ["deepwiki", "old", "other"]
+        assert sorted(e.name for e in connector_paths.mcp_servers("hermes")) == ["deepwiki", "other"]
 
-        # Unset also removes the copy older builds wrote under mcp.servers.
-        unset_mcp_server("hermes", "old")
         unset_mcp_server("hermes", "deepwiki")
         unset_mcp_server("hermes", "other")
-        assert config.read_bytes() == original.split(b"mcp:\r\n")[0]
+        assert config.read_bytes() == original
 
     def test_unparseable_layout_is_refused_untouched(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

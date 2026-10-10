@@ -21,12 +21,21 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from defenseclaw.commands.cmd_doctor import _check_hook_runtime_integrity, _DoctorResult
-from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, unrunnable_hook_problem
+from defenseclaw.hook_integrity import (
+    edited_hook_problems,
+    edited_hook_script,
+    hook_registration_problems,
+    hook_runtime_problems,
+    repair_command,
+    unrunnable_hook_problem,
+)
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix hook scripts only")
 
@@ -74,7 +83,24 @@ def test_edited_script_and_missing_token_fail_doctor(tmp_path, monkeypatch):
     _check_hook_runtime_integrity(cfg, "codex", r)
     row = next(row for row in r.checks if row.get("label") == "Hook runtime files")
     assert row["status"] == "fail"
-    assert "defenseclaw setup codex" in row["detail"]
+    assert "doctor --fix" in row["detail"] and "setup codex" not in row["detail"]
+
+    # GAP-0098: --fix restarts the gateway, which renders the script again.
+    from defenseclaw.commands import cmd_doctor
+
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: ["codex"])
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener_for_lifecycle", lambda _cfg: SimpleNamespace(trusted=True, detail="")
+    )
+
+    def restart(_cfg, *, start_if_stopped):
+        script.write_text("".join(text))
+        return True, ""
+
+    monkeypatch.setattr(cmd_doctor, "_repair_gateway_lifecycle", restart)
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+    assert cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True)[0] == "pass"
+    assert not any("changed since setup" in p for p in hook_runtime_problems(cfg, "codex"))
 
 
 def test_non_executable_script_fails_doctor_and_fix_restores_it(tmp_path, monkeypatch):
@@ -110,8 +136,9 @@ def test_mode_repair_does_not_execute_unreadable_tampered_script(tmp_path, monke
     monkeypatch.setattr(
         hook_integrity.os,
         "access",
-        lambda path, mode: False if str(path) == str(script) and not script.stat().st_mode & 0o400
-        else original_access(path, mode),
+        lambda path, mode: (
+            False if str(path) == str(script) and not script.stat().st_mode & 0o400 else original_access(path, mode)
+        ),
     )
 
     try:
@@ -176,6 +203,47 @@ def test_removed_hook_registration_is_reported(tmp_path):
     assert hook_registration_problems(cfg, "codex") == []
 
 
+def test_unquoted_hook_path_with_a_space_fails_doctor(tmp_path):
+    # GAP-0382: the shell runs the first half of an unquoted path with a space.
+    data_dir = tmp_path / "dc ip8" / ".defenseclaw"
+    (data_dir / "hooks").mkdir(parents=True)
+    script = str(data_dir / "hooks" / "claude-code-hook.sh")
+    settings = tmp_path / "settings.json"
+    lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock))
+    cfg = SimpleNamespace(data_dir=str(data_dir))
+
+    def register(command):
+        settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": command}]}]}}))
+
+    register(shlex.quote(script))
+    assert hook_registration_problems(cfg, "claudecode") == []
+    register(script)
+    problems = hook_registration_problems(cfg, "claudecode")
+    assert problems and "cannot run" in problems[0]
+    r = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "claudecode", r)
+    row = next(row for row in r.checks if row.get("label") == "Hook command")
+    assert row["status"] == "fail"
+
+
+def test_missing_windows_hook_launcher_names_the_installer(tmp_path, monkeypatch):
+    # GAP-0378: the native launcher is gone; only the installer restores it.
+    from defenseclaw import hook_integrity
+
+    settings = tmp_path / "settings.json"
+    launcher = "C:\\Users\\dcw-dr1\\.local\\bin\\defenseclaw-hook.exe"
+    hook = {"type": "command", "command": launcher, "args": ["hook", "--connector", "claudecode"]}
+    settings.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [hook]}]}}))
+    lock = {"version": 2, "connectors": {"claudecode": {"locations": {"hook_config_paths": [str(settings)]}}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+
+    problems = hook_registration_problems(SimpleNamespace(data_dir=str(tmp_path)), "claudecode")
+    assert problems and launcher in problems[0]
+    assert "installer" in hook_integrity.repair_command("claudecode", problems[0])
+
+
 def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
     # GAP-1316: an older build's script still holds the freshness sentinels,
     # but it does not match the digest setup sealed.
@@ -189,7 +257,36 @@ def test_older_build_render_is_not_reported_fresh(tmp_path, monkeypatch):
     with mock.patch.object(cmd_doctor, "_stale_generated_hook_reasons", return_value=[]):
         cmd_doctor._check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
     row = r.checks[-1]
-    assert row["status"] == "warn" and "defenseclaw-gateway restart" in row["remediation"]
+    assert row["status"] == "warn" and "defenseclaw doctor --fix" in row["remediation"]
+
+
+def test_fix_drops_a_stale_openclaw_lock_entry(tmp_path, monkeypatch):
+    # GAP-0225: after an OpenClaw upgrade or downgrade the lock still named the
+    # old version, the gateway refused to start and doctor --fix had no repair.
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.inventory import agent_discovery
+
+    lock_path = tmp_path / "hook_contract_lock.json"
+    entries = {
+        "openclaw": {"raw_agent_version": "OpenClaw 2026.9.8 (fc23bc8)"},
+        "codex": {"raw_agent_version": "0.142.4"},
+    }
+    lock_path.write_text(json.dumps({"version": 2, "connectors": entries}))
+    installed = SimpleNamespace(agents={"openclaw": SimpleNamespace(version="OpenClaw 2026.6.8 (844f405)")})
+    monkeypatch.setattr(agent_discovery, "_read_cache", lambda data_dir: installed)
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener_for_lifecycle", lambda _cfg: SimpleNamespace(trusted=True, detail="")
+    )
+    restarts = []
+    monkeypatch.setattr(
+        cmd_doctor, "_repair_gateway_lifecycle", lambda _cfg, *, start_if_stopped: (restarts.append(1) or True, "")
+    )
+    cfg = SimpleNamespace(data_dir=str(tmp_path))
+
+    assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True, plan_only=True)[0] == "plan"
+    assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True)[0] == "pass"
+    assert set(json.loads(lock_path.read_text())["connectors"]) == {"codex"} and restarts == [1]
+    assert cmd_doctor._fix_stale_proxy_contract_lock(cfg, assume_yes=True)[0] == "skip"
 
 
 def test_install_moved_with_the_home_names_the_old_folder(tmp_path, monkeypatch):
@@ -224,3 +321,165 @@ def test_unreadable_script_is_reported_as_unguarded_not_edited(tmp_path, monkeyp
         script.chmod(0o700)
     assert "cannot be read" in problem
     assert "changed since setup" not in " ".join(problems)
+
+
+def test_missing_hook_script_is_named_as_missing_with_one_repair(tmp_path):
+    from defenseclaw.commands.cmd_doctor import _repair_display_tag
+
+    cfg, script = _install(tmp_path)
+    script.unlink()
+    problems = hook_runtime_problems(cfg, "codex")
+    assert len(problems) == 1 and "is missing" in problems[0]
+    assert "changed since setup" not in problems[0]
+
+    result = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, "codex", result)
+    row = next(row for row in result.checks if row.get("label") == "Hook runtime files")
+    assert row["detail"].count("doctor --fix") == 1
+    assert _repair_display_tag("blocked") == "skip"
+
+
+def _agent_config(tmp_path, connector, name):
+    config = tmp_path / name
+    lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": [str(config)]}}}}
+    (tmp_path / "hook_contract_lock.json").write_text(json.dumps(lock))
+    return SimpleNamespace(data_dir=str(tmp_path)), config
+
+
+def test_claude_disable_all_hooks_is_degraded_with_its_own_repair(tmp_path, monkeypatch):
+    # GAP-1066/GAP-1067: the hooks stay registered but Claude Code runs none of them.
+    monkeypatch.chdir(tmp_path)
+    cfg, settings = _agent_config(tmp_path, "claudecode", "settings.json")
+    hooks = {"PreToolUse": [{"hooks": [{"type": "command", "command": "/x/.defenseclaw/hooks/claude-code-hook.sh"}]}]}
+    settings.write_text(json.dumps({"hooks": hooks}))
+    assert hook_registration_problems(cfg, "claudecode") == []
+
+    project = tmp_path / ".claude"
+    project.mkdir()
+    (project / "settings.local.json").write_text(json.dumps({"disableAllHooks": True}))
+    problems = hook_registration_problems(cfg, "claudecode")
+    assert problems and "disableAllHooks" in problems[0] and "settings.local.json" in problems[0]
+    assert unrunnable_hook_problem(cfg, "claudecode") == problems[0]
+    assert repair_command("claudecode", problems[0]).startswith("remove disableAllHooks from")
+
+
+def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
+    # GAP-1094: [features] hooks = false; GAP-1102: entries without a command.
+    from defenseclaw.commands.cmd_doctor import _check_codex_hooks
+
+    cfg, config = _agent_config(tmp_path, "codex", "config.toml")
+    (tmp_path / "hooks").mkdir()
+    (tmp_path / "hooks" / "codex-hook.sh").write_text("#!/bin/bash\n")
+    command = "/home/u/.defenseclaw/hooks/codex-hook.sh --event PreToolUse"
+    entry = "[[hooks.PreToolUse]]\nmatcher = '*'\n[[hooks.PreToolUse.hooks]]\ntype = 'command'\ntimeout = 30\n"
+    config.write_text("[features]\nhooks = false\n" + entry + f"command = '{command}'\n")
+
+    r = _DoctorResult()
+    _check_codex_hooks(cfg, r, platform_name="posix", config_path=str(config))
+    row = next(check for check in r.checks if check["label"] == "Codex hooks")
+    assert row["status"] == "fail" and "turned off" in row["detail"]
+    assert "codex features enable hooks" in row["remediation"]
+
+    config.write_text(entry + entry + f"command = '{command}'\n")
+    problems = hook_registration_problems(cfg, "codex")
+    assert problems and "without a command" in problems[0] and "refuses to start" in problems[0]
+
+
+_EDITED_GOLDEN = (
+    Path(__file__).resolve().parents[2]
+    / "internal"
+    / "gateway"
+    / "connector"
+    / "testdata"
+    / "hook_edited_commands.json"
+)
+
+
+def test_edited_hook_shape_matches_the_go_recogniser():
+    # The Go repair and this doctor check read one golden, so they cannot drift.
+    for case in json.loads(_EDITED_GOLDEN.read_text(encoding="utf-8")):
+        assert bool(edited_hook_script(case["command"], case["script"])) is case["edited"], case
+
+
+_EDITED_ENTRIES_GOLDEN = _EDITED_GOLDEN.with_name("hook_edited_entries.json")
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads(_EDITED_ENTRIES_GOLDEN.read_text(encoding="utf-8")),
+    ids=lambda case: case["name"],
+)
+def test_edited_hook_entries_match_the_go_hook_guard(tmp_path, case):
+    # GAP-0906: the doctor reports what the hook guard repairs, one edited
+    # entry among intact ones included (internal/gateway/connector reads the same golden).
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    config = tmp_path / case["file"]
+    config.write_text(case["document"].replace("{data_dir}", str(data_dir)), encoding="utf-8")
+    connectors = {case["connector"]: {"locations": {"hook_config_paths": [str(config)]}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps({"version": 2, "connectors": connectors}))
+    problems = edited_hook_problems(SimpleNamespace(data_dir=str(data_dir)), case["connector"])
+    assert bool(problems) is case["edited"], problems
+
+
+@pytest.mark.parametrize("connector", ["copilot", "hermes", "claudecode"])
+@pytest.mark.parametrize(
+    "edit",
+    [
+        ("/.defenseclaw/hooks/{s}", "/.defenseclaw/hooks/{stem}X.sh"),
+        ("/.defenseclaw/hooks/{s}", "/.defenseclaw/xhooks/{s}"),
+        ("/.defenseclaw/hooks/{s}", "/.defenseclawX/hooks/{s}"),
+    ],
+    ids=["script", "dir", "marker"],
+)
+def test_edited_hook_entry_fails_doctor_and_fix_reruns_setup(tmp_path, monkeypatch, connector, edit):
+    # GAP-0906 / GAP-0907: an edited entry next to a good set used to pass.
+    from defenseclaw.commands import cmd_doctor
+
+    script = {"copilot": "copilot-hook.sh", "hermes": "hermes-hook.sh", "claudecode": "claude-code-hook.sh"}[connector]
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    current = str(data_dir / "hooks" / script)
+    config = tmp_path / ("config.yaml" if connector == "hermes" else "hooks.json")
+    lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": [str(config)]}}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock))
+    cfg = SimpleNamespace(data_dir=str(data_dir))
+
+    def register(*paths):
+        if connector == "hermes":
+            entries = "".join(f"  - command: \"'{path}'\"\n" for path in paths)
+            config.write_text("hooks:\n  pre_tool_call:\n" + entries)
+        elif connector == "copilot":
+            entries = [{"type": "command", "bash": f"'{path}' --event 'preToolUse'"} for path in paths]
+            config.write_text(json.dumps({"version": 1, "hooks": {"preToolUse": entries}}))
+        else:
+            config.write_text(json.dumps({"hooks": {"PreToolUse": [{"hooks": [{"command": p} for p in paths]}]}}))
+
+    register(current)
+    assert hook_registration_problems(cfg, connector) == []
+    old, new = (part.format(s=script, stem=script[:-3]) for part in edit)
+    edited = current.replace(old, new)
+    register(current, edited)
+
+    problems = hook_registration_problems(cfg, connector)
+    assert problems and problems[0].startswith(f"hook command edited: {connector}") and edited in problems[0]
+    r = _DoctorResult(passive=True, quiet=True)
+    _check_hook_runtime_integrity(cfg, connector, r)
+    row = next(row for row in r.checks if row.get("label") == "Hook command")
+    assert row["status"] == "fail"
+
+    monkeypatch.setattr(cmd_doctor, "_doctor_active_connectors", lambda _cfg: [connector])
+    monkeypatch.setattr(
+        cmd_doctor, "_trusted_gateway_listener_for_lifecycle", lambda _cfg: SimpleNamespace(trusted=True, detail="")
+    )
+    restarts = []
+
+    def restart(_cfg, *, start_if_stopped):
+        restarts.append(start_if_stopped)
+        register(current)  # the restarted gateway's setup replaces the edited entry
+        return True, "restarted"
+
+    monkeypatch.setattr(cmd_doctor, "_repair_gateway_lifecycle", restart)
+    state, _detail = cmd_doctor._fix_hook_script_drift(cfg, assume_yes=True)
+    assert (state, restarts) == ("pass", [False])
+    assert hook_registration_problems(cfg, connector) == []

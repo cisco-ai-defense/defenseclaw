@@ -1,6 +1,6 @@
 {
   "$schema_version": "1",
-  "$description": "DefenseClaw environment-variable registry. Single source of truth for every DEFENSECLAW_* env var consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog.",
+  "$description": "DefenseClaw environment-variable registry. Single source of truth for every DEFENSECLAW_* env var consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
   "$categories": {
     "security_opt_out": "Toggles that weaken security defaults. Surfaced by 'defenseclaw doctor' whenever active.",
     "debug": "Verbose-logging toggles. Safe but noisy.",
@@ -24,6 +24,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/scan_v7.go",
@@ -46,6 +47,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/scan_v7.go",
@@ -64,6 +66,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "extensions/defenseclaw/src/index.ts",
@@ -83,6 +86,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/netguard/netguard.go",
@@ -111,6 +115,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/sidecar.go",
@@ -139,6 +144,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/scanner/mcp.go",
@@ -159,6 +165,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/netguard/allowlist.go",
@@ -182,6 +189,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_doctor.py",
@@ -201,6 +209,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/transaction.go",
@@ -225,6 +234,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/inspect-tool.sh",
@@ -244,6 +254,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "scripts/install.sh",
@@ -263,6 +274,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw/service_windows_test.go",
@@ -282,6 +294,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/audit/audit_db_lock_unix_test.go",
@@ -301,6 +314,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/tests/test_windows_installer_artifacts.py",
@@ -320,6 +334,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -339,6 +354,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/scanner/plugin_test.go",
@@ -362,6 +378,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw/service_windows_test.go",
@@ -381,6 +398,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "packaging/scripts/lib/repro-flags.sh",
@@ -408,6 +426,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "packaging/scripts/lib/assert-cisco-signature.sh",
@@ -430,6 +449,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_skill.py",
@@ -448,6 +468,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_skill.py",
@@ -467,6 +488,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows.go",
@@ -486,6 +508,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/platform_windows.go",
@@ -505,6 +528,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/platform_windows.go",
@@ -524,6 +548,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/platform_windows.go",
@@ -543,6 +568,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/platform_windows.go",
@@ -562,6 +588,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/platform_windows.go",
@@ -580,6 +607,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "extensions/defenseclaw/src/policy/enforcer.ts",
@@ -599,6 +627,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/managed/cmidbroker/broker.go",
@@ -620,6 +649,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/managed/cmidbroker/broker.go",
@@ -641,6 +671,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/managed/cmidbroker/broker.go",
@@ -661,6 +692,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex.go",
@@ -681,6 +713,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex_policy_windows_test.go",
@@ -700,6 +733,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex_policy_windows_test.go",
@@ -719,6 +753,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex_policy_test.go",
@@ -738,6 +773,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex_policy_test.go",
@@ -757,6 +793,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex_policy_windows_test.go",
@@ -776,6 +813,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex_policy_windows_test.go",
@@ -795,6 +833,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex_policy_windows_test.go",
@@ -814,6 +853,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codex_policy_windows_test.go",
@@ -833,6 +873,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/config/defaults.go",
@@ -861,6 +902,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -884,6 +926,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/transaction.go",
@@ -900,7 +943,7 @@
     {
       "name": "DEFENSECLAW_CUSTOM_PROVIDERS_PATH",
       "category": "runtime_path",
-      "purpose": "Path to a custom providers YAML file consulted before the embedded catalog.",
+      "purpose": "Path of the derived custom-providers.json overlay, for test and container installs; DefenseClaw writes that file from llm_providers in config.yaml, so change llm_providers, not the file. Defaults to custom-providers.json in the data directory.",
       "default": "unset",
       "accepted_values": [
         "any-absolute-path",
@@ -908,6 +951,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/configs/embed.go",
@@ -926,6 +970,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/daemon/daemon.go",
@@ -944,6 +989,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/daemon/daemon.go",
@@ -963,6 +1009,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/client.go",
@@ -986,6 +1033,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go",
@@ -1005,6 +1053,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go",
@@ -1024,6 +1073,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/deferred_uninstall_cleanup_windows_test.go",
@@ -1043,6 +1093,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/connector_deferred_verify_windows_test.go",
@@ -1062,6 +1113,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/hookruntime/delegation_windows_test.go",
@@ -1082,6 +1134,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/config/config.go",
@@ -1106,10 +1159,14 @@
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
           "description": "Windows SCM service env pin (both DefenseClawGateway + DefenseClawHookGuardian); already the source of the managed_enterprise value the spec 003 wait loops key off"
+        },
+        {
+          "location": "internal/cli/root.go",
+          "description": "Refuses the pin from .env files so only the service definition sets it"
         }
       ],
       "since": "0.8.0",
-      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases."
+      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases. Refused from .env files: only the service definition may set it."
     },
     {
       "name": "DEFENSECLAW_DEV",
@@ -1123,6 +1180,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/redaction/credentials.go",
@@ -1142,6 +1200,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/transaction.go",
@@ -1170,6 +1229,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/transaction.go",
@@ -1194,6 +1254,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts",
@@ -1214,6 +1275,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
@@ -1236,6 +1298,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "scripts/test-e2e-full-stack.sh",
@@ -1255,6 +1318,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "test/e2e/codex_policy_fixture_windows_test.go",
@@ -1277,6 +1341,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "test/e2e/openshell/hookonly_e2e_test.go",
@@ -1296,6 +1361,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/openshell/sandbox_env.go",
@@ -1319,6 +1385,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/openshell/sandbox_env.go",
@@ -1348,6 +1415,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/config/config.go",
@@ -1376,6 +1444,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/config/env_config.go",
@@ -1401,6 +1470,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "tighten_only",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/inspect-tool.sh",
@@ -1420,6 +1490,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codeguard_native_test.go",
@@ -1439,6 +1510,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/codeguard_native_test.go",
@@ -1458,6 +1530,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts",
@@ -1476,6 +1549,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hermes_foreign_guard.go",
@@ -1496,6 +1570,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/hook.go",
@@ -1519,6 +1594,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/gateway.py",
@@ -1538,6 +1614,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/codex_setup_fixture_windows_test.go",
@@ -1557,6 +1634,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/inspect-tool.sh",
@@ -1580,6 +1658,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/security_suite_test.go",
@@ -1598,6 +1677,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/hermes-hook.sh",
@@ -1617,6 +1697,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hermes_foreign_guard.go",
@@ -1636,6 +1717,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hermes_foreign_guard.go",
@@ -1655,6 +1737,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hermes_foreign_guard.go",
@@ -1674,6 +1757,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hermes_foreign_guard.go",
@@ -1693,6 +1777,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hermes_foreign_guard.go",
@@ -1712,6 +1797,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hermes_foreign_guard.go",
@@ -1731,6 +1817,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hermes_foreign_guard.go",
@@ -1750,6 +1837,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "bundles/splunk_local_bridge/env/.env.example",
@@ -1768,6 +1856,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "bundles/splunk_local_bridge/env/.env.example",
@@ -1786,6 +1875,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/config/defaults.go",
@@ -1821,6 +1911,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/openshell/timezone.go",
@@ -1848,6 +1939,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/inspect-tool.sh",
@@ -1866,6 +1958,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -1885,6 +1978,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/hookruntime/delegation_windows_test.go",
@@ -1904,6 +1998,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/hookruntime/delegation_windows_test.go",
@@ -1923,6 +2018,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/managed/managed.go",
@@ -1950,6 +2046,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -1968,6 +2065,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "tighten_only",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -1988,6 +2086,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/inspect-tool.sh",
@@ -2006,6 +2105,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -2024,6 +2124,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -2043,6 +2144,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hook_socket_transport.go",
@@ -2061,6 +2163,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hook_socket_transport.go",
@@ -2080,6 +2183,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/hook_api_token_test.go",
@@ -2099,6 +2203,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/hook_api_token_test.go",
@@ -2118,6 +2223,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/hook_api_token_test.go",
@@ -2137,6 +2243,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/hook_api_token_test.go",
@@ -2156,6 +2263,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/actionfacts/http_command_injection_test.go",
@@ -2175,6 +2283,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/actionfacts/http_command_injection_test.go",
@@ -2194,6 +2303,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/actionfacts/http_sql_injection_test.go",
@@ -2212,6 +2322,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "bundles/splunk_local_bridge/env/.env.example",
@@ -2231,6 +2342,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "scripts/install.sh",
@@ -2249,6 +2361,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "scripts/setup-llm.sh",
@@ -2268,6 +2381,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "scripts/install.sh",
@@ -2288,6 +2402,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw-launcher/main.go",
@@ -2308,6 +2423,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "bundles/splunk_local_bridge/env/.env.example",
@@ -2327,6 +2443,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/hookruntime/delegation_windows.go",
@@ -2347,6 +2464,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/main.go",
@@ -2371,6 +2489,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/main.go",
@@ -2395,6 +2514,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/ipc/paths.go",
@@ -2420,6 +2540,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
@@ -2442,6 +2563,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2461,6 +2583,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2480,6 +2603,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2501,6 +2625,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2520,6 +2645,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2539,6 +2665,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2558,6 +2685,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2577,6 +2705,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2596,6 +2725,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2615,6 +2745,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2634,6 +2765,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2653,6 +2785,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2672,6 +2805,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2691,6 +2825,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2710,6 +2845,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge_corpus_benchmark_test.go",
@@ -2719,28 +2855,9 @@
       "since": "0.8.12"
     },
     {
-      "name": "DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE",
-      "category": "telemetry",
-      "purpose": "Emergency boot-time override for the async judge-persistence queue depth. Controls how many judge bodies can buffer before drops are recorded (defenseclaw.judge.persist.drops, reason=queue_full). Normally set via guardrail.judge_persist_queue_depth in config.yaml.",
-      "default": "unset (config guardrail.judge_persist_queue_depth, default 1024)",
-      "accepted_values": [
-        "positive integer",
-        "unset"
-      ],
-      "security_impact": "none",
-      "surface_in_doctor": false,
-      "consumers": [
-        {
-          "location": "internal/gateway/sidecar.go",
-          "description": "Overrides cfg.Guardrail.JudgePersistQueueDepth at sidecar boot"
-        }
-      ],
-      "since": "0.7.0"
-    },
-    {
       "name": "DEFENSECLAW_JUDGE_TRACE",
       "category": "debug",
-      "purpose": "LLM judge logs every prompt + response. May contain agent traffic and secrets.",
+      "purpose": "Secure Client integration only: log every LLM judge prompt + response; on every other install use guardrail.judge.trace in config.yaml, which this variable does not affect. May contain agent traffic and secrets.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -2749,6 +2866,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/llm_judge.go",
@@ -2768,6 +2886,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-launcher/long_cwd_windows_test.go",
@@ -2787,6 +2906,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-launcher/long_cwd_windows_test.go",
@@ -2806,6 +2926,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/enterprisehooks/enumerator_unix_test.go",
@@ -2825,6 +2946,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/unixidentity/identity_test.go",
@@ -2844,6 +2966,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw/service_windows_test.go",
@@ -2864,6 +2987,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/enterpriseunix/env.go",
@@ -2885,6 +3009,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/llm.py",
@@ -2904,6 +3029,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/credentials.py",
@@ -2922,6 +3048,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/credentials.py",
@@ -2941,6 +3068,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/tests/test_config.py",
@@ -2959,6 +3087,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/credentials.py",
@@ -2978,6 +3107,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/daemon.go",
@@ -2997,6 +3127,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/local_splunk.py",
@@ -3020,6 +3151,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/daemon.go",
@@ -3039,6 +3171,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/long_path_windows_test.go",
@@ -3058,6 +3191,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3077,6 +3211,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3096,6 +3231,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -3115,6 +3251,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/proxy.go",
@@ -3134,6 +3271,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/tool_value_lineage_sql_test.go",
@@ -3153,6 +3291,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/openshell/wrapper/wrapper.go",
@@ -3172,7 +3311,7 @@
     {
       "name": "DEFENSECLAW_NO_UPDATE_CHECK",
       "category": "debug",
-      "purpose": "Turns off the once-a-day 'new release available' notice in the CLI and TUI.",
+      "purpose": "Turns off the once-a-day 'new release available' notice in the CLI and TUI; the config.yaml equivalent is update.check: false.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -3180,6 +3319,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/update_notice.py",
@@ -3199,6 +3339,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py",
@@ -3218,6 +3359,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "bundles/local_observability_stack/bin/openclaw-observability-bridge",
@@ -3237,6 +3379,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts",
@@ -3259,14 +3402,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Preserves the effective v7 OTel master-toggle decision during upgrade"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Binds the variable only inside the legacy configuration loader used before v8 activation"
         }
       ],
       "since": "0.4.0",
@@ -3285,14 +3425,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 endpoint into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the endpoint only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3311,14 +3448,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3341,14 +3475,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3367,14 +3498,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3397,14 +3525,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3427,14 +3552,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 protocol into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the protocol only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3457,14 +3579,11 @@
       "security_impact": "high",
       "security_note": "Enabling this variable disables OTLP server-certificate verification after legacy configuration is migrated into a named destination.",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 TLS policy into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the TLS decision only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3483,14 +3602,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3513,14 +3629,11 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3539,6 +3652,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_provider.py",
@@ -3558,6 +3672,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
@@ -3577,6 +3692,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
@@ -3587,8 +3703,8 @@
     },
     {
       "name": "DEFENSECLAW_PERSIST_JUDGE",
-      "category": "debug",
-      "purpose": "Persist every judge prompt + response to disk under data_dir. Disk grows fast; use only during analysis.",
+      "category": "upgrade_internal",
+      "purpose": "Read only by the 0.x observability migration, which folds it into config.yaml; nothing reads it at runtime.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -3596,14 +3712,17 @@
         "unset"
       ],
       "security_impact": "medium",
-      "surface_in_doctor": true,
+      "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
-          "location": "internal/gateway/sidecar.go",
-          "description": "Gateway boot enables judge persistence"
+          "location": "cli/defenseclaw/observability/v8_migration.py",
+          "description": "0.x migration reader"
         }
       ],
-      "since": "0.4.0"
+      "since": "0.4.0",
+      "deprecated": true,
+      "migration_only": true
     },
     {
       "name": "DEFENSECLAW_PLIST_SRC",
@@ -3616,6 +3735,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "packaging/macos/install.sh",
@@ -3635,6 +3755,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "extensions/defenseclaw/src/__tests__/agent_identity.test.ts",
@@ -3654,6 +3775,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_policy.py",
@@ -3673,6 +3795,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3692,6 +3815,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3711,6 +3835,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3730,6 +3855,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3749,6 +3875,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3768,6 +3895,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3787,6 +3915,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/processutil/command_windows_test.go",
@@ -3805,6 +3934,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "bundles/splunk_local_bridge/env/.env.example",
@@ -3824,6 +3954,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_registry.py",
@@ -3835,13 +3966,15 @@
     {
       "name": "DEFENSECLAW_REPO",
       "category": "upgrade_internal",
-      "purpose": "GitHub owner/name whose releases `defenseclaw upgrade` and the installers use (for testing on a fork).",
+      "purpose": "Deprecated alias of update.source in config.yaml: the GitHub owner/name (or https mirror base URL) whose releases `defenseclaw upgrade` and the installers use, for testing on a fork. It only changes where release bytes are fetched; signatures are always verified against the compiled release identity.",
       "default": "cisco-ai-defense/defenseclaw",
       "accepted_values": [
-        "owner/name"
+        "owner/name",
+        "https mirror base URL"
       ],
-      "security_impact": "none",
+      "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/upgrade_shim.py",
@@ -3869,6 +4002,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "benchmarks/internal/benchmark/manifest_external_test.go",
@@ -3889,6 +4023,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/redaction/redaction.go",
@@ -3908,6 +4043,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gatewaylog/runid.go",
@@ -3947,6 +4083,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "allow",
       "security_note": "Sandbox bypass: while set, sandbox run and the shell wrappers run the harness natively on the host, as DEFENSECLAW_NO_SANDBOX does, without a notice. DefenseClaw sets it only inside the sandboxes it launches and refuses it from .env files, so a value on the host was planted or leaked.",
       "replacement_hint": "Unset it outside a DefenseClaw sandbox.",
       "consumers": [
@@ -3980,6 +4117,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/openshell/sandbox_env.go",
@@ -4003,6 +4141,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/sandbox_artifacts_test.go",
@@ -4023,6 +4162,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/openshell/sandbox_env.go",
@@ -4057,6 +4197,174 @@
       "security_note": "Never log or persist the value. Sandbox hooks must read it from the environment at request time; a placeholder baked into static config does not resolve."
     },
     {
+      "name": "DEFENSECLAW_SCANNER_AID_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport of the Cisco AI Defense API key (cisco_ai_defense.api_key or api_key_env) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan), so the key never appears on its command line. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the AI Defense API key"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_AID_ENDPOINT",
+      "category": "hook_internal",
+      "purpose": "Cisco AI Defense endpoint (cisco_ai_defense.endpoint) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan); the runtime uses the default endpoint when it is unset. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (the default AI Defense endpoint)",
+      "accepted_values": [
+        "https URL",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the AI Defense endpoint"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport of the LLM judge API key (llm.api_key or api_key_env) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan), so the key never appears on its command line. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge API key"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_BASE_URL",
+      "category": "hook_internal",
+      "purpose": "LLM judge base URL (llm.base_url) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "URL",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge base URL"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_MODEL",
+      "category": "hook_internal",
+      "purpose": "LiteLLM model id of the LLM judge (llm.provider and llm.model) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "LiteLLM model id",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge model"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_PROVIDER",
+      "category": "hook_internal",
+      "purpose": "LLM judge provider (llm.provider) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "provider name",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge provider"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_REGION",
+      "category": "hook_internal",
+      "purpose": "LLM judge region (llm.region, or llm.bedrock.region when set) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan); the gateway also sets AWS_REGION to it. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "cloud region",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge region"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_SCRUB_BIN",
       "category": "runtime_path",
       "purpose": "Override the DefenseClaw gateway binary used by the macOS uninstaller for the per-user agent-config scrub step (`defenseclaw-gateway enterprise hooks scrub`). Discovery order without this env var: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to the uninstall.sh script. Bundle-fixture and dev-tree tests set this so they can drive uninstall.sh against a stub binary without needing the managed install tree present.",
@@ -4067,6 +4375,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "packaging/macos/uninstall.sh",
@@ -4087,6 +4396,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/sensor/acquire/paths.go",
@@ -4107,6 +4417,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-sensor-helper/version_test.go",
@@ -4126,6 +4437,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/main_test.go",
@@ -4145,6 +4457,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/setup_lock_windows_test.go",
@@ -4164,6 +4477,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go",
@@ -4183,6 +4497,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_observability.py",
@@ -4206,6 +4521,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup.py",
@@ -4229,6 +4545,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup.py",
@@ -4252,6 +4569,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup.py",
@@ -4275,6 +4593,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup.py",
@@ -4298,6 +4617,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_init.py",
@@ -4317,6 +4637,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_init.py",
@@ -4336,6 +4657,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go",
@@ -4359,6 +4681,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go",
@@ -4382,6 +4705,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/maintenance_gateway_windows_test.go",
@@ -4405,6 +4729,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/main_test.go",
@@ -4424,6 +4749,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/connector_test.go",
@@ -4444,6 +4770,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/sidecar.go",
@@ -4462,6 +4789,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/scan_v7.go",
@@ -4480,6 +4808,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "skills/codeguard/main.py",
@@ -4499,6 +4828,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
@@ -4518,6 +4848,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_registry.py",
@@ -4537,6 +4868,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/credentials.py",
@@ -4555,6 +4887,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "bundles/splunk_local_bridge/env/.env.example",
@@ -4573,6 +4906,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "bundles/splunk_local_bridge/env/.env.example",
@@ -4592,6 +4926,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw/service_windows_test.go",
@@ -4611,6 +4946,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup.py",
@@ -4630,6 +4966,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py",
@@ -4653,6 +4990,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "tighten_only",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -4672,6 +5010,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "benchmarks/internal/benchmark/manifest_external_test.go",
@@ -4692,6 +5031,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "bundles/local_observability_stack/docker-compose.yml",
@@ -4711,6 +5051,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw/service_windows_test.go",
@@ -4730,6 +5071,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_splunk_o11y_dashboards.py",
@@ -4750,6 +5092,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/redaction/credentials.go",
@@ -4769,6 +5112,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/agentprocess/agentprocess_test.go",
@@ -4788,6 +5132,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/enterprise_hooks_standalone_unix_test.go",
@@ -4807,6 +5152,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/awaited_hook_fast_exit_windows_test.go",
@@ -4826,6 +5172,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/connector_reconcile_subprocess_windows_test.go",
@@ -4845,6 +5192,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/connector_reconcile_subprocess_windows_test.go",
@@ -4864,6 +5212,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/connector_reconcile_subprocess_windows_test.go",
@@ -4885,6 +5234,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/daemon_executable_windows_test.go",
@@ -4904,6 +5254,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/daemon_executable_windows_test.go",
@@ -4923,6 +5274,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/daemon/daemon_test.go",
@@ -4942,6 +5294,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/daemon/daemon_test.go",
@@ -4961,6 +5314,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/daemon/daemon_test.go",
@@ -4980,6 +5334,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/tests/test_llm_env.py",
@@ -4998,6 +5353,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/tests/test_llm_env.py",
@@ -5018,6 +5374,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/kiro_windows_shell_test.go",
@@ -5037,6 +5394,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/enterprise_hooks_standalone_unix_test.go",
@@ -5056,6 +5414,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/tests/test_llm_env.py",
@@ -5075,6 +5434,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/tests/test_cmd_skill.py",
@@ -5094,6 +5454,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/windows_enterprise_payload_test.go",
@@ -5113,6 +5474,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/daemon/proc_windows_flags_test.go",
@@ -5132,6 +5494,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/watchdog_pidfile_windows_test.go",
@@ -5151,6 +5514,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/watchdog_pidfile_windows_test.go",
@@ -5170,6 +5534,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/notify/notify_windows_test.go",
@@ -5190,6 +5555,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "extensions/defenseclaw/src/index.ts",
@@ -5209,6 +5575,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/hook.go",
@@ -5236,6 +5603,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/hook.go",
@@ -5263,6 +5631,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/inventory/agent_discovery.py",
@@ -5287,6 +5656,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/requestctx.go",
@@ -5309,6 +5679,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/tui/__init__.py",
@@ -5328,6 +5699,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "extensions/defenseclaw/src/fetch-interceptor.ts",
@@ -5357,6 +5729,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/managed/managed.go",
@@ -5381,6 +5754,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/tests/test_windows_installer_artifacts.py",
@@ -5400,6 +5774,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/hook_render_golden_test.go",
@@ -5425,6 +5800,26 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_UPDATE_SECURE_CLIENT_EVALUATION",
+      "category": "test_fixture",
+      "purpose": "Regenerates the Secure Client admission and guardrail evaluation goldens instead of comparing against them. Use it only for an approved change to Secure Client behaviour.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/secure_client_evaluation_golden_test.go",
+          "description": "Rewrites testdata/secure_client_evaluation/*.golden.json for the current OS"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
       "category": "security_opt_out",
       "purpose": "Retired 0.x upgrade override with no effect in 1.x. Still refused from .env files so an old dotenv cannot carry it forward.",
@@ -5435,6 +5830,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/cli/root.go",
@@ -5460,6 +5856,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cmd/defenseclaw-setup/main.go",
@@ -5482,6 +5879,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "cli/defenseclaw/upgrade_shim.py",
@@ -5505,6 +5903,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5524,6 +5923,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5543,6 +5943,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5562,6 +5963,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5581,6 +5983,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5600,6 +6003,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5619,6 +6023,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5638,6 +6043,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5657,6 +6063,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5676,6 +6083,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5695,6 +6103,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5714,6 +6123,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5733,6 +6143,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5752,6 +6163,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5771,6 +6183,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5790,6 +6203,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5809,6 +6223,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5828,6 +6243,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5847,6 +6263,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5866,6 +6283,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5885,6 +6303,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5904,6 +6323,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5923,6 +6343,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go",
@@ -5942,6 +6363,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
@@ -5961,6 +6383,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/webhook.go",
@@ -5988,6 +6411,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/webhook.go",
@@ -6007,6 +6431,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
@@ -6026,6 +6451,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/windows_codex_requirements.go",
@@ -6050,6 +6476,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/windows_codex_requirements.go",
@@ -6074,6 +6501,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
@@ -6094,6 +6522,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/windows_enterprise_service.go",
@@ -6113,6 +6542,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/windows_codex_requirements.go",
@@ -6137,6 +6567,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/inventory/process_snapshot_windows_test.go",
@@ -6156,6 +6587,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": true,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/enterprisehooks/rollback_first_install_windows.go",
@@ -6175,6 +6607,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/managed/managed.go",
@@ -6203,6 +6636,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw/service_windows.go",
@@ -6227,6 +6661,7 @@
       ],
       "security_impact": "high",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cmd/defenseclaw/service_windows.go",
@@ -6247,6 +6682,7 @@
       ],
       "security_impact": "medium",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/cli/windows_managed_hooks_teardown.go",
@@ -6271,6 +6707,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/openshell/sshshim.go",
@@ -6293,6 +6730,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -6314,6 +6752,7 @@
       ],
       "security_impact": "low",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
@@ -6337,6 +6776,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "ignore",
       "consumers": [
         {
           "location": "internal/daemon/logstamp.go",
@@ -6356,6 +6796,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/daemon/logstamp.go",
@@ -6375,6 +6816,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "cli/defenseclaw/commands/cmd_audit.py",
@@ -6383,6 +6825,30 @@
         {
           "location": "internal/cli/usage_args.go",
           "description": "Names 'defenseclaw' instead of the gateway binary in usage errors"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_EXPLICIT_CODEX_SETUP",
+      "category": "hook_internal",
+      "purpose": "Set by the Python CLI to the absolute Codex home while a Codex setup restarts the gateway, so that gateway binds Codex to the home the user just chose instead of the root recorded in the managed backup (GAP-1106). The gateway uses it only when it names the Codex home the gateway itself resolves.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Sets it to the Codex home while it restarts the gateway after a Codex setup"
+        },
+        {
+          "location": "internal/gateway/connector/config_root_pin.go",
+          "description": "Skips the recorded Codex root pin when it names the current Codex home"
         }
       ],
       "since": "1.0.0"
@@ -6398,6 +6864,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/scanner/plugin.go",
@@ -6420,6 +6887,7 @@
       ],
       "security_impact": "none",
       "surface_in_doctor": false,
+      "managed": "allow",
       "consumers": [
         {
           "location": "internal/gateway/connector/hook_socket_transport.go",
@@ -6431,6 +6899,31 @@
         }
       ],
       "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_STANDALONE_FORCED_UNINSTALL",
+      "category": "upgrade_internal",
+      "purpose": "Carries Setup /uninstall FORCE=1 (enterprise windows uninstall --force) from the native lifecycle CLI to the standalone Windows installer, which removes the deployment without reading its pending transaction. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for an Uninstall and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only when --force was requested for an Uninstall action"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes Force to the lifecycle only for the Uninstall action"
+        }
+      ],
+      "since": "1.0.1",
+      "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
     }
   ]
 }

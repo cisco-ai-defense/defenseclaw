@@ -222,6 +222,21 @@ try {
             }
             Test-Accepted 'tree after the uninstall sweep' $busy
 
+            # GAP-1190: a file DefenseClaw did not install (an administrator's
+            # renamed copy of the hook) stops the standalone uninstall before
+            # it changes anything, and the refusal names the file and the step.
+            $renamed = New-TestLayout 'renamed'
+            $away = [IO.Path]::Combine($renamed.BinDirectory, 'defenseclaw-hook.exe.away')
+            [IO.File]::WriteAllText($away, 'renamed hook')
+            Test-Refused 'uninstall with a renamed hook copy' {
+                Assert-DefenseClawStandaloneUninstallInstallTree -Layout $renamed
+            } ('unexpected file from managed install root: .*\\defenseclaw-hook\.exe\.away\. ' +
+                'The uninstall stopped before it changed anything\..* move it out of .*DefenseClaw, ' +
+                'then run the uninstall again$')
+            if (-not [IO.File]::Exists($away)) {
+                $failures.Add('the refused uninstall removed the renamed copy')
+            }
+
             $sibling = New-TestLayout 'sibling'
             [void](New-Plugin $sibling)
             [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($sibling.InstallRoot, 'share', 'policies'))
@@ -253,9 +268,31 @@ try {
                 $failures.Add('link target outside the tree was removed')
             }
 
+            # GAP-0942: an editor's ACP thread that runs defenseclaw-acp.exe
+            # from the install folder refuses the uninstall before it changes
+            # anything and names the program, account and parent; a process
+            # seen only once (a hook call) and this lifecycle do not block.
+            $inUse = New-TestLayout 'in-use'
+            $script:SmokeProcessPasses = 0
+            $acp = [IO.Path]::Combine($inUse.BinDirectory, 'defenseclaw-acp.exe')
+            $hook = [IO.Path]::Combine($inUse.BinDirectory, 'defenseclaw-hook.exe')
+            function script:Get-DefenseClawProcessImages {
+                $script:SmokeProcessPasses++
+                [pscustomobject]@{ Id = 4242; Path = $acp; UserName = 'HOST\dcw-w3a1'; Parent = 'zed' }
+                [pscustomobject]@{ Id = [int]$PID; Path = $acp; UserName = ''; Parent = '' }
+                if ($script:SmokeProcessPasses -eq 1) {
+                    [pscustomobject]@{ Id = 4343; Path = $hook; UserName = 'HOST\dcw-w3a2'; Parent = 'claude' }
+                }
+            }
+            $script:InstallTreeUseRecheckMilliseconds = 0
+            Test-Refused 'uninstall with an open ACP thread' {
+                Assert-DefenseClawStandaloneInstallTreeNotInUse -Layout $inUse -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian
+            } '^uninstall_in_use: defenseclaw-acp\.exe \(pid 4242, account HOST\\dcw-w3a1, started by zed\) runs from .*nothing was changed'
+
             # Secure Client keeps its original allow-list: neither ipc nor share
             # is accepted, and removal is a no-op.
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+            Assert-DefenseClawStandaloneInstallTreeNotInUse -Layout $inUse -GatewayServiceName DefenseClawGateway -GuardianServiceName DefenseClawHookGuardian
             $secureClient = New-TestLayout 'secure-client-ipc'
             [void][IO.Directory]::CreateDirectory($secureClient.ManagedIPCDirectory)
             Test-Refused 'Secure Client allow-list (ipc)' { Assert-DefenseClawManagedInstallTree -Layout $secureClient } 'unexpected directory'

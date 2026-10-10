@@ -153,7 +153,8 @@ func (c *Client) GetConfig(ctx context.Context) (json.RawMessage, error) {
 	return c.Request(ctx, "config.get", nil)
 }
 
-// PatchConfig applies a partial configuration update.
+// PatchConfig applies a partial configuration update (POST /config/patch,
+// Secure Client only).
 func (c *Client) PatchConfig(ctx context.Context, path string, value interface{}) error {
 	params := ConfigPatchParams{
 		Path:  path,
@@ -186,27 +187,15 @@ func (c *Client) GetSkillsBins(ctx context.Context) (json.RawMessage, error) {
 	return c.Request(ctx, "skills.bins", nil)
 }
 
-// SessionsList fetches active sessions from the gateway.
-func (c *Client) SessionsList(ctx context.Context) (json.RawMessage, error) {
-	return c.Request(ctx, "sessions.list", nil)
-}
-
-// SessionsSubscribe subscribes to session events (including session.tool).
-func (c *Client) SessionsSubscribe(ctx context.Context, sessionID string) error {
-	params := map[string]string{"sessionId": sessionID}
-	_, err := c.Request(ctx, "sessions.subscribe", params)
-	if err != nil {
-		return fmt.Errorf("gateway: sessions.subscribe %q: %w", sessionID, err)
-	}
-	return nil
-}
-
-// SessionsMessagesSubscribe subscribes to message-level events for a session.
-func (c *Client) SessionsMessagesSubscribe(ctx context.Context, sessionID string) error {
-	params := map[string]string{"sessionId": sessionID}
-	_, err := c.Request(ctx, "sessions.messages.subscribe", params)
-	if err != nil {
-		return fmt.Errorf("gateway: sessions.messages.subscribe %q: %w", sessionID, err)
+// SessionsSubscribe subscribes this connection to the events of every session
+// (session.message, session.tool, sessions.changed), including sessions that
+// start later. The empty params ask for the acknowledgment only: OpenClaw
+// 2026.9 validates them as sessions.list parameters and rejected the
+// per-session sessionId DefenseClaw sent, while 2026.6 ignores them
+// (GAP-0224).
+func (c *Client) SessionsSubscribe(ctx context.Context) error {
+	if _, err := c.Request(ctx, "sessions.subscribe", map[string]any{}); err != nil {
+		return fmt.Errorf("gateway: sessions.subscribe: %w", err)
 	}
 	return nil
 }

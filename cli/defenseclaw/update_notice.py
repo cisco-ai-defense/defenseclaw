@@ -18,7 +18,7 @@
 
 Checks the latest release at most once a day and stays silent unless both
 stdout and stderr are terminals. Disabled by ``DEFENSECLAW_NO_UPDATE_CHECK=1``,
-by ``CI``, by ``update_check: false`` in config.yaml, on Windows by the
+by ``CI``, by ``update.check: false`` in config.yaml, on Windows by the
 ``DisableSelfUpdate`` enterprise policy that also stops install.ps1, and on
 any computer whose DefenseClaw is managed by the organization, where
 ``defenseclaw upgrade`` always refuses. Never raises.
@@ -87,7 +87,8 @@ def _disabled() -> bool:
             raw = yaml.safe_load(stream)
     except Exception:  # noqa: BLE001 - missing or unreadable config keeps the default
         return False
-    return isinstance(raw, dict) and raw.get("update_check") is False
+    update = raw.get("update") if isinstance(raw, dict) else None
+    return isinstance(update, dict) and update.get("check") is False
 
 
 def _self_update_disabled_by_policy() -> bool:
@@ -135,10 +136,10 @@ def _lookup_latest() -> str:
     socket timeout; a slow network must not hold the terminal.
     """
 
-    from defenseclaw.upgrade_shim import DEFAULT_REPO, REPO_ENV, _latest_from_redirect
+    from defenseclaw.upgrade_shim import _latest_from_redirect, release_source
 
     found: list[str] = []
-    repo = os.environ.get(REPO_ENV) or DEFAULT_REPO
+    repo = release_source()
 
     def lookup() -> None:
         # A notice is best effort: nothing from the network may reach the terminal.

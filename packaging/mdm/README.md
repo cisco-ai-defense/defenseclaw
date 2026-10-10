@@ -53,7 +53,7 @@ in the config, including which agents to protect, is in
 
    That SHA-256 is the pin for hash-pinned trust, the default. See
    `signing/README.md` for signature-based trust instead.
-2. **Write the administrator config.** It needs `config_version: 8`,
+2. **Write the administrator config.** It needs `config_version: 9` (a version 8 file is migrated),
    `deployment_mode: managed_enterprise` and `enterprise.profile:
    standalone`, and it chooses the agents to protect. Start from the
    per-OS minimal config in
@@ -67,14 +67,16 @@ in the config, including which agents to protect, is in
    (and any credential file) in a folder that only administrators can
    change: the wrappers refuse a file when the file or any folder above it
    can be renamed, deleted or re-permissioned by another account. On
-   Windows client editions a folder created directly under `C:\` inherits
-   "Authenticated Users: Modify" (Windows Server does not add that entry,
-   but the same commands work there), so remove the inheritance first:
+   Windows client editions a folder created directly under `C:\` can hold
+   "Authenticated Users: Modify" and "Users: Read" as entries of its own,
+   which `/inheritance:r` does not remove (Windows Server does not add them,
+   but the same commands work there), so remove them by name:
 
    ```powershell
    # Windows (PowerShell 7)
    New-Item -ItemType Directory C:\Staging
    icacls C:\Staging /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+   icacls C:\Staging /remove:g "*S-1-5-11" "*S-1-5-32-545" /T /C
    pwsh -NoProfile -File Invoke-DefenseClawEnterprise.ps1 `
      -SetupPath C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe -Sha256 <pin> `
      -ConfigPath C:\Staging\config.yaml

@@ -244,7 +244,7 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 
 func runStart(cmd *cobra.Command, args []string) error {
 	coldStart := cmd != nil && hookColdStartRequested(cmd.Flags())
-	if coldStart && !hookColdStartSupported {
+	if coldStart && !hookColdStartSupported() {
 		return errHookColdStartUnsupported
 	}
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
@@ -587,7 +587,7 @@ func runStop(cmd *cobra.Command, _ []string) error {
 		// Stop watchdog first since it monitors the gateway. Ordinary operator
 		// stop keeps the historical best-effort behavior after identity preflight.
 		_ = runWatchdogStop(nil, nil)
-		if hookColdStartSupported && !secureClientHost() {
+		if hookColdStartSupported() && !secureClientHost() {
 			// The watchdog can be waiting for an independent cold-start child
 			// when it exits. Wait for that child's start lock before taking the
 			// final running snapshot and publishing the stop marker. A start
@@ -1701,10 +1701,10 @@ func daemonReadinessRequirementsFromConfig(cfg *config.Config, startedNotBefore 
 	requirements := daemonReadinessRequirements{
 		guardrailEnabled: configuredGuardrailExpectedRunning(cfg),
 		watcherEnabled:   cfg.Gateway.Watcher.Enabled,
-		// The canonical schema-v8 observability runtime always binds the
-		// sidecar telemetry health source.
-		// Match that runtime state instead of waiting forever for "disabled".
-		telemetryEnabled: cfg.ConfigVersion >= config.ObservabilityV8ConfigVersion,
+		// The canonical observability runtime always binds the sidecar
+		// telemetry health source. Match that runtime state instead of
+		// waiting forever for "disabled".
+		telemetryEnabled: true,
 		routingEnabled:   cfg.Routing.Enabled,
 		startedNotBefore: startedNotBefore,
 		expectedDataDir:  cfg.DataDir,

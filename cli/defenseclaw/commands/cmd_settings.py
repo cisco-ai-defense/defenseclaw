@@ -11,6 +11,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
 from defenseclaw.config import config_path_for_data_dir
+from defenseclaw.config_writer import ACTOR_PREFIX_CLI, current_actor
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -58,7 +59,7 @@ def settings_save(app: AppContext) -> None:
         )
     if app.logger:
         app.logger.log_activity(
-            actor="cli:operator",
+            actor=current_actor(ACTOR_PREFIX_CLI),
             action=ACTION_CONFIG_UPDATE,
             target_type="config",
             target_id="config.yaml",

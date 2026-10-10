@@ -120,6 +120,27 @@ func plantLinuxListener(t *testing.T, h *testHost, pid, uid string) {
 	}
 }
 
+// A per-user gateway still listening on 127.0.0.1:18970 let the first
+// managed install change everything, fail to start the API socket and roll
+// back with activation_failed, while linux.mdx promised only a warning. The
+// install is refused before anything changes, naming the holder (GAP-0366).
+func TestInstallRefusesAHeldAPIPortBeforeChangingAnything(t *testing.T) {
+	h := newTestHost(t, "linux")
+	plantLinuxListener(t, h, "31337", "4242")
+	if err := os.Symlink("/home/dcr-u1/.local/bin/defenseclaw-gateway", h.env.P("/proc/31337/exe")); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0")})
+	requireError(t, r, codeAPIPortHeld)
+	if got := messagesOf(r.Errors, codeAPIPortHeld); !strings.Contains(got, "held by pid 31337 (uid 4242), a per-user DefenseClaw gateway") ||
+		!strings.Contains(got, "nothing was changed") || !strings.Contains(got, "kill 31337") {
+		t.Fatalf("the refusal does not name the per-user gateway: %s", got)
+	}
+	if exists(h.env.P(h.env.Layout.ConfigPath)) || countCalls(h.services.calls, "start "+unitAPISocket) > 0 {
+		t.Fatalf("the refused install changed the host: %v", h.services.calls)
+	}
+}
+
 // lsofRunner answers lsof like macOS does for a listener on the API port.
 type lsofRunner struct {
 	Runner
@@ -148,6 +169,15 @@ func TestStatusAndVerifyRepeatGatewayAssignmentAndDestinationWarnings(t *testing
 		if !hasWarning(result, codeProfileAssignments) || !hasWarning(result, codeOptionalDestination) {
 			t.Fatalf("%s warnings = %+v", action, result.Warnings)
 		}
+	}
+	// A /health read other than root on the hook socket gets only their
+	// number, and status says so instead of listing nothing (GAP-1268).
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"profile_assignment_warning_count":2,"profile_warning_count":2}`), nil
+	}
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeProfileAssignments); !strings.Contains(got,
+		"2 guardrail profile assignment warning(s) are not listed") || !strings.Contains(got, "profile-explain --user") {
+		t.Fatalf("withheld assignment warnings = %q", got)
 	}
 }
 
@@ -227,10 +257,10 @@ func TestGatewayWithoutItsAPIPortIsNotReadyAndNamesTheHolder(t *testing.T) {
 			t.Fatal("status reports the gateway ready")
 		}
 
-		h.services.failStart[unitAPISocket] = errors.New("systemctl start defenseclaw-gateway-api.socket: exit 1: Job for defenseclaw-gateway-api.socket failed. See \"journalctl -xe\" for details.")
+		// Repair refuses before it changes anything (GAP-0366).
 		repair := h.run(Options{Action: ActionRepair})
-		requireError(t, repair, codeActivate)
-		if got := messagesOf(repair.Errors, codeActivate); !strings.Contains(got, want) {
+		requireError(t, repair, codeAPIPortHeld)
+		if got := messagesOf(repair.Errors, codeAPIPortHeld); !strings.Contains(got, want) {
 			t.Fatalf("repair does not name the port holder: %s", got)
 		}
 	})
@@ -413,4 +443,32 @@ func TestHookSocketProbesReadTheGateway(t *testing.T) {
 			t.Fatal("a missing hook socket was reported as served")
 		}
 	})
+}
+
+// GAP-0514: with 4 MiB free on the root filesystem, enforcement and audit
+// held, but status, verify and the journal never said the disk was full.
+func TestStatusWarnsWhenTheAuditFilesystemIsNearlyFull(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.DiskSpace = func(string) (uint64, uint64, uint64, error) { return 4 << 20, 10 << 30, 1, nil }
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeDiskSpaceLow)
+	if !strings.Contains(got, h.env.Layout.DataDir+" has 4.0 MiB free") || strings.Count(got, "MiB free") != 1 {
+		t.Fatalf("status does not warn once about the nearly full filesystem: %q", got)
+	}
+}
+
+// GAP-0626: with the judge's provider unreachable, /health said
+// judge_state failing while status and verify stayed silent.
+func TestStatusWarnsWhenTheJudgeIsFailing(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"disabled"},` +
+			`"guardrail":{"state":"running","details":{"judge_state":"failing","judge_recent_calls":18,"judge_failed_calls":18,` +
+			`"judge_last_error":"Bedrock request failed","judge_last_failure_at":"2026-10-08T05:00:00Z"}}}`), nil
+	}
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeJudgeFailing)
+	if !strings.Contains(got, "failed its last 18 calls") || !strings.Contains(got, "Bedrock request failed") {
+		t.Fatalf("status does not warn about the failing judge: %q", got)
+	}
 }

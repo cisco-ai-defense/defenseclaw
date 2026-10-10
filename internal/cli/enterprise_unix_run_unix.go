@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -89,19 +90,18 @@ func runUnixLifecycle(cmd *cobra.Command, platform, action string, opts *unixLif
 		defer stop()
 	}
 	result := enterpriseunix.Run(ctx, env, enterpriseunix.Options{
-		Action:               action,
-		PayloadDir:           opts.payload,
-		FromPackage:          opts.fromPackage,
-		ConfigFile:           opts.config,
-		NoStart:              opts.noStart,
-		AdoptExisting:        opts.adoptExisting,
-		AllowDowngrade:       opts.allowDowngrade,
-		Purge:                opts.purge,
-		RemoveServiceAccount: opts.removeServiceAccount,
-		KeepState:            opts.keepState,
-		KeepServiceAccount:   opts.keepServiceAccount,
-		ProductVersion:       opts.productVersion,
-		Reason:               opts.reason,
+		Action:             action,
+		PayloadDir:         opts.payload,
+		FromPackage:        opts.fromPackage,
+		ConfigFile:         opts.config,
+		NoStart:            opts.noStart,
+		AdoptExisting:      opts.adoptExisting,
+		AllowDowngrade:     opts.allowDowngrade,
+		Purge:              opts.purge,
+		KeepState:          opts.keepState,
+		KeepServiceAccount: opts.keepServiceAccount,
+		ProductVersion:     opts.productVersion,
+		Reason:             opts.reason,
 	})
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
@@ -160,8 +160,11 @@ func lifecycleFailure(result *enterprisestatus.Result, asJSON bool, repairComman
 	}
 	message := fmt.Sprintf("%s failed; see the %s listed above", result.Action, countNoun(len(result.Errors), "problem"))
 	// A status that found another run in progress checked nothing, so
-	// repair is not the next step (GAP-2246).
-	if repairCommand != "" && result.Installed && !lifecycleResultHasError(result, "lifecycle_busy") && !configOnlyProblems(result) &&
+	// repair is not the next step (GAP-2246). Nor is it for a gateway whose
+	// config the installed binary refuses: repair applies the same config
+	// again, and the config_refused error above names the fix.
+	if repairCommand != "" && result.Installed && !lifecycleResultHasError(result, "lifecycle_busy") &&
+		!lifecycleResultHasError(result, "config_refused") && !repairCannotFixProblems(result) &&
 		(result.Action == enterpriseunix.ActionVerify || result.Action == enterpriseunix.ActionStatus) {
 		target := "them"
 		if len(result.Errors) == 1 {
@@ -209,6 +212,9 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	for _, change := range result.Changes {
 		fmt.Fprintf(w, "  - %s\n", change)
 	}
+	if result.Action == enterpriseunix.ActionRotateCredentials && result.Noop && result.NoopReason == enterpriseunix.NoopNoCredentials {
+		fmt.Fprintln(w, "  no enrolled user holds a DefenseClaw credential yet: hooks use the hook socket, and the guardian creates the per-user key when it first gives a user one (agent telemetry, an in-agent plugin or ACP)")
+	}
 	if result.Action == enterpriseunix.ActionRepair && result.OK {
 		if len(result.Changes) == 0 {
 			fmt.Fprintln(w, "  nothing to repair")
@@ -234,6 +240,11 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 		}
 		enterprisestatus.WriteDestinations(w, result.Destinations)
 	}
+	// The policy the lifecycle left in place (absent under Secure Client):
+	// an administrator reading the text must see the generation and digest.
+	if result.Policy != nil {
+		fmt.Fprintf(w, "  %s\n", result.Policy.Line())
+	}
 	// A busy status checked nothing else, but still reports the recorded
 	// deployment's version, as the docs say (GAP-2409).
 	if result.Action == enterpriseunix.ActionStatus && result.Installed && lifecycleResultHasError(result, "lifecycle_busy") {
@@ -252,11 +263,11 @@ func lifecycleResultHasWarning(result *enterprisestatus.Result, code string) boo
 	return false
 }
 
-// configOnlyProblems reports whether every error of result is a config
-// problem (no connector enabled, a rejected config.yaml). Its line already
-// says to change config.yaml and run ensure; repair does not fix it
-// (GAP-0265).
-func configOnlyProblems(result *enterprisestatus.Result) bool {
+// repairCannotFixProblems reports whether every error of result is one
+// repair does not fix: a config problem (no connector enabled, a rejected
+// config.yaml), whose line says to change config.yaml and run ensure
+// (GAP-0265), or a file the administrator owns.
+func repairCannotFixProblems(result *enterprisestatus.Result) bool {
 	configProblems := map[string]bool{}
 	for _, warning := range result.Warnings {
 		if warning.Code == "no_connectors_enabled" || warning.Code == "config_rejected" {
@@ -264,7 +275,10 @@ func configOnlyProblems(result *enterprisestatus.Result) bool {
 		}
 	}
 	for _, e := range result.Errors {
-		if !configProblems[e.Message] {
+		// A file the administrator owns (ownership: verify_only) is fixed by
+		// deploying the export the problem names; repair never writes it
+		// (GAP-0918).
+		if !configProblems[e.Message] && !strings.Contains(e.Message, "missing_defenseclaw_hooks:") {
 			return false
 		}
 	}
@@ -347,6 +361,9 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	case "set":
 		var source io.Reader = cmd.InOrStdin()
 		if opts.fromFile != "" {
+			if err := enterpriseunix.TrustedSecretSource(opts.fromFile); err != nil {
+				return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
+			}
 			file, err := os.Open(opts.fromFile)
 			if err != nil {
 				return withExitCode(err, enterprisestatus.UnixExitFailure)
@@ -358,7 +375,11 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err != nil {
 			return withExitCode(err, enterprisestatus.UnixExitInvalidArgs)
 		}
+		caller := secretCallerPID()
 		mutate = func(ctx context.Context) error {
+			if err := secretCallerGone(caller, secretCallerPID()); err != nil {
+				return err
+			}
 			// An identical value is not rewritten, so the output can say
 			// the credential already holds it (GAP-2373).
 			stored, readErr := os.ReadFile(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
@@ -384,6 +405,20 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return err
 	}
 	return lifecycleFailure(result, opts.json, "")
+}
+
+// secretCallerPID is the parent of this process. A seam for tests.
+var secretCallerPID = os.Getppid
+
+// secretCallerGone refuses to store a credential once the process that ran
+// `secret set` has exited while the command waited for the lifecycle lock:
+// an MDM agent that killed its wrapper reported the run as failed, and the
+// orphaned command stored the key minutes later anyway (GAP-0632).
+func secretCallerGone(started, now int) error {
+	if started == now {
+		return nil
+	}
+	return errors.New("the process that started this command exited while it waited for the lifecycle lock, so the credential was not stored; run the command again")
 }
 
 // describeSecretChange labels a secret set or remove result with the command

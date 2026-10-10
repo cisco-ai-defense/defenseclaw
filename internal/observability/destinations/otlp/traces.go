@@ -404,7 +404,7 @@ func otlpCanonicalResource(span sdktrace.ReadOnlySpan) (map[string]string, strin
 		values[key] = item.Value.AsString()
 		validation[key] = item.Value.AsString()
 	}
-	if observability.ValidateTelemetryResourceAttributes(validation) != nil {
+	if observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(validation) != nil {
 		return nil, "", false
 	}
 	return values, resource.SchemaURL(), true
@@ -471,6 +471,7 @@ func (exporter *SpanExporter) exportBatch(
 	exporter.counters.accepted.Add(uint64(len(spans)))
 	dialSequence := exporter.config.tracker.snapshot()
 	attemptContext, attempts := withAttemptCounter(ctx)
+	redialGRPC(attemptContext, exporter.connection)
 	err := exporter.inner.ExportSpans(attemptContext, spans)
 	recordRetryAttempts(&exporter.counters, observer, observability.SignalTraces, uint64(len(spans)), attempts.Load())
 	if err != nil {

@@ -36,6 +36,7 @@ unparseable config and managed-mode writes remain administrator-gated.
 
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import os
 import re
@@ -60,6 +61,7 @@ from defenseclaw.observability.v8_presets import (
 from defenseclaw.observability.v8_presets import (
     _load_dotenv,
     adapter_destination_fields,
+    restore_secret,
     secret_note_is_info,
 )
 from defenseclaw.observability.v8_presets import (
@@ -85,16 +87,6 @@ from defenseclaw.platform_support import (
     is_local_splunk_stack_destination,
     local_observability_stack_supported,
     local_splunk_stack_supported,
-)
-
-# All prompt keys across all presets. Exposed as Click options so the
-# same command surface covers every preset; the writer ignores unknown
-# keys per preset.
-_ALL_PROMPT_FLAGS = (
-    "realm", "site", "region", "dataset",
-    "endpoint", "protocol", "project", "logstream",
-    "host", "port", "index", "source", "sourcetype",
-    "url", "method", "url_path", "verify_tls",
 )
 
 _LEGACY_GENERATED_GALILEO_SEND = {
@@ -158,9 +150,8 @@ def observability() -> None:
 @click.option("--sourcetype", default=None, help="Splunk HEC sourcetype field")
 @click.option("--url", default=None, help="Webhook URL, https only (webhook)")
 @click.option("--method", default=None, help="Webhook HTTP method: POST, PUT or PATCH (webhook)")
-@click.option("--url-path", "url_path", default=None, hidden=True, help="Ignored; kept for older scripts")
 @click.option("--verify-tls/--no-verify-tls", "verify_tls", default=None,
-              help="Verify the Splunk HEC TLS certificate (default: off for splunk-hec, on for splunk-enterprise)")
+              help="Verify the Splunk HEC TLS certificate (default: on; --no-verify-tls for a self-signed collector)")
 @click.option(
     "--allow-private-networks",
     is_flag=True,
@@ -192,7 +183,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
     realm, site, region, dataset,
     endpoint, protocol, project, logstream,
     host, port, index, source, sourcetype,
-    url, method, url_path, verify_tls,
+    url, method, verify_tls,
     allow_private_networks,
     plaintext,
     environment,
@@ -235,7 +226,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
         "project": project, "logstream": logstream,
         "host": host, "port": port, "index": index, "source": source,
         "sourcetype": sourcetype,
-        "url": url, "method": method, "url_path": url_path,
+        "url": url, "method": method,
     }
     if verify_tls is not None:
         raw_inputs["verify_tls"] = "true" if verify_tls else "false"
@@ -270,6 +261,8 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
             allow_private_networks, plaintext = _confirm_private_endpoint(preset, resolved_inputs, plaintext)
         _require_v8_operator_status(app.cfg.data_dir)
         destination_name = _destination_name(preset, name, _resolve_inputs(preset, resolved_inputs))
+        if destination_name == "local-sqlite":
+            raise click.ClickException("local-sqlite is a reserved destination name; pick another name")
         # Only picks "added" or "updated" for the summary line. A missing or
         # unreadable config is the add step's to report, not this lookup's.
         try:
@@ -413,6 +406,13 @@ def _setup_observability_add_details(name: str, preset_id: str, endpoint: str, *
 def list_cmd(app: AppContext, emit_json: bool) -> None:
     """List configured observability destinations."""
     _print_v8_destination_list(_require_v8_operator_status(app.cfg.data_dir), emit_json=emit_json)
+    if not emit_json:
+        # The rows are config.yaml's; say when the running gateway does not
+        # apply it yet (GAP-0552).
+        from defenseclaw.gateway import gateway_reload_notice
+
+        if notice := gateway_reload_notice(app.cfg):
+            ux.warn(notice, indent="  ")
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +426,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
 def enable_cmd(app: AppContext, name: str) -> None:
     """Turn a disabled destination back on."""
     _require_v8_operator_status(app.cfg.data_dir)
-    _set_v8_destination_enabled(app.cfg.data_dir, name, True, "")
+    _set_v8_destination_enabled(app.cfg.data_dir, name, True)
 
 
 @observability.command("disable")
@@ -435,7 +435,7 @@ def enable_cmd(app: AppContext, name: str) -> None:
 def disable_cmd(app: AppContext, name: str) -> None:
     """Disable a destination."""
     _require_v8_operator_status(app.cfg.data_dir)
-    _set_v8_destination_enabled(app.cfg.data_dir, name, False, "")
+    _set_v8_destination_enabled(app.cfg.data_dir, name, False)
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +455,7 @@ def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
     if not yes and not click.confirm(f"  Remove destination {name!r}?", default=False):
         click.echo("  Aborted.")
         return
-    _remove_v8_destination(app.cfg.data_dir, name, "")
+    _remove_v8_destination(app.cfg.data_dir, name)
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +469,7 @@ def remove_cmd(app: AppContext, name: str, yes: bool) -> None:
 @click.option(
     "--write-probe",
     is_flag=True,
-    help="For v8, send one marked content-free probe to the named destination.",
+    help="Send one marked, content-free probe to the named destination.",
 )
 @pass_ctx
 def test_cmd(app: AppContext, name: str, timeout: float, write_probe: bool) -> None:
@@ -551,14 +551,12 @@ def _add_v8_destination(
             )
     elif plaintext:
         raise ValueError("--plaintext applies to OTLP destinations only")
-    authored = _v8_authored_destinations(data_dir)
+    authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
     matches = [
         (index, existing)
         for index, existing in enumerate(authored)
         if existing.get("name") == destination_name
     ]
-    if len(matches) > 1:
-        raise ValueError(f"destination {destination_name!r} is duplicated in the v8 source")
     if matches:
         index, existing = matches[0]
         if existing.get("kind") != destination["kind"]:
@@ -585,21 +583,47 @@ def _add_v8_destination(
                 "GRAFANA_OTLP_TOKEN must contain the complete Authorization value, including the Basic prefix"
             )
     secret_before = _stored_secret(data_dir, preset.token_env)
+    environ_before = os.environ.get(preset.token_env) if preset.token_env else None
     warnings.extend(_apply_secret(data_dir, preset, stored_secret, dry_run=dry_run))
-    if not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before:
-        # GAP-2356: the running gateway still holds the old key, and
-        # config.yaml may be unchanged, so the restart has to be asked for.
-        mark_setup_secret_changed()
+    secret_changed = not dry_run and _stored_secret(data_dir, preset.token_env) != secret_before
     validator = None
     if dry_run and stored_secret and preset.token_env:
         validator = _staged_secret_validator({preset.token_env: stored_secret})
-    result = mutate_v8_config(
-        config_path_for_data_dir(data_dir),
-        mutations,
-        data_dir=data_dir,
-        validator=validator,
-        dry_run=dry_run,
-    )
+    try:
+        result = mutate_v8_config(
+            config_path_for_data_dir(data_dir),
+            mutations,
+            data_dir=data_dir,
+            validator=validator,
+            dry_run=dry_run,
+            expected_before_sha256=expected_sha256,
+        )
+    except BaseException:
+        if secret_changed:
+            # GAP-0210: a failed add leaves no key behind in .env.
+            try:
+                restore_secret(data_dir, preset.token_env, secret_before, environ_before, stored_secret)
+            except Exception as restore_error:  # noqa: BLE001 - the add error is the one to report.
+                # GAP-0374: a hand-made .env whose permissions DefenseClaw did
+                # not write can refuse the restore. Keep the original error,
+                # take the key out of this process, and say what is left.
+                if os.environ.get(preset.token_env) == stored_secret:
+                    if environ_before is None:
+                        os.environ.pop(preset.token_env, None)
+                    else:
+                        os.environ[preset.token_env] = environ_before
+                dotenv_path = os.path.join(data_dir, ".env")
+                click.echo(
+                    f"  Note: {preset.token_env} is still in {dotenv_path}: it could not be "
+                    f"taken out again ({type(restore_error).__name__}), because the permissions of that file are "
+                    "not the private ones DefenseClaw writes. Delete that line, then run: defenseclaw doctor --fix",
+                    err=True,
+                )
+        raise
+    if secret_changed:
+        # GAP-2356: the running gateway still holds the old key, and
+        # config.yaml may be unchanged, so the restart has to be asked for.
+        mark_setup_secret_changed()
     return result, warnings
 
 
@@ -618,8 +642,9 @@ def _stored_secret(data_dir: str, key: str) -> str | None:
 def _staged_secret_validator(overrides: dict[str, str]):
     """Validate a dry-run candidate with the unwritten --token value (GAP-1890).
 
-    A real add writes the key to .env and the environment before it validates;
-    a dry run writes nothing, so the value goes to the validator directly.
+    A real add writes the key to .env and the environment before it validates
+    (and takes it back out if the candidate fails, GAP-0210); a dry run writes
+    nothing, so the value goes to the validator directly.
     """
     from defenseclaw.observability import v8_writer
 
@@ -631,23 +656,28 @@ def _staged_secret_validator(overrides: dict[str, str]):
             environment_overrides=overrides,
         )
         if result.valid is not True:
-            raise RuntimeError("canonical v8 configuration validator rejected the candidate")
+            raise RuntimeError("the configuration validator rejected the candidate")
 
     return validate
 
 
-def _v8_authored_destinations(data_dir: str) -> list[dict[str, Any]]:
+def _v8_authored_destination_snapshot(data_dir: str) -> tuple[list[dict[str, Any]], str]:
     from defenseclaw.observability.v8_config import load_validate_v8
 
     path = config_path_for_data_dir(data_dir)
-    source = load_validate_v8(path.read_bytes(), source_name=str(path)).source
+    source_bytes = path.read_bytes()
+    source = load_validate_v8(source_bytes, source_name=str(path)).source
     observability = source.get("observability")
-    if not isinstance(observability, dict):
-        return []
-    destinations = observability.get("destinations")
-    if not isinstance(destinations, list):
-        return []
-    return [dict(value) for value in destinations if isinstance(value, dict)]
+    destinations = observability.get("destinations") if isinstance(observability, dict) else None
+    authored = (
+        [dict(value) for value in destinations if isinstance(value, dict)]
+        if isinstance(destinations, list) else []
+    )
+    return authored, hashlib.sha256(source_bytes).hexdigest()
+
+
+def _v8_authored_destinations(data_dir: str) -> list[dict[str, Any]]:
+    return _v8_authored_destination_snapshot(data_dir)[0]
 
 
 def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[Any]:
@@ -655,8 +685,8 @@ def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[An
 
     host.name is reserved and always comes from the operating system, so two
     computers with the same name (a cloned VM, for example) are told apart by
-    this tag. A legacy ``deployment.environment`` alias, when present, is kept
-    equal so the validator does not reject the pair as conflicting.
+    this tag. A retired ``deployment.environment`` spelling, when present, is
+    removed so only the canonical name remains.
     """
 
     if environment is None:
@@ -679,7 +709,7 @@ def _v8_environment_mutations(data_dir: str, environment: str | None) -> list[An
             f"it is already {current!r}. Edit the gateway resource tag explicitly to change it."
         )
     if isinstance(attributes, dict) and "deployment.environment" in attributes:
-        mutations.append(V8YAMLMutation.set((*prefix, "deployment.environment"), value))
+        mutations.append(V8YAMLMutation.delete((*prefix, "deployment.environment")))
     return mutations
 
 
@@ -759,7 +789,9 @@ def _v8_header_value(value: str) -> Any:
     if composite:
         return {"env": composite.group(1)}
     if "${" in value:
-        raise ValueError("v8 secret-backed headers must be a whole environment reference")
+        # Reached by a Galileo --project or --logstream such as "a${B}c": the value would be
+        # read as a secret reference.
+        raise ValueError("a header value may contain '$' only as one whole ${NAME} secret reference; remove the '$'")
     return value
 
 
@@ -872,7 +904,7 @@ def _print_v8_destination_list(status, *, emit_json: bool) -> None:
         click.echo(_json.dumps(rows, indent=2))
         return
     click.echo()
-    ux.section("Observability v8 destinations")
+    ux.section("Observability destinations")
     click.echo(
         f"  {'NAME':<24} {'KIND':<12} {'STATE':<9} {'SIGNALS':<22} "
         f"{'BUCKETS':<8} {'POLICY':<20} REDACTION"
@@ -984,11 +1016,12 @@ def _destination_platform_status(destination) -> str:
     )
 
 
-def _v8_source_destination_index(data_dir: str, name: str) -> int:
+def _v8_source_destination_snapshot(data_dir: str, name: str) -> tuple[int, str, list[dict]]:
     from defenseclaw.observability.v8_config import load_validate_v8
 
     path = config_path_for_data_dir(data_dir)
-    validated = load_validate_v8(path.read_bytes(), source_name=str(path)).source
+    source = path.read_bytes()
+    validated = load_validate_v8(source, source_name=str(path)).source
     observability = validated.get("observability")
     if not isinstance(observability, dict):
         observability = {}
@@ -1014,50 +1047,43 @@ def _v8_source_destination_index(data_dir: str, name: str) -> int:
         raise click.ClickException(
             ux.not_found_message("observability destination", name, known, "defenseclaw setup observability list")
         )
-    return matches[0]
+    return matches[0], hashlib.sha256(source).hexdigest(), destinations
+
+
+def _v8_source_destination_index(data_dir: str, name: str) -> int:
+    return _v8_source_destination_snapshot(data_dir, name)[0]
 
 
 def _set_v8_destination_enabled(
     data_dir: str,
     name: str,
     enabled: bool,
-    connector: str,
 ) -> None:
     from defenseclaw.observability.v8_writer import mutate_v8_config
     from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
-    if connector:
-        raise click.ClickException(
-            "v8 destinations are process-wide; use route selectors to constrain a connector"
-        )
-    index = _v8_source_destination_index(data_dir, name)
+    index, expected_sha256, _authored = _v8_source_destination_snapshot(data_dir, name)
     result = mutate_v8_config(
         config_path_for_data_dir(data_dir),
         [V8YAMLMutation.set(("observability", "destinations", index, "enabled"), enabled)],
         data_dir=data_dir,
+        expected_before_sha256=expected_sha256,
     )
     state = "enabled" if enabled else "disabled"
     suffix = "" if result.changed else " (already set)"
     click.echo(f"  {name}: {state}{suffix}")
 
 
-def _remove_v8_destination(data_dir: str, name: str, connector: str) -> None:
+def _remove_v8_destination(data_dir: str, name: str) -> None:
     from defenseclaw.observability.v8_writer import mutate_v8_config
     from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
-    if connector:
-        raise click.ClickException(
-            "v8 destinations are process-wide; use route selectors to constrain a connector"
-        )
-    index = _v8_source_destination_index(data_dir, name)
-    try:
-        authored = _v8_authored_destinations(data_dir)
-    except (OSError, ValueError):
-        authored = []
+    index, expected_sha256, authored = _v8_source_destination_snapshot(data_dir, name)
     mutate_v8_config(
         config_path_for_data_dir(data_dir),
         [V8YAMLMutation.delete(("observability", "destinations", index))],
         data_dir=data_dir,
+        expected_before_sha256=expected_sha256,
     )
     click.echo(f"  {name}: removed")
     # GAP-1892: add wrote the key to .env; say so when nothing else uses it.

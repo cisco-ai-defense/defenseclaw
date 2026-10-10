@@ -38,6 +38,7 @@ from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.commands._audit_notice import note_asset_policy_observed, saved_change_audit
 from defenseclaw.commands._scan_ui import record_scan as _record_scan
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 from defenseclaw.inventory.plugin_directories import (
     PluginInstallClaims,
     PluginRegistryCache,
@@ -578,7 +579,7 @@ def _plugin_scan_findings_verdict(
         from defenseclaw.enforce import PolicyEngine
         from defenseclaw.enforce.admission import evaluate_admission
 
-        pe = PolicyEngine(app.store)
+        pe = PolicyEngine(app.store, app.cfg)
         try:
             if pe.is_blocked_for_connector("plugin", name, connector):
                 return _scan_ui.VERDICT_BLOCKED, False
@@ -586,18 +587,16 @@ def _plugin_scan_findings_verdict(
             pass
         decision = evaluate_admission(
             pe,
-            policy_dir=app.cfg.policy_dir,
+            config=app.cfg,
             target_type="plugin",
             name=name,
             source_path=path,
             scan_result=result,
-            fallback_actions=app.cfg.plugin_actions,
             connector=connector,
-            asset_policy=app.cfg.asset_policy,
         )
         blocks = decision.verdict != "allowed" and decision.action.install == "block"
-    except Exception:
-        blocks = app.cfg.plugin_actions.should_install_block(sev)
+    except Exception:  # noqa: BLE001 - an admission failure must not read as clean.
+        blocks = True
     return (_scan_ui.VERDICT_INFO if sev == "INFO" else _scan_ui.VERDICT_WARN), blocks
 
 
@@ -1355,7 +1354,7 @@ def _build_scan_options(
 @plugin.command()
 @click.argument("name_or_path")
 @click.option("--force", is_flag=True, help="Force install (overwrites existing)")
-@click.option("--action", "take_action", is_flag=True, help="Apply plugin_actions policy based on scan severity")
+@click.option("--action", "take_action", is_flag=True, help="Apply the admission policy (admission.plugin)")
 @click.option(
     "--connector",
     "connector_flag",
@@ -1378,7 +1377,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
       HTTP(S) URL       defenseclaw plugin install https://example.com/plugin.tgz
 
     After downloading, the plugin is scanned for security issues. Pass --action
-    to apply the configured plugin_actions policy (quarantine, disable, block)
+    to apply the configured admission policy (quarantine, disable, block)
     based on scan severity. Use --force to overwrite an existing plugin.
 
     With no ``--connector`` the source is materialized into every configured
@@ -1408,7 +1407,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
     )
 
     source = detect_source(name_or_path)
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     # Package/source names are fetch hints only.  Policy identity is read from
     # the materialized manifest below.
@@ -1613,13 +1612,11 @@ def _check_plugin_pre_install_admission(
     for connector, _install_root in targets:
         decision = evaluate_admission(
             pe,
-            policy_dir=app.cfg.policy_dir,
+            config=app.cfg,
             target_type="plugin",
             name=plugin_name,
             source_path=source_path,
-            fallback_actions=app.cfg.plugin_actions,
             connector=connector,
-            asset_policy=app.cfg.asset_policy,
             include_quarantine=True,
         )
         pre_decisions[connector] = decision
@@ -1941,15 +1938,45 @@ def _scan_installed_plugin_for_connector(
 
     post_decision = evaluate_admission(
         pe,
-        policy_dir=app.cfg.policy_dir,
+        config=app.cfg,
         target_type="plugin",
         name=plugin_name,
         source_path=plugin_path,
         scan_result=result,
-        fallback_actions=app.cfg.plugin_actions,
         connector=connector,
-        asset_policy=app.cfg.asset_policy,
     )
+
+    if post_decision.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
+        if rollback:
+            rollback()
+        else:
+            _rollback_plugin_install_paths([plugin_path])
+        ux.echo(f"error: plugin {plugin_name!r} blocked for connector={connector}: "
+                f"{post_decision.reason}", err=True)
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected", plugin_name,
+                f"connector={connector} source={post_decision.source} reason={post_decision.reason}",
+            )
+        raise SystemExit(1)
+
+    if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
+        # The admission action for the findings' severity is allow; nothing
+        # is on an allow list, so this is installed like a clean plugin.
+        if app.logger and not defer_scan_log:
+            saved_change_audit(app.logger).log_scan(result, connector=connector)
+        click.echo(
+            f"[install] {plugin_name!r} installed: the admission policy allows its findings "
+            f"({post_decision.reason}, connector={connector})"
+        )
+        pe.set_source_path("plugin", plugin_name, plugin_path, connector)
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-allowed",
+                plugin_name,
+                f"reason=admission-action-allow connector={connector}",
+            )
+        return False
 
     if post_decision.verdict == "allowed":
         if app.logger and not defer_scan_log:
@@ -2046,12 +2073,8 @@ def _scan_installed_plugin_for_connector(
             pe.disable_for_connector("plugin", plugin_name, connector, enforcement_reason)
 
     if action_cfg.install == "block":
-        pe.block_for_connector("plugin", plugin_name, connector, enforcement_reason)
-        applied_actions.append("added to block list")
-
-    if action_cfg.install == "allow":
-        pe.allow_for_connector("plugin", plugin_name, connector, enforcement_reason)
-        applied_actions.append("added to allow list")
+        pe.record_scan_block("plugin", plugin_name, connector, enforcement_reason)
+        applied_actions.append("install blocked by this scan")
 
     pe.set_source_path("plugin", plugin_name, plugin_path, connector)
 
@@ -2147,7 +2170,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                         registry_cache=registry_cache,
                     ),
                     _build_plugin_scan_map_for_connector(app, connector),
-                    _build_plugin_actions_map(app.store, connector),
+                    _build_plugin_actions_map(app.store, connector, app.cfg),
                     connector=connector,
                 )
                 _report_host_plugin_list_error(connector)
@@ -2169,7 +2192,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
             items = _plugin_list_json_items(
                 plugins,
                 _build_plugin_scan_map_for_connector(app, connectors[0]),
-                _build_plugin_actions_map(app.store, connectors[0]),
+                _build_plugin_actions_map(app.store, connectors[0], app.cfg),
                 connector=connectors[0],
             )
             click.echo(json.dumps(items, indent=2, default=str))
@@ -2211,7 +2234,7 @@ def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 else:
                     click.echo(f"Plugins (connector={connector}): no plugins found")
             continue
-        actions_map = _build_plugin_actions_map(app.store, connector)
+        actions_map = _build_plugin_actions_map(app.store, connector, app.cfg)
         connector_scan_map = _build_plugin_scan_map_for_connector(app, connector)
         _print_plugin_list_table(plugins, connector_scan_map, actions_map, connector)
         shown_any = True
@@ -2274,7 +2297,7 @@ def _collect_plugins_for_connector(
     except PluginIdentityError as exc:
         raise click.ClickException(str(exc)) from exc
     known_ids = {p["id"] for p in plugins}
-    for pid, ae in sorted(_build_plugin_actions_map(app.store, connector).items()):
+    for pid, ae in sorted(_build_plugin_actions_map(app.store, connector, app.cfg).items()):
         if pid in known_ids or ae.actions.file != "quarantine":
             continue
         row = _quarantined_hermes_row(app, pid, ae, connector)
@@ -2538,21 +2561,6 @@ def _plugin_list_json_items(
         item["verdict"] = verdict_label
         items.append(item)
     return items
-
-
-def _print_plugin_list_json(
-    plugins: list[dict[str, Any]],
-    scan_map: dict[str, dict[str, Any]],
-    actions_map: dict[str, Any],
-    connector: str = "",
-) -> None:
-    click.echo(
-        json.dumps(
-            _plugin_list_json_items(plugins, scan_map, actions_map, connector=connector),
-            indent=2,
-            default=str,
-        )
-    )
 
 
 def _print_plugin_list_table(
@@ -3406,17 +3414,6 @@ def _parse_plugin_list_json(text: str) -> list[dict[str, Any]]:
     return [p for p in plugins if isinstance(p, dict)]
 
 
-def _parse_plugin_list_text(text: str) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith(("name", "plugin")):
-            continue
-        name = line.split()[0]
-        out.append({"id": name, "name": name})
-    return out
-
-
 def _list_openclaw_plugins(connector: str = "") -> list[dict]:
     """Query plugins from the requested connector.
 
@@ -3864,8 +3861,8 @@ def _plugin_has_connector_enforcement(
     if app.store is None:
         return False
     return (
-        app.store.has_action("plugin", plugin_name, "install", "block", connector)
-        or app.store.has_action("plugin", plugin_name, "install", "allow", connector)
+        asset_lists.has_entry(app.cfg, app.store, "plugin", plugin_name, connector, "block")
+        or asset_lists.has_entry(app.cfg, app.store, "plugin", plugin_name, connector, "allow")
         or app.store.has_action("plugin", plugin_name, "file", "quarantine", connector)
         or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
         or app.store.has_action("plugin", plugin_name, "runtime", "enable", connector)
@@ -3880,7 +3877,7 @@ def _plugin_copies_disabled(app: AppContext, plugin_name: str, connector: str) -
             rows = _merge_all_plugins(app.cfg.plugin_dir, c, cfg=app.cfg)
         except Exception:  # noqa: BLE001 - keep the generic "still loads" note.
             return False
-        actions_map = _build_plugin_actions_map(app.store, c)
+        actions_map = _build_plugin_actions_map(app.store, c, app.cfg)
         states.extend(
             _plugin_effectively_enabled(p, _row_action(p, actions_map))
             for p in rows
@@ -3894,6 +3891,7 @@ def _plugin_copies_disabled(app: AppContext, plugin_name: str, connector: str) -
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install block list.
 
@@ -3906,6 +3904,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
+    name = asset_lists.policy_rule_name("plugin", name)
     connector = _resolve_connector_scope(app, connector_flag)
     _refuse_managed_bridge_action(
         app,
@@ -3914,20 +3913,14 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         action="block",
     )
     plugin_name, hermes_path = _policy_plugin_target(app, name, connector)
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     if not reason:
         reason = "manual block via CLI"
 
     if connector:
         if pe.is_blocked_for_connector("plugin", plugin_name, connector):
-            if app.store and app.store.has_action(
-                "plugin",
-                plugin_name,
-                "install",
-                "block",
-                connector,
-            ):
+            if app.store and asset_lists.has_entry(app.cfg, app.store, "plugin", plugin_name, connector, "block"):
                 click.echo(f"Already blocked for {connector}: {plugin_name}")
             else:
                 click.echo(f"Already blocked by unscoped policy (covers {connector}): {plugin_name}")
@@ -3982,11 +3975,11 @@ def _plugin_only_allow_entry(app: AppContext, pe, plugin_name: str, connector: s
         return False
     if connector:
         restrictive = (
-            app.store.has_action("plugin", plugin_name, "install", "block", connector)
+            asset_lists.has_entry(app.cfg, app.store, "plugin", plugin_name, connector, "block")
             or app.store.has_action("plugin", plugin_name, "file", "quarantine", connector)
             or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
         )
-        allowed = app.store.has_action("plugin", plugin_name, "install", "allow", connector)
+        allowed = asset_lists.has_entry(app.cfg, app.store, "plugin", plugin_name, connector, "allow")
     else:
         restrictive = (
             pe.is_blocked("plugin", plugin_name)
@@ -4031,17 +4024,18 @@ def _plugin_unblock_followup(plugin_name: str, connector: str, all_only_allow: b
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove plugin enforcement state without adding an allow entry."""
     from defenseclaw.enforce import PolicyEngine
 
     connector = _resolve_connector_scope(app, connector_flag)
     plugin_name, _hermes_path = _policy_plugin_target(app, name, connector)
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     if connector:
         has_state = bool(app.store) and (
-            app.store.has_action("plugin", plugin_name, "install", "block", connector)
-            or app.store.has_action("plugin", plugin_name, "install", "allow", connector)
+            asset_lists.has_entry(app.cfg, app.store, "plugin", plugin_name, connector, "block")
+            or asset_lists.has_entry(app.cfg, app.store, "plugin", plugin_name, connector, "allow")
             or app.store.has_action("plugin", plugin_name, "file", "quarantine", connector)
             or app.store.has_action("plugin", plugin_name, "runtime", "disable", connector)
         )
@@ -4130,6 +4124,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install allow list.
 
@@ -4141,32 +4136,47 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
+    name = asset_lists.policy_rule_name("plugin", name)
     # P-A connector-scoped allow: write the narrowed entry and clear residual
     # file/runtime state for that peer. The gateway runtime-enable dance below
     # is for the unscoped/OpenClaw runtime lane and stays on the bare path.
     connector_scope = _resolve_connector_scope(app, connector_flag)
     plugin_name, hermes_path = _policy_plugin_target(app, name, connector_scope)
     runtime_name = plugin_name
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
+
+    # A quarantined copy is absent from installed directories. Allowing it now
+    # would create a name-only rule and clear the journal needed by restore.
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+
+    quarantines = PluginEnforcer(app.cfg.quarantine_dir)
+    scopes = [connector_scope] if connector_scope else _active_plugin_connectors(app)
+    scopes = [*scopes, ""]  # Legacy/global quarantine slot.
+    journal_quarantine = any(
+        entry.target_name == plugin_name
+        and entry.actions.file == "quarantine"
+        and (not connector_scope or entry.connector in ("", connector_scope))
+        for entry in pe.list_by_type("plugin")
+    )
+    if not asset_lists.is_secure_client(app.cfg) and (
+        journal_quarantine or any(quarantines.is_quarantined(plugin_name, scope) for scope in scopes)
+    ):
+        raise click.ClickException(
+            f"{plugin_name!r} is quarantined; restore it before allowing the installed copy"
+        )
 
     if not reason:
         reason = "manual allow via CLI"
 
     if connector_scope:
         if pe.is_allowed_for_connector("plugin", plugin_name, connector_scope):
-            if app.store and app.store.has_action(
-                "plugin",
-                plugin_name,
-                "install",
-                "allow",
-                connector_scope,
-            ):
+            if app.store and asset_lists.has_entry(app.cfg, app.store, "plugin", plugin_name, connector_scope, "allow"):
                 click.echo(f"Already allowed for {connector_scope}: {plugin_name}")
             else:
                 click.echo(f"Already allowed by unscoped policy (covers {connector_scope}): {plugin_name}")
             return
-        pe.allow_for_connector("plugin", plugin_name, connector_scope, reason)
         plugin_path = hermes_path or _resolve_plugin_path(app, plugin_name, connector_scope)
+        pe.allow_for_connector("plugin", plugin_name, connector_scope, reason, plugin_path or "")
         if plugin_path:
             pe.set_source_path("plugin", plugin_name, plugin_path, connector_scope)
         click.secho(f"[plugin] Allowed {plugin_name!r} ({connector_scope}).", fg="green")
@@ -4187,8 +4197,8 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     targets = _plugin_policy_fanout_connectors(app, pe, plugin_name)
     if targets and (len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"):
         for target_connector in targets:
-            pe.allow_for_connector("plugin", plugin_name, target_connector, reason)
             plugin_path = _resolve_plugin_path(app, plugin_name, target_connector)
+            pe.allow_for_connector("plugin", plugin_name, target_connector, reason, plugin_path or "")
             if plugin_path:
                 pe.set_source_path("plugin", plugin_name, plugin_path, target_connector)
             click.secho(f"[plugin] Allowed {plugin_name!r} ({target_connector}).", fg="green")
@@ -4217,12 +4227,8 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
         if runtime_cleared and runtime_name != plugin_name:
             pe.enable("plugin", runtime_name)
 
-    if runtime_cleared:
-        pe.allow("plugin", plugin_name, reason)
-    else:
-        app.store.set_action_field("plugin", plugin_name, "install", "allow", reason)
-
     plugin_path = _resolve_plugin_path(app, plugin_name)
+    pe.allow("plugin", plugin_name, reason, plugin_path or "", clear_journal=runtime_cleared)
     if plugin_path:
         pe.set_source_path("plugin", plugin_name, plugin_path)
     if runtime_cleared:
@@ -4302,7 +4308,7 @@ def disable(app: AppContext, name: str, reason: str, connector_flag: str) -> Non
     if not reason:
         reason = "manual disable via CLI"
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     if not connector_flag and (len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"):
         targets = _plugin_match_dir_scopes(app, plugin_name)
         if not targets:
@@ -4396,7 +4402,7 @@ def enable(app: AppContext, name: str, connector_flag: str) -> None:
     if connector_flag and connector != "openclaw":
         _plugin_match_dir_scopes(app, plugin_name, connector)
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     if not connector_flag and (len(_active_plugin_connectors(app)) > 1 or connector != "openclaw"):
         targets = _plugin_match_dir_scopes(app, plugin_name)
         if not targets:
@@ -4549,7 +4555,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
     if not targets:
         if not reason:
             reason = "manual quarantine via CLI"
-        pe = PolicyEngine(app.store)
+        pe = PolicyEngine(app.store, app.cfg)
         quarantined_connectors = (
             [resolved_connector]
             if resolved_connector and pe_enforcer.is_quarantined(plugin_name, resolved_connector)
@@ -4565,7 +4571,7 @@ def quarantine(app: AppContext, name: str, reason: str, connector_flag: str) -> 
 
     if not reason:
         reason = "manual quarantine via CLI"
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
 
     for target_connector, plugin_path in targets:
         dest = pe_enforcer.quarantine(
@@ -4620,7 +4626,7 @@ def restore(app: AppContext, name: str, restore_path: str, connector_flag: str) 
 
     plugin_name = _validated_plugin_argument(name)
 
-    pe = PolicyEngine(app.store)
+    pe = PolicyEngine(app.store, app.cfg)
     alias_scope = _resolve_connector_scope(app, connector_flag) if connector_flag else ""
     if "/" in name.strip("/\\"):
         # GAP-2464: "web/x" names the category plugin itself, not a flat "x".
@@ -4899,7 +4905,7 @@ def _plugin_info_card(
         if connector
         else _build_plugin_scan_map(app.store).get(plugin_name)
     )
-    actions_map = _build_plugin_actions_map(app.store, connector)
+    actions_map = _build_plugin_actions_map(app.store, connector, app.cfg)
     scoped_action = None
     if suppress_global_action_only and connector and app.store is not None:
         try:
@@ -4916,7 +4922,7 @@ def _plugin_info_card(
     if info_map is None and not quarantined and connector and app.store is not None:
         from defenseclaw.enforce import PolicyEngine
 
-        alias = _quarantined_plugin_alias(PolicyEngine(app.store), plugin_name, connector)
+        alias = _quarantined_plugin_alias(PolicyEngine(app.store, app.cfg), plugin_name, connector)
         if alias and alias != plugin_name and pe_enforcer.is_quarantined(alias, connector):
             action_name = alias
             quarantined = True
@@ -5223,7 +5229,7 @@ def _latest_plugin_scan_for_connector(
     return matches[0][1]
 
 
-def _build_plugin_actions_map(store, connector: str = "") -> dict:
+def _build_plugin_actions_map(store, connector: str = "", cfg=None) -> dict:
     """Build a map of plugin-name -> effective ActionEntry from the DB.
 
     Resolves most-specific-wins per name (P-A): the connector-scoped row
@@ -5235,7 +5241,7 @@ def _build_plugin_actions_map(store, connector: str = "") -> dict:
     if store is None:
         return actions_map
     try:
-        entries = store.list_actions_by_type("plugin")
+        entries = asset_lists.merge_operator_entries(store.list_actions_by_type("plugin"), cfg, "plugin")
     except Exception as exc:
         click.echo(f"warning: failed to load plugin actions data: {exc}", err=True)
         return actions_map

@@ -152,6 +152,7 @@ type V8ResourceContext struct {
 	schemaURL                      string
 	values                         map[string]string
 	custom                         observability.TelemetryCustomResourceAttributes
+	secureClientAliases            bool
 	resourceDroppedAttributesCount uint32
 }
 
@@ -200,14 +201,14 @@ func (context V8ResourceContext) Values() map[string]string {
 	return cloneV8ResourceValues(context.values)
 }
 
-// CustomResourceAttributes returns the sealed custom-resource projection and
-// compatibility-alias policy owned by this provider generation.
+// CustomResourceAttributes returns the sealed custom-resource projection owned
+// by this provider generation.
 func (context V8ResourceContext) CustomResourceAttributes() observability.TelemetryCustomResourceAttributes {
 	return context.custom
 }
 
 // TraceResourceFields returns a fresh structural resource input with the same
-// sealed custom attributes and alias policy used by the physical SDK resource.
+// sealed custom attributes used by the physical SDK resource.
 func (context V8ResourceContext) TraceResourceFields() V8TraceResourceFields {
 	value := func(key string) observability.Optional[string] {
 		if candidate := context.values[key]; candidate != "" {
@@ -221,6 +222,9 @@ func (context V8ResourceContext) TraceResourceFields() V8TraceResourceFields {
 		},
 		context.custom,
 	)
+	if context.secureClientAliases {
+		resourceInput = observability.WithSecureClientResourceAliases(resourceInput)
+	}
 	return V8TraceResourceFields{
 		Resource:                  resourceInput,
 		ServiceName:               context.values["service.name"],
@@ -1063,7 +1067,11 @@ func newV8ResourceContext(
 	if identity.deviceFingerprint != "" {
 		values["defenseclaw.device.public_key_fingerprint"] = identity.deviceFingerprint
 	}
-	if snapshot.ResourceAttributeEntries.CompatibilityAliasesEnabled() {
+	// The retired aliases remain part of Secure Client v8 OTLP resources.
+	// Only that plan carries this switch; new v9 plans omit the aliases.
+	secureClientAliases := snapshot.TracePolicy.CompatibilityAliases != nil &&
+		*snapshot.TracePolicy.CompatibilityAliases
+	if secureClientAliases {
 		for canonical, legacy := range map[string]string{
 			"deployment.environment.name":               "deployment.environment",
 			"defenseclaw.deployment.mode":               "deployment.mode",
@@ -1080,9 +1088,10 @@ func newV8ResourceContext(
 		}
 	}
 	context := V8ResourceContext{
-		schemaURL: v8ResourceSchemaURL,
-		values:    values,
-		custom:    snapshot.ResourceAttributeEntries,
+		schemaURL:           v8ResourceSchemaURL,
+		values:              values,
+		custom:              snapshot.ResourceAttributeEntries,
+		secureClientAliases: secureClientAliases,
 	}
 	if err := validateV8ResourceContext(context); err != nil {
 		return V8ResourceContext{}, err
@@ -1095,7 +1104,13 @@ func validateV8ResourceContext(context V8ResourceContext) error {
 	for key, value := range context.values {
 		attributes[key] = value
 	}
-	if err := observability.ValidateTelemetryResourceAttributes(attributes); err != nil {
+	var err error
+	if context.secureClientAliases {
+		err = observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(attributes)
+	} else {
+		err = observability.ValidateTelemetryResourceAttributes(attributes)
+	}
+	if err != nil {
 		return newV8ProviderError(V8ProviderErrorInitialization, nil)
 	}
 	return nil

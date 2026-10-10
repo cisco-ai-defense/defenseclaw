@@ -13,7 +13,9 @@
 package managed
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,23 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
+
+// UntrustedPrincipalError is a path element whose owner, or one of whose
+// write-like allow entries, names a principal the trust check does not
+// accept. Error keeps the text the Secure Client profile pins; the
+// standalone lifecycle reads the fields to name the account and the fix
+// (GAP-0528, GAP-0562).
+type UntrustedPrincipalError struct {
+	// Path is the file or folder that failed the check.
+	Path string
+	// SID is the untrusted principal.
+	SID string
+	// Owner is true for an untrusted owner and false for a write-like entry.
+	Owner bool
+	text  string
+}
+
+func (e *UntrustedPrincipalError) Error() string { return e.text }
 
 func ValidateTrustedConfigPath(path string) error {
 	return ValidateTrustedFilePath(path, "managed config")
@@ -164,6 +183,62 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) e
 	)
 }
 
+// windowsRulePackTreeMaxEntries bounds the walk of an administrator rule pack.
+const windowsRulePackTreeMaxEntries = 20000
+
+var errWindowsRulePackTreeTooLarge = errors.New("too many entries")
+
+// ValidateTrustedRulePackTree is the standalone lifecycle check of an
+// administrator rule pack. The pack folder and the folders above it get the
+// check the gateway makes of a managed rule pack (ValidateTrustedServiceRuntimeDir),
+// and then every folder and file in the pack, without following links: no
+// reparse point, owned by Administrators, LocalSystem, TrustedInstaller or
+// the gateway service, and no write-like entry for anyone else. The gateway
+// checks only the folder, so a standard user with Modify on the pack manifest
+// or a rules file changed what the agents of every user are held to and,
+// against a digest pin, kept the gateway from starting at the next restart
+// (GAP-0672). A service account that does not resolve yet (before the first
+// install) is held to the administrator-only rule.
+func ValidateTrustedRulePackTree(dir, label, serviceAccount string) error {
+	writer, err := windowsVirtualServiceSID(serviceAccount)
+	if err != nil {
+		writer = nil
+	}
+	if err := validateTrustedWindowsRuntimeDir(dir, label, writer); err != nil {
+		return err
+	}
+	root, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	return walkWindowsRulePackTree(root, func(path string, isDir bool) error {
+		return validateTrustedWindowsPathElementWithWriter(path, isDir, label, writer, false)
+	})
+}
+
+// walkWindowsRulePackTree calls check for every folder and file below root
+// (root itself excluded: the caller checks it with its parents) without
+// following links, and stops at the first refusal.
+func walkWindowsRulePackTree(root string, check func(path string, isDir bool) error) error {
+	entries := 0
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			return nil
+		}
+		if entries++; entries > windowsRulePackTreeMaxEntries {
+			return errWindowsRulePackTreeTooLarge
+		}
+		return check(path, entry.IsDir())
+	})
+	if errors.Is(err, errWindowsRulePackTreeTooLarge) {
+		return fmt.Errorf("%s has more than %d entries", root, windowsRulePackTreeMaxEntries)
+	}
+	return err
+}
+
 func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows.SID) error {
 	if label == "" {
 		label = "managed runtime dir"
@@ -241,7 +316,12 @@ func validateTrustedWindowsPathElementWithWriter(
 		if allowedWriter != nil {
 			expected = fmt.Sprintf("%s, or the pinned service SID %s", expected, sidString(allowedWriter))
 		}
-		return fmt.Errorf("%s: owner %s is not trusted for %s; expected %s", path, sidString(owner), label, expected)
+		return &UntrustedPrincipalError{
+			Path:  path,
+			SID:   sidString(owner),
+			Owner: true,
+			text:  fmt.Sprintf("%s: owner %s is not trusted for %s; expected %s", path, sidString(owner), label, expected),
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
@@ -295,7 +375,11 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 			continue
 		}
 		if !windowsTrustedOwner(sid) && !sameWindowsSID(sid, allowedWriter) {
-			return fmt.Errorf("%s: untrusted Windows principal %s has write-like access mask 0x%x", path, sidString(sid), uint32(ace.Mask))
+			return &UntrustedPrincipalError{
+				Path: path,
+				SID:  sidString(sid),
+				text: fmt.Sprintf("%s: untrusted Windows principal %s has write-like access mask 0x%x", path, sidString(sid), uint32(ace.Mask)),
+			}
 		}
 	}
 	return nil

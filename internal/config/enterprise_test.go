@@ -11,6 +11,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -295,8 +296,8 @@ func TestStandaloneDropsSecureClientSurfaces(t *testing.T) {
 		Enterprise:     EnterpriseConfig{Profile: "standalone"},
 		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://us.api.inspect.aidefense.security.cisco.com"},
 	}
-	if standalone.HasManagedAIDLogSink() {
-		t.Fatal("standalone must not require the CMID-authenticated AI Defense sink")
+	if standalone.SecureClientIntegration() {
+		t.Fatal("standalone must not take the Secure Client integration (CMID-authenticated AI Defense sink)")
 	}
 	if standalone.ManagedIPCEnabled() {
 		t.Fatal("standalone has no Secure Client GUI and must not expose IPC")
@@ -305,7 +306,7 @@ func TestStandaloneDropsSecureClientSurfaces(t *testing.T) {
 		DeploymentMode: "managed_enterprise",
 		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://us.api.inspect.aidefense.security.cisco.com"},
 	}
-	if !secureClient.HasManagedAIDLogSink() || !secureClient.ManagedIPCEnabled() {
+	if !secureClient.SecureClientIntegration() || !secureClient.ManagedIPCEnabled() {
 		t.Fatal("Secure Client surfaces must stay enabled for an unprofiled managed config")
 	}
 }
@@ -319,6 +320,34 @@ func TestManagedAIDDestinationSkippedForStandalone(t *testing.T) {
 	})
 	if err != nil || got != plan {
 		t.Fatalf("standalone must leave the observability plan untouched: plan=%p got=%p err=%v", plan, got, err)
+	}
+}
+
+// A Secure Client plan keeps the retired trace_policy.compatibility_aliases
+// switch of main, so the plan digest every local audit record carries stays
+// the digest of main; a standalone plan does not carry it (issue #1092).
+func TestSecureClientPlanKeepsTheAliasSwitchOfMain(t *testing.T) {
+	if runtime.GOOS == "linux" {
+		t.Skip("the Secure Client profile exists on macOS and Windows only")
+	}
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.EnterpriseProfileEnv, "")
+	for profile, want := range map[string]bool{managed.ProfileSecureClient: true, managed.ProfileStandalone: false} {
+		raw := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: " + profile + "\n"
+		compiled, err := ParseCompileObservabilityV8(filepath.Join(t.TempDir(), "config.yaml"), []byte(raw),
+			ObservabilityV8CompileOptions{DefaultDataDir: t.TempDir()})
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		var plan struct {
+			TracePolicy map[string]any `json:"trace_policy"`
+		}
+		if err := json.Unmarshal(compiled.Plan.EffectiveJSON(), &plan); err != nil {
+			t.Fatal(err)
+		}
+		if value, ok := plan.TracePolicy["compatibility_aliases"]; ok != want || (ok && value != true) {
+			t.Fatalf("%s: trace_policy.compatibility_aliases = %v (present %t), want present %t", profile, value, ok, want)
+		}
 	}
 }
 
@@ -692,7 +721,7 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, "config.yaml")
-	body := fmt.Sprintf("deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
+	body := fmt.Sprintf("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\nguardrail:\n  rule_pack_dir: %s\n", root, pack)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -705,5 +734,62 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 	}
 	if cfg.Gateway.APIPort == 0 {
 		t.Fatal("lifecycle recovery load has no gateway API port")
+	}
+}
+
+// GAP-1193: a connector that inherits the global rule pack is not checked
+// again, so a refusal names guardrail.rule_pack_dir, or guardrail.rule_pack
+// when the global pack is selected by name (GAP-0039).
+func TestReferencedRulePackDirsIncludesApplicationProtection(t *testing.T) {
+	cfg := &Config{PolicyDir: "/etc/defenseclaw/policies"}
+	cfg.Guardrail.RulePack = "default"
+	cfg.ApplicationProtection.Enabled = true
+	cfg.ApplicationProtection.Guardrail.RulePack = "strict"
+	cfg.ApplicationProtection.Connectors = map[string]ApplicationProtectionConnectorConfig{
+		"codex": {Guardrail: PerConnectorGuardrailConfig{RulePack: "permissive"}},
+	}
+	dirs := cfg.ReferencedRulePackDirs()
+	for label, want := range map[string]string{
+		"application_protection.guardrail.rule_pack":                  filepath.Join(cfg.PolicyDir, "guardrail", "strict"),
+		"application_protection.connectors.codex.guardrail.rule_pack": filepath.Join(cfg.PolicyDir, "guardrail", "permissive"),
+	} {
+		if got := dirs[label]; got != want {
+			t.Errorf("%s = %q, want %q", label, got, want)
+		}
+	}
+}
+
+func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
+	got := RulePackCheckOrder(map[string]string{
+		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.amp.rule_pack_dir":   "/etc/defenseclaw/policies/guardrail/custom",
+		"guardrail.connectors.codex.rule_pack_dir": "/etc/defenseclaw/policies/guardrail/codex",
+	})
+	want := []string{"guardrail.rule_pack_dir", "guardrail.connectors.codex.rule_pack_dir"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
+func TestRulePackCheckOrderNamesTheSelectedPack(t *testing.T) {
+	got := RulePackCheckOrder(map[string]string{
+		"guardrail.rule_pack":                      `C:\packs\acme`,
+		"guardrail.connectors.amp.rule_pack_dir":   `C:\packs\acme`,
+		"guardrail.custom_packs.acme.path":         `C:\packs\acme`,
+		"guardrail.connectors.codex.rule_pack_dir": `C:\packs\codex`,
+	})
+	want := "guardrail.rule_pack,guardrail.connectors.codex.rule_pack_dir"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("order = %v, want %s", got, want)
+	}
+}
+
+// TestValidateCandidateRejectsManagedJudgeInlineKey keeps role-specific LLM
+// credentials out of a standalone managed v9 config before a writer commits it.
+func TestValidateCandidateRejectsManagedJudgeInlineKey(t *testing.T) {
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\nguardrail:\n  judge:\n    llm:\n      api_key: inline-test-key\nobservability: {}\n")
+	err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw)
+	if err == nil || !strings.Contains(err.Error(), "guardrail.judge.llm.api_key") {
+		t.Fatalf("ValidateCandidate() error = %v, want guardrail.judge.llm.api_key refusal", err)
 	}
 }

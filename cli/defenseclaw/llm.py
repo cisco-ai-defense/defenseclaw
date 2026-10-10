@@ -84,6 +84,7 @@ import sys
 import time
 from typing import Any
 
+from defenseclaw import envvars
 from defenseclaw.gateway_error_codes import ERR_LLM_BRIDGE_ERROR
 
 # Opt-in debug flag. Default off so the plugin scanner stays quiet on
@@ -96,7 +97,7 @@ from defenseclaw.gateway_error_codes import ERR_LLM_BRIDGE_ERROR
 # here because this module is executed as a short-lived subprocess
 # without any log configuration, and configuring a root logger per
 # invocation is worse than a plain stderr line.
-_DEBUG = os.environ.get("DEFENSECLAW_LLM_DEBUG", "").strip() not in ("", "0", "false", "False")
+_DEBUG = (envvars.lookup("DEFENSECLAW_LLM_DEBUG") or "").strip() not in ("", "0", "false", "False")
 
 
 def _debug(msg: str) -> None:
@@ -725,7 +726,8 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
         "timeout": max(1, int(timeout or 5)),
         "num_retries": 0,
     }
-    base_url = getattr(llm_config, "base_url", "") or ""
+    request_base_url = getattr(llm_config, "request_base_url", None)
+    base_url = (request_base_url() if callable(request_base_url) else getattr(llm_config, "base_url", "")) or ""
     if base_url:
         kwargs["api_base"] = base_url
     if api_key:

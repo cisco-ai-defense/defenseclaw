@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -463,13 +464,22 @@ func TestWindowsEnterpriseDiscoveryQualifiedUserExcludesAmbiguousRuntimeFinding(
 		if user == `DCLAB\alice` {
 			return []string{domainSID}
 		}
+		if user == `.\alice` {
+			return []string{localSID}
+		}
 		return nil
 	}
-	stubEnterpriseDiscoveryRuntime(t, &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
+	runtimeView := &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
 		{PID: 41, User: "alice", Process: "node"},
-		{PID: 42, User: `DCLAB\alice`, Process: "python3"},
-		{PID: 43, User: `LOCAL\alice`, Process: "codex"},
-	}}, nil)
+		{PID: 42, User: `DCLAB\alice`, UserSID: domainSID, Process: "python3"},
+		{PID: 43, User: `LOCAL\alice`, UserSID: localSID, Process: "codex"},
+	}}
+	stubEnterpriseDiscoveryRuntime(t, runtimeView, nil)
+	enterpriseDiscoveryRuntime = func() (*enterpriseRuntimeView, error) {
+		view := *runtimeView
+		view.Findings = append([]enterpriseRuntimeFinding(nil), runtimeView.Findings...)
+		return &view, nil
+	}
 
 	var out bytes.Buffer
 	if err := writeWindowsEnterpriseDiscovery(&out, `DCLAB\alice`, true); err != nil {
@@ -483,10 +493,103 @@ func TestWindowsEnterpriseDiscoveryQualifiedUserExcludesAmbiguousRuntimeFinding(
 		report.Runtime == nil || len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != 42 {
 		t.Fatalf("qualified account runtime findings: %s", out.String())
 	}
+	for _, tc := range []struct {
+		user string
+		want int
+	}{
+		{user: "alice", want: 3},
+		{user: `.\alice`, want: 43},
+		{user: localSID, want: 43},
+		{user: domainSID, want: 42},
+	} {
+		out.Reset()
+		if err := writeWindowsEnterpriseDiscovery(&out, tc.user, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Runtime == nil || (tc.want == 3 && len(report.Runtime.Findings) != 3) ||
+			(tc.want != 3 && (len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != tc.want)) {
+			t.Fatalf("--user %q runtime findings: %s", tc.user, out.String())
+		}
+	}
+}
+
+// GAP-1117/GAP-1250: every spelling of one account lists that account and
+// exactly its runtime findings; a host-wide finding the gateway could not
+// attribute matches no account and is listed apart.
+func TestWindowsEnterpriseDiscoveryUserFormsListOnlyThatAccountsRuntimeFindings(t *testing.T) {
+	const aliceSID, bobSID = "S-1-5-21-1-2-3-1104", "S-1-5-21-9-8-7-1001"
+	previousReport, previousIDs, previousCfg := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg = previousReport, previousIDs, previousCfg
+	})
+	cfg = nil
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Codex", Category: "supported_connector", UserName: "alice", UserID: aliceSID},
+			{Name: "Codex", Category: "supported_connector", UserName: "bob", UserID: bobSID},
+		}}, "127.0.0.1:18970", nil
+	}
+	// A fake LSA: the workgroup test host has no DCLAB domain.
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\alice`: {aliceSID}, `DCFC-WIN2-RS1\bob`: {bobSID}, `.\bob`: {bobSID}}[user]
+	}
+	findings := []enterpriseRuntimeFinding{
+		{PID: 10, Process: "codex.exe", User: `DCLAB\alice`, UserSID: aliceSID, Attribution: "process_owner"},
+		{PID: 11, Process: "uvx.exe", User: `DCLAB\alice`, UserSID: aliceSID, Attribution: "session"},
+		{PID: 20, Process: "python.exe", User: `DCFC-WIN2-RS1\bob`, UserSID: bobSID, Attribution: "enrolled_profile"},
+		{PID: 30, Process: "claude", Attribution: "unattributed", AttributionReason: "owner unknown"},
+	}
+	stubEnterpriseDiscoveryRuntime(t, nil, nil)
+	enterpriseDiscoveryRuntime = func() (*enterpriseRuntimeView, error) {
+		return &enterpriseRuntimeView{Enabled: true, Findings: append([]enterpriseRuntimeFinding(nil), findings...)}, nil
+	}
+	for _, test := range []struct {
+		user, sid string
+		pids      []int
+	}{
+		{"alice", aliceSID, []int{10, 11}},
+		{`DCLAB\alice`, aliceSID, []int{10, 11}},
+		{aliceSID, aliceSID, []int{10, 11}},
+		{"bob", bobSID, []int{20}},
+		{`DCFC-WIN2-RS1\bob`, bobSID, []int{20}},
+		{`.\bob`, bobSID, []int{20}},
+		{bobSID, bobSID, []int{20}},
+	} {
+		var out bytes.Buffer
+		var report enterpriseDiscoveryReport
+		if err := writeWindowsEnterpriseDiscovery(&out, test.user, true); err != nil || json.Unmarshal(out.Bytes(), &report) != nil {
+			t.Fatalf("--user %s: %v\n%s", test.user, err, out.String())
+		}
+		if len(report.Accounts) != 1 || report.Accounts[0].SID != test.sid || report.Runtime == nil {
+			t.Fatalf("--user %s accounts: %s", test.user, out.String())
+		}
+		var pids []int
+		for _, finding := range report.Runtime.Findings {
+			pids = append(pids, finding.PID)
+		}
+		if !slices.Equal(pids, test.pids) {
+			t.Errorf("--user %s runtime findings = %v, want %v", test.user, pids, test.pids)
+		}
+		if len(report.Runtime.UnattributedFindings) != 1 || report.Runtime.UnattributedFindings[0].PID != 30 {
+			t.Errorf("--user %s unattributed = %+v, want the host-wide pid 30 apart", test.user, report.Runtime.UnattributedFindings)
+		}
+	}
+	var text bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&text, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "4 finding(s), 1 of them unattributed (host-wide)") ||
+		!strings.Contains(text.String(), "host-wide (unattributed)") {
+		t.Fatalf("summary does not label the unattributed finding:\n%s", text.String())
+	}
 }
 
 // A Secure Client computer keeps the enterprise groups and the discovery
-// --user match it had before the identity views (GAP-0138, issue #1092).
+// --user match it had before the identity views (GAP-0138), and drops the
+// other commands main does not have (issue #1092).
 func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	previousHost, previousCfg, previousReport := secureClientHost, cfg, enterpriseDiscoveryGatewayReport
 	t.Cleanup(func() {
@@ -505,12 +608,31 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	acpGroup.AddCommand(&cobra.Command{Use: "enroll"}, &cobra.Command{Use: "setup", Annotations: enterpriseACPSetupCmd.Annotations})
 	enterprise.AddCommand(group, acpGroup)
 	root.AddCommand(enterprise)
+	policyGroup := &cobra.Command{Use: "policy"}
+	policyGroup.AddCommand(&cobra.Command{Use: "show", Short: policyShowCmd.Short, Annotations: policyShowCmd.Annotations},
+		&cobra.Command{Use: "digest", Annotations: policyDigestCmd.Annotations})
+	scanGroup := &cobra.Command{Use: "scan"}
+	scanGroup.AddCommand(&cobra.Command{Use: "code"}, &cobra.Command{Use: "skill", Annotations: scanSkillCmd.Annotations},
+		&cobra.Command{Use: "mcp", Annotations: scanMCPCmd.Annotations}, &cobra.Command{Use: "plugin", Annotations: scanPluginCmd.Annotations})
+	root.AddCommand(policyGroup, scanGroup)
+	// Nor the config group, audit export --db, and the newer help of
+	// rulepack and sandbox setup --no-mounts (GAP-0270).
+	configGroup := &cobra.Command{Use: "config", Annotations: configCmd.Annotations}
+	export := &cobra.Command{Use: "export", Long: auditExportCmd.Long, Annotations: auditExportCmd.Annotations}
+	db := *auditExportCmd.Flags().Lookup("db")
+	export.Flags().AddFlag(&db)
+	rulePack := &cobra.Command{Use: "rulepack", Long: rulePackCmd.Long, Annotations: rulePackCmd.Annotations}
+	sandboxSetup := newSandboxSetupCmd()
+	root.AddCommand(configGroup, export, rulePack, sandboxSetup)
 	hook := newHookCmd()
 	root.AddCommand(hook)
 	secureClientHost = func() bool { return false }
 	keepCommandTreeOfMainOnSecureClient(root)
-	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || hook.Commands()[0].Name() != "session-facts" {
+	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || len(hook.Commands()) != 2 {
 		t.Fatalf("standalone groups have %d and %d commands, want the identity views and setup too", got, len(acpGroup.Commands()))
+	}
+	if len(policyGroup.Commands()) != 2 || len(scanGroup.Commands()) != 4 {
+		t.Fatalf("standalone policy %v, scan %v: want policy digest and scan skill|mcp|plugin", policyGroup.Commands(), scanGroup.Commands())
 	}
 	secureClientHost = func() bool { return true }
 	keepCommandTreeOfMainOnSecureClient(root)
@@ -519,11 +641,23 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 		t.Fatalf("Secure Client group = %v, --user %q, want discovery only with the usage of main", got, discovery.Flag("user").Usage)
 	}
 	if len(hook.Commands()) != 0 {
-		t.Fatal("Secure Client retained hook session-facts")
+		t.Fatal("Secure Client retained hook session-facts or resolve-writes")
 	}
 	if got := acpGroup.Commands(); len(got) != 1 || got[0].Name() != "enroll" ||
 		!strings.HasSuffix(acpGroup.Long, "ACP runtime. The gateway never writes an editor profile or user home.") {
 		t.Fatalf("Secure Client acp group = %v, help %q, want the ones of main", got, acpGroup.Long)
+	}
+	if p, s := policyGroup.Commands(), scanGroup.Commands(); len(p) != 1 || p[0].Name() != "show" || len(s) != 1 || s[0].Name() != "code" {
+		t.Fatalf("Secure Client policy %v, scan %v: want the commands of main (policy show, scan code)", p, s)
+	}
+	if got := policyGroup.Commands()[0].Short; got != "Display the current OPA data.json policy configuration" {
+		t.Fatalf("Secure Client policy show help = %q, want the line of main", got)
+	}
+	if !configGroup.Hidden || export.Flag("db") != nil || strings.Contains(export.Long, "--db") ||
+		!strings.HasSuffix(rulePack.Long, "pointing guardrail.rule_pack_dir at it.") ||
+		sandboxSetup.Flag("no-mounts").Usage != "leave bind mounts off (Linux); every run then works on a copy" {
+		t.Fatalf("Secure Client config hidden=%v, export --db %v, help %q / %q / %q: want the tree of main",
+			configGroup.Hidden, export.Flag("db"), export.Long, rulePack.Long, sandboxSetup.Flag("no-mounts").Usage)
 	}
 
 	stubEnterpriseDiscoveryRuntime(t, nil, errors.New("stub"))

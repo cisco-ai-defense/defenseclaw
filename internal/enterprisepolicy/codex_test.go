@@ -132,6 +132,24 @@ func TestCodexReconcilePreservesAdministratorBytes(t *testing.T) {
 	if got := string(stripCodexOwned([]byte(merged))); got != adminCodexRequirements {
 		t.Fatalf("stripping DefenseClaw content must return the exact administrator bytes:\n--- got\n%s\n--- want\n%s", got, adminCodexRequirements)
 	}
+	// Only DefenseClaw's own lines are added: no blank separators around
+	// its blocks (GAP-0903).
+	var others []string
+	inBlock := false
+	for _, line := range strings.SplitAfter(merged, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case trimmed == codexHeadBegin || trimmed == codexTailBegin:
+			inBlock = true
+		case trimmed == codexHeadEnd || trimmed == codexTailEnd:
+			inBlock = false
+		case !inBlock && !strings.HasSuffix(trimmed, codexOwnedMark):
+			others = append(others, line)
+		}
+	}
+	if got := strings.Join(others, ""); got != adminCodexRequirements {
+		t.Fatalf("DefenseClaw added lines outside its blocks:\n--- got\n%s\n--- want\n%s", got, adminCodexRequirements)
+	}
 	if !strings.Contains(merged, "hooks = true "+codexOwnedMark) || !strings.Contains(merged, "managed_dir = \"/opt/defenseclaw/bin\" "+codexOwnedMark) {
 		t.Fatalf("owned lines not inserted into administrator tables:\n%s", merged)
 	}
@@ -149,6 +167,28 @@ func TestCodexReconcilePreservesAdministratorBytes(t *testing.T) {
 	again, err := codexTarget{}.Reconcile(opts)
 	if err != nil || again.Changed {
 		t.Fatalf("second reconcile changed the file: %v %+v", err, again)
+	}
+}
+
+// A company requirements.toml saved by a Windows editor (UTF-8 BOM, CRLF)
+// is read and merged as Codex reads it: DefenseClaw refused it, so Codex ran
+// without DefenseClaw's hooks (GAP-0917).
+func TestCodexMergesARequirementsFileWithBOMAndCRLF(t *testing.T) {
+	opts := testOptions(t)
+	path := codexPath(t, opts)
+	company := "\ufeff# Company requirements\r\nallowed_approval_policies = [\"on-request\"]\r\n\r\n[features]\r\nweb_search = false\r\n"
+	writeFile(t, path, company)
+	state, err := codexTarget{}.Reconcile(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustNoConflicts(t, state)
+	merged := readFile(t, path)
+	if !strings.HasPrefix(merged, "\ufeff") || string(stripCodexOwned([]byte(merged))) != company {
+		t.Fatalf("the administrator bytes changed:\n%q", merged)
+	}
+	if again, err := (codexTarget{}).Reconcile(opts); err != nil || again.Changed || !again.Covered {
+		t.Fatalf("a second reconcile must find the entries in place once: %v %+v", err, again)
 	}
 }
 
@@ -235,6 +275,28 @@ func TestCodexRemoveRestoresPreimageOrStripsOwned(t *testing.T) {
 	}
 }
 
+// A DefenseClaw hook entry changed to run something else leaves the other
+// entries in place, but the connector is no longer in place: ensure sees the
+// drift and republishes (GAP-0077).
+func TestCodexTamperedEntryIsNotInPlaceUntilRepublished(t *testing.T) {
+	opts := testOptions(t)
+	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	path := codexPath(t, opts)
+	writeFile(t, path, strings.Replace(readFile(t, path), "/opt/defenseclaw/bin/defenseclaw-hook", "/bin/true", 1))
+	result, _ := VerifyAll(opts, []string{"codex"})
+	if len(result.MachinePolicyConnectors) != 0 {
+		t.Fatalf("a tampered requirements.toml still verifies as in place: %+v", result.MachinePolicyConnectors)
+	}
+	if _, err := (codexTarget{}).Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	if result, _ = VerifyAll(opts, []string{"codex"}); len(result.MachinePolicyConnectors) != 1 {
+		t.Fatalf("a republished requirements.toml is not in place: %+v", result.MachinePolicyConnectors)
+	}
+}
+
 func TestCodexVerifyOnlyNeverWrites(t *testing.T) {
 	opts := withPolicy(testOptions(t), "codex", func(p *config.EnterpriseConnectorPolicy) { p.Ownership = "verify_only" })
 	path := codexPath(t, opts)
@@ -245,6 +307,12 @@ func TestCodexVerifyOnlyNeverWrites(t *testing.T) {
 	}
 	if readFile(t, path) != adminCodexRequirements || state.Covered || !strings.Contains(strings.Join(state.Details, " "), "missing_defenseclaw_hooks") {
 		t.Fatalf("verify_only must report missing hooks without writing: %+v", state)
+	}
+	// enterprise policy verify names the export too, not only one conflict
+	// per missing entry (GAP-0918).
+	if verified, _ := VerifyAll(opts, []string{"codex"}); len(verified.States) == 0 ||
+		!strings.Contains(strings.Join(verified.States[0].Details, " "), "policy export --connector codex") {
+		t.Fatalf("policy verify does not name the export: %+v", verified.States)
 	}
 	exported, err := codexTarget{}.Export(opts, "toml")
 	if err != nil {

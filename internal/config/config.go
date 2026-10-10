@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -37,6 +39,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// viperLoadMu guards the process-wide Viper store for the entire config load.
+// A reload and a candidate validation can otherwise exchange defaults and keys.
+var viperLoadMu sync.Mutex
 
 // ReportConfigLoadError is wired by the unified v8 runtime to emit a generated
 // platform-health signal when legacy/recovery config decoding fails.
@@ -262,38 +268,6 @@ type ACPProfile struct {
 	DeniedMethods  []string `mapstructure:"denied_methods" yaml:"denied_methods,omitempty" json:"denied_methods,omitempty"`
 }
 
-// CurrentConfigVersion is the last compatibility-decoder version used by the
-// explicit release upgrader. The strict target runtime is schema v8 and is
-// loaded through LoadRuntimeV8FromBytes plus the observability-v8 compiler; do
-// not use this constant to select target-runtime behavior.
-//
-// v4: replaces the legacy `splunk:` block with a generic `audit_sinks:`
-// list; decouples OTel from any vendor-specific auto-injection. There is
-// no in-process migration shim — the v3→v4 step requires operator action,
-// and Load() emits a hard error when a legacy `splunk:` block is found.
-//
-// v5: introduces the unified `llm:` block at the top level plus optional
-// per-component `llm:` overrides under scanners.*, guardrail, and
-// guardrail.judge. The legacy `default_llm_api_key_env`,
-// `default_llm_model`, `inspect_llm`, `guardrail.model`,
-// `guardrail.api_key_env`, `guardrail.api_base`, `guardrail.judge.model`,
-// `guardrail.judge.api_key_env`, and `guardrail.judge.api_base` fields
-// are migrated in-process by migrateConfig: their values are copied
-// into the matching LLMConfig slots, then the legacy fields are left
-// alone so hand-edited configs keep round-tripping. `defenseclaw setup
-// migrate-llm` writes the canonical v5 shape back to disk.
-//
-// v6: introduces the optional `guardrail.connectors:` map for
-// per-connector guardrail overrides (multi-connector support). The
-// legacy singular `guardrail.connector` field stays valid and keeps
-// driving the single-connector path, so the v5→v6 step is a no-op
-// normalization — no field rewrite is required.
-//
-// v7: introduces named OTel destinations. Legacy flat exporter fields
-// (`otel.endpoint`, `otel.protocol`, and per-signal transport blocks) are
-// migrated in-process so existing installations keep exporting on upgrade.
-const CurrentConfigVersion = 7
-
 type Config struct {
 	ConfigVersion  int    `mapstructure:"config_version"        yaml:"config_version"`
 	ConfigFilePath string `mapstructure:"-" yaml:"-"`
@@ -308,10 +282,18 @@ type Config struct {
 	// legacyConnectorRouteSelectors names the observability route selectors
 	// that list a retired connector ID, for the migration notice.
 	legacyConnectorRouteSelectors []string
+	// SecureClientV8Actions holds the skill_actions, mcp_actions and
+	// plugin_actions of a Secure Client source (critical, high, medium, low,
+	// info), which the gateway compares on reload as main did. Set only by
+	// the loader, only under Secure Client.
+	SecureClientV8Actions map[string][5]SeverityAction `mapstructure:"-" yaml:"-" json:",omitempty"`
 	// LegacyConnectorNotices records connector IDs this load moved to their
 	// replacement (see internal/legacyconnector). The gateway logs them once
 	// per boot and finishes the host-side cleanup. Never serialized.
 	LegacyConnectorNotices []string `mapstructure:"-" yaml:"-"`
+	// RuntimeV8RulePackRebase applies the 0.8.x custom-pack rebase only to
+	// this read-only v8 runtime snapshot. The source pack remains on disk.
+	RuntimeV8RulePackRebase bool `mapstructure:"-" yaml:"-" json:"-"`
 
 	// LLM is the top-level unified LLM configuration. Every LLM-using
 	// component (guardrail, judge, mcp scanner, skill scanner, plugin
@@ -333,6 +315,11 @@ type Config struct {
 	DefaultLLMAPIKeyEnv string `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
 	DefaultLLMModel     string `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
 
+	// LLMProviders declares custom LLM providers (config_version 9). It is
+	// the input custom-providers.json is derived from. Decoded from the
+	// source bytes, not viper, so map keys keep their case.
+	LLMProviders LLMProvidersConfig `mapstructure:"-" yaml:"llm_providers,omitempty"`
+
 	DataDir string `mapstructure:"data_dir"              yaml:"data_dir"`
 	AuditDB string `mapstructure:"audit_db"         yaml:"audit_db"`
 	// JudgeBodiesDB is the standalone SQLite file that holds
@@ -346,47 +333,42 @@ type Config struct {
 	// point this at a separate disk in high-throughput
 	// deployments. The legacy judge_responses rows in audit.db
 	// remain readable; new rows only ever land here.
-	JudgeBodiesDB   string                     `mapstructure:"judge_bodies_db"  yaml:"judge_bodies_db,omitempty"`
-	QuarantineDir   string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir       string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir       string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment     string                     `mapstructure:"environment"      yaml:"environment"`
-	TenantID        string                     `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
-	WorkspaceID     string                     `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
-	DeploymentMode  string                     `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
-	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
-	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
-	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
-	ACP             ACPConfig                  `mapstructure:"acp"              yaml:"acp,omitempty"`
-	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
-	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell       OpenShellConfig            `mapstructure:"openshell"        yaml:"openshell"`
-	Watch           WatchConfig                `mapstructure:"watch"            yaml:"watch"`
-	Firewall        FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail       GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway         GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
-	CloudAuth       CloudAuthConfig            `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
-	SkillActions    SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions      MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	AssetPolicy     AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
-	Registries      RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
-	OTel            OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
-	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
-	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
-	ConnectorHooks  map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
-	// AuditSinks preserves v7 decoder fidelity for the explicit upgrade path.
-	// Runtime-v8 loading clears it before any service is constructed; canonical
-	// export ownership lives in observability.destinations/routes.
-	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
-	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
-	// Observability decodes the notification-only connector compatibility
-	// subset used by webhook setup. The canonical v8 telemetry graph is parsed
-	// and compiled independently; connector audit_sinks survive here only as
-	// release-upgrader input and never own target-runtime routing.
+	JudgeBodiesDB   string               `mapstructure:"judge_bodies_db"  yaml:"judge_bodies_db,omitempty"`
+	QuarantineDir   string               `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir       string               `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir       string               `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment     string               `mapstructure:"environment"      yaml:"environment"`
+	TenantID        string               `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
+	WorkspaceID     string               `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
+	DeploymentMode  string               `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
+	DiscoverySource string               `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
+	Claw            ClawConfig           `mapstructure:"claw"             yaml:"claw"`
+	Agent           AgentConfig          `mapstructure:"agent"            yaml:"agent,omitempty"`
+	ACP             ACPConfig            `mapstructure:"acp"              yaml:"acp,omitempty"`
+	InspectLLM      InspectLLMConfig     `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
+	CiscoAIDefense  CiscoAIDefenseConfig `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners        ScannersConfig       `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell       OpenShellConfig      `mapstructure:"openshell"        yaml:"openshell"`
+	Watch           WatchConfig          `mapstructure:"watch"            yaml:"watch"`
+	Firewall        FirewallConfig       `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail       GuardrailConfig      `mapstructure:"guardrail"        yaml:"guardrail"`
+	Gateway         GatewayConfig        `mapstructure:"gateway"          yaml:"gateway"`
+	CloudAuth       CloudAuthConfig      `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
+	// Admission is the install-time admission policy (config_version 9).
+	// It replaces policies/rego/data.json.
+	// Decoded from the source bytes, not viper, because an action is either
+	// a shorthand string or an install/file/runtime triple.
+	Admission      AdmissionConfig            `mapstructure:"-" yaml:"admission,omitempty"`
+	AssetPolicy    AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
+	Registries     RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
+	ClaudeCode     AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
+	Codex          AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
+	ConnectorHooks map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
+	Webhooks       []WebhookConfig            `mapstructure:"webhooks"         yaml:"webhooks"`
+	// Observability decodes the notification-only per-connector webhook
+	// overrides used by webhook setup. The canonical v8 telemetry graph is
+	// parsed and compiled independently and owns all export routing.
 	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
-	Privacy               PrivacyConfig               `mapstructure:"privacy"          yaml:"privacy,omitempty"`
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
@@ -398,6 +380,8 @@ type Config struct {
 	// standalone) and tunes the standalone profile. See enterprise.go.
 	Enterprise EnterpriseConfig `mapstructure:"enterprise" yaml:"enterprise,omitempty"`
 	Routing    RoutingConfig    `mapstructure:"routing"          yaml:"routing,omitempty"`
+	// Update holds the self-update settings (config_version 9).
+	Update UpdateConfig `mapstructure:"update" yaml:"update,omitempty"`
 }
 
 // RoutingConfig mirrors routing.RoutingConfig for config.yaml parsing.
@@ -452,34 +436,6 @@ type RoutingRemoteConfig struct {
 	TimeoutMs int    `mapstructure:"timeout_ms" yaml:"timeout_ms,omitempty"`
 }
 
-// PrivacyConfig groups privacy/redaction toggles. Today it carries
-// only the redaction kill-switch; future fields (per-sink redaction
-// scope, custom redactor profiles) land here so operators have a
-// single section to audit.
-//
-// Scope: this is a deliberate, persistent operator decision.
-// Defaults match the existing redacting-by-default behavior so a
-// fresh install or a config without a `privacy:` block keeps the
-// historical contract documented in OBSERVABILITY.md.
-type PrivacyConfig struct {
-	// DisableRedaction, when true, instructs the sidecar to bypass
-	// every ForSink* redaction helper at startup — including
-	// persistent sinks (SQLite audit, OTel log exporters, Splunk
-	// HEC, webhooks). Equivalent to setting
-	// DEFENSECLAW_DISABLE_REDACTION=1 but persisted in config so
-	// the choice survives restarts and TUI invocations without
-	// per-shell env-var ceremony.
-	//
-	// WARNING: this violates the unconditional-redaction contract
-	// documented in OBSERVABILITY.md. Only enable on single-tenant
-	// installs where every downstream sink already lives inside
-	// the same trust boundary (e.g. lab / prompt-engineering use).
-	// The CLI emits a loud warning on flip-on, and config loaders emit
-	// a once-per-process warning when they observe the setting so the
-	// runtime state stays auditable without spamming reload loops.
-	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
-}
-
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
 // supported connectors and broader "shadow AI" usage signals. Outbound
 // telemetry is sanitized by the inventory service. Local inspection is the
@@ -519,7 +475,6 @@ type AIDiscoveryConfig struct {
 	LookupModelProvenanceOnline bool     `mapstructure:"lookup_model_provenance_online" yaml:"lookup_model_provenance_online"`
 	MaxFilesPerScan             int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
 	MaxFileBytes                int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
-	EmitOTel                    bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
 	StoreRawLocalPaths          bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
 	ConfidencePolicyPath        string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
 	RequireTrustedBinaryPaths   bool     `mapstructure:"require_trusted_binary_paths" yaml:"require_trusted_binary_paths"`
@@ -550,6 +505,16 @@ type AIDiscoveryConfig struct {
 	// IDEInventoryAll (the default, also when empty), IDEInventoryAIOnly
 	// or IDEInventoryOff. Resolve through EffectiveIDEInventory.
 	IDEInventory string `mapstructure:"ide_inventory" yaml:"ide_inventory,omitempty"`
+
+	// SignaturePackDigests pins pack files by path ("sha256:<hex>"): a
+	// pinned pack loads only when it matches, and on a managed standalone
+	// device an unpinned pack does not load. ConfidencePolicyDigest pins
+	// ConfidencePolicyPath the same way.
+	// The keys are file paths with dots, which Viper would split into nested
+	// maps, so the loader reads this map from the YAML itself
+	// (restoreSignaturePackDigests).
+	SignaturePackDigests   map[string]string `mapstructure:"-"                        yaml:"signature_pack_digests,omitempty"`
+	ConfidencePolicyDigest string            `mapstructure:"confidence_policy_digest" yaml:"confidence_policy_digest,omitempty"`
 }
 
 // ValidateTrustedADChildDomains refuses an entry of
@@ -889,7 +854,8 @@ type LLMConfig struct {
 	// ExtraHeaders are additional HTTP headers sent on every request to
 	// this provider (e.g. {"llm-model": "gpt-5-5"} for Circuit routing).
 	// Forwarded to Bifrost's NetworkConfig.ExtraHeaders.
-	ExtraHeaders map[string]string `mapstructure:"extra_headers" yaml:"extra_headers,omitempty"`
+	ExtraHeaders                map[string]string `mapstructure:"extra_headers" yaml:"extra_headers,omitempty"`
+	protectedCredentialRequired bool
 }
 
 // TLSConfig captures per-instance TLS overrides on a role-level
@@ -970,6 +936,9 @@ type AzureKeyConfig struct {
 // Python parity test (cli/tests/test_llm_env.py::ParityTests) asserts
 // these stay in lock-step.
 func (l LLMConfig) ResolvedAPIKey() string {
+	if l.protectedCredentialRequired {
+		return l.APIKey
+	}
 	if l.APIKeyEnv != "" {
 		if v, ok := GetKey(l.APIKeyEnv); ok && strings.TrimSpace(v) != "" {
 			return strings.TrimSpace(v)
@@ -1034,6 +1003,35 @@ func (l LLMConfig) IsLocalProvider() bool {
 		}
 	}
 	return false
+}
+
+// openAIStyleLLMProviders speak the OpenAI chat-completions route
+// (<base>/v1/chat/completions). Keep in step with _OPENAI_STYLE_LLM_PROVIDERS
+// in cli/defenseclaw/config.py.
+var openAIStyleLLMProviders = map[string]struct{}{
+	"openai": {}, "openai-compatible": {}, "custom-openai": {}, "vllm": {},
+	"lm_studio": {}, "lmstudio": {}, "local": {},
+}
+
+// RequestBaseURL is BaseURL as LiteLLM and the Python scanners must send it.
+// The judge's client appends /v1/chat/completions to the host, while LiteLLM
+// appends only /chat/completions to what it is given, so a bare host reached
+// the two on different paths. For an OpenAI-style provider a base URL with no
+// path gets /v1; a URL with a path is used as written (GAP-0156). Mirrors
+// LLMConfig.request_base_url in cli/defenseclaw/config.py.
+func (l LLMConfig) RequestBaseURL() string {
+	raw := strings.TrimSpace(l.BaseURL)
+	if raw == "" {
+		return l.BaseURL
+	}
+	if _, ok := openAIStyleLLMProviders[l.ProviderPrefix()]; !ok {
+		return l.BaseURL
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return l.BaseURL
+	}
+	return strings.TrimRight(raw, "/") + "/v1"
 }
 
 // ForwardCustomHeadersEnabled reports whether the gateway forwards
@@ -1197,6 +1195,14 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 		out.APIKeyEnv = c.DefaultLLMAPIKeyEnv
 	}
 
+	// A standalone deployment that names enterprise.inspection.llm.credential
+	// takes every role's key from that protected credential.
+	if key, configured := c.standaloneLLMKey(); configured {
+		out.APIKey = key
+		out.APIKeyEnv = ""
+		out.protectedCredentialRequired = true
+	}
+
 	maybeWarnUnknownProvider(out.ProviderPrefix(), path)
 	return out
 }
@@ -1207,251 +1213,6 @@ func (c *Config) ResolveLLM(path string) LLMConfig {
 // component in one call.
 func (c *Config) ResolvedDefaultLLMAPIKey() string {
 	return c.ResolveLLM("").ResolvedAPIKey()
-}
-
-// EffectiveInspectLLM returns InspectLLM-shaped settings by delegating to
-// ResolveLLM. DEPRECATED: prefer c.ResolveLLM("scanners.skill") /
-// c.ResolveLLM("scanners.mcp") directly.
-func (c *Config) EffectiveInspectLLM() InspectLLMConfig {
-	base := c.ResolveLLM("")
-	out := c.InspectLLM
-	if out.Model == "" {
-		out.Model = base.Model
-	}
-	if out.Provider == "" {
-		out.Provider = base.Provider
-	}
-	if out.APIKey == "" {
-		out.APIKey = base.APIKey
-	}
-	if out.APIKeyEnv == "" {
-		out.APIKeyEnv = base.APIKeyEnv
-	}
-	if out.BaseURL == "" {
-		out.BaseURL = base.BaseURL
-	}
-	if out.Timeout == 0 {
-		out.Timeout = base.EffectiveTimeout()
-	}
-	if out.MaxRetries == 0 {
-		out.MaxRetries = base.EffectiveMaxRetries()
-	}
-	return out
-}
-
-type OTelConfig struct {
-	Enabled      bool                    `mapstructure:"enabled"      yaml:"enabled"`
-	Traces       OTelTracePolicyConfig   `mapstructure:"traces"       yaml:"traces"`
-	Logs         OTelLogPolicyConfig     `mapstructure:"logs"         yaml:"logs"`
-	Metrics      OTelMetricPolicyConfig  `mapstructure:"metrics"      yaml:"metrics"`
-	Batch        OTelBatchConfig         `mapstructure:"batch"        yaml:"batch"`
-	Resource     OTelResourceConfig      `mapstructure:"resource"     yaml:"resource"`
-	Destinations []OTelDestinationConfig `mapstructure:"destinations" yaml:"destinations,omitempty"`
-}
-
-// OTelDestinationConfig is one independently queued OTLP destination. The
-// top-level OTelConfig remains the master switch and owns process-wide resource
-// attributes, sampling, and emission policy. Keeping those concerns global
-// lets one SDK provider fan the same spans/logs/metrics out to multiple OTLP
-// backends without creating competing global providers.
-//
-// A configuration with no destinations is invalid when OTel is enabled.
-type OTelDestinationConfig struct {
-	Name       string               `mapstructure:"name"        yaml:"name"`
-	Preset     string               `mapstructure:"preset"      yaml:"preset,omitempty"`
-	Enabled    bool                 `mapstructure:"enabled"     yaml:"enabled"`
-	Protocol   string               `mapstructure:"protocol"    yaml:"protocol"`
-	Endpoint   string               `mapstructure:"endpoint"    yaml:"endpoint"`
-	Headers    map[string]string    `mapstructure:"headers"     yaml:"headers,omitempty"`
-	TLS        OTelTLSConfig        `mapstructure:"tls"         yaml:"tls"`
-	Traces     OTelTracesConfig     `mapstructure:"traces"      yaml:"traces"`
-	Logs       OTelLogsConfig       `mapstructure:"logs"        yaml:"logs"`
-	Metrics    OTelMetricsConfig    `mapstructure:"metrics"     yaml:"metrics"`
-	Batch      OTelBatchConfig      `mapstructure:"batch"       yaml:"batch"`
-	SpanFilter OTelSpanFilterConfig `mapstructure:"span_filter" yaml:"span_filter,omitempty"`
-}
-
-// OTelSpanFilterConfig is a vendor-neutral projection applied to one trace
-// destination. Presets may use it when a backend accepts only a subset of the
-// process trace graph (for example, GenAI inference spans).
-type OTelSpanFilterConfig struct {
-	RequireOperation  string                          `json:"require_operation,omitempty"  mapstructure:"require_operation"  yaml:"require_operation,omitempty"`
-	RequireAttributes []string                        `json:"require_attributes,omitempty" mapstructure:"require_attributes" yaml:"require_attributes,omitempty"`
-	Operations        []OTelSpanFilterOperationConfig `json:"operations,omitempty"         mapstructure:"operations"         yaml:"operations,omitempty"`
-}
-
-func (f OTelSpanFilterConfig) Enabled() bool {
-	return strings.TrimSpace(f.RequireOperation) != "" ||
-		len(f.RequireAttributes) > 0 || len(f.Operations) > 0
-}
-
-// OTelSpanFilterOperationConfig defines one operation-specific schema branch.
-// It permits destinations such as Galileo to accept chat, agent, and tool
-// spans without weakening the required attributes for any individual branch.
-type OTelSpanFilterOperationConfig struct {
-	Name              string   `json:"name"                         mapstructure:"name"               yaml:"name"`
-	RequireAttributes []string `json:"require_attributes,omitempty" mapstructure:"require_attributes" yaml:"require_attributes,omitempty"`
-}
-
-// ValidateNamedDestinations rejects ambiguous fan-out configuration before
-// the SDK providers are created. Runtime transport failures remain isolated
-// per exporter, but duplicate/empty names would make CLI lifecycle operations
-// nondeterministic and must fail fast.
-func (c OTelConfig) ValidateNamedDestinations() error {
-	return c.validateNamedDestinations(false)
-}
-
-// HasManagedAIDLogSink reports whether the managed Cisco AI Defense event
-// export is required by this source. The v8 target runtime materializes that
-// capability as a canonical destination; the legacy decoder uses the same
-// predicate only to avoid rejecting a managed source before migration.
-func (c *Config) HasManagedAIDLogSink() bool {
-	return c != nil && c.SecureClientIntegration() &&
-		strings.TrimSpace(c.CiscoAIDefense.Endpoint) != ""
-}
-
-func (c OTelConfig) validateNamedDestinations(hasImplicitSink bool) error {
-	if c.Enabled && len(c.Destinations) == 0 && !hasImplicitSink {
-		return fmt.Errorf("otel.enabled requires at least one named destination in otel.destinations[]")
-	}
-	seen := make(map[string]struct{}, len(c.Destinations))
-	for i, destination := range c.Destinations {
-		name := strings.TrimSpace(destination.Name)
-		if name == "" {
-			return fmt.Errorf("destinations[%d].name is required", i)
-		}
-		if _, exists := seen[name]; exists {
-			return fmt.Errorf("duplicate destination name %q", name)
-		}
-		seen[name] = struct{}{}
-		if destination.Enabled &&
-			!destination.Traces.Enabled &&
-			!destination.Logs.Enabled &&
-			!destination.Metrics.Enabled {
-			return fmt.Errorf("destination %q is enabled but has no enabled signals", name)
-		}
-		if destination.Enabled {
-			destinationEndpoint := strings.TrimSpace(destination.Endpoint)
-			for _, signal := range []struct {
-				name     string
-				enabled  bool
-				endpoint string
-			}{
-				{"traces", destination.Traces.Enabled, destination.Traces.Endpoint},
-				{"logs", destination.Logs.Enabled, destination.Logs.Endpoint},
-				{"metrics", destination.Metrics.Enabled, destination.Metrics.Endpoint},
-			} {
-				if signal.enabled && destinationEndpoint == "" && strings.TrimSpace(signal.endpoint) == "" {
-					return fmt.Errorf("destination %q enables %s but has no endpoint", name, signal.name)
-				}
-			}
-		}
-		if destination.Enabled {
-			protocol := strings.ToLower(strings.TrimSpace(destination.Protocol))
-			switch protocol {
-			case "grpc", "grpc/protobuf", "http", "http/protobuf", "http/json":
-			default:
-				return fmt.Errorf("destination %q requires protocol grpc or http/protobuf", name)
-			}
-		}
-		if destination.SpanFilter.Enabled() && !destination.Traces.Enabled {
-			return fmt.Errorf("destination %q has a span_filter but traces are disabled", name)
-		}
-		if len(destination.SpanFilter.Operations) > 0 &&
-			(strings.TrimSpace(destination.SpanFilter.RequireOperation) != "" ||
-				len(destination.SpanFilter.RequireAttributes) > 0) {
-			return fmt.Errorf("destination %q span_filter cannot mix operations with top-level require_operation/require_attributes", name)
-		}
-		filterAttrs := make(map[string]struct{}, len(destination.SpanFilter.RequireAttributes))
-		for _, attributeName := range destination.SpanFilter.RequireAttributes {
-			attributeName = strings.TrimSpace(attributeName)
-			if attributeName == "" {
-				return fmt.Errorf("destination %q span_filter contains an empty required attribute", name)
-			}
-			if _, exists := filterAttrs[attributeName]; exists {
-				return fmt.Errorf("destination %q span_filter repeats required attribute %q", name, attributeName)
-			}
-			filterAttrs[attributeName] = struct{}{}
-		}
-		seenOperations := make(map[string]struct{}, len(destination.SpanFilter.Operations))
-		for _, operation := range destination.SpanFilter.Operations {
-			name := strings.TrimSpace(operation.Name)
-			if name == "" {
-				return fmt.Errorf("destination %q span_filter operation name is required", destination.Name)
-			}
-			if _, exists := seenOperations[name]; exists {
-				return fmt.Errorf("destination %q span_filter repeats operation %q", destination.Name, name)
-			}
-			seenOperations[name] = struct{}{}
-			seenAttrs := make(map[string]struct{}, len(operation.RequireAttributes))
-			for _, attributeName := range operation.RequireAttributes {
-				attributeName = strings.TrimSpace(attributeName)
-				if attributeName == "" {
-					return fmt.Errorf("destination %q span_filter operation %q contains an empty required attribute", destination.Name, name)
-				}
-				if _, exists := seenAttrs[attributeName]; exists {
-					return fmt.Errorf("destination %q span_filter operation %q repeats required attribute %q", destination.Name, name, attributeName)
-				}
-				seenAttrs[attributeName] = struct{}{}
-			}
-		}
-	}
-	return nil
-}
-
-type OTelTracePolicyConfig struct {
-	Sampler    string `mapstructure:"sampler"     yaml:"sampler"`
-	SamplerArg string `mapstructure:"sampler_arg" yaml:"sampler_arg"`
-}
-
-type OTelLogPolicyConfig struct {
-	EmitIndividualFindings bool `mapstructure:"emit_individual_findings" yaml:"emit_individual_findings"`
-}
-
-type OTelMetricPolicyConfig struct {
-	ExportIntervalS int    `mapstructure:"export_interval_s" yaml:"export_interval_s"`
-	Temporality     string `mapstructure:"temporality"       yaml:"temporality"`
-}
-
-type OTelTLSConfig struct {
-	Insecure bool   `mapstructure:"insecure" yaml:"insecure"`
-	CACert   string `mapstructure:"ca_cert"  yaml:"ca_cert"`
-}
-
-type OTelTracesConfig struct {
-	Enabled    bool   `mapstructure:"enabled"     yaml:"enabled"`
-	Sampler    string `mapstructure:"sampler"      yaml:"sampler"`
-	SamplerArg string `mapstructure:"sampler_arg"  yaml:"sampler_arg"`
-	Endpoint   string `mapstructure:"endpoint"     yaml:"endpoint"`
-	Protocol   string `mapstructure:"protocol"     yaml:"protocol"`
-	URLPath    string `mapstructure:"url_path"     yaml:"url_path"`
-}
-
-type OTelLogsConfig struct {
-	Enabled                bool   `mapstructure:"enabled"                  yaml:"enabled"`
-	EmitIndividualFindings bool   `mapstructure:"emit_individual_findings" yaml:"emit_individual_findings"`
-	Endpoint               string `mapstructure:"endpoint"                 yaml:"endpoint"`
-	Protocol               string `mapstructure:"protocol"                 yaml:"protocol"`
-	URLPath                string `mapstructure:"url_path"                 yaml:"url_path"`
-}
-
-type OTelMetricsConfig struct {
-	Enabled         bool   `mapstructure:"enabled"            yaml:"enabled"`
-	ExportIntervalS int    `mapstructure:"export_interval_s"  yaml:"export_interval_s"`
-	Temporality     string `mapstructure:"temporality"         yaml:"temporality"`
-	Endpoint        string `mapstructure:"endpoint"           yaml:"endpoint"`
-	Protocol        string `mapstructure:"protocol"           yaml:"protocol"`
-	URLPath         string `mapstructure:"url_path"           yaml:"url_path"`
-}
-
-type OTelBatchConfig struct {
-	MaxExportBatchSize int `mapstructure:"max_export_batch_size" yaml:"max_export_batch_size"`
-	ScheduledDelayMs   int `mapstructure:"scheduled_delay_ms"    yaml:"scheduled_delay_ms"`
-	MaxQueueSize       int `mapstructure:"max_queue_size"         yaml:"max_queue_size"`
-}
-
-type OTelResourceConfig struct {
-	Attributes map[string]string `mapstructure:"attributes" yaml:"attributes"`
 }
 
 type FirewallConfig struct {
@@ -1483,7 +1244,7 @@ type FirewallConfig struct {
 // Name is the CLI-visible identifier (“defenseclaw setup webhook
 // enable <name>“ etc.). The runtime dispatcher itself identifies
 // webhooks by URL, but Name is round-tripped through Load/Save so
-// saving the config via Config.Save() or the TUI doesn't silently
+// saving the config through the config writer or the TUI doesn't silently
 // strip the operator's chosen name. “omitempty“ keeps legacy files
 // that never set “name:“ identical after load-save.
 type WebhookConfig struct {
@@ -1545,20 +1306,6 @@ type AgentHookConfig struct {
 	ComponentScanIntervalMinutes int      `mapstructure:"component_scan_interval_minutes" yaml:"component_scan_interval_minutes,omitempty"`
 }
 
-// EffectiveFailMode returns the per-connector POLICY-LAYER fail
-// mode for AgentHookConfig, defaulting to "closed" for backward
-// compatibility. NOTE: this is NOT what governs the generated
-// hook scripts; see GuardrailConfig.EffectiveHookFailMode for
-// that. Both fields are named "fail_mode" in YAML — the namespace
-// (top-level connector vs guardrail.hook_fail_mode) is what tells
-// them apart.
-func (c AgentHookConfig) EffectiveFailMode() string {
-	if c.FailMode == "open" {
-		return "open"
-	}
-	return "closed"
-}
-
 // ConnectorHookConfig returns the AgentHookConfig for a named connector.
 // It checks ConnectorHooks first, then falls back to the legacy
 // ClaudeCode/Codex top-level fields for backward compatibility.
@@ -1578,11 +1325,12 @@ func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
 }
 
 type WatchConfig struct {
-	DebounceMs          int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
-	AutoBlock           bool `mapstructure:"auto_block"             yaml:"auto_block"`
-	AllowListBypassScan bool `mapstructure:"allow_list_bypass_scan" yaml:"allow_list_bypass_scan"`
-	RescanEnabled       bool `mapstructure:"rescan_enabled"         yaml:"rescan_enabled"`
-	RescanIntervalMin   int  `mapstructure:"rescan_interval_min"    yaml:"rescan_interval_min"`
+	DebounceMs int  `mapstructure:"debounce_ms"            yaml:"debounce_ms"`
+	AutoBlock  bool `mapstructure:"auto_block"             yaml:"auto_block"`
+	// watch.allow_list_bypass_scan is only v8 migration input (read from the
+	// YAML document) for admission.<type>.allow_list_bypass_scan.
+	RescanEnabled     bool `mapstructure:"rescan_enabled"         yaml:"rescan_enabled"`
+	RescanIntervalMin int  `mapstructure:"rescan_interval_min"    yaml:"rescan_interval_min"`
 	// RescanContentGated skips the scanner during a periodic re-scan when a
 	// target's content hash and scanner fingerprint are both unchanged since
 	// the stored baseline. This avoids re-running the (expensive) scanner and
@@ -1613,42 +1361,78 @@ func (c *InspectLLMConfig) ResolvedAPIKey() string {
 }
 
 type SkillScannerConfig struct {
+	// Binary is the launcher name. It is a v8 key (rejected in a
+	// config_version 9 source) kept for a config_version 8 document that
+	// skips the in-memory migration, as a Secure Client one does; it goes
+	// when that document moves to config_version 9 (spec section 7, row 19).
+	// The v8 use_virustotal, use_aidefense and virustotal_api_key[_env] keys
+	// are not modeled: foldV8ScannerKeys reads them into Analyzers.
 	Binary        string `mapstructure:"binary"                 yaml:"binary"`
 	UseLLM        bool   `mapstructure:"use_llm"                yaml:"use_llm"`
 	UseBehavioral bool   `mapstructure:"use_behavioral"         yaml:"use_behavioral"`
 	EnableMeta    bool   `mapstructure:"enable_meta"            yaml:"enable_meta"`
 	UseTrigger    bool   `mapstructure:"use_trigger"            yaml:"use_trigger"`
-	UseVirusTotal bool   `mapstructure:"use_virustotal"         yaml:"use_virustotal"`
-	UseAIDefense  bool   `mapstructure:"use_aidefense"          yaml:"use_aidefense"`
 	LLMConsensus  int    `mapstructure:"llm_consensus_runs"     yaml:"llm_consensus_runs"`
 	Policy        string `mapstructure:"policy"                 yaml:"policy"`
 	Lenient       bool   `mapstructure:"lenient"                yaml:"lenient"`
 	// LLM overrides the top-level llm: block for the skill scanner.
 	// Every field is optional: unset fields inherit from Config.LLM
 	// via Config.ResolveLLM("scanners.skill").
-	LLM              LLMConfig `mapstructure:"llm"                    yaml:"llm,omitempty"`
-	VirusTotalKey    string    `mapstructure:"virustotal_api_key"     yaml:"virustotal_api_key"`
-	VirusTotalKeyEnv string    `mapstructure:"virustotal_api_key_env" yaml:"virustotal_api_key_env"`
+	LLM LLMConfig `mapstructure:"llm"                    yaml:"llm,omitempty"`
+
+	// legacyVirusTotalKey is the inline v8 virustotal_api_key of a document
+	// that skips the in-memory migration. Read once at load, never serialized.
+	legacyVirusTotalKey string
+
+	// PolicyFile pins a custom scan policy by digest; required when Policy
+	// is "custom" (config_version 9).
+	PolicyFile AssetFileRef `mapstructure:"policy_file" yaml:"policy_file,omitempty"`
+	// JudgeSource is "inherit" (top-level llm:) or "override" (LLM above).
+	JudgeSource string `mapstructure:"judge_source" yaml:"judge_source,omitempty"`
+	// FailOnSeverity is the blocking gate DefenseClaw applies to the JSON
+	// findings; it is never passed to the scanner. ReviewQueueMin starts
+	// the [ReviewQueueMin, FailOnSeverity) review (warn) band.
+	FailOnSeverity string `mapstructure:"fail_on_severity" yaml:"fail_on_severity,omitempty"`
+	ReviewQueueMin string `mapstructure:"review_queue_min" yaml:"review_queue_min,omitempty"`
+	// Analyzers holds the optional analyzers, all off by default.
+	Analyzers SkillScannerAnalyzers `mapstructure:"analyzers" yaml:"analyzers,omitempty"`
+	Timeouts  SkillScannerTimeouts  `mapstructure:"timeouts"  yaml:"timeouts,omitempty"`
 }
 
-// ResolvedVirusTotalKey returns the VirusTotal key from the env var (if set) or the direct value.
+// ResolvedVirusTotalKey returns the VirusTotal key from its env var (the
+// keys store first, then the process), or the inline value of a v8 document.
 func (c *SkillScannerConfig) ResolvedVirusTotalKey() string {
-	if c.VirusTotalKeyEnv != "" {
-		if v := os.Getenv(c.VirusTotalKeyEnv); v != "" {
-			return v
-		}
+	name := c.VirusTotalKeyEnvName()
+	if v, ok := GetKey(name); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
 	}
-	return c.VirusTotalKey
+	if v := strings.TrimSpace(os.Getenv(name)); v != "" {
+		return v
+	}
+	return c.legacyVirusTotalKey
 }
 
 type MCPScannerConfig struct {
-	Binary           string `mapstructure:"binary"            yaml:"binary"`
-	Analyzers        string `mapstructure:"analyzers"         yaml:"analyzers"`
-	ScanPrompts      bool   `mapstructure:"scan_prompts"      yaml:"scan_prompts"`
-	ScanResources    bool   `mapstructure:"scan_resources"    yaml:"scan_resources"`
-	ScanInstructions bool   `mapstructure:"scan_instructions" yaml:"scan_instructions"`
+	// Binary is a v8 key: migration input, rejected in config_version 9.
+	Binary string `mapstructure:"binary"            yaml:"binary"`
+	// Analyzers lists the analyzers to run; empty lets the scanner choose.
+	// A v8 source holds a comma-separated string, which the loader splits.
+	Analyzers        []string `mapstructure:"analyzers"         yaml:"analyzers"`
+	ScanPrompts      bool     `mapstructure:"scan_prompts"      yaml:"scan_prompts"`
+	ScanResources    bool     `mapstructure:"scan_resources"    yaml:"scan_resources"`
+	ScanInstructions bool     `mapstructure:"scan_instructions" yaml:"scan_instructions"`
 	// LLM overrides the top-level llm: block for the MCP scanner.
 	LLM LLMConfig `mapstructure:"llm"               yaml:"llm,omitempty"`
+
+	// JudgeSource is "inherit" (top-level llm:) or "override" (LLM above).
+	JudgeSource string               `mapstructure:"judge_source" yaml:"judge_source,omitempty"`
+	YARA        MCPScannerYARAConfig `mapstructure:"yara"         yaml:"yara,omitempty"`
+}
+
+// AnalyzersArg renders EffectiveAnalyzers as the scanner's comma-separated
+// --analyzers value ("" is auto).
+func (c MCPScannerConfig) AnalyzersArg() string {
+	return strings.Join(c.EffectiveAnalyzers(), ",")
 }
 
 type ScannersConfig struct {
@@ -1782,12 +1566,26 @@ type GuardrailConfig struct {
 	// upstream model name the client will see rewritten onto outgoing
 	// requests (Bifrost model-routing). It is orthogonal to the
 	// LLM block.
-	OriginalModel     string      `mapstructure:"original_model"       yaml:"original_model,omitempty"`
-	BlockMessage      string      `mapstructure:"block_message"        yaml:"block_message"`
-	StreamBufferBytes int         `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
-	RulePackDir       string      `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
-	Judge             JudgeConfig `mapstructure:"judge"                yaml:"judge"`
-	HILT              HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
+	OriginalModel     string `mapstructure:"original_model"       yaml:"original_model,omitempty"`
+	BlockMessage      string `mapstructure:"block_message"        yaml:"block_message"`
+	StreamBufferBytes int    `mapstructure:"stream_buffer_bytes"  yaml:"stream_buffer_bytes"`
+	// RulePackDir is a v8 key: migration input for RulePack/CustomPacks,
+	// rejected in a config_version 9 source.
+	RulePackDir string `mapstructure:"rule_pack_dir"        yaml:"rule_pack_dir"`
+	// RulePack names a built-in pack (default, strict, permissive) or a
+	// CustomPacks key; empty uses the default pack (config_version 9).
+	RulePack string `mapstructure:"rule_pack" yaml:"rule_pack,omitempty"`
+	// CustomPacks maps a pack name to its directory and pinned digest.
+	CustomPacks map[string]CustomRulePack `mapstructure:"custom_packs" yaml:"custom_packs,omitempty"`
+	// Rules customises RulePack in memory (protections, enable/disable,
+	// severity overrides, suppressions, sensitive tools). Restored from
+	// the source bytes so rule IDs keep their case.
+	Rules GuardrailRulesConfig `mapstructure:"-" yaml:"rules,omitempty"`
+	// CiscoTrustLevel is full, advisory or none; empty means full. It was
+	// data.json guardrail.cisco_trust_level.
+	CiscoTrustLevel string      `mapstructure:"cisco_trust_level" yaml:"cisco_trust_level,omitempty"`
+	Judge           JudgeConfig `mapstructure:"judge"                yaml:"judge"`
+	HILT            HILTConfig  `mapstructure:"hilt"                 yaml:"hilt"`
 
 	// BlockAt and AlertAt replace the block and alert levels the rule
 	// pack's profile implies (strict / default / permissive) when the
@@ -1819,8 +1617,7 @@ type GuardrailConfig struct {
 	// OTLP) is redacted by emitJudge before it leaves the process.
 	//
 	// Operators who prefer not to store judge bodies can opt out via
-	// `guardrail.retain_judge_bodies: false` in config.yaml or the
-	// DEFENSECLAW_PERSIST_JUDGE=0 environment override. Redaction is
+	// `guardrail.retain_judge_bodies: false` in config.yaml. Redaction is
 	// the safety mechanism for downstream sinks; retention is a
 	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
@@ -1837,9 +1634,6 @@ type GuardrailConfig struct {
 	//     while bounding worst-case memory to ~64 MiB (each row
 	//     is capped at MaxJudgeRawBytes = 64 KiB).
 	//   - Setting this to 0 falls back to the default at boot.
-	//   - DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE env var overrides
-	//     the config value at sidecar boot for emergency tuning
-	//     without a config push.
 	//
 	// Drops show up as defenseclaw.judge.persist.drops with
 	// reason="queue_full"; a sustained non-zero rate is the cue
@@ -1853,6 +1647,10 @@ type GuardrailConfig struct {
 	// proxy never fails open. The request is still inspected, audited,
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
+
+	// LLMRole is "", judge_only or judge_and_agent. Python setup owns it;
+	// the Go field lets the canonical validator round-trip the key.
+	LLMRole string `mapstructure:"llm_role" yaml:"llm_role,omitempty"`
 
 	// AllowPrivateUpstreams is a list of specific IP addresses that are
 	// exempt from the SSRF private-address block for LLM upstream forwarding.
@@ -1942,6 +1740,10 @@ type GuardrailConfig struct {
 	// guardrail.connectors. It is unexported, so it never reaches YAML,
 	// JSON or a cloned configuration.
 	profileConnectors map[string]PerConnectorGuardrailConfig
+	// profileRules is the profile's own guardrail.profiles.<p>.rules on a
+	// derived configuration; EffectiveRulesForConnector layers it over the
+	// global and connector rules. Unexported like profileConnectors.
+	profileRules *GuardrailRulesConfig
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -1955,7 +1757,12 @@ type PerConnectorGuardrailConfig struct {
 	HILT         *HILTConfig `mapstructure:"hilt"           yaml:"hilt,omitempty"`
 	HookFailMode string      `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
 	BlockMessage string      `mapstructure:"block_message"  yaml:"block_message,omitempty"`
-	RulePackDir  string      `mapstructure:"rule_pack_dir"  yaml:"rule_pack_dir,omitempty"`
+	// RulePackDir is a v8 key, rejected in config_version 9 (use RulePack).
+	RulePackDir string `mapstructure:"rule_pack_dir"  yaml:"rule_pack_dir,omitempty"`
+	// RulePack and Rules override the global pack and its customisation
+	// for this connector; empty / nil inherit.
+	RulePack string                `mapstructure:"rule_pack" yaml:"rule_pack,omitempty"`
+	Rules    *GuardrailRulesConfig `mapstructure:"-"         yaml:"rules,omitempty"`
 
 	// BlockAt / AlertAt set this connector's block and alert levels,
 	// winning over guardrail.block_at / alert_at and over the levels of
@@ -2427,6 +2234,10 @@ type JudgeConfig struct {
 	// every connector.
 	HookConnectors []string `mapstructure:"hook_connectors" yaml:"hook_connectors,omitempty"`
 
+	// Trace logs judge prompts and responses for debugging. It replaces
+	// DEFENSECLAW_JUDGE_TRACE and is refused in managed mode.
+	Trace bool `mapstructure:"trace" yaml:"trace,omitempty"`
+
 	// HookTimeout caps the hook-lane judge round-trip in seconds.
 	// Distinct from Timeout (proxy lane, default 30s) because hook
 	// scripts abandon the gateway call at curl --max-time 10; the
@@ -2695,67 +2506,114 @@ type SeverityAction struct {
 	Install InstallAction `mapstructure:"install" yaml:"install"`
 }
 
-type SkillActionsConfig struct {
-	Critical SeverityAction `mapstructure:"critical" yaml:"critical"`
-	High     SeverityAction `mapstructure:"high"     yaml:"high"`
-	Medium   SeverityAction `mapstructure:"medium"   yaml:"medium"`
-	Low      SeverityAction `mapstructure:"low"      yaml:"low"`
-	Info     SeverityAction `mapstructure:"info"     yaml:"info"`
-}
-
-type MCPActionsConfig struct {
-	Critical SeverityAction `mapstructure:"critical" yaml:"critical"`
-	High     SeverityAction `mapstructure:"high"     yaml:"high"`
-	Medium   SeverityAction `mapstructure:"medium"   yaml:"medium"`
-	Low      SeverityAction `mapstructure:"low"      yaml:"low"`
-	Info     SeverityAction `mapstructure:"info"     yaml:"info"`
-}
-
-type PluginActionsConfig struct {
-	Critical SeverityAction `mapstructure:"critical" yaml:"critical"`
-	High     SeverityAction `mapstructure:"high"     yaml:"high"`
-	Medium   SeverityAction `mapstructure:"medium"   yaml:"medium"`
-	Low      SeverityAction `mapstructure:"low"      yaml:"low"`
-	Info     SeverityAction `mapstructure:"info"     yaml:"info"`
-}
-
-func Load() (*Config, error) {
-	return LoadFromFileWithRuntimeMigration(ConfigPath())
-}
-
+// LoadFromFile reads one config file (the default config path when empty) and
+// decodes it with the strict runtime loader, the one path every consumer
+// shares with the gateway. A source older than config_version 8 is refused
+// with a single error that names the repair, `defenseclaw migrate`; nothing
+// here converts or half-loads it. The managed-enterprise trust check runs
+// before the file is read.
 func LoadFromFile(configFile string) (*Config, error) {
-	return loadFromFile(configFile, false)
+	return loadFromFile(configFile, true, true)
 }
 
-// LoadFromBytes applies the same defaults, migrations, environment bindings,
-// compatibility decoding, and validation as LoadFromFile, but decodes the
-// supplied immutable source bytes instead of rereading configFile. configFile
-// remains the source identity for relative defaults, diagnostics, trust checks,
-// and ConfigFilePath. Runtime-file migration is deliberately disabled because
-// a captured snapshot must never cause an ambient-path rewrite.
-func LoadFromBytes(configFile string, raw []byte) (*Config, error) {
-	return loadConfigSource(configFile, false, append([]byte(nil), raw...), true, true, false, true)
+// LoadManagedFileForLifecycleRecovery loads a managed config like
+// LoadFromFile, without publishing provenance and without requiring the
+// standalone policy inputs (policy_dir, rule-pack dirs) to be readable by
+// the gateway service. The Windows managed-hook lifecycle snapshot and
+// teardown read only listener settings from it, and they run during the
+// rollback of an install whose new config the services could not load:
+// refusing that config there failed the rollback too, and left every
+// service stopped (GAP-1291). The gateway and every activation keep the
+// strict loaders.
+func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
+	return loadFromFile(configFile, false, false)
 }
 
-// LoadCandidateFromBytes decodes an exact reload candidate without publishing
-// process-global provenance. The caller must set version.SetContentHash only
-// after the candidate has passed every compile/apply transaction boundary.
-func LoadCandidateFromBytes(configFile string, raw []byte) (*Config, error) {
-	return loadConfigSource(configFile, false, append([]byte(nil), raw...), true, false, false, true)
+func loadFromFile(configFile string, publishProvenance, checkPolicyInputs bool) (*Config, error) {
+	if strings.TrimSpace(configFile) == "" {
+		configFile = ConfigPath()
+	}
+	configFile = filepath.Clean(configFile)
+	if pinned := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv)); managed.IsManagedEnterprise(pinned) {
+		if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+			}
+			return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+		}
+	}
+	raw, err := readRuntimeSourceFile(configFile)
+	if err != nil {
+		return nil, err
+	}
+	return loadFileSource(configFile, raw, publishProvenance, true, checkPolicyInputs)
+}
+
+// loadFileSource decodes the source bytes loadFromFile read from configFile.
+func loadFileSource(configFile string, raw []byte, publishProvenance, enforceManagedTrust, checkPolicyInputs bool) (*Config, error) {
+	if enforceManagedTrust {
+		if err := checkManagedConfigTrustBeforeParse(configFile, raw); err != nil {
+			return nil, err
+		}
+	}
+	document, err := ParseV8YAML(configFile, raw)
+	if err != nil {
+		return nil, err
+	}
+	candidate, err := loadConfigSourceChecked(configFile, raw, publishProvenance, enforceManagedTrust, checkPolicyInputs)
+	if err != nil {
+		return nil, err
+	}
+	if candidate.SecureClientIntegration() {
+		dropEmptyGuardrailConnectors(candidate, raw)
+	}
+	applyRuntimeV8DataDirDefaults(candidate, document, candidate.DataDir)
+	return candidate, nil
+}
+
+// checkManagedConfigTrustBeforeParse refuses an untrusted config path before
+// any content check when the environment pins managed_enterprise or the
+// source declares it. The full parse checks config_version and the schema,
+// and on a Secure Client host it refuses a version 9 source as newer; run
+// first, that told an operator to upgrade or restore a backup next to a file
+// whose location is not trusted, instead of naming the location. A source
+// that does not decode leaves the refusal to the parse and the trust check
+// in loadConfigSourceChecked.
+func checkManagedConfigTrustBeforeParse(configFile string, raw []byte) error {
+	mode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
+	if !managed.IsManagedEnterprise(mode) && len(raw) <= V8YAMLMaxSourceBytes {
+		var declared struct {
+			DeploymentMode string `yaml:"deployment_mode"`
+		}
+		if decodeSourceYAML(raw, &declared) == nil {
+			mode = normalizeDeploymentMode(declared.DeploymentMode)
+		}
+	}
+	if !managed.IsManagedEnterprise(mode) {
+		return nil
+	}
+	if err := managed.ValidateTrustedConfigPath(filepath.Clean(configFile)); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "managed_config_untrusted")
+		}
+		return fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
+	}
+	return nil
 }
 
 // LoadRuntimeV8FromBytes decodes the non-observability portions of an exact
 // schema-v8 source for the target gateway runtime. The caller remains
 // responsible for compiling the canonical ObservabilityV8 plan from the same
-// immutable bytes before activation. Unlike LoadFromBytes, this entrypoint
-// never consults v7 OTel environment variables, runs flat-OTel migration, or
-// validates/retains legacy audit-sink routing state.
+// immutable bytes before activation.
 func LoadRuntimeV8FromBytes(configFile string, raw []byte) (*Config, error) {
+	if err := checkManagedConfigTrustBeforeParse(configFile, raw); err != nil {
+		return nil, err
+	}
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := loadConfigSource(configFile, false, append([]byte(nil), raw...), true, true, true, true)
+	candidate, err := loadConfigSource(configFile, append([]byte(nil), raw...), true, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2784,15 +2642,7 @@ func loadRuntimeV8CandidateFromBytes(configFile string, raw []byte, enforceManag
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := loadConfigSource(
-		configFile,
-		false,
-		append([]byte(nil), raw...),
-		true,
-		false,
-		true,
-		enforceManagedTrust,
-	)
+	candidate, err := loadConfigSource(configFile, append([]byte(nil), raw...), false, enforceManagedTrust)
 	if err != nil {
 		return nil, err
 	}
@@ -2895,58 +2745,25 @@ func applyRuntimeV8DataDirDefaults(candidate *Config, document *V8YAMLDocument, 
 	}
 }
 
-func LoadFromFileWithRuntimeMigration(configFile string) (*Config, error) {
-	return loadFromFile(configFile, true)
-}
-
-func loadFromFile(configFile string, migrateRuntime bool) (*Config, error) {
-	return loadConfigSource(configFile, migrateRuntime, nil, false, true, false, true)
-}
-
-// LoadManagedFileForLifecycleRecovery loads a managed config like
-// LoadFromFile, without publishing provenance and without requiring the
-// standalone policy inputs (policy_dir, rule-pack dirs) to be readable by
-// the gateway service. The Windows managed-hook lifecycle snapshot and
-// teardown read only listener settings from it, and they run during the
-// rollback of an install whose new config the services could not load:
-// refusing that config there failed the rollback too, and left every
-// service stopped (GAP-1291). The gateway and every activation keep the
-// strict loaders.
-func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
-	return loadConfigSourceChecked(configFile, false, nil, false, false, false, true, false)
-}
-
-func loadConfigSource(
-	configFile string,
-	migrateRuntime bool,
-	sourceBytes []byte,
-	sourceProvided bool,
-	publishProvenance bool,
-	runtimeV8 bool,
-	enforceManagedTrust bool,
-) (*Config, error) {
-	return loadConfigSourceChecked(
-		configFile, migrateRuntime, sourceBytes, sourceProvided,
-		publishProvenance, runtimeV8, enforceManagedTrust, true,
-	)
+func loadConfigSource(configFile string, sourceBytes []byte, publishProvenance, enforceManagedTrust bool) (*Config, error) {
+	return loadConfigSourceChecked(configFile, sourceBytes, publishProvenance, enforceManagedTrust, true)
 }
 
 func loadConfigSourceChecked(
 	configFile string,
-	migrateRuntime bool,
 	sourceBytes []byte,
-	sourceProvided bool,
 	publishProvenance bool,
-	runtimeV8 bool,
 	enforceManagedTrust bool,
 	checkPolicyInputs bool,
 ) (*Config, error) {
+	viperLoadMu.Lock()
+	defer viperLoadMu.Unlock()
+
 	// viper holds a process-global keystore. Without resetting it, a
-	// previous Load() (e.g. from another binary path or test case)
-	// leaves stale keys behind — including a legacy `splunk.*` block
-	// that detectLegacySplunk() would then flag forever. Reset gives
-	// us a clean slate per Load(); setDefaults() re-installs defaults
-	// and BindEnv() bindings immediately after.
+	// previous load (e.g. from another binary path or test case) leaves
+	// stale keys behind. Reset gives us a clean slate per load;
+	// setDefaults() re-installs defaults and BindEnv() bindings
+	// immediately after.
 	viper.Reset()
 
 	if strings.TrimSpace(configFile) == "" {
@@ -2961,7 +2778,7 @@ func loadConfigSourceChecked(
 	// A managed standalone config at the Linux or macOS layout path that
 	// leaves data_dir unset uses the layout's data directory, the one the
 	// services and the lifecycle require, instead of the config's folder.
-	if layoutDataDir, ok := standaloneLayoutDataDirForSource(configFile, sourceBytes, sourceProvided); ok {
+	if layoutDataDir, ok := standaloneLayoutDataDirForSource(configFile, sourceBytes); ok {
 		dataDir = layoutDataDir
 	}
 	pinnedDeploymentMode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
@@ -2980,93 +2797,42 @@ func loadConfigSourceChecked(
 	viper.SetConfigFile(configFile)
 	viper.SetConfigType("yaml")
 
-	setDefaults(dataDir, !runtimeV8)
+	setDefaults(dataDir)
 
-	// Pre-extract otel.resource.attributes from the raw YAML. OTel
-	// semconv keys are dotted (service.name, defenseclaw.preset, …)
-	// and Viper interprets "." as a path separator, which silently
-	// nests them into map[string]map[string]… and then fails to
-	// unmarshal back into map[string]string. We parse that block with
-	// yaml.v3 (literal keys), then strip it from the bytes we feed to
-	// Viper so Viper never sees the problematic shape, and reinstate
-	// it on the decoded Config afterwards.
-	var otelAttrs map[string]string
-	var cleanedBytes []byte
-	var err error
-	if runtimeV8 {
-		cleanedBytes = sourceBytes
-	} else if sourceProvided {
-		otelAttrs, cleanedBytes, err = extractOTelResourceAttributesBytes(sourceBytes)
-	} else {
-		otelAttrs, cleanedBytes, err = extractOTelResourceAttributes(configFile)
-	}
-	if err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "otel_attrs_parse")
+	var cfg Config
+	read := false
+	if split := splitProfileSubtrees(sourceBytes); split != nil {
+		// Secure Client and a source the direct decode refuses keep the
+		// whole-source viper read.
+		if read = split.load(&cfg) && !resolvesToSecureClient(&cfg, pinnedDeploymentMode); !read {
+			cfg = Config{}
+			viper.Reset()
+			viper.SetConfigFile(configFile)
+			viper.SetConfigType("yaml")
+			setDefaults(dataDir)
 		}
-		return nil, fmt.Errorf("config: parse otel.resource.attributes: %w", err)
 	}
-
-	if sourceProvided || cleanedBytes != nil {
-		if err := viper.ReadConfig(bytes.NewReader(cleanedBytes)); err != nil {
+	if !read {
+		if err := viper.ReadConfig(bytes.NewReader(sourceBytes)); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "read_config")
 			}
 			return nil, fmt.Errorf("config: read %s: %w", configFile, err)
 		}
-	} else if err := viper.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			if !os.IsNotExist(err) {
-				if ReportConfigLoadError != nil {
-					ReportConfigLoadError(context.Background(), "read_config")
-				}
-				return nil, fmt.Errorf("config: read %s: %w", configFile, err)
-			}
-		}
-	}
-
-	// Backward compat: legacy configs store mcp_scanner as a bare string.
-	if v := viper.Get("scanners.mcp_scanner"); v != nil {
-		if s, ok := v.(string); ok {
-			viper.Set("scanners.mcp_scanner", map[string]interface{}{
-				"binary": s,
-			})
-		}
-	}
-	if !viper.IsSet("guardrail.hilt") && viper.IsSet("guardrail.hitl") {
-		viper.Set("guardrail.hilt", viper.Get("guardrail.hitl"))
-	}
-
-	// Legacy `splunk:` configuration must pass through the release upgrader.
-	// Detect populated keys and refuse to start so operators do not silently
-	// lose forwarding or bypass the atomic config-v8 migration transaction.
-	if !runtimeV8 {
-		if legacy := detectLegacySplunk(); legacy != "" {
+		if err := viper.Unmarshal(&cfg); err != nil {
 			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "legacy_splunk")
+				ReportConfigLoadError(context.Background(), "unmarshal")
 			}
-			return nil, fmt.Errorf("config: legacy `splunk:` block found in %s (key %s). "+
-				"Run `defenseclaw upgrade --yes` to migrate supported legacy observability "+
-				"configuration to config v8; see "+
-				"https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/ "+
-				"for the current schema",
-				configFile, legacy)
+			return nil, fmt.Errorf("config: unmarshal: %w", err)
 		}
 	}
-
-	var cfg Config
-	if err := viper.Unmarshal(&cfg); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "unmarshal")
-		}
-		return nil, fmt.Errorf("config: unmarshal: %w", err)
+	foldV8ScannerKeys(&cfg)
+	cleanCustomPackPaths(&cfg)
+	if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
+		return nil, err
 	}
-	if runtimeV8 {
-		if err := restoreRuntimeV8GuardrailConnectors(&cfg, configFile, sourceBytes); err != nil {
-			return nil, err
-		}
-	} else if !resolvesToSecureClient(&cfg, pinnedDeploymentMode) {
-		restoreEmptyGuardrailConnectors(&cfg)
+	if err := restoreSignaturePackDigests(&cfg, sourceBytes, configFile); err != nil {
+		return nil, err
 	}
 	if !resolvesToSecureClient(&cfg, pinnedDeploymentMode) {
 		restoreEmptyGuardrailProfiles(&cfg)
@@ -3078,26 +2844,8 @@ func loadConfigSourceChecked(
 	// key is normalized or checked for duplicates.
 	migrateLegacyConnectorIDs(&cfg)
 
-	// Reinstate the dot-preserving OTel resource attributes that we
-	// stripped before handing bytes to Viper.
-	if otelAttrs != nil {
-		cfg.OTel.Resource.Attributes = otelAttrs
-	}
-
-	// migrateConfig stamps pre-v7 compatibility sources as v7, so the runtime
-	// gate reports the version the file actually declares.
-	sourceConfigVersion := cfg.ConfigVersion
-	migrateConfig(&cfg)
-	if !runtimeV8 {
-		normalizeRelativeGatewayDeviceKeyFile(&cfg)
-	}
-	if runtimeV8 {
-		if err := checkRuntimeConfigVersion(sourceConfigVersion); err != nil {
-			return nil, err
-		}
-		clearLegacyObservabilityRuntimeConfig(&cfg)
-	} else {
-		migrateFlatOTelConfigFromViper(&cfg)
+	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
+		return nil, err
 	}
 	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
 	if pinnedDeploymentMode != "" {
@@ -3119,6 +2867,7 @@ func loadConfigSourceChecked(
 		}
 		return nil, err
 	}
+	applySecureClientScannerDefaults(&cfg)
 	if enforceManagedTrust && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !managed.IsManagedEnterprise(pinnedDeploymentMode) {
 			if err := managed.ValidateTrustedConfigPath(configFile); err != nil {
@@ -3168,71 +2917,21 @@ func loadConfigSourceChecked(
 		return nil, err
 	}
 
-	if !runtimeV8 {
-		if err := cfg.OTel.validateNamedDestinations(cfg.HasManagedAIDLogSink()); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "otel_destination_invalid")
-			}
-			return nil, fmt.Errorf("config: otel: %w", err)
-		}
-		for i := range cfg.AuditSinks {
-			if err := cfg.AuditSinks[i].Validate(); err != nil {
-				if ReportConfigLoadError != nil {
-					ReportConfigLoadError(context.Background(), "audit_sink_invalid")
-				}
-				return nil, fmt.Errorf("config: audit_sinks[%d]: %w", i, err)
-			}
-		}
-	}
-
 	// Per-connector observability (D5b): reject empty / alias-duplicate
-	// connector names, then validate each connector's override audit sinks
-	// exactly like the global list above so a hand-edited
-	// observability.connectors[...] block fails loud at startup rather than
-	// silently mis-routing a connector's events. Webhooks are validated at
-	// dispatcher build time (URL/SSRF checks), matching the top-level
-	// webhooks: handling.
+	// connector names so a hand-edited observability.connectors[...] block
+	// fails loud at startup rather than silently mis-routing a connector's
+	// webhooks. Webhooks are validated at dispatcher build time (URL/SSRF
+	// checks), matching the top-level webhooks: handling.
 	if err := cfg.Observability.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "observability_invalid")
 		}
 		return nil, fmt.Errorf("config: observability: %w", err)
 	}
-	if !runtimeV8 {
-		for _, name := range cfg.Observability.ConnectorNames() {
-			pc := cfg.Observability.Connectors[name]
-			if pc.AuditSinks == nil {
-				continue
-			}
-			for i := range *pc.AuditSinks {
-				if err := (*pc.AuditSinks)[i].Validate(); err != nil {
-					if ReportConfigLoadError != nil {
-						ReportConfigLoadError(context.Background(), "audit_sink_invalid")
-					}
-					return nil, fmt.Errorf(
-						"config: observability.connectors[%q].audit_sinks[%d]: %w", name, i, err)
-				}
-			}
+	if cfg.SecureClientIntegration() {
+		if err := readSecureClientV8Actions(&cfg); err != nil {
+			return nil, err
 		}
-	}
-
-	if err := cfg.SkillActions.Validate(); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "skill_actions_invalid")
-		}
-		return nil, err
-	}
-	if err := cfg.MCPActions.Validate(); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "mcp_actions_invalid")
-		}
-		return nil, err
-	}
-	if err := cfg.PluginActions.Validate(); err != nil {
-		if ReportConfigLoadError != nil {
-			ReportConfigLoadError(context.Background(), "plugin_actions_invalid")
-		}
-		return nil, err
 	}
 	if err := cfg.ACP.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3241,6 +2940,16 @@ func loadConfigSourceChecked(
 		return nil, fmt.Errorf("config: acp: %w", err)
 	}
 
+	// Asset policy connector aliases must resolve to one enforcement mode.
+	// Secure Client keeps the pre-1.0 config loader behavior.
+	if !cfg.SecureClientIntegration() {
+		if err := cfg.AssetPolicy.Validate(); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "asset_policy_invalid")
+			}
+			return nil, fmt.Errorf("config: asset_policy: %w", err)
+		}
+	}
 	if err := cfg.Guardrail.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
@@ -3252,6 +2961,12 @@ func loadConfigSourceChecked(
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.Scanners.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "scanners_invalid")
+		}
+		return nil, err
 	}
 	if err := cfg.Routing.Validate(); err != nil {
 		if ReportConfigLoadError != nil {
@@ -3318,39 +3033,127 @@ func loadConfigSourceChecked(
 
 	warnPlaintextSecrets(&cfg)
 
-	// v7 provenance: seed the content_hash from the on-disk config
-	// bytes at load time so events emitted between sidecar boot and
-	// the first Save() already carry a meaningful fingerprint.
-	// Without this, dashboards would see `content_hash=""` for every
-	// event until someone explicitly saves the config through the
-	// CLI/TUI, which hides genuine drift across restarts. Prefer
-	// the original (dot-preserving) bytes read by
-	// extractOTelResourceAttributes; fall back to a re-marshal when
-	// the file did not exist (first boot / default config) so the
-	// hash is still stable across identical in-memory configs.
+	// Provenance: seed the content_hash from the exact source bytes at load
+	// time so events emitted between sidecar boot and the first Save()
+	// already carry a meaningful fingerprint. Without this, dashboards would
+	// see `content_hash=""` for every event until someone explicitly saves
+	// the config through the CLI/TUI, which hides genuine drift across
+	// restarts. An empty source falls back to a re-marshal of the in-memory
+	// config so the hash is still stable across identical configs.
 	if publishProvenance {
-		seedProvenanceOnLoadSource(configFile, &cfg, sourceBytes, sourceProvided)
-	}
-
-	// Managed-enterprise config is an administrator-owned trust boundary while
-	// data_dir is intentionally writable by the lower-privilege service account.
-	// Never let ordinary gateway or root guardian startup promote legacy runtime
-	// state across that boundary. Managed upgrades must migrate config through an
-	// explicit administrator-controlled workflow; config.yaml remains authoritative.
-	if guardrailRuntimeMigrationAllowed(migrateRuntime, cfg.DeploymentMode) {
-		migrated, err := MigrateGuardrailRuntimeFile(configFile, cfg.DataDir)
-		if err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "guardrail_runtime_migration")
-			}
-			return nil, err
-		}
-		if migrated {
-			return loadFromFile(configFile, false)
-		}
+		seedProvenanceOnLoad(&cfg, sourceBytes)
 	}
 
 	return &cfg, nil
+}
+
+// profileSubtrees are the guardrail.profiles and guardrail.profile_assignments
+// values of a configuration source, taken from its shared parse, and the rest
+// of the document.
+type profileSubtrees struct {
+	rest        *yaml.Node
+	profiles    *yaml.Node
+	assignments *yaml.Node
+}
+
+// splitProfileSubtrees finds guardrail.profiles and
+// guardrail.profile_assignments in the shared parse of raw (sourceYAMLNode).
+// Viper flattened every key of every profile and assignment, looked each one
+// up again and mapstructure decoded them one by one: with 1,000 profiles that
+// was half of every config load, paid twice by gateway start (the start
+// command and the gateway) and by every command that loads the config
+// (GAP-0276). The load gives viper the rest of the document and decodes the
+// two values straight into their types. It returns nil, so viper reads the
+// whole source as before, unless both are plain values whose keys are all
+// lower case (viper lower-cases keys; the rule IDs under rules are restored
+// from the source either way).
+func splitProfileSubtrees(raw []byte) *profileSubtrees {
+	doc, err := sourceYAMLNode(raw)
+	if err != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil
+	}
+	root := doc.Content[0]
+	at := -1
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if strings.EqualFold(root.Content[i].Value, "guardrail") {
+			if at >= 0 || root.Content[i].Value != "guardrail" {
+				return nil
+			}
+			at = i + 1
+		}
+	}
+	if at < 0 || root.Content[at].Kind != yaml.MappingNode {
+		return nil
+	}
+	guardrail := root.Content[at]
+	split := &profileSubtrees{}
+	kept := make([]*yaml.Node, 0, len(guardrail.Content))
+	for i := 0; i+1 < len(guardrail.Content); i += 2 {
+		key, value := guardrail.Content[i].Value, guardrail.Content[i+1]
+		var slot **yaml.Node
+		switch {
+		case key == "profiles":
+			slot = &split.profiles
+		case key == "profile_assignments":
+			slot = &split.assignments
+		case strings.EqualFold(key, "profiles") || strings.EqualFold(key, "profile_assignments"):
+			return nil
+		default:
+			kept = append(kept, guardrail.Content[i], value)
+			continue
+		}
+		if *slot != nil || !lowerCaseYAMLKeys(value) {
+			return nil
+		}
+		*slot = value
+	}
+	if split.profiles == nil && split.assignments == nil {
+		return nil
+	}
+	restGuardrail, restRoot, rest := *guardrail, *root, *doc
+	restGuardrail.Content = kept
+	restRoot.Content = append([]*yaml.Node(nil), root.Content...)
+	restRoot.Content[at] = &restGuardrail
+	rest.Content = []*yaml.Node{&restRoot}
+	split.rest = &rest
+	return split
+}
+
+// lowerCaseYAMLKeys reports whether n holds no alias and every mapping key
+// under it, outside rules, is lower case.
+func lowerCaseYAMLKeys(n *yaml.Node) bool {
+	switch n.Kind {
+	case yaml.AliasNode:
+		return false
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			key := n.Content[i].Value
+			if key != strings.ToLower(key) || (key != "rules" && !lowerCaseYAMLKeys(n.Content[i+1])) {
+				return false
+			}
+		}
+	case yaml.SequenceNode:
+		for _, child := range n.Content {
+			if !lowerCaseYAMLKeys(child) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// load reads the rest of the document through viper into cfg and decodes the
+// profiles and assignments directly. false means the caller reads the whole
+// source through viper instead (a value viper decodes more leniently).
+func (s *profileSubtrees) load(cfg *Config) bool {
+	rest := map[string]any{}
+	if s.rest.Decode(&rest) != nil || viper.MergeConfigMap(rest) != nil || viper.Unmarshal(cfg) != nil {
+		return false
+	}
+	if s.profiles != nil && s.profiles.Decode(&cfg.Guardrail.Profiles) != nil {
+		return false
+	}
+	return s.assignments == nil || s.assignments.Decode(&cfg.Guardrail.ProfileAssignments) == nil
 }
 
 // restoreEmptyGuardrailProfiles preserves profile and connector override entries
@@ -3388,51 +3191,123 @@ func restoreEmptyGuardrailProfiles(cfg *Config) {
 	}
 }
 
-// restoreRuntimeV8GuardrailConnectors closes a Viper decode gap for connector
-// entries whose policy value is an empty mapping (for example, codex: {}).
-// Those entries are semantically meaningful roster members, but Viper omits
-// them while unmarshalling. Decode this one dynamic map from the same immutable
-// target-runtime bytes before migration/defaulting and validation continue. The
-// strict parse of those bytes is shared (ParseV8YAML), so this does not parse a
-// large source again (GAP-0264).
+// restoreRuntimeV8GuardrailConnectors closes Viper decode gaps by decoding
+// some sections from the same immutable target-runtime bytes before
+// migration/defaulting and validation continue:
+//   - guardrail.connectors: entries whose policy value is an empty mapping
+//     (for example, codex: {}) are roster members, but Viper omits them;
+//   - guardrail.rules (global, profile and profile connector): Viper
+//     lower-cases map keys, and severity_overrides is keyed by rule ID;
+//   - admission: an action is a shorthand string or a triple, which the
+//     mapstructure decode cannot express;
+//   - llm_providers: header and alias map keys keep their case.
+//
+// The strict parse of those bytes is shared (ParseV8YAML), so a large source is
+// not parsed again for them (GAP-0264).
 func restoreRuntimeV8GuardrailConnectors(cfg *Config, configFile string, raw []byte) error {
 	document, err := ParseV8YAML(configFile, raw)
 	if err != nil {
 		return err
 	}
-	var connectors map[string]PerConnectorGuardrailConfig
-	if node := v8YAMLMapValue(v8YAMLMapValue(v8DocumentRoot(document.Document), "guardrail"), "connectors"); node != nil {
-		if err := node.Decode(&connectors); err != nil {
-			return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
-		}
+	type profileConnectorRules struct {
+		Rules *GuardrailRulesConfig `yaml:"rules"`
 	}
-	cfg.Guardrail.Connectors = connectors
+	type profileRules struct {
+		Rules      *GuardrailRulesConfig            `yaml:"rules"`
+		Connectors map[string]profileConnectorRules `yaml:"connectors"`
+	}
+	var source struct {
+		ApplicationProtection struct {
+			Guardrail struct {
+				Rules *GuardrailRulesConfig `yaml:"rules"`
+			} `yaml:"guardrail"`
+			Connectors map[string]struct {
+				Guardrail struct {
+					Rules *GuardrailRulesConfig `yaml:"rules"`
+				} `yaml:"guardrail"`
+			} `yaml:"connectors"`
+		} `yaml:"application_protection"`
+		Admission    AdmissionConfig    `yaml:"admission"`
+		LLMProviders LLMProvidersConfig `yaml:"llm_providers"`
+		Guardrail    struct {
+			Connectors map[string]PerConnectorGuardrailConfig `yaml:"connectors"`
+			Rules      GuardrailRulesConfig                   `yaml:"rules"`
+			Profiles   map[string]profileRules                `yaml:"profiles"`
+		} `yaml:"guardrail"`
+	}
+	if err := document.Document.Decode(&source); err != nil {
+		return fmt.Errorf("config: decode schema-v8 guardrail.connectors: %w", err)
+	}
+	cfg.ApplicationProtection.Guardrail.Rules = source.ApplicationProtection.Guardrail.Rules
+	for name, restored := range source.ApplicationProtection.Connectors {
+		if cfg.ApplicationProtection.Connectors == nil {
+			cfg.ApplicationProtection.Connectors = make(map[string]ApplicationProtectionConnectorConfig)
+		}
+		connector := cfg.ApplicationProtection.Connectors[name]
+		connector.Guardrail.Rules = restored.Guardrail.Rules
+		cfg.ApplicationProtection.Connectors[name] = connector
+	}
+	cfg.Guardrail.Connectors = source.Guardrail.Connectors
+	cfg.Guardrail.Rules = source.Guardrail.Rules
+	cfg.Admission = source.Admission
+	cfg.LLMProviders = source.LLMProviders
+	for name, restored := range source.Guardrail.Profiles {
+		profile, ok := cfg.Guardrail.Profiles[name]
+		if !ok {
+			continue
+		}
+		profile.Rules = restored.Rules
+		for connector, entry := range restored.Connectors {
+			if override, ok := profile.Connectors[connector]; ok {
+				override.Rules = entry.Rules
+				profile.Connectors[connector] = override
+			}
+		}
+		cfg.Guardrail.Profiles[name] = profile
+	}
 	return nil
 }
 
-// restoreEmptyGuardrailConnectors keeps the guardrail.connectors entries
-// Viper drops while unmarshalling because their value is empty (codex: {} or
-// a bare codex:). A listed connector with an empty value is enabled with the
-// defaults, as the runtime loader above and the Python CLI read it; without
-// this the Windows guardian, enumerator and Setup enrolled no one for the
-// documented enterprise configs (GAP-0221). The Secure Client profile keeps
-// the loader of main, which drops them.
-func restoreEmptyGuardrailConnectors(cfg *Config) {
-	listed, ok := viper.Get("guardrail.connectors").(map[string]any)
-	if !ok {
+// restoreSignaturePackDigests reads ai_discovery.signature_pack_digests, keyed
+// by pack file path, from the YAML (the source bytes, else the file): Viper
+// splits a key at every dot, so a path never survived its decode (GAP-0066).
+func restoreSignaturePackDigests(cfg *Config, raw []byte, configFile string) error {
+	if raw == nil {
+		var err error
+		if raw, err = os.ReadFile(configFile); err != nil { // #nosec G304 -- the config file being loaded.
+			return nil
+		}
+	}
+	var source struct {
+		AIDiscovery struct {
+			SignaturePackDigests map[string]string `yaml:"signature_pack_digests"`
+		} `yaml:"ai_discovery"`
+	}
+	if err := decodeSourceYAML(raw, &source); err != nil {
+		return fmt.Errorf("config: decode ai_discovery.signature_pack_digests: %w", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = source.AIDiscovery.SignaturePackDigests
+	return nil
+}
+
+// dropEmptyGuardrailConnectors removes the guardrail.connectors entries whose
+// value is empty (codex: {} or a bare codex:). The strict loader keeps them as
+// enabled with the defaults (GAP-0221); the file loader of main, which the
+// Windows guardian, enumerator and Setup read a Secure Client config with,
+// dropped them, so a Secure Client file load still does (issue #1092).
+func dropEmptyGuardrailConnectors(cfg *Config, raw []byte) {
+	var source struct {
+		Guardrail struct {
+			Connectors map[string]any `yaml:"connectors"`
+		} `yaml:"guardrail"`
+	}
+	if yaml.Unmarshal(raw, &source) != nil {
 		return
 	}
-	for name, value := range listed {
-		if body, isMap := value.(map[string]any); value != nil && (!isMap || len(body) != 0) {
-			continue
+	for name, value := range source.Guardrail.Connectors {
+		if body, isMap := value.(map[string]any); value == nil || (isMap && len(body) == 0) {
+			delete(cfg.Guardrail.Connectors, name)
 		}
-		if _, present := cfg.Guardrail.Connectors[name]; present {
-			continue
-		}
-		if cfg.Guardrail.Connectors == nil {
-			cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{}
-		}
-		cfg.Guardrail.Connectors[name] = PerConnectorGuardrailConfig{}
 	}
 }
 
@@ -3533,597 +3408,40 @@ func isLoopbackListenerHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
-	return requested && !managed.IsManagedEnterprise(deploymentMode)
-}
-
-// clearLegacyObservabilityRuntimeConfig makes the general application Config
-// a one-way consumer of the v8 compiler. These fields remain on Config solely
-// so the upgrade/preview loaders can decode historical v7 sources; no target
-// runtime object may carry them past this boundary.
-func clearLegacyObservabilityRuntimeConfig(cfg *Config) {
-	if cfg == nil {
-		return
-	}
-	cfg.OTel = OTelConfig{}
-	cfg.AuditSinks = nil
-	cfg.AIDiscovery.EmitOTel = false
-	for name, connector := range cfg.Observability.Connectors {
-		connector.AuditSinks = nil
-		cfg.Observability.Connectors[name] = connector
-	}
-}
-
-// seedProvenanceOnLoad stamps the process-wide content hash from the
-// config we just loaded. Separated from Load() so the branching stays
-// readable and so tests can bypass it by not calling Load(). A hash
-// failure is non-fatal — we just leave the prior value in place, which
-// is the correct behavior for transient read races (editor saving
-// in-place under us) where the next successful Load() will re-seed.
-func seedProvenanceOnLoad(configFile string, cfg *Config) {
-	seedProvenanceOnLoadSource(configFile, cfg, nil, false)
-}
-
-func seedProvenanceOnLoadSource(configFile string, cfg *Config, sourceBytes []byte, sourceProvided bool) {
-	if sourceProvided && len(sourceBytes) > 0 {
+// seedProvenanceOnLoad stamps the process-wide content hash from the exact
+// source bytes just loaded. A hash failure is non-fatal: the prior value stays
+// in place, which is the correct behavior for transient read races (an editor
+// saving in place under us) where the next successful load re-seeds.
+func seedProvenanceOnLoad(cfg *Config, sourceBytes []byte) {
+	if len(sourceBytes) > 0 {
 		version.SetContentHash(sourceBytes)
 		return
 	}
-	if sourceProvided {
-		// Preserve the file loader's empty-source behavior without consulting a
-		// path that may now contain different bytes.
-		if data, err := yaml.Marshal(cfg); err == nil && len(data) > 0 {
-			version.SetContentHash(data)
-		}
-		return
-	}
-	if data, err := os.ReadFile(configFile); err == nil && len(data) > 0 {
-		version.SetContentHash(data)
-		return
-	}
-	// File not found or empty — fall back to a canonical re-marshal
-	// of the in-memory Config so first-boot events still carry a
-	// non-empty, deterministic fingerprint of the default config.
+	// Empty source: fall back to a canonical re-marshal of the in-memory
+	// Config so first-boot events still carry a non-empty, deterministic
+	// fingerprint of the default config.
 	if data, err := yaml.Marshal(cfg); err == nil && len(data) > 0 {
 		version.SetContentHash(data)
 	}
 }
 
-// extractOTelResourceAttributes reads the config file with yaml.v3
-// (which preserves dotted map keys verbatim), pulls the
-// otel.resource.attributes block out as a flat map[string]string, and
-// returns the remaining YAML bytes with that block removed. The caller
-// feeds the cleaned bytes to Viper (whose "." key separator would
-// otherwise nest "service.name" into map[service][name] and break the
-// mapstructure unmarshal into map[string]string) and re-attaches the
-// returned attributes to the decoded Config afterwards.
-//
-// Returns:
-//   - (attrs, cleanedBytes, nil) when the file exists and the block was
-//     present (attrs may be empty if `attributes: {}` was set).
-//   - (nil, cleanedBytes, nil) when the file exists but has no
-//     otel.resource.attributes; caller should still use the cleaned
-//     bytes (which are just the original bytes in that case) for
-//     deterministic behavior.
-//   - (nil, nil, nil) when the config file does not exist — caller
-//     should fall back to viper.ReadInConfig's normal not-found path.
-//   - (nil, nil, err) when the YAML is malformed or an attribute has a
-//     non-scalar value.
-func extractOTelResourceAttributes(configFile string) (map[string]string, []byte, error) {
-	data, err := os.ReadFile(configFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, nil
-		}
-		return nil, nil, fmt.Errorf("read %s: %w", configFile, err)
-	}
-	return extractOTelResourceAttributesBytes(data)
-}
-
-func extractOTelResourceAttributesBytes(data []byte) (map[string]string, []byte, error) {
-	var root yaml.Node
-	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, nil, fmt.Errorf("yaml unmarshal: %w", err)
-	}
-
-	doc := firstDocumentNode(&root)
-	if doc == nil || doc.Kind != yaml.MappingNode {
-		// Empty or non-mapping YAML (e.g. only comments). Nothing to
-		// strip; pass original bytes back so Viper behavior is
-		// unchanged.
-		return nil, data, nil
-	}
-
-	otelNode := mappingChild(doc, "otel")
-	if otelNode == nil || otelNode.Kind != yaml.MappingNode {
-		return nil, data, nil
-	}
-	resourceNode := mappingChild(otelNode, "resource")
-	if resourceNode == nil || resourceNode.Kind != yaml.MappingNode {
-		return nil, data, nil
-	}
-	attrsNode := mappingChild(resourceNode, "attributes")
-	if attrsNode == nil {
-		return nil, data, nil
-	}
-	// Support explicit null (`attributes: ~`) by treating it as absent.
-	if attrsNode.Kind == yaml.ScalarNode && attrsNode.Tag == "!!null" {
-		removeMappingChild(resourceNode, "attributes")
-		cleaned, marshalErr := yaml.Marshal(&root)
-		if marshalErr != nil {
-			return nil, nil, fmt.Errorf("yaml re-marshal: %w", marshalErr)
-		}
-		return map[string]string{}, cleaned, nil
-	}
-	if attrsNode.Kind != yaml.MappingNode {
-		return nil, nil, fmt.Errorf("otel.resource.attributes must be a mapping, got %v", yamlKindName(attrsNode.Kind))
-	}
-
-	attrs := make(map[string]string, len(attrsNode.Content)/2)
-	for i := 0; i+1 < len(attrsNode.Content); i += 2 {
-		keyNode := attrsNode.Content[i]
-		valNode := attrsNode.Content[i+1]
-		if keyNode.Kind != yaml.ScalarNode {
-			return nil, nil, fmt.Errorf("otel.resource.attributes: non-scalar key at line %d", keyNode.Line)
-		}
-		key := keyNode.Value
-		switch valNode.Kind {
-		case yaml.ScalarNode:
-			if valNode.Tag == "!!null" {
-				// Skip: operator explicitly cleared this attribute.
-				continue
-			}
-			attrs[key] = valNode.Value
-		default:
-			return nil, nil, fmt.Errorf("otel.resource.attributes[%q]: expected scalar, got %v", key, yamlKindName(valNode.Kind))
-		}
-	}
-
-	// Strip otel.resource.attributes from the tree before feeding to
-	// Viper. We keep the surrounding otel.resource scaffolding so
-	// anything else under `resource:` (future fields) still loads
-	// normally.
-	removeMappingChild(resourceNode, "attributes")
-
-	cleaned, err := yaml.Marshal(&root)
-	if err != nil {
-		return nil, nil, fmt.Errorf("yaml re-marshal: %w", err)
-	}
-	return attrs, cleaned, nil
-}
-
-// firstDocumentNode unwraps a DocumentNode root produced by
-// yaml.Unmarshal into *yaml.Node. Returns nil if the document is empty.
-func firstDocumentNode(n *yaml.Node) *yaml.Node {
-	if n == nil {
-		return nil
-	}
-	if n.Kind == yaml.DocumentNode {
-		if len(n.Content) == 0 {
-			return nil
-		}
-		return n.Content[0]
-	}
-	return n
-}
-
-// mappingChild returns the value node for `key` inside a mapping node,
-// or nil if the key is absent or the parent isn't a mapping.
-func mappingChild(m *yaml.Node, key string) *yaml.Node {
-	if m == nil || m.Kind != yaml.MappingNode {
-		return nil
-	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		k := m.Content[i]
-		if k.Kind == yaml.ScalarNode && k.Value == key {
-			return m.Content[i+1]
-		}
-	}
-	return nil
-}
-
-// removeMappingChild deletes the (key, value) pair for `key` from a
-// mapping node in place. No-op if `key` is absent.
-func removeMappingChild(m *yaml.Node, key string) {
-	if m == nil || m.Kind != yaml.MappingNode {
-		return
-	}
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		k := m.Content[i]
-		if k.Kind == yaml.ScalarNode && k.Value == key {
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return
-		}
-	}
-}
-
-func yamlKindName(k yaml.Kind) string {
-	switch k {
-	case yaml.DocumentNode:
-		return "document"
-	case yaml.SequenceNode:
-		return "sequence"
-	case yaml.MappingNode:
-		return "mapping"
-	case yaml.ScalarNode:
-		return "scalar"
-	case yaml.AliasNode:
-		return "alias"
-	default:
-		return fmt.Sprintf("unknown(%d)", k)
-	}
-}
-
-// checkRuntimeConfigVersion admits config_version 8 through
-// MaxSupportedConfigVersion. Older sources are rewritten by the CLI migration;
-// newer ones belong to a newer DefenseClaw and are never guessed at.
-func checkRuntimeConfigVersion(version int) error {
+// checkRuntimeConfigVersion admits v8 for Secure Client and v8 through
+// MaxSupportedConfigVersion for other profiles. An older source (a released 0.8.x layout) is
+// never decoded here: `defenseclaw migrate` rewrites it once, and this
+// runtime refuses it with that single instruction. A newer one belongs to a
+// newer DefenseClaw and is never guessed at.
+func checkRuntimeConfigVersion(version int, secureClient bool) error {
 	switch {
+	case secureClient && version > ObservabilityV8ConfigVersion:
+		return fmt.Errorf("config: Secure Client supports config_version 8 only (received %d)", version)
 	case version < ObservabilityV8ConfigVersion:
 		return fmt.Errorf("config: config_version %d is older than %d; run `defenseclaw migrate`",
 			version, ObservabilityV8ConfigVersion)
 	case version > MaxSupportedConfigVersion:
-		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); "+
-			"upgrade DefenseClaw or restore ~/.defenseclaw/previous", version)
+		return fmt.Errorf("config: config was written by a newer DefenseClaw (config_version %d); %s",
+			version, newerConfigAction)
 	}
 	return nil
-}
-
-// migrateConfig applies forward migrations when config_version is behind
-// CurrentConfigVersion. Each migration step is idempotent.
-func migrateConfig(cfg *Config) {
-	if cfg.ConfigVersion >= CurrentConfigVersion {
-		return
-	}
-
-	oldVersion := cfg.ConfigVersion
-
-	// v0/v1 → v2: ensure detection_strategy defaults are populated
-	if cfg.ConfigVersion < 2 {
-		if cfg.Guardrail.DetectionStrategy == "" {
-			cfg.Guardrail.DetectionStrategy = "regex_only"
-		}
-		if cfg.Guardrail.Mode == "" {
-			cfg.Guardrail.Mode = "observe"
-		}
-		if cfg.Guardrail.RulePackDir == "" {
-			cfg.Guardrail.RulePackDir = filepath.Join(cfg.DataDir, "policies", "guardrail", "default")
-		}
-		if cfg.Guardrail.StreamBufferBytes == 0 {
-			cfg.Guardrail.StreamBufferBytes = 1024
-		}
-	}
-
-	// v2 → v3: upgrade detection_strategy to regex_judge when judge is
-	// enabled, add completion-specific strategy, wire shared LLM key
-	if cfg.ConfigVersion < 3 {
-		if cfg.Guardrail.Judge.Enabled && cfg.Guardrail.DetectionStrategy == "regex_only" {
-			cfg.Guardrail.DetectionStrategy = "regex_judge"
-		}
-		if cfg.Guardrail.DetectionStrategyCompletion == "" {
-			cfg.Guardrail.DetectionStrategyCompletion = "regex_only"
-		}
-	}
-
-	// v3 → v4: there is no in-process upgrade. The legacy `splunk:` block
-	// is detected in Load() before unmarshal and produces a hard error,
-	// so reaching this branch with v<4 simply means the file was created
-	// without a splunk block at all — safe to bump the version stamp.
-	// No in-process field changes are required here.
-
-	// v4 → v5: copy legacy LLM fields into the unified LLMConfig blocks
-	// so ResolveLLM(...) returns the same answers as the pre-v5
-	// ResolvedDefaultLLMAPIKey / EffectiveInspectLLM /
-	// ResolvedJudgeAPIKey functions. Migration is one-way and
-	// idempotent: if the v5 llm: block is already populated we
-	// leave it alone, otherwise we populate it from the legacy
-	// fields. We deliberately do NOT clear the legacy fields here
-	// so hand-edited YAML keeps round-tripping; `defenseclaw setup
-	// migrate-llm` is the tool that actually rewrites the file.
-	if cfg.ConfigVersion < 5 {
-		migrateLLMConfigFields(cfg)
-	}
-
-	// v5 → v6: multi-connector support adds the optional
-	// `guardrail.connectors:` map. The legacy singular
-	// `guardrail.connector` field is still valid and keeps driving the
-	// single-connector path, so there is nothing to rewrite in-process —
-	// this is a pure version-stamp normalization. The opt-in rewrite to
-	// the plural shape is performed explicitly by `setup migrate-connectors`.
-	if cfg.ConfigVersion < 6 {
-		// no-op: singular connector config remains valid as-is.
-	}
-
-	// v6 → v7: named OTel destinations are migrated in-process after
-	// unmarshalling because legacy transport keys are not fields on OTelConfig.
-	// See migrateFlatOTelConfigFromViper.
-	if cfg.ConfigVersion < 7 {
-		// no-op here; Load wires the runtime destination from Viper below.
-	}
-
-	cfg.ConfigVersion = CurrentConfigVersion
-	// Intentionally silent: migrateConfig() runs on every Load() because
-	// we don't rewrite the YAML file (that would be a surprising
-	// write-on-read side effect). Logging on every load was just noise
-	// — every CLI invocation, every TUI launch, every sidecar restart.
-	// The migration is idempotent; suppressing the line keeps the TUI's
-	// initial render clean and stops `defenseclaw-gateway status` from
-	// printing a banner above the actual status output.
-	_ = oldVersion
-}
-
-func migrateFlatOTelConfigFromViper(cfg *Config) {
-	if cfg == nil {
-		return
-	}
-	globalEndpoint := firstNonEmptyString(viper.GetString("otel.endpoint"), flatOTelEnvEndpoint(""))
-	traceEndpoint := firstNonEmptyString(viper.GetString("otel.traces.endpoint"), flatOTelEnvEndpoint("TRACES"))
-	logEndpoint := firstNonEmptyString(viper.GetString("otel.logs.endpoint"), flatOTelEnvEndpoint("LOGS"))
-	metricEndpoint := firstNonEmptyString(viper.GetString("otel.metrics.endpoint"), flatOTelEnvEndpoint("METRICS"))
-	if !hasFlatOTelTransportInConfig() && !(cfg.OTel.Enabled && firstNonEmptyString(
-		globalEndpoint, traceEndpoint, logEndpoint, metricEndpoint,
-	) != "") {
-		return
-	}
-	globalProtocol := firstNonEmptyString(viper.GetString("otel.protocol"), flatOTelEnvProtocol(""))
-	traceProtocol := firstNonEmptyString(viper.GetString("otel.traces.protocol"), flatOTelEnvProtocol("TRACES"))
-	logProtocol := firstNonEmptyString(viper.GetString("otel.logs.protocol"), flatOTelEnvProtocol("LOGS"))
-	metricProtocol := firstNonEmptyString(viper.GetString("otel.metrics.protocol"), flatOTelEnvProtocol("METRICS"))
-	tracesEnabled := flatOTelSignalEnabled("otel.traces.enabled")
-	logsEnabled := flatOTelSignalEnabled("otel.logs.enabled")
-	metricsEnabled := flatOTelSignalEnabled("otel.metrics.enabled")
-	hasExplicitSignalEnabled := viper.InConfig("otel.traces.enabled") ||
-		viper.InConfig("otel.logs.enabled") || viper.InConfig("otel.metrics.enabled")
-	if !viper.InConfig("otel.traces.enabled") && (traceEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
-		tracesEnabled = true
-	}
-	if !viper.InConfig("otel.logs.enabled") && (logEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
-		logsEnabled = true
-	}
-	if !viper.InConfig("otel.metrics.enabled") && (metricEndpoint != "" || (globalEndpoint != "" && !hasExplicitSignalEnabled)) {
-		metricsEnabled = true
-	}
-
-	destination := OTelDestinationConfig{
-		Name:    uniqueOTelDestinationName(cfg.OTel.Destinations, "generic-otlp"),
-		Preset:  "generic-otlp",
-		Enabled: cfg.OTel.Enabled,
-		Protocol: firstNonEmptyString(
-			globalProtocol,
-			traceProtocol,
-			logProtocol,
-			metricProtocol,
-			"grpc",
-		),
-		Endpoint: globalEndpoint,
-		Headers:  viper.GetStringMapString("otel.headers"),
-		TLS:      cfg.OTelTLSFromFlatConfig(),
-		Batch:    cfg.OTel.Batch,
-		Traces: OTelTracesConfig{
-			Enabled:  tracesEnabled,
-			Endpoint: traceEndpoint,
-			Protocol: traceProtocol,
-			URLPath:  viper.GetString("otel.traces.url_path"),
-		},
-		Logs: OTelLogsConfig{
-			Enabled:  logsEnabled,
-			Endpoint: logEndpoint,
-			Protocol: logProtocol,
-			URLPath:  viper.GetString("otel.logs.url_path"),
-		},
-		Metrics: OTelMetricsConfig{
-			Enabled:         metricsEnabled,
-			ExportIntervalS: cfg.OTel.Metrics.ExportIntervalS,
-			Temporality:     cfg.OTel.Metrics.Temporality,
-			Endpoint:        metricEndpoint,
-			Protocol:        metricProtocol,
-			URLPath:         viper.GetString("otel.metrics.url_path"),
-		},
-	}
-
-	if !destination.Traces.Enabled && !destination.Logs.Enabled && !destination.Metrics.Enabled {
-		destination.Traces.Enabled = true
-		destination.Logs.Enabled = true
-		destination.Metrics.Enabled = true
-	}
-	if destination.Protocol == "" {
-		destination.Protocol = "grpc"
-	}
-	cfg.OTel.Destinations = append([]OTelDestinationConfig{destination}, cfg.OTel.Destinations...)
-}
-
-func hasFlatOTelTransportInConfig() bool {
-	for _, key := range []string{
-		"otel.protocol", "otel.endpoint", "otel.headers", "otel.tls",
-		"otel.traces.enabled", "otel.traces.endpoint", "otel.traces.protocol", "otel.traces.url_path",
-		"otel.logs.enabled", "otel.logs.endpoint", "otel.logs.protocol", "otel.logs.url_path",
-		"otel.metrics.enabled", "otel.metrics.endpoint", "otel.metrics.protocol", "otel.metrics.url_path",
-	} {
-		if viper.InConfig(key) {
-			return true
-		}
-	}
-	return false
-}
-
-func flatOTelSignalEnabled(key string) bool {
-	if viper.InConfig(key) {
-		return viper.GetBool(key)
-	}
-	return false
-}
-
-func flatOTelEnvEndpoint(signal string) string {
-	signal = strings.ToUpper(strings.TrimSpace(signal))
-	if signal == "" {
-		return firstNonEmptyString(
-			os.Getenv("DEFENSECLAW_OTEL_ENDPOINT"),
-			os.Getenv("OPENCLAW_OTEL_ENDPOINT"),
-			os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-		)
-	}
-	return firstNonEmptyString(
-		os.Getenv("DEFENSECLAW_OTEL_"+signal+"_ENDPOINT"),
-		os.Getenv("OPENCLAW_OTEL_"+signal+"_ENDPOINT"),
-		os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_ENDPOINT"),
-	)
-}
-
-func flatOTelEnvProtocol(signal string) string {
-	signal = strings.ToUpper(strings.TrimSpace(signal))
-	if signal == "" {
-		return firstNonEmptyString(
-			os.Getenv("DEFENSECLAW_OTEL_PROTOCOL"),
-			os.Getenv("OPENCLAW_OTEL_PROTOCOL"),
-			os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"),
-		)
-	}
-	return firstNonEmptyString(
-		os.Getenv("DEFENSECLAW_OTEL_"+signal+"_PROTOCOL"),
-		os.Getenv("OPENCLAW_OTEL_"+signal+"_PROTOCOL"),
-		os.Getenv("OTEL_EXPORTER_OTLP_"+signal+"_PROTOCOL"),
-	)
-}
-
-func uniqueOTelDestinationName(destinations []OTelDestinationConfig, base string) string {
-	base = strings.TrimSpace(base)
-	if base == "" {
-		base = "generic-otlp"
-	}
-	seen := make(map[string]struct{}, len(destinations))
-	for _, destination := range destinations {
-		if name := strings.TrimSpace(destination.Name); name != "" {
-			seen[name] = struct{}{}
-		}
-	}
-	name := base
-	for suffix := 2; ; suffix++ {
-		if _, ok := seen[name]; !ok {
-			return name
-		}
-		name = fmt.Sprintf("%s-%d", base, suffix)
-	}
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func (cfg Config) OTelTLSFromFlatConfig() OTelTLSConfig {
-	var tls OTelTLSConfig
-	if viper.InConfig("otel.tls") {
-		_ = viper.UnmarshalKey("otel.tls", &tls)
-	}
-	if !viper.InConfig("otel.tls.insecure") {
-		switch strings.ToLower(firstNonEmptyString(
-			os.Getenv("DEFENSECLAW_OTEL_TLS_INSECURE"),
-			os.Getenv("OPENCLAW_OTEL_TLS_INSECURE"),
-		)) {
-		case "1", "true", "yes", "on":
-			tls.Insecure = true
-		case "0", "false", "no", "off":
-			tls.Insecure = false
-		}
-	}
-	return tls
-}
-
-// migrateLLMConfigFields performs the v4→v5 migration: legacy fields
-// (default_llm_api_key_env, default_llm_model, inspect_llm.*,
-// guardrail.model, guardrail.api_key_env, guardrail.api_base,
-// guardrail.judge.model, guardrail.judge.api_key_env,
-// guardrail.judge.api_base) are copied into the unified LLMConfig
-// slots on the top level and per-component overrides.
-//
-// Idempotent: re-running does nothing when the v5 slots are already
-// populated.
-func migrateLLMConfigFields(cfg *Config) {
-	// Top-level: inspect_llm + default_llm_* → cfg.LLM.
-	if cfg.LLM.APIKeyEnv == "" {
-		if cfg.DefaultLLMAPIKeyEnv != "" {
-			cfg.LLM.APIKeyEnv = cfg.DefaultLLMAPIKeyEnv
-		} else if cfg.InspectLLM.APIKeyEnv != "" {
-			cfg.LLM.APIKeyEnv = cfg.InspectLLM.APIKeyEnv
-		}
-	}
-	if cfg.LLM.APIKey == "" && cfg.InspectLLM.APIKey != "" {
-		cfg.LLM.APIKey = cfg.InspectLLM.APIKey
-	}
-	if cfg.LLM.Model == "" {
-		switch {
-		case cfg.DefaultLLMModel != "":
-			cfg.LLM.Model = cfg.DefaultLLMModel
-		case cfg.InspectLLM.Model != "":
-			cfg.LLM.Model = cfg.InspectLLM.Model
-		}
-	}
-	if cfg.LLM.Provider == "" && cfg.InspectLLM.Provider != "" {
-		cfg.LLM.Provider = cfg.InspectLLM.Provider
-	}
-	if cfg.LLM.BaseURL == "" && cfg.InspectLLM.BaseURL != "" {
-		cfg.LLM.BaseURL = cfg.InspectLLM.BaseURL
-	}
-	if cfg.LLM.Timeout == 0 && cfg.InspectLLM.Timeout > 0 {
-		cfg.LLM.Timeout = cfg.InspectLLM.Timeout
-	}
-	if cfg.LLM.MaxRetries == 0 && cfg.InspectLLM.MaxRetries > 0 {
-		cfg.LLM.MaxRetries = cfg.InspectLLM.MaxRetries
-	}
-
-	// Guardrail upstream.
-	if cfg.Guardrail.LLM.Model == "" && cfg.Guardrail.Model != "" {
-		cfg.Guardrail.LLM.Model = cfg.Guardrail.Model
-	}
-	if cfg.Guardrail.LLM.APIKeyEnv == "" && cfg.Guardrail.APIKeyEnv != "" {
-		cfg.Guardrail.LLM.APIKeyEnv = cfg.Guardrail.APIKeyEnv
-	}
-	if cfg.Guardrail.LLM.BaseURL == "" && cfg.Guardrail.APIBase != "" {
-		cfg.Guardrail.LLM.BaseURL = cfg.Guardrail.APIBase
-	}
-
-	// Judge.
-	if cfg.Guardrail.Judge.LLM.Model == "" && cfg.Guardrail.Judge.Model != "" {
-		cfg.Guardrail.Judge.LLM.Model = cfg.Guardrail.Judge.Model
-	}
-	if cfg.Guardrail.Judge.LLM.APIKeyEnv == "" && cfg.Guardrail.Judge.APIKeyEnv != "" {
-		cfg.Guardrail.Judge.LLM.APIKeyEnv = cfg.Guardrail.Judge.APIKeyEnv
-	}
-	if cfg.Guardrail.Judge.LLM.BaseURL == "" && cfg.Guardrail.Judge.APIBase != "" {
-		cfg.Guardrail.Judge.LLM.BaseURL = cfg.Guardrail.Judge.APIBase
-	}
-}
-
-// detectLegacySplunk returns the first populated splunk.* key found in the
-// already-loaded viper state, or "" when none are present. Callers use a
-// non-empty result to fail fast with a migration error rather than
-// silently dropping the legacy block.
-//
-// We probe a small set of meaningful keys instead of `viper.IsSet("splunk")`
-// because viper treats default values as "set" and all `splunk.*` defaults
-// were removed; the only way a key shows up here now is if the operator's
-// config file (or env var) populated it.
-func detectLegacySplunk() string {
-	keys := []string{
-		"splunk.hec_endpoint",
-		"splunk.hec_token",
-		"splunk.hec_token_env",
-		"splunk.enabled",
-		"splunk.index",
-		"splunk.source",
-		"splunk.sourcetype",
-	}
-	for _, k := range keys {
-		if viper.IsSet(k) {
-			return k
-		}
-	}
-	return ""
 }
 
 // warnPlaintextSecrets logs a deprecation warning for each secret stored as
@@ -4142,19 +3460,6 @@ func warnPlaintextSecrets(cfg *Config) {
 	}
 	if cfg.CiscoAIDefense.APIKey != "" {
 		warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
-	}
-	if cfg.Scanners.SkillScanner.VirusTotalKey != "" {
-		warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
-	}
-	for _, s := range cfg.AuditSinks {
-		if s.SplunkHEC != nil && s.SplunkHEC.Token != "" {
-			log.Printf("WARNING: audit_sinks[%q].splunk_hec.token is set inline — "+
-				"prefer token_env to keep secrets out of config.yaml", s.Name)
-		}
-		if s.HTTPJSONL != nil && s.HTTPJSONL.BearerToken != "" {
-			log.Printf("WARNING: audit_sinks[%q].http_jsonl.bearer_token is set inline — "+
-				"prefer bearer_env to keep secrets out of config.yaml", s.Name)
-		}
 	}
 }
 
@@ -4200,36 +3505,21 @@ func normalizeDeploymentMode(mode string) string {
 	}
 }
 
-func (c *Config) Save() error {
-	configFile := filepath.Join(c.DataDir, DefaultConfigName)
-
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("config: marshal: %w", err)
+// applySecureClientScannerDefaults preserves the v8 scanner defaults when
+// Secure Client omits these keys. Explicit settings still win.
+func applySecureClientScannerDefaults(cfg *Config) {
+	if !cfg.SecureClientIntegration() {
+		return
 	}
-
-	if err := os.WriteFile(configFile, data, 0o600); err != nil {
-		return err
+	if !viper.InConfig("scanners.skill_scanner.use_llm") {
+		cfg.Scanners.SkillScanner.UseLLM = false
 	}
-
-	// v7 provenance: every successful config save updates the
-	// content_hash (so downstream events carry a fingerprint of
-	// exactly which config shape produced them) and bumps the
-	// monotonic generation counter (so dashboards can detect churn
-	// without diffing hashes). A failed Save() never reaches this
-	// line — a stale generation would fire spurious "config
-	// changed" alerts. Hash the marshaled YAML bytes directly; they
-	// are already deterministic per (Config struct, yaml.Marshal
-	// impl) and any Load() reading the same file will compute the
-	// same fingerprint, which is the property needed for content
-	// hash stability across save↔load round-trips.
-	version.SetContentHash(data)
-	version.BumpGeneration()
-
-	return nil
+	if !viper.InConfig("scanners.skill_scanner.policy") {
+		cfg.Scanners.SkillScanner.Policy = "permissive"
+	}
 }
 
-func setDefaults(dataDir string, legacyObservability bool) {
+func setDefaults(dataDir string) {
 	viper.SetDefault("data_dir", dataDir)
 	viper.SetDefault("audit_db", filepath.Join(dataDir, DefaultAuditDBName))
 	viper.SetDefault("judge_bodies_db", filepath.Join(dataDir, DefaultJudgeBodiesDBName))
@@ -4275,17 +3565,13 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("cisco_ai_defense.enabled_rules", []string{})
 
 	viper.SetDefault("scanners.skill_scanner.binary", "skill-scanner")
-	viper.SetDefault("scanners.skill_scanner.use_llm", false)
+	viper.SetDefault("scanners.skill_scanner.use_llm", true)
 	viper.SetDefault("scanners.skill_scanner.use_behavioral", false)
 	viper.SetDefault("scanners.skill_scanner.enable_meta", false)
 	viper.SetDefault("scanners.skill_scanner.use_trigger", false)
-	viper.SetDefault("scanners.skill_scanner.use_virustotal", false)
-	viper.SetDefault("scanners.skill_scanner.use_aidefense", false)
 	viper.SetDefault("scanners.skill_scanner.llm_consensus_runs", 0)
-	viper.SetDefault("scanners.skill_scanner.policy", "permissive")
+	viper.SetDefault("scanners.skill_scanner.policy", DefaultSkillScannerPolicy)
 	viper.SetDefault("scanners.skill_scanner.lenient", true)
-	viper.SetDefault("scanners.skill_scanner.virustotal_api_key", "")
-	viper.SetDefault("scanners.skill_scanner.virustotal_api_key_env", "VIRUSTOTAL_API_KEY")
 	viper.SetDefault("scanners.mcp_scanner.binary", "mcp-scanner")
 	viper.SetDefault("scanners.mcp_scanner.analyzers", "auto")
 	viper.SetDefault("scanners.mcp_scanner.scan_prompts", false)
@@ -4308,62 +3594,9 @@ func setDefaults(dataDir string, legacyObservability bool) {
 
 	viper.SetDefault("watch.debounce_ms", 500)
 	viper.SetDefault("watch.auto_block", true)
-	viper.SetDefault("watch.allow_list_bypass_scan", true)
 	viper.SetDefault("watch.rescan_enabled", true)
 	viper.SetDefault("watch.rescan_interval_min", 60)
 	viper.SetDefault("watch.rescan_content_gated", true)
-
-	if legacyObservability {
-		viper.SetDefault("audit_sinks", []AuditSink{})
-	}
-
-	viper.SetDefault("skill_actions.critical.file", string(FileActionQuarantine))
-	viper.SetDefault("skill_actions.critical.runtime", string(RuntimeDisable))
-	viper.SetDefault("skill_actions.critical.install", string(InstallBlock))
-	viper.SetDefault("skill_actions.high.file", string(FileActionQuarantine))
-	viper.SetDefault("skill_actions.high.runtime", string(RuntimeDisable))
-	viper.SetDefault("skill_actions.high.install", string(InstallBlock))
-	viper.SetDefault("skill_actions.medium.file", string(FileActionNone))
-	viper.SetDefault("skill_actions.medium.runtime", string(RuntimeEnable))
-	viper.SetDefault("skill_actions.medium.install", string(InstallNone))
-	viper.SetDefault("skill_actions.low.file", string(FileActionNone))
-	viper.SetDefault("skill_actions.low.runtime", string(RuntimeEnable))
-	viper.SetDefault("skill_actions.low.install", string(InstallNone))
-	viper.SetDefault("skill_actions.info.file", string(FileActionNone))
-	viper.SetDefault("skill_actions.info.runtime", string(RuntimeEnable))
-	viper.SetDefault("skill_actions.info.install", string(InstallNone))
-
-	viper.SetDefault("mcp_actions.critical.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.critical.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.critical.install", string(InstallBlock))
-	viper.SetDefault("mcp_actions.high.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.high.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.high.install", string(InstallBlock))
-	viper.SetDefault("mcp_actions.medium.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.medium.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.medium.install", string(InstallNone))
-	viper.SetDefault("mcp_actions.low.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.low.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.low.install", string(InstallNone))
-	viper.SetDefault("mcp_actions.info.file", string(FileActionNone))
-	viper.SetDefault("mcp_actions.info.runtime", string(RuntimeEnable))
-	viper.SetDefault("mcp_actions.info.install", string(InstallNone))
-
-	viper.SetDefault("plugin_actions.critical.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.critical.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.critical.install", string(InstallNone))
-	viper.SetDefault("plugin_actions.high.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.high.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.high.install", string(InstallNone))
-	viper.SetDefault("plugin_actions.medium.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.medium.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.medium.install", string(InstallNone))
-	viper.SetDefault("plugin_actions.low.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.low.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.low.install", string(InstallNone))
-	viper.SetDefault("plugin_actions.info.file", string(FileActionNone))
-	viper.SetDefault("plugin_actions.info.runtime", string(RuntimeEnable))
-	viper.SetDefault("plugin_actions.info.install", string(InstallNone))
 
 	viper.SetDefault("asset_policy.enabled", false)
 	viper.SetDefault("asset_policy.mode", AssetPolicyModeObserve)
@@ -4394,9 +3627,6 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("ai_discovery.lookup_model_provenance_online", false)
 	viper.SetDefault("ai_discovery.max_files_per_scan", 1000)
 	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)
-	if legacyObservability {
-		viper.SetDefault("ai_discovery.emit_otel", true)
-	}
 	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
 	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
 	viper.SetDefault("ai_discovery.require_trusted_binary_paths", false)
@@ -4476,7 +3706,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	// in ~/.defenseclaw/audit.db, which is already covered by the
 	// same filesystem ACLs as the rest of the data directory. Operators
 	// with strict storage or privacy constraints can still opt out with
-	// `guardrail.retain_judge_bodies: false` or DEFENSECLAW_PERSIST_JUDGE=0.
+	// `guardrail.retain_judge_bodies: false`.
 	viper.SetDefault("guardrail.retain_judge_bodies", true)
 	// Buffered async persistence queue: 1024 entries is the sweet
 	// spot between memory ceiling and BUSY absorption under burst
@@ -4520,7 +3750,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	// observe-mode "would have blocked / would have asked" toasts
 	// stay quiet by default and are an explicit opt-in for operators
 	// tuning policy. Keep this in lockstep with
-	// DefaultNotificationsConfig() and cli/defenseclaw/config.py.
+	// cli/defenseclaw/config.py.
 	viper.SetDefault("notifications.enabled", DefaultNotificationsEnabled)
 	viper.SetDefault("notifications.block_enforced", true)
 	viper.SetDefault("notifications.block_would_block", false)
@@ -4530,18 +3760,4 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("notifications.sources.asset_policy", true)
 	viper.SetDefault("notifications.dedup_window", NotificationsDefaultDedupWindow)
 	viper.SetDefault("notifications.max_per_minute", NotificationsDefaultMaxPerMinute)
-
-	if legacyObservability {
-		viper.SetDefault("otel.enabled", false)
-		viper.SetDefault("otel.traces.sampler", "always_on")
-		viper.SetDefault("otel.traces.sampler_arg", "1.0")
-		viper.SetDefault("otel.logs.emit_individual_findings", false)
-		viper.SetDefault("otel.metrics.export_interval_s", 60)
-		viper.SetDefault("otel.metrics.temporality", "delta")
-		viper.SetDefault("otel.batch.max_export_batch_size", 512)
-		viper.SetDefault("otel.batch.scheduled_delay_ms", 5000)
-		viper.SetDefault("otel.batch.max_queue_size", 2048)
-
-		_ = viper.BindEnv("otel.enabled", "DEFENSECLAW_OTEL_ENABLED")
-	}
 }

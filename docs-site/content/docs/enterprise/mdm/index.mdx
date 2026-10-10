@@ -120,12 +120,22 @@ Replace `FILE` with the artifact you deploy. On a Mac, use `shasum -a 256 -c`
 in place of `sha256sum --check`. Signature-based trust is optional
 and is covered in the kit's `signing/README.md`.
 
+The identity in the `cosign verify-blob` command is the release identity that
+the installers compile in. If you stage releases on an internal mirror, copy
+`checksums.txt` and `checksums.txt.bundle` with the files, unchanged, and
+verify them the same way: a mirror changes where the bytes come from, not who
+must have signed them. See
+[Where releases come from](/docs/enterprise/rollout#where-releases-come-from).
+
 ## Deliver the config
 
-The config decides which agents are protected and how. Its content is
-described in [Configuration](/docs/enterprise/configuration#settings-reference);
+The config decides which agents are protected and how, and it is the only
+policy a managed host enforces: thresholds and block and allow lists live in
+it too ([Policy in the config](/docs/enterprise/configuration#policy-in-the-config)).
+Its content is described in [Configuration](/docs/enterprise/configuration#settings-reference);
 start with [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
-The lifecycle installs it at a fixed path:
+A `config_version: 8` file is accepted and migrated to 9 when the lifecycle
+applies it. The lifecycle installs it at a fixed path:
 
 | OS | Installed config |
 | --- | --- |
@@ -149,11 +159,16 @@ Rules that apply to every method:
 
 - **Only administrators may be able to change the file.** On Linux and macOS
   the file and every parent directory must be owned by root and not writable
-  by group or others (a sticky parent such as `/tmp` is accepted). On Windows
+  by group or others (a sticky parent such as `/tmp` is accepted). On macOS
+  none of them may carry an ACL entry that lets an account other than root or
+  the `admin` group write, delete or re-own it; the refusal names the entry
+  and the `chmod -N` command that removes it. On Windows
   the file must be owned by SYSTEM, Administrators or TrustedInstaller and
   grant no one else write, delete or permission rights. The wrappers refuse
-  anything else with `mdm_untrusted_input`; Setup run directly refuses it with
-  its own error and exit `1603`.
+  anything else with `mdm_untrusted_input`; the standalone Setup run directly
+  refuses it with `invalid_arguments` and exit `1639`. On Windows both name the
+  account that can change the file and the `icacls` commands that fix its
+  folder.
 - **Absolute local paths only.** Setup also refuses relative paths, paths with
   environment variables such as `%TEMP%`, and network paths (the standalone
   Setup exits `1639`).
@@ -233,11 +248,15 @@ sudo ./defenseclaw-enterprise.sh \
 
 On Windows, in PowerShell 7 as SYSTEM. The staging folder must be writable
 only by SYSTEM and Administrators, or the wrapper and Setup refuse the config.
-On Windows client editions a new folder under `C:\` inherits write access for
-authenticated users, so restrict it first:
+On Windows client editions a new folder under `C:\` can hold write access for
+Authenticated Users, and read access for Users, as entries of its own, which
+`/inheritance:r` does not remove. Restrict the folder and remove those entries
+by name; `icacls C:\Staging /T` then lists only `NT AUTHORITY\SYSTEM` and
+`BUILTIN\Administrators`, for the folder and each file in it:
 
 ```powershell
 icacls C:\Staging /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+icacls C:\Staging /remove:g "*S-1-5-11" "*S-1-5-32-545" /T /C
 $pin = '<SHA-256 of the Setup from checksums.txt>'
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -NonInteractive -File .\Invoke-DefenseClawEnterprise.ps1 `
   -SetupPath C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe `
@@ -271,13 +290,14 @@ exit $LASTEXITCODE
 | `--product-version X.Y.Z` | `-ProductVersion X.Y.Z` | Linux and macOS: refuse an artifact of any other version (`mdm_version_mismatch`) before anything is installed. Windows: only without `-SetupPath`, where it sets the version the installed CLI's `ensure` records; with `-SetupPath` it is refused (`mdm_invalid_arguments`, `1639`), because the `-Sha256` pin already ties the Setup to one release. |
 | `--https-proxy URL` | — | Proxy for the download only. The services' own proxy is set in the config ([Network proxy](/docs/enterprise/configuration#network-proxy)). |
 | `--log FILE` | — | Wrapper log path. |
+| `--staging-dir DIR` | — | The root-only folder the wrapper stages the artifact and the config in. Default `/var/lib/defenseclaw-mdm` on Linux, which the wrapper creates (`root`, `0700`), and `/var/tmp` on macOS. A payload (tarball) source runs its `defenseclaw-gateway` from there, so the folder must be on a filesystem that allows execution; CIS hosts mount `/tmp` and `/var/tmp` `noexec`. It must be a directory owned by root that no other account can write (`mdm_staging_untrusted`). |
 
 Script-only MDMs that cannot pass arguments set the same values in the
 settings block at the top of `defenseclaw-enterprise.sh` (`DC_SOURCE`,
 `DC_SOURCE_URL`, `DC_SOURCE_SHA256`, `DC_TRUST_MODE`, `DC_ALLOWED_TEAM_IDS`,
 `DC_GPG_KEYRING`, `DC_SIGNATURE`, `DC_SIGNATURE_URL`, `DC_PRODUCT_VERSION`,
 `DC_CONFIG_FILE`, `DC_SECRET_NAME`, `DC_SECRET_FILE`, `DC_HTTPS_PROXY`,
-`DC_LOG`). Flags override the settings block. The wrapper refuses any argument
+`DC_LOG`, `DC_STAGING_DIR`). Flags override the settings block. The wrapper refuses any argument
 it does not know, including positional arguments, with exit `2`
 (`mdm_invalid_arguments`). If your MDM appends its own arguments, follow its
 recipe in this section.
@@ -410,9 +430,84 @@ comes from the lifecycle; see [Troubleshooting](/docs/enterprise/troubleshooting
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | Setup's code or `1603` / the lifecycle's code or `1` | The lifecycle did not start or printed no result document. |
 | `mdm_secret_failed` | `1603` / `1`, `2` or `75` | Storing the key failed. On Windows the deployment applied; on Linux and macOS the key is stored first, so the config was not applied, and the exit code is the one `secret set` returned. |
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | `1603` / `1` | The private staging folder, or the Intune Win32 app content (Windows), is not as expected. |
+| `mdm_staging_noexec` | — / `1` | Linux: the payload's `defenseclaw-gateway` cannot run from the staging folder because its filesystem is mounted `noexec`; the message names the mount. Pass `--staging-dir` with a root-only folder that allows execution, or use the deb or rpm as the source. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | `1603` / — | The PowerShell 7 wrapper refused its host. The lifecycle applies the same checks. |
 
+## Stage a custom macOS rule pack
+
+If your config selects a custom pack, deliver it **before** the pkg and config
+are applied. Add a root MDM script that copies a trusted pack directory from
+your MDM payload into the administrator policy folder. Replace `PACK_SOURCE`
+with the staged payload path:
+
+```sh
+set -eu
+PACK_SOURCE=/path/to/mdm-payload/acme
+PACK_DEST=/opt/cisco/defenseclaw/etc/policies/guardrail/acme
+test -d "$PACK_SOURCE" || exit 1
+PACK_PARENT=$(dirname "$PACK_DEST")
+PACK_NAME=$(basename "$PACK_DEST")
+install -d -o root -g wheel -m 0755 "$PACK_PARENT"
+STAGE=$(mktemp -d "$PACK_PARENT/.$PACK_NAME.stage.XXXXXXXX")
+BACKUP=
+PUBLISHED=0
+cleanup() {
+  result=$?
+  trap - 0
+  if [ "$PUBLISHED" -eq 0 ] && [ -n "$BACKUP" ] &&
+     [ -e "$BACKUP/$PACK_NAME" ]; then
+    if [ -e "$PACK_DEST" ] || ! mv "$BACKUP/$PACK_NAME" "$PACK_DEST"; then
+      echo "Pack publish failed; previous pack is in $BACKUP" >&2
+      exit 1
+    fi
+  fi
+  rm -rf "$STAGE"
+  [ -z "$BACKUP" ] || rm -rf "$BACKUP"
+  exit "$result"
+}
+trap cleanup 0
+trap 'exit 1' HUP INT TERM
+cp -R "$PACK_SOURCE/." "$STAGE/"
+chown -R root:wheel "$STAGE"
+find "$STAGE" -type d -exec chmod 0755 {} +
+find "$STAGE" -type f -exec chmod 0644 {} +
+BACKUP=$(mktemp -d "$PACK_PARENT/.$PACK_NAME.backup.XXXXXXXX")
+if [ -e "$PACK_DEST" ]; then
+  mv "$PACK_DEST" "$BACKUP/$PACK_NAME"
+fi
+mv "$STAGE" "$PACK_DEST"
+PUBLISHED=1
+```
+
+Validate the pack on a reference Mac with
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir "$PACK_DEST"`
+after that binary is installed, and put its `custom_packs pin` value in the
+config. For the first installation, validate an identical copy on a reference
+Mac before assigning the new device. The pin covers the pack's own files.
+
+```yaml
+guardrail:
+  rule_pack: acme
+  custom_packs:
+    acme: {path: /opt/cisco/defenseclaw/etc/policies/guardrail/acme, digest: "sha256:<digest>"}
+```
+
+Re-run the stage script and update the pin before applying an edited pack.
+The script stages a complete replacement before publishing it. A failed copy
+leaves the previous pack in place and returns a nonzero exit. Files removed
+from the MDM payload do not remain in the published pack or change its digest. An uninstall removes
+the policy folder; re-stage the pack before a reinstall.
+
 ## Detection
+
+Run Unix `detect.sh` as root. A standard user gets `unknown` in value/Jamf
+format. `--min-version` requires a dotted release such as `1.0.0`; a bad
+value exits `2`. With `--require-healthy`, lifecycle lock contention reports
+`busy` (exit `75` in exit format), so retry after the apply finishes. On
+Linux, `--require-healthy` also reports `unhealthy` while dpkg lists the
+package half-configured or half-installed, or rpm lists two versions of it
+(an install or upgrade cut short, for example by a power loss), so the MDM
+runs the deployment again; until then apt refuses every other package.
 
 MDMs ask two different questions. Answer each with the mechanism that fits.
 
@@ -503,7 +598,7 @@ those computers.
 | Windows | `mdm-wrapper.log`, same folder | The wrapper's steps |
 | Windows | `DefenseClaw` event log, source "DefenseClaw Lifecycle" | `100` installed, `101` upgraded, `102` repaired, `110` uninstalled (Application log only), `111` ensure no-op, `112` ensure applied, `120` unhealthy, `130` failed, `140` busy, `150` refused |
 | Windows | Application log, source "DefenseClaw Enterprise" | A legacy copy of each event |
-| Linux | `/var/log/defenseclaw-enterprise-mdm.log` (root, `0600`) | The wrapper's steps and results |
+| Linux | `/var/log/defenseclaw-enterprise-mdm.log` (root, `0600`) | Install and ensure results; uninstall removes this log, so use the MDM policy log for its result |
 | Linux | `/var/lib/defenseclaw-enterprise/last-package-result.json` and `last-package-result.log` | The package's own `ensure` |
 | Linux | `journalctl -u defenseclaw-enterprise-apply.service` and `-u defenseclaw-enterprise-verify.service` | Config-change runs and the daily verify |
 | macOS | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, `0600`) | The wrapper's steps and results |
@@ -525,7 +620,10 @@ upgrades as supersedence, make the new version supersede the old one
 *without* uninstalling it first. On Linux, a package manager upgrade works
 too: the package's post-install step runs `ensure`. Keep each host on one
 channel: a host installed from the deb or rpm refuses a payload-archive
-upgrade (`package_owned_binaries`).
+upgrade (`package_owned_binaries`). The first `ensure` of a new release also
+migrates a `config_version: 8` config to 9 and, on Linux and macOS, reports the
+applied policy in the result's `policy` object
+([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
 
 **Roll back.** Every lifecycle refuses an older release than the installed one
 unless you ask for the rollback (`downgrade_refused`; exit `1603` on Windows).

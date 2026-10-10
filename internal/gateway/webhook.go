@@ -38,6 +38,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/google/uuid"
@@ -161,7 +162,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.Observabili
 	if len(endpoints) == 0 && connEndpointCount == 0 {
 		return nil
 	}
-	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+	allowLoopback := envvars.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 	return &WebhookDispatcher{
 		endpoints:          endpoints,
 		connectorEndpoints: connectorEndpoints,
@@ -170,7 +171,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig, obs ...config.Observabili
 		retryBackoff:       webhookRetryBackoff,
 		sem:                make(chan struct{}, webhookMaxConcurrency),
 		logger:             logger,
-		debug:              os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
+		debug:              envvars.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
 		done:               make(chan struct{}),
 	}
 }
@@ -697,6 +698,13 @@ var lookupWebhookIPs = net.LookupIP
 // Blocks non-HTTP schemes, localhost, private/link-local IP ranges, and
 // cloud metadata endpoints.
 func validateWebhookURL(rawURL string) error {
+	return validateWebhookURLWith(rawURL, lookupWebhookIPs)
+}
+
+// validateWebhookURLWith is validateWebhookURL with the resolver for host
+// names; a nil resolver checks only what the URL itself shows (scheme, host,
+// IP literals), which is what a config writer can decide without the network.
+func validateWebhookURLWith(rawURL string, lookup func(string) ([]net.IP, error)) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -709,7 +717,7 @@ func validateWebhookURL(rawURL string) error {
 	if host == "" {
 		return fmt.Errorf("empty hostname")
 	}
-	allowLocal := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+	allowLocal := envvars.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 
 	hostLower := strings.ToLower(host)
 	if hostLower == "localhost" {
@@ -720,7 +728,10 @@ func validateWebhookURL(rawURL string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		ips, resolveErr := lookupWebhookIPs(host)
+		if lookup == nil {
+			return nil
+		}
+		ips, resolveErr := lookup(host)
 		if resolveErr != nil {
 			return nil // allow DNS names that can't be resolved at config time
 		}
@@ -1053,7 +1064,8 @@ func categorizeAction(action string) string {
 		strings.Contains(action, "gateway-recovered"),
 		strings.Contains(action, "guardrail-degraded"):
 		return "health"
-	case strings.Contains(action, "guardrail"):
+	case strings.Contains(action, "guardrail"),
+		action == string(audit.ActionToolResultPIIAlert):
 		return "guardrail"
 	case strings.Contains(action, "drift"),
 		strings.Contains(action, "rescan"):

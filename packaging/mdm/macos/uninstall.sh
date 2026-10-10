@@ -24,6 +24,7 @@
 set -eu
 
 DC_SCRIPT_OS=darwin # linux | darwin - the only line that differs between the copies
+DC_LOG_NAME=uninstall.sh
 
 # ---- MDM settings (flags override) -------------------------------------------
 DC_PURGE=0          # 1: also remove each account's ~/.defenseclaw and per-user binaries
@@ -61,7 +62,7 @@ dc_log() {
         ( umask 077; : >"$DC_LOG" ) 2>/dev/null || return 0
     fi
     [ -f "$DC_LOG" ] && [ ! -L "$DC_LOG" ] || return 0
-    printf '%s %s[%s] %s\n' "$(dc_now)" "${0##*/}" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
+    printf '%s %s[%s] %s\n' "$(dc_now)" "$DC_LOG_NAME" "$$" "$1" >>"$DC_LOG" 2>/dev/null || true
 }
 
 dc_stat_uid() {
@@ -72,12 +73,37 @@ dc_stat_mode() { # octal permission bits including setuid/setgid/sticky, e.g. 17
     if [ "$DC_SCRIPT_OS" = darwin ]; then stat -f %Mp%Lp "$1"; else stat -c %a "$1"; fi
 }
 
+# dc_acl_write_entry <path>: on macOS, print the first ACL entry of path (as
+# ls -lde shows it) that lets an account other than root or the admin group
+# change, delete or re-own it; return 1 when there is none. macOS grants such
+# an entry without changing the owner or the mode bits, so a check of those
+# alone trusts a path another account can change. An unreadable listing
+# counts as such an entry.
+dc_acl_write_entry() {
+    [ "$DC_SCRIPT_OS" = darwin ] || return 1
+    listing=$(ls -lde -- "$1" 2>/dev/null) || { printf 'unreadable ACL\n'; return 0; }
+    entry=$(printf '%s\n' "$listing" | awk '
+        /^ *[0-9]+: / {
+            sub(/^ *[0-9]+: */, "")
+            n = split(tolower($0), word, " ")
+            kind = ""; rights = ""
+            for (i = 2; i < n; i++) if (word[i] == "allow" || word[i] == "deny") { kind = word[i]; rights = word[i + 1] }
+            if (kind != "allow" || word[1] == "user:root" || word[1] == "group:wheel" || word[1] == "group:admin") next
+            split(rights, right, ",")
+            for (r in right) if (right[r] ~ /^(write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)$/) { print; exit }
+        }')
+    [ -n "$entry" ] || return 1
+    printf '%s\n' "$entry"
+}
+
 # dc_trusted_path <path>: the file and every ancestor directory are owned by
 # root, and none is writable by group or others unless it is a sticky
 # directory (such as /tmp), whose root-owned entries other accounts cannot
-# rename or delete. So no other account can swap what root reads or runs.
+# rename or delete, and (macOS) no ACL entry lets another account change
+# one of them. So no other account can swap what root reads or runs.
+# DC_TRUST_ACL names a refusing ACL entry for messages.
 dc_trusted_path() {
-    path=$1 child=""
+    path=$1 child="" DC_TRUST_ACL=""
     case "$path" in /*) ;; *) return 1 ;; esac
     [ ! -L "$path" ] || return 1
     while :; do
@@ -93,6 +119,10 @@ dc_trusted_path() {
                 case "$mode" in 1??? | 3??? | 5??? | 7???) ;; *) return 1 ;; esac
                 ;;
         esac
+        if acl=$(dc_acl_write_entry "$path"); then
+            DC_TRUST_ACL="; the macOS ACL entry '$acl' on $path lets another account change it (remove it with chmod -N $path)"
+            return 1
+        fi
         [ "$path" = / ] && return 0
         child=$path
         path=$(dirname "$path")
@@ -159,6 +189,18 @@ dc_remove_linux_package() {
     dc_log "removed package $DC_LINUX_PACKAGE ($kind)"
 }
 
+# Intune's Linux agent may repeat its /proc/self/fd/N script descriptor.
+case "${1:-}" in
+    /proc/self/fd/*)
+        case "${1#/proc/self/fd/}" in '' | *[!0-9]*) ;; *) shift ;; esac
+        ;;
+esac
+if [ "$DC_SCRIPT_OS" = darwin ]; then
+    [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
+else
+    [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
+fi
+dc_log "start action=uninstall"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --purge) DC_PURGE=1; shift ;;
@@ -191,7 +233,7 @@ package=""
 
 if [ -e "$gateway" ]; then
     dc_trusted_path "$gateway" ||
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "$gateway is not root-owned or is writable by other accounts; refusing to run it"
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "$gateway is not root-owned or is writable by other accounts; refusing to run it$DC_TRUST_ACL"
     set -- uninstall
     [ "$DC_PURGE" = 1 ] && set -- "$@" --purge
     set +e

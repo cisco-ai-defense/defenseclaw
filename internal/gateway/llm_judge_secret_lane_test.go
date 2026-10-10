@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -72,5 +73,30 @@ func TestParseAdjudicationResponseSecretIdentity(t *testing.T) {
 		verdict.Findings[0] != "JUDGE-ADJ-SECRET" ||
 		verdict.Reason != "judge-adjudicate-secret" {
 		t.Fatalf("secret verdict=%+v", verdict)
+	}
+}
+
+// GAP-0351: a suppression saved with --connector lives in that connector
+// composed pack, not in the global pack the judge is built with; the
+// hook-lane run must apply it.
+func TestJudgeAppliesTheConnectorPackSuppressions(t *testing.T) {
+	j := testJudge(t)
+	data := map[string]interface{}{
+		"Email Address": map[string]interface{}{
+			"detection_result": true,
+			"entities":         []interface{}{"ci-bot@build.acme.example"},
+		},
+	}
+	if v := j.piiToVerdictWith(j.suppressionPack(context.Background()), data, "completion", ""); v.Action != "block" {
+		t.Fatalf("global pack: action = %q, want block", v.Action)
+	}
+	connectorPack := &guardrail.RulePack{Suppressions: &guardrail.SuppressionsConfig{
+		FindingSupps: []guardrail.FindingSuppression{
+			{ID: "C-EMAIL", FindingPattern: "JUDGE-PII-EMAIL", EntityPattern: ".*", Reason: "ci bot"},
+		},
+	}}
+	ctx := withJudgeSuppressionPack(context.Background(), connectorPack)
+	if v := j.piiToVerdictWith(j.suppressionPack(ctx), data, "completion", ""); v.Action != "allow" {
+		t.Fatalf("connector pack: action = %q findings=%v, want allow", v.Action, v.Findings)
 	}
 }

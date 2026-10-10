@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,54 @@ func TestRejectedInPlaceConfigIsReverted(t *testing.T) {
 			t.Fatalf("ensure after the revert is not a no-op: %+v %+v", again.Errors, again.Warnings)
 		}
 	})
+	// A bad profile push left config.yaml 0666 and a standard user switched
+	// enforcement to observe; the apply trigger applied it (GAP-0524).
+	t.Run("writable by other accounts", func(t *testing.T) {
+		h := newTestHost(t, "darwin")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		applied := h.read(h.env.Layout.ConfigPath)
+		if err := os.Chmod(h.env.P(h.env.Layout.ConfigPath), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		editConfigInPlace(t, h, "mode: observe", "mode: action")
+		r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+		requireError(t, r, codeConfig)
+		if got := h.read(h.env.Layout.ConfigPath); got != applied || h.mode(h.env.Layout.ConfigPath) != 0o640 {
+			t.Fatalf("the edit written while config.yaml was 0666 was applied (%04o):\n%s", h.mode(h.env.Layout.ConfigPath), got)
+		}
+	})
+	// The live repro: right after the mode was loosened (and the runtime
+	// descriptor removed) a standard user rewrote config.yaml through a
+	// descriptor opened while it was 0666, moments after the apply run read
+	// it. The run re-owned the file in place and its follow-up transaction
+	// applied the edit (GAP-0524); the run now puts a new file there.
+	t.Run("written while the run applies it", func(t *testing.T) {
+		h := newTestHost(t, "darwin")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		applied := h.read(h.env.Layout.ConfigPath)
+		before, _ := h.env.loadDeployment()
+		if err := os.Remove(h.env.P(h.env.Layout.DescriptorPath)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(h.env.P(h.env.Layout.ConfigPath), 0o666); err != nil {
+			t.Fatal(err)
+		}
+		held, err := os.OpenFile(h.env.P(h.env.Layout.ConfigPath), os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer held.Close()
+		edited := []byte(strings.Replace(applied, "mode: observe", "mode: action", 1))
+		h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(string) {
+			_ = held.Truncate(0)
+			_, _ = held.WriteAt(edited, 0)
+		}}
+		requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+		after, _ := h.env.loadDeployment()
+		if got := h.read(h.env.Layout.ConfigPath); got != applied || after.ConfigSHA256 != before.ConfigSHA256 || h.mode(h.env.Layout.ConfigPath) != 0o640 {
+			t.Fatalf("the edit written while config.yaml was 0666 was applied (%04o):\n%s", h.mode(h.env.Layout.ConfigPath), got)
+		}
+	})
 	t.Run("activation fails", func(t *testing.T) {
 		h := newTestHost(t, "linux")
 		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -87,6 +136,38 @@ func TestRejectedInPlaceConfigIsReverted(t *testing.T) {
 			t.Fatalf("the applied config copy was not updated: %v", err)
 		}
 	})
+}
+
+// Configuration management that enforces the administrator's v8 file in
+// place puts it back after the upgrade migrated it. ensure keeps those bytes
+// instead of migrating them again on every run, which would loop with the
+// tool.
+func TestReassertedV8ConfigIsNotRewritten(t *testing.T) {
+	h := newTestHost(t, "linux")
+	v8 := v8AdminConfig(h.env.Layout)
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(cfg, []byte(v8), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: cfg}))
+	if !strings.Contains(h.read(h.env.Layout.ConfigPath), "config_version: 9") {
+		t.Fatal("the v8 admin config was not migrated on install")
+	}
+	if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), []byte(v8), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+	if got := h.read(h.env.Layout.ConfigPath); got != v8 {
+		t.Fatalf("the re-asserted v8 config was rewritten:\n%s", got)
+	}
+	r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	if !r.Noop {
+		t.Fatalf("the kept v8 config does not settle: %+v", r.Changes)
+	}
+	// The settled run still says the file is version 8 (GAP-0540).
+	if !hasWarning(r, codeConfigV8) {
+		t.Fatalf("a run that read a config_version 8 file does not say so: %+v", r.Warnings)
+	}
 }
 
 func hasMessage(messages []enterprisestatus.Message, substring string) bool {
@@ -132,10 +213,13 @@ func TestRejectedConfigStaysReportedUntilConfigIsPushedAgain(t *testing.T) {
 		if again := h.run(Options{Action: ActionEnsure, Reason: "path"}); !again.Noop || !hasWarning(again, codeConfigRejected) {
 			t.Fatalf("ensure after the revert: noop=%v warnings=%+v", again.Noop, again.Warnings)
 		}
-		if status := h.run(Options{Action: ActionStatus}); !hasWarning(status, codeConfigRejected) ||
-			!hasMessage(status.Warnings, "api_port") || hasMessage(status.Warnings, "the lifecycle log says why") {
-			// The warning names the cause, not only the log (GAP-0689).
-			t.Fatalf("status does not report the rejected edit and why: %+v", status.Warnings)
+		status := h.run(Options{Action: ActionStatus})
+		if !hasWarning(status, codeConfigRejected) {
+			t.Fatalf("status does not report the rejected edit: %+v", status.Warnings)
+		}
+		// GAP-0587: the reason is named, not left to the lifecycle log.
+		if got := messagesOf(status.Warnings, codeConfigRejected); !strings.Contains(got, "api_port") || strings.Contains(got, "lifecycle log says why") {
+			t.Fatalf("the rejected edit's reason is not named: %q", got)
 		}
 		if verify := h.run(Options{Action: ActionVerify}); !hasMessage(verify.Errors, "rejected") {
 			t.Fatalf("verify does not fail on the rejected edit: %+v", verify.Errors)

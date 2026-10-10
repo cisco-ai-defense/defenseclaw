@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -34,18 +35,22 @@ func TestManagedStandaloneFailClosedTextIsPlain(t *testing.T) {
 			name:    "claude prompt, gateway unreachable",
 			failure: sessionStopCauses[2],
 			ev:      sessionStopEvent{connector: "claudecode", payload: `{"hook_event_name":"UserPromptSubmit"}`},
-			want:    "DefenseClaw blocked this prompt: " + unavailable + " (gateway unreachable)",
+			want:    "DefenseClaw blocked this prompt: " + unavailable,
 		},
 		{
 			name:    "codex prompt, gateway unreachable",
 			failure: sessionStopCauses[2],
 			ev:      sessionStopEvent{connector: "codex", event: "UserPromptSubmit"},
-			want:    "DefenseClaw blocked this prompt: " + unavailable + " (gateway unreachable)",
+			want:    "DefenseClaw blocked this prompt: " + unavailable,
 			body:    true,
 		},
 	} {
 		r, _ := runSessionStop(t, tc.failure, tc.ev, true)
-		if got := strings.TrimSpace(r.stderr); got != tc.want {
+		if tc.ev.connector == "claudecode" {
+			if r.code != 0 || !strings.Contains(r.stdout, mustJSONString(tc.want)) || r.stderr != "" {
+				t.Fatalf("%s: expected structured prompt block: %+v", tc.name, r)
+			}
+		} else if got := strings.TrimSpace(r.stderr); got != tc.want {
 			t.Fatalf("%s: stderr\n got %q\nwant %q", tc.name, got, tc.want)
 		}
 		if tc.body && !strings.Contains(r.stdout, mustJSONString(tc.want)) {
@@ -72,6 +77,22 @@ func TestManagedFailClosedTextOutsideStandaloneIsUnchanged(t *testing.T) {
 	}
 }
 
+// A stopped gateway's block text names the status command of the platform
+// the hook runs on and ends with the documented refusal code, as the shell
+// hooks' text does: a Linux developer was told to run `enterprise windows
+// status`, with no code to look up (GAP-1179).
+func TestManagedGatewayStoppedTextNamesThisPlatformAndRefusalCode(t *testing.T) {
+	text := managedStandaloneFailClosedText("UserPromptSubmit", "transport", managedGatewayNotRunningReason)
+	command := managedStatusCommand(runtime.GOOS)
+	if !strings.Contains(text, "`"+command+"`") || !strings.HasSuffix(text, " ("+managedGatewayNotRunningReason+")") ||
+		(runtime.GOOS != "windows" && strings.Contains(text, "windows")) {
+		t.Fatalf("text = %q, want %q and the refusal code last", text, command)
+	}
+	if got := managedStatusCommand("linux"); got != "enterprise linux status" {
+		t.Fatalf("linux status command = %q", got)
+	}
+}
+
 func TestHookEventSubject(t *testing.T) {
 	for event, want := range map[string]string{
 		"beforeSubmitPrompt":  "prompt",
@@ -90,6 +111,37 @@ type notRunningRT struct{}
 
 func (notRunningRT) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("%w: %w (state=1 pid=0)", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+}
+
+type portHeldRT struct{}
+
+func (portHeldRT) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("%w: %w: connected listener PID 9328 does not equal service PID 7828",
+		errManagedGatewayPeerUnverified, errManagedGatewayPortHeld)
+}
+
+// GAP-1029: while another process listens on the gateway API port, a Windows
+// standalone hook says the port is held, not that the running service is
+// stopped; Secure Client keeps the peer-unverified reason.
+func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
+	for _, explain := range []bool{true, false} {
+		home := t.TempDir()
+		token := "managed-test-token"
+		var out, errb bytes.Buffer
+		Run(context.Background(), Options{
+			Connector: "codex", Event: "PreToolUse", HookContractID: "codex-hooks-v4", APIAddr: "127.0.0.1:1",
+			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open", ManagedEnterprise: true,
+			ExplainUnenrolledAccount: explain, AuthenticatedManagedToken: &token,
+			Stdin:  strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),
+			Stdout: &out, Stderr: &errb, HTTPClient: &http.Client{Transport: portHeldRT{}},
+		})
+		failures, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
+		held := strings.Contains(out.String(), "another program is using the DefenseClaw gateway") &&
+			strings.Contains(string(failures), managedGatewayPortHeldReason)
+		if explain != held || strings.Contains(out.String(), "not running") {
+			t.Fatalf("explain=%v: stdout = %q failures = %q, want the held-port text only for the standalone hook", explain, out.String(), failures)
+		}
+	}
 }
 
 // A Windows standalone managed hook (ExplainUnenrolledAccount) whose gateway
@@ -123,8 +175,8 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	}
 	code, stdout, stderr, failures := run(true)
 	want := "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
-		"Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
-		"(" + managedGatewayNotRunningReason + ")"
+		"Try again in a moment; if this continues, ask your administrator to check DefenseClaw on this computer: `" +
+		managedStatusCommand(runtime.GOOS) + "` names what to do. (enterprise_managed_gateway_not_running)"
 	if code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) || !strings.Contains(stdout, mustJSONString(want)) {
 		t.Fatalf("windows standalone: code = %d stdout = %q stderr = %q, want a deny carrying %q", code, stdout, stderr, want)
 	}
@@ -134,6 +186,65 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 	_, stdout, _, failures = run(false)
 	if !strings.Contains(stdout, failedClosed) || !strings.Contains(failures, managedGatewayPeerUnverifiedReason) {
 		t.Fatalf("secure client: stdout = %q failures = %q, want the unchanged text and reason", stdout, failures)
+	}
+}
+
+// A Windows standalone Cursor hook whose gateway service is stopped is
+// refused by the foreign-hook guard before hookexec reads the payload, and
+// Cursor's command binds no event. The deny must still be the event's own
+// (permission deny on preToolUse and beforeShellExecution), not the {}
+// Cursor answers an event it cannot name with: Cursor ran the shell call of
+// an open session (GAP-1032). Secure Client is unchanged.
+func TestWindowsStandaloneCursorStoppedGatewayDeniesEachToolEvent(t *testing.T) {
+	for _, event := range []string{"preToolUse", "beforeShellExecution"} {
+		run := func(explain bool) (int, string) {
+			home := t.TempDir()
+			var out, errb bytes.Buffer
+			code := Run(context.Background(), Options{
+				Connector:                "cursor",
+				Home:                     home,
+				HookDir:                  filepath.Join(home, "hooks"),
+				ManagedEnterprise:        true,
+				ExplainUnenrolledAccount: explain,
+				ManagedRuntimeFailure:    managedGatewayNotRunningReason,
+				Stdin:                    strings.NewReader(`{"hook_event_name":"` + event + `","command":"Get-Date"}`),
+				Stdout:                   &out,
+				Stderr:                   &errb,
+			})
+			return code, out.String()
+		}
+		code, stdout := run(true)
+		if code != blockExit || !strings.Contains(stdout, `"permission":"deny"`) ||
+			!strings.Contains(stdout, "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running") {
+			t.Fatalf("%s: code = %d stdout = %q, want the event's deny with the plain text", event, code, stdout)
+		}
+		if code, stdout = run(false); strings.TrimSpace(stdout) != "{}" || code != blockExit {
+			t.Fatalf("%s: Secure Client code = %d stdout = %q, want its unchanged answer", event, code, stdout)
+		}
+	}
+}
+
+// A standalone hook that refuses an over-cap Claude Code prompt shows the
+// structured prompt block (not a raw stderr line about a "request") and
+// reports the refusal to the gateway with the event and session fields and
+// none of the content, so it has an audit record (GAP-0965, GAP-1042).
+func TestManagedStandaloneOversizedPromptIsBlockedAndReported(t *testing.T) {
+	rt := &stubRT{status: http.StatusOK, body: `{"action":"block"}`}
+	prompt := strings.Repeat("p", 4096)
+	r := run(t, "claudecode", rt, func(o *Options) {
+		o.Event = ""
+		o.ManagedEnterprise, o.ManagedStandalone = true, true
+		o.ManagedUnixSocket, o.ManagedServiceUID = "/run/defenseclaw-hook/hook.sock", 0
+		o.FailMode, o.MaxBody = "closed", 1024
+		o.Stdin = strings.NewReader(`{"session_id":"sess-1","hook_event_name":"UserPromptSubmit","prompt":"` + prompt + `"}`)
+	})
+	want := mustJSONString("DefenseClaw blocked this prompt: it is too large for DefenseClaw to inspect. Make it smaller and try again.")
+	if r.code != 0 || !strings.Contains(r.stdout, `"decision":"block"`) || !strings.Contains(r.stdout, want) || r.stderr != "" {
+		t.Fatalf("refusal = %+v, want the structured prompt block", r)
+	}
+	if rt.requests != 1 || rt.gotReq.Header.Get(HookRefusalHeader) != HookRefusalPayloadTooLarge ||
+		!strings.Contains(string(rt.gotBody), `"session_id":"sess-1"`) || strings.Contains(string(rt.gotBody), "ppp") {
+		t.Fatalf("report: %d request(s), body %q", rt.requests, rt.gotBody)
 	}
 }
 

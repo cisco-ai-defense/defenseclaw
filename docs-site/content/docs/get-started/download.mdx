@@ -77,8 +77,10 @@ troubleshooting.
 
 </OsTabs>
 
-If you used the plain install command, run `defenseclaw init` next. The
-install-and-setup command has already done that step. The
+If you used the plain install command, run the `defenseclaw init --connector
+<agent>` command it prints next, for the agent you picked (plain `defenseclaw
+init` sets up every agent it finds). The install-and-setup command has already
+done that step. The
 [5-minute quickstart](/docs/get-started/quickstart) takes you from there to
 your first blocked tool call.
 
@@ -156,6 +158,11 @@ grep "  $FILE\$" checksums.txt | sha256sum -c -
 
 On macOS, use `shasum -a 256 -c -` in place of `sha256sum -c -`.
 
+The signing identity in that command is the one DefenseClaw itself checks: it
+is built into the installer and the CLI, not read from a setting. A mirror set
+with `update.source` (see [Upgrade](/docs/get-started/upgrade#install-from-a-mirror))
+changes only where files are downloaded from, never which signature is trusted.
+
 On Windows, compare the file's hash with its line in `checksums.txt`:
 
 ```powershell
@@ -174,7 +181,10 @@ defenseclaw uninstall               # remove connector hooks; keep ~/.defensecla
 ```
 
 Running the one-line installer again also upgrades or repairs an install and
-keeps your configuration. [Upgrade](/docs/get-started/upgrade) explains what
+keeps your configuration. When a release changes the `config.yaml` format, the
+upgrade converts the file and keeps the old copy
+([Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9)); `rollback`
+puts the old file back. [Upgrade](/docs/get-started/upgrade) explains what
 an upgrade does, and [Install → Uninstall](/docs/get-started/install#uninstall)
 lists every uninstall option, including how to remove everything.
 

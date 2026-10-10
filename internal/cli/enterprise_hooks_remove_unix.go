@@ -164,7 +164,8 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 	if enterpriseHooksRemoveAllPurge {
 		report.StateFailed = append(report.StateFailed, addEnterpriseHookStatePurges(jobs, rows, cleanupFailed)...)
 	}
-	for _, run := range runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism) {
+	runs := retryTimedOutWorkers(cmd.Context(), runEnterpriseHookWorkerPool(cmd.Context(), sortedWorkerJobs(jobs), enterpriseHookWorkerParallelism))
+	for _, run := range runs {
 		answered := map[int]enterpriseHookWorkerTargetResult{}
 		for _, result := range run.Response.Targets {
 			answered[result.Index] = result
@@ -229,6 +230,15 @@ func removeAllEnterpriseHookTargets(cmd *cobra.Command) (enterpriseHooksRemoveAl
 		}
 	}
 	return report, nil
+}
+
+// newEnterpriseHookRemoveJob is one account's worker job; its targets are
+// added by the callers.
+func newEnterpriseHookRemoveJob(account enterpriseHookWorkerAccount) *enterpriseHookWorkerJob {
+	return &enterpriseHookWorkerJob{
+		Account: account,
+		Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true},
+	}
 }
 
 // enterpriseHookRemoveRow is one manifest row and the account it resolved
@@ -307,10 +317,7 @@ func enterpriseHookRemoveJobs(rows []enterpriseHookRemoveRow) (map[int]*enterpri
 		}
 		job := jobs[uid]
 		if job == nil {
-			job = &enterpriseHookWorkerJob{
-				Account: enterpriseHookWorkerAccount{UID: uid, GID: gid, User: user, Home: home},
-				Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true},
-			}
+			job = newEnterpriseHookRemoveJob(enterpriseHookWorkerAccount{UID: uid, GID: gid, User: user, Home: home})
 			jobs[uid] = job
 		}
 		if job.Account.Home != home || job.Account.GID != gid {
@@ -359,10 +366,7 @@ func addEnterpriseHookLeftoverRemovals(jobs map[int]*enterpriseHookWorkerJob, ma
 		}
 		job := jobs[account.UID]
 		if job == nil {
-			job = &enterpriseHookWorkerJob{
-				Account: enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: home},
-				Request: enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpApply, Standalone: true},
-			}
+			job = newEnterpriseHookRemoveJob(enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: home})
 			jobs[account.UID] = job
 		}
 		if job.Account.Home != home || job.Account.GID != account.GID {
@@ -483,8 +487,9 @@ func enterpriseHookJobRemoves(job *enterpriseHookWorkerJob, connector string) bo
 // enrolls with the purge of that account's DefenseClaw per-user state (each
 // data directory its rows name) and per-user binaries, except for the
 // accounts in skip, whose pending cleanup failed and whose backups a retry
-// still needs. It returns every enrolled account it did not add a purge for,
-// as "user: reason", so the report names each account whose data stays.
+// still needs. Eligible accounts without a manifest row are not proof of
+// managed enrollment. It returns every enrolled account it did not add a purge
+// for, as "user: reason", so the report names each account whose data stays.
 func addEnterpriseHookStatePurges(jobs map[int]*enterpriseHookWorkerJob, rows []enterpriseHookRemoveRow, skip map[int]bool) []string {
 	dataDirs := map[int][]string{}
 	notPurged := map[string]string{}

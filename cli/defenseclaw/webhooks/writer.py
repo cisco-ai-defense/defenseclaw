@@ -35,7 +35,6 @@ from __future__ import annotations
 import copy
 import inspect
 import ipaddress
-import os
 import re
 import socket
 from dataclasses import dataclass
@@ -43,6 +42,7 @@ from functools import wraps
 from typing import Any
 from urllib.parse import urlparse
 
+from defenseclaw import envvars
 from defenseclaw.config import (
     config_path_for_data_dir,
     locked_config_yaml,
@@ -438,7 +438,7 @@ def _cgnat_allowed() -> bool:
     means tests can flip the env var with ``patch.dict`` without a
     module reload.
     """
-    return os.environ.get("DEFENSECLAW_ALLOW_CGNAT") == "1"
+    return envvars.lookup("DEFENSECLAW_ALLOW_CGNAT") == "1"
 
 
 def _private_target_hint(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
@@ -485,7 +485,7 @@ def validate_webhook_url(url: str) -> None:
     if not host:
         raise ValueError("empty hostname")
 
-    allow_local = os.environ.get("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
+    allow_local = envvars.lookup("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 
     if host.lower() == "localhost":
         if not allow_local:
@@ -581,9 +581,10 @@ def redact_webhook_url(url: str) -> str:
 
 
 def _load_yaml(path: str) -> dict[str, Any]:
+    from defenseclaw.config import read_config_text
+
     try:
-        with open(path) as f:
-            data = parse_config_yaml(f.read()) or {}
+        data = parse_config_yaml(read_config_text(path)) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:

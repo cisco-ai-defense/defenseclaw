@@ -19,12 +19,15 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,6 +35,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -41,9 +45,7 @@ func init() {
 	policyCmd.AddCommand(policyTestCmd)
 	policyCmd.AddCommand(policyShowCmd)
 	policyCmd.AddCommand(policyEvaluateCmd)
-	policyCmd.AddCommand(policyEvaluateFirewallCmd)
 	policyCmd.AddCommand(policyReloadCmd)
-	policyCmd.AddCommand(policyDomainsCmd)
 
 	policyValidateCmd.Flags().String("rego-dir", "", "Rego directory to validate (default: the configured policy directory)")
 	policyTestCmd.Flags().String("rego-dir", "", "Rego directory to test (default: the configured policy directory)")
@@ -53,11 +55,6 @@ func init() {
 	policyEvaluateCmd.Flags().String("target-name", "", "Target name to evaluate")
 	policyEvaluateCmd.Flags().String("severity", "", "Max severity of scan result (empty = pre-scan)")
 	policyEvaluateCmd.Flags().Int("findings", 0, "Number of findings")
-
-	policyEvaluateFirewallCmd.Flags().String("destination", "", "Destination hostname or IP")
-	policyEvaluateFirewallCmd.Flags().Int("port", 443, "Destination port")
-	policyEvaluateFirewallCmd.Flags().String("protocol", "tcp", "Protocol (tcp/udp)")
-	policyEvaluateFirewallCmd.Flags().String("target-type", "skill", "Target type context")
 }
 
 var policyCmd = &cobra.Command{
@@ -66,56 +63,99 @@ var policyCmd = &cobra.Command{
 	Long:  "Validate, inspect, evaluate, and reload DefenseClaw OPA policies.",
 }
 
+// policyConfigOnlyPreRunE is the setup of the read-only policy views
+// (digest, show, validate): they need the strict runtime config and the
+// policy assets, never the audit store, so a short-lived process does not
+// become a second SQLite owner. On a standalone managed host an
+// administrator's run reads the managed deployment without extra
+// environment variables, as status does; a standard user gets the managed
+// answer instead of a per-user config that does not exist.
+func policyConfigOnlyPreRunE(cmd *cobra.Command, _ []string) error {
+	if err := managedStandardUserGatewayRefusal(); err != nil {
+		return err
+	}
+	if err := pinManagedAdministratorEnvironment("policy", func() string {
+		return windowsManagedStandardUserViewAnswer("the managed policy", "enterprise policy show --user "+managedHostCurrentAccountName())
+	}); err != nil {
+		return err
+	}
+	applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
+	return loadGatewayCommandConfigFor(cmd)
+}
+
+func policyConfigOnlyPostRun(*cobra.Command, []string) {}
+
 // ---------------------------------------------------------------------------
 // policy validate
 // ---------------------------------------------------------------------------
 
 var policyValidateCmd = &cobra.Command{
-	Use:   "validate",
-	Short: "Compile-check all Rego modules and validate data.json",
+	Use:               "validate",
+	Short:             "Compile-check all Rego modules and the admission policy compiled from config.yaml",
+	Annotations:       map[string]string{secureClientShortAnnotation: "Compile-check all Rego modules and validate data.json"},
+	PersistentPreRunE: policyConfigOnlyPreRunE,
+	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		regoDir, err := policyCommandRegoDir(cmd)
 		if err != nil {
 			return err
 		}
-
-		fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
-
-		engine, err := policy.NewExact(regoDir)
-		if err != nil {
-			return fmt.Errorf("policy: load failed: %w", err)
+		if cfg != nil && cfg.SecureClientIntegration() {
+			return validateSecureClientPolicy(regoDir)
 		}
 
-		if err := engine.Compile(); err != nil {
-			return fmt.Errorf("policy: compilation failed:\n%w", err)
-		}
-
-		fmt.Println("All Rego modules compiled successfully.")
-
-		data, err := policy.LoadDataExact(regoDir)
-		if err != nil {
-			return fmt.Errorf("policy: load effective data: %w", err)
-		}
-
-		required := []string{"config", "actions", "severity_ranking"}
-		for _, key := range required {
-			if _, ok := data[key]; !ok {
-				fmt.Fprintf(os.Stderr, "warning: data.json missing key: %s\n", key)
+		if _, statErr := os.Stat(regoDir); errors.Is(statErr, fs.ErrNotExist) {
+			// An existing policy root without Rego is config-only mode, as
+			// the gateway treats it. A missing root is a failed reload.
+			paths, err := resolvePolicyPaths()
+			if err != nil {
+				return err
+			}
+			if _, rootErr := os.Stat(paths.rootDir); rootErr != nil {
+				return fmt.Errorf("policy: compilation failed:\npolicy: read rego directory: %w", statErr)
+			}
+			fmt.Printf("No Rego directory at %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
+		} else {
+			fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
+			if _, err := policy.NewExact(regoDir); errors.Is(err, policy.ErrNoModules) {
+				fmt.Printf("No Rego modules in %s: the admission policy is compiled from config.yaml alone.\n", regoDir)
+			} else if err != nil {
+				return fmt.Errorf("policy: compilation failed:\n%w", err)
+			} else {
+				fmt.Println("All Rego modules compiled successfully.")
 			}
 		}
 
-		fmt.Println("data.json schema: OK")
+		for _, assetType := range []string{config.AdmissionTypeSkill, config.AdmissionTypeMCP, config.AdmissionTypePlugin} {
+			compiled := policy.CompileAdmission(cfg)[assetType]
+			fmt.Printf("admission.%s: actions from %s\n", assetType, compiled.Source)
+		}
 		return nil
 	},
 }
 
-// ---------------------------------------------------------------------------
-// policy test — run the Rego unit tests with the embedded OPA test runner
-// ---------------------------------------------------------------------------
+// validateSecureClientPolicy is policy validate of main, which a Secure
+// Client host keeps (issue #1092): data.json is required, then the Rego
+// modules compile.
+func validateSecureClientPolicy(regoDir string) error {
+	fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
+	data, err := policy.LoadSecureClientData(regoDir)
+	if err != nil {
+		return fmt.Errorf("policy: load failed: %w", err)
+	}
+	if _, err := policy.PrepareSecureClientExact(context.Background(), regoDir); err != nil {
+		return fmt.Errorf("policy: compilation failed:\n%w", err)
+	}
+	fmt.Println("All Rego modules compiled successfully.")
+	for _, key := range []string{"config", "actions", "severity_ranking"} {
+		if _, ok := data[key]; !ok {
+			fmt.Fprintf(os.Stderr, "warning: data.json missing key: %s\n", key)
+		}
+	}
+	fmt.Println("data.json schema: OK")
+	return nil
+}
 
-// policyTestCmd runs the *_test.rego unit tests in-process, so `defenseclaw
-// policy test` works on installs without a separate `opa` binary (GAP-1091).
-// It loads the directory the same way `opa test <dir>` does.
 var policyTestCmd = &cobra.Command{
 	Use:   "test",
 	Short: "Run the Rego unit tests (*_test.rego) without an external opa binary",
@@ -200,20 +240,28 @@ func policyCommandRegoDir(cmd *cobra.Command) (string, error) {
 // ---------------------------------------------------------------------------
 
 var policyShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Display the current OPA data.json policy configuration",
+	Use:               "show",
+	Short:             "Display the admission policy and thresholds compiled from config.yaml",
+	Annotations:       map[string]string{secureClientShortAnnotation: "Display the current OPA data.json policy configuration"},
+	PersistentPreRunE: policyConfigOnlyPreRunE,
+	PersistentPostRun: policyConfigOnlyPostRun,
 	RunE: func(_ *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
+		if cfg != nil && cfg.SecureClientIntegration() {
+			return showSecureClientPolicy()
 		}
-
-		data, err := policy.LoadDataExact(paths.regoDir)
-		if err != nil {
-			return fmt.Errorf("policy: load effective data: %w", err)
+		view := map[string]any{"admission": policy.CompileAdmission(cfg)}
+		if cfg != nil {
+			// The levels the gateway resolves: block_at / alert_at over
+			// the rule pack's posture.
+			levels := gateway.ConfigThresholds(cfg, "")
+			view["guardrail"] = map[string]string{
+				"block_at":          levels.Block,
+				"alert_at":          levels.Alert,
+				"source":            levels.Source,
+				"cisco_trust_level": cfg.Guardrail.EffectiveCiscoTrustLevel(),
+			}
 		}
-
-		out, err := json.MarshalIndent(data, "", "  ")
+		out, err := json.MarshalIndent(view, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -222,13 +270,37 @@ var policyShowCmd = &cobra.Command{
 	},
 }
 
-// ---------------------------------------------------------------------------
-// policy evaluate — dry-run admission
-// ---------------------------------------------------------------------------
+// showSecureClientPolicy is policy show of main, which a Secure Client
+// host keeps (issue #1092): the data.json of the Rego directory.
+func showSecureClientPolicy() error {
+	paths, err := resolvePolicyPaths()
+	if err != nil {
+		return fmt.Errorf("policy: resolve paths: %w", err)
+	}
+	data, err := policy.LoadSecureClientData(paths.regoDir)
+	if err != nil {
+		return fmt.Errorf("policy: load effective data: %w", err)
+	}
+	out, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return nil
+}
 
 var policyEvaluateCmd = &cobra.Command{
 	Use:   "evaluate",
 	Short: "Dry-run the admission policy for a given input",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if _, windows := managedHostWindowsStandalone(); windows {
+			return policyConfigOnlyPreRunE(cmd, args)
+		}
+		if _, unix := managedHostUnixRecord(nil); unix {
+			return policyConfigOnlyPreRunE(cmd, args)
+		}
+		return rootPersistentPreRunE(cmd, args)
+	},
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		paths, err := resolvePolicyPaths()
 		if err != nil {
@@ -244,15 +316,17 @@ var policyEvaluateCmd = &cobra.Command{
 			return fmt.Errorf("--target-name is required")
 		}
 
-		engine, err := policy.NewExact(paths.regoDir)
-		if err != nil {
-			return err
-		}
-
+		secureClient := cfg != nil && cfg.SecureClientIntegration()
 		input := policy.AdmissionInput{
 			TargetType: targetType,
 			TargetName: targetName,
 			Path:       "/dry-run",
+		}
+		if !secureClient {
+			input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
+				TargetType: targetType, Name: targetName, SourcePath: "/dry-run",
+			})
+			input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), targetType)
 		}
 
 		if severity != "" {
@@ -265,57 +339,31 @@ var policyEvaluateCmd = &cobra.Command{
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		out, err := engine.Evaluate(ctx, input)
-		if err != nil {
-			return fmt.Errorf("evaluation failed: %w", err)
+		// The managed packages ship no Rego: the config-driven twin the
+		// gateway falls back to decides, as it does there. Secure Client
+		// keeps the engine error of main (issue #1092).
+		var out *policy.AdmissionOutput
+		var engine *policy.Engine
+		var secureClientPrepared *policy.Prepared
+		if secureClient {
+			secureClientPrepared, err = policy.PrepareSecureClientExact(ctx, paths.regoDir)
+		} else {
+			engine, err = policy.NewExact(paths.regoDir)
 		}
-
-		result, _ := json.MarshalIndent(out, "", "  ")
-		fmt.Println(string(result))
-		return nil
-	},
-}
-
-// ---------------------------------------------------------------------------
-// policy evaluate-firewall — dry-run firewall
-// ---------------------------------------------------------------------------
-
-var policyEvaluateFirewallCmd = &cobra.Command{
-	Use:   "evaluate-firewall",
-	Short: "Dry-run the firewall policy for a given destination",
-	RunE: func(cmd *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
-		}
-
-		destination, _ := cmd.Flags().GetString("destination")
-		port, _ := cmd.Flags().GetInt("port")
-		protocol, _ := cmd.Flags().GetString("protocol")
-		targetType, _ := cmd.Flags().GetString("target-type")
-
-		if destination == "" {
-			return fmt.Errorf("--destination is required")
-		}
-
-		engine, err := policy.NewExact(paths.regoDir)
-		if err != nil {
+		switch {
+		case !secureClient && (errors.Is(err, policy.ErrNoModules) || errors.Is(err, fs.ErrNotExist)):
+			out = policy.EvaluateAdmissionFallback(input)
+		case err != nil:
 			return err
-		}
-
-		input := policy.FirewallInput{
-			TargetType:  targetType,
-			Destination: destination,
-			Port:        port,
-			Protocol:    protocol,
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		out, err := engine.EvaluateFirewall(ctx, input)
-		if err != nil {
-			return fmt.Errorf("evaluation failed: %w", err)
+		default:
+			if secureClient {
+				out, err = secureClientPrepared.EvaluateAdmission(ctx, input)
+			} else {
+				out, err = engine.Evaluate(ctx, input)
+			}
+			if err != nil {
+				return fmt.Errorf("evaluation failed: %w", err)
+			}
 		}
 
 		result, _ := json.MarshalIndent(out, "", "  ")
@@ -331,6 +379,12 @@ var policyEvaluateFirewallCmd = &cobra.Command{
 var policyReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Tell the running gateway to reload OPA policies",
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if err := managedStandardUserGatewayRefusal(); err != nil {
+			return err
+		}
+		return rootPersistentPreRunE(cmd, args)
+	},
 	RunE: func(_ *cobra.Command, _ []string) error {
 		port := 18790
 		bind := "127.0.0.1"
@@ -382,70 +436,82 @@ var policyReloadCmd = &cobra.Command{
 		defer resp.Body.Close()
 
 		body, _ := io.ReadAll(resp.Body)
+		if cfg != nil && cfg.SecureClientIntegration() {
+			return printSecureClientPolicyReload(resp.StatusCode, body)
+		}
 		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("reload failed (HTTP %d): %s", resp.StatusCode, string(body))
+			return policyReloadError(resp.StatusCode, body)
 		}
 
-		var result map[string]interface{}
-		if err := json.Unmarshal(body, &result); err == nil {
-			out, _ := json.MarshalIndent(result, "", "  ")
-			fmt.Println(string(out))
-		} else {
-			fmt.Println(string(body))
-		}
+		fmt.Println(policyReloadMessage(body))
 		return nil
 	},
 }
 
-// ---------------------------------------------------------------------------
-// policy domains — list allowed/blocked domains from data.json
-// ---------------------------------------------------------------------------
+// printSecureClientPolicyReload is the policy reload output of main, which a
+// Secure Client host keeps (issue #1092): a refused reload shows the HTTP
+// status and the body, a successful one the indented JSON answer.
+func printSecureClientPolicyReload(status int, body []byte) error {
+	if status != http.StatusOK {
+		return fmt.Errorf("reload failed (HTTP %d): %s", status, string(body))
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(body, &result); err == nil {
+		out, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(out))
+	} else {
+		fmt.Println(string(body))
+	}
+	return nil
+}
 
-var policyDomainsCmd = &cobra.Command{
-	Use:   "domains",
-	Short: "List firewall domain allowlist and blocklist from active policy",
-	RunE: func(_ *cobra.Command, _ []string) error {
-		paths, err := resolvePolicyPaths()
-		if err != nil {
-			return fmt.Errorf("policy: resolve paths: %w", err)
-		}
+// policyReloadMessage says a successful /policy/reload in one sentence, naming
+// the generation and digest that are enforcing now when the gateway reports them.
+func policyReloadMessage(body []byte) string {
+	var result struct {
+		Generation uint64 `json:"generation"`
+		Digest     string `json:"digest"`
+	}
+	if json.Unmarshal(body, &result) != nil || result.Generation == 0 {
+		return "Policy reloaded."
+	}
+	if result.Digest == "" {
+		return fmt.Sprintf("Policy reloaded (generation %d).", result.Generation)
+	}
+	return fmt.Sprintf("Policy reloaded (generation %d, digest %s).", result.Generation, result.Digest)
+}
 
-		effectiveData, err := policy.LoadDataExact(paths.regoDir)
-		if err != nil {
-			return fmt.Errorf("policy: load effective data: %w", err)
-		}
-		raw, err := json.Marshal(effectiveData)
-		if err != nil {
-			return fmt.Errorf("policy: encode effective data: %w", err)
-		}
+// customPackPinMismatch matches the rebuild error for a custom rule pack whose
+// files no longer match its guardrail.custom_packs pin.
+var customPackPinMismatch = regexp.MustCompile(`rule pack "([^"]+)": digest (sha256:[0-9a-f]{64}) does not match guardrail\.custom_packs\.`)
 
-		var data struct {
-			Firewall struct {
-				DefaultAction       string   `json:"default_action"`
-				BlockedDestinations []string `json:"blocked_destinations"`
-				AllowedDomains      []string `json:"allowed_domains"`
-				AllowedPorts        []int    `json:"allowed_ports"`
-			} `json:"firewall"`
-		}
-		if err := json.Unmarshal(raw, &data); err != nil {
-			return fmt.Errorf("policy: parse data.json: %w", err)
-		}
-
-		fmt.Printf("Default action: %s\n", data.Firewall.DefaultAction)
-		fmt.Printf("Allowed ports:  %v\n\n", data.Firewall.AllowedPorts)
-
-		fmt.Println("Blocked destinations:")
-		for _, d := range data.Firewall.BlockedDestinations {
-			fmt.Printf("  - %s\n", d)
-		}
-		fmt.Println()
-
-		fmt.Println("Allowed domains:")
-		for _, d := range data.Firewall.AllowedDomains {
-			fmt.Printf("  + %s\n", d)
-		}
-		return nil
-	},
+// policyReloadError says a refused /policy/reload in plain words: no HTTP
+// status, no JSON body and no internal stage names. A rebuild that fails leaves
+// the previous policy enforcing; a pin mismatch also names the command that
+// pins the pack as it is now.
+func policyReloadError(status int, body []byte) error {
+	var payload struct {
+		Error  string `json:"error"`
+		Status string `json:"status"`
+	}
+	reason := strings.TrimSpace(string(body))
+	if json.Unmarshal(body, &payload) == nil && payload.Error != "" {
+		reason = payload.Error
+	}
+	if reason == "" {
+		return fmt.Errorf("policy reload failed (HTTP %d)", status)
+	}
+	reason = strings.TrimPrefix(reason, "reload failed: ")
+	reason = strings.TrimPrefix(reason, "config reload rule pack preflight: ")
+	if m := customPackPinMismatch.FindStringSubmatch(reason); m != nil {
+		key := "guardrail.custom_packs." + m[1] + ".digest"
+		return fmt.Errorf("policy reload failed: rule pack %s no longer matches its pin (%s). The previous policy is still enforcing. "+
+			"Review the pack, then pin it with: defenseclaw config set %s %s", m[1], key, key, m[2])
+	}
+	if payload.Status == "failed" {
+		return fmt.Errorf("policy reload failed: %s. The previous policy is still enforcing", strings.TrimSuffix(reason, "."))
+	}
+	return fmt.Errorf("policy reload failed: %s", reason)
 }
 
 // ---------------------------------------------------------------------------
@@ -453,16 +519,14 @@ var policyDomainsCmd = &cobra.Command{
 // ---------------------------------------------------------------------------
 
 type resolvedPolicyPaths struct {
-	rootDir  string
-	regoDir  string
-	dataPath string
+	rootDir string
+	regoDir string
 }
 
 // resolvePolicyPaths resolves one immutable layout for every local policy
 // command. Current installations use <policy-root>/rego; releases through
-// 0.3.x used the flat policy root. Canonical evidence always wins, including a
-// data.json without modules, so an incomplete or malformed canonical layout
-// cannot silently downgrade to stale flat policy data.
+// 0.3.x used the flat policy root. Canonical modules always win, so a stale
+// flat copy cannot shadow them.
 func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 	root, err := resolvePolicyRoot()
 	if err != nil {
@@ -473,42 +537,32 @@ func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 	if err != nil {
 		return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical Rego directory: %w", err)
 	}
-	nestedData, err := resolveContainedPolicyPath(root, filepath.Join(nestedDir, "data.json"))
-	if err != nil {
-		return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical policy data: %w", err)
-	}
 	nestedModules, err := policyDirectoryHasRego(root, nestedDir)
 	if err != nil {
 		return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical Rego directory: %w", err)
 	}
-	nestedDataExists, err := policyDataFileExists(nestedData)
-	if err != nil {
-		return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical policy data: %w", err)
-	}
 
-	paths := resolvedPolicyPaths{rootDir: root}
-	if nestedModules || nestedDataExists {
-		paths.regoDir = nestedDir
-		paths.dataPath = nestedData
-	} else {
-		flatData, err := resolveContainedPolicyPath(root, filepath.Join(root, "data.json"))
+	// Secure Client still reads legacy data.json; a canonical data file
+	// selects that layout even when it has no Rego modules.
+	if cfg != nil && cfg.SecureClientIntegration() {
+		nestedData, err := resolveContainedPolicyPath(root, filepath.Join(nestedDir, "data.json"))
 		if err != nil {
-			return resolvedPolicyPaths{}, fmt.Errorf("resolve legacy policy data: %w", err)
+			return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical policy data: %w", err)
 		}
+		dataExists, err := policyDataFileExists(nestedData)
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical policy data: %w", err)
+		}
+		nestedModules = nestedModules || dataExists
+	}
+	paths := resolvedPolicyPaths{rootDir: root, regoDir: nestedDir}
+	if !nestedModules {
 		flatModules, err := policyDirectoryHasRego(root, root)
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("inspect legacy Rego directory: %w", err)
 		}
-		flatDataExists, err := policyDataFileExists(flatData)
-		if err != nil {
-			return resolvedPolicyPaths{}, fmt.Errorf("inspect legacy policy data: %w", err)
-		}
-		if flatModules || flatDataExists {
+		if flatModules {
 			paths.regoDir = root
-			paths.dataPath = flatData
-		} else {
-			paths.regoDir = nestedDir
-			paths.dataPath = nestedData
 		}
 	}
 
@@ -520,25 +574,13 @@ func resolvePolicyPaths() (resolvedPolicyPaths, error) {
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("resolve nested Rego directory: %w", err)
 		}
-		deeperData, err := resolveContainedPolicyPath(root, filepath.Join(deeperDir, "data.json"))
-		if err != nil {
-			return resolvedPolicyPaths{}, fmt.Errorf("resolve nested policy data: %w", err)
-		}
 		deeperModules, err := policyDirectoryHasRego(root, deeperDir)
 		if err != nil {
 			return resolvedPolicyPaths{}, fmt.Errorf("inspect nested Rego directory: %w", err)
 		}
-		deeperDataExists, err := policyDataFileExists(deeperData)
-		if err != nil {
-			return resolvedPolicyPaths{}, fmt.Errorf("inspect nested policy data: %w", err)
-		}
-		if deeperModules || deeperDataExists {
+		if deeperModules {
 			return resolvedPolicyPaths{}, fmt.Errorf("policy root contains an unsupported nested rego/rego layout")
 		}
-	}
-
-	if err := validatePolicyEnginePaths(root, paths.regoDir); err != nil {
-		return resolvedPolicyPaths{}, err
 	}
 	return paths, nil
 }
@@ -693,17 +735,6 @@ func policyDataFileExists(path string) (bool, error) {
 		return false, fmt.Errorf("policy data is not a regular file")
 	}
 	return true, nil
-}
-
-func validatePolicyEnginePaths(root, regoDir string) error {
-	supplemental, err := resolveContainedPolicyPath(root, filepath.Join(regoDir, "data-sandbox.json"))
-	if err != nil {
-		return fmt.Errorf("resolve supplemental policy data: %w", err)
-	}
-	if _, err := policyDataFileExists(supplemental); err != nil {
-		return fmt.Errorf("inspect supplemental policy data: %w", err)
-	}
-	return nil
 }
 
 func policyPathContained(root, candidate string) bool {

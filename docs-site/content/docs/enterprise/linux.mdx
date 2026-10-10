@@ -31,9 +31,10 @@ the same config.
 | Not WSL | The lifecycle refuses a new install inside a WSL distribution (`wsl_distribution`), even one with systemd: the Windows user can open the distribution as root. A deployment that is already there gets a `wsl_distribution` warning on status, verify and upgrade. Govern WSL from Windows instead. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl). |
 | Architecture | x86_64 (`amd64`) or `arm64`. Each release has a package and a tarball for both. |
 | Package format | `.deb` (Debian, Ubuntu) or `.rpm` (RHEL and derivatives). Hosts without a package manager use the payload tarball. |
-| SELinux | Supported. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw` and `/etc/defenseclaw`, and reports a `selinux_relabel` warning if that fails. |
+| SELinux | Supported, for unconfined and SELinux-confined users (`user_u`, `staff_u` and other confined logins). Where SELinux is enabled, the lifecycle loads a small policy module, `defenseclaw` (`semodule -l` lists it). It labels the hook socket `defenseclaw_hook_sock_t` and the gateway binary `defenseclaw_gateway_exec_t`, so systemd starts the gateway, and creates its listening sockets, in a domain of its own, `defenseclaw_gateway_t`, with the privileges of `unconfined_service_t` (the root DefenseClaw services that run the same binary, such as the hook guardian, run in it too). Every user domain may stat and write the hook socket and connect to `defenseclaw_gateway_t`, and to no other service. The gateway still authorizes each caller by uid. A transaction that loads a changed module also replaces the hook socket, so the socket carries the new label. Uninstall removes the module. After each change the lifecycle runs `restorecon -R` on `/opt/defenseclaw`, `/etc/defenseclaw` and `/run/defenseclaw-hook`, and reports a `selinux_relabel` warning if that fails, or `selinux_module` if the module does not load. `status` and `verify` warn with `selinux_module_missing` while confined users cannot reach the socket: the module is not loaded, or the socket or the gateway binary lacks its label. |
 | Privileges | root. Every `enterprise linux` action, status included, needs root: a standard user gets `not_root`. Per-user commands such as `defenseclaw-gateway status` and `audit export` answer that the computer is managed and name the administrator command. |
 | Other profiles | No Secure Client DefenseClaw layout at `/opt/cisco/secureclient/defenseclaw`. The lifecycle refuses with `profile_conflict`. |
+| Application control | fapolicyd: the deb and rpm ship every file an agent loads (the binaries and the managed OpenCode plugin), so package-database trust covers them. After a payload install, add `/opt/defenseclaw/` to a trust file. See [Application control must allow DefenseClaw files](/docs/enterprise/threat-model#application-control-must-allow-defenseclaw-files). |
 
 The systemd version decides how the gateway reads secrets:
 
@@ -54,7 +55,7 @@ lists each directive and the version it needs.
 | Item | Path | Owner and mode |
 | --- | --- | --- |
 | Binaries | `/opt/defenseclaw/bin`: `defenseclaw-gateway`, `defenseclaw-hook`, `defenseclaw-sensor-helper`, and `defenseclaw-acp` when present | `root`, `0755` |
-| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/defenseclaw.js` | `root`, `0644` |
+| Managed OpenCode plugin | `/opt/defenseclaw/share/opencode/defenseclaw.js`, shipped in the deb and rpm (a payload install writes it) | `root`, `0644` |
 | Config | `/etc/defenseclaw/config.yaml` | `root:defenseclaw`, `0640` |
 | Policies | `/etc/defenseclaw/policies` | `root:defenseclaw`, `0750` |
 | Secrets | `/etc/defenseclaw/secrets` | See the table above |
@@ -70,7 +71,11 @@ lists each directive and the version it needs.
 
 The gateway runs as the `defenseclaw` system account. The lifecycle creates
 it with `systemd-sysusers`, or `useradd` as a fallback, and reuses an
-existing account.
+existing account that cannot sign in. An existing `defenseclaw` account with
+a login shell (anything other than `nologin` or `false`) is refused, and
+`status` and `verify` report one: whoever signs in as it could stop the
+gateway. Remove it with `userdel defenseclaw`, or give it the shell
+`/usr/sbin/nologin`, and run `ensure` again.
 
 The units:
 
@@ -79,7 +84,7 @@ The units:
 | `defenseclaw-gateway.service` | `defenseclaw`, no capabilities | Policy engine and hook API. `Type=notify` with a 60 s watchdog and `Restart=always`. Config, binaries and ledger are read-only to it. |
 | `defenseclaw-gateway-api.socket` | PID 1 | Listens on `127.0.0.1:18970` |
 | `defenseclaw-gateway-hook.socket` | PID 1 | Listens on `/run/defenseclaw-hook/hook.sock` |
-| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. The same worker runs each enrolled user's AI Discovery scan ([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)). It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
+| `defenseclaw-hook-guardian.service` | root, bounded capabilities | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. The same worker runs each enrolled user's AI Discovery scan ([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)). It never writes machine policy or the install root itself. Every 5 seconds it checks that the hook binary is in place and intact (not empty, executable, owned by root and the binary the deployment recorded) and that DefenseClaw's Claude Code drop-in (`90-defenseclaw.json`) has the bytes the lifecycle wrote. When either is gone or changed it logs a `tamper:` line and starts `defenseclaw-enterprise-apply.service`, whose `ensure` puts the hook binary back from the copy the lifecycle sealed and the drop-in from the applied config, with no service restart. Other machine-policy drift, including the Claude Code version floor, is repaired by `ensure`, `repair` and `reconcile`. |
 | `defenseclaw-hook-guardian-reconcile.service` | root | One immediate reconcile, on demand |
 | `defenseclaw-hook-enumerator.service` | root, homes read-only | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests |
@@ -172,13 +177,14 @@ public key, `defenseclaw-enterprise-release-key.asc`.
 ### 2. Stage the config
 
 This example protects Codex and Claude Code in observe mode. The lifecycle
-requires `config_version: 8`, `deployment_mode: managed_enterprise`,
+requires `config_version: 9` (a version 8 file is migrated by `ensure`),
+`deployment_mode: managed_enterprise`,
 `enterprise.profile: standalone` and `data_dir: /var/lib/defenseclaw`. If you
 set `gateway.api_bind` or `gateway.api_port`, they must be `127.0.0.1` and
 `18970`.
 
 ```yaml title="config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw
 policy_dir: /etc/defenseclaw/policies
@@ -365,6 +371,7 @@ service and readiness check, and exits `1` when anything fails. Look for:
 | `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
 | `coverage_complete` | `true`: the gateway, guardian and enumerator are ready |
 | `security_complete` | `true`: coverage is complete, the sensor helper is ready, and there are no errors |
+| `policy` | `applied` is `true`: the running gateway reports the digest of the config on disk. `effective_digest` and `config_generation` identify that config; compare them across hosts ([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)) |
 | `enrollment.targets` | The number of per-user targets in the manifest. Connectors published through machine policy (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets unless `enterprise.enrollment.unenrolled_users` is `deny`, so `0` is normal when you enable only those. For per-user connectors, `0` means nobody is enrolled yet. |
 | `errors` | Empty |
 
@@ -401,6 +408,20 @@ read-only.
 Do not edit the units; `verify` reports local overrides. Put host-specific
 settings in a drop-in, and never widen the gateway sandbox: user discovery and
 hook repair are the guardian's job.
+
+- A drop-in may set the unit's ordering, resource limits, restart and timeout
+  tuning, and environment for the host (a proxy, a CA bundle). `status` and
+  `verify` list such drop-ins as the warning `unit_drop_in`.
+- Any other setting in a drop-in DefenseClaw did not write (`User`,
+  `ProtectHome`, `ExecStart`, `ReadWritePaths` and the rest of the sandbox),
+  an `Environment` line that sets a `DEFENSECLAW_*` or loader variable, and
+  an empty `Environment=` line (systemd then clears every variable set before
+  it, the DefenseClaw pins included) fail `status` and `verify`, which name
+  the file and the settings.
+- The managed gateway reads `/etc/defenseclaw/config.yaml` and
+  `/var/lib/defenseclaw` only. It ignores `DEFENSECLAW_CONFIG` and
+  `DEFENSECLAW_HOME` from its environment and logs a line for each value it
+  replaced.
 
 To inspect the sandbox:
 
@@ -457,6 +478,14 @@ use bubblewrap, which needs user namespaces:
 DefenseClaw's hooks inspect each tool call whether or not the agent's own
 sandbox runs.
 
+An agent started inside a private user namespace that was not given such a
+view (for example with `unshare -Ur`) fails closed: its prompts and tool
+calls are blocked with "this agent runs in a private user namespace ...
+Start the agent from your normal login session", and the gateway records the
+refusal as an `api-auth-failure` audit row with reason
+`enterprise_managed_user_namespace` and a `hook socket refused` line in its
+journal, as it does for an account that is not enrolled.
+
 ## Per-user installs
 
 On a computer with `/etc/defenseclaw/managed-runtime.json`, the per-user
@@ -473,8 +502,20 @@ each user remove their per-user install with `defenseclaw uninstall --binaries -
 Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
-A per-user gateway that was already running keeps running until it is
-stopped. The install, `status` and `verify` name each such account with the
+A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy
+the device enforces. `defenseclaw config get`, `guardrail`, `status` and the
+other per-user commands exit `3` and name it instead of answering from it, and
+`doctor` reports the device as managed. `defenseclaw uninstall --all --binaries
+--yes` removes it.
+
+A per-user gateway that is still running holds the managed gateway port,
+`127.0.0.1:18970`, unless its user moved it to another port. The install then
+stops before it changes anything: it fails with `api_port_held`, which names
+the process and gives the `kill` command (the package install still completes,
+and `last-package-result.json` has the error). Stop that gateway, or move it to
+another port, then run `defenseclaw-gateway enterprise linux ensure --from-package`.
+A per-user gateway on another port keeps running until it is stopped. The
+install, `status` and `verify` name each such account with the
 `per_user_gateway_running` warning and the `kill` command that stops it.
 
 ## Remove
@@ -506,6 +547,10 @@ install it again) and run `uninstall --purge`, or delete those files by
 hand. If uninstall reports an
 error, it keeps the deployment record, the config and the state, so you can
 fix the cause and rerun it.
+After an uninstall and after a reinstall, ask users to restart their agents:
+an agent session left open through both runs without DefenseClaw until it
+restarts, and the `ensure` result, `status` and `verify` name it with the
+`agent_sessions_restart_required` warning.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
 On a host installed from the package, `uninstall` leaves the package's
@@ -514,9 +559,9 @@ binaries and units in place, so dpkg or rpm still lists
 
 | Package command | Effect |
 | --- | --- |
-| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
-| `apt purge defenseclaw-enterprise` | The same, and it also deletes what a failed uninstall left of `/etc/defenseclaw`, `/var/lib/defenseclaw`, `/var/lib/defenseclaw-hook-guardian`, `/var/lib/defenseclaw-enterprise` and `/var/log/defenseclaw`. |
-| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go; each user keeps `~/.defenseclaw`. |
+| `apt remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go, also after a package install that failed and rolled back; each user keeps `~/.defenseclaw`. |
+| `apt purge defenseclaw-enterprise` | The same, and it also deletes what a failed uninstall left of `/etc/defenseclaw`, `/var/lib/defenseclaw`, `/var/lib/defenseclaw-hook-guardian` and `/var/log/defenseclaw`, plus lifecycle state except for the root-owned `/var/lib/defenseclaw-enterprise/lifecycle.lock`. |
+| `dnf remove defenseclaw-enterprise` | Runs `uninstall`, then removes the package files. The config, state and the `defenseclaw` account go, also after a package install that failed and rolled back; each user keeps `~/.defenseclaw`. |
 
 If the package's `uninstall` reports a problem, its result stays in
 `/var/lib/defenseclaw-enterprise/last-package-result.json`.
@@ -543,7 +588,9 @@ On a tarball host, `uninstall --purge` removes everything, including
   replaces any file unless the rollback marker
   `/var/lib/defenseclaw-enterprise/allow-downgrade` exists. See
   [Upgrade](/docs/enterprise/lifecycle#upgrade) and
-  [Roll back](/docs/enterprise/lifecycle#roll-back).
+  [Roll back](/docs/enterprise/lifecycle#roll-back). The first `ensure` of a
+  new release migrates a `config_version: 8` config to 9 and keeps
+  `config.yaml.v8.bak` and `migration-v9.json` next to it.
 - **A package older than the config.** The package refuses to install,
   before it replaces any file, when `/etc/defenseclaw/config.yaml` has a
   `config_version` newer than the release reads (a config written for a

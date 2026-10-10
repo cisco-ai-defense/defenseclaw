@@ -641,27 +641,6 @@ func TestGetConfigRPC(t *testing.T) {
 	}
 }
 
-func TestPatchConfigRPC(t *testing.T) {
-	received := make(chan receivedRequest, 5)
-	srv := startMockGW(t, rpcRecordingLoop(received))
-	client := connectToMockGW(t, srv)
-
-	ctx := context.Background()
-	if err := client.PatchConfig(ctx, "gateway.auto_approve", true); err != nil {
-		t.Fatalf("PatchConfig: %v", err)
-	}
-
-	rpc := drainRPC(t, received)
-	if rpc.Method != "config.patch" {
-		t.Errorf("Method = %q, want config.patch", rpc.Method)
-	}
-	var params ConfigPatchParams
-	json.Unmarshal(rpc.Params, &params)
-	if params.Path != "gateway.auto_approve" {
-		t.Errorf("Path = %q, want gateway.auto_approve", params.Path)
-	}
-}
-
 func TestGetStatusRPC(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
@@ -693,6 +672,22 @@ func TestGetToolsCatalogRPC(t *testing.T) {
 	rpc := drainRPC(t, received)
 	if rpc.Method != "tools.catalog" {
 		t.Errorf("Method = %q, want tools.catalog", rpc.Method)
+	}
+}
+
+// OpenClaw 2026.9 validates sessions.subscribe params as sessions.list params
+// and rejects a sessionId; empty params subscribe the connection (GAP-0224).
+func TestSessionsSubscribeRPC(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	client := connectToMockGW(t, srv)
+
+	if err := client.SessionsSubscribe(context.Background()); err != nil {
+		t.Fatalf("SessionsSubscribe: %v", err)
+	}
+	rpc := drainRPC(t, received)
+	if rpc.Method != "sessions.subscribe" || string(rpc.Params) != "{}" {
+		t.Errorf("request = %s %s, want sessions.subscribe {}", rpc.Method, rpc.Params)
 	}
 }
 
@@ -1041,37 +1036,6 @@ func TestAPISkillEnableSuccess(t *testing.T) {
 	json.Unmarshal(rpc.Params, &params)
 	if !params.Enabled {
 		t.Error("Enabled should be true for enable")
-	}
-}
-
-func TestAPIConfigPatchSuccess(t *testing.T) {
-	received := make(chan receivedRequest, 5)
-	srv := startMockGW(t, rpcRecordingLoop(received))
-	client := connectToMockGW(t, srv)
-	_, logger := testStoreAndLogger(t)
-	api := &APIServer{health: NewSidecarHealth(), client: client, logger: logger}
-
-	body, _ := json.Marshal(configPatchRequest{Path: "gateway.auto_approve", Value: true})
-	req := httptest.NewRequest(http.MethodPost, "/config/patch", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	api.handleConfigPatch(w, req)
-
-	if w.Result().StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want %d", w.Result().StatusCode, http.StatusOK)
-	}
-
-	var result map[string]string
-	json.NewDecoder(w.Result().Body).Decode(&result)
-	if result["status"] != "patched" {
-		t.Errorf("status = %q, want patched", result["status"])
-	}
-	if result["path"] != "gateway.auto_approve" {
-		t.Errorf("path = %q, want gateway.auto_approve", result["path"])
-	}
-
-	rpc := drainRPC(t, received)
-	if rpc.Method != "config.patch" {
-		t.Errorf("RPC Method = %q, want config.patch", rpc.Method)
 	}
 }
 

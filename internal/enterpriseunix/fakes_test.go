@@ -40,7 +40,9 @@ type fakeServices struct {
 	active  map[string]bool
 	enabled map[string]bool
 	// disabled units carry launchd's disabled override; Enable clears it.
-	disabled  map[string]bool
+	disabled map[string]bool
+	// masked units (systemctl mask) refuse Enable until Unmask.
+	masked    map[string]bool
 	calls     []string
 	failStart map[string]error
 	// failed units report systemd's failed state.
@@ -49,6 +51,8 @@ type fakeServices struct {
 	// Result ("success" for a planned restart, "exit-code" for a crash).
 	// PlannedRestart reads it once, and the unit is active again after that.
 	restarting map[string]string
+	// activating units are running a oneshot start (systemd "activating").
+	activating map[string]bool
 	reloads    int
 	inner      ServiceManager // definition paths and unit list
 	env        *Env
@@ -77,6 +81,22 @@ func (f *fakeServices) FragmentPath(_ context.Context, u Unit) string {
 		}
 	}
 	return ""
+}
+
+// DropInPaths lists the unit's drop-ins in /etc/systemd/system.
+func (f *fakeServices) DropInPaths(_ context.Context, u Unit) []string {
+	if f.goos != "linux" {
+		return nil
+	}
+	dir := filepath.Join("/etc/systemd/system", u.Name+".d")
+	entries, _ := os.ReadDir(f.env.P(dir))
+	var out []string
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".conf") {
+			out = append(out, filepath.Join(dir, entry.Name()))
+		}
+	}
+	return out
 }
 
 func (f *fakeServices) record(call string) {
@@ -127,8 +147,33 @@ func (f *fakeServices) Disabled(_ context.Context, u Unit) bool {
 	return f.disabled[u.Name]
 }
 
+func (f *fakeServices) ResetFailed(_ context.Context, u Unit) error {
+	f.record("reset-failed " + u.Name)
+	f.mu.Lock()
+	delete(f.failed, u.Name)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeServices) Masked(_ context.Context, u Unit) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.masked[u.Name]
+}
+
+func (f *fakeServices) Unmask(_ context.Context, u Unit) error {
+	f.record("unmask " + u.Name)
+	f.mu.Lock()
+	delete(f.masked, u.Name)
+	f.mu.Unlock()
+	return nil
+}
+
 func (f *fakeServices) Enable(_ context.Context, u Unit) error {
 	f.record("enable " + u.Name)
+	if f.Masked(context.Background(), u) {
+		return fmt.Errorf("systemctl enable %s: exit 1: Failed to enable unit: Unit file is masked", u.Name)
+	}
 	f.mu.Lock()
 	f.enabled[u.Name] = true
 	delete(f.disabled, u.Name)
@@ -152,6 +197,9 @@ func (f *fakeServices) Status(_ context.Context, u Unit) (enterprisestatus.Servi
 	f.mu.Lock()
 	if f.failed[u.Name] {
 		state = "failed/failed"
+	}
+	if f.activating[u.Name] {
+		state = "activating/start"
 	}
 	f.mu.Unlock()
 	return enterprisestatus.Service{Name: u.Name, Kind: u.Kind, State: state, Required: u.Required}, nil
@@ -219,12 +267,25 @@ type fakeRunner struct {
 	versions map[string]string // gateway path -> version
 	calls    []string
 	ps       string // what ps -axo pid=,uid=,comm= prints (macOS)
+	// replies answer a command by filepath.Base(name) and its joined args.
+	replies map[string]fakeReply
+	// acls are the macOS ACL entries of rooted paths, as ls -le prints them;
+	// chmod -h -N removes them.
+	acls map[string][]string
+}
+
+type fakeReply struct {
+	result CommandResult
+	err    error
 }
 
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
 	r.mu.Lock()
 	r.calls = append(r.calls, name+" "+strings.Join(args, " "))
 	r.mu.Unlock()
+	if reply, ok := r.replies[filepath.Base(name)+" "+strings.Join(args, " ")]; ok {
+		return reply.result, reply.err
+	}
 	if len(args) > 0 && args[len(args)-1] == "--check" &&
 		strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
 		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
@@ -245,6 +306,22 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 	switch name {
 	case "ps":
 		return CommandResult{Stdout: []byte(r.ps)}, nil
+	case "ls":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		var out strings.Builder
+		for _, path := range args[2:] {
+			fmt.Fprintf(&out, "-rw-r--r--+ 1 root  wheel  0 Oct  9 04:09 %s\n", path)
+			for index, entry := range r.acls[path] {
+				fmt.Fprintf(&out, " %d: %s\n", index, entry)
+			}
+		}
+		return CommandResult{Stdout: []byte(out.String())}, nil
+	case "chmod":
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		delete(r.acls, args[len(args)-1])
+		return CommandResult{}, nil
 	case "dpkg", "rpm":
 		return CommandResult{ExitCode: 1}, errors.New("not owned")
 	case "restorecon":
@@ -321,6 +398,10 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	}
 	env.Lchown = func(path string, uid, gid int) error {
 		h.owners[stagedFinal(path)] = [2]int{uid, gid}
+		return nil
+	}
+	env.Fchown = func(f *os.File, uid, gid int) error {
+		h.owners[f.Name()] = [2]int{uid, gid}
 		return nil
 	}
 	env.OwnerOf = func(path string) (int, int, error) {

@@ -12,12 +12,15 @@
 
 set -u
 # dpkg runs "postinst abort-remove" after preremove refused a removal because
-# another lifecycle run kept the lock or hook-removal precheck refused.
-# Nothing was removed, so there is nothing to apply; a second wait on the
-# same busy lock would only stall apt.
+# another lifecycle run kept the lock or the hook-removal precheck refused.
+# Nothing was removed, so there is nothing to apply, and a second wait on
+# the same busy lock would only stall apt. "abort-upgrade" is the same after
+# a failed upgrade step: the previous files are back, so there is nothing to
+# apply.
 case "${1:-}" in
     abort-remove) exit 0 ;;
-    abort-upgrade|abort-install|abort-deconfigure)
+    abort-upgrade | abort-install | abort-deconfigure)
+        # Restart the apply trigger the preinstall held for this upgrade.
         if [ -e /run/defenseclaw-enterprise-apply-path.held ]; then
             if systemctl start defenseclaw-enterprise-apply.path >/dev/null 2>&1; then
                 rm -f /run/defenseclaw-enterprise-apply-path.held
@@ -53,6 +56,12 @@ if [ -e "$held" ]; then
     apply_path_was_active=1
 fi
 
+# Flush the payload the package manager just unpacked before anything uses
+# it: a power loss after the rename but before the data reached the disk
+# left zero-length binaries and units, and an empty hook binary runs as an
+# empty script that exits 0, so every agent's hook allowed everything
+# (GAP-0467).
+sync >/dev/null 2>&1 || true
 systemd-sysusers /usr/lib/sysusers.d/defenseclaw.conf >/dev/null 2>&1 || true
 systemd-tmpfiles --create /usr/lib/tmpfiles.d/defenseclaw.conf >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true

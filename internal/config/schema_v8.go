@@ -54,7 +54,8 @@ type V8SchemaError struct {
 	// Value is the rejected scalar of an enum violation (at most 60 bytes),
 	// so the CLI can say 'mode is "x"; allowed values: ...' as config validate
 	// does (GAP-1914). Error() never prints it.
-	Value string
+	Value   string
+	Version int
 }
 
 func (e *V8SchemaError) Error() string {
@@ -70,6 +71,21 @@ func (e *V8SchemaError) Error() string {
 		if e.Column > 0 {
 			source += ":" + strconv.Itoa(e.Column)
 		}
+	}
+	if e.Version >= 9 {
+		key := strings.TrimPrefix(e.Path, "$.")
+		key = regexp.MustCompile(`\[[^]]+\]`).ReplaceAllString(key, "")
+		if key == "" || key == "$" {
+			key = "config.yaml"
+		}
+		message := fmt.Sprintf("config_version %d: %s is invalid", e.Version, key)
+		if e.Expected != "" && !strings.Contains(e.Expected, "canonical v8") {
+			message += "; expected " + e.Expected
+		}
+		if e.Suggestion != "" {
+			message += "; did you mean " + e.Suggestion + "?"
+		}
+		return message + "; see defenseclaw config reference --format json-schema."
 	}
 	message := fmt.Sprintf("%s: [config_schema_invalid]", source)
 	if e.Path != "" {
@@ -114,10 +130,15 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 	if err := schema.Validate(document.Plain); err != nil {
 		var validation *jsonschema.ValidationError
 		if !errors.As(err, &validation) {
+			summary := "configuration does not satisfy the canonical v8 schema"
+			if v8SchemaDocumentVersion(document) >= 9 {
+				summary = "configuration does not satisfy the config_version 9 schema"
+			}
 			return &V8SchemaError{
 				Source:  source,
 				Path:    "$",
-				Summary: "configuration does not satisfy the canonical v8 schema",
+				Summary: summary,
+				Version: v8SchemaDocumentVersion(document),
 				Action:  "correct the configuration and retry",
 			}
 		}
@@ -139,6 +160,13 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 		}
 		node := v8SchemaYAMLNode(document.Document, leaf.InstanceLocation, unknown)
 		expected, suggestion := v8SchemaExpectation(leaf, unknown)
+		if v8SchemaDocumentVersion(document) >= 9 && expected == "the canonical v8 field contract" {
+			expected = "a valid value for this setting"
+		}
+		action := "inspect the canonical v8 schema or generated reference and correct this field"
+		if v8SchemaDocumentVersion(document) >= 9 {
+			action = "inspect the config_version 9 settings reference and correct this field"
+		}
 		result := &V8SchemaError{
 			Source:        source,
 			Path:          path,
@@ -147,7 +175,8 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			Expected:      expected,
 			Suggestion:    suggestion,
 			Summary:       "configuration violates the " + keyword + " constraint",
-			Action:        "inspect the canonical v8 schema or generated reference and correct this field",
+			Action:        action,
+			Version:       v8SchemaDocumentVersion(document),
 		}
 		if key := v8SchemaUnknownKeyNode(document.Document, leaf.InstanceLocation, unknown); key != nil {
 			// The line of the key itself: an unknown section's value
@@ -200,12 +229,62 @@ func deepestV8SchemaError(root *jsonschema.ValidationError) *jsonschema.Validati
 		if len(current.Causes) == 0 && score > bestDepth {
 			best, bestDepth = current, score
 		}
-		for _, cause := range current.Causes {
+		for _, cause := range v8SchemaMatchingBranches(current) {
 			visit(cause, depth+1)
 		}
 	}
 	visit(root, 0)
 	return best
+}
+
+// v8SchemaMatchingBranches is the causes of a oneOf failure without the
+// branches whose kind or value type does not match: an http_jsonl
+// destination that set both bearer_env and bearer_credential was reported as
+// "kind must be the literal jsonl", the deeper error of a branch that never
+// applied (GAP-0940), and an admission action mapping without runtime as
+// "expected a value of type string" (GAP-1290). Other errors keep all their
+// causes.
+func v8SchemaMatchingBranches(current *jsonschema.ValidationError) []*jsonschema.ValidationError {
+	if !strings.HasSuffix(current.KeywordLocation, "/oneOf") {
+		return current.Causes
+	}
+	matching := make([]*jsonschema.ValidationError, 0, len(current.Causes))
+	for _, branch := range current.Causes {
+		if !v8SchemaKindMismatch(branch) && !v8SchemaTypeMismatch(branch, current.InstanceLocation) {
+			matching = append(matching, branch)
+		}
+	}
+	if len(matching) == 0 {
+		return current.Causes
+	}
+	return matching
+}
+
+// v8SchemaTypeMismatch reports a oneOf branch that fails only because the
+// value at the location of the oneOf has another type (a string branch for
+// a mapping).
+func v8SchemaTypeMismatch(validation *jsonschema.ValidationError, instance string) bool {
+	if len(validation.Causes) == 0 {
+		return validation.InstanceLocation == instance && strings.HasSuffix(validation.KeywordLocation, "/type")
+	}
+	for _, cause := range validation.Causes {
+		if !v8SchemaTypeMismatch(cause, instance) {
+			return false
+		}
+	}
+	return true
+}
+
+func v8SchemaKindMismatch(validation *jsonschema.ValidationError) bool {
+	if strings.HasSuffix(validation.KeywordLocation, "/properties/kind/const") {
+		return true
+	}
+	for _, cause := range validation.Causes {
+		if v8SchemaKindMismatch(cause) {
+			return true
+		}
+	}
+	return false
 }
 
 // firstUnknownV8SchemaError is the undeclared-key error whose key comes
@@ -343,6 +422,13 @@ func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string)
 		}
 		switch {
 		case strings.HasSuffix(validation.KeywordLocation, "/required"):
+			var missing []string
+			for _, quoted := range observabilityV8QuotedPropertyPattern.FindAllStringSubmatch(validation.Message, -1) {
+				missing = append(missing, quoted[1])
+			}
+			if len(missing) > 0 {
+				return "all required fields (missing " + strings.Join(missing, ", ") + ")", ""
+			}
 			return "all required fields", ""
 		case strings.HasSuffix(validation.KeywordLocation, "/type"):
 			return "the schema-declared value type", ""
@@ -372,6 +458,15 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 	var current any = observabilityV8SchemaDoc
 	var parent map[string]any
 	for _, segment := range segments {
+		// allOf, anyOf and oneOf are arrays (GAP-0940).
+		if list, ok := current.([]any); ok {
+			index, err := strconv.Atoi(segment)
+			if err != nil || index < 0 || index >= len(list) {
+				return ""
+			}
+			current = list[index]
+			continue
+		}
 		mapping, ok := current.(map[string]any)
 		if !ok {
 			return ""
@@ -383,6 +478,13 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 		keyword = segments[len(segments)-1]
 	}
 	switch keyword {
+	case "not":
+		// {"not": {"required": [a, b]}}: two fields that exclude each other.
+		if rule, ok := current.(map[string]any); ok {
+			if fields, ok := rule["required"].([]any); ok && len(fields) == 2 {
+				return fmt.Sprintf("either %v or %v, not both", fields[0], fields[1])
+			}
+		}
 	case "const":
 		raw, _ := json.Marshal(current)
 		return "the literal " + string(raw)
@@ -394,6 +496,10 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 			return "a value of type " + value
 		}
 	case "pattern":
+		if current == "^agt-[0-9a-f]{16}$" {
+			// An agent identity (GAP-0829).
+			return "an agent identity: agt- followed by 16 lowercase hexadecimal digits"
+		}
 		return "a value matching the schema-declared pattern"
 	case "minimum", "maximum":
 		return v8SchemaNumberRange(parent)
@@ -517,4 +623,12 @@ func v8SchemaNodeClass(node *yaml.Node) string {
 	default:
 		return "value"
 	}
+}
+
+func v8SchemaDocumentVersion(document *V8YAMLDocument) int {
+	if document == nil {
+		return 0
+	}
+	version, _ := strconv.Atoi(fmt.Sprint(document.Plain["config_version"]))
+	return version
 }

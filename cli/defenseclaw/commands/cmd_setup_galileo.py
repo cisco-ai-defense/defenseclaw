@@ -172,7 +172,7 @@ def enable_cmd(app: AppContext) -> None:
     """Enable the Galileo destination."""
 
     _require_v8_operator_status(app.cfg.data_dir)
-    _set_v8_destination_enabled(app.cfg.data_dir, _DESTINATION, True, "")
+    _set_v8_destination_enabled(app.cfg.data_dir, _DESTINATION, True)
 
 
 @galileo.command("disable")
@@ -181,7 +181,7 @@ def disable_cmd(app: AppContext) -> None:
     """Disable Galileo without deleting its configuration."""
 
     _require_v8_operator_status(app.cfg.data_dir)
-    _set_v8_destination_enabled(app.cfg.data_dir, _DESTINATION, False, "")
+    _set_v8_destination_enabled(app.cfg.data_dir, _DESTINATION, False)
 
 
 @galileo.command("remove")
@@ -194,7 +194,7 @@ def remove_cmd(app: AppContext, yes: bool) -> None:
         click.echo("  Aborted.")
         return
     _require_v8_operator_status(app.cfg.data_dir)
-    _remove_v8_destination(app.cfg.data_dir, _DESTINATION, "")
+    _remove_v8_destination(app.cfg.data_dir, _DESTINATION)
     click.echo("  GALILEO_API_KEY was preserved.")
 
 
@@ -348,7 +348,7 @@ def _print_v8_setup_result(
     click.echo(f"  Log stream:  {logstream}")
     click.echo("  Signals:     traces")
     ux.echo("  Delivery:    real-time after each completed model/tool operation (≤1s batch delay)")
-    click.echo(f"  Config:      v8 ({'changed' if result.changed else 'already configured'})")
+    click.echo(f"  Config:      config.yaml ({'changed' if result.changed else 'already configured'})")
     echo_setup_notes(resolve_preset("galileo"), warnings)
     if not dry_run and not key_saved:
         # GAP-1299: the key came from this shell only. A gateway started

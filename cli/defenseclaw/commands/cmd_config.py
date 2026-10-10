@@ -16,7 +16,7 @@
 
 """defenseclaw config — inspect and validate configuration.
 
-Five subcommands:
+Subcommands:
 
 * ``config validate`` — parse ``~/.defenseclaw/config.yaml`` and
   return a non-zero exit code on any error. Used both by the operator
@@ -25,12 +25,16 @@ Five subcommands:
   masked (observability resolved; every other section as written, with
   defaults for the keys config.yaml leaves out).
 * ``config get`` — print one dotted key of that view.
+* ``config set`` / ``config unset`` — change one key through the single
+  config writer (validated first; refused with exit 3 on a managed device).
+* ``config migrate`` — move config.yaml to config_version 9.
 * ``config reference`` — render schema-generated v8 reference material.
 * ``config path`` — print the filesystem layout DefenseClaw uses.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import os
@@ -51,7 +55,16 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.observability.v8_config import MAX_SOURCE_BYTES, V8ConfigError, load_masked_v8, load_validate_v8
+from defenseclaw.observability.v8_config import (
+    MAX_SOURCE_BYTES,
+    RETIRED_KEY_ACTION_PREFIX,
+    V8ConfigError,
+    load_config_value,
+    load_masked_v8,
+    load_masked_v8_with_source,
+    load_validate_v8,
+    retired_key_replacement,
+)
 from defenseclaw.webhooks.writer import redact_webhook_url
 
 # Field names here catch both the bare form (``api_key``) and the
@@ -71,10 +84,9 @@ _SECRET_FIELDS = (
 _V8_VERSION_LINE = re.compile(
     rb"(?m)^config_version\s*:\s*"
     rb"(?:(?:!!int|tag:yaml\.org,2002:int)\s+)?"
-    rb"(?:8|['\"]8['\"])\s*(?:#.*)?$"
+    rb"(?:[89]|['\"][89]['\"])\s*(?:#.*)?$"
 )
 _MAX_VERSION_PROBE_BYTES = 4 * 1024 * 1024 + 1
-_V7_READ_ONLY_SUBCOMMANDS = frozenset({"validate", "show", "get", "reference", "path"})
 
 
 @click.group("config")
@@ -82,23 +94,19 @@ _V7_READ_ONLY_SUBCOMMANDS = frozenset({"validate", "show", "get", "reference", "
 def config_cmd(ctx: click.Context) -> None:
     """Inspect and validate DefenseClaw configuration."""
 
-    # The root command deliberately lets config recovery/inspection run while
-    # a v7 source still exists.  Keep that exemption narrow and future-proof:
-    # a newly-added mutating subcommand must never silently write the legacy
-    # document just because the top-level ``config`` group bypasses runtime
-    # initialization.
+    # The root command lets this group run while an unconverted 0.8.x source
+    # still exists, so ``validate`` can explain a file the root preflight would
+    # only refuse, and ``reference`` reads no file. Every other subcommand needs
+    # a current-schema source and stops with the one instruction.
     subcommand = ctx.invoked_subcommand
     path = config_module.config_path()
     if (
         subcommand
-        and subcommand not in _V7_READ_ONLY_SUBCOMMANDS
+        and subcommand not in {"validate", "reference"}
         and path.exists()
         and not _looks_like_v8_config(str(path))
     ):
-        raise click.ClickException(
-            "configuration schema v8 is required for config changes; "
-            "run 'defenseclaw migrate' first"
-        )
+        raise click.ClickException(_not_current_message(str(path)))
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +127,7 @@ def config_validate(quiet: bool) -> None:
     if result.exists:
         ux.ok("file exists", indent="  ")
     else:
-        ux.warn("file does not exist yet — run 'defenseclaw init' or 'defenseclaw quickstart'")
+        ux.warn(f"file does not exist yet — {config_module.first_run_hint()}")
 
     if result.parse_error:
         ux.err(f"parse error: {result.parse_error}", indent="  ")
@@ -131,6 +139,12 @@ def config_validate(quiet: bool) -> None:
     for warning in result.warnings:
         ux.warn(warning, indent="  ")
 
+    # The file is checked, not the running gateway: say when the gateway has
+    # not applied it (GAP-0352, GAP-0363).
+    from defenseclaw.gateway import current_gateway_reload_notice
+
+    if notice := current_gateway_reload_notice():
+        ux.warn(notice, indent="  ")
     click.echo()
     if not result.ok:
         raise SystemExit(1)
@@ -168,14 +182,6 @@ def config_validate(quiet: bool) -> None:
     default=None,
     help="Show one top-level section, for example asset_policy, guardrail or observability.",
 )
-@click.option(
-    "--reveal",
-    is_flag=True,
-    # Hidden: it works only for pre-v8 configurations, and every 1.0
-    # config is v8 (secrets there are always masked).
-    hidden=True,
-    help="Pre-v8 configurations only: show partly masked secret values instead of '***'.",
-)
 @pass_ctx
 def config_show(
     app: AppContext,
@@ -184,7 +190,6 @@ def config_show(
     effective: bool,
     provenance: bool,
     section: str | None,
-    reveal: bool,
 ) -> None:
     """Show the configuration with secrets masked.
 
@@ -194,7 +199,8 @@ def config_show(
     config.yaml sets. Read one value with 'defenseclaw config get KEY', for
     example asset_policy.enabled.
     """
-    data = _show_data(app, source=source, effective=effective, provenance=provenance, reveal=reveal)
+    _managed_view_note()
+    data = _show_data(app, source=source, effective=effective, provenance=provenance)
     if section:
         view = "effective" if (effective or provenance) else ("source" if source else "full")
         data = _select_section(data, section, view=view)
@@ -223,36 +229,69 @@ def config_show(
     show_default=True,
     help="Format of a section or list value.",
 )
+@click.option(
+    "--effective",
+    is_flag=True,
+    help="Print the value the gateway enforces and where it comes from "
+    "(config.yaml, the rule pack's default, the derived scanner gate).",
+)
 @pass_ctx
-def config_get(app: AppContext, key: str, fmt: str) -> None:
+def config_get(app: AppContext, key: str, fmt: str, effective: bool) -> None:
     """Print one configuration value (secrets masked).
 
-    KEY is a dotted path such as asset_policy.enabled or
-    asset_policy.mcp.registry_required. A key config.yaml leaves out prints
-    its default, with a note on stderr. Exits 1 when the key has no value
+    KEY is a dotted path with [i] list indexes, such as asset_policy.enabled or
+    asset_policy.skill.denied[0].name. A key config.yaml leaves out prints
+    its default, with a note on stderr. With --effective, guardrail levels
+    (guardrail.block_at, guardrail.connectors.<c>.alert_at) and admission[.<type>]
+    print what the gateway resolves them to; admission keys config.yaml leaves
+    out always print that resolved value, as do guardrail.cisco_trust_level and
+    the guardrail levels when unset. Exits 1 when the key has no value
     and no default, and 2 for an unknown section.
     """
-    parts = [part for part in key.strip().split(".") if part]
-    if not parts:
+    from defenseclaw.config_writer import parse_path
+
+    if not key.strip():
         raise click.UsageError("KEY must be a dotted path such as asset_policy.enabled")
-    cfg_path = str(config_module.config_path())
-    v8 = _looks_like_v8_config(cfg_path)
-    written: dict | None = None
-    if v8 and parts[0] != "observability":
-        # One parse of the source serves the value and the "not set" note; the
-        # observability plan and the full validation are not needed for a
-        # key outside observability (GAP-0276).
+    try:
+        parts = list(parse_path(key.strip()))
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    _managed_view_note()
+    # One parse of the source serves the value, the "not set" note and the
+    # written checks of a key outside observability; the observability plan
+    # and the full validation of every section are left to config show and
+    # config validate (GAP-0276).
+    written = _masked_source(str(config_module.config_path()), app) if parts[0] != "observability" else None
+    if parts[:2] == ["admission", "defaults"] and not _written_in_source(app, parts, written):
+        raise click.ClickException(
+            f"{key} is not set. admission.defaults is an optional layer shared by skill, mcp and plugin; "
+            "run 'defenseclaw config get admission.skill' (or mcp, plugin) to see the policy in force."
+        )
+    if effective or (_resolves_when_unset(parts) and not _written_in_source(app, parts, written)):
         try:
-            written = load_masked_v8(Path(cfg_path).read_bytes(), source_name=cfg_path)
-        except OSError as exc:
-            raise click.ClickException(f"cannot read configuration source: {exc}") from exc
-        except (V8ConfigError, RuntimeError) as exc:
-            raise click.ClickException(str(exc)) from exc
-        view = _merge_defaults(written, _v8_defaults(app))
+            resolved = _effective_value(app, parts)
+        except (ValueError, yaml.YAMLError, V8ConfigError, config_module.ConfigVersionError) as exc:
+            raise click.ClickException(
+                f"Cannot read effective configuration: {exc}. Fix config.yaml, then run defenseclaw config validate; "
+                "a running gateway keeps its last good configuration."
+            ) from exc
+        if resolved is not None:
+            value, source = resolved
+            click.echo(f"(source: {source})", err=True)
+            _echo_value(value, fmt)
+            return
+    if written is not None:
+        profile_key = parts[:2] in (["guardrail", "profiles"], ["guardrail", "profile_assignments"])
+        view = _merge_defaults(written, _v8_defaults(app, profiles=profile_key))
+        if parts == ["guardrail", "hook_self_heal"]:
+            view.setdefault("guardrail", {}).setdefault("hook_self_heal", True)
+        _resolve_defaults(app, view, written, profiles=profile_key)
     else:
-        view = _show_data(app, source=False, effective=False, provenance=False, reveal=False)
+        view = _key_view(app, parts)
     found, value = _lookup(view, parts)
     if not found:
+        if _is_destination_key(parts):
+            raise click.ClickException(_destination_not_set(key, parts, view))
         sections = _v8_sections() or set(view)
         if parts[0] not in view and parts[0] not in sections:
             available = ", ".join(sorted(sections)) or "none"
@@ -265,8 +304,103 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
             f"{key} is not set and has no default. "
             f"Run 'defenseclaw config show --section {parts[0]}' to see the keys it has."
         )
-    if written is not None and not _lookup(written, parts)[0]:
-        click.echo(f"(default: config.yaml does not set {key})", err=True)
+    if parts[0] != "observability":
+        if written is None:
+            written = _show_data(app, source=True, effective=False, provenance=False)
+        if not _lookup(written, parts)[0]:
+            click.echo(f"(default: config.yaml does not set {key})", err=True)
+        elif effective:
+            click.echo(f"(source: {config_module.config_path()})", err=True)
+    _echo_value(value, fmt)
+
+
+def _managed_view_note() -> None:
+    """Say, on a managed device, that the gateway enforces the administrator's config.
+
+    A per-user config.yaml (or the built-in defaults when there is none) is not what
+    the managed gateway runs, so reading it must not look like the enforced value
+    (GAP-0207)."""
+    from defenseclaw.config_writer import machine_managed_standalone
+
+    if machine_managed_standalone():
+        click.echo(
+            "(this device is managed: the gateway enforces the administrator's config, "
+            "not a per-user config.yaml)",
+            err=True,
+        )
+
+
+def _is_destination_key(parts: list) -> bool:
+    return parts[:2] == ["observability", "destinations"]
+
+
+def _key_view(app: AppContext, parts: list) -> dict:
+    """The document a key is read from: config.yaml as written for the
+    observability destinations, the resolved defaults for everything else.
+
+    config set indexes the destinations as written in config.yaml; the
+    resolved plan also lists the generated ones, such as local-sqlite at
+    index 0, so reading the plan would answer for indexes set cannot edit
+    (GAP-0008, GAP-0154).
+    """
+    return _show_data(app, source=_is_destination_key(parts), effective=False, provenance=False)
+
+
+def _written_config() -> dict | None:
+    """config.yaml as written ({} before it exists), or None when it cannot
+    be read or does not parse."""
+    cfg_path = str(config_module.config_path())
+    if not os.path.isfile(cfg_path):
+        return {}
+    try:
+        return dict(load_validate_v8(Path(cfg_path).read_bytes(), source_name=cfg_path).masked)
+    except (OSError, V8ConfigError, RuntimeError):
+        return None
+
+
+def _destination_not_set(key: str, parts: list, written: dict) -> str:
+    listed = _lookup(written, parts[:2])[1]
+    count = len(listed) if isinstance(listed, list) else 0
+    if count == 0:
+        return (
+            f"{key} is not set: config.yaml lists no destinations. Add one with "
+            "'defenseclaw setup observability add'; 'defenseclaw config show --effective' "
+            "shows the generated ones."
+        )
+    if len(parts) > 2 and isinstance(parts[2], int) and parts[2] >= count:
+        noun = "destination" if count == 1 else "destinations"
+        return f"{key} is not set: the index is out of range (config.yaml lists {count} {noun})."
+    return (
+        f"{key} is not set in config.yaml. 'defenseclaw config show --effective' shows the "
+        "value the gateway resolves."
+    )
+
+
+def _masked_source(cfg_path: str, app: AppContext) -> dict | None:
+    """config.yaml as written, secrets masked, from one parse without the full
+    validation; None when it is not a v8 or later source (GAP-0276). The
+    parse also serves the read-only load of _loaded_config without profiles."""
+    if not _looks_like_v8_config(cfg_path):
+        return None
+    try:
+        masked, app._config_source = load_masked_v8_with_source(Path(cfg_path).read_bytes(), source_name=cfg_path)
+        return masked
+    except OSError as exc:
+        raise click.ClickException(f"cannot read configuration source: {exc}") from exc
+    except (V8ConfigError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _written_in_source(app: AppContext, parts: list, written: dict | None = None) -> bool:
+    """Whether config.yaml itself sets the key (a v8 or later source only)."""
+    if written is not None:
+        return _lookup(written, parts)[0]
+    if not _looks_like_v8_config(str(config_module.config_path())):
+        return True
+    return _lookup(_show_data(app, source=True, effective=False, provenance=False), parts)[0]
+
+
+def _echo_value(value: object, fmt: str) -> None:
     if isinstance(value, (dict, list)) or fmt.lower() == "json":
         _emit(value, fmt)
     elif isinstance(value, bool):
@@ -277,17 +411,567 @@ def config_get(app: AppContext, key: str, fmt: str) -> None:
         click.echo(str(value))
 
 
+_LEVEL_KEYS = ("block_at", "alert_at")
+_ADMISSION_TYPES = ("skill", "mcp", "plugin")
+_TRUST_KEY = ["guardrail", "cisco_trust_level"]
+
+
+def _resolves_when_unset(parts: list) -> bool:
+    """Keys whose default is resolved (a rule pack level, the Cisco trust
+    level, the admission and update sections) rather than blank."""
+    return parts[0] in ("admission", "update") or parts == _TRUST_KEY or (
+        parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS
+    )
+
+
+def _loaded_config(app: AppContext, *, profiles: bool = True):
+    """The configuration, loaded once per command: config get read it in
+    up to three helpers, each a full parse and validation of every profile
+    (GAP-0276). Without profiles, and no full load yet, it is the read-only
+    load that leaves the guardrail profiles out (config get of a key outside
+    them); that view is never saved and never becomes app.cfg."""
+    if app.cfg is not None:
+        return app.cfg
+    if not profiles:
+        view = getattr(app, "_cfg_without_profiles", None)
+        if view is None:
+            view = config_module.load(
+                without_guardrail_profiles=True, parsed_source=getattr(app, "_config_source", None)
+            )
+            app._cfg_without_profiles = view
+        return view
+    app.cfg = config_module.load()
+    return app.cfg
+
+
+def _effective_value(app: AppContext, parts: list[str]) -> tuple[object, str] | None:
+    """The resolved value of a guardrail level or admission.<type> key and its
+    source, as the gateway resolves them; None for any other key."""
+    cfg = _loaded_config(app)
+    if parts[0] == "guardrail" and parts[-1] in _LEVEL_KEYS:
+        if len(parts) == 2:
+            connector = ""
+        elif len(parts) == 4 and parts[1] == "connectors":
+            connector = parts[2]
+        else:
+            return None
+        from defenseclaw.policy_catalog import level_name, pack_profile, scope_levels, scope_pack_path
+
+        levels = scope_levels(cfg, connector)
+        which = parts[-1]
+        source = levels.block_source if which == "block_at" else levels.alert_source
+        value = level_name(levels.block_rank if which == "block_at" else levels.alert_rank)
+        if source == "pack":
+            label = f"pack-default:{pack_profile(scope_pack_path(cfg, connector))}"
+        elif source == "global":
+            label = f"config:guardrail.{which}"
+        else:
+            label = f"config:guardrail.connectors.{connector}.{which}"
+        if which == "alert_at" and levels.alert_clamped:
+            label += " (clamped to block_at)"
+        return value, label
+    if parts == _TRUST_KEY:
+        written = str(getattr(cfg.guardrail, "cisco_trust_level", "") or "").strip().lower()
+        if written in ("full", "advisory", "none"):
+            return written, "config:guardrail.cisco_trust_level"
+        return "full", "builtin"
+    if parts[0] == "update" and len(parts) <= 2:
+        data, sources = _update_view(cfg)
+        if len(parts) == 1:
+            return data, _whole_source(sources)
+        return (data[parts[1]], sources[parts[1]]) if parts[1] in data else None
+    if parts[0] == "admission" and (len(parts) == 1 or parts[1] in _ADMISSION_TYPES):
+        if len(parts) == 1:
+            views = {name: _admission_view(cfg, name) for name in _ADMISSION_TYPES}
+            return (
+                {name: data for name, (data, _) in views.items()},
+                ", ".join(f"{name}={_whole_source(sources)}" for name, (_, sources) in views.items()),
+            )
+        data, sources = _admission_view(cfg, parts[1])
+        found, value = _lookup(data, parts[2:]) if len(parts) > 2 else (True, data)
+        if not found:
+            return None
+        return value, sources.get(parts[2], _whole_source(sources)) if len(parts) > 2 else _whole_source(sources)
+    return None
+
+
+def _update_view(cfg: object) -> tuple[dict, dict[str, str]]:
+    """``update:`` with its defaults resolved (the update notice on, the stable
+    channel, the official release feed), and where each value comes from."""
+    from defenseclaw.upgrade_shim import OFFICIAL_SOURCE
+
+    written = getattr(cfg, "update", None)
+    check = getattr(written, "check", None)
+    channel = str(getattr(written, "channel", "") or "")
+    source = str(getattr(written, "source", "") or "")
+    data = {
+        "check": True if check is None else bool(check),
+        "channel": channel or "stable",
+        "source": source or OFFICIAL_SOURCE,
+    }
+    sources = {
+        name: f"config:update.{name}" if is_set else "builtin"
+        for name, is_set in (("check", check is not None), ("channel", bool(channel)), ("source", bool(source)))
+    }
+    return data, sources
+
+
+def _whole_source(sources: dict[str, str]) -> str:
+    """The source of a whole asset type: every field that config.yaml or the
+    scanner gate sets, else builtin."""
+    labels = list(dict.fromkeys(label for label in sources.values() if label != "builtin"))
+    return ", ".join(labels) or "builtin"
+
+
+_ADMISSION_FIELDS = (
+    "actions",
+    "scan_on_install",
+    "allow_list_bypass_scan",
+    "scanner_overrides",
+    "first_party_allow_list",
+)
+
+
+def _admission_layer_key(parts: list) -> bool:
+    """Whether *parts* name a field of admission.defaults or admission.<type>."""
+    if len(parts) < 2 or parts[0] != "admission" or parts[1] not in ("defaults", *_ADMISSION_TYPES):
+        return False
+    if len(parts) == 4 and parts[2] == "actions":
+        return str(parts[3]).lower() in ("critical", "high", "medium", "low", "info")
+    return len(parts) == 2 or (len(parts) == 3 and parts[2] in _ADMISSION_FIELDS)
+
+
+def _admission_view(cfg: object, target_type: str) -> tuple[dict, dict[str, str]]:
+    """The admission policy of one asset type as the gateway enforces it, and
+    where each field comes from."""
+    from defenseclaw.enforce.admission import ADMISSION_SEVERITY_ORDER, action_label, compile_admission
+
+    compiled = compile_admission(cfg, target_type)
+    data = {
+        "scan_on_install": compiled.scan_on_install,
+        "allow_list_bypass_scan": compiled.allow_list_bypass_scan,
+        "actions": {
+            sev.lower(): action_label(compiled.actions[sev])
+            for sev in ADMISSION_SEVERITY_ORDER
+            if sev in compiled.actions
+        },
+        "scanner_overrides": {
+            scanner: {sev.lower(): action_label(action) for sev, action in actions.items()}
+            for scanner, actions in compiled.scanner_overrides.items()
+        },
+        "first_party_allow_list": [
+            {"name": name, "source_path_contains": list(paths)}
+            for name, paths in compiled.first_party_allow.items()
+        ],
+    }
+    return data, compiled.field_sources or {"actions": compiled.source}
+
+
+# ---------------------------------------------------------------------------
+# set / unset / migrate (the single config writer)
+# ---------------------------------------------------------------------------
+
+#: Exit code for a change refused on a managed device.
+MANAGED_EXIT_CODE = 3
+
+
+def _unloaded_signature_pack_notes(cfg: object) -> list[str]:
+    """Configured signature packs the gateway leaves out (a missing file, a
+    pin that does not match). The change still applies; discovery is blind to
+    the agents those packs describe until they are fixed (GAP-0232)."""
+    discovery = getattr(cfg, "ai_discovery", None)
+    if not getattr(discovery, "enabled", False) or not getattr(discovery, "signature_packs", None):
+        return []
+    try:
+        from defenseclaw.inventory import ai_signatures
+
+        _total, refused = ai_signatures.refused_packs(cfg)
+    except Exception:  # noqa: BLE001 - the change is committed; the note is best effort
+        return []
+    return [
+        f"Warning: signature pack {pack.path} is not loaded ({pack.reason}); "
+        "every other setting applies. See: defenseclaw doctor"
+        for pack in refused
+    ]
+
+
+def _shadowed_mode_notes(changes: list) -> list[str]:
+    """Connectors that keep their own mode after a ``guardrail.mode`` change.
+
+    ``guardrail.connectors.<C>.mode`` wins over the global mode, so a change to
+    ``guardrail.mode`` does not reach those connectors. Name each one and the
+    command that does (GAP-0259), as ``guardrail mode`` already does."""
+    if not any(getattr(change, "path", "") == "guardrail.mode" for change in changes):
+        return []
+    try:
+        from defenseclaw import policy_catalog
+        from defenseclaw.commands.cmd_guardrail import _connector_label
+
+        cfg = config_module.load()
+        gc = cfg.guardrail
+        new_mode = policy_catalog.mode_label(gc.mode)
+        notes = []
+        for connector in (str(c) for c in cfg.active_connectors()):
+            own = gc._connector_override(connector)
+            if own is None or not (own.mode or "").strip():
+                continue
+            kept = policy_catalog.mode_label(own.mode)
+            if kept != new_mode:
+                notes.append(
+                    f"{_connector_label(connector)} keeps its own mode ({kept}); "
+                    f"change it with: defenseclaw guardrail mode {new_mode} --connector {connector}"
+                )
+        return notes
+    except Exception:  # noqa: BLE001 - the change is committed; the hint is best effort
+        return []
+
+
+def _shadowed_hilt_notes(changes: list) -> list[str]:
+    if not any(
+        getattr(change, "path", "") == "guardrail.hilt.enabled" and change.value is False
+        for change in changes
+    ):
+        return []
+    try:
+        cfg = config_module.load()
+        enabled = [
+            connector for connector in cfg.active_connectors()
+            if (own := cfg.guardrail._connector_override(connector)) is not None
+            and own.hilt is not None and own.hilt.enabled
+        ]
+    except Exception:  # noqa: BLE001 - config change already committed; keep the hint best effort.
+        return []
+    if not enabled:
+        return []
+    return [
+        f"HILT remains on for {', '.join(enabled)} because each connector has its own override; "
+        "turn it off with: defenseclaw guardrail hilt off"
+    ]
+
+
+def _write_config_change(app: AppContext, changes: list, expect_sha256: str | None, verb: str) -> bool:
+    """Apply the changes in one write through the writer; False when they changed nothing."""
+    from defenseclaw import config_writer
+
+    path = str(config_module.config_path())
+    key = ", ".join(getattr(change, "path", "") for change in changes)
+    try:
+        result = config_writer.apply(
+            changes,
+            config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI),
+            f"defenseclaw config {verb}",
+            expect_sha256,
+            path=path,
+        )
+    except config_writer.ManagedConfigWriteError as exc:
+        from defenseclaw.enforce.asset_lists import audit_managed_config_refusal
+
+        audit_managed_config_refusal(key or "config", f"config {verb}")
+        click.echo(f"error: {exc}", err=True)
+        raise SystemExit(MANAGED_EXIT_CODE) from exc
+    except config_writer.ConfigConflictError as exc:
+        raise click.ClickException("config.yaml changed since --expect-sha256 was read; read it again") from exc
+    except yaml.YAMLError as exc:
+        try:
+            syntax = _yaml_syntax_detail(Path(config_module.config_path()).read_bytes())
+        except OSError:
+            syntax = None
+        detail = syntax or "invalid YAML; run defenseclaw config validate to see the line"
+        raise click.ClickException(f"config.yaml was not changed: {detail}") from exc
+    except (config_writer.ConfigWriteError, V8ConfigError, ValueError, OSError) as exc:
+        value = changes[0].value if len(changes) == 1 else None
+        detail = config_writer.plain_error(exc, value=value, directory=os.path.dirname(path))
+        raise click.ClickException(f"config.yaml was not changed: {detail}") from exc
+    if not result.changed:
+        if verb != "unset":
+            click.echo(f"{key} already has that value (generation {result.generation}).")
+        for note in _shadowed_hilt_notes(changes):
+            click.echo(note)
+        return False
+    changed_key = ", ".join(result.changed) if verb == "unset" else key
+    click.echo(
+        f"{verb.capitalize()} {changed_key} "
+        f"(config generation {result.generation}, sha256 {result.sha256[:12]})."
+    )
+    from defenseclaw.gateway import local_policy_digest
+
+    cfg = app.cfg if app.cfg is not None else config_module.load()
+    digest = local_policy_digest(cfg, timeout=20)
+    if digest:
+        click.echo(f"Effective policy digest: {digest['effective_digest']}")
+    for note in _shadowed_mode_notes(changes):
+        click.echo(note)
+    for note in _shadowed_hilt_notes(changes):
+        click.echo(note)
+    for note in _unloaded_signature_pack_notes(cfg):
+        click.echo(note)
+    pending = result.restart_required
+    if pending:
+        click.echo(f"Restart the gateway to apply {', '.join(pending)}: defenseclaw-gateway restart")
+    logger = getattr(app, "logger", None)
+    if logger is not None:
+        try:
+            logger.log_config_change(
+                f"config-{verb}", f"{key}=" + ("(unset)" if verb == "unset" else "(set)")
+            )
+        except Exception:  # noqa: BLE001 - the change is committed; audit is best effort
+            pass
+    return True
+
+
+def _guarded_connector_modes(app: AppContext) -> dict[str, str]:
+    """Active connector -> its mode, read before a change."""
+    try:
+        from defenseclaw import policy_catalog
+
+        cfg = app.cfg if app.cfg is not None else config_module.load()
+        return {
+            str(c): policy_catalog.mode_label(cfg.guardrail.effective_mode(str(c))) for c in cfg.active_connectors()
+        }
+    except Exception:  # noqa: BLE001 - the roster note is best effort
+        return {}
+
+
+def _left_roster_notes(parsed: list, before: dict[str, str]) -> list[str]:
+    """Say so when ``config unset guardrail.connectors.<C>`` dropped a guarded connector (GAP-1021).
+
+    The whole entry is the connector's place in the roster: the gateway tears
+    its hooks down and stops guarding it, which a typo for
+    ``guardrail.connectors.<C>.mode`` must not leave unsaid.
+    """
+    try:
+        after = set(str(c) for c in config_module.load().active_connectors())
+    except Exception:  # noqa: BLE001
+        return []
+    from defenseclaw.commands.cmd_guardrail import _connector_label
+    from defenseclaw.hook_integrity import setup_command
+
+    notes = []
+    for _key, parts in parsed:
+        if len(parts) != 3 or parts[:2] != ["guardrail", "connectors"]:
+            continue
+        name = str(parts[2])
+        if name not in before or name in after:
+            continue
+        label = _connector_label(name)
+        notes.append(
+            f"{label} left the guardrail roster: DefenseClaw no longer guards {label} and removes its hooks. "
+            f"To guard it again run: {setup_command(name)} --mode {before[name]}. To pause it on purpose use "
+            f"defenseclaw guardrail disable --connector {name}; to change one setting, name it "
+            f"(for example guardrail.connectors.{name}.mode)."
+        )
+    return notes
+
+
+def _refuse_config_version(parts: list) -> None:
+    """config_version names the schema the file is written in; only the
+    migration changes it. Relabelling a version 9 file as 8 made the next
+    migration back it up as the 0.8.x original (config.yaml.v8.bak)."""
+    if parts and parts[0] == "config_version":
+        raise click.ClickException(
+            "config_version is set by the migration ('defenseclaw migrate'), not by config set or unset; "
+            "config.yaml was not changed."
+        )
+
+
+@config_cmd.command("set")
+@click.argument("key")
+@click.argument("value")
+@click.option("--json", "as_json", is_flag=True, help="Parse VALUE as JSON instead of a YAML scalar.")
+@click.option("--expect-sha256", default=None, help="Refuse the change unless config.yaml still has this sha256.")
+@pass_ctx
+def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha256: str | None) -> None:
+    """Set one configuration value through the config writer.
+
+    KEY is a dotted path with [i] list indexes, for example
+    guardrail.block_at or asset_policy.skill.denied[0].name. VALUE is a YAML
+    scalar (true, 3, HIGH, off: only true and false are booleans) or, with
+    --json, any JSON value. The change is
+    validated before it is written; on a managed device it is refused (exit 3).
+    """
+    from defenseclaw.config_writer import Change, parse_path
+
+    if any(ord(char) < 32 and char not in "\t\r\n" for char in value):
+        raise click.ClickException(f"config.yaml was not changed: {key} contains a control character")
+    try:
+        parts = list(parse_path(key))
+        parsed = json.loads(value) if as_json else load_config_value(value)
+    except (ValueError, yaml.YAMLError) as exc:
+        raise click.UsageError(str(exc)) from exc
+    _refuse_config_version(parts)
+    _refuse_retired_scanner_key(key, parts)
+    if (
+        len(parts) == 4
+        and parts[:2] == ["registries", "sources"]
+        and isinstance(parts[2], int)
+        and parts[3] == "auto_sync"
+    ):
+        from defenseclaw.config_writer import machine_managed_standalone
+
+        if not machine_managed_standalone():
+            raise click.ClickException(
+                f"{key} was retired in config_version 9; config.yaml was not changed."
+            )
+    if value == "" and not as_json:
+        raise click.ClickException(
+            f"an empty value does not set {key}; use defenseclaw config unset {key}"
+        )
+    _write_config_change(app, [Change(key, parsed)], expect_sha256, "set")
+
+
+def _refuse_retired_scanner_key(key: str, parts: list) -> None:
+    """A load ignores the scanner keys no scan read (GAP-0295, GAP-0301), so
+    setting one must fail instead of writing a value that does nothing."""
+    from defenseclaw.observability.v8_config import _RETIRED_SCANNER_KEYS
+
+    if any(tuple(parts[: len(retired)]) == retired for retired in _RETIRED_SCANNER_KEYS):
+        raise click.ClickException(
+            f"{key} is not a configuration key: it was removed because no scan read it; "
+            "config.yaml was not changed."
+        )
+
+
+@config_cmd.command("unset")
+@click.argument("keys", nargs=-1, required=True)
+@click.option("--expect-sha256", default=None, help="Refuse the change unless config.yaml still has this sha256.")
+@pass_ctx
+def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | None) -> None:
+    """Remove configuration keys (their defaults apply again).
+
+    Several KEYs are removed in one validated write, so a pair that depends on
+    each other, such as openshell.admin.required_pack and
+    openshell.admin.required_pack_digest, can go together.
+    """
+    from defenseclaw.config_writer import Change, parse_path
+
+    try:
+        parsed = [(key, list(parse_path(key))) for key in keys]
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+    for _key, parts in parsed:
+        _refuse_config_version(parts)
+    # Validate every path before the writer runs so a valid path cannot hide a
+    # typo. A key config.yaml lists is valid without the resolved view, and a
+    # file that does not parse is left to the writer, which names the line.
+    written = _written_config()
+    for key, parts in parsed:
+        if written is None or _lookup(written, parts)[0]:
+            continue
+        view = _key_view(app, parts)
+        if not _admission_layer_key(parts) and not _lookup(view, parts)[0] and not _unlisted_entry_key(parts):
+            if _is_destination_key(parts):
+                raise click.ClickException(f"{_destination_not_set(key, parts, view)} config.yaml was not changed.")
+            raise click.ClickException(f"{key} is not a configuration key; config.yaml was not changed.")
+    roster = _guarded_connector_modes(app)
+    if _write_config_change(app, [Change(key, unset=True) for key in keys], expect_sha256, "unset"):
+        for note in _left_roster_notes(parsed, roster):
+            click.echo(note)
+        return
+    if len(keys) == 1:
+        click.echo(f"{keys[0]} is not set in config.yaml; its default already applies.")
+    else:
+        click.echo(f"{', '.join(keys)} are not set in config.yaml; their defaults already apply.")
+
+
+@config_cmd.command("migrate")
+@click.option("--dry-run", is_flag=True, help="Show what would move; write nothing.")
+@click.option("--ack", is_flag=True, help="Mark migration-v9.json as read so doctor stops reporting it.")
+@click.option("--json", "as_json", is_flag=True, help="Print the migration result as JSON.")
+def config_migrate(dry_run: bool, ack: bool, as_json: bool) -> None:
+    """Migrate config.yaml to config_version 9 (or acknowledge the migration).
+
+    Moves the admission policy in policies/rego/data.json, the *_actions
+    keys, rule_pack_dir, the v8 scanner keys, update_check, a leftover
+    privacy section and the operator block/allow entries of audit.db into
+    config.yaml. Keeps config.yaml.v8.bak and writes migration-v9.json.
+    """
+    from defenseclaw.config_inspect import migrate_config_v9
+
+    path = str(config_module.config_path())
+    try:
+        result = migrate_config_v9(config_path=path, dry_run=dry_run, ack=ack)
+    except ConfigInspectError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if ack:
+        click.echo("Marked the config_version 9 migration record as read.")
+        return
+    if as_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    record = result.get("record") or {}
+    if record.get("from_version") == 9:
+        click.echo("config.yaml is already config_version 9; nothing to migrate.")
+        return
+    verb = "Would move" if dry_run else "Moved"
+    click.echo(
+        f"{verb} {len(record.get('moved') or [])} values into config.yaml; "
+        f"{len(record.get('conflicts') or [])} conflicts."
+    )
+    for move in record.get("moved") or []:
+        click.echo(f"  {move.get('from')} -> {move.get('to')}")
+    for conflict in record.get("conflicts") or []:
+        click.echo(f"  conflict {conflict.get('to')}: kept {conflict.get('kept')}, dropped {conflict.get('lost')}")
+    for note in record.get("notes") or []:
+        click.echo(f"  note: {note}")
+
+
 def _lookup(data: object, parts: list[str]) -> tuple[bool, object]:
     """Follow a dotted path through dicts and list indexes."""
     value = data
     for part in parts:
         if isinstance(value, dict) and part in value:
             value = value[part]
-        elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+        elif isinstance(value, list) and isinstance(part, int) and 0 <= part < len(value):
+            value = value[part]
+        elif isinstance(value, list) and isinstance(part, str) and part.isdigit() and int(part) < len(value):
             value = value[int(part)]
         else:
             return False, None
     return True, value
+
+
+def _unlisted_entry_key(parts: list) -> bool:
+    """Whether *parts* is a config_version 9 key under a map entry config.yaml
+    does not list, such as guardrail.connectors.codex.block_at or
+    guardrail.custom_packs.foo: the resolved view has no entry for that name
+    to look the key up in, but the schema declares it."""
+    schema = _v8_schema()
+    defs = schema.get("$defs") or {}
+
+    def _resolve(node: object) -> object:
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs.get(str(node["$ref"]).rsplit("/", 1)[-1])
+        return node
+
+    def _names_ok(rule: object, name: str) -> bool:
+        rule = _resolve(rule)
+        if not isinstance(rule, dict):
+            return True
+        if "enum" in rule and name not in rule["enum"]:
+            return False
+        if not rule.get("minLength", 0) <= len(name) <= rule.get("maxLength", len(name)):
+            return False
+        return "pattern" not in rule or re.search(str(rule["pattern"]), name) is not None
+
+    node: object = schema
+    removed: object = defs.get("v9SourceConstraints") or {}
+    through_entry = False
+    for part in parts:
+        node = _resolve(node)
+        if not isinstance(node, dict) or not isinstance(part, str):
+            return False
+        removed = removed if isinstance(removed, dict) else {}
+        properties = node.get("properties") or {}
+        if part in properties:
+            node, removed = properties[part], (removed.get("properties") or {}).get(part, {})
+        elif isinstance(node.get("additionalProperties"), dict) and _names_ok(node.get("propertyNames"), part):
+            node, removed = node["additionalProperties"], removed.get("additionalProperties", {})
+            through_entry = True
+        else:
+            return False
+        if removed is False:
+            return False
+    return through_entry
 
 
 def _v8_schema() -> dict:
@@ -300,22 +984,34 @@ def _v8_schema() -> dict:
 
 
 def _v8_sections() -> set[str]:
-    return set((_v8_schema().get("properties") or {}).keys())
+    """The top-level sections a config_version 9 config.yaml may have. The
+    schema also declares the sections version 9 removed (skill_actions,
+    privacy, ...), so a version 8 source still reads; they are not offered."""
+    schema = _v8_schema()
+    removed = ((schema.get("$defs") or {}).get("v9SourceConstraints") or {}).get("properties") or {}
+    return {key for key in schema.get("properties") or {} if removed.get(key) is not False}
 
 
-def _v8_defaults(app: AppContext) -> dict:
+def _v8_defaults(app: AppContext, *, profiles: bool = True) -> dict:
     """The masked values the CLI runs with, pruned to v8 schema keys.
 
     They fill the keys config.yaml leaves out, so a fresh install shows
-    asset_policy.enabled and the rest (GAP-2171).
+    asset_policy.enabled and the rest (GAP-2171). Without profiles the
+    guardrail profiles and their assignments are left out: config.yaml holds
+    every one of them, and masking 1,000 of them for a key elsewhere made
+    config get several times slower (GAP-0276).
     """
     schema = _v8_schema()
     if not schema:
         return {}
     try:
-        cfg = app.cfg if app.cfg is not None else config_module.load()
+        cfg = _loaded_config(app, profiles=profiles)
     except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
         cfg = config_module.default_config()
+    if not profiles and (cfg.guardrail.profiles or cfg.guardrail.profile_assignments):
+        cfg = dataclasses.replace(
+            cfg, guardrail=dataclasses.replace(cfg.guardrail, profiles={}, profile_assignments=[])
+        )
     defs = schema.get("$defs") or {}
 
     def _resolve(node: object) -> object:
@@ -330,7 +1026,53 @@ def _v8_defaults(app: AppContext) -> dict:
         props = node["properties"]
         return {k: _prune(v, props[k]) for k, v in value.items() if k in props}
 
-    return _prune(_config_to_masked_dict(cfg, reveal=False), schema)  # type: ignore[return-value]
+    pruned = _prune(_config_to_masked_dict(cfg), schema)
+    _show_effective_scanner_settings(pruned)  # type: ignore[arg-type]
+    return pruned  # type: ignore[return-value]
+
+
+def _show_effective_scanner_settings(masked: dict) -> None:
+    """Fill the scanner keys a blank value stands for with what the gateway
+    runs with (the severity gate and the judge source)."""
+    from defenseclaw.enforce.admission import _DEFAULT_FAIL_ON_SEVERITY, _DEFAULT_REVIEW_QUEUE_MIN
+
+    scanners = masked.get("scanners")
+    if not isinstance(scanners, dict):
+        return
+    for name in ("skill_scanner", "mcp_scanner"):
+        block = scanners.get(name)
+        if not isinstance(block, dict):
+            continue
+        if not block.get("judge_source"):
+            llm = block.get("llm")
+            block["judge_source"] = "override" if isinstance(llm, dict) and any(llm.values()) else "inherit"
+    skill = scanners.get("skill_scanner")
+    if isinstance(skill, dict):
+        skill["fail_on_severity"] = skill.get("fail_on_severity") or _DEFAULT_FAIL_ON_SEVERITY
+        skill["review_queue_min"] = skill.get("review_queue_min") or _DEFAULT_REVIEW_QUEUE_MIN
+
+
+def _resolve_defaults(app: AppContext, view: dict, written: dict, *, profiles: bool = True) -> None:
+    """Replace the placeholders of admission and update with what the gateway runs with.
+
+    The dataclass dump shows an unset admission or update key as null or {}, which
+    reads as "no policy". Each asset type shows its resolved policy, and update shows
+    the notice and channel it runs with. admission.defaults is shown only when
+    config.yaml sets it: it is an optional layer under the three types and has no
+    value of its own.
+    """
+    try:
+        cfg = _loaded_config(app, profiles=profiles)
+    except Exception:  # noqa: BLE001 - fall back to the built-in defaults.
+        cfg = config_module.default_config()
+    if isinstance(view.get("admission"), dict):
+        layer = written.get("admission") if isinstance(written.get("admission"), dict) else {}
+        resolved = {key: value for key, value in layer.items() if key not in _ADMISSION_TYPES}
+        for name in _ADMISSION_TYPES:
+            resolved[name] = _admission_view(cfg, name)[0]
+        view["admission"] = resolved
+    if isinstance(view.get("update"), dict):
+        view["update"] = _update_view(cfg)[0]
 
 
 def _merge_defaults(written: dict, defaults: dict) -> dict:
@@ -343,7 +1085,7 @@ def _merge_defaults(written: dict, defaults: dict) -> dict:
     return merged
 
 
-def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bool, reveal: bool) -> dict:
+def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bool) -> dict:
     """Return the masked view 'config show' and 'config get' print."""
     if source and effective:
         raise click.UsageError("--source and --effective are mutually exclusive")
@@ -351,20 +1093,11 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
         raise click.UsageError("--provenance annotates the effective view and cannot be combined with --source")
 
     cfg_path = str(config_module.config_path())
-    if not _looks_like_v8_config(cfg_path):
-        if provenance:
-            raise click.UsageError("--provenance requires a configuration v8 effective plan")
-        # Preserve the pre-v8 view for installations that have not upgraded.
-        cfg = app.cfg if app.cfg is not None else config_module.load()
-        legacy = _config_to_masked_dict(cfg, reveal=reveal)
-        if effective:
-            return {"observability": legacy.get("observability")}
-        return legacy
-
-    if reveal:
-        raise click.UsageError(
-            "--reveal works only for pre-v8 configurations; this config is v8, which always masks secret values"
-        )
+    if not os.path.isfile(cfg_path):
+        # No config.yaml yet: show the defaults the CLI would run with.
+        if source or effective or provenance:
+            raise click.ClickException(f"config.yaml does not exist yet; {config_module.first_run_hint()}")
+        return _v8_defaults(app)
     resolved_only = effective or provenance
     masked: dict = {}
     if not resolved_only:
@@ -377,7 +1110,9 @@ def _show_data(app: AppContext, *, source: bool, effective: bool, provenance: bo
             raise click.ClickException(str(exc)) from exc
         if source:
             return masked
-        masked = _merge_defaults(masked, _v8_defaults(app))
+        written = masked
+        masked = _merge_defaults(written, _v8_defaults(app))
+        _resolve_defaults(app, masked, written)
     try:
         result = inspect_v8_config("effective", config_path=cfg_path)
     except ConfigInspectError as exc:
@@ -472,6 +1207,21 @@ def config_reference(section: str, fmt: str, output: Path | None) -> None:
             rendered = config_v8_reference(fmt, section=section.lower())
     except ConfigInspectError as exc:
         raise click.ClickException(str(exc)) from exc
+    if fmt.lower() == "json-schema":
+        schema = json.loads(rendered)
+
+        def describe_block_message(node: object) -> None:
+            if isinstance(node, dict):
+                for key, child in node.items():
+                    if key == "block_message" and isinstance(child, dict):
+                        child.setdefault("description", "At most 4096 characters.")
+                    describe_block_message(child)
+            elif isinstance(node, list):
+                for child in node:
+                    describe_block_message(child)
+
+        describe_block_message(schema)
+        rendered = json.dumps(schema, indent=2)
     if fmt.lower() == "yaml":
         rendered = _strip_generator_header(rendered)
 
@@ -519,7 +1269,7 @@ def config_path(app: AppContext) -> None:
     cfg_path = str(config_module.config_path())
     if app.cfg is not None:
         cfg = app.cfg
-    elif _looks_like_v8_config(cfg_path):
+    elif os.path.isfile(cfg_path):
         cfg = _v8_config_path_view(cfg_path)
     else:
         cfg = config_module.load()
@@ -594,7 +1344,8 @@ def validate_config() -> ValidationResult:
             res.errors.append(_v8_failure_detail(cfg_path, exc))
             return res
         if inspected.valid is not True:
-            res.errors.append("canonical v8 validator returned no validity decision")
+            res.errors.append("the configuration validator returned no validity decision")
+        res.warnings.extend(inspected.warnings)
         if os.name == "nt" and res.ok:
             source = load_masked_v8(_bounded_source(cfg_path) or b"", source_name=cfg_path)
             res.warnings.extend(_per_user_windows_group_warnings(source))
@@ -603,7 +1354,7 @@ def validate_config() -> ValidationResult:
     if damage := config_module.config_damage_message(cfg_path):
         res.errors.append(damage)
         return res
-    res.errors.append("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+    res.errors.append(_not_current_message(cfg_path))
     return res
 
 
@@ -754,6 +1505,21 @@ def _key_line(raw: bytes | None, field_path: str) -> int:
     return lines[0] if lines else 0
 
 
+def _config_version(raw: bytes | None) -> int:
+    """The root ``config_version`` of ``raw`` as an integer, or 0."""
+
+    try:
+        root = yaml.compose(raw or b"", Loader=config_module.YAML_LOADER)
+    except (yaml.YAMLError, RecursionError, OverflowError):
+        return 0
+    if isinstance(root, yaml.MappingNode):
+        for key_node, value_node in root.value:
+            if isinstance(key_node, yaml.ScalarNode) and key_node.value == "config_version":
+                if isinstance(value_node, yaml.ScalarNode) and value_node.value.strip().isdigit():
+                    return int(value_node.value)
+    return 0
+
+
 def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     path = field_path.split(" (line", 1)[0].strip()
     field = path[2:] if path.startswith("$.") else ("config.yaml" if path == "$" else path)
@@ -762,6 +1528,10 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     where = f"line {line}: " if line else ""
     match = _V8_REASON.match(reason.strip())
     code, text = (match.group("code"), match.group("text")) if match else ("", reason.strip())
+    if code in ("pattern", "config_schema_invalid") and (
+        field.endswith(".block_at") or field.endswith(".alert_at")
+    ) and "pattern constraint" in text:
+        return f"{where}{field} must be one of CRITICAL, HIGH, MEDIUM, LOW"
 
     if code == "secret_reference_unresolved" and "protected credential" not in text:
         env = ""
@@ -800,9 +1570,30 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     if code == "config_schema_invalid" and text.startswith(_UNDECLARED_KEY_SUMMARY):
         # The gateway's words for an undeclared key, not the schema keyword
         # (GAP-2235): 'guardrail.mdoe: unknown field (did you mean "mode"?).'
+        replacement = retired_key_replacement(field)
+        if replacement:
+            # A key config_version 9 replaced: say so, not "unknown field".
+            fix = (
+                "run: defenseclaw migrate"
+                if _config_version(raw) == 8
+                else f"move it to {replacement}"
+            )
+            return f"{where}{field} was replaced by {replacement} in config_version 9; {fix}"
         suggestion = re.search(r"suggested field ([^;]+)", text)
         hint = f' (did you mean "{suggestion.group(1).strip()}"?)' if suggestion else ""
         return f"{where}{field}: unknown field{hint}. All fields: {_ALL_FIELDS_COMMAND}"
+
+    if (code == "maxLength" or "maxLength constraint" in text) and isinstance(node, yaml.ScalarNode):
+        return f"{where}{field} has {len(node.value)} characters; the limit is 4096. All fields: {_ALL_FIELDS_COMMAND}"
+
+    if code == "additionalProperties" and text.startswith(RETIRED_KEY_ACTION_PREFIX):
+        return f"{where}{field} {text[len('this key '):]}"
+    from defenseclaw.config_writer import pack_pin_repair
+
+    repair = pack_pin_repair(text)
+    if repair:
+        return f"{where}{field}: {text}. Re-pin the edited pack: {repair}"
+
 
     parts = [
         part.strip()
@@ -820,8 +1611,22 @@ def _plain_v8_issue(raw: bytes | None, field_path: str, reason: str) -> str:
     detail = "; ".join(parts).rstrip(".") or "is not valid"
     # ``config reference`` (YAML) covers only observability; the JSON schema
     # lists every section and field (GAP-1661).
-    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code == "config_schema_invalid" else ""
+    suffix = f" All fields: {_ALL_FIELDS_COMMAND}" if code in ("config_schema_invalid", "additionalProperties") else ""
     return f"{where}{field}: {detail}.{suffix}"
+
+
+def _not_current_message(path: str) -> str:
+    """Why a config_version this build does not load is refused: a newer file
+    needs an upgrade or rollback, not a migration (as the root preflight says)."""
+
+    try:
+        version = config_module.source_config_version(path=path)
+    except config_module.ConfigVersionError as exc:
+        # An unreadable file is not an older one (GAP-0398).
+        return str(exc)
+    if version and version > config_module.CURRENT_CONFIG_VERSION:
+        return config_module.newer_config_message(version)
+    return "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
 
 
 def _looks_like_v8_config(path: str) -> bool:
@@ -848,6 +1653,11 @@ def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
             raw = stream.read(_MAX_VERSION_PROBE_BYTES)
     except OSError:
         return False
+    # The line probe answers yes for the usual file without composing it: a
+    # yes from either check is the answer, and composing 1,000 guardrail
+    # profiles was a fifth of every config command (GAP-0276).
+    if _V8_VERSION_LINE.search(raw.removeprefix(b"\xef\xbb\xbf")) is not None:
+        return True
     try:
         root = yaml.compose(raw, Loader=config_module.YAML_LOADER)
     except (yaml.YAMLError, RecursionError, OverflowError):
@@ -857,23 +1667,23 @@ def _looks_like_v8_config_at(path: str, _mtime_ns: int, _size: int) -> bool:
             if not isinstance(key_node, yaml.ScalarNode) or key_node.value != "config_version":
                 continue
             if isinstance(value_node, yaml.ScalarNode):
-                if value_node.value.strip() == "8":
+                if value_node.value.strip() in ("8", "9"):
                     return True
                 if value_node.tag == "tag:yaml.org,2002:int":
                     try:
-                        if yaml.safe_load(value_node.value) == 8:
+                        if yaml.safe_load(value_node.value) in (8, 9):
                             return True
                     except yaml.YAMLError:
                         pass
-    return _V8_VERSION_LINE.search(raw) is not None
+    return False
 
 
 def _v8_config_path_view(path: str):
-    """Build the legacy path-display shape from a masked v8 source.
+    """Build the path-display shape from a masked v8 source.
 
-    ``config path`` is a recovery command and must not send an exact-v8 file
-    through the v7 loader. Only non-secret filesystem fields used by the view
-    are projected; observability policy remains owned by the Go compiler.
+    ``config path`` is a recovery command and must work while the source does
+    not fully load. Only non-secret filesystem fields used by the view are
+    projected; observability policy remains owned by the Go compiler.
     """
 
     try:
@@ -889,7 +1699,7 @@ def _v8_config_path_view(path: str):
     cfg.audit_db = str(
         ((source.get("observability") or {}).get("local") or {}).get("path") or os.path.join(data_dir, "audit.db")
     )
-    cfg.policy_dir = str(source.get("policy_dir") or os.path.join(data_dir, "policies"))
+    cfg.policy_dir = str(source.get("policy_dir") or config_module._default_policy_dir(path, data_dir))
     cfg.plugin_dir = str(source.get("plugin_dir") or os.path.join(data_dir, "plugins"))
     cfg.quarantine_dir = str(source.get("quarantine_dir") or os.path.join(data_dir, "quarantine"))
 
@@ -908,10 +1718,8 @@ def _v8_config_path_view(path: str):
 # ---------------------------------------------------------------------------
 
 
-def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
+def _config_to_masked_dict(cfg) -> dict:
     """Convert a Config dataclass tree into a dict with secrets masked."""
-    from defenseclaw.credentials import mask
-
     def _convert(value):
         if is_dataclass(value):
             return {f.name: _convert(getattr(value, f.name)) for f in fields(value) if not f.name.startswith("_")}
@@ -922,6 +1730,9 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
         return value
 
     raw = _convert(cfg)
+    if getattr(cfg, "_source_config_version", 0) != config_module.FIRST_CURRENT_CONFIG_VERSION:
+        # virustotal_api_key is the literal v8 key a Secure Client config keeps; v9 has none.
+        raw.get("scanners", {}).get("skill_scanner", {}).pop("virustotal_api_key", None)
 
     def _walk(node, key_hint: str = "") -> None:
         if isinstance(node, dict):
@@ -934,11 +1745,11 @@ def _config_to_masked_dict(cfg, *, reveal: bool) -> dict:
             in_webhook = key_hint.lower() == "webhooks"
             for k, v in list(node.items()):
                 if _is_secret_field(k) and isinstance(v, str) and v:
-                    node[k] = mask(v) if reveal else "***"
+                    node[k] = "***"
                 elif in_headers and isinstance(v, str) and v:
-                    node[k] = mask(v) if reveal else "***"
+                    node[k] = "***"
                 elif in_webhook and k.lower() == "url" and isinstance(v, str) and v:
-                    node[k] = v if reveal else redact_webhook_url(v)
+                    node[k] = redact_webhook_url(v)
                 else:
                     _walk(v, k)
         elif isinstance(node, list):

@@ -61,6 +61,9 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	if err != nil {
 		return err
 	}
+	if verify && len(result.Kept) > 0 {
+		return fmt.Errorf("DefenseClaw's Copilot plugin under %s holds hooks DefenseClaw did not write: %s; the guardian leaves such a file in place and the foreign-hook guard denies this user's Copilot calls while it is there: move it aside, and the guardian writes DefenseClaw's plugin on its next pass", home, strings.Join(result.Kept, ", "))
+	}
 	if verify && len(result.Changed)+len(result.Removed) > 0 {
 		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
 	}
@@ -191,10 +194,11 @@ var enterpriseHookWindowsCursorAdapterRefresh = enterprisehooks.RefreshWindowsCu
 var windowsStandaloneGoOwnedPolicyMu sync.Mutex
 
 // enterpriseHookStandalonePlatformWatch starts, for the life of the watch
-// loop, the guardian's managed OpenCode plugin watch, which restores the
-// plugin right after a standard account changes its attributes instead of
-// at the next pass.
+// loop, the guardian's hook binary check and its managed OpenCode plugin
+// watch, which restores the plugin right after a standard account changes
+// its attributes instead of at the next pass.
 func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer) {
+	go watchWindowsStandaloneHookBinary(ctx, stderr)
 	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone || err != nil || strings.TrimSpace(opts.OpenCodePluginPath) == "" {
 		return

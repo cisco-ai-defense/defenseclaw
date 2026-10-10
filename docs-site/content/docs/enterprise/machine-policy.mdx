@@ -21,6 +21,13 @@ enrolled user's agent config and repairs it. See
 Only agents you select in the config are protected; see
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 
+DefenseClaw's entries are derived from the config
+(`guardrail.connectors` and `enterprise.machine_policy`), never read back as
+policy. A change to one of its entries in a vendor file is rewritten by the
+next `ensure`, `repair` or `reconcile`, and `verify` reports the drift until
+then. Change the config, not the vendor file, to change what DefenseClaw
+publishes.
+
 ## Routes by connector
 
 | Connector | Linux and macOS | Windows |
@@ -134,7 +141,9 @@ own: it enrolls no user and is not in the runtime descriptor.
 
 On every OS the guardian keeps each enrolled user's DefenseClaw runtime in
 step with the policy, and `verify` reports any drift. On Linux and macOS the
-guardian never writes machine policy itself.
+guardian never writes machine policy itself: when DefenseClaw's Claude Code
+drop-in is edited or deleted it logs a tamper and starts the lifecycle's
+config-apply job, whose `ensure` puts the drop-in back within seconds.
 
 On Windows, the guardian publishes Cursor's `hooks.json`, and the protected
 PowerShell adapter next to it, only while at least one user is enrolled for
@@ -202,7 +211,10 @@ it. OpenCode itself can still start without it: see
 
 - **Its own entries only.**
   - Claude Code and Copilot: DefenseClaw owns the whole
-    `90-defenseclaw.json` drop-in.
+    `90-defenseclaw.json` drop-in, whatever it holds once DefenseClaw has
+    written it. An edit inside it (a hook path or binary name changed) is
+    put back by the next `ensure` or `repair`, and uninstall removes the
+    file. Put your own settings in another drop-in.
   - Codex: DefenseClaw owns two marked blocks in `requirements.toml`, plus
     single marked lines inside your own tables (for example
     `hooks = true # defenseclaw-managed` in an existing `[features]`
@@ -214,17 +226,21 @@ it. OpenCode itself can still start without it: see
     `plugin` list and keeps your other entries.
 - **Ownership records and preimages** in the `machine-policy` directory
   under the lifecycle directory (`/var/lib/defenseclaw-enterprise` on
-  Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS). Uninstall removes
-  exactly what DefenseClaw added, keeps edits you made later, and does not
-  bring back content you deleted.
+  Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS). In the files you
+  share with DefenseClaw, uninstall removes exactly what DefenseClaw added,
+  keeps edits you made later, and does not bring back content you deleted.
 - **Root-owned files that users can read** (`0644`). Copilot ignores a
   policy file that is not root-owned or that group or others can write.
 - **Removal of policy it no longer publishes.** When you remove a
   connector's name from both `guardrail.connectors` and
   `enterprise.machine_policy.connectors`, or set its `ownership` to
-  `"off"`, the next `ensure` removes DefenseClaw's entries for it.
-  `enabled: false` is not enough: it stops only per-user enrollment, and
-  the machine policy stays (see
+  `"off"`, the next `ensure` removes DefenseClaw's entries for it, and
+  its result says so: DefenseClaw no longer inspects that agent on the
+  computer. A DefenseClaw drop-in whose hook paths you edited counts as
+  DefenseClaw's, so it is removed too rather than kept as your content.
+  On Linux and macOS, `guardrail.connectors.claudecode.enabled: false`
+  also removes Claude Code machine policy and hooks. For other connectors,
+  check the machine-policy ownership map (see
   [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)).
 
 If a Codex `requirements.toml` defines `features` or `hooks` as dotted keys
@@ -280,7 +296,10 @@ config and plugin, and the foreign-hook guard summary. See
   drop-in name is removed (a link, never its target) or moved aside to a
   hidden `.<name>.defenseclaw-displaced-<time>-<id>` name that DefenseClaw
   owns, and the folder is created in its place. A `*.json` file a standard
-  user left in Copilot's `policy.d` is moved aside the same way. Objects
+  user left in Copilot's `policy.d` is moved aside the same way. Install,
+  reconcile and uninstall all do this, also for a connector that was never
+  configured, so a folder a standard user created cannot make the
+  administrator's or the MDM's uninstall fail. Objects
   Administrators, LocalSystem or TrustedInstaller own are never removed;
   DefenseClaw reports them instead.
 - **`policy show`.** It checks Claude Code with the same rules as on Linux
@@ -450,10 +469,10 @@ policy; see
   drop-in (a later drop-in, a higher-precedence source), no floor applies
   and `policy verify` fails until you fix or remove the value.
 - **When it applies.** The drop-in is written only in the standalone
-  profile, while `claudecode` is named under `guardrail.connectors` (even
-  with `enabled: false`) or under `enterprise.machine_policy.connectors`,
+  profile, while `claudecode` is enabled under `guardrail.connectors` or
+  named under `enterprise.machine_policy.connectors`,
   with `ownership: merge`. To stop it, remove the name from both maps or set
-  `ownership: "off"`. Windows follows the same name-based rule for the
+  `enabled: false` or `ownership: "off"`. Windows follows the same rule for the
   floor, not the enrolled-row rule it uses for `90-defenseclaw.json`: a
   Windows config that names `claudecode` writes the floor even when no
   Claude Code user is enrolled. Linux and macOS write it at install and at
@@ -495,7 +514,7 @@ Some policy sources outrank the files DefenseClaw writes.
 
 | Connector | Source | OS | Accepted when |
 | --- | --- | --- | --- |
-| Claude Code | `com.anthropic.claudecode` managed preferences in `/Library/Managed Preferences` | macOS | It contains DefenseClaw's hooks, or sets `"managedSourcesBehavior": "merge"` (Claude Code 2.1.242 or later) |
+| Claude Code | `com.anthropic.claudecode` managed preferences in `/Library/Managed Preferences` | macOS | It contains DefenseClaw's hooks, or sets `"managedSourcesBehavior": "merge"` (Claude Code 2.1.242 or later). With `version_floor: enforce` (the default), a merge profile must also set `"requiredMinimumVersion"` to the floor `policy verify` names, because builds older than 2.1.242 read only the profile. The `--format plist` export embeds the hooks and the floor instead |
 | Claude Code | Server-managed settings from the claude.ai console | All | Not visible on the machine; prove the result with `--live` |
 | Claude Code | `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` | Windows | Never; see [Windows differences](#windows-differences) |
 | Codex | `com.openai.codex` managed preferences (`requirements_toml_base64`) in `/Library/Managed Preferences` | macOS | It contains DefenseClaw's managed hooks. Export them with `--format plist`. |
@@ -510,9 +529,10 @@ the Claude Code drop-in while that value is set, whatever this setting says.
 
 - **`fail` (default).** The source is recorded as a conflict and the
   connector counts as not covered. `ensure` and `status` report the
-  warning `machine_policy_incomplete`.
-  `defenseclaw-gateway enterprise macos verify` turns it into an error,
-  exits 1 and reports `security_complete: false`. Enrollment continues.
+  warning `machine_policy_incomplete`, which names the source, with
+  `security_complete: false`.
+  `defenseclaw-gateway enterprise macos verify` turns it into an error and
+  exits 1. Enrollment continues.
 - **`warn`.** The source is reported as a note, and the connector can still
   count as covered.
 

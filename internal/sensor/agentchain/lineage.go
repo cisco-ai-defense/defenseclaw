@@ -43,10 +43,22 @@ const (
 	// maxAncestryWalk bounds a single ancestry walk. A pid table can contain a
 	// cycle after pid reuse, and an unbounded walk would hang the poll.
 	maxAncestryWalk = 64
+
+	// startTolerance allows for rounding between kernel start-time sources.
+	// Exec time is not a process start time: a process may exec long after
+	// fork. Two known starts further apart than this on one pid are two
+	// processes.
+	startTolerance = 2 * time.Second
 )
 
 type processRecord struct {
-	pid            int
+	pid int
+	// start is the kernel creation time when known. keyStart is the first
+	// observed start used for the session key, zero when the first source
+	// could not say. It stays fixed when a later poll refines or fills start.
+	start          time.Time
+	keyStart       time.Time
+	instance       uint64
 	ppid           int
 	responsiblePID int
 	name           string
@@ -74,7 +86,8 @@ type Tracker struct {
 	// processes skip the scan entirely instead of walking every record to
 	// discover there is nothing to drop -- which, under sustained process
 	// churn, is a full-table scan for every new pid, on the poll path.
-	exited int
+	exited       int
+	nextInstance uint64
 }
 
 // NewTracker returns an empty tracker using the real clock.
@@ -87,10 +100,12 @@ func newTracker(ttl time.Duration, now func() time.Time) *Tracker {
 // ObserveExec records an exec event. This is the authoritative source: it
 // carries the parent at the moment of exec, which a later process-table poll
 // cannot recover once the parent has exited and the child is reparented.
-func (t *Tracker) ObserveExec(pid, ppid, responsiblePID int, name, cmdline string) {
+// start is the kernel creation time when the backend knows it, zero otherwise.
+// The event's timestamp is not the process creation time.
+func (t *Tracker) ObserveExec(pid, ppid, responsiblePID int, name, cmdline string, start time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.recordLocked(pid, ppid, responsiblePID, name, cmdline)
+	t.recordLocked(pid, ppid, responsiblePID, name, cmdline, start)
 }
 
 // ObserveProcessTable records a poll of the live process table. It is the
@@ -100,7 +115,7 @@ func (t *Tracker) ObserveProcessTable(rows []ProcessRow) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, row := range rows {
-		t.recordLocked(row.PID, row.PPID, row.PPID, row.Name, row.Cmdline)
+		t.recordLocked(row.PID, row.PPID, row.PPID, row.Name, row.Cmdline, row.Start)
 	}
 }
 
@@ -110,9 +125,11 @@ type ProcessRow struct {
 	PPID    int
 	Name    string
 	Cmdline string
+	// Start is when the kernel created the process, zero when unknown.
+	Start time.Time
 }
 
-func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline string) {
+func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline string, start time.Time) {
 	if pid <= 0 {
 		return
 	}
@@ -131,15 +148,23 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 		existing = &processRecord{pid: pid}
 		t.records[pid] = existing
 	}
-	// A pid that has already exited, or that now reports a different image,
-	// is a different process: the kernel recycled the number, or the process
-	// exec'd into something else. Either way the identity recorded before
-	// belongs to a process that is gone.
-	recycled := !existing.exitedAt.IsZero() || existing.name != name
+	// Exec replaces an image, not a process. Only an observed exit or a
+	// different kernel start means the pid names a new process instance.
+	recycled := !existing.exitedAt.IsZero() || differentStart(existing.start, start)
+	reimaged := existing.name != name
 	if !existing.exitedAt.IsZero() {
 		t.exited--
 	}
-
+	if existing.instance == 0 || recycled {
+		t.nextInstance++
+		existing.instance = t.nextInstance
+		existing.start = start
+		existing.keyStart = start
+	} else if existing.start.IsZero() && !start.IsZero() {
+		// Learn the real start without changing the key of a live session
+		// first seen while its creation time was unavailable.
+		existing.start = start
+	}
 	existing.ppid = ppid
 	existing.responsiblePID = responsiblePID
 	existing.name = name
@@ -155,7 +180,7 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 		}
 		return
 	}
-	if recycled {
+	if recycled || reimaged {
 		// Clear rather than carry forward. The lineage gate is the whole
 		// false-positive control for the host plane, so a stale agent name on
 		// a recycled pid turns ordinary developer activity -- in this process
@@ -217,6 +242,35 @@ func (t *Tracker) Reap() int {
 	return removed
 }
 
+// StartOf is when the process now recorded under pid was created, zero when
+// the tracker has no record of it or no source could say.
+func (t *Tracker) StartOf(pid int) time.Time {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if record, ok := t.records[pid]; ok {
+		return record.start
+	}
+	return time.Time{}
+}
+
+// differentStart reports two known start times too far apart to be one
+// process.
+func differentStart(recorded, observed time.Time) bool {
+	if recorded.IsZero() || observed.IsZero() {
+		return false
+	}
+	delta := recorded.Sub(observed)
+	return delta > startTolerance || delta < -startTolerance
+}
+
+// reusedParent reports a parent record that started after its child: the
+// child's parent exited and its pid now names a younger process, which is
+// not the child's ancestor and must not lend it an agent identity.
+func reusedParent(parent, child *processRecord) bool {
+	return !parent.start.IsZero() && !child.start.IsZero() &&
+		parent.start.After(child.start.Add(startTolerance))
+}
+
 // Attribute walks a pid's ancestry to the agent answerable for it, or reports
 // false when there is no agent above it.
 //
@@ -244,8 +298,10 @@ func (t *Tracker) attributeLocked(pid int) (Attribution, bool) {
 		// session into one session per command it ran -- which is exactly the
 		// fragmentation this package exists to prevent, since the sequence is
 		// the finding.
+		root := t.outermostSameAgentLocked(pid, record.agentName)
 		return Attribution{
-			RootPID:   t.outermostSameAgentLocked(pid, record.agentName),
+			RootPID: root, RootStart: t.records[root].start, RootKeyStart: t.records[root].keyStart,
+			RootInstance: t.records[root].instance, RootName: t.records[root].name,
 			AgentName: record.agentName, Depth: 0,
 			Via: record.via, State: StateAttributed,
 		}, true
@@ -291,7 +347,7 @@ func (t *Tracker) walkAncestryLocked(
 			return Attribution{}, false
 		}
 		parent, ok := t.records[next]
-		if !ok {
+		if !ok || reusedParent(parent, current) {
 			return Attribution{}, false
 		}
 		if parent.agentName != "" {
@@ -304,7 +360,8 @@ func (t *Tracker) walkAncestryLocked(
 				via = "responsible"
 			}
 			return Attribution{
-				RootPID: next, AgentName: parent.agentName, Depth: depth,
+				RootPID: next, RootStart: parent.start, RootKeyStart: parent.keyStart,
+				RootInstance: parent.instance, RootName: parent.name, AgentName: parent.agentName, Depth: depth,
 				Via: via, State: StateAttributed,
 			}, true
 		}
@@ -341,7 +398,7 @@ func (t *Tracker) outermostSameAgentLocked(pid int, agentName string) int {
 			return root
 		}
 		parent, ok := t.records[next]
-		if !ok || parent.agentName != agentName {
+		if !ok || parent.agentName != agentName || reusedParent(parent, current) {
 			return root
 		}
 		root = next

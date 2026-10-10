@@ -46,6 +46,17 @@ type EnterpriseConfig struct {
 // standalone deployment. Secure Client deployments always use CMID.
 type EnterpriseInspectionConfig struct {
 	AIDefense EnterpriseAIDefenseConfig `mapstructure:"ai_defense" yaml:"ai_defense,omitempty"`
+	LLM       EnterpriseLLMConfig       `mapstructure:"llm"        yaml:"llm,omitempty"`
+}
+
+// EnterpriseLLMConfig names the protected credential that carries the API
+// key of the llm: block on a standalone deployment. The LLM judge and the
+// scanners' LLM analyzers read it, through ResolveLLM, instead of
+// llm.api_key, api_key_env or the data-dir .env: the gateway service account
+// has no user's environment, so this is how a managed gateway gets an LLM key
+// (for example a Bedrock API key). The key itself never appears in config.
+type EnterpriseLLMConfig struct {
+	Credential string `mapstructure:"credential" yaml:"credential,omitempty"`
 }
 
 // EnterpriseAIDefenseConfig names the protected credential that carries the
@@ -613,6 +624,32 @@ func standaloneLayoutDataDir(configFile string, document *yaml.Node) (string, bo
 	return layout.DataDir, true
 }
 
+// resolveStandaloneLLMCredential reads a protected credential; tests replace
+// it because a trusted credential file needs an administrator-owned path.
+var resolveStandaloneLLMCredential = func(name, secretsDir string) ([]byte, error) {
+	value, _, err := managed.ResolveServiceCredential(name, secretsDir)
+	return value, err
+}
+
+// standaloneLLMKey returns the llm: API key of a standalone deployment that
+// names enterprise.inspection.llm.credential. configured is true whenever the
+// credential is named: a missing or untrusted credential then yields no key,
+// never the environment or .env key.
+func (c *Config) standaloneLLMKey() (key string, configured bool) {
+	if c == nil || !c.StandaloneEnterprise() {
+		return "", false
+	}
+	name := strings.TrimSpace(c.Enterprise.Inspection.LLM.Credential)
+	if name == "" {
+		return "", false
+	}
+	value, err := resolveStandaloneLLMCredential(name, managed.StandaloneSecretsDirForConfig(runtime.GOOS, c.ConfigFilePath))
+	if err != nil {
+		return "", true
+	}
+	return string(value), true
+}
+
 // ObservabilityCredentialsDir is where the observability credential
 // references of a loaded standalone enterprise config resolve, the same
 // secrets directory as the AI Defense key. Other deployments resolve none.
@@ -626,16 +663,35 @@ func (c *Config) ObservabilityCredentialsDir() string {
 // standaloneManagedDocument reports whether a v8 source root resolves, with
 // the service pins, to the standalone managed-enterprise profile on goos.
 func standaloneManagedDocument(goos string, root *yaml.Node) bool {
+	profile, ok := managedDocumentProfile(goos, root)
+	return ok && managed.IsStandaloneProfile(profile)
+}
+
+// secureClientManagedDocument reports whether a v8 source document resolves
+// to the Secure Client profile.
+func secureClientManagedDocument(goos string, root *yaml.Node) bool {
+	profile, ok := managedDocumentProfile(goos, root)
+	return ok && managed.IsSecureClientProfile(profile)
+}
+
+// managedDocumentProfile resolves the enterprise profile of a
+// managed-enterprise v8 source document from its deployment mode (the
+// pinned one first), the pinned profile, enterprise.profile and the OS
+// default. ok is false for any other document.
+func managedDocumentProfile(goos string, root *yaml.Node) (string, bool) {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return "", false
+	}
 	mode := normalizeDeploymentMode(os.Getenv(managed.DeploymentModeEnv))
 	if mode == "" {
 		mode = normalizeDeploymentMode(yamlScalarValue(v8YAMLMapValue(root, "deployment_mode")))
 	}
 	if !managed.IsManagedEnterprise(mode) {
-		return false
+		return "", false
 	}
 	declared := yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "enterprise"), "profile"))
 	profile, err := managed.ResolveEnterpriseProfile(goos, mode, os.Getenv(managed.EnterpriseProfileEnv), declared)
-	return err == nil && managed.IsStandaloneProfile(profile)
+	return profile, err == nil
 }
 
 // standaloneCredentialsDir is where the observability credential references
@@ -651,25 +707,17 @@ func standaloneCredentialsDir(configFile string, document *yaml.Node) string {
 }
 
 // standaloneLayoutDataDirForSource applies standaloneLayoutDataDir to the
-// source the loader is about to read: sourceBytes when provided, else the
-// file. A read or parse error returns false; the loader reports it itself.
-func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte, sourceProvided bool) (string, bool) {
+// source bytes the loader is about to decode. A parse error returns false;
+// the loader reports it itself.
+func standaloneLayoutDataDirForSource(configFile string, sourceBytes []byte) (string, bool) {
 	if _, ok := standaloneUnixLayoutForConfig(configFile); !ok {
 		return "", false
 	}
-	raw := sourceBytes
-	if !sourceProvided {
-		data, err := os.ReadFile(configFile)
-		if err != nil {
-			return "", false
-		}
-		raw = data
-	}
-	var document yaml.Node
-	if err := yaml.Unmarshal(raw, &document); err != nil {
+	document, err := sourceYAMLNode(sourceBytes)
+	if err != nil {
 		return "", false
 	}
-	return standaloneLayoutDataDir(configFile, &document)
+	return standaloneLayoutDataDir(configFile, document)
 }
 
 func yamlScalarValue(node *yaml.Node) string {
@@ -682,11 +730,32 @@ func yamlScalarValue(node *yaml.Node) string {
 func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 	return strings.TrimSpace(e.Profile) == "" &&
 		!e.Inspection.AIDefense.Enabled && strings.TrimSpace(e.Inspection.AIDefense.Credential) == "" &&
+		strings.TrimSpace(e.Inspection.LLM.Credential) == "" &&
 		enrollmentEmpty(e.Enrollment) &&
 		machinePolicyEmpty(e.MachinePolicy) &&
 		strings.TrimSpace(e.Trust.Mode) == "" && len(e.Trust.AllowedSigners) == 0 &&
 		strings.TrimSpace(e.Coexistence.PerUserInstall) == "" && e.Coexistence.DisableSelfUpdate == nil &&
 		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == ""
+}
+
+// standaloneInlineSecrets lists the inline secret keys cfg sets.
+func standaloneInlineSecrets(cfg *Config) []string {
+	var inline []string
+	for _, field := range []struct{ key, value string }{
+		{"llm.api_key", cfg.LLM.APIKey},
+		{"guardrail.llm.api_key", cfg.Guardrail.LLM.APIKey},
+		{"guardrail.judge.llm.api_key", cfg.Guardrail.Judge.LLM.APIKey},
+		{"scanners.mcp_scanner.llm.api_key", cfg.Scanners.MCPScanner.LLM.APIKey},
+		{"scanners.skill_scanner.llm.api_key", cfg.Scanners.SkillScanner.LLM.APIKey},
+		{"scanners.plugin_llm.api_key", cfg.Scanners.PluginScannerLLM.APIKey},
+		{"cisco_ai_defense.api_key", cfg.CiscoAIDefense.APIKey},
+		{"gateway.token", cfg.Gateway.Token},
+	} {
+		if strings.TrimSpace(field.value) != "" {
+			inline = append(inline, field.key)
+		}
+	}
+	return inline
 }
 
 func enrollmentEmpty(e EnterpriseEnrollmentConfig) bool {
@@ -722,6 +791,11 @@ func validateEnterpriseConfig(cfg *Config) error {
 		}
 		return nil
 	}
+	// Judge trace logs raw prompts and model responses; a managed device
+	// never writes them.
+	if cfg.Guardrail.Judge.Trace {
+		return fmt.Errorf("config: guardrail.judge.trace is not allowed on a managed device")
+	}
 	ai := e.Inspection.AIDefense
 	if ai.Enabled {
 		if !ValidEnterpriseCredentialName(ai.Credential) {
@@ -730,10 +804,22 @@ func validateEnterpriseConfig(cfg *Config) error {
 	} else if strings.TrimSpace(ai.Credential) != "" && !ValidEnterpriseCredentialName(ai.Credential) {
 		return fmt.Errorf("config: enterprise.inspection.ai_defense.credential %q is not a valid credential name", ai.Credential)
 	}
-	// The key never lives in config: the gateway reads it from the named
-	// protected credential and ignores cisco_ai_defense.api_key_env.
-	if strings.TrimSpace(cfg.CiscoAIDefense.APIKey) != "" {
-		return fmt.Errorf("config: managed standalone deployments read the AI Defense key from a protected credential (enterprise.inspection.ai_defense.credential); remove cisco_ai_defense.api_key")
+	if name := strings.TrimSpace(e.Inspection.LLM.Credential); name != "" && !ValidEnterpriseCredentialName(name) {
+		return fmt.Errorf("config: enterprise.inspection.llm.credential %q must be a protected credential name (lowercase letters, digits and dashes)", name)
+	}
+	// Secrets never live in config: the gateway reads the keys from the
+	// named protected credentials (it ignores cisco_ai_defense.api_key_env)
+	// and the lifecycle provisions the gateway token. Every inline secret is
+	// named, never its value: Windows Setup reported such a config only as
+	// "could not be compiled safely" at $ (GAP-0932).
+	if inline := standaloneInlineSecrets(cfg); len(inline) > 0 {
+		return &V8SemanticError{
+			Path:    "$." + inline[0],
+			Summary: "a managed standalone config holds no secrets; remove " + strings.Join(inline, ", "),
+			Action: "store each key as a protected credential with `enterprise secret set --name <name>` and name it in " +
+				"enterprise.inspection.llm.credential (the LLM key) or enterprise.inspection.ai_defense.credential " +
+				"(the AI Defense key); the lifecycle provisions the gateway token",
+		}
 	}
 	en := e.Enrollment
 	if err := oneOf("enterprise.enrollment.mode", en.Mode, EnterpriseEnrollmentAuto, EnterpriseEnrollmentManifest); err != nil {
@@ -960,8 +1046,11 @@ func validateManagedStandalonePolicyInputs(cfg *Config) error {
 	if err := check("policy_dir", cfg.PolicyDir); err != nil {
 		return err
 	}
-	for _, setting := range cfg.RulePackSettings() {
-		if err := check(setting.Key, setting.Dir); err != nil {
+	// Every pack the gateway can load: the v9 rule_pack and custom_packs
+	// selections, profile packs and the v8 rule_pack_dir alike.
+	dirs := cfg.ReferencedRulePackDirs()
+	for _, label := range RulePackCheckOrder(dirs) {
+		if err := check(label, dirs[label]); err != nil {
 			return err
 		}
 	}

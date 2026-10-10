@@ -19,14 +19,6 @@ package defenseclaw.guardrail_test
 import data.defenseclaw.guardrail
 import rego.v1
 
-_guardrail_data := {
-	"severity_rank": {"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4},
-	"block_threshold": 4,
-	"alert_threshold": 2,
-	"hilt": {"enabled": false, "min_severity": "HIGH"},
-	"cisco_trust_level": "full",
-}
-
 test_allow_when_no_findings if {
 	result := guardrail with input as {
 		"direction": "prompt",
@@ -37,7 +29,6 @@ test_allow_when_no_findings if {
 		"cisco_result": null,
 		"content_length": 100,
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "allow"
 	result.severity == "NONE"
@@ -53,7 +44,6 @@ test_alert_on_high_local_balanced if {
 		"cisco_result": null,
 		"content_length": 200,
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "alert"
 	result.severity == "HIGH"
@@ -69,7 +59,6 @@ test_block_on_critical_local_balanced if {
 		"cisco_result": null,
 		"content_length": 200,
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "block"
 	result.severity == "CRITICAL"
@@ -84,8 +73,8 @@ test_confirm_on_high_when_hilt_enabled if {
 		"local_result": {"action": "block", "severity": "HIGH", "findings": ["ignore previous"], "reason": "matched: ignore previous"},
 		"cisco_result": null,
 		"content_length": 200,
+		"hilt": {"enabled": true, "min_severity": "HIGH"},
 	}
-		with data.guardrail as object.union(_guardrail_data, {"hilt": {"enabled": true, "min_severity": "HIGH"}})
 
 	result.action == "confirm"
 	result.severity == "HIGH"
@@ -100,8 +89,9 @@ test_strict_blocks_medium_before_hilt if {
 		"local_result": {"action": "alert", "severity": "MEDIUM", "findings": ["sk-"], "reason": "matched: sk-"},
 		"cisco_result": null,
 		"content_length": 150,
+		"thresholds": {"block": 2, "alert": 1, "cisco_trust_level": "full"},
+		"hilt": {"enabled": true, "min_severity": "HIGH"},
 	}
-		with data.guardrail as object.union(_guardrail_data, {"block_threshold": 2, "alert_threshold": 1, "hilt": {"enabled": true, "min_severity": "HIGH"}})
 
 	result.action == "block"
 	result.severity == "MEDIUM"
@@ -117,7 +107,6 @@ test_alert_on_medium_local if {
 		"cisco_result": null,
 		"content_length": 150,
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "alert"
 	result.severity == "MEDIUM"
@@ -133,7 +122,6 @@ test_observe_mode_never_blocks if {
 		"cisco_result": null,
 		"content_length": 200,
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "alert"
 	result.severity == "HIGH"
@@ -194,7 +182,6 @@ test_cisco_only_high_alerts_balanced if {
 		"cisco_result": {"action": "block", "severity": "HIGH", "findings": ["Prompt Injection"], "reason": "cisco: Prompt Injection"},
 		"content_length": 300,
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "alert"
 	result.severity == "HIGH"
@@ -210,7 +197,6 @@ test_both_mode_cisco_escalates if {
 		"cisco_result": {"action": "block", "severity": "HIGH", "findings": ["SECURITY_VIOLATION"], "reason": "cisco: SECURITY_VIOLATION"},
 		"content_length": 400,
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "alert"
 	result.severity == "HIGH"
@@ -226,7 +212,6 @@ test_both_mode_combined_reasons if {
 		"cisco_result": {"action": "block", "severity": "HIGH", "findings": ["Data Leak"], "reason": "cisco: Data Leak"},
 		"content_length": 500,
 	}
-		with data.guardrail as _guardrail_data
 
 	result.severity == "HIGH"
 	result.action == "alert"
@@ -243,8 +228,8 @@ test_advisory_cisco_downgrades_to_alert if {
 		"local_result": {"action": "allow", "severity": "NONE", "findings": [], "reason": ""},
 		"cisco_result": {"action": "block", "severity": "HIGH", "findings": ["Prompt Injection"], "reason": "cisco: Prompt Injection"},
 		"content_length": 300,
+		"thresholds": {"block": 4, "alert": 2, "cisco_trust_level": "advisory"},
 	}
-		with data.guardrail as object.union(_guardrail_data, {"cisco_trust_level": "advisory"})
 
 	result.action == "alert"
 }
@@ -259,24 +244,16 @@ test_scanner_sources_populated if {
 		"cisco_result": {"action": "block", "severity": "HIGH", "findings": ["Prompt Injection"], "reason": "cisco: Prompt Injection"},
 		"content_length": 500,
 	}
-		with data.guardrail as _guardrail_data
 
 	"local-pattern" in result.scanner_sources
 	"ai-defense" in result.scanner_sources
 	"opa-policy" in result.scanner_sources
 }
 
-# --- input.hilt override (config.yaml -> Rego) ---
-# These tests pin the SSOT-via-input contract introduced when the Go
-# gateway started passing cfg.Guardrail.HILT into policy.GuardrailInput.
-# Without these, a regression where the gateway stops sending input.hilt
-# (or where the policy stops preferring it) would silently fall back to
-# stale data.guardrail.hilt and surface HIGH findings as `alert` instead
-# of `confirm` — exactly the bug this work was meant to eliminate.
+# --- input.hilt (config.yaml -> Rego) ---
+# The policy reads only input: the gateway passes cfg.Guardrail.HILT.
 
-test_input_hilt_enabled_overrides_data_disabled if {
-	# data.guardrail.hilt is disabled (legacy / out-of-sync data.json),
-	# but input.hilt enables HILT — Rego must honor the input.
+test_input_hilt_enabled_confirms if {
 	result := guardrail with input as {
 		"direction": "prompt",
 		"model": "test-model",
@@ -287,15 +264,12 @@ test_input_hilt_enabled_overrides_data_disabled if {
 		"content_length": 200,
 		"hilt": {"enabled": true, "min_severity": "HIGH"},
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "confirm"
 	result.severity == "HIGH"
 }
 
-test_input_hilt_disabled_overrides_data_enabled if {
-	# Inverse: data.guardrail.hilt is enabled, input.hilt disables it.
-	# Rego must honor the input and degrade to plain `alert`.
+test_input_hilt_disabled_alerts if {
 	result := guardrail with input as {
 		"direction": "prompt",
 		"model": "test-model",
@@ -306,7 +280,6 @@ test_input_hilt_disabled_overrides_data_enabled if {
 		"content_length": 200,
 		"hilt": {"enabled": false, "min_severity": "HIGH"},
 	}
-		with data.guardrail as object.union(_guardrail_data, {"hilt": {"enabled": true, "min_severity": "HIGH"}})
 
 	result.action == "alert"
 	result.severity == "HIGH"
@@ -325,16 +298,13 @@ test_input_hilt_min_severity_critical_skips_high_confirm if {
 		"content_length": 200,
 		"hilt": {"enabled": true, "min_severity": "CRITICAL"},
 	}
-		with data.guardrail as _guardrail_data
 
 	result.action == "alert"
 	result.severity == "HIGH"
 }
 
-test_input_hilt_absent_falls_back_to_data if {
-	# When input.hilt is omitted (legacy callers, e.g. direct opa eval),
-	# the policy must still consult data.guardrail.hilt — preserving
-	# backward compatibility for the `_sync_guardrail_hilt_to_opa` path.
+test_input_hilt_absent_is_off if {
+	# Without input.hilt there is no confirmation: data.json is not read.
 	result := guardrail with input as {
 		"direction": "prompt",
 		"model": "test-model",
@@ -344,9 +314,9 @@ test_input_hilt_absent_falls_back_to_data if {
 		"cisco_result": null,
 		"content_length": 200,
 	}
-		with data.guardrail as object.union(_guardrail_data, {"hilt": {"enabled": true, "min_severity": "HIGH"}})
+		with data.guardrail as {"hilt": {"enabled": true, "min_severity": "HIGH"}, "block_threshold": 1}
 
-	result.action == "confirm"
+	result.action == "alert"
 	result.severity == "HIGH"
 }
 
@@ -359,8 +329,8 @@ test_cisco_trust_none_ignores_cisco if {
 		"local_result": {"action": "allow", "severity": "NONE", "findings": [], "reason": ""},
 		"cisco_result": {"action": "block", "severity": "HIGH", "findings": ["Prompt Injection"], "reason": "cisco: Prompt Injection"},
 		"content_length": 300,
+		"thresholds": {"block": 4, "alert": 2, "cisco_trust_level": "none"},
 	}
-		with data.guardrail as object.union(_guardrail_data, {"cisco_trust_level": "none"})
 
 	result.action == "allow"
 	result.severity == "NONE"

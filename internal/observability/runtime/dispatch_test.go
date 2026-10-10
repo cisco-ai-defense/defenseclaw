@@ -661,11 +661,10 @@ func TestRuntimeRemovedDestinationDrainsOldGenerationAndCancellationDoesNotFanou
 
 func TestRuntimeOTLPLogResourceIsProviderBoundAndRetainedAcrossReload(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
-	makePlan := func(generation string, aliases bool) *config.ObservabilityV8Plan {
+	makePlan := func(generation string) *config.ObservabilityV8Plan {
 		return runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
 			func(source *config.ObservabilityV8Source) {
 				source.Resource.Attributes = map[string]string{"team.generation": generation}
-				source.TracePolicy.CompatibilityAliases = &aliases
 				source.Destinations = []config.ObservabilityV8DestinationSource{
 					runtimeOTLPLogDestination("otel-logs"),
 				}
@@ -694,7 +693,7 @@ func TestRuntimeOTLPLogResourceIsProviderBoundAndRetainedAcrossReload(t *testing
 		mutex.Unlock()
 		return adapter, func(context.Context) error { return nil }, nil
 	})
-	initial := makePlan("generation-one", true)
+	initial := makePlan("generation-one")
 	options := dependencies.options()
 	options.DestinationAdapterFactory = factory
 	options.TelemetryProviderFactory = telemetry.NewV8ProviderFactory(telemetry.V8ProviderOptions{
@@ -724,7 +723,7 @@ func TestRuntimeOTLPLogResourceIsProviderBoundAndRetainedAcrossReload(t *testing
 	reloadDone := make(chan error, 1)
 	go func() {
 		result, graphErr := runtime.Reload(
-			context.Background(), runtimegraph.ConfigFromPlan(makePlan("generation-two", false), false),
+			context.Background(), runtimegraph.ConfigFromPlan(makePlan("generation-two"), false),
 		)
 		var reloadErr error
 		if graphErr != nil {
@@ -754,13 +753,12 @@ func TestRuntimeOTLPLogResourceIsProviderBoundAndRetainedAcrossReload(t *testing
 	newAdapter := adapters[1]
 	mutex.Unlock()
 	if oldValues["team.generation"] != "generation-one" ||
-		oldValues["deployment.environment"] != oldValues["deployment.environment.name"] ||
-		oldDropped != 0 {
+		oldValues["deployment.environment.name"] == "" || oldDropped != 0 {
 		t.Fatalf("old OTLP resource=%+v", oldValues)
 	}
 	if newValues["team.generation"] != "generation-two" ||
-		newValues["deployment.environment"] != "" || newValues["deployment.mode"] != "" ||
-		newValues["defenseclaw.device.id"] != "" || newDropped != 0 {
+		newValues["deployment.environment.name"] == "" || newValues["deployment.environment"] != "" ||
+		newValues["deployment.mode"] != "" || newValues["defenseclaw.device.id"] != "" || newDropped != 0 {
 		t.Fatalf("new OTLP resource=%+v", newValues)
 	}
 	if _, err := runtime.Emit(

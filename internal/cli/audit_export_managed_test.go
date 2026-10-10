@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
-
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -117,19 +115,9 @@ func TestManagedAdministratorViewRefusesAStandardAccountWithElevationRequired(t 
 }
 
 // The rollback database option belongs to per-user and standalone installs,
-// while a managed audit export must use the deployment store.
+// while a managed audit export must use the deployment store. (Secure Client
+// drops --db from its command tree: TestSecureClientKeepsTheEnterpriseViews.)
 func TestAuditExportDBFlagAndManagedBoundary(t *testing.T) {
-	secure := &cobra.Command{Use: "export"}
-	registerAuditExportDBFlag(secure, true)
-	if secure.Flags().Lookup("db") != nil {
-		t.Fatal("Secure Client gained --db")
-	}
-	standalone := &cobra.Command{Use: "export"}
-	registerAuditExportDBFlag(standalone, false)
-	if standalone.Flags().Lookup("db") == nil {
-		t.Fatal("standalone lost --db")
-	}
-
 	withAuditExportManagedSeams(t, true, false)
 	previousDB := auditExportDB
 	auditExportDB = "previous/audit.db"
@@ -138,12 +126,12 @@ func TestAuditExportDBFlagAndManagedBoundary(t *testing.T) {
 		t.Fatalf("managed standard account with --db = %v, want elevation refusal", err)
 	}
 	auditExportCallerIsAdministrator = func() bool { return true }
-	if err := auditExportPersistentPreRunE(nil, nil); err == nil || !strings.Contains(err.Error(), "not available on a managed deployment") {
-		t.Fatalf("managed administrator with --db = %v, want managed refusal", err)
+	if err := auditExportPersistentPreRunE(nil, nil); err != nil {
+		t.Fatalf("managed administrator with --db = %v, want read-only copy access", err)
 	}
 	auditExportManagedHost = func() bool { return false }
 	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
-	if err := auditExportPersistentPreRunE(nil, nil); err == nil || !strings.Contains(err.Error(), "not available on a managed deployment") {
-		t.Fatalf("managed unix mode with --db = %v, want managed refusal", err)
+	if err := auditExportPersistentPreRunE(nil, nil); err == nil || !strings.Contains(err.Error(), "requires root") {
+		t.Fatalf("managed unix mode without administrator = %v, want administrator refusal", err)
 	}
 }

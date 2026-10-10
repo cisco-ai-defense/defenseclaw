@@ -142,14 +142,14 @@ class TestEffectiveResolvers(unittest.TestCase):
             mode="observe",
             hook_fail_mode="open",
             block_message="global-msg",
-            rule_pack_dir="/global/rules",
+            rule_pack="strict",
             hilt=HILTConfig(enabled=False, min_severity="HIGH"),
             connectors={
                 "codex": PerConnectorGuardrailConfig(
                     mode="action",
                     hook_fail_mode="closed",
                     block_message="codex-msg",
-                    rule_pack_dir="/codex/rules",
+                    rule_pack="permissive",
                     hilt=HILTConfig(enabled=True, min_severity="LOW"),
                 ),
                 "empty": PerConnectorGuardrailConfig(),
@@ -161,16 +161,26 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("codex"), "action")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         self.assertEqual(g.effective_block_message("codex"), "codex-msg")
-        self.assertEqual(g.effective_rule_pack_dir("codex"), "/codex/rules")
+        self.assertEqual(g.effective_rule_pack("codex"), "permissive")
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
+
+    def test_cursor_fail_mode_tracks_mode_despite_stored_open(self):
+        g = GuardrailConfig(
+            mode="observe",
+            hook_fail_mode="open",
+            connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="open")},
+        )
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
+        g.connectors["cursor"].mode = "action"
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
 
     def test_empty_block_inherits_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("empty"), "observe")
         self.assertEqual(g.effective_hook_fail_mode("empty"), "open")
         self.assertEqual(g.effective_block_message("empty"), "global-msg")
-        self.assertEqual(g.effective_rule_pack_dir("empty"), "/global/rules")
+        self.assertEqual(g.effective_rule_pack("empty"), "strict")
         self.assertFalse(g.effective_hilt("empty").enabled)
         self.assertEqual(g.effective_hilt("empty").min_severity, "HIGH")
 
@@ -179,8 +189,33 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertEqual(g.effective_mode("nope"), "observe")
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
 
+    def test_config_version_9_rule_pack_resolves_and_a_global_selection_clears_it(self):
+        from defenseclaw.commands.cmd_setup import _apply_rule_pack_selection
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("strict", "permissive"):
+                os.makedirs(os.path.join(tmp, "guardrail", name))
+            cfg = Config(
+                policy_dir=tmp,
+                guardrail=GuardrailConfig(
+                    rule_pack="strict",
+                    connectors={
+                        "codex": PerConnectorGuardrailConfig(rule_pack="permissive"),
+                        "claudecode": PerConnectorGuardrailConfig(),
+                    },
+                ),
+            )
+            g = cfg.guardrail
+            self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.join(tmp, "guardrail", "permissive"))
+            self.assertEqual(g.effective_rule_pack_dir("claudecode"), os.path.join(tmp, "guardrail", "strict"))
+            # A global selection clears every connector's pack, v9 key included.
+            _apply_rule_pack_selection(g, "strict", connector=None)
+            self.assertEqual(g.connectors["codex"].rule_pack, "")
+            self.assertEqual(g.effective_rule_pack_dir("codex"), os.path.join(tmp, "guardrail", "strict"))
+
     def test_safe_fallbacks_when_unset(self):
-        g = GuardrailConfig(mode="", hook_fail_mode="", rule_pack_dir="")
+        g = GuardrailConfig(mode="", hook_fail_mode="")
         self.assertEqual(g.effective_mode(""), "observe")
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
         self.assertEqual(g.effective_block_message(""), "")
@@ -349,15 +384,6 @@ class TestMergeConnectors(unittest.TestCase):
         # antigravity has an explicit hilt block (min_severity upper-cased)
         self.assertIsNotNone(gc.connectors["antigravity"].hilt)
         self.assertEqual(gc.connectors["antigravity"].hilt.min_severity, "LOW")
-
-    def test_hitl_alias_in_connector(self):
-        gc = _merge_guardrail(
-            {"connectors": {"codex": {"hitl": {"enabled": True}}}},
-            "/tmp",
-        )
-        self.assertIsNotNone(gc.connectors["codex"].hilt)
-        self.assertTrue(gc.connectors["codex"].hilt.enabled)
-
 
 class TestLoadAndRoundTrip(unittest.TestCase):
     def test_load_rejects_invalid_connector_mode(self):

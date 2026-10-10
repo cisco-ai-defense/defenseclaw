@@ -61,7 +61,7 @@ The daemons:
 | Label | Runs as | What it does |
 | --- | --- | --- |
 | `com.cisco.defenseclaw.gateway` | `_defenseclaw` | Policy engine and hook API. Binds `127.0.0.1:18970` and `run/hook.sock`. |
-| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. The same worker runs each enrolled user's AI Discovery scan ([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)). It does not repair machine policy, including the Claude Code version floor: `ensure`, `repair` and `reconcile` do. |
+| `com.cisco.defenseclaw.hook-guardian` | root | Always running. Reconciles each user's hooks every minute (`enterprise hooks watch --interval 1m`), through a worker that runs as each user. The same worker runs each enrolled user's AI Discovery scan ([Per-user scans](/docs/ai-discovery#per-user-scans-in-standalone-enterprise)). It never writes machine policy or the install root itself. Every 5 seconds it checks that the hook binary is in place and intact (not empty, executable, owned by root and the binary the deployment recorded) and that DefenseClaw's Claude Code drop-in (`90-defenseclaw.json`) has the bytes the lifecycle wrote. When either is gone or changed it logs a `tamper:` line and starts `com.cisco.defenseclaw.apply`, whose `ensure` puts the hook binary back from the copy the lifecycle sealed and the drop-in from the applied config, with no service restart. Other machine-policy drift, including the Claude Code version floor, is repaired by `ensure`, `repair` and `reconcile`. |
 | `com.cisco.defenseclaw.hook-enumerator` | root | Rewrites the target manifest every five minutes (in the default `auto` enrollment mode) |
 | `com.cisco.defenseclaw.sensor-helper` | root | Answers the gateway's fixed AI Discovery requests |
 | `com.cisco.defenseclaw.apply` | root | Runs `ensure --reason path` when `etc/config.yaml`, `etc/secrets` or `etc/policies` changes |
@@ -158,13 +158,14 @@ pkg does not satisfy Gatekeeper on Macs that require notarization.
 ### 2. Stage the config
 
 This example protects Codex and Claude Code in observe mode. The lifecycle
-requires `config_version: 8`, `deployment_mode: managed_enterprise`,
+requires `config_version: 9` (a version 8 file is migrated by `ensure`),
+`deployment_mode: managed_enterprise`,
 `enterprise.profile: standalone` and
 `data_dir: /opt/cisco/defenseclaw/runtime`. If you set `gateway.api_bind` or
 `gateway.api_port`, they must be `127.0.0.1` and `18970`.
 
 ```yaml title="config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime
 policy_dir: /opt/cisco/defenseclaw/etc/policies
@@ -327,7 +328,14 @@ pkgutil --pkg-info com.cisco.defenseclaw.enterprise   # pkg installs only
 ```
 
 `status` reports the state. `verify` also checks every file, permission,
-service and readiness check, and exits `1` when anything fails. Look for:
+service and readiness check, and exits `1` when anything fails. Permissions
+include macOS ACL entries, which `chmod +a` adds without changing the mode
+bits: an entry that lets another account change a DefenseClaw file or folder
+(the binaries, `bin`, the LaunchDaemon plists, the vendor machine-policy
+files), or reach a private one (`runtime`, `etc/secrets`, `lifecycle`,
+`etc/config.yaml`), fails `status` and `verify` with the path, and `repair`
+removes it (`chmod -N`). An `apply` or `verify` daemon that is not loaded fails
+them too; `repair` loads it again. Look for:
 
 | Field | Healthy value |
 | --- | --- |
@@ -336,6 +344,7 @@ service and readiness check, and exits `1` when anything fails. Look for:
 | `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
 | `coverage_complete` | `true`: the gateway, guardian and enumerator are ready |
 | `security_complete` | `true`: coverage is complete, the sensor helper is ready, and there are no errors |
+| `policy` | `applied` is `true`: the running gateway reports the digest of the config on disk. `effective_digest` and `config_generation` identify that config; compare them across hosts ([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)) |
 | `enrollment.targets` | The number of per-user targets in the manifest. Connectors published through machine policy (Codex, Claude Code, Cursor, GitHub Copilot) have no per-user targets unless `enterprise.enrollment.unenrolled_users` is `deny`, so `0` is normal when you enable only those. For per-user connectors, `0` means nobody is enrolled yet. |
 | `errors` | Empty |
 
@@ -347,6 +356,14 @@ enumerator enrolls accounts with a uid of 501 or higher by default. See
 [Enrollment](/docs/enterprise/enrollment). To reconcile at once instead of
 waiting for the next minute, run
 `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`.
+
+A `guardrail.profile_assignments` group this Mac does not know (renamed or
+deleted in the directory) selects nobody, so its members get the default
+profile. `status` and `verify` warn `profile_assignment_unmatched` for it,
+with the same list `enterprise macos profile-explain --user <account>
+--connector <connector>` shows under `warnings`, and the gateway log
+(`/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`) has a `[guardrail]` line for
+it. The managed Mac has no `defenseclaw guardrail profile` commands.
 
 See [Status and verify](/docs/enterprise/operations#status-and-verify) and
 [Logs and events](/docs/enterprise/operations#logs-and-events) for
@@ -368,8 +385,20 @@ each user remove their per-user install with `defenseclaw uninstall --binaries -
 Add `--all` to also delete `~/.defenseclaw`. See
 [Uninstall](/docs/get-started/install#uninstall).
 
-A per-user gateway that was already running keeps running until it is
-stopped. The install, `status` and `verify` name each such account with the
+A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy
+the device enforces. `defenseclaw config get`, `guardrail`, `status` and the
+other per-user commands exit `3` and name it instead of answering from it, and
+`doctor` reports the device as managed. `defenseclaw uninstall --all --binaries
+--yes` removes it.
+
+A per-user gateway that is still running holds the managed gateway port,
+`127.0.0.1:18970`, unless its user moved it to another port. The install then
+stops before it changes anything: it fails with `api_port_held`, which names
+the process and gives the `kill` command (the pkg install still completes, and
+`last-package-result.json` has the error). Stop that gateway, or move it to
+another port, then run `defenseclaw-gateway enterprise macos ensure --from-package`.
+A per-user gateway on another port keeps running until it is stopped. The
+install, `status` and `verify` name each such account with the
 `per_user_gateway_running` warning and the `kill` command that stops it.
 
 ## Remove
@@ -394,8 +423,13 @@ DefenseClaw wheels earlier per-user installs left in `~/.cache/uv`, and the
 result names every user it purged or left alone.
 See [Uninstall](/docs/enterprise/lifecycle#uninstall).
 
-A pkg has no uninstaller, so the lifecycle removes the binaries itself. For
-a pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`,
+If macOS denies deleting the `_defenseclaw` account (it can, from a remote
+shell), the uninstall still completes: the result carries a `service_account`
+warning with the two `dscl` commands that delete the account by hand.
+
+A pkg has no uninstaller, so the lifecycle removes the binaries itself.
+The root-owned `/opt/cisco/defenseclaw/lifecycle/lifecycle.lock` remains so
+waiting lifecycle runs keep using the same lock. For a pkg install it also runs `pkgutil --forget com.cisco.defenseclaw.enterprise`,
 so the pkg receipt is gone afterward.
 
 launchd keeps a record for each removed label. After uninstall,
@@ -413,7 +447,9 @@ that profile.
   rollback marker `/opt/cisco/defenseclaw/lifecycle/allow-downgrade` exists;
   the lifecycle refuses an older tarball unless you pass `--allow-downgrade`.
   See [Upgrade](/docs/enterprise/lifecycle#upgrade) and
-  [Roll back](/docs/enterprise/lifecycle#roll-back).
+  [Roll back](/docs/enterprise/lifecycle#roll-back). The first `ensure` of a
+  new release migrates a `config_version: 8` config to 9 and keeps
+  `config.yaml.v8.bak` and `migration-v9.json` next to it.
 - **Change the config.** Replace `/opt/cisco/defenseclaw/etc/config.yaml`.
   The apply daemon runs `ensure`, which validates the new file and applies
   it, or rolls back. See

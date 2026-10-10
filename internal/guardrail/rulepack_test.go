@@ -962,3 +962,73 @@ func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {
 		t.Fatalf("reason = %q", packErr.Reason)
 	}
 }
+
+func TestLoadRulePackRejectsInvalidManifestPosture(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"strict"}`)
+	mustLoadRulePack(t, dir)
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":`)
+	if _, err := LoadRulePack(dir); err == nil {
+		t.Fatal("invalid manifest accepted and strict posture lost")
+	}
+	if _, err := LoadRulePackForSecureClient(dir); err != nil {
+		t.Fatalf("Secure Client legacy manifest handling changed: %v", err)
+	}
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"unknown"}`)
+	if _, err := LoadRulePack(dir); err == nil {
+		t.Fatal("unknown manifest posture accepted")
+	}
+}
+
+// GAP-0431: the manifest's posture sets the levels the gateway enforces, so
+// adding or editing defenseclaw-pack.json changes the pin and the summary
+// digest; a pack without a manifest keeps both.
+func TestPackManifestChangesThePinAndTheSummaryDigest(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	before := mustLoadRulePack(t, dir)
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"strict"}`)
+	strict := mustLoadRulePack(t, dir)
+	if strict.FilesDigest() == before.FilesDigest() || strict.Summary().Digest == before.Summary().Digest {
+		t.Fatal("adding the manifest left the pin or the summary digest unchanged")
+	}
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"permissive"}`)
+	if again := mustLoadRulePack(t, dir); again.FilesDigest() == strict.FilesDigest() {
+		t.Fatal("editing the manifest posture left the pin unchanged")
+	}
+}
+
+// GAP-1313: on a case-insensitive volume (Windows, macOS) ReadPackPosture
+// opens a differently cased manifest, so the inventory pins it too; Linux
+// keeps the exact name.
+func TestPackManifestNameCaseFollowsTheVolume(t *testing.T) {
+	for _, tc := range []struct {
+		rel             string
+		caseInsensitive bool
+		want            bool
+	}{
+		{PackManifestFile, false, true},
+		{"DefenseClaw-Pack.json", false, false},
+		{"DefenseClaw-Pack.json", true, true},
+		{"rules/defenseclaw-pack.json", true, false},
+	} {
+		if got := packManifestNameMatches(tc.rel, tc.caseInsensitive); got != tc.want {
+			t.Errorf("packManifestNameMatches(%q, %v) = %v, want %v", tc.rel, tc.caseInsensitive, got, tc.want)
+		}
+	}
+	if !isPackManifestName("DefenseClaw-Pack.json") {
+		return
+	}
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	writeRulePackFile(t, dir, "DefenseClaw-Pack.json", `{"posture":"strict"}`)
+	if ReadPackPosture(dir) != "strict" {
+		return // a case-sensitive volume: the cased file is not the manifest
+	}
+	strict := mustLoadRulePack(t, dir)
+	writeRulePackFile(t, dir, "DefenseClaw-Pack.json", `{"posture":"permissive"}`)
+	if mustLoadRulePack(t, dir).FilesDigest() == strict.FilesDigest() {
+		t.Fatal("editing a differently cased manifest left the pin unchanged")
+	}
+}

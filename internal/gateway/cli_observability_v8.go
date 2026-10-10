@@ -148,7 +148,18 @@ func (a *APIServer) handleCLIObservabilityV8(w http.ResponseWriter, r *http.Requ
 	}
 	request, err := decodeCLIObservabilityV8Request(r.Body)
 	if err != nil {
-		http.Error(w, `{"error":"invalid canonical observability request"}`, http.StatusBadRequest)
+		if cfg := a.decisionConfig(r.Context()); cfg != nil && cfg.SecureClientIntegration() {
+			http.Error(w, `{"error":"invalid canonical observability request"}`, http.StatusBadRequest)
+			return
+		}
+		// The reason is one of this file's fixed strings (never source
+		// payload text), so the CLI can tell the operator what was invalid.
+		body, _ := json.Marshal(map[string]string{
+			"error": "invalid canonical observability request", "reason": err.Error(),
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write(body)
 		return
 	}
 	if a.logger == nil && request.Kind != "llm_bridge" && request.Kind != "webhook_delivery" {
@@ -235,8 +246,11 @@ func (request cliObservabilityV8Request) validate() error {
 			return errors.New("invalid alert")
 		}
 	case "scan":
-		if request.Scan == nil || request.Scan.validate() != nil {
+		if request.Scan == nil {
 			return errors.New("invalid scan")
+		}
+		if err := request.Scan.validate(); err != nil {
+			return err
 		}
 	case "llm_bridge":
 		if request.LLMBridge == nil || request.LLMBridge.validate() != nil {
@@ -316,7 +330,8 @@ func (finding cliObservabilityV8Finding) validate(scanScanner string) error {
 		!cliObservabilityV8Text(finding.Location, cliObservabilityV8MaxLocationBytes, false) ||
 		!cliObservabilityV8Text(finding.Remediation, cliObservabilityV8MaxEvidenceBytes, false) ||
 		(finding.Scanner != "" &&
-			(!cliObservabilityV8Identifier(finding.Scanner, true) || finding.Scanner != scanScanner)) ||
+			(!cliObservabilityV8Identifier(finding.Scanner, true) ||
+				!cliObservabilityV8FindingScannerMatches(finding.Scanner, scanScanner))) ||
 		(finding.RuleID != "" && !cliObservabilityV8Identifier(finding.RuleID, true)) ||
 		(finding.LineNumber != nil && *finding.LineNumber < 1) ||
 		len(finding.Tags) > cliObservabilityV8MaxTags {
@@ -333,6 +348,13 @@ func (finding cliObservabilityV8Finding) validate(scanScanner string) error {
 		}
 	}
 	return nil
+}
+
+// cliObservabilityV8FindingScannerMatches accepts the scan's own scanner name
+// or a sub-analyzer of it ("mcp-scanner/YARA"). Any other scanner is an
+// analyzer name leaking out of the scan it belongs to.
+func cliObservabilityV8FindingScannerMatches(findingScanner, scanScanner string) bool {
+	return findingScanner == scanScanner || strings.HasPrefix(findingScanner, scanScanner+"/")
 }
 
 func cliObservabilityV8Severity(value scanner.Severity) bool {

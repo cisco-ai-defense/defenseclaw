@@ -487,6 +487,14 @@ class GateCaseFoldTests(unittest.TestCase):
     'Hermes' or ' * ' entry that is live on the gateway is never
     reported as un-gated by the CLI."""
 
+    def test_list_reports_failing_runtime_judge(self):
+        app = make_ctx(hook_connectors=["hermes"])
+        with patch.object(cmd_judge, "_judge_not_running_reason", return_value="all of its last 7 calls failed"):
+            result = invoke(app, ["list"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("the judge is failing", result.output)
+        self.assertIn("hermes: judged (hook lane), but the judge is failing", result.output)
+
     def test_list_treats_mixed_case_entry_as_gated(self):
         app = make_ctx(hook_connectors=["Hermes"])
         result = invoke(app, ["list"])

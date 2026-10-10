@@ -87,11 +87,11 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 	}{
 		{"Bash", "echo k >> ~/.ssh/authorized_keys", authorizedKeys, true},
 		{"Bash", `echo k >> "$HOME/.ssh/authorized_keys"`, authorizedKeys, true},
-		{"Bash", "cat ~/.ssh/id_rsa", privateKey, false},
+		{"Bash", "cat ~/.ssh/id_rsa", privateKey, true},
 		{"powershell", `Add-Content -Path $HOME\.ssh\authorized_keys -Value k`, authorizedKeys, true},
 		{"powershell", `echo k >> "$env:USERPROFILE\.ssh\authorized_keys"`, authorizedKeys, true},
-		{"powershell", `Get-Content ~\.ssh\id_rsa`, privateKey, false},
-		{"cmd", `type %USERPROFILE%\.ssh\id_rsa`, privateKey, false},
+		{"powershell", `Get-Content ~\.ssh\id_rsa`, privateKey, true},
+		{"cmd", `type %USERPROFILE%\.ssh\id_rsa`, privateKey, true},
 		// Codex names its Windows PowerShell tool Bash.
 		{"codex-windows", `Add-Content -Path $HOME\.ssh\authorized_keys -Value k`, authorizedKeys, true},
 		{"codex-windows", "echo k >> $HOME/.ssh/authorized_keys", authorizedKeys, true},
@@ -103,7 +103,7 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 		input := actionfacts.Input{Tool: test.tool, Args: args, CWD: `C:\Users\alice\project`, ActiveHome: `C:\Users\alice`}
 		if test.tool == "codex-windows" {
 			input.Tool = "Bash"
-			input.DialectHint = codexWindowsShellDialect("Bash", test.command, input)
+			input.DialectHint = selectWindowsShellDialect("Bash", test.command, input)
 		}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input:              input,
@@ -122,7 +122,7 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 		case finding == nil:
 			t.Errorf("%s %q: no %s; findings=%v", test.tool, test.command, test.rule, FindingStrings(findings))
 		case finding.contributesToEnforcement() != test.block:
-			t.Errorf("%s %q: %s blocks = %t, want %t", test.tool, test.command, test.rule, !test.block, test.block)
+			t.Errorf("%s %q: %s blocks = %t, want %t", test.tool, test.command, test.rule, finding.contributesToEnforcement(), test.block)
 		case !test.block && finding.enforcement != findingEnforcementAlertOnly:
 			t.Errorf("%s %q: %s is not an alert", test.tool, test.command, test.rule)
 		}
@@ -143,7 +143,7 @@ func TestWindowsCodexShellGrammarKeepsEnforcement(t *testing.T) {
 			Tool: "Bash", Args: args, CWD: `C:\Users\alice\project`,
 			ActiveHome: `C:\Users\alice`,
 		}
-		input.DialectHint = codexWindowsShellDialect("Bash", test.command, input)
+		input.DialectHint = selectWindowsShellDialect("Bash", test.command, input)
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: input, LegacyText: string(args), Connector: connector, EnforcementCapable: true,
 		})
@@ -175,7 +175,7 @@ func TestWindowsHomeWithSpacesStillEnforcesSSHPath(t *testing.T) {
 				}
 				if tool == "codex-windows" {
 					input.Tool = "Bash"
-					input.DialectHint = codexWindowsShellDialect("Bash", command, input)
+					input.DialectHint = selectWindowsShellDialect("Bash", command, input)
 				}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, LegacyText: string(args),

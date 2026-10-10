@@ -50,7 +50,7 @@ _GRAFANA_AUTHORIZATION: str | None = None
 # label. Resource labels are shared across all application metrics and remain
 # legal selectors in addition to the instrument-specific labels below.
 COMMON_PROMETHEUS_RESOURCE_LABELS = {
-    "deployment_environment",
+    "deployment_environment_name",
     "host_arch",
     "host_name",
     "job",

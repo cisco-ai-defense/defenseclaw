@@ -86,7 +86,7 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 	}
 	intent := guardrailActionAllow
 	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		intent = guardrailToolCallActionForConnector(
+		intent = guardrailActionForConnector(
 			a.decisionConfig(ctx),
 			req.ConnectorName,
 			HighestSeverity(enforceable),

@@ -109,9 +109,15 @@ def test_config_show_has_every_section_and_get_reads_one_key(tmp_path: Path) -> 
         patch.object(cmd_config.config_module, "config_path", return_value=tmp_path / "config.yaml"),
         patch.object(cmd_config, "inspect_v8_config", side_effect=AssertionError("observability plan")),
         patch.object(cmd_config, "load_validate_v8", side_effect=AssertionError("full validation")),
+        patch.object(cmd_config.config_module, "load", wraps=cmd_config.config_module.load) as load,
     ):
         fast = CliRunner().invoke(cmd_config.config_cmd, ["get", "asset_policy.enabled"])
     assert fast.exit_code == 0 and fast.output == "true\n", fast.output
+    # ... and the configuration is loaded once, not once per helper, without
+    # building every guardrail profile for a key outside them.
+    assert load.call_count == 1
+    assert load.call_args.kwargs["without_guardrail_profiles"] is True
+    assert load.call_args.kwargs["parsed_source"] is not None
 
 
 def test_fresh_v8_config_shows_and_gets_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -144,3 +150,90 @@ def test_fresh_v8_config_shows_and_gets_defaults(tmp_path: Path, monkeypatch: py
     assert run(["show", "--section", "managed"]).exit_code == 1
     source = run(["show", "--source", "--section", "asset_policy"])
     assert source.exit_code == 1 and "Drop --source" in source.output
+
+
+def test_config_get_shows_the_scanner_gate_the_gateway_runs_with(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0068: blank gate and judge source, and the v8 migration keys, in a v9 dump.
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("config_version: 9\ngateway: {}\nobservability: {}\n", encoding="utf-8")
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_effective({"destinations": []})),
+    ):
+        got = CliRunner().invoke(cmd_config.config_cmd, ["get", "scanners.skill_scanner", "--format", "json"])
+    assert got.exit_code == 0, got.output
+    skill = json.loads(got.stdout)
+    assert (skill["fail_on_severity"], skill["review_queue_min"], skill["judge_source"]) == ("HIGH", "MEDIUM", "inherit")
+    assert not {"binary", "use_virustotal", "use_aidefense", "virustotal_api_key"} & set(skill)
+
+
+def test_config_get_destinations_index_the_list_config_set_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-0008: the resolved plan lists the generated local-sqlite destination first.
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 9\ngateway: {}\nobservability:\n  destinations:\n"
+        "    - {name: remote, kind: otlp, endpoint: 'https://otel.example.test'}\n",
+        encoding="utf-8",
+    )
+    plan = {"destinations": [{"name": "local-sqlite"}, {"name": "remote"}]}
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=config_path),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_effective(plan)),
+    ):
+        first = CliRunner().invoke(cmd_config.config_cmd, ["get", "observability.destinations[0].name"])
+        listed = CliRunner().invoke(cmd_config.config_cmd, ["get", "observability.destinations", "--format", "json"])
+        past = CliRunner().invoke(cmd_config.config_cmd, ["get", "observability.destinations[1].name"])
+    assert first.exit_code == 0, first.output
+    assert first.stdout == "remote\n"
+    assert [item["name"] for item in json.loads(listed.stdout)] == ["remote"]
+    # GAP-0154: the plan's entry at index 1 is not one config set can edit.
+    assert past.exit_code == 1 and "out of range (config.yaml lists 1 destination)" in past.output
+
+
+def test_config_get_effective_resolves_pack_levels_and_the_scanner_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "config_version: 9\ngateway: {}\nobservability: {}\nguardrail: {rule_pack: strict}\n"
+        "scanners: {skill_scanner: {fail_on_severity: CRITICAL}}\n"
+        "admission: {mcp: {scan_on_install: false}, plugin: {first_party_allow_list: []}}\n",
+        encoding="utf-8",
+    )
+    with patch.object(cmd_config.config_module, "config_path", return_value=config_path):
+        block = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.block_at", "--effective"])
+        scan = CliRunner().invoke(cmd_config.config_cmd, ["get", "admission.mcp.scan_on_install", "--effective"])
+        plugin = CliRunner().invoke(cmd_config.config_cmd, ["get", "admission.plugin", "--effective"])
+        skill = CliRunner().invoke(
+            cmd_config.config_cmd, ["get", "admission.skill.actions", "--effective", "--format", "json"]
+        )
+    assert block.exit_code == 0, block.output
+    assert block.stdout == "MEDIUM\n" and "pack-default:strict" in block.stderr
+    # An unset level or trust level prints what applies, not a blank default.
+    with patch.object(cmd_config.config_module, "config_path", return_value=config_path):
+        plain = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.block_at"])
+        trust = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.cisco_trust_level"])
+        config_path.write_text(
+            "config_version: 9\ngateway: {}\nobservability: {}\nguardrail: {cisco_trust_level: advisory}\n",
+            encoding="utf-8",
+        )
+        set_trust = CliRunner().invoke(cmd_config.config_cmd, ["get", "guardrail.cisco_trust_level", "--effective"])
+    assert plain.stdout == "MEDIUM\n" and "pack-default:strict" in plain.stderr
+    assert trust.stdout == "full\n" and "builtin" in trust.stderr
+    assert set_trust.stdout == "advisory\n" and "config:guardrail.cisco_trust_level" in set_trust.stderr
+    assert skill.exit_code == 0, skill.output
+    assert json.loads(skill.stdout) == {
+        "critical": "quarantine", "high": "warn", "medium": "warn", "low": "allow", "info": "allow"
+    }
+    assert "derived:scanners.skill_scanner" in skill.stderr
+    # A key config.yaml sets names config.yaml as its source, not builtin (GAP-0009).
+    assert scan.stdout == "false\n" and "config:admission.mcp.scan_on_install" in scan.stderr
+    assert "config:admission.plugin.first_party_allow_list" in plugin.stderr

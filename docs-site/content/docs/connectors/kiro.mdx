@@ -38,6 +38,11 @@ Kiro has two hook surfaces, so setup installs two hook configs:
 
 Restart Kiro CLI or run `/agent swap defenseclaw` so `/hooks` lists them.
 
+When you add an MCP server with Kiro, the running gateway reads the user
+`~/.kiro/settings/mcp.json` and the configured workspace's
+`.kiro/settings/mcp.json`. It scans a new server and records an admission
+verdict within about 30 seconds. In action mode, a blocked server is denied.
+
 ### How the hook files are written
 
 - **Agent hooks (CLI 2.x).** The `preToolUse` and `postToolUse` hooks use the
@@ -376,31 +381,3 @@ instead, run `defenseclaw setup remove kiro --yes`; add `--force` when it is
 the last connector. On Linux and macOS, `~/.defenseclaw/hooks/kiro-hook.sh`
 stays behind as an inert stub that exits successfully, because a running Kiro
 session may still call the path it cached until it restarts.
-
-## Upgrade notes
-
-If you set up Kiro with an earlier release, these fixes apply:
-
-- **Tool hook matcher.** Releases before this fix wrote the agent's
-  `preToolUse` and `postToolUse` matcher as `.*`, which Kiro CLI reads as a
-  glob that matches no tool, so those tool hooks never ran. The gateway
-  rewrites DefenseClaw's entries the first time it starts after an upgrade,
-  and `defenseclaw setup kiro` rewrites them too. Hook entries you added
-  yourself are not changed.
-- **Hook timeout.** Earlier releases set no `timeout_ms` on the agent's hooks,
-  so a DefenseClaw verdict that took longer than Kiro's default of about ten
-  seconds (a slow scan or judge) let the tool run. The gateway adds the
-  timeout to DefenseClaw's entries the first time it starts after an upgrade.
-- **Upgraded agents.** Releases before this fix replaced the whole hook list of
-  an agent that `kiro-cli --v3` or `/upgrade-agent` had upgraded, so hooks you
-  had added were lost, and teardown left DefenseClaw's upgraded entries
-  behind.
-- **Windows hook commands.** Earlier builds wrote commands that used
-  `Start-Process -Wait`, which could report a hook that exited at once as 1, or
-  the PowerShell command alone, which a PowerShell host reported as 1 for a
-  block. Before that, the binary rejected `--hook-surface`, so every Kiro IDE
-  and `kiro-cli --v3` event went through with a warning, and the unmarked CLI
-  2.x hook blocked every tool call; the command was also
-  `& '<defenseclaw-hook.exe>' ...`, which `cmd.exe` rejects and PowerShell does
-  not wait for, so a block never reached Kiro. Run `defenseclaw setup kiro`
-  again to replace any of these entries.

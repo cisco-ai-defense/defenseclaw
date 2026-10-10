@@ -107,14 +107,6 @@ func DetectEnvironment() Environment {
 	return EnvLinux
 }
 
-// DefaultSkillWatchPaths returns skill directories for the default claw mode.
-// Prefer Config.SkillDirsForConnector when a config is available;
-// this fallback always uses the OpenClaw layout because we don't
-// know the active framework here.
-func DefaultSkillWatchPaths() []string {
-	return SkillDirsForOpenClaw("")
-}
-
 func DefaultConfig() *Config {
 	dataDir := DefaultDataPath()
 	clawMode := ClawOpenClaw
@@ -144,12 +136,13 @@ func DefaultConfig() *Config {
 		Scanners: ScannersConfig{
 			SkillScanner: SkillScannerConfig{
 				Binary:  "skill-scanner",
-				Policy:  "permissive",
+				UseLLM:  true,
+				Policy:  DefaultSkillScannerPolicy,
 				Lenient: true,
 			},
 			MCPScanner: MCPScannerConfig{
 				Binary:    "mcp-scanner",
-				Analyzers: "auto",
+				Analyzers: []string{"auto"},
 			},
 			PluginScanner: "defenseclaw",
 			CodeGuard:     filepath.Join(dataDir, "codeguard-rules"),
@@ -170,12 +163,11 @@ func DefaultConfig() *Config {
 			LLM:           DefaultOpenShellLLM,
 		},
 		Watch: WatchConfig{
-			DebounceMs:          500,
-			AutoBlock:           true,
-			AllowListBypassScan: true,
-			RescanEnabled:       true,
-			RescanIntervalMin:   60,
-			RescanContentGated:  true,
+			DebounceMs:         500,
+			AutoBlock:          true,
+			RescanEnabled:      true,
+			RescanIntervalMin:  60,
+			RescanContentGated: true,
 		},
 		AIDiscovery: AIDiscoveryConfig{
 			Enabled:                   true,
@@ -192,7 +184,6 @@ func DefaultConfig() *Config {
 			IncludeNetworkDomains:     true,
 			MaxFilesPerScan:           1000,
 			MaxFileBytes:              512 * 1024,
-			EmitOTel:                  true,
 			StoreRawLocalPaths:        false,
 			ConfidencePolicyPath:      filepath.Join(dataDir, "confidence.yaml"),
 			RequireTrustedBinaryPaths: false,
@@ -227,10 +218,6 @@ func DefaultConfig() *Config {
 				MinSeverity: "HIGH",
 			},
 		},
-		// AuditSinks is empty by default — operators opt in to forwarding
-		// by adding entries (splunk_hec / otlp_logs / http_jsonl). The
-		// local SQLite store always receives every event.
-		AuditSinks: nil,
 		Gateway: GatewayConfig{
 			Host:            "127.0.0.1",
 			Port:            18789,
@@ -257,8 +244,5 @@ func DefaultConfig() *Config {
 				},
 			},
 		},
-		SkillActions:  DefaultSkillActions(),
-		MCPActions:    DefaultMCPActions(),
-		PluginActions: DefaultPluginActions(),
 	}
 }

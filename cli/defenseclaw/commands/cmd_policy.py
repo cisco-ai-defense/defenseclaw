@@ -22,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from typing import NoReturn
 
 import click
@@ -29,6 +30,7 @@ import yaml
 
 from defenseclaw import policy_catalog, ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
 SEVERITIES = ["critical", "high", "medium", "low", "info"]
@@ -53,17 +55,30 @@ def _rego_dir() -> str:
 
 
 def _default_rego_dir(app: AppContext) -> str:
-    """The Rego directory the gateway loads: <policy_dir>/rego when it exists.
+    """The Rego directory the gateway loads: <policy_dir>/rego.
 
-    Falls back to the bundled copy (a fresh install before init). The bundled
-    directory lives inside the package and is replaced on upgrade, so it is
-    the wrong place to point users at for their own tests (GAP-1459).
+    The bundled copy stands in only before init (no config.yaml yet). The
+    bundled directory lives inside the package and is replaced on upgrade, so
+    it is the wrong place to point users at for their own tests (GAP-1459),
+    and after init it must not hide a policy directory that is gone, which
+    defenseclaw-gateway policy validate reports (GAP-0889). Secure Client
+    keeps the fallback of main (issue #1092).
     """
-    policy_dir = getattr(getattr(app, "cfg", None), "policy_dir", "") or ""
+    cfg = getattr(app, "cfg", None)
+    policy_dir = getattr(cfg, "policy_dir", "") or ""
     user_rego = os.path.join(policy_dir, "rego") if policy_dir else ""
     if user_rego and os.path.isdir(user_rego):
         return user_rego
+    if user_rego and _initialized(cfg) and not asset_lists.is_secure_client(cfg):
+        return user_rego
     return _rego_dir()
+
+
+def _initialized(cfg) -> bool:
+    """True once init has written config.yaml for this data directory."""
+    from defenseclaw.config import config_path_for_data_dir
+
+    return config_path_for_data_dir(getattr(cfg, "data_dir", None)).is_file()
 
 
 def _ensure_policies_dir(app: AppContext) -> str:
@@ -129,7 +144,7 @@ def _not_a_policy_error(name: str, data: object) -> None:
 def _policy_not_found(app: AppContext, name: str) -> NoReturn:
     """Report an unknown policy name with the valid names, then exit 1 (GAP-1818)."""
     try:
-        names = [p.name for p in policy_catalog.list_named_policies(_policies_dir(app))]
+        names = [p.name for p in policy_catalog.list_named_policies(_policies_dir(app), app.cfg)]
     except Exception:  # noqa: BLE001 - the hint is best effort
         names = []
     msg = f"Error: policy '{name}' not found."
@@ -294,13 +309,17 @@ def create(
 @pass_ctx
 def list_policies(app: AppContext, json_out: bool) -> None:
     """List all available policies (built-in and custom)."""
-    policies = policy_catalog.list_named_policies(_policies_dir(app))
-    active = policy_catalog.active_policy_name(_policies_dir(app))
+    policies = policy_catalog.list_named_policies(_policies_dir(app), app.cfg)
+    active = policy_catalog.active_policy_name(_policies_dir(app), app.cfg)
+    warnings = [] if asset_lists.is_secure_client(app.cfg) else policy_catalog.configured_hilt_warnings(app.cfg)
 
     if json_out:
+        payload = {"version": 1, "active": active, "policies": [p.to_json() for p in policies]}
+        if warnings:
+            payload["warnings"] = warnings
         click.echo(
             json.dumps(
-                {"version": 1, "active": active, "policies": [p.to_json() for p in policies]},
+                payload,
                 indent=2,
             )
         )
@@ -312,6 +331,8 @@ def list_policies(app: AppContext, json_out: bool) -> None:
 
     click.echo(f"{ux.bold('Available policies:')}")
     click.echo()
+    for warning in warnings:
+        ux.warn(warning)
     for summary in policies:
         prefix = "  * " if summary.active else "    "
         label = ux.bold(summary.name)
@@ -326,6 +347,12 @@ def list_policies(app: AppContext, json_out: bool) -> None:
             click.echo(f"      {ux.dim(summary.description)}")
 
     click.echo()
+    if not active and not asset_lists.is_secure_client(app.cfg):
+        # Since config_version 9 a policy is active when config.yaml holds its
+        # values; an edit made after `policy activate` matches none (GAP-0970).
+        click.echo(ux.dim("  No policy is active: none matches the values config.yaml holds now (activating a policy"))
+        click.echo(ux.dim("  writes its values there, and a later change to one of them leaves no policy matching)."))
+        click.echo()
     click.echo(f"  {ux.dim('Activate a policy:')} defenseclaw policy activate <name>")
     click.echo(f"  {ux.dim('Show details:')}      defenseclaw policy show <name>")
 
@@ -345,7 +372,7 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
         _policy_not_found(app, name)
 
     if json_out:
-        summary = policy_catalog.get_policy(_sanitize_policy_name(name), _policies_dir(app))
+        summary = policy_catalog.get_policy(_sanitize_policy_name(name), _policies_dir(app), app.cfg)
         if summary is None:
             click.echo(f"error: policy '{name}' could not be read", err=True)
             raise SystemExit(1)
@@ -421,8 +448,7 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
         click.echo(f"  block_threshold:    {_severity_rank_label(guardrail.get('block_threshold', 4))}")
         click.echo(f"  alert_threshold:    {_severity_rank_label(guardrail.get('alert_threshold', 2))}")
         click.echo(
-            "  (these thresholds apply to LLM traffic through the guardrail proxy; "
-            "tool-call blocking uses 'defenseclaw guardrail block-at')"
+            "  (activation writes them to guardrail.block_at / alert_at)"
         )
         hilt = guardrail.get("hilt", {}) or {}
         click.echo(
@@ -430,31 +456,15 @@ def show(app: AppContext, name: str, json_out: bool) -> None:
             f"min={hilt.get('min_severity', 'HIGH')}"
         )
         click.echo(f"  cisco_trust_level:  {guardrail.get('cisco_trust_level', 'full')}")
-        patterns = guardrail.get("patterns", {})
-        if patterns:
-            click.echo("  patterns:")
-            for cat, pats in patterns.items():
-                click.echo(f"    {cat}: {len(pats)} pattern(s)")
-        mappings = guardrail.get("severity_mappings", {})
-        if mappings:
-            click.echo("  severity_mappings:")
-            for cat, sev in mappings.items():
-                click.echo(f"    {cat}: {sev}")
 
     fw = data.get("firewall", {})
     if fw:
         click.echo()
-        click.echo("Firewall:")
+        click.echo("Firewall (stored in the preset; the gateway does not enforce it):")
         click.echo(f"  default_action:        {fw.get('default_action', 'deny')}")
         click.echo(f"  blocked_destinations:  {len(fw.get('blocked_destinations', []))} entries")
         click.echo(f"  allowed_domains:       {len(fw.get('allowed_domains', []))} entries")
         click.echo(f"  allowed_ports:         {fw.get('allowed_ports', [])}")
-
-    enforcement = data.get("enforcement", {})
-    if enforcement:
-        click.echo()
-        click.echo("Enforcement:")
-        click.echo(f"  max_enforcement_delay_seconds: {enforcement.get('max_enforcement_delay_seconds', 2)}")
 
     audit_cfg = data.get("audit", {})
     if audit_cfg:
@@ -484,15 +494,22 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     (POST /policy/reload) so the change takes effect immediately. If the
     gateway isn't running, it loads the policy when it next starts.
     """
-    before = _restart_only_config(app.cfg)
-    path = _activate_policy(app, name)
+    secure_client = asset_lists.is_secure_client(app.cfg)
+    before = _restart_only_config(app.cfg) if secure_client else ()
+    levels_before = None if secure_client else _global_levels(app.cfg)
+    path, restart_keys = _activate_policy(app, name)
     ux.ok(f"Policy '{name}' activated.")
-    # The policy's guardrail thresholds are not the tool-call block level
-    # (GAP-1228).
-    click.echo(
-        "  Its guardrail thresholds govern LLM traffic through the proxy; tool-call "
-        "blocking is unchanged (see 'defenseclaw guardrail status' and 'guardrail block-at')."
-    )
+    if secure_client:
+        click.echo(
+            "  Its guardrail thresholds govern LLM traffic through the proxy; tool-call "
+            "blocking is unchanged (see 'defenseclaw guardrail status' and 'guardrail block-at')."
+        )
+    else:
+        click.echo(
+            "  Its guardrail levels apply to tool calls, prompts and LLM traffic on every connector "
+            "without its own level (see 'defenseclaw guardrail status' and 'guardrail block-at')."
+        )
+        _report_level_changes(levels_before, app.cfg, name)
     # A stopped gateway gets one note after the success lines, covering both
     # the skipped audit event and the reload on start (GAP-1718).
     audit_skipped = _log_policy_action(
@@ -500,9 +517,48 @@ def activate(app: AppContext, name: str, reload_gateway: bool) -> None:
     )
     if not reload_gateway:
         return
-    _reload_and_report(
-        app, name, needs_restart=_restart_only_config(app.cfg) != before, audit_skipped=audit_skipped
+    # The gateway applies a preset hot from the new configuration generation
+    # (spec section 4); only a key the writer reports as restart-required
+    # restarts it (GAP-0056). Secure Client keeps the restart of main for
+    # the sections its gateway reads at start (issue #1092).
+    needs_restart = _restart_only_config(app.cfg) != before if secure_client else bool(restart_keys)
+    _reload_and_report(app, name, needs_restart=needs_restart, audit_skipped=audit_skipped)
+
+
+def _global_levels(cfg) -> dict[str, tuple[str, int]]:  # noqa: ANN001 - Config, imported lazily
+    """guardrail.block_at and alert_at: the stored value and the effective rank of the global scope."""
+    levels = policy_catalog.resolve_levels(
+        policy_catalog.global_pack(cfg).path, (cfg.guardrail.block_at, cfg.guardrail.alert_at)
     )
+    return {
+        "block_at": (policy_catalog.level_value(cfg.guardrail.block_at), levels.block_rank),
+        "alert_at": (policy_catalog.level_value(cfg.guardrail.alert_at), levels.alert_rank),
+    }
+
+
+def _report_level_changes(before: dict[str, tuple[str, int]], cfg, name: str) -> None:  # noqa: ANN001
+    """Name each global guardrail level the activation changed, old and new.
+
+    A preset writes its levels over the ones in config.yaml, including a level
+    set with `guardrail block-at` / `alert-at`; one that now blocks or alerts on
+    fewer severities is a warning with the command that sets it back
+    (GAP-1020).
+    """
+    after = _global_levels(cfg)
+    for key, command in (("block_at", "block-at"), ("alert_at", "alert-at")):
+        (old_set, old_rank), (new_set, new_rank) = before[key], after[key]
+        if old_rank == new_rank:
+            continue
+        old, new = policy_catalog.level_name(old_rank), policy_catalog.level_name(new_rank)
+        if new_rank < old_rank:
+            click.echo(f"  guardrail.{key}: {old} -> {new}")
+            continue
+        how = "cleared" if old_set and not new_set else "lowered"
+        origin = f"guardrail.{key} {old_set} in config.yaml" if old_set else f"the rule pack's {old}"
+        ux.warn(
+            f"guardrail.{key}: {old} -> {new}: policy '{name}' {how} {origin}. "
+            f"To keep {old}: defenseclaw guardrail {command} {old}"
+        )
 
 
 def _log_policy_action(
@@ -536,14 +592,13 @@ def _log_policy_action(
 
 
 def _restart_only_config(cfg) -> tuple[str, ...]:  # noqa: ANN001 - Config, imported lazily
-    """The config.yaml sections a policy writes that the gateway cannot hot-reload.
+    """The sections a policy writes that a Secure Client gateway reads at start.
 
-    The gateway's config watcher refuses a change to ``skill_actions``,
-    ``watch`` or (outside managed installs) ``cisco_ai_defense`` with
-    "config reload requires gateway restart", so a policy change that
-    touches them needs a restart to take effect.
+    On Secure Client ``policy activate`` keeps the restart of main for a
+    change to ``watch`` or ``cisco_ai_defense`` (issue #1092); every other
+    gateway reloads them hot.
     """
-    return tuple(repr(getattr(cfg, section, None)) for section in ("skill_actions", "watch", "cisco_ai_defense"))
+    return tuple(repr(getattr(cfg, section, None)) for section in ("watch", "cisco_ai_defense"))
 
 
 def _gateway_pid_alive(app: AppContext) -> bool:
@@ -691,36 +746,124 @@ def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
     return "reloaded", ""
 
 
-def _skill_actions_from_policy(data: dict):  # noqa: ANN202 - SkillActionsConfig, imported lazily
-    """The ``skill_actions`` block of a policy as the config.yaml section."""
-    from defenseclaw.config import SeverityAction, SkillActionsConfig
+_RANK_NAMES = {1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}
 
-    actions_raw = data.get("skill_actions", {})
 
-    def _parse_action(raw: dict) -> SeverityAction:
-        return SeverityAction(
-            file=raw.get("file", "none"),
-            runtime=raw.get("runtime", "enable"),
-            install=raw.get("install", "none"),
+def _admission_triple(raw: dict) -> dict:
+    """A policy action in config ``admission`` triple form. Policy YAML uses
+    either runtime vocabulary (enable/disable or allow/block, F-0241)."""
+    runtime = str(raw.get("runtime", "enable")).strip().lower()
+    if runtime not in {"enable", "disable", "allow", "block"}:
+        raise ValueError(f"invalid runtime action {runtime!r}; expected enable, disable, allow or block")
+    return {
+        "install": str(raw.get("install") or "none"),
+        "file": str(raw.get("file") or "none"),
+        "runtime": "disable" if runtime in ("disable", "block") else "enable",
+    }
+
+
+def _policy_bool(value: object, key: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be a boolean")
+    return value
+
+
+def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, imported lazily
+    """A named policy's admission settings as config ``admission:``.
+
+    The policy's ``skill_actions`` applied to every asset type and its
+    ``scanner_overrides.<type>`` refined one type, so they become
+    ``admission.defaults.actions`` and ``admission.<type>.actions``.
+    """
+    from defenseclaw.config import AdmissionConfig, AdmissionFirstParty
+
+    adm = AdmissionConfig()
+    raw = data.get("admission") or {}
+    if isinstance(raw, dict):
+        if "scan_on_install" in raw:
+            adm.defaults.scan_on_install = _policy_bool(raw["scan_on_install"], "admission.scan_on_install")
+        if "allow_list_bypass_scan" in raw:
+            adm.defaults.allow_list_bypass_scan = _policy_bool(
+                raw["allow_list_bypass_scan"], "admission.allow_list_bypass_scan"
+            )
+    for sev, action in (data.get("skill_actions") or {}).items():
+        if isinstance(action, dict) and str(sev).lower() in SEVERITIES:
+            adm.defaults.actions[str(sev).lower()] = _admission_triple(action)
+    for target_type, sevs in (data.get("scanner_overrides") or {}).items():
+        holder = getattr(adm, str(target_type), None) if target_type in ("skill", "mcp", "plugin") else None
+        if holder is None or not isinstance(sevs, dict):
+            continue
+        for sev, action in sevs.items():
+            if isinstance(action, dict) and str(sev).lower() in SEVERITIES:
+                holder.actions[str(sev).lower()] = _admission_triple(action)
+    if "first_party_allow_list" in data:
+        entries = data["first_party_allow_list"]
+        if not isinstance(entries, list):
+            raise ValueError("first_party_allow_list must be a list")
+        # The preset's top-level list is complete when present. Keep an
+        # explicit empty list so compilation cannot restore built-in entries.
+        for target_type in ("skill", "mcp", "plugin"):
+            getattr(adm, target_type).first_party_allow_list = []
+    else:
+        entries = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        holder = getattr(adm, str(entry.get("target_type", "")), None)
+        name = str(entry.get("target_name", "") or "")
+        paths = [str(p) for p in entry.get("source_path_contains") or [] if p]
+        if holder is None or not name or not paths:
+            continue
+        if holder.first_party_allow_list is None:
+            holder.first_party_allow_list = []
+        holder.first_party_allow_list.append(
+            AdmissionFirstParty(name=name, source_path_contains=paths, reason=str(entry.get("reason", "") or "")),
         )
-
-    return SkillActionsConfig(
-        critical=_parse_action(actions_raw.get("critical", {})),
-        high=_parse_action(actions_raw.get("high", {})),
-        medium=_parse_action(actions_raw.get("medium", {})),
-        low=_parse_action(actions_raw.get("low", {})),
-        info=_parse_action(actions_raw.get("info", {})),
-    )
+    # The preset's actions are an explicit choice for skills too: without
+    # admission.skill.actions the scanner gate would decide skills instead.
+    for sev, action in adm.defaults.actions.items():
+        adm.skill.actions.setdefault(sev, action)
+    return adm
 
 
-def _activate_policy(app: AppContext, name: str) -> str:
-    """Apply the named policy to config.yaml and sync OPA data.json.
+def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, imported lazily
+    """A named policy's guardrail mode, thresholds and Cisco trust level as
+    config keys. A threshold equal to the configured rule pack's posture
+    default is left unset so that default applies; any other is written, so the
+    preset's levels hold whichever pack is selected (as the v9 migration
+    compares). A preset's ``hilt`` is not applied: HITL is the operator's
+    setting (``defenseclaw guardrail hilt``), and activation keeps it."""
+    from defenseclaw.policy_catalog import _PROFILE_RANKS, global_pack, pack_profile
 
-    Returns the resolved source path. Raises ``SystemExit(1)`` when the
-    policy can't be found. Shared by the ``activate`` command and the N1
-    ``delete --force`` fallback, which re-activates ``default`` after
-    removing the policy that was live so the gateway never keeps
-    enforcing a deleted policy.
+    guardrail = data.get("guardrail") or {}
+    if not isinstance(guardrail, dict):
+        return
+    pack_block, pack_alert = _PROFILE_RANKS[pack_profile(global_pack(cfg).path)]
+    for key, attr, default in (
+        ("block_threshold", "block_at", pack_block),
+        ("alert_threshold", "alert_at", pack_alert),
+    ):
+        if key in guardrail:
+            rank = int(guardrail[key])
+            setattr(cfg.guardrail, attr, "" if rank == default else _RANK_NAMES.get(rank, ""))
+    if "mode" in guardrail:
+        mode = str(guardrail["mode"]).strip()
+        if mode not in {"observe", "action"}:
+            raise ValueError("guardrail.mode must be observe or action")
+        cfg.guardrail.mode = mode
+    if "cisco_trust_level" in guardrail:
+        level = str(guardrail["cisco_trust_level"] or "")
+        cfg.guardrail.cisco_trust_level = "" if level == "full" else level
+
+
+def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
+    """Apply a named preset to config.yaml, and to v8 OPA data on Secure Client.
+
+    A named policy is a preset: its admission, guardrail threshold, watch,
+    Cisco AI Defense and webhook settings become config keys. Returns the
+    resolved source path and the changed keys the writer reports as
+    restart-required. Raises ``SystemExit(1)`` when the policy can't be
+    found.
     """
     path = _find_policy(app, name)
     if not path:
@@ -729,15 +872,20 @@ def _activate_policy(app: AppContext, name: str) -> str:
     data = _load_policy(path)
 
     watch_raw = data.get("watch", {})
-    app.cfg.skill_actions = _skill_actions_from_policy(data)
+    secure_client = asset_lists.is_secure_client(app.cfg)
+    opa_update = _prepare_opa_data(app, data) if secure_client else None
+    if not secure_client:
+        try:
+            app.cfg.admission = _admission_from_policy(data)
+            _apply_policy_guardrail(app.cfg, data)
+        except (TypeError, ValueError) as exc:
+            raise click.ClickException(f"invalid policy {name!r}: {exc}") from exc
     if "rescan_enabled" in watch_raw:
         app.cfg.watch.rescan_enabled = bool(watch_raw["rescan_enabled"])
     if "rescan_interval_min" in watch_raw:
         app.cfg.watch.rescan_interval_min = int(watch_raw["rescan_interval_min"])
 
-    # Apply Cisco AI Defense settings into config.yaml. The gateway reads
-    # the AID lane from Config.CiscoAIDefense, not from data.json, so we
-    # have to mutate ``app.cfg.cisco_ai_defense`` here. We deliberately
+    # Apply Cisco AI Defense settings into config.yaml (Config.CiscoAIDefense). We deliberately
     # only touch the fields the policy YAML carries — if a field is
     # absent we keep whatever the operator set via ``defenseclaw setup``.
     aid_raw = data.get("cisco_ai_defense", {})
@@ -802,12 +950,15 @@ def _activate_policy(app: AppContext, name: str) -> str:
                         f"Skipped webhook {label}: a webhook with that name or URL is already configured"
                     )
             app.cfg.webhooks = merged
-    app.cfg.save()
+    if opa_update is not None:
+        # The writer validates and saves config first, under its lock. If the
+        # OPA replacement fails, save_verified restores the prior config.
+        result = app.cfg.save_verified(lambda _path: _write_opa_data(*opa_update))
+    else:
+        result = app.cfg.save()
     for note in webhook_notes:
         click.echo(f"  {note}")
-
-    _sync_opa_data(app, data)
-    return path
+    return path, list(getattr(result, "restart_required", None) or [])
 
 
 # ---------------------------------------------------------------------------
@@ -816,8 +967,7 @@ def _activate_policy(app: AppContext, name: str) -> str:
 
 @policy.command()
 @click.argument("name")
-@click.option("--force", is_flag=True,
-              help="Delete even if active; re-activates 'default' afterward")
+@click.option("--force", is_flag=True, help="On Secure Client, delete an active custom policy and activate default")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
 def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
@@ -827,15 +977,12 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
     you are asked to confirm first; pass --yes to skip the prompt.
 
     For a built-in policy (default, strict, permissive) only the user copy
-    that ``policy edit`` saved is removed, which restores the built-in; an
-    active built-in is re-activated from the restored version.
+    that ``policy edit`` saved is removed, which restores the built-in.
 
-    The active policy is not deleted unless --force is given; activate
-    another policy first, or pass --force to delete it and switch back to
-    the built-in 'default' policy.
+    On Secure Client, an active edited built-in is reactivated from the
+    bundled copy. An active custom policy needs --force and then activates
+    the built-in default. Other profiles keep the applied config preset.
     """
-    # Without the guard the gateway would keep enforcing a policy whose YAML
-    # is gone and 'policy list' would still mark it [active].
     name = _sanitize_policy_name(name)
 
     user_dir = _policies_dir(app)
@@ -863,7 +1010,8 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
         click.echo(f"error: policy '{name}' not found in {user_dir}", err=True)
         raise SystemExit(1)
 
-    is_active = name == _get_active_policy_name(app)
+    secure_client = asset_lists.is_secure_client(app.cfg)
+    is_active = secure_client and name == _get_active_policy_name(app)
     if builtin:
         # GAP-1458: drop the user copy that shadowed the built-in.
         _confirm_policy_delete(f"your edited copy of built-in policy '{name}'", path, assume_yes)
@@ -883,18 +1031,22 @@ def delete(app: AppContext, name: str, force: bool, assume_yes: bool) -> None:
         )
         raise SystemExit(1)
 
+    # A named policy is a preset: config.yaml keeps what an activation
+    # applied, so deleting the file changes nothing that is enforced.
     _confirm_policy_delete(f"policy '{name}'", path, assume_yes)
     os.remove(real_path)
     ux.ok(f"Policy '{name}' deleted.")
     _log_policy_action(app, "policy-delete", name, "", done="Policy deleted")
-
-    # N1: the live data.json still names the just-deleted policy. Re-point
-    # it at the default built-in so the gateway never keeps enforcing a
-    # policy whose source is gone. Only reachable with --force (the guard
-    # above blocks the implicit case).
     if is_active:
         ux.warn(f"'{name}' was the active policy — re-activating 'default'.")
         _reactivate_after_delete(app, "default")
+
+
+def _reactivate_after_delete(app: AppContext, name: str) -> None:
+    """Apply the replacement to Secure Client OPA data and reload the gateway."""
+    before = _restart_only_config(app.cfg)
+    _activate_policy(app, name)
+    _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
 
 
 def _stdin_is_tty() -> bool:
@@ -914,13 +1066,6 @@ def _confirm_policy_delete(label: str, path: str, assume_yes: bool) -> None:
         raise SystemExit(1)
 
 
-def _reactivate_after_delete(app: AppContext, name: str) -> None:
-    """Re-activate *name* and apply it to the running gateway like ``policy activate`` (GAP-1723)."""
-    before = _restart_only_config(app.cfg)
-    _activate_policy(app, name)
-    _reload_and_report(app, name, needs_restart=_restart_only_config(app.cfg) != before)
-
-
 # ---------------------------------------------------------------------------
 # validate
 # ---------------------------------------------------------------------------
@@ -931,77 +1076,32 @@ def _reactivate_after_delete(app: AppContext, name: str) -> None:
                    "~/.defenseclaw/policies/rego; the bundled copy before init)")
 @pass_ctx
 def validate(app: AppContext, rego_dir: str | None) -> None:
-    """Check the policy rule files (Rego modules and data.json) for errors.
+    """Check policy rule files and Secure Client's legacy OPA data.
 
-    Checks:\n
-      1. data.json is valid JSON with required top-level keys\n
-      2. All severity levels in actions and scanner_overrides have valid fields\n
-      3. Rego modules compile without errors ('opa' if installed, else defenseclaw-gateway)
+    On v9, the Rego modules read only their input: admission and block/allow
+    policy come from config.yaml, which ``defenseclaw config`` validates.
+    Rego compiles with defenseclaw-gateway, the loader the gateway runs, or
+    with 'opa' when the gateway is not installed.
     """
     rd = rego_dir or _default_rego_dir(app)
-    errors: list[str] = []
-
-    # 1. Validate data.json
-    data_json_path = os.path.join(rd, "data.json")
-    if not os.path.isfile(data_json_path):
-        ux.err(f"FAIL: data.json not found at {data_json_path}")
+    if asset_lists.is_secure_client(app.cfg) and not _validate_legacy_data(rd):
         raise SystemExit(1)
-
-    try:
-        with open(data_json_path) as f:
-            data = json.load(f)
-    except json.JSONDecodeError as exc:
-        ux.err(f"FAIL: data.json is not valid JSON: {exc}")
-        raise SystemExit(1)
-
-    required_keys = ["config", "actions", "severity_ranking"]
-    for key in required_keys:
-        if key not in data:
-            errors.append(f"data.json missing required key: {key}")
-
-    valid_runtimes = {"block", "allow"}
-    valid_files = {"quarantine", "none"}
-    valid_installs = {"block", "allow", "none"}
-
-    actions = data.get("actions", {})
-    for sev, action in actions.items():
-        if not isinstance(action, dict):
-            errors.append(f"actions.{sev}: expected object, got {type(action).__name__}")
-            continue
-        if action.get("runtime") not in valid_runtimes:
-            errors.append(f"actions.{sev}.runtime: invalid value '{action.get('runtime')}' (expected {valid_runtimes})")
-        if action.get("file") not in valid_files:
-            errors.append(f"actions.{sev}.file: invalid value '{action.get('file')}' (expected {valid_files})")
-        if "install" in action and action["install"] not in valid_installs:
-            errors.append(f"actions.{sev}.install: invalid value '{action['install']}' (expected {valid_installs})")
-
-    overrides = data.get("scanner_overrides", {})
-    for scanner_type, sevs in overrides.items():
-        if not isinstance(sevs, dict):
-            errors.append(f"scanner_overrides.{scanner_type}: expected object")
-            continue
-        for sev, action in sevs.items():
-            if not isinstance(action, dict):
-                errors.append(f"scanner_overrides.{scanner_type}.{sev}: expected object")
-                continue
-            if action.get("runtime") not in valid_runtimes:
-                errors.append(f"scanner_overrides.{scanner_type}.{sev}.runtime: invalid '{action.get('runtime')}'")
-            if action.get("file") not in valid_files:
-                errors.append(f"scanner_overrides.{scanner_type}.{sev}.file: invalid '{action.get('file')}'")
-            if "install" in action and action["install"] not in valid_installs:
-                errors.append(f"scanner_overrides.{scanner_type}.{sev}.install: invalid '{action['install']}'")
-
-    if errors:
-        ux.err("data.json validation errors:")
-        for e in errors:
-            click.echo(f"  - {e}")
-    else:
-        ux.ok("data.json: OK")
-
-    # 2. Try to compile Rego
-    rego_compiled = _try_rego_compile(rd)
-
-    if errors or not rego_compiled:
+    if not os.path.isdir(rd):
+        # As in defenseclaw-gateway policy validate: a policy directory
+        # without rego/ is config-only mode, a missing one fails (GAP-0889).
+        policy_dir = getattr(app.cfg, "policy_dir", "") or ""
+        if rego_dir or not policy_dir or not os.path.isdir(policy_dir):
+            ux.err(f"FAIL: read rego directory {rd}: no such directory")
+            if not rego_dir:
+                ux.subhead(
+                    f"The policy directory {policy_dir or rd} is gone; restore it or run 'defenseclaw init'.",
+                    indent="  ",
+                )
+            raise SystemExit(1)
+        click.echo(f"No Rego directory at {rd}: the admission policy is compiled from config.yaml alone.")
+        ux.ok("All validations passed.")
+        return
+    if not _try_rego_compile(rd, app.cfg):
         raise SystemExit(1)
 
     ux.ok("All validations passed.")
@@ -1033,7 +1133,7 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
         # Installed policy directories ship no *_test.rego files, so this is
         # the normal answer there, not a failure (GAP-1091). The modules
         # must still compile, as 'opa test' requires (GAP-1392).
-        if not _try_rego_compile(rd):
+        if not _try_rego_compile(rd, app.cfg):
             raise SystemExit(1)
         click.echo(
             f"No Rego unit tests (*_test.rego) in {rd}; nothing to run. "
@@ -1081,11 +1181,10 @@ def test_rego(app: AppContext, rego_dir: str | None, verbose: bool) -> None:
 def edit() -> None:
     """Edit policy sections (guardrail, firewall, scanner, actions).
 
-    Each edit changes the active policy unless --policy-name (-p) names
-    another one; the result line names the policy it changed. Editing the
-    active policy applies the change and, by default, asks the running
-    gateway to reload it (``--no-reload`` to skip). Editing any other policy
-    only saves the draft.
+    Without --policy-name (-p) an edit changes the live policy in config.yaml
+    (``admission:`` and ``guardrail:``) and the gateway applies it. With
+    --policy-name it saves a named policy (a preset) for a later
+    ``policy activate``; the result line names what it changed.
     """
 
 
@@ -1094,8 +1193,61 @@ _reload_option = click.option(
     "reload_gateway",
     default=True,
     show_default=True,
-    help="When the edited policy is the active one, ask the running gateway to reload it.",
+    help="After a live edit, ask the running gateway to reload.",
 )
+
+_policy_name_option = click.option(
+    "--policy-name", "-p", default=None,
+    help="Named policy (preset) to edit instead of the live config.yaml policy",
+)
+
+
+def _live_admission_triple(app: AppContext, holder_name: str, severity: str) -> tuple[dict, bool]:
+    """The current live triple and its allowed verdict, from config or the compiled default."""
+    from defenseclaw.enforce.admission import compile_admission
+
+    holder = getattr(app.cfg.admission, holder_name)
+    raw = holder.actions.get(severity)
+    if isinstance(raw, dict):
+        return dict(raw), False
+    target = "tool" if holder_name == "defaults" else holder_name
+    if isinstance(raw, str):
+        from defenseclaw.enforce.admission import _SHORTHANDS
+
+        action, allowed = _SHORTHANDS.get(raw, _SHORTHANDS["warn"])
+    else:
+        action, allowed = compile_admission(app.cfg, target).actions[severity.upper()]
+    return {"install": action.install, "file": action.file, "runtime": action.runtime}, allowed
+
+
+def _edit_live_actions(
+    app: AppContext, holder_name: str, severity: str, runtime: str | None, file_action: str | None,
+    install: str | None, reload_gateway: bool,
+) -> None:
+    triple, allowed = _live_admission_triple(app, holder_name, severity)
+    original = dict(triple)
+    changed = []
+    for key, value in (("runtime", runtime), ("file", file_action), ("install", install)):
+        if value is not None:
+            triple[key] = value
+            changed.append(f"{key}={value}")
+    if not changed:
+        click.echo("No changes specified. Use --runtime, --file, and/or --install.")
+        return
+    # A triple cannot express the distinct allowed verdict. Keep the allow
+    # shorthand when the requested edit leaves its actions unchanged.
+    value = "allow" if allowed and triple == original else triple
+    getattr(app.cfg.admission, holder_name).actions[severity] = value
+    updated = [f"admission.{holder_name}.actions.{severity}"]
+    if holder_name == "defaults":
+        # Skills resolve the scanner gate (scanners.skill_scanner
+        # fail_on_severity / review_queue_min) before admission.defaults, and
+        # the gate covers every severity, so the edit is also the skill's own.
+        app.cfg.admission.skill.actions[severity] = dict(value) if isinstance(value, dict) else value
+        updated.append(f"admission.skill.actions.{severity}")
+    app.cfg.save()
+    ux.ok(f"Updated {' and '.join(updated)}: {', '.join(changed)}")
+    _reload_after_edit(app, "live", synced=True, reload_gateway=reload_gateway)
 
 
 @edit.command("actions")
@@ -1107,12 +1259,16 @@ _reload_option = click.option(
               help="Quarantine the files of a finding at this severity, or leave them (none)")
 @click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None,
               help="Block or allow installing an item with a finding at this severity (none: no rule)")
-@click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_policy_name_option
 @_reload_option
 @pass_ctx
 def edit_actions(app: AppContext, severity: str, runtime: str | None, file_action: str | None,
                  install: str | None, policy_name: str | None, reload_gateway: bool) -> None:
-    """Edit severity actions for the global policy."""
+    """Edit the severity actions of every asset type: admission.defaults,
+    and admission.skill, whose scanner gate outranks the defaults."""
+    if policy_name is None and not asset_lists.is_secure_client(app.cfg):
+        _edit_live_actions(app, "defaults", severity, runtime, file_action, install, reload_gateway)
+        return
     path, data, name = _resolve_editable_policy(app, policy_name)
 
     actions = data.setdefault("skill_actions", {})
@@ -1133,27 +1289,14 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
         click.echo("No changes specified.")
         return
 
-    synced = _save_and_maybe_sync(app, path, data, name)
-    before = _restart_only_config(app.cfg)
-    if synced:
-        # CLI skill-action paths fall back to config.yaml's skill_actions,
-        # which `policy activate` writes; an edit to the active policy
-        # updates them the same way. A draft edit leaves them alone.
-        app.cfg.skill_actions = _skill_actions_from_policy(data)
-        app.cfg.save()
-    ux.ok(f"Updated {severity.upper()} actions of {_edited_policy_label(app, name)}: {', '.join(changed)}")
-    _reload_after_edit(
-        app,
-        name,
-        synced=synced,
-        reload_gateway=reload_gateway,
-        needs_restart=_restart_only_config(app.cfg) != before,
-    )
+    synced = _save_policy_edit(app, path, data, name)
+    ux.ok(f"Updated {severity.upper()} actions of {_edited_policy_label(name)}: {', '.join(changed)}")
+    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
 @edit.command("scanner")
 @click.option("--type", "scanner_type", required=True, type=click.Choice(["skill", "mcp", "plugin"]),
-              help="Scanner type to override")
+              help="Asset type to override")
 @click.option("--severity", "-s", required=True, type=click.Choice(SEVERITIES),
               help="Severity level to configure")
 @click.option("--runtime", type=click.Choice(RUNTIME_CHOICES), default=None,
@@ -1162,14 +1305,27 @@ def edit_actions(app: AppContext, severity: str, runtime: str | None, file_actio
               help="Quarantine the files of a finding at this severity, or leave them (none)")
 @click.option("--install", type=click.Choice(INSTALL_CHOICES), default=None,
               help="Block or allow installing an item with a finding at this severity (none: no rule)")
-@click.option("--remove", is_flag=True, help="Remove this override (revert to global)")
-@click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@click.option("--remove", is_flag=True, help="Remove this override (revert to the inherited action)")
+@_policy_name_option
 @_reload_option
 @pass_ctx
 def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str | None,
                  file_action: str | None, install: str | None, remove: bool,
                  policy_name: str | None, reload_gateway: bool) -> None:
-    """Edit per-scanner-type severity overrides."""
+    """Edit one asset type's severity actions (admission.<type>.actions)."""
+    if policy_name is None and not asset_lists.is_secure_client(app.cfg):
+        if remove:
+            actions = getattr(app.cfg.admission, scanner_type).actions
+            if severity not in actions:
+                click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
+                return
+            del actions[severity]
+            app.cfg.save()
+            ux.ok(f"Removed admission.{scanner_type}.actions.{severity}.")
+            _reload_after_edit(app, "live", synced=True, reload_gateway=reload_gateway)
+            return
+        _edit_live_actions(app, scanner_type, severity, runtime, file_action, install, reload_gateway)
+        return
     path, data, name = _resolve_editable_policy(app, policy_name)
 
     overrides = data.setdefault("scanner_overrides", {})
@@ -1180,8 +1336,8 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
             del scanner_ovr[severity]
             if not scanner_ovr:
                 del overrides[scanner_type]
-            synced = _save_and_maybe_sync(app, path, data, name)
-            ux.ok(f"Removed {scanner_type}/{severity.upper()} override from {_edited_policy_label(app, name)}.")
+            synced = _save_policy_edit(app, path, data, name)
+            ux.ok(f"Removed {scanner_type}/{severity.upper()} override from {_edited_policy_label(name)}.")
             _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
         else:
             click.echo(f"No override found for {scanner_type}/{severity.upper()}.")
@@ -1205,9 +1361,9 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
         click.echo("No changes specified. Use --runtime, --file, and/or --install.")
         return
 
-    synced = _save_and_maybe_sync(app, path, data, name)
+    synced = _save_policy_edit(app, path, data, name)
     ux.ok(
-        f"Updated scanner override {scanner_type}/{severity.upper()} in {_edited_policy_label(app, name)}: "
+        f"Updated scanner override {scanner_type}/{severity.upper()} in {_edited_policy_label(name)}: "
         f"{', '.join(changed)}"
     )
     _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
@@ -1220,28 +1376,35 @@ def edit_scanner(app: AppContext, scanner_type: str, severity: str, runtime: str
               help="Lowest severity to alert on: LOW, MEDIUM, HIGH, CRITICAL (or 1-4)")
 @click.option("--cisco-trust-level", type=click.Choice(["full", "advisory", "none"]), default=None,
               help="How Cisco AI Defense verdicts count: full (can block), advisory (shown, never block), none")
-@click.option("--add-pattern", nargs=2, multiple=True, metavar="CATEGORY PATTERN",
-              help="Add a guardrail pattern (e.g. --add-pattern injection 'new pattern')")
-@click.option("--remove-pattern", nargs=2, multiple=True, metavar="CATEGORY PATTERN",
-              help="Remove a guardrail pattern")
-@click.option("--set-severity-mapping", nargs=2, multiple=True, metavar="CATEGORY SEVERITY",
-              help="Set severity mapping (e.g. --set-severity-mapping injection CRITICAL)")
-@click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
+@_policy_name_option
 @_reload_option
 @pass_ctx
 def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold: int | None,
-                   cisco_trust_level: str | None, add_pattern: tuple, remove_pattern: tuple,
-                   set_severity_mapping: tuple, policy_name: str | None, reload_gateway: bool) -> None:
-    """Edit guardrail thresholds, patterns, and severity mappings.
+                   cisco_trust_level: str | None, policy_name: str | None, reload_gateway: bool) -> None:
+    """Edit guardrail thresholds and the Cisco AI Defense trust level.
 
     Thresholds are severities: LOW, MEDIUM, HIGH or CRITICAL (or their
-    ranks 1-4).
-    They govern LLM traffic through the guardrail proxy only. Tool calls
-    from hook connectors (Claude Code, Codex, ...) are blocked at the level
-    set with 'defenseclaw guardrail block-at' / 'alert-at' instead.
-
-    Edits the active policy unless --policy-name names another one.
+    ranks 1-4). A live edit writes guardrail.block_at / alert_at and
+    guardrail.cisco_trust_level in config.yaml.
     """
+    if policy_name is None and not asset_lists.is_secure_client(app.cfg):
+        changed = []
+        if block_threshold is not None:
+            app.cfg.guardrail.block_at = _RANK_NAMES[block_threshold]
+            changed.append(f"block_at={app.cfg.guardrail.block_at}")
+        if alert_threshold is not None:
+            app.cfg.guardrail.alert_at = _RANK_NAMES[alert_threshold]
+            changed.append(f"alert_at={app.cfg.guardrail.alert_at}")
+        if cisco_trust_level is not None:
+            app.cfg.guardrail.cisco_trust_level = "" if cisco_trust_level == "full" else cisco_trust_level
+            changed.append(f"cisco_trust_level={cisco_trust_level}")
+        if not changed:
+            click.echo("No changes specified.")
+            return
+        app.cfg.save()
+        ux.ok(f"Guardrail updated: {', '.join(changed)}")
+        _reload_after_edit(app, "live", synced=True, reload_gateway=reload_gateway)
+        return
     path, data, name = _resolve_editable_policy(app, policy_name)
 
     guardrail = data.setdefault("guardrail", {})
@@ -1257,40 +1420,12 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
         guardrail["cisco_trust_level"] = cisco_trust_level
         changed.append(f"cisco_trust_level={cisco_trust_level}")
 
-    patterns = guardrail.setdefault("patterns", {})
-    for category, pattern in add_pattern:
-        cat_list = patterns.setdefault(category, [])
-        if pattern not in cat_list:
-            cat_list.append(pattern)
-            changed.append(f"+pattern {category}:'{pattern}'")
-        else:
-            click.echo(f"  Pattern already exists in {category}: '{pattern}'")
-
-    for category, pattern in remove_pattern:
-        cat_list = patterns.get(category, [])
-        if pattern in cat_list:
-            cat_list.remove(pattern)
-            changed.append(f"-pattern {category}:'{pattern}'")
-        else:
-            click.echo(f"  Pattern not found in {category}: '{pattern}'")
-
-    mappings = guardrail.setdefault("severity_mappings", {})
-    for category, severity in set_severity_mapping:
-        mappings[category] = severity
-        changed.append(f"mapping {category}={severity}")
-
     if not changed:
         click.echo("No changes specified.")
         return
 
-    synced = _save_and_maybe_sync(app, path, data, name)
-    ux.ok(f"Guardrail of {_edited_policy_label(app, name)} updated: {', '.join(changed)}")
-    if block_threshold is not None or alert_threshold is not None:
-        click.echo(
-            "  Note: these thresholds apply to LLM traffic through the guardrail proxy. "
-            "To change when hook tool calls are blocked, run "
-            "'defenseclaw guardrail block-at LEVEL [--connector NAME]'."
-        )
+    synced = _save_policy_edit(app, path, data, name)
+    ux.ok(f"Guardrail of {_edited_policy_label(name)} updated: {', '.join(changed)}")
     _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
 
 
@@ -1303,13 +1438,14 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
 @click.option("--remove-blocked", multiple=True, help="Remove a blocked destination")
 @click.option("--add-port", multiple=True, type=int, help="Add an allowed port")
 @click.option("--remove-port", multiple=True, type=int, help="Remove an allowed port")
-@click.option("--policy-name", "-p", default=None, help="Policy to edit (default: active policy)")
-@_reload_option
+@click.option("--policy-name", "-p", required=True, help="Named policy (preset) to edit")
 @pass_ctx
 def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple,
                   remove_domain: tuple, add_blocked: tuple, remove_blocked: tuple,
-                  add_port: tuple, remove_port: tuple, policy_name: str | None, reload_gateway: bool) -> None:
-    """Edit egress firewall rules (domains, ports, blocked destinations)."""
+                  add_port: tuple, remove_port: tuple, policy_name: str) -> None:
+    """Edit a named policy's egress firewall rules (domains, ports, blocked
+    destinations). The gateway does not enforce them; OpenShell sandboxes use
+    openshell: in config.yaml."""
     path, data, name = _resolve_editable_policy(app, policy_name)
 
     fw = data.setdefault("firewall", {})
@@ -1353,9 +1489,8 @@ def edit_firewall(app: AppContext, default_action: str | None, add_domain: tuple
         click.echo("No changes specified.")
         return
 
-    synced = _save_and_maybe_sync(app, path, data, name)
-    ux.ok(f"Firewall of {_edited_policy_label(app, name)} updated: {', '.join(changed)}")
-    _reload_after_edit(app, name, synced=synced, reload_gateway=reload_gateway)
+    _save_policy_edit(app, path, data, name)
+    ux.ok(f"Firewall of {_edited_policy_label(name)} updated: {', '.join(changed)}")
 
 
 # ---------------------------------------------------------------------------
@@ -1386,17 +1521,12 @@ def _default_policy_data() -> dict:
                 "min_severity": "HIGH",
             },
             "cisco_trust_level": "full",
-            "patterns": {},
-            "severity_mappings": {},
         },
         "firewall": {
             "default_action": "deny",
             "blocked_destinations": ["169.254.169.254", "fd00:ec2::254"],
             "allowed_domains": [],
             "allowed_ports": [443, 80],
-        },
-        "enforcement": {
-            "max_enforcement_delay_seconds": 2,
         },
         "audit": {
             "log_all_actions": True,
@@ -1414,26 +1544,6 @@ def _action_for_level(level: str) -> dict:
         return {"file": "none", "runtime": "enable", "install": "none"}
     else:
         return {"file": "none", "runtime": "enable", "install": "none"}
-
-
-def _get_active_policy_name(app: AppContext) -> str | None:
-    """Determine which policy is currently active by reading OPA data.json.
-
-    Prefers the user policy_dir copy (where activation writes), falling
-    back to the bundled repo-local copy.
-    """
-    user_data_json = os.path.join(app.cfg.policy_dir, "rego", "data.json")
-    bundled_data_json = os.path.join(_bundled_policies_dir(), "rego", "data.json")
-
-    for data_json in (user_data_json, bundled_data_json):
-        if os.path.isfile(data_json):
-            try:
-                with open(data_json) as f:
-                    data = json.load(f)
-                return data.get("config", {}).get("policy_name")
-            except (OSError, json.JSONDecodeError):
-                continue
-    return None
 
 
 def _is_bundled_path(path: str) -> bool:
@@ -1471,31 +1581,22 @@ def _user_policy_dest(app: AppContext, name: str) -> str:
 
 
 def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[str, dict, str]:
-    """Resolve the policy to edit. Returns ``(path, data, name)``.
+    """Resolve the named policy to edit. Returns ``(path, data, name)``.
 
     ``path`` is always a writable location under the user policy dir:
     editing a built-in copies it out of the bundled wheel dir first
     (copy-on-write, OTHER-4) so we never write back into site-packages,
-    which is lost on upgrade and may be read-only. ``name`` is the
-    resolved policy name so callers can gate the live OPA sync on whether
-    the edited policy is the active one (OTHER-2). Raises ``SystemExit(1)``
+    which is lost on upgrade and may be read-only. Raises ``SystemExit(1)``
     when the policy can't be found.
     """
-    if policy_name:
-        name = _sanitize_policy_name(policy_name)
-        path = _find_policy(app, name)
-        if not path:
-            _policy_not_found(app, policy_name)
-    else:
-        name = _get_active_policy_name(app)
-        path = _find_policy(app, name) if name else None
-        if not path:
-            click.echo(
-                "error: no active policy found. Activate one first: "
-                "defenseclaw policy activate <name>",
-                err=True,
-            )
-            raise SystemExit(1)
+    if policy_name is None and asset_lists.is_secure_client(app.cfg):
+        policy_name = _get_active_policy_name(app)
+        if not policy_name:
+            raise click.ClickException("Secure Client active policy not found in data.json")
+    name = _sanitize_policy_name(policy_name)
+    path = _find_policy(app, name)
+    if not path:
+        _policy_not_found(app, policy_name)
 
     data = _load_policy(path)
 
@@ -1514,40 +1615,53 @@ def _resolve_editable_policy(app: AppContext, policy_name: str | None) -> tuple[
     return path, data, name
 
 
-def _save_and_maybe_sync(app: AppContext, path: str, data: dict, name: str) -> bool:
-    """Persist the edited policy YAML, syncing the live OPA data.json only
-    when the edited policy is the active one (OTHER-2).
+def _get_active_policy_name(app: AppContext) -> str | None:
+    """Secure Client stores the live preset name in its v8 OPA data."""
+    path = os.path.join(app.cfg.policy_dir, "rego", "data.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data.get("config", {}).get("policy_name")
+    except (OSError, ValueError, AttributeError):
+        return None
 
-    Editing a non-active draft must not overwrite the gateway's live
-    data.json nor silently stamp the draft as active (a "tweak a draft"
-    action becoming a live policy swap). When the edited policy isn't
-    active we save the YAML and tell the operator how to apply it.
-    Returns True when the live (active) copy was synced.
-    """
-    _save_policy(path, data)
+
+def _save_policy_edit(app: AppContext, path: str, data: dict, name: str) -> bool:
+    """A Secure Client edit of its active preset must update the legacy OPA data."""
+    if not asset_lists.is_secure_client(app.cfg):
+        _save_draft(path, data, name)
+        return False
     active = _get_active_policy_name(app)
-    if active is not None and name == active:
+    if active == name:
+        # Check the target before saving the YAML, so a missing data file
+        # cannot leave a seemingly applied edit behind.
         _sync_opa_data(app, data)
+        _save_policy(path, data)
         return True
+    _save_draft(path, data, name)
+    return False
+
+
+def _save_draft(path: str, data: dict, name: str) -> None:
+    """Persist an edited named policy; activation applies it to config.yaml."""
+    _save_policy(path, data)
     click.echo(
-        f"  {ux.dim('Saved draft. Activate with:')} "
+        f"  {ux.dim('Saved. Apply it with:')} "
         f"defenseclaw policy activate {name}"
     )
-    return False
 
 
 def _reload_after_edit(
     app: AppContext, name: str, *, synced: bool, reload_gateway: bool, needs_restart: bool = False
 ) -> None:
-    """After editing the active policy, reload it like ``policy activate``."""
+    """After a live edit, reload like ``policy activate``."""
     if synced and reload_gateway:
         _reload_and_report(app, name, needs_restart=needs_restart)
 
 
-def _edited_policy_label(app: AppContext, name: str) -> str:
-    """"policy 'strict' (active)": the result line of an edit names the policy it changed (GAP-1667)."""
-    state = "active" if name == _get_active_policy_name(app) else "draft"
-    return f"policy '{name}' ({state})"
+def _edited_policy_label(name: str) -> str:
+    """"policy 'strict'": the result line of an edit names the policy it changed (GAP-1667)."""
+    return f"policy '{name}'"
 
 
 def _opa_runtime_action(runtime: str) -> str:
@@ -1556,18 +1670,21 @@ def _opa_runtime_action(runtime: str) -> str:
     Policy YAML may use either the enforcement vocabulary
     (``enable``/``disable``) or the OPA vocabulary (``allow``/``block``).
     Both ``disable`` and ``block`` mean "do not allow runtime execution"
-    and must map to ``block``; ``enable``/``allow`` (and anything
-    unrecognised) map to ``allow``. The previous
+    and must map to ``block``; ``enable``/``allow`` map to ``allow``.
+    Unknown values are rejected before activation. The previous
     ``"block" if runtime == "disable" else "allow"`` silently rewrote an
     existing ``runtime: block`` override to ``allow`` (F-0241), so a
     bundled override meant to block runtime execution was synced as an
     allow.
     """
-    return "block" if str(runtime).strip().lower() in ("disable", "block") else "allow"
+    value = str(runtime).strip().lower()
+    if value not in {"disable", "block", "enable", "allow"}:
+        raise click.ClickException(f"invalid runtime action {runtime!r}")
+    return "block" if value in ("disable", "block") else "allow"
 
 
-def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
-    """Sync OPA data.json with the activated policy settings.
+def _prepare_opa_data(app: AppContext, policy_data: dict) -> tuple[str, dict]:
+    """Prepare OPA data.json from a named policy without changing the file.
 
     This performs a complete sync of all policy dimensions:
     - config (admission settings, enforcement)
@@ -1577,22 +1694,18 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     - firewall (domains, ports, blocked destinations)
     - audit (retention, logging flags)
 
-    Writes to the user's policy_dir (where the gateway reads from).
-    Falls back to the bundled repo-local copy as a seed source.
+    Writes to the Secure Client user's policy_dir, which the gateway reads.
+    A missing file is an error because this branch no longer bundles v8 data.
     """
     user_rego_dir = os.path.join(app.cfg.policy_dir, "rego")
     user_data_json = os.path.join(user_rego_dir, "data.json")
-    bundled_data_json = os.path.join(_bundled_policies_dir(), "rego", "data.json")
-
     if os.path.isfile(user_data_json):
         data_json_path = user_data_json
-    elif os.path.isfile(bundled_data_json):
-        os.makedirs(user_rego_dir, exist_ok=True)
-        import shutil
-        shutil.copy2(bundled_data_json, user_data_json)
-        data_json_path = user_data_json
     else:
-        return
+        raise click.ClickException(
+            f"Secure Client OPA data file not found at {user_data_json}; "
+            "run `defenseclaw policy validate` and repair before activating"
+        )
 
     try:
         with open(data_json_path) as f:
@@ -1614,6 +1727,8 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
             f"run `defenseclaw policy validate` and repair before activating"
         ) from exc
 
+    if not isinstance(opa_data, dict):
+        raise click.ClickException(f"OPA data file at {data_json_path} must contain an object")
     # --- config section ---
     opa_data.setdefault("config", {})
     opa_data["config"]["policy_name"] = policy_data.get("name", "custom")
@@ -1711,9 +1826,71 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
             if key in audit_cfg:
                 opa_data["audit"][key] = audit_cfg[key]
 
-    with open(data_json_path, "w") as f:
-        json.dump(opa_data, f, indent=2)
-        f.write("\n")
+    return data_json_path, opa_data
+
+
+def _write_opa_data(path: str, data: dict) -> None:
+    """Replace legacy OPA data atomically, preserving its file mode."""
+    mode = os.stat(path).st_mode & 0o777
+    fd, staged = tempfile.mkstemp(prefix=".data-", suffix=".json", dir=os.path.dirname(path))
+    try:
+        os.chmod(staged, mode)
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(staged, path)
+    finally:
+        if os.path.exists(staged):
+            os.unlink(staged)
+
+
+def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
+    """Sync legacy OPA data for an active policy edit."""
+    _write_opa_data(*_prepare_opa_data(app, policy_data))
+
+
+def _validate_legacy_data(rego_dir: str) -> bool:
+    """Validate the Secure Client v8 OPA data that its gateway still loads."""
+    path = os.path.join(rego_dir, "data.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        ux.err(f"FAIL: data.json is missing or invalid at {path}: {exc}")
+        return False
+    if not isinstance(data, dict):
+        ux.err("FAIL: data.json must contain an object")
+        return False
+    errors = [f"missing {key}" for key in ("config", "actions", "severity_ranking") if key not in data]
+    for section in ("actions", "scanner_overrides"):
+        entries = data.get(section, {})
+        if not isinstance(entries, dict):
+            errors.append(f"{section} must be an object")
+            continue
+        if section == "scanner_overrides":
+            entries = {f"{kind}.{sev}": action for kind, group in entries.items()
+                       for sev, action in (group.items() if isinstance(group, dict) else [("", group)])}
+        for name, action in entries.items():
+            if not isinstance(action, dict):
+                errors.append(f"{section}.{name} must be an object")
+                continue
+            for field, choices in (
+                ("runtime", {"block", "allow"}),
+                ("file", {"quarantine", "none"}),
+                ("install", {"block", "allow", "none"}),
+            ):
+                if field == "install" and field not in action:
+                    continue
+                if action.get(field) not in choices:
+                    errors.append(f"{section}.{name}.{field} is invalid")
+    if errors:
+        for error in errors:
+            ux.err(f"FAIL: data.json {error}")
+        return False
+    ux.ok("data.json: OK")
+    return True
 
 
 def _has_rego_tests(rego_dir: str) -> bool:
@@ -1724,28 +1901,37 @@ def _has_rego_tests(rego_dir: str) -> bool:
     return False
 
 
-def _rego_tool_cmd(opa_args: list[str], gateway_args: list[str]) -> list[str] | None:
+def _rego_tool_cmd(opa_args: list[str], gateway_args: list[str], *, gateway_first: bool = False) -> list[str] | None:
     """Return the argv for a Rego check: 'opa' when installed, else the gateway.
 
     defenseclaw-gateway embeds OPA (``policy validate`` / ``policy test``), so
     a standard install can validate and test Rego without a separate 'opa'
-    binary (GAP-1091). Returns None when neither is available.
+    binary (GAP-1091). ``gateway_first`` picks the gateway whenever it is
+    installed: its ``policy validate`` is the loader the gateway runs, which
+    also refuses a module that reads data config_version 9 no longer
+    provides (data.config, data.actions), where 'opa check' accepts any data
+    reference. Returns None when neither is available.
     """
     import shutil
 
-    opa = shutil.which("opa")
-    if opa:
-        return [opa, *opa_args]
     from defenseclaw.gateway import resolve_gateway_binary
 
-    gateway = resolve_gateway_binary()
+    opa = shutil.which("opa")
+    gateway = resolve_gateway_binary() if gateway_first or not opa else None
     if gateway:
         return [gateway, *gateway_args]
+    if opa:
+        return [opa, *opa_args]
     return None
 
 
-def _try_rego_compile(rego_dir: str) -> bool:
-    """Try to compile Rego modules. Returns True on success."""
+def _try_rego_compile(rego_dir: str, cfg=None) -> bool:
+    """Try to compile Rego modules. Returns True on success.
+
+    The gateway gives the verdict when it is installed, so a module the
+    gateway refuses never passes here; a Secure Client host keeps the 'opa'
+    first order of main (issue #1092).
+    """
     rego_files = [
         os.path.join(rego_dir, f) for f in os.listdir(rego_dir)
         if f.endswith(".rego") and not f.endswith("_test.rego")
@@ -1754,12 +1940,18 @@ def _try_rego_compile(rego_dir: str) -> bool:
         ux.err("FAIL: no .rego files found")
         return False
 
-    cmd = _rego_tool_cmd(["check", "--strict", *rego_files], ["policy", "validate", "--rego-dir", rego_dir])
+    cmd = _rego_tool_cmd(
+        ["check", "--strict", *rego_files],
+        ["policy", "validate", "--rego-dir", rego_dir],
+        gateway_first=not asset_lists.is_secure_client(cfg),
+    )
     if cmd is None:
         # A missing checker must not turn into a clean "Rego compilation: OK"
         # verdict, so the default fails closed. Operators can opt out with
         # DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1.
-        if os.environ.get("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA", "").strip() == "1":
+        from defenseclaw.envvars import lookup
+
+        if (lookup("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA") or "").strip() == "1":
             ux.echo("  No Rego checker found — skipping Rego compilation (opt-in).")
             return True
         ux.err("FAIL: no Rego checker found (neither 'opa' nor 'defenseclaw-gateway').")

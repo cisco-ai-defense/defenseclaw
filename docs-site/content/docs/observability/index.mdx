@@ -37,7 +37,7 @@ diagnostics:
 Collection happens once; every destination independently selects, redacts, and
 delivers its own projection.
 
-The source of truth is `observability:` under `config_version: 8`. It owns
+The source of truth is `observability:` under `config_version: 9`. It owns
 collection, local retention, resource attributes, sampling, metric policy,
 redaction profiles, destination routing, and transport settings. Notification
 webhooks remain a separate product surface.
@@ -58,7 +58,7 @@ boundary, per-profile inventory joins, and the opt-in plaintext email field.
 The minimal configuration is:
 
 ```yaml
-config_version: 8
+config_version: 9
 observability: {}
 ```
 
@@ -126,7 +126,7 @@ remain in `security.finding`. An asset lifecycle transition also produces an
 This configuration sends everything supported to both destinations:
 
 ```yaml
-config_version: 8
+config_version: 9
 observability:
   destinations:
     - name: engineering
@@ -311,11 +311,16 @@ permissions, edit only deliberate overrides, and validate before activation:
 defenseclaw config validate
 defenseclaw config show --effective --section observability
 defenseclaw observability plan
-defenseclaw-gateway restart
 defenseclaw doctor
 ```
 
-Stop if validation fails. A global or bucket redaction profile also changes local
+A running gateway applies a valid edit to buckets, redaction profiles and
+destinations by itself, with no restart, and keeps the previous policy if it
+rejects one; the **Policy** row of `defenseclaw doctor` shows which. The RELOAD
+column of `defenseclaw observability plan` says, per route, whether a change
+is `live_reloadable` or `restart_required`. Only a Prometheus destination (it
+owns a listener) and `observability.local.path` need `defenseclaw-gateway
+restart`. Stop if validation fails. A global or bucket redaction profile also changes local
 SQLite. To preserve full-fidelity local history while redacting a remote trust
 boundary, apply the profile only to that destination's `send` or matching route.
 
@@ -401,6 +406,16 @@ many records the local history is missing, so the gap in an audit export is
 not silent. Those records are not written to the local history afterwards;
 read them from the destinations that received them.
 
+The count also survives a gateway crash or restart before writes resume. The
+gateway keeps it in `local-write-losses.journal` in its data directory, a
+64 KiB file it reserves in advance so a full disk cannot stop the count. The
+file holds counts, times and SQLite failure classes, never record content.
+After the restart, the first stored `sqlite.write_failed` record reports the
+earlier losses with their journal generation, and later restarts do not
+report them again. If the gateway cannot write the journal, the missing
+records are counted in memory only: `defenseclaw status` and
+`defenseclaw doctor` report it until the journal can be written again.
+
 Seven days is also the default when `retention_days` is omitted. The gateway
 runs the graph-aware SQLite reaper after startup readiness and every six hours;
 CLI-only writes are reaped the next time the gateway starts. Existing v8
@@ -421,10 +436,10 @@ reuses the freed pages. Raw judge-body capture is
 controlled separately by `guardrail.retain_judge_bodies`. Redaction profiles
 do not apply to it: while it is `true` (the default), `judge_bodies.db` keeps
 the raw LLM-judge request and response text, which can quote secrets from
-prompts, for the same retention period. Set it to `false` and restart the
-gateway to stop that capture. The OPA
-`audit.retention_days` input is a distinct policy and does not configure this
-SQLite reaper.
+prompts, for the same retention period. Set it to `false` with
+`defenseclaw config set guardrail.retain_judge_bodies false` and restart the
+gateway to stop that capture; it is one of the
+[restart-required keys](/docs/reference/cli#restart-required-keys).
 
 The same window also bounds AI discovery scan history in
 `<data_dir>/inventory.db`. When continuous discovery is enabled, the gateway

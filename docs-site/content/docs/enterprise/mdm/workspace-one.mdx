@@ -227,6 +227,17 @@ Pass `-Purge` to also remove each enrolled account's
 See [Exit codes](/docs/enterprise/mdm#exit-codes) and
 [Lifecycle error codes](/docs/enterprise/troubleshooting#lifecycle-error-codes).
 
+## Deliver a custom macOS rule pack
+
+Before the first pkg install, add a root **stage-pack** script that copies the
+pack into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with
+`root:wheel` ownership, `0755` directories and `0644` files. Use the exact
+[stage-pack script and pin example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack).
+Run it before the config and pkg steps. In `config.yaml`, set
+`guardrail.rule_pack` to the pack name and
+`guardrail.custom_packs.<name>` to that absolute path and its
+`sha256:<digest>` pin. Stage the pack again before reinstalling after purge.
+
 ## macOS
 
 ### How Workspace ONE runs macOS apps, scripts and sensors
@@ -255,8 +266,10 @@ On the app's **Scripts** settings:
 
 The pre-install script puts your config at the layout path
 `/opt/cisco/defenseclaw/etc/config.yaml` before the package installs, so the
-package's own `ensure --from-package` applies it on the first install. It never
-overwrites an existing config:
+package's own `ensure --from-package` applies it on the first install. Once the
+package is installed (its pkg receipt exists) it never overwrites the config.
+Until then it replaces it, so a redeploy after a first install that failed on
+the config installs the fixed one:
 
 ```bash
 #!/bin/bash
@@ -264,12 +277,14 @@ overwrites an existing config:
 set -eu
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 layout=/opt/cisco/defenseclaw/etc
-[ -e "$layout/config.yaml" ] && exit 0
+if [ -e "$layout/config.yaml" ] && pkgutil --pkg-info com.cisco.defenseclaw.enterprise >/dev/null 2>&1; then
+    exit 0
+fi
 umask 022
 mkdir -p "$layout"
 tmp=$(mktemp "$layout/.config.yaml.XXXXXX")
 cat >"$tmp" <<'DEFENSECLAW_CONFIG'
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime
 policy_dir: /opt/cisco/defenseclaw/etc/policies
@@ -311,7 +326,7 @@ DC_ACTION=ensure
 
 dc_inline_config() {
     cat <<'DEFENSECLAW_CONFIG'
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime
 policy_dir: /opt/cisco/defenseclaw/etc/policies
@@ -392,7 +407,7 @@ true` and `credential: ai-defense-api-key` in the config.
 | Where | What |
 | --- | --- |
 | Workspace ONE: the device's **Scripts** and **Sensors** tabs | Script status and logs, and sensor values |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Each run of `defenseclaw-enterprise.sh` and `uninstall.sh` that gets past its argument checks, with its result (root, `0600`). `detect.sh` does not log. |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure runs, with their results (root, `0600`). Uninstall removes this log with the machine state; use the MDM policy or audit log for the uninstall result. `detect.sh` does not log. |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The package's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | The automatic apply and daily verify jobs |
 

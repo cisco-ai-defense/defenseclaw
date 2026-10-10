@@ -303,8 +303,12 @@ def test_implicit_tui_refuses_legacy_terminal_with_actionable_message() -> None:
         assert main_mod._try_launch_tui() is True
 
     run_tui.assert_not_called()
-    assert "Windows Terminal or PowerShell 7" in stderr.getvalue()
-    assert "defenseclaw status" in stderr.getvalue()
+    if sys.platform == "win32":
+        assert "needs a UTF-8 capable terminal" in stderr.getvalue()
+        assert "Windows Terminal" in stderr.getvalue()
+    else:
+        assert "needs UTF-8 output" in stderr.getvalue()
+        assert "terminal or tmux" in stderr.getvalue() or "Terminal.app" in stderr.getvalue()
 
 
 def test_implicit_tui_launches_on_capable_terminal() -> None:
@@ -370,7 +374,7 @@ def test_explicit_tui_uses_the_same_capability_guard() -> None:
     with mock.patch.object(ux, "terminal_supports_tui", return_value=False):
         rejected = runner.invoke(tui, catch_exceptions=False)
     assert rejected.exit_code != 0
-    assert "Windows Terminal or PowerShell 7" in rejected.output
+    assert "terminal on stdin and stdout" in rejected.output
 
     with (
         mock.patch.object(ux, "terminal_supports_tui", return_value=True),

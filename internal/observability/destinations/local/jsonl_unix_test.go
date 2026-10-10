@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 )
 
 func TestJSONLExactFIFOOutputAndOwnerOnlyPermissions(t *testing.T) {
@@ -119,6 +121,9 @@ func TestJSONLRefusesSymlinkHardlinkNonRegularAndUnsafeMode(t *testing.T) {
 		if _, err := NewJSONL(JSONLConfig{Path: path, MaxSizeMB: 1}); !IsError(err, ErrorUnsafePath) {
 			t.Fatalf("NewJSONL error = %v, want unsafe_path", err)
 		}
+		if problem := JSONLPathProblem(path); !strings.Contains(problem, "hard link") {
+			t.Fatalf("JSONLPathProblem = %q, want the hard link", problem)
+		}
 	})
 
 	t.Run("non-regular", func(t *testing.T) {
@@ -138,6 +143,11 @@ func TestJSONLRefusesSymlinkHardlinkNonRegularAndUnsafeMode(t *testing.T) {
 		}
 		if _, err := NewJSONL(JSONLConfig{Path: path, MaxSizeMB: 1}); !IsError(err, ErrorUnsafePath) {
 			t.Fatalf("NewJSONL error = %v, want unsafe_path", err)
+		}
+		// config validate and ensure refuse it too, naming the mode
+		// (GAP-1033: they passed it and only the gateway start failed).
+		if problem := JSONLPathProblem(path); !strings.Contains(problem, "mode 0640") {
+			t.Fatalf("JSONLPathProblem = %q, want the file mode", problem)
 		}
 	})
 }
@@ -458,5 +468,52 @@ func TestJSONLUnwritableFileAtStartDefersTheOpen(t *testing.T) {
 	}
 	if body, err := os.ReadFile(path); err != nil || string(body) != "{\"index\":1}\n" {
 		t.Fatalf("file after the open succeeded = %q, %v", body, err)
+	}
+}
+
+func TestJSONLInaccessibleParentAtStartDefersAndRecovers(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can traverse a mode 000 directory")
+	}
+	parent := filepath.Join(t.TempDir(), "closed")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	path := filepath.Join(parent, "events.jsonl")
+	adapter, err := NewJSONL(JSONLConfig{Path: path, MaxSizeMB: 1})
+	if err != nil || adapter == nil || !adapter.OpenDeferred() {
+		t.Fatalf("NewJSONL = %v, adapter %v; want deferred open", err, adapter)
+	}
+	if got := adapter.Deliver(context.Background(), delivery.Batch{}); got.Outcome != delivery.OutcomeTransient ||
+		got.FailureCode != delivery.FailureCodeFileWriteFailed {
+		t.Fatalf("delivery with inaccessible parent = %+v", got)
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := newTestDispatcher(t, "jsonl-parent-deferred", adapter, 8*1024*1024, 4)
+	enqueue(t, dispatcher, "jsonl-parent-recovered", `{"index":1}`)
+	drainAndCloseDispatcher(t, dispatcher)
+	if got, err := os.ReadFile(path); err != nil || string(got) != "{\"index\":1}\n" {
+		t.Fatalf("recovered file = %q, %v", got, err)
+	}
+}
+
+func TestJSONLPathProblemRefusesUnusableFolder(t *testing.T) {
+	folder := filepath.Join(t.TempDir(), "closed")
+	if err := os.Mkdir(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(folder, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(folder, 0o700) })
+	path := filepath.Join(folder, "events.jsonl")
+	if problem := JSONLPathProblem(path); !strings.Contains(problem, "cannot traverse or write") {
+		t.Fatalf("JSONLPathProblem(%s) = %q, want unusable-folder error", path, problem)
 	}
 }

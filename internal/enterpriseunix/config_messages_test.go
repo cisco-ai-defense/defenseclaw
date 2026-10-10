@@ -13,13 +13,63 @@
 package enterpriseunix
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
+
+type fakeJSONLACLReader func(string, os.FileMode) (posixacl.View, error)
+
+func (f fakeJSONLACLReader) Read(path string, mode os.FileMode) (posixacl.View, error) {
+	return f(path, mode)
+}
+
+func TestManagedConfigRefusalsHideDiagnosticCodes(t *testing.T) {
+	h := newTestHost(t, "linux")
+	for _, err := range []error{
+		&config.V8YAMLError{Code: config.V8YAMLErrorDuplicateKey, Path: "$.guardrail.mode", Line: 3, Summary: "duplicate mapping key"},
+		&config.V8YAMLError{Code: config.V8YAMLErrorInvalidUTF8, Path: "$", Summary: "invalid UTF-8"},
+		&config.V8SemanticError{Path: "$.guardrail", Summary: "unknown rule pack"},
+	} {
+		got, ok := h.env.plainConfigProblem(err, "/tmp/admin.yaml", nil)
+		if !ok || !strings.Contains(got, "/tmp/admin.yaml") || strings.Contains(got, "[$") ||
+			strings.Contains(got, "[yaml_") || strings.Contains(got, "[config_") || strings.Contains(got, " $.") {
+			t.Fatalf("managed refusal = %q (handled %t)", got, ok)
+		}
+	}
+}
+
+func TestManagedConfigPatternNamesAllowedFormat(t *testing.T) {
+	h := newTestHost(t, "linux")
+	for _, tc := range []struct{ path, expected string }{
+		{"$.guardrail.rule_pack", "lowercase letters, digits, - or _"},
+		{"$.guardrail.custom_packs.example.digest", "sha256: followed by 64 lowercase hexadecimal"},
+	} {
+		got, ok := h.env.plainConfigProblem(&config.V8SchemaError{Path: tc.path, Keyword: "pattern", Expected: "a value matching the schema-declared pattern"}, "/tmp/admin.yaml", nil)
+		if !ok || !strings.Contains(got, tc.expected) || strings.Contains(got, "schema-declared pattern") {
+			t.Fatalf("%s: %q", tc.path, got)
+		}
+	}
+}
+
+func TestManagedConfigModeAndProfileNameOnlyInstalledChoices(t *testing.T) {
+	h := newTestHost(t, "linux")
+	mode := &config.V8SchemaError{Path: "$.deployment_mode", Keyword: "enum", Expected: `one of ["","managed_enterprise","saas"]`, Value: "standalone"}
+	got, ok := h.env.plainConfigProblem(mode, "/tmp/admin.yaml", nil)
+	if !ok || !strings.Contains(got, "allowed values: managed_enterprise") || strings.Contains(got, "saas") {
+		t.Fatalf("deployment mode = %q", got)
+	}
+	got, ok = h.env.plainConfigProblem(errors.New(`config: enterprise.profile="secure_client" conflicts with immutable DEFENSECLAW_ENTERPRISE_PROFILE="standalone"`), "/tmp/admin.yaml", nil)
+	if !ok || !strings.Contains(got, "fixed to standalone") || strings.Contains(got, "DEFENSECLAW_ENTERPRISE_PROFILE") {
+		t.Fatalf("enterprise profile = %q", got)
+	}
+}
 
 // GAP-1948, GAP-1944: a bad enum value and an unstored credential are
 // reported in plain words, with the value, the line and the fix, and
@@ -102,5 +152,188 @@ func TestUninstallKeptLineNamesAccounts(t *testing.T) {
 		"To delete them too, install the DefenseClaw enterprise package again and run `"
 	if !strings.Contains(summary, want) || strings.Contains(summary, "carol") {
 		t.Fatalf("kept line:\n%s", summary)
+	}
+}
+
+// installMessage runs a first install with raw as the config and returns
+// the config_invalid message.
+func installMessage(t *testing.T, h *testHost, raw string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "admin.yaml")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: path})
+	requireError(t, r, codeConfig)
+	if exists(h.env.P(h.env.Layout.ConfigPath)) {
+		t.Fatal("a refused config was installed")
+	}
+	return r.Errors[0].Message
+}
+
+// GAP-0939, GAP-0940: a destination secret read from an environment
+// variable is refused up front whether or not the variable is set (set, the
+// config was applied and the gateway failed to start into a rollback), and
+// a destination with both fields gets the documented sentence.
+func TestManagedConfigRefusesEnvironmentSecretReferences(t *testing.T) {
+	hec := "observability:\n  destinations:\n    - name: eoi-hec\n      kind: splunk_hec\n" +
+		"      endpoint: https://hec.example.test:8088/services/collector\n      token_env: EO3_REF\n"
+	for _, value := range []string{"", "set"} {
+		t.Setenv("EO3_REF", value)
+		h := newTestHost(t, "linux")
+		got := installMessage(t, h, string(DefaultConfig(h.env.Layout))+hec)
+		if !strings.Contains(got, "(eoi-hec) token_env reads a secret from an environment variable") ||
+			!strings.Contains(got, "never passes one to its services") || !strings.Contains(got, "token_credential") ||
+			!strings.Contains(got, "enterprise secret set") || strings.Contains(got, "keys set") {
+			t.Fatalf("EO3_REF=%q: %s", value, got)
+		}
+	}
+	h := newTestHost(t, "linux")
+	both := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: eo3-http\n      kind: http_jsonl\n" +
+		"      endpoint: https://collector.example.test/ingest\n      bearer_credential: eo3-http-token\n      bearer_env: EO3_REF\n"
+	if got := installMessage(t, h, both); !strings.Contains(got, "(eo3-http) sets both bearer_credential and bearer_env; set either bearer_credential or bearer_env, not both") {
+		t.Fatalf("both fields: %s", got)
+	}
+}
+
+// GAP-0829: a malformed agent identity names the assignment, the value and
+// the form.
+func TestManagedConfigNamesTheMalformedAgentIdentity(t *testing.T) {
+	h := newTestHost(t, "linux")
+	raw := string(DefaultConfig(h.env.Layout)) + "  profiles:\n    strict:\n      mode: action\n" +
+		"  profile_assignments:\n    - profile: strict\n      match:\n        agents: [agt-49fb88f74f28975]\n"
+	got := installMessage(t, h, raw)
+	if !strings.Contains(got, `guardrail.profile_assignments[0].match.agents[0] is "agt-49fb88f74f28975"`) ||
+		!strings.Contains(got, "agt- followed by 16 lowercase hexadecimal digits") {
+		t.Fatalf("agent identity: %s", got)
+	}
+}
+
+// GAP-0917: an administrator-created file can pass the path check while the
+// unprivileged gateway cannot append to it.
+func TestManagedConfigRefusesJSONLFileOwnedByAnotherAccount(t *testing.T) {
+	h := newTestHost(t, "linux")
+	path := "/var/log/defenseclaw/events.jsonl"
+	if err := os.MkdirAll(filepath.Dir(h.env.P(path)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(path), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.accounts.Ensure(t.Context(), h.env.Layout.ServiceUser); err != nil {
+		t.Fatal(err)
+	}
+	h.owners[h.env.P(path)] = [2]int{0, 0}
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: events\n      kind: jsonl\n      path: " + path + "\n"
+	got := installMessage(t, h, raw)
+	if !strings.Contains(got, `destination "events" writes `+path) ||
+		!strings.Contains(got, "gateway service account cannot append") {
+		t.Fatalf("existing JSONL file refusal: %s", got)
+	}
+}
+
+// GAP-1146: a missing JSONL parent still needs a writable existing ancestor.
+func TestManagedConfigRefusesJSONLUnderUnwritableAncestor(t *testing.T) {
+	h := newTestHost(t, "linux")
+	ancestor := h.env.P("/var/log/defenseclaw/exports")
+	if err := os.MkdirAll(ancestor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(ancestor, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	path := "/var/log/defenseclaw/exports/new/events.jsonl"
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: events\n      kind: jsonl\n      path: " + path + "\n"
+	if got := installMessage(t, h, raw); !strings.Contains(got, "exports") || !strings.Contains(got, "cannot create") {
+		t.Fatalf("missing JSONL parent accepted or unclear refusal: %s", got)
+	}
+}
+
+// GAP-1362: an existing parent must be writable by the gateway account.
+func TestManagedConfigRefusesJSONLUnderExistingUnwritableParent(t *testing.T) {
+	h := newTestHost(t, "linux")
+	parent := "/var/log/defenseclaw/reports"
+	if err := os.MkdirAll(h.env.P(parent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.accounts.Ensure(t.Context(), h.env.Layout.ServiceUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.owners[h.env.P(parent)] = [2]int{0, 0}
+	previous := jsonlACLReader
+	t.Cleanup(func() { jsonlACLReader = previous })
+	jsonlACLReader = fakeJSONLACLReader(func(path string, mode os.FileMode) (posixacl.View, error) {
+		if path == h.env.P(parent) {
+			return posixacl.View{Present: true, Owner: 7, Group: 5, Other: 5, Mask: 5,
+				Users: []posixacl.Entry{{Kind: "user", ID: account.UID, Perm: 0}}}, nil
+		}
+		return posixacl.View{}, nil
+	})
+	path := parent + "/events.jsonl"
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: events\n      kind: jsonl\n      path: " + path + "\n"
+	if got := installMessage(t, h, raw); !strings.Contains(got, "gateway service account") || !strings.Contains(got, "reports") {
+		t.Fatalf("existing JSONL parent accepted or unclear refusal: %s", got)
+	}
+}
+
+// GAP-0890: a jsonl destination the gateway cannot write is refused before
+// anything changes, naming the destination, the path and the rule.
+func TestManagedConfigRefusesUnsafeJSONLDestinations(t *testing.T) {
+	for path, rule := range map[string]string{
+		"/var/log/defenseclaw/siem":         "is a directory",
+		"/var/log/defenseclaw/link.jsonl":   "is a symbolic link",
+		"/var/log/defenseclaw/open/x.jsonl": "a folder its group or other users can write",
+		"/var/log/siem/x.jsonl":             "outside the folders the gateway service may write",
+	} {
+		h := newTestHost(t, "linux")
+		for _, dir := range []string{"/var/log/defenseclaw/siem", "/var/log/defenseclaw/open"} {
+			if err := os.MkdirAll(h.env.P(dir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chmod(h.env.P("/var/log/defenseclaw/open"), 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("/etc/hosts", h.env.P("/var/log/defenseclaw/link.jsonl")); err != nil {
+			t.Fatal(err)
+		}
+		raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: rv-jsonl\n      kind: jsonl\n      path: " + path + "\n"
+		if got := installMessage(t, h, raw); !strings.Contains(got, `destination "rv-jsonl" writes `+path) || !strings.Contains(got, rule) {
+			t.Fatalf("%s: %s", path, got)
+		}
+	}
+}
+
+// GAP-1196: mode 0600 does not exclude a macOS ACL reader on a custom
+// JSONL output. The config and the installed destination must both reject it.
+func TestMacJSONLDestinationReadACL(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	payload := h.payload("1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: payload}))
+	path := filepath.Join(h.env.Layout.LogDir, "custom-audit.jsonl")
+	if err := os.WriteFile(h.env.P(path), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	account := h.accounts.accounts[h.env.Layout.ServiceUser]
+	h.owners[h.env.P(path)] = [2]int{account.UID, account.GID}
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: custom-audit\n      kind: jsonl\n      path: " + path + "\n"
+	if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.runner.acls = map[string][]string{h.env.P(path): {"user:standard allow read,readattr"}}
+	result := h.run(Options{Action: ActionEnsure, ConfigFile: cfg})
+	if result.OK || !strings.Contains(messagesOf(result.Errors, codeConfig), "ACL") {
+		t.Fatalf("ensure accepted the JSONL read ACL: %+v", result)
+	}
+	delete(h.runner.acls, h.env.P(path))
+	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: cfg}))
+	h.runner.acls[h.env.P(path)] = []string{"user:standard allow read,readattr"}
+	for _, action := range []string{ActionStatus, ActionVerify, ActionEnsure} {
+		result := h.run(Options{Action: action})
+		if result.OK || !strings.Contains(messagesOf(result.Errors, codeVerify)+messagesOf(result.Errors, codeConfig), "ACL") {
+			t.Fatalf("%s missed the JSONL read ACL: %+v", action, result)
+		}
 	}
 }

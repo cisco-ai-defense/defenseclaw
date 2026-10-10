@@ -93,11 +93,23 @@ def content_hash_for_provenance(cfg: Config) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def config_generation() -> int:
+    """config_generation from config.generation.json (spec section 5), 0
+    before the first recorded write or when the file cannot be read."""
+    from defenseclaw import config as cfg_mod
+    from defenseclaw import config_writer
+
+    try:
+        return config_writer.read_generation_state(cfg_mod.config_path()).generation
+    except (OSError, ValueError):
+        return 0
+
+
 def provenance_quartet(cfg: Config) -> dict[str, Any]:
     return {
         "schema_version": 7,
         "content_hash": content_hash_for_provenance(cfg),
-        "generation": 0,
+        "generation": config_generation(),
         "binary_version": __version__,
     }
 

@@ -164,3 +164,16 @@ def test_setup_detail_lists_attention_checks_first() -> None:
 
     assert pairs["Command"].startswith("defenseclaw ")
     assert statuses == sorted(statuses, key=lambda status: {"FAIL": 0, "WARN": 1}.get(status, 2))
+
+
+def test_fail_mode_ignores_disabled_connector() -> None:
+    from defenseclaw.config import PerConnectorGuardrailConfig, default_config
+
+    cfg = default_config()
+    cfg.guardrail.mode = "action"
+    cfg.guardrail.hook_fail_mode = "closed"
+    cfg.guardrail.connectors = {
+        "claudecode": PerConnectorGuardrailConfig(mode="action", enabled=True),
+        "codex": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="open", enabled=False),
+    }
+    assert setup_catalog._fail_mode_text(cfg) == "fail closed"

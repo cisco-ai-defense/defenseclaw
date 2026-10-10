@@ -34,8 +34,10 @@ from datetime import datetime
 from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
+from typing import Any
 
 from defenseclaw.db import Store
+from defenseclaw.enforce.policy import tool_rule_entries
 from defenseclaw.models import ActionEntry, Counts, Event
 from defenseclaw.tui.panels.activity import (
     activity_mutations_from_v8_history,
@@ -106,9 +108,10 @@ class TUIReadResult:
 class TUIReadRepository:
     """Own a read connection and serialize all work onto one thread."""
 
-    def __init__(self, db_path: str | Path, *, timeout: float = 0.25) -> None:
+    def __init__(self, db_path: str | Path, *, timeout: float = 0.25, config: Any = None) -> None:
         self.db_path = str(db_path)
         self.timeout = timeout
+        self._config = config
         self._executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="defenseclaw-tui-read",
@@ -257,13 +260,13 @@ class TUIReadRepository:
             slow_error_count = len(errors)
             tool_actions = self._component(
                 "tools",
-                lambda: tuple(store.list_actions_by_type("tool")),
+                lambda: tuple(tool_rule_entries(self._config, store)),
                 previous.tool_actions if previous else (),
                 errors,
             )
             enforcement_counts = self._component(
                 "counts",
-                store.get_enforcement_counts,
+                lambda: store.get_enforcement_counts(cfg=self._config),
                 previous.enforcement_counts if previous else Counts(),
                 errors,
             )
@@ -336,10 +339,10 @@ class TUIReadRepository:
     def _refresh_slow_components(self, store: Store, previous: TUIReadSnapshot, now: float) -> TUIReadResult:
         errors: list[str] = []
         tool_actions = self._component(
-            "tools", lambda: tuple(store.list_actions_by_type("tool")), previous.tool_actions, errors
+            "tools", lambda: tuple(tool_rule_entries(self._config, store)), previous.tool_actions, errors
         )
         enforcement_counts = self._component(
-            "counts", store.get_enforcement_counts, previous.enforcement_counts, errors
+            "counts", lambda: store.get_enforcement_counts(cfg=self._config), previous.enforcement_counts, errors
         )
         if not errors:
             self._slow_components_loaded_at = now

@@ -16,7 +16,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeChangedConfig(t *testing.T, h *testHost, from, to string) string {
@@ -39,12 +41,11 @@ func touched(calls []string, unit string) []string {
 	return out
 }
 
-// A transaction's own writes (the snapshot links config.yaml, --config
-// rewrites it) fire the apply path unit, whose run then waits for the
-// lifecycle lock. Quiesce stopped that waiting run 27 ms later, so every
-// `ensure --config` left defenseclaw-enterprise-apply.service failed (seen
-// on RHEL and Ubuntu), and an administrator change that fired it was
-// dropped. The queued run is left alone through the change and a rollback.
+// A change made while a transaction runs fires the apply path unit, whose
+// run then waits for the lifecycle lock. Quiesce stopped that waiting run
+// 27 ms later, which left defenseclaw-enterprise-apply.service failed (seen
+// on RHEL and Ubuntu) and dropped the administrator change that fired it.
+// The queued run is left alone through the change and a rollback.
 func TestTransactionsLeaveAQueuedApplyRunAlone(t *testing.T) {
 	t.Run("linux", func(t *testing.T) {
 		h := newTestHost(t, "linux")
@@ -75,6 +76,27 @@ func TestTransactionsLeaveAQueuedApplyRunAlone(t *testing.T) {
 			t.Fatalf("ensure booted out or kickstarted the apply job: %v", calls)
 		}
 	})
+}
+
+// The snapshot hard-linked config.yaml while the apply path unit still
+// watched it; the link count change fired the unit, whose ensure queued
+// behind the transaction and held the lock after it, so a verify right
+// after every ensure --config failed lifecycle_busy (GAP-0354).
+func TestSnapshotLeavesTheWatchedConfigLinkCountAlone(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	snap, err := h.env.takeSnapshot("trigger", []string{h.env.Layout.ConfigPath}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.env.discardSnapshot(snap)
+	info, err := os.Stat(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if links := info.Sys().(*syscall.Stat_t).Nlink; links != 1 {
+		t.Fatalf("the snapshot linked the watched config.yaml (%d links)", links)
+	}
 }
 
 // A failed oneshot sat in status and verify as failed/failed under a green
@@ -165,8 +187,10 @@ func TestAPackageUpgradeDoesNotLeaveTheDailyVerifyFailed(t *testing.T) {
 	if !h.services.active[unitVerifyService] {
 		t.Fatalf("the upgrade stopped the waiting verify run: %v", h.services.calls)
 	}
-	if !strings.Contains(strings.Join(h.runner.calls, "\n"), "systemctl reset-failed "+unitVerifyService) {
-		t.Fatalf("the verify failure from before the upgrade is kept: %v", h.runner.calls)
+	// The committed change clears the failure (clearSupersededUnitFailures,
+	// GAP-0423).
+	if h.services.failed[unitVerifyService] {
+		t.Fatalf("the verify failure from before the upgrade is kept: %v", h.services.calls)
 	}
 	marker := h.env.P(packageTransactionMarker)
 	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
@@ -176,4 +200,30 @@ func TestAPackageUpgradeDoesNotLeaveTheDailyVerifyFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireError(t, h.run(Options{Action: ActionVerify}), codeBusy)
+}
+
+// Right after an administrator replaced config.yaml, status and verify failed
+// with "modified after install ... run repair" while the apply trigger was
+// still applying the change; a repair then fought the apply (GAP-0919).
+func TestStatusAndVerifyWhileTheApplyTriggerRunsAreBusyNotFailed(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.services.activating = map[string]bool{unitApplyService: true}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if len(r.Errors) != 1 || r.Errors[0].Code != codeBusy || !strings.Contains(r.Errors[0].Message, "configuration change is being applied") {
+			t.Fatalf("%s during an apply: %+v", action, r.Errors)
+		}
+	}
+	// An apply that ends within the lock wait is waited for, not reported
+	// busy: a no-op apply right after an ensure --config made detect.sh
+	// --require-healthy print busy on a healthy macOS host.
+	writeFreshLedger(t, h)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		h.services.mu.Lock()
+		delete(h.services.activating, unitApplyService)
+		h.services.mu.Unlock()
+	}()
+	requireOK(t, h.run(Options{Action: ActionVerify}))
 }

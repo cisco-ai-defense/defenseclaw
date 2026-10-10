@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,7 +29,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Per-user AI discovery (standalone profile, Linux and macOS). The gateway's
@@ -114,8 +117,34 @@ func (b *enterpriseHookScanBreaker) keep(enrolled map[int]bool) {
 func init() {
 	enterpriseHookAfterWatchReconcile = func(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
 		run.Rows = enterpriseHookEnrolledAccountRows(stderr, run)
+		restoreEnterprisePolicyDirs(stderr)
 		startEnterpriseHookAIDiscovery(ctx, stderr, run)
 		startEnterpriseHookIdentitySpool(ctx, stderr, run)
+	}
+}
+
+// restoreEnterprisePolicyDirs gives the vendor directories DefenseClaw
+// publishes machine policy into back the mode every user's agent needs to
+// read it (GAP-0913). The guardian may write these directories: the
+// lifecycle lists them in its sandbox.
+func restoreEnterprisePolicyDirs(stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return
+	}
+	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	if err != nil {
+		return
+	}
+	opts, err := enterprisepolicy.StandaloneOptions(layout, "", "", cfg)
+	if err != nil {
+		return
+	}
+	restored, err := enterprisepolicy.RestorePublishedPolicyDirs(opts)
+	if len(restored) > 0 {
+		fmt.Fprintf(stderr, "[hook-guardian] restored %s to mode 0755: users could not read DefenseClaw's machine policy there\n", strings.Join(restored, ", "))
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] machine policy directories: %v\n", err)
 	}
 }
 
@@ -261,6 +290,8 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 	// would let the service account choose what is read in user homes.
 	catalog, err := inventory.LoadAISignaturesWithOptions(inventory.AISignatureLoadOptions{
 		SignaturePacks:       cfg.AIDiscovery.SignaturePacks,
+		PackDigests:          cfg.AIDiscovery.SignaturePackDigests,
+		RequireDigests:       cfg.StandaloneEnterprise(),
 		DisabledSignatureIDs: cfg.AIDiscovery.DisabledSignatureIDs,
 	})
 	if err != nil {

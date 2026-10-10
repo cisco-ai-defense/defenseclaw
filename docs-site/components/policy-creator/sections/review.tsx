@@ -3,7 +3,7 @@
 //
 // Review & Export. Three sub-views:
 //
-//   files     — every YAML / data.json / Rego snippet the wizard
+//   files     — every YAML / Rego snippet the wizard
 //               renders, with per-file copy buttons.
 //   install   — one bash script that lays everything down on disk
 //               and runs `defenseclaw policy activate`.
@@ -48,6 +48,9 @@ export function ReviewSection({ policy }: { policy: Policy }) {
 
   return (
     <div className="space-y-3">
+      <p role="alert" className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
+        Firewall and audit choices are not applied by policy activate. The generated policy and install script exclude them; configure those controls separately before relying on them.
+      </p>
       <div className="flex flex-wrap items-center gap-2">
         <SegmentedControl
           name="review-tab"

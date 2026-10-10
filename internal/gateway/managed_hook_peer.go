@@ -261,11 +261,6 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		}
 		return allowManagedHook()
 	}
-	if z.exempt(peer) {
-		decision := allowManagedHook()
-		decision.Exempt = true
-		return decision
-	}
 	refuse := z.enrollment.UnverifiedVersionsFor(connectorName) == config.EnterpriseUnverifiedRefuse
 	if refuse && connector.SurfaceRefused(connectorName, surface, config.EnterpriseUnverifiedRefuse) {
 		return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
@@ -278,6 +273,11 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		if refused.refused(peer, connectorName) {
 			return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
 		}
+	}
+	if z.exempt(peer) {
+		decision := allowManagedHook()
+		decision.Exempt = true
+		return decision
 	}
 	machine := z.machinePolicy[connectorName]
 	strict := strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny)
@@ -473,6 +473,24 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			return
 		}
 		defer release()
+		if r.URL.Path == managedRefusalAuditPath {
+			// Any kernel-verified local account may report its own refused
+			// policy write; the route has no connector to enroll for.
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Header.Get(hookexec.ClientRefusalHeader) == hookexec.ManagedUserNamespaceReason {
+			// A hook in a private user namespace refused its agent before it
+			// could check the runtime state; the refusal left no audit row or
+			// log line, unlike a refused unenrolled account (GAP-0923).
+			connectorName, _ := a.managedHookRouteScope(r)
+			fmt.Fprintf(os.Stderr,
+				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent runs in a private user namespace\n",
+				peer.UID, connectorName, route, hookexec.ManagedUserNamespaceReason)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, hookexec.ManagedUserNamespaceReason, connectorName)
+			writeManagedHookRefusal(w, http.StatusForbidden, hookexec.ManagedUserNamespaceReason)
+			return
+		}
 		connectorName, inspect := a.managedHookRouteScope(r)
 		decision := authorizer.decide(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader))
 		if !decision.Allow {
@@ -545,9 +563,10 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 }
 
 // managedHookSocketMux registers only the agent-facing routes on the hook
-// socket: connector hook endpoints, the inspect endpoints and the Codex
-// notifier. Management, status, configuration, policy and scan routes are
-// not reachable through it at all.
+// socket: connector hook endpoints, the inspect endpoints, the Codex
+// notifier and the refused-write report of a standard user CLI. Management,
+// status, configuration, policy and scan routes are not reachable through it
+// at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
@@ -560,6 +579,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.Handle("/api/v1/inspect/", limiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	a.registerConnectorHookRoutes(mux, limiter)
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
+	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	return a.apiCSRFProtect(handler)
 }

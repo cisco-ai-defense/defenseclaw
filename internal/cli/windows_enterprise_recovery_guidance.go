@@ -262,6 +262,69 @@ func windowsEnterprisePerUserDataDirNextStep(original, text string) string {
 		" out of the profile, then run Setup again."
 }
 
+// windowsEnterpriseCommittedJournalNextStep says what an install, upgrade or
+// repair that committed but could not retire its managed-hook lifecycle
+// journal leaves, and how it converges. The result failed with 1603 while
+// DefenseClaw was installed and running, and named no remedy (GAP-0741). A
+// per-user .defenseclaw folder named in the error is the usual cause.
+func windowsEnterpriseCommittedJournalNextStep(original string, installed bool) string {
+	if !installed || !strings.Contains(original, "committed, but its protected managed-hook lifecycle journal could not be retired") {
+		return ""
+	}
+	step := ". The change is committed and DefenseClaw is installed and running; only the clean-up of its lifecycle journal failed."
+	if path := windowsEnterpriseFirstWindowsPath(original); path != "" {
+		if index := strings.Index(strings.ToLower(path), `\.defenseclaw`); index >= 0 {
+			folder := path[:index+len(`\.defenseclaw`)]
+			step += " " + folder + " was left by a per-user DefenseClaw install, whose permissions the managed install does not change:" +
+				" have that user run `defenseclaw uninstall --all --binaries --yes`, or move the folder out of the profile."
+		}
+	}
+	return step + " Next step: run Setup /ensure again; it removes the stale journal and converges."
+}
+
+// windowsEnterpriseANSIPattern matches the color sequences PowerShell may
+// write around an error record.
+var windowsEnterpriseANSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// windowsEnterpriseExecutionPolicyRefusal explains a lifecycle that
+// PowerShell refused to start because of the machine execution policy. A
+// Group Policy scope (MachinePolicy or UserPolicy, for example AllSigned)
+// overrides the -ExecutionPolicy Bypass the lifecycle passes, so the script
+// never ran and printed no result; every action failed with only "exited
+// with code 1" (GAP-0770). It returns "" when stderr carries no such
+// refusal.
+func windowsEnterpriseExecutionPolicyRefusal(stderr []byte) string {
+	for _, line := range strings.Split(windowsEnterpriseANSIPattern.ReplaceAllString(string(stderr), ""), "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "cannot be loaded") ||
+			!(strings.Contains(lower, "digitally signed") || strings.Contains(lower, "execution polic") || strings.Contains(lower, "not trusted")) {
+			continue
+		}
+		if len(line) > 1024 {
+			line = line[:1024]
+		}
+		return "powershell_execution_policy: PowerShell refused to run the DefenseClaw lifecycle script (" + strings.TrimRight(line, ".") + ")." +
+			" A machine PowerShell execution policy set by Group Policy (MachinePolicy or UserPolicy, for example AllSigned) overrides the -ExecutionPolicy Bypass DefenseClaw passes, so nothing was changed." +
+			" Add the certificate that signs DefenseClaw to the Trusted Publishers store of the computer, or set that policy to RemoteSigned or Unrestricted, then run it again"
+	}
+	return ""
+}
+
+// windowsEnterpriseRolledBackMessage is the ensure warning after a pending
+// transaction was rolled back and nothing newer was asked for: the services
+// run again on the restored release, and the change the transaction made
+// (typically an upgrade cut off by a restart or a power loss) did not finish.
+func windowsEnterpriseRolledBackMessage(version string) string {
+	restored := "the restored release"
+	if version = strings.TrimSpace(version); version != "" {
+		restored = "DefenseClaw " + version
+	}
+	return "ensure rolled back an interrupted lifecycle change (for example an upgrade cut off by a restart or a power loss), and " +
+		restored + " runs again. The interrupted change did not finish: run the Setup that started it again with /ensure " +
+		"(" + windowsEnterpriseStandaloneSetupName + " of that release, or let the MDM retry its app assignment)"
+}
+
 // windowsEnterpriseInvalidRuntimeBundleNextStep names the next step when a
 // lifecycle refused to collect a managed runtime bundle it cannot confirm
 // belongs to this deployment (GAP-1419): the error named no file, no reason
@@ -278,6 +341,19 @@ func windowsEnterpriseInvalidRuntimeBundleNextStep(original string) string {
 	return ". DefenseClaw does not delete a managed runtime bundle it cannot attribute to this deployment, so the lifecycle stopped." +
 		" Next step: leave " + file + " in place and send it with the lifecycle log (" + windowsEnterpriseLifecycleLogPath +
 		") to DefenseClaw support"
+}
+
+// windowsEnterpriseMissingArtifactNextStep names the next step when a
+// lifecycle found a recorded DefenseClaw binary missing (an antivirus
+// quarantine, for example) and had no payload to restore it from: the
+// installed CLI carries none, and the Intune Fix script printed only "still
+// failing (lifecycle_error)" (GAP-0935).
+func windowsEnterpriseMissingArtifactNextStep(original string, hasPayload bool) string {
+	if !strings.Contains(original, "recorded managed artifact is missing") || hasPayload {
+		return ""
+	}
+	return ". The installed CLI carries no payload to restore it from. Next step: run DefenseClaw Setup of the installed release as LocalSystem: " +
+		windowsEnterpriseStandaloneSetupName + " /repair JSON=1 (or /ensure CONFIG=<config.yaml> JSON=1); it restores the file from its own payload"
 }
 
 // windowsEnterpriseLifecycleLogPath is the lifecycle log Setup and the CLI
@@ -384,10 +460,14 @@ func windowsEnterpriseStandaloneNextStep(
 	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
 	const lead = "The transaction is still pending: the DefenseClaw services stay stopped until it is recovered."
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
+	// The last resort when no recovery finishes: it removes the deployment
+	// without recovering the transaction (GAP-0920, GAP-1041).
+	lastResort := " If you cannot wait for that, remove the deployment without recovering the transaction, as LocalSystem: " +
+		windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1, then install again with /ensure."
 	if len(runs) != 0 {
 		return lead + " Recovery ran with this Setup's verified gateway and still did not finish." +
 			" Next step: leave DefenseClaw files and permissions as they are, send the lifecycle log to DefenseClaw support," +
-			" and run a DefenseClaw Setup that fixes this failure as LocalSystem: " + command + "."
+			" and run a DefenseClaw Setup that fixes this failure as LocalSystem: " + command + "." + lastResort
 	}
 	code := ""
 	detail := ""
@@ -423,9 +503,24 @@ func windowsEnterpriseStandaloneNextStep(
 			" Next step: leave DefenseClaw files and permissions as they are, send the lifecycle log to DefenseClaw support," +
 			" and run a DefenseClaw Setup whose gateway carries its release version as LocalSystem: " + command + recovers
 	default:
+		if windowsEnterpriseRunningAsLocalSystem() {
+			// This run was the LocalSystem recovery the default step names;
+			// repeating it unchanged fails the same way (GAP-0920). The
+			// error does not always name a path or an account to correct
+			// (GAP-1041), so the step does not say it does.
+			return lead + " This run was LocalSystem and its recovery did not finish, so running it again unchanged fails the same way." +
+				" Next step: if the error above names something to fix (a path, an account or an icacls command), fix it and run " + command +
+				". Otherwise, or if it fails the same way, remove the deployment without recovering the transaction, as LocalSystem: " +
+				windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1, then install again with /ensure, and send the lifecycle log (" +
+				windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
+		}
 		return lead + " Next step: run DefenseClaw Setup (this release or a newer one) as LocalSystem: " + command + recovers
 	}
 }
+
+// windowsEnterpriseRunningAsLocalSystem reports a lifecycle running as
+// LocalSystem; set on Windows, replaceable in tests.
+var windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
 
 // windowsEnterpriseStoppedServiceNextStep names what starts the stopped
 // DefenseClaw services again when status or verify fails on them
@@ -518,8 +613,18 @@ func windowsEnterpriseEnumeratorFailureText(message string) (text, code string, 
 	if text == "" {
 		return message, "", false
 	}
-	if strings.Contains(text, "rule_pack_dir") && strings.Contains(text, "cannot read") {
+	if label, _, found := strings.Cut(strings.TrimPrefix(text, "the managed config's "), " "); found &&
+		windowsEnterpriseRulePackLabel(label) && strings.Contains(text, "cannot read") {
 		code = "rule_pack_unreadable"
 	}
 	return text, code, true
+}
+
+// windowsEnterpriseRulePackLabel reports whether label is a rule-pack
+// setting config.ReferencedRulePackDirs names: a rule_pack (v9) or
+// rule_pack_dir, global, per connector or per profile, or a custom_packs
+// path.
+func windowsEnterpriseRulePackLabel(label string) bool {
+	return strings.HasSuffix(label, ".rule_pack") || strings.HasSuffix(label, ".rule_pack_dir") ||
+		(strings.HasPrefix(label, "guardrail.custom_packs.") && strings.HasSuffix(label, ".path"))
 }

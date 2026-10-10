@@ -18,6 +18,11 @@ work:
   registration into each enrolled user's agent config, and repairs it when
   it changes. It also re-checks every target once a minute.
 
+An agent reads DefenseClaw's hooks when it starts, so an agent session that
+started before DefenseClaw was activated on the computer runs without it
+until the user restarts it; the `ensure` or Setup result, `status` and
+`verify` name such sessions with the `agent_sessions_restart_required` warning.
+
 <Flow
   direction="TB"
   caption="Both are system services that run as root (SYSTEM on Windows), and the manifest is a file only administrators can change. The guardian writes into a user's agent config as that user: through a worker process on Linux and macOS, and under the user's own signed-in session on Windows."
@@ -264,6 +269,11 @@ The enumerator applies these checks to each account, in this order:
 5. Group filters: `exclude_groups` wins; when `include_groups` is not
    empty, only members pass. Accounts in `include_users` are filtered here
    too.
+
+An account that stops passing `include_groups` keeps its existing enrollment
+rows until three consecutive enumerator cycles miss it. At the five-minute
+cycle this takes about 10 to 15 minutes; an enumerator restart runs a cycle
+immediately.
 6. The home directory must be under a home root, owned by the user, not a
    link, and not writable by group or others. No parent directory may be
    writable by everyone.
@@ -344,7 +354,7 @@ A call from an `exempt_users` account is visible to a reviewer of
 `audit export` or a SIEM: its `hook_decision` row carries
 `defenseclaw.user.enrollment: exempt`, and the audit store gets an
 `enterprise-exempt-user` row (at most one per account and connector every 10
-minutes). The gateway log has an `enterprise_exempt_user` line for each call.
+minutes). The gateway journal has an `enterprise_exempt_user` line for each call.
 
 With `unenrolled_users: deny`, the enumerator also creates enrollment rows
 for machine-policy agents, so enrolled users keep working. OpenCode counts

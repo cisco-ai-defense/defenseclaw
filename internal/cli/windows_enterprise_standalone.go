@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -53,34 +54,35 @@ type windowsEnterpriseStandaloneRun struct {
 // windowsEnterpriseInstallerReport is the subset of the installer's schema-1
 // status document the standalone result is built from.
 type windowsEnterpriseInstallerReport struct {
-	SchemaVersion                     int      `json:"schema_version"`
-	OK                                bool     `json:"ok"`
-	Action                            string   `json:"action"`
-	Installed                         bool     `json:"installed"`
-	TransactionPending                bool     `json:"transaction_pending"`
-	InstallRoot                       string   `json:"install_root"`
-	StateRoot                         string   `json:"state_root"`
-	GatewayService                    string   `json:"gateway_service"`
-	GuardianService                   string   `json:"guardian_service"`
-	GatewayServiceState               string   `json:"gateway_service_state"`
-	GuardianServiceState              string   `json:"guardian_service_state"`
-	SensorHelperService               string   `json:"sensor_helper_service"`
-	SensorHelperServiceState          string   `json:"sensor_helper_service_state"`
-	EnumeratorService                 string   `json:"enumerator_service"`
-	EnumeratorServiceState            string   `json:"enumerator_service_state"`
-	GatewayReady                      bool     `json:"gateway_ready"`
-	GuardianReady                     bool     `json:"guardian_ready"`
-	CodexMachineRequirementsReady     bool     `json:"codex_machine_requirements_ready"`
-	CodexMachineRequirementsDisposion string   `json:"codex_machine_requirements_disposition"`
-	CodexTargetEnabled                bool     `json:"codex_target_enabled"`
-	CursorTargetEnabled               bool     `json:"cursor_target_enabled"`
-	ClaudeTargetEnabled               bool     `json:"claude_target_enabled"`
-	ClaudeEffectivePolicyVerified     bool     `json:"claude_effective_policy_verified"`
-	SecurityComplete                  bool     `json:"security_complete"`
-	InstalledVersion                  string   `json:"installed_version"`
-	TrustMode                         string   `json:"trust_mode"`
-	Error                             string   `json:"error"`
-	Errors                            []string `json:"errors"`
+	SchemaVersion                     int               `json:"schema_version"`
+	OK                                bool              `json:"ok"`
+	Action                            string            `json:"action"`
+	Installed                         bool              `json:"installed"`
+	TransactionPending                bool              `json:"transaction_pending"`
+	InstallRoot                       string            `json:"install_root"`
+	StateRoot                         string            `json:"state_root"`
+	GatewayService                    string            `json:"gateway_service"`
+	GuardianService                   string            `json:"guardian_service"`
+	GatewayServiceState               string            `json:"gateway_service_state"`
+	GuardianServiceState              string            `json:"guardian_service_state"`
+	SensorHelperService               string            `json:"sensor_helper_service"`
+	SensorHelperServiceState          string            `json:"sensor_helper_service_state"`
+	EnumeratorService                 string            `json:"enumerator_service"`
+	EnumeratorServiceState            string            `json:"enumerator_service_state"`
+	ServiceStartModes                 map[string]string `json:"service_start_modes"`
+	GatewayReady                      bool              `json:"gateway_ready"`
+	GuardianReady                     bool              `json:"guardian_ready"`
+	CodexMachineRequirementsReady     bool              `json:"codex_machine_requirements_ready"`
+	CodexMachineRequirementsDisposion string            `json:"codex_machine_requirements_disposition"`
+	CodexTargetEnabled                bool              `json:"codex_target_enabled"`
+	CursorTargetEnabled               bool              `json:"cursor_target_enabled"`
+	ClaudeTargetEnabled               bool              `json:"claude_target_enabled"`
+	ClaudeEffectivePolicyVerified     bool              `json:"claude_effective_policy_verified"`
+	SecurityComplete                  bool              `json:"security_complete"`
+	InstalledVersion                  string            `json:"installed_version"`
+	TrustMode                         string            `json:"trust_mode"`
+	Error                             string            `json:"error"`
+	Errors                            []string          `json:"errors"`
 	// A committed standalone uninstall reports the DefenseClaw per-user
 	// registrations it could not remove from users' agent configurations.
 	// They are decoded leniently: a malformed value must not hide the
@@ -111,9 +113,28 @@ type windowsEnterpriseInstallerReport struct {
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
 	StaleLifecycleJournalRemoved string `json:"stale_lifecycle_journal_removed"`
+	// StaleTeardownJournalRemoved names the managed-hook teardown journal the
+	// lifecycle removed because an earlier uninstall that was refused or
+	// rolled back left it (GAP-1041).
+	StaleTeardownJournalRemoved string `json:"stale_teardown_journal_removed"`
+	// Forced is set by Setup /uninstall FORCE=1, which removed the
+	// deployment without recovering its transaction; ForcedStateRootKept
+	// names the moved-aside managed state it could not delete.
+	Forced              bool   `json:"forced"`
+	ForcedStateRootKept string `json:"forced_state_root_kept"`
 	// CursorAdapterRestored is set when the lifecycle wrote this release's
 	// Cursor enterprise adapter back over a changed or deleted one (GAP-2480).
 	CursorAdapterRestored bool `json:"cursor_adapter_restored"`
+	// TerminatedServiceProcesses names each service process the lifecycle
+	// ended because it did not answer a stop ("<service> (pid <n>)").
+	TerminatedServiceProcesses []string `json:"terminated_service_processes"`
+	// SkippedRuntimeFiles names each runtime file whose access list the
+	// lifecycle left as it was because it could not open the file at all
+	// (GAP-1220).
+	SkippedRuntimeFiles []string `json:"skipped_runtime_files"`
+	// SquattedRootNotes says what Install did with each standalone root a
+	// standard user created first: a link removed, a folder moved aside.
+	SquattedRootNotes []string `json:"squatted_root_notes"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -141,6 +162,23 @@ var (
 // windowsEnterpriseLifecycleBusyMarker is the installer's lock-contention
 // diagnostic (Enter-DefenseClawLifecycleLock).
 const windowsEnterpriseLifecycleBusyMarker = "holds the protected file lock"
+
+// windowsEnterpriseRemoveReplacementCopies removes the unused replacement
+// copies in the production bin folder; replaceable in tests.
+var windowsEnterpriseRemoveReplacementCopies = func() []string {
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil {
+		return nil
+	}
+	return removeWindowsReplacementCopies(filepath.Join(roots.InstallRoot, "bin"))
+}
+
+func init() {
+	windowsEnterpriseRunningAsLocalSystem = func() bool {
+		user, err := windows.GetCurrentProcessToken().GetTokenUser()
+		return err == nil && user != nil && user.User.Sid != nil && user.User.Sid.IsWellKnown(windows.WinLocalSystemSid)
+	}
+}
 
 func windowsEnterpriseStandaloneRequested(opts *windowsEnterpriseLifecycleOptions) bool {
 	return opts != nil && (windowsEnterpriseStandalone(opts) ||
@@ -171,7 +209,11 @@ func runWindowsEnterprisePowerShell7(
 		return windowsEnterpriseStandaloneRun{}, err
 	}
 	environment := func(temp string) ([]string, error) {
-		return trustedWindowsEnterprisePowerShell7Environment(temp, engine)
+		env, err := trustedWindowsEnterprisePowerShell7Environment(temp, engine)
+		if err == nil && windowsEnterpriseForcedUninstallRequested(ctx) {
+			env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+		}
+		return env, err
 	}
 	stderr := &windowsEnterpriseOutputCapture{}
 	capture, runErr := runWindowsEnterprisePowerShellEngine(
@@ -195,9 +237,36 @@ func runWindowsEnterprisePowerShell7(
 		if detail := windowsEnterpriseStderrCode(stderr.buffer.Bytes()); detail != "" {
 			return run, fmt.Errorf("%s (%w)", detail, runErr)
 		}
+		if detail := windowsEnterpriseExecutionPolicyRefusal(stderr.buffer.Bytes()); detail != "" {
+			return run, fmt.Errorf("%s (%w)", detail, runErr)
+		}
 		return run, runErr
 	}
 	return run, nil
+}
+
+// windowsEnterpriseForcedUninstallVariable carries --force (Setup /uninstall
+// FORCE=1) to the standalone installer, which reads it only for Uninstall and
+// clears it. It is not an installer parameter: the parameter set of the
+// installer is the Secure Client installer command line, which must not change
+// (GAP-0920, GAP-1041).
+const windowsEnterpriseForcedUninstallVariable = "DEFENSECLAW_STANDALONE_FORCED_UNINSTALL"
+
+type windowsEnterpriseForcedUninstallKey struct{}
+
+func windowsEnterpriseForcedUninstallRequested(ctx context.Context) bool {
+	forced, _ := ctx.Value(windowsEnterpriseForcedUninstallKey{}).(bool)
+	return forced
+}
+
+// windowsEnterpriseInstallerAction is the -Action value of installer args.
+func windowsEnterpriseInstallerAction(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "-Action" {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // windowsEnterpriseStderrCode returns the first stderr line that carries a
@@ -247,6 +316,9 @@ func runWindowsEnterpriseStandaloneAction(
 		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
+		if err := refuseWindowsEnterpriseAPIPortChange(opts); err != nil {
+			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+		}
 	}
 	if action == "uninstall" {
 		present, err := windowsEnterpriseStandaloneFootprint()
@@ -258,10 +330,40 @@ func runWindowsEnterpriseStandaloneAction(
 			return finishWindowsEnterpriseStandalone(cmd, opts, result, 0)
 		}
 	}
+	hookRuntimeRepaired := ""
+	if action == "repair" && windowsEnterpriseIsElevated() {
+		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
+	}
+	configReplaced := ""
+	if action == "repair" || action == "upgrade" {
+		// As ensure does: never load an installed config.yaml that does not
+		// parse before the supplied one (GAP-0948).
+		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		if err != nil {
+			result := newWindowsEnterpriseStandaloneResult(action, opts)
+			result.AddError("preflight_failed", err.Error())
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		if kept != "" {
+			configReplaced = windowsEnterpriseUnparseableConfigChange(kept, action)
+		}
+	}
 	report, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, args)
 	result := newWindowsEnterpriseStandaloneResult(action, opts)
+	if hookRuntimeRepaired != "" {
+		result.Changes = append(result.Changes, hookRuntimeRepaired)
+	}
+	if configReplaced != "" {
+		result.Changes = append(result.Changes, configReplaced)
+	}
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
+		if action == "status" || action == "verify" {
+			// The lifecycle never ran, so it changed nothing: report the
+			// recorded deployment and the service states instead of
+			// installed:false for a running deployment (GAP-0770).
+			applyWindowsEnterpriseRecordedDeployment(result)
+		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	if action == "uninstall" && windowsEnterpriseRecoveredFailedInstall(report) {
@@ -289,25 +391,150 @@ func runWindowsEnterpriseStandaloneAction(
 		report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	}
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
+	applyWindowsEnterprisePolicy(ctx, result)
 	if (action == "status" || action == "verify") && report.Installed {
 		if report.CursorTargetEnabled {
 			result.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
 		}
-		if report.GatewayReady {
+		// Readiness, not the probe: another process on the port answers
+		// /health too (GAP-1029).
+		if result.Readiness.Gateway {
 			if body, err := windowsStandaloneGatewayHealth(); err == nil {
-				appendStandaloneGatewayWarnings(result, body)
+				appendStandaloneGatewayWarnings(result, body, windowsStandaloneGatewayStatus())
 			}
+		}
+		if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
+			appendAdmissionIssueWarnings(result, layout.DataDir, layout.GuardianAuthDir)
 		}
 	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
 
-// The standalone gateway's machine API uses the default loopback port. This
-// advisory read is bounded; the installer has already established readiness.
+// windowsEnterprisePolicyDigest runs the installed CLI with `policy digest`
+// under the service pins (windowsEnterpriseServicePins) for every caller:
+// ensure, status and verify run in the administrator or SYSTEM console, which
+// carries none of them, and the digest call was refused there so the result
+// silently omitted policy (GAP-0180). The digest comes from the binary the
+// gateway service runs, computed from the config and assets it loads. Its
+// stdout is the report even when the exit status is not 0 (a policy that
+// cannot be built still reports what the gateway says). A seam for tests.
+var windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	command, err := windowsEnterprisePolicyDigestCommand(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return command.Output()
+}
+
+// windowsEnterpriseInstalledAdminCLI resolves the CLI from the protected
+// machine registration. An elevated lifecycle can inherit ProgramFiles from
+// a caller, so the path used for a subprocess must not use that environment.
+func windowsEnterpriseInstalledAdminCLI() (string, error) {
+	programFiles, err := trustedWindowsEnterpriseProgramFiles()
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted Program Files for installed CLI: %w", err)
+	}
+	return filepath.Join(programFiles, "Cisco", "DefenseClaw", "bin", "defenseclaw.exe"), nil
+}
+
+func windowsEnterprisePolicyDigestCommand(ctx context.Context) (*exec.Cmd, error) {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return nil, err
+	}
+	installedCLI, err := windowsEnterpriseInstalledAdminCLI()
+	if err != nil {
+		return nil, err
+	}
+	command := exec.CommandContext(ctx, installedCLI, "policy", "digest", "--json", "--check-gateway")
+	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
+	return command, nil
+}
+
+// applyWindowsEnterprisePolicy fills Result.Policy as the Unix lifecycle
+// does: the effective policy digest and config_generation the installed
+// config computes to, and whether the running gateway reports the same
+// digest. A change action warns when it does not, and records
+// policy-state.json beside deployment.json when it does. A gateway that
+// rejected a reload and a config.yaml edited outside the lifecycle are
+// reported for every action. Nothing is reported while the gateway is not
+// ready or when the installed CLI cannot compute it.
+func applyWindowsEnterprisePolicy(ctx context.Context, result *enterprisestatus.Result) {
+	if !result.Installed || !result.Readiness.Gateway {
+		return
+	}
+	out, _ := windowsEnterprisePolicyDigest(ctx)
+	change := result.Action != "status" && result.Action != "verify"
+	state := applyEnterprisePolicyReport(result, out, change)
+	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
+		return
+	}
+	if err := writeWindowsEnterprisePolicyState(state); err != nil {
+		result.AddWarning("policy_state_unrecorded", "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
+	}
+}
+
+// writeWindowsEnterprisePolicyState records the applied policy in
+// policy-state.json beside deployment.json, with the same access control.
+// deployment.json itself is not extended: an earlier release decodes it
+// strictly and must still read it after a rollback.
+func writeWindowsEnterprisePolicyState(state *enterprisestatus.PolicyState) error {
+	deployment, err := windowsEnterpriseDeploymentInspector(managed.ProfileStandalone)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || deployment.MetadataPath == "" {
+		return nil
+	}
+	data, err := json.MarshalIndent(enterprisestatus.PolicyStateRecord{
+		EffectiveDigest:  state.EffectiveDigest,
+		ConfigGeneration: state.ConfigGeneration,
+		AppliedAt:        time.Now().UTC().Format(time.RFC3339),
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileKeepingDACL(filepath.Join(filepath.Dir(deployment.MetadataPath), enterprisestatus.PolicyStateFileName), append(data, '\n'), deployment.MetadataPath)
+}
+
+// writeFileKeepingDACL replaces path with data, giving the new file the
+// DACL of sibling before it is renamed into place, so it is never readable
+// by more than sibling is.
+func writeFileKeepingDACL(path string, data []byte, sibling string) error {
+	restore, err := keepConfigDACL(sibling)
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return err
+	}
+	if err := restore(temporary); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	if err := os.Rename(temporary, path); err != nil {
+		_ = os.Remove(temporary)
+		return err
+	}
+	return nil
+}
+
+// windowsStandaloneGatewayHealth reads /health of the standalone gateway on
+// the gateway.api_port of the installed config, the port /status is read on:
+// the default port may be another listener (GAP-1351). This advisory read is
+// bounded; the installer has already established readiness.
 func windowsStandaloneGatewayHealth() ([]byte, error) {
+	layout, err := managedScanWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	base, err := managedWindowsGatewayBase(layout)
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{Timeout: 1500 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", config.DefaultGatewayAPIPort))
+	resp, err := client.Get(base + "/health")
 	if err != nil {
 		return nil, err
 	}
@@ -316,6 +543,36 @@ func windowsStandaloneGatewayHealth() ([]byte, error) {
 		return nil, fmt.Errorf("gateway health returned %s", resp.Status)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// windowsStandaloneGatewayStatus reads the gateway's /status with the
+// gateway token in its data directory, which only an administrator can
+// read: the profile warnings name configured groups and accounts, so
+// /health gives only their number (GAP-1268). nil when it cannot.
+func windowsStandaloneGatewayStatus() []byte {
+	base, token, _, err := managedScanGatewayEndpoint()
+	if err != nil || token == "" {
+		return nil
+	}
+	req, err := http.NewRequest(http.MethodGet, base+"/status", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil
+	}
+	return body
 }
 
 // addWindowsEnterpriseNothingInstalledError fails an install or upgrade
@@ -399,7 +656,12 @@ func runWindowsEnterpriseStandaloneInstaller(
 	if !containsString(args, "-Json") {
 		args = append(append([]string{}, args...), "-Json")
 	}
+	if opts != nil && opts.force && windowsEnterpriseInstallerAction(args) == "Uninstall" {
+		ctx = context.WithValue(ctx, windowsEnterpriseForcedUninstallKey{}, true)
+	}
+	migrationRecord := readWindowsEnterpriseMigrationRecord()
 	run, err := windowsEnterpriseStandaloneRunner(ctx, cmd, script, args)
+	noteWindowsEnterpriseMigration(opts, migrationRecord)
 	if err != nil {
 		return nil, run, err
 	}
@@ -411,6 +673,124 @@ func runWindowsEnterpriseStandaloneInstaller(
 		return nil, run, fmt.Errorf("installer exited %d without a valid JSON report: %w", run.ExitCode, parseErr)
 	}
 	return report, run, nil
+}
+
+// readWindowsEnterpriseMigrationRecord reads the migration-v9.json beside the
+// installed config, or nil when there is none.
+func readWindowsEnterpriseMigrationRecord() []byte {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil || strings.TrimSpace(layout.ConfigPath) == "" {
+		return nil
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(config.MigrationRecordPath(layout.ConfigPath), windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return nil
+	}
+	return raw
+}
+
+// noteWindowsEnterpriseMigration keeps the audit.db block/allow entries a
+// config_version 9 migration left in place, when the installer run wrote a
+// new migration-v9.json. The installer migrates in its config step
+// (validate-service-config --record-lifecycle, a child process), so the
+// record is how the count reaches the result, as the Unix lifecycle reports
+// it (GAP-0292). A run that rolled back restored the previous record.
+func noteWindowsEnterpriseMigration(opts *windowsEnterpriseLifecycleOptions, before []byte) {
+	after := readWindowsEnterpriseMigrationRecord()
+	if opts == nil || after == nil || bytes.Equal(before, after) {
+		return
+	}
+	var record config.MigrationRecord
+	if json.Unmarshal(trimWindowsJSONBOM(after), &record) != nil {
+		return
+	}
+	opts.localEnforcementEntriesIgnored = record.ActionsRowsIgnored
+	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
+		opts.configMigration = &record
+		opts.configMigrationPath = layout.ConfigPath
+	}
+}
+
+// addWindowsEnterpriseMissingCredentialWarnings warns credential_missing for
+// each protected credential the installed config names that is not stored:
+// the judge, the scanners or AI Defense then run without a key, silently,
+// while status printed the judge model as if it worked (GAP-0660). Only a
+// run that read the deployment says so; a standard account cannot read the
+// secrets folder.
+func addWindowsEnterpriseMissingCredentialWarnings(result *enterprisestatus.Result) {
+	switch result.Action {
+	case "status", "verify", "install", "upgrade", "repair", "ensure":
+	default:
+		return
+	}
+	if !result.Installed || windowsEnterpriseResultHasWarning(result, windowsEnterpriseHealthNotChecked) {
+		return
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return
+	}
+	body, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return
+	}
+	var document struct {
+		Enterprise struct {
+			Inspection struct {
+				AIDefense struct {
+					Enabled    bool   `yaml:"enabled"`
+					Credential string `yaml:"credential"`
+				} `yaml:"ai_defense"`
+				LLM struct {
+					Credential string `yaml:"credential"`
+				} `yaml:"llm"`
+			} `yaml:"inspection"`
+		} `yaml:"enterprise"`
+	}
+	if yaml.Unmarshal(trimWindowsJSONBOM(body), &document) != nil {
+		return
+	}
+	inspection := document.Enterprise.Inspection
+	aiDefense := ""
+	if inspection.AIDefense.Enabled {
+		aiDefense = inspection.AIDefense.Credential
+	}
+	for _, named := range []struct{ key, name, effect string }{
+		{"enterprise.inspection.llm.credential", inspection.LLM.Credential,
+			"the LLM judge and the skill, MCP and plugin scanners' LLM analyzers run without a key"},
+		{"enterprise.inspection.ai_defense.credential", aiDefense, "Cisco AI Defense inspection runs without a key"},
+	} {
+		name := strings.TrimSpace(named.name)
+		if !managed.ValidCredentialName(name) {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(layout.SecretsDir, name)); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		result.AddWarning("credential_missing", fmt.Sprintf(
+			"the config names the protected credential %s (%s) but it is not stored, so %s; store it from an elevated prompt with `defenseclaw.exe enterprise secret set --name %s --from-file <key file>`",
+			name, named.key, named.effect, name))
+	}
+}
+
+// addWindowsEnterpriseMigrationChange says in changes what a migration in
+// this run wrote, as the Unix lifecycle does; the Windows result had only an
+// ensure_upgrade drift:config warning (GAP-0472). Values that disagreed are
+// a warning: migration-v9.json lists what was kept and what was lost.
+func addWindowsEnterpriseMigrationChange(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) {
+	migration := opts.configMigration
+	if migration == nil || len(result.Errors) != 0 {
+		return
+	}
+	path := opts.configMigrationPath
+	result.Changes = append(result.Changes, fmt.Sprintf(
+		"migrated %s to config_version 9 (%d values moved, %d conflicts; the v8 file is kept as %s%s, the --config a rollback to a config_version 8 release needs)",
+		path, len(migration.Moved), len(migration.Conflicts), path, config.ConfigV8BackupSuffix))
+	if len(migration.Conflicts) != 0 {
+		result.AddWarning("config_migration_conflicts", fmt.Sprintf(
+			"%d values disagreed while migrating %s to config_version 9; %s lists what was kept and what was lost",
+			len(migration.Conflicts), path, config.MigrationRecordPath(path)))
+	}
 }
 
 // parseWindowsEnterpriseInstallerReport takes the last JSON object line;
@@ -496,10 +876,11 @@ func applyWindowsEnterpriseInstallerReport(
 			continue
 		}
 		result.Services = append(result.Services, enterprisestatus.Service{
-			Name:     service.name,
-			Kind:     service.kind,
-			State:    service.state,
-			Required: true,
+			Name:      service.name,
+			Kind:      service.kind,
+			State:     service.state,
+			StartMode: report.ServiceStartModes[service.name],
+			Required:  true,
 		})
 	}
 	result.Readiness = enterprisestatus.Readiness{
@@ -538,14 +919,18 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseEnrolledConnectors(result)
 		applyWindowsEnterpriseAmpMachineFolder(result)
 		applyWindowsEnterpriseAccountFolders(result)
+		if result.Action == "status" || result.Action == "verify" {
+			applyWindowsEnterpriseHookRuntimeAccess(result)
+		}
 		applyWindowsEnterpriseDiscoveryHomeDirs(result)
 	}
 	applyWindowsEnterpriseGatewayStartFailure(result, report)
-	applyWindowsEnterpriseAPIPortHolders(result, report)
+	applyWindowsEnterpriseAPIPortHolders(result, opts, report)
 	messages := append([]string{}, report.Errors...)
 	if len(messages) == 0 && strings.TrimSpace(report.Error) != "" {
 		messages = append(messages, report.Error)
 	}
+	messages = windowsEnterpriseNoStartMessages(result, opts, report, messages)
 	// A failed lifecycle tells the administrator what failed in plain terms
 	// and what to run next; internal security-descriptor detail stays in a
 	// lifecycle_diagnostic warning for support.
@@ -562,6 +947,7 @@ func applyWindowsEnterpriseInstallerReport(
 			message, enumeratorCode = text, specific
 		}
 		message = windowsEnterpriseNameServiceRights(message, result.Action == "status" || result.Action == "verify")
+		message = windowsEnterpriseNamePrincipals(message)
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
 		if enumeratorCode != "" {
 			code = enumeratorCode
@@ -577,7 +963,9 @@ func applyWindowsEnterpriseInstallerReport(
 				message = text
 			}
 			message += windowsEnterprisePerUserDataDirNextStep(original, message)
+			message += windowsEnterpriseCommittedJournalNextStep(original, report.Installed)
 			message += windowsEnterpriseInvalidRuntimeBundleNextStep(original)
+			message += windowsEnterpriseMissingArtifactNextStep(original, opts != nil && strings.TrimSpace(opts.hookBinary) != "")
 		}
 		result.AddError(code, message)
 	}
@@ -639,6 +1027,46 @@ func applyWindowsEnterpriseInstallerReport(
 	if report.Installed || report.TransactionPending {
 		addEnterpriseSecurityIncompleteReasons(result, report.TransactionPending)
 	}
+}
+
+// windowsEnterpriseNoStartGuardianIssues are what the guardian status says
+// of a deployment whose guardian has never run.
+var windowsEnterpriseNoStartGuardianIssues = map[string]bool{
+	"guardian status: hook guardian has not completed a reconcile":      true,
+	"guardian status: protected hook guardian authorization is missing": true,
+	"guardian status: protected hook guardian activation is missing":    true,
+}
+
+// windowsEnterpriseNoStartMessages drops the guardian status issues of an
+// install, upgrade or repair that completed with --no-start (NOSTART=1): its
+// services stay stopped and disabled as asked, so the guardian has not run
+// yet. They made Setup /ensure NOSTART=1 exit 1603 on a deployment installed
+// as documented (GAP-1214). One warning names the next step instead; every
+// other error stays.
+func windowsEnterpriseNoStartMessages(
+	result *enterprisestatus.Result,
+	opts *windowsEnterpriseLifecycleOptions,
+	report *windowsEnterpriseInstallerReport,
+	messages []string,
+) []string {
+	if opts == nil || !opts.noStart || !report.OK || !report.Installed || report.TransactionPending {
+		return messages
+	}
+	switch report.Action {
+	case "install", "upgrade", "repair":
+	default:
+		return messages
+	}
+	kept := make([]string, 0, len(messages))
+	for _, message := range messages {
+		if !windowsEnterpriseNoStartGuardianIssues[strings.TrimSpace(message)] {
+			kept = append(kept, message)
+		}
+	}
+	// The code Linux and macOS use for a --no-start install.
+	result.AddWarning("not_started", "installed with the services stopped and disabled (NOSTART=1, --no-start), so agents are not protected yet; "+
+		"run Setup /repair, or /ensure without NOSTART=1, to start them")
+	return kept
 }
 
 // addWindowsEnterpriseUserStateWarning names each enrolled account whose
@@ -714,6 +1142,51 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Message: "Setup removed the stale committed managed-hook lifecycle journal " +
 				"(managed-hooks-lifecycle-journal.json in the protected install state) because its retire could not complete: " +
 				windowsEnterpriseBoundedDiagnostic(removed),
+		})
+	}
+	if removed := strings.TrimSpace(report.StaleTeardownJournalRemoved); removed != "" {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "stale_lifecycle_journal_removed",
+			Message: "Setup removed the stale managed-hook teardown journal " + windowsEnterpriseBoundedDiagnostic(removed) +
+				", which an earlier uninstall left when it was refused or rolled back; its rollback had finished, so nothing used it",
+		})
+	}
+	if report.Forced {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "forced_uninstall",
+			Message: "FORCE=1 removed the deployment without recovering its pending transaction: the services, the binaries, " +
+				"the managed state and the machine-wide hook files; what it could not remove is listed in this result",
+		})
+	}
+	if kept := strings.TrimSpace(report.ForcedStateRootKept); kept != "" {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "forced_state_root_kept",
+			Message: "the forced uninstall moved the managed state aside but could not delete it; delete that folder once " +
+				"DefenseClaw support has the lifecycle log: " + windowsEnterpriseBoundedDiagnostic(kept),
+		})
+	}
+	for _, note := range report.SquattedRootNotes {
+		// The install used to say only "ensure ran install: root_squatted"
+		// (GAP-0904).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code:    "root_squatted",
+			Message: "a standard user created a DefenseClaw root before the install: " + windowsEnterpriseBoundedDiagnostic(note),
+		})
+	}
+	if len(report.TerminatedServiceProcesses) != 0 {
+		// A hung or suspended service process held up the stop (GAP-0946,
+		// GAP-1038).
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "service_process_terminated",
+			Message: "these DefenseClaw service processes did not answer a stop request within 30 seconds and were ended " +
+				"(by the lifecycle, or by Windows for a stuck stop) before it continued: " + windowsEnterpriseBoundedLabels(report.TerminatedServiceProcesses),
+		})
+	}
+	if len(report.SkippedRuntimeFiles) != 0 {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "runtime_file_skipped",
+			Message: "the lifecycle could not open these runtime files and left their access lists unchanged: " +
+				windowsEnterpriseBoundedLabels(report.SkippedRuntimeFiles),
 		})
 	}
 	if report.CursorAdapterRestored {
@@ -1224,6 +1697,16 @@ var windowsEnterpriseStagedConnectors = windowsEnterpriseConfigConnectors
 // empty) as the guardian loads the installed one and returns the hook
 // connectors it enrols.
 func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
+	cfg, err := loadWindowsEnterpriseStandaloneConfig(path)
+	if err != nil {
+		return nil, err
+	}
+	return enterprisehooks.EffectiveWindowsStandaloneHookConnectors(cfg), nil
+}
+
+// loadWindowsEnterpriseStandaloneConfig loads path (the installed config
+// when empty) the way the guardian loads the installed one.
+func loadWindowsEnterpriseStandaloneConfig(path string) (*config.Config, error) {
 	layout, err := managed.StandaloneWindowsLayout()
 	if err != nil {
 		return nil, err
@@ -1242,11 +1725,44 @@ func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
 		managed.WindowsServiceAccountEnv: layout.ServiceUser,
 	})
 	defer restore()
-	cfg, err := config.LoadManagedFileForLifecycleRecovery(path)
+	return config.LoadManagedFileForLifecycleRecovery(path)
+}
+
+// windowsEnterpriseConfigAPIPort returns the gateway.api_port of path (the
+// installed config when empty); replaceable in tests.
+var windowsEnterpriseConfigAPIPort = func(path string) (int, error) {
+	cfg, err := loadWindowsEnterpriseStandaloneConfig(path)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
+	return cfg.Gateway.APIPort, nil
+}
+
+// refuseWindowsEnterpriseAPIPortChange refuses, before any service stops, a
+// config that moves gateway.api_port of an installed deployment. Every
+// user's hook registrations and the Cursor machine hooks name the installed
+// port, so the upgrade transaction stopped and restarted every service
+// twice, failed 1603 after about five minutes on the Cursor machine
+// identity and rolled back (GAP-0865). A config either side cannot load is
+// left to the checks that report it.
+func refuseWindowsEnterpriseAPIPortChange(opts *windowsEnterpriseLifecycleOptions) error {
+	path := strings.TrimSpace(opts.configPath)
+	if !windowsEnterpriseStandalone(opts) || path == "" {
+		return nil
+	}
+	staged, err := windowsEnterpriseConfigAPIPort(path)
+	if err != nil || staged == 0 {
+		return nil
+	}
+	installed, err := windowsEnterpriseConfigAPIPort("")
+	if err != nil || installed == 0 || installed == staged {
+		return nil
+	}
+	return windowsEnterpriseInvalidArguments(
+		"%s changes gateway.api_port from %d to %d; the port of an installed managed deployment cannot be changed, "+
+			"because every user's agent hooks and the Cursor machine hooks are bound to it, so nothing was changed and no service was stopped. "+
+			"Keep gateway.api_port: %d in the config, or uninstall DefenseClaw and install it again with the new port",
+		path, installed, staged, installed)
 }
 
 // refuseWindowsEnterpriseConnectorlessConfig refuses, before anything
@@ -1372,6 +1888,15 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	applyWindowsStandaloneScannerRuntime(result, opts)
+	addWindowsEnterpriseMigrationChange(result, opts)
+	addWindowsEnterpriseMissingCredentialWarnings(result)
+	applyWindowsEnterpriseAgentSessions(result, opts)
+	if opts.localEnforcementEntriesIgnored > 0 {
+		result.AddWarning(config.LocalEnforcementEntriesIgnored, fmt.Sprintf(
+			"%d local block/allow entries in audit.db are ignored; the administrator config is the policy",
+			opts.localEnforcementEntriesIgnored))
+	}
 	exitCode := result.Finish("windows", failureCode)
 	result.LogPath = windowsEnterpriseStandaloneObserver(result, opts)
 	unknownProfile := windowsEnterpriseUnknownProfileRequested(opts) && exitCode != 0 && len(result.Errors) != 0
@@ -1431,6 +1956,10 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
 	}
+	writeWindowsEnterpriseScanners(output, result.Scanners)
+	if result.Policy != nil {
+		fmt.Fprintf(output, "  %s\n", result.Policy.Line())
+	}
 	enterprisestatus.WriteDestinations(output, result.Destinations)
 	for _, message := range result.Errors {
 		fmt.Fprintf(output, "  error %s: %s\n", message.Code, message.Message)
@@ -1454,6 +1983,46 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 	action string,
 	opts *windowsEnterpriseLifecycleOptions,
 	cause error,
+) error {
+	return writeWindowsEnterpriseStandaloneRefusal(cmd, action, opts, cause, applyWindowsEnterpriseRecordedDeployment)
+}
+
+// writeWindowsEnterpriseStandaloneConfigRefusal answers an install or ensure
+// whose config the gateway could not load. It changed nothing, so the result
+// is the status of the host as it is, as an ensure refused by its plan
+// reports it: installed, version, services and readiness of the running
+// deployment. Reporting installed false with every readiness flag false made
+// an MDM compliance rule read a healthy host as uninstalled (GAP-0181). A
+// probe that cannot read the host leaves the recorded deployment.
+func writeWindowsEnterpriseStandaloneConfigRefusal(
+	ctx context.Context,
+	cmd *cobra.Command,
+	action string,
+	opts *windowsEnterpriseLifecycleOptions,
+	script string,
+	cause error,
+) error {
+	return writeWindowsEnterpriseStandaloneRefusal(cmd, action, opts, cause, func(result *enterprisestatus.Result) {
+		status, run, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
+			windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
+		if err != nil || status.probeFailed {
+			applyWindowsEnterpriseRecordedDeployment(result)
+			return
+		}
+		applyWindowsEnterpriseInstallerReport(result, opts, status, run)
+		result.Errors = []enterprisestatus.Message{}
+	})
+}
+
+// writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a
+// request refused before it changed anything. describeHost fills the host
+// as it is into a refusal for invalid arguments.
+func writeWindowsEnterpriseStandaloneRefusal(
+	cmd *cobra.Command,
+	action string,
+	opts *windowsEnterpriseLifecycleOptions,
+	cause error,
+	describeHost func(*enterprisestatus.Result),
 ) error {
 	if cause == nil {
 		return nil
@@ -1490,12 +2059,17 @@ func writeWindowsEnterpriseStandalonePreflightFailure(
 			// the text the Secure Client profile pins.
 			message = fmt.Sprintf("invalid --profile %q: use %s or %s",
 				strings.TrimSpace(opts.profile), managed.ProfileStandalone, managed.ProfileSecureClient)
-			applyWindowsEnterpriseRecordedDeployment(result)
 		}
+		describeHost(result)
 	}
 	result.AddError(code, message)
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 }
+
+// windowsEnterpriseHealthNotChecked is the warning of a request refused
+// before any health check ran: its result reports only the recorded
+// deployment and the service states.
+const windowsEnterpriseHealthNotChecked = "health_not_checked"
 
 // windowsEnterpriseServiceState is a service's state as the installer
 // names it (running, stopped, absent, ...); tests replace it.
@@ -1544,7 +2118,7 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 				result.Readiness.SensorHelper = state == "running"
 			}
 		}
-		result.AddWarning("health_not_checked", "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
+		result.AddWarning(windowsEnterpriseHealthNotChecked, "this request was refused before any health check ran, so readiness.gateway, readiness.guardian, "+
 			"coverage_complete and security_complete were not checked (they read false); only the recorded deployment and the service states are reported. "+
 			"For the deployment's health, run `& '"+managedWindowsAdminCLI()+"' enterprise windows verify --profile "+profile+" --json` from an elevated PowerShell prompt")
 		return
@@ -1850,6 +2424,8 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	statusReport, statusRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, windowsEnterprisePowerShellArgs("status", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil {
 		result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
+		// Nothing ran: keep the recorded deployment in the result (GAP-0770).
+		applyWindowsEnterpriseRecordedDeployment(result)
 		return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 	}
 	plan, planErr := planWindowsEnterpriseEnsure(statusReport, opts, script)
@@ -1865,23 +2441,90 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
-		if verifyReport.OK {
+		if _, drifted := windowsEnterpriseHookRuntimeDrift(); verifyReport.OK && drifted == "" {
 			applyWindowsEnterpriseInstallerReport(result, opts, verifyReport, verifyRun)
+			if windowsEnterpriseIsElevated() {
+				// A copy an earlier upgrade kept of a binary an editor still
+				// ran goes once nothing runs it (GAP-0934).
+				for _, removed := range windowsEnterpriseRemoveReplacementCopies() {
+					result.Changes = append(result.Changes, "removed "+removed+", which no program runs any more")
+				}
+			}
 			result.Noop = true
 			result.NoopReason = plan.Reason
+			applyWindowsEnterprisePolicy(ctx, result)
 			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 		}
 		plan = windowsEnterpriseEnsurePlan{Action: "repair", Reason: "verify_failed"}
+	}
+
+	// An upgrade that keeps the installed config: this release's gateway must
+	// load it before the lifecycle stops the services (GAP-0188). A
+	// drift:config upgrade replaces the edited file instead.
+	if plan.Action == "upgrade" && plan.Reason != "drift:config" && windowsEnterpriseKeepsInstalledConfig(opts) {
+		if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+
+	// A repair restarts the gateway on the installed config: refuse one whose
+	// rule packs the gateway would not load, before anything stops (GAP-0672).
+	if plan.Action == "repair" && plan.Reason == "verify_failed" {
+		if err := windowsEnterpriseStandaloneRepairRulePackPreflight(); err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+
+	keptConfig := ""
+	var startOnlyKeys []string
+	if plan.Action == "upgrade" && plan.Reason == "drift:config" {
+		applied, keys := windowsEnterpriseHotConfigApply(ctx, cmd, opts, script, statusReport, result)
+		if applied {
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		startOnlyKeys = keys
+		keptConfig = keepInstalledWindowsEnterpriseEditedConfig()
+	}
+	if (plan.Action == "upgrade" || plan.Action == "repair") && !statusReport.TransactionPending {
+		// The transaction must not load an installed config.yaml that does
+		// not parse before it uses the supplied one (GAP-0948).
+		kept, err := installWindowsEnterpriseSuppliedConfigOverUnparseable(opts.configPath)
+		if err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
+		if kept != "" {
+			keptConfig = kept
+			result.Changes = append(result.Changes, windowsEnterpriseUnparseableConfigChange(kept, plan.Action))
+		}
 	}
 
 	actionOpts := *opts
 	actionOpts.jsonOutput = true
 	if plan.Action == "repair" {
 		// Repair reapplies ACL, service, and environment invariants from the
-		// installed payload; it takes no sources and records the installed
-		// binaries' version.
-		clearWindowsEnterpriseSources(&actionOpts)
+		// installed payload and records the installed binaries' version. A
+		// repair after a failed verify keeps this run's payload: the planner
+		// found every supplied source byte-identical to the recorded one
+		// (no drift), so it is the installed release, and it is the only
+		// copy of a payload file an antivirus quarantine removed. Without it
+		// ensure refused "recorded managed artifact is missing" where Setup
+		// /repair healed the same host (GAP-0935).
+		if plan.Reason != "verify_failed" {
+			clearWindowsEnterpriseSources(&actionOpts)
+		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
+		if repaired := repairWindowsEnterpriseHookRuntimeAccess(); repaired != "" {
+			result.Changes = append(result.Changes, repaired)
+		}
 	}
 	var cleanupManifest func()
 	if plan.Action == "install" && strings.TrimSpace(actionOpts.manifestPath) == "" && strings.TrimSpace(actionOpts.mode) == "" {
@@ -1892,6 +2535,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		}
 		cleanupManifest = cleanup
 		actionOpts.manifestPath = manifestPath
+		if err := windowsEnterpriseStandaloneProfilesPreflight(manifestPath); err != nil {
+			cleanup()
+			result.AddError("preflight_failed", err.Error())
+			return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
 	}
 	if cleanupManifest != nil {
 		defer cleanupManifest()
@@ -1974,14 +2622,56 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 					result.AddError(windowsEnterpriseMessageCode(err.Error(), "lifecycle_launch_failed"), err.Error())
 					return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
 				}
+			} else if !deferredActivation {
+				// The recovery rolled the deployment back and this release
+				// cannot finish the change it interrupted: say so and name the
+				// next step instead of a plain "repaired" (GAP-0767).
+				result.AddWarning("recovered_pending_transaction", windowsEnterpriseRolledBackMessage(followStatus.InstalledVersion))
 			}
 		}
 	}
 	report = windowsEnterpriseFailureWithDeploymentState(ctx, cmd, opts, script, report)
 	applyWindowsEnterpriseInstallerReport(result, opts, report, run)
 	addWindowsEnterpriseNothingInstalledError(result, report, plan.Action)
-	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+plan.Reason)
+	if keptConfig != "" && len(result.Errors) == 0 {
+		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+keptConfig)
+	}
+	applyWindowsEnterprisePolicy(ctx, result)
+	reason := plan.Reason
+	if len(startOnlyKeys) > 0 {
+		// Say why a config-only change stopped the services (GAP-0719).
+		reason += " (the services read " + strings.Join(startOnlyKeys, ", ") + " only at start, so every service was restarted)"
+	}
+	result.AddWarning("ensure_"+plan.Action, "ensure ran "+plan.Action+": "+reason)
 	return false, finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// windowsEnterpriseStandaloneProfilesPreflight refuses a first install, in
+// seconds and before it changes anything, when a target profile holds a
+// .defenseclaw folder the install plan would refuse (a per-user install
+// left it). The refusal names the folder and the next step. Any other
+// inspection failure is left to the install, which reports it. Tests
+// replace it.
+var windowsEnterpriseStandaloneProfilesPreflight = func(manifestPath string) error {
+	manifest, _, err := loadWindowsTargetRuntimeManifest(manifestPath)
+	if err != nil {
+		return nil
+	}
+	return windowsEnterpriseProfilesPreflightRefusal(enterprisehooks.PreflightWindowsManagedRuntimeRoots(manifest))
+}
+
+// windowsEnterpriseProfilesPreflightRefusal turns the profile inspection
+// into the preflight refusal, or nil.
+func windowsEnterpriseProfilesPreflightRefusal(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "reject noncanonical managed runtime baseline") {
+		return nil
+	}
+	original := err.Error()
+	message := original
+	if text, internal := windowsEnterpriseStandaloneErrorText(message); internal {
+		message = text
+	}
+	return errors.New(message + windowsEnterprisePerUserDataDirNextStep(original, message) + " Nothing was changed.")
 }
 
 // planWindowsEnterpriseEnsure chooses the converging action from the
@@ -2009,6 +2699,9 @@ func planWindowsEnterpriseEnsure(
 	}
 	if status.Installed {
 		if err := refuseWindowsEnterpriseConnectorlessConfig(opts); err != nil {
+			return windowsEnterpriseEnsurePlan{}, err
+		}
+		if err := refuseWindowsEnterpriseAPIPortChange(opts); err != nil {
 			return windowsEnterpriseEnsurePlan{}, err
 		}
 	}
@@ -2080,6 +2773,12 @@ func missingWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) []
 		}
 	}
 	return missing
+}
+
+// windowsEnterpriseKeepsInstalledConfig reports a request that names no
+// config: an upgrade keeps the installed config.yaml.
+func windowsEnterpriseKeepsInstalledConfig(opts *windowsEnterpriseLifecycleOptions) bool {
+	return strings.TrimSpace(opts.configPath) == "" && strings.TrimSpace(opts.mode) == ""
 }
 
 func clearWindowsEnterpriseSources(opts *windowsEnterpriseLifecycleOptions) {
@@ -2171,7 +2870,9 @@ func windowsEnterpriseEnsureDrift(opts *windowsEnterpriseLifecycleOptions, scrip
 			return "", err
 		}
 		got, err := windowsEnterpriseFileSHA256(layout.ConfigPath)
-		if err != nil || got != want {
+		// A config_version 8 source is installed as its v9 migration, so the
+		// same source is not drift while the installed file is that result.
+		if err != nil || (got != want && !config.MigratedFrom(layout.ConfigPath, want, got)) {
 			return "config", nil
 		}
 	}

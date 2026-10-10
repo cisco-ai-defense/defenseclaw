@@ -14,169 +14,261 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""PolicyEngine — thin facade over the audit Store for enforcement decisions.
+"""PolicyEngine — enforcement answers for skills, MCP servers, plugins and tools.
 
-Mirrors internal/enforce/policy.go exactly.
+Operator block/allow decisions live in config.yaml ``asset_policy`` (the
+``<type>.denied/allowed`` and ``tool`` lists): :meth:`block`, :meth:`allow`
+and :meth:`unblock` change them through the single config writer, and the
+``is_blocked*``/``is_allowed*`` reads come from the loaded config passed as
+``cfg``. The audit.db ``actions`` table is the enforcement journal — scan
+verdict blocks, quarantine, runtime disable — and is never read as policy.
+Secure Client hosts keep operator rows in the table, unchanged.
+
+Mirrors internal/enforce/policy.go.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from defenseclaw.enforce import asset_lists
 from defenseclaw.models import ActionEntry, ActionState
 
 if TYPE_CHECKING:
     from defenseclaw.db import Store
 
 
+def _tool_policy_entries(tools: Any) -> list[ActionEntry]:
+    """asset_policy.tool rules as ActionEntry rows. config.yaml stores no
+    time for a rule, so ``updated_at`` is None (shown as "-"), never the
+    time of the read."""
+    out: list[ActionEntry] = []
+    for decision, rules in (("block", getattr(tools, "denied", [])), ("allow", getattr(tools, "allowed", []))):
+        for rule in rules or []:
+            target = f"@{rule.connector}/{rule.name}" if rule.connector else rule.name
+            out.append(ActionEntry(
+                id=f"asset_policy:tool:{target}", target_type="tool", target_name=target,
+                actions=ActionState(install=decision), reason=rule.reason, updated_at=None,
+            ))
+    return out
+
+
+def tool_rule_entries(cfg: Any | None, store: Store | None) -> list[ActionEntry]:
+    """The tool rules ``defenseclaw tool list`` shows, as config.yaml holds them now.
+
+    For a long-running reader such as the TUI: the CLI it runs writes
+    ``asset_policy.tool`` to config.yaml, so the config loaded at start would
+    miss every later rule. Secure Client (and a reader with no config) keeps
+    the audit.db rows.
+    """
+    if cfg is None or asset_lists.is_secure_client(cfg):
+        return store.list_actions_by_type("tool") if store else []
+    return _tool_policy_entries(asset_lists.tool_policy_on_disk(cfg))
+
+
 class PolicyEngine:
-    def __init__(self, store: Store | None) -> None:
+    def __init__(self, store: Store | None, cfg: Any | None = None) -> None:
         self.store = store
+        self.cfg = cfg
+
+    def _legacy_rows(self) -> bool:
+        return asset_lists.is_secure_client(self.cfg)
+
+    def _asset_policy(self) -> Any | None:
+        return getattr(self.cfg, "asset_policy", None)
+
+    # ------------------------------------------------------------------
+    # Operator block/allow (config.yaml asset_policy)
+    #
+    # A rule scoped to the connector decides before an unscoped one, so a
+    # connector-scoped allow overrides a global block for that connector.
+    # ------------------------------------------------------------------
 
     def is_blocked(self, target_type: str, name: str) -> bool:
-        if not self.store:
-            return False
-        return self.store.has_action(target_type, name, "install", "block")
+        return self.is_blocked_for_connector(target_type, name, "")
 
     def is_allowed(self, target_type: str, name: str) -> bool:
-        if not self.store:
-            return False
-        return self.store.has_action(target_type, name, "install", "allow")
-
-    def is_quarantined(self, target_type: str, name: str) -> bool:
-        if not self.store:
-            return False
-        return self.store.has_action(target_type, name, "file", "quarantine")
-
-    def block(self, target_type: str, name: str, reason: str) -> None:
-        if self.store:
-            self.store.set_action_field(target_type, name, "install", "block", reason)
-
-    def allow(self, target_type: str, name: str, reason: str) -> None:
-        """Set install=allow and clear residual file/runtime enforcement.
-
-        Mirrors internal/enforce/policy.go Allow() exactly: after allowing,
-        quarantine and disable state are removed so the allow takes full
-        effect.  Only a manual block() can override an allow entry.
-        """
-        if not self.store:
-            return
-        self.store.set_action_field(target_type, name, "install", "allow", reason)
-        self.store.clear_action_field(target_type, name, "file")
-        self.store.clear_action_field(target_type, name, "runtime")
-
-    def unblock(self, target_type: str, name: str) -> None:
-        if self.store:
-            self.store.clear_action_field(target_type, name, "install")
-
-    def quarantine(self, target_type: str, name: str, reason: str) -> None:
-        if self.store:
-            self.store.set_action_field(target_type, name, "file", "quarantine", reason)
-
-    def clear_quarantine(self, target_type: str, name: str) -> None:
-        if self.store:
-            self.store.clear_action_field(target_type, name, "file")
-
-    def disable(self, target_type: str, name: str, reason: str) -> None:
-        if self.store:
-            self.store.set_action_field(target_type, name, "runtime", "disable", reason)
-
-    def enable(self, target_type: str, name: str) -> None:
-        if self.store:
-            self.store.clear_action_field(target_type, name, "runtime")
-
-    def set_source_path(
-        self, target_type: str, name: str, path: str, connector: str = "",
-    ) -> None:
-        if self.store:
-            self.store.set_source_path(target_type, name, path, connector)
-
-    def set_action(
-        self, target_type: str, name: str, source_path: str,
-        state: ActionState, reason: str,
-    ) -> None:
-        if self.store:
-            self.store.set_action(target_type, name, source_path, state, reason)
-
-    def get_action(
-        self, target_type: str, name: str, connector: str = "",
-    ) -> ActionEntry | None:
-        if not self.store:
-            return None
-        return self.store.get_action(target_type, name, connector)
-
-    def list_blocked(self) -> list[ActionEntry]:
-        if not self.store:
-            return []
-        return self.store.list_by_action("install", "block")
-
-    def list_allowed(self) -> list[ActionEntry]:
-        if not self.store:
-            return []
-        return self.store.list_by_action("install", "allow")
-
-    def list_all(self) -> list[ActionEntry]:
-        if not self.store:
-            return []
-        return self.store.list_all_actions()
-
-    def list_by_type(self, target_type: str) -> list[ActionEntry]:
-        if not self.store:
-            return []
-        return self.store.list_actions_by_type(target_type)
-
-    def remove_action(self, target_type: str, name: str) -> None:
-        if self.store:
-            self.store.remove_action(target_type, name)
-
-    # ------------------------------------------------------------------
-    # Connector-scoped enforcement helpers (N2 — per-connector
-    # mcp block/allow/unblock)
-    #
-    # The connector dimension lives in the audit store's per-connector
-    # ``connector`` column (the f/dbmig SK-4 foundation), which is distinct
-    # from the ``@<connector>/<tool>`` name-encoding the tool gate uses below.
-    # A bare entry (connector="") is **GLOBAL** — it applies to every
-    # connector; a non-empty connector **NARROWS** the entry to that peer.
-    #
-    # Reads resolve **most-specific-wins per action field**: if the connector
-    # owns a row with the requested field set, that field is authoritative for
-    # that connector; otherwise the global row falls through. This lets a
-    # connector-scoped allow override a global block for that connector, while a
-    # connector-scoped block still wins when both scoped/global allows exist.
-    # Writes are exact-match on connector (the actions table is unique on
-    # (target_type, target_name, connector)). Mirrors the ``*ForConnector``
-    # methods in internal/enforce/policy.go.
-    # ------------------------------------------------------------------
+        return self.is_allowed_for_connector(target_type, name, "")
 
     def is_blocked_for_connector(
-        self, target_type: str, name: str, connector: str = "",
+        self, target_type: str, name: str, connector: str = "", *,
+        source_path: str = "", url: str = "", command: str = "",
+        args: list[str] | None = None, transport: str = "",
     ) -> bool:
-        """True if blocked for ``connector`` (connector-scoped entry, else global)."""
+        if self._legacy_rows():
+            if target_type == "tool":
+                return self._legacy_tool_install_is(name, connector, "block")
+            return self._journal_install_is(target_type, name, connector, "block")
+        if target_type == "tool":
+            return self._operator_decision(target_type, name, connector) == asset_lists.LIST_DENY
+        return asset_lists.list_decision(
+            self._asset_policy(), target_type, name, connector,
+            source_path=source_path, url=url, command=command, args=args or [],
+            transport=transport,
+        )[0] == asset_lists.LIST_DENY
+
+    def is_allowed_for_connector(self, target_type: str, name: str, connector: str = "") -> bool:
+        if self._legacy_rows():
+            if target_type == "tool":
+                return self._legacy_tool_install_is(name, connector, "allow")
+            return self._journal_install_is(target_type, name, connector, "allow")
+        return self._operator_decision(target_type, name, connector) == asset_lists.LIST_ALLOW
+
+    def _operator_decision(self, target_type: str, name: str, connector: str) -> str:
+        if target_type == "tool":
+            return asset_lists.tool_decision(self._asset_policy(), name, connector)[0]
+        return asset_lists.list_decision(self._asset_policy(), target_type, name, connector)[0]
+
+    def block(self, target_type: str, name: str, reason: str) -> None:
+        self.block_for_connector(target_type, name, "", reason)
+
+    def block_for_connector(self, target_type: str, name: str, connector: str, reason: str) -> None:
+        """Add an operator block (asset_policy.<type>.denied)."""
+        if self._legacy_rows():
+            if self.store:
+                self.store.set_action_field(target_type, name, "install", "block", reason, connector)
+            return
+        asset_lists.write_operator_decision(
+            self.cfg, op=asset_lists.OP_BLOCK, target_type=target_type, name=name,
+            connector=connector, reason=reason,
+        )
+
+    def allow(
+        self, target_type: str, name: str, reason: str, source_path: str = "", *, clear_journal: bool = True,
+        pins: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.allow_for_connector(target_type, name, "", reason, source_path, clear_journal=clear_journal, pins=pins)
+
+    def allow_for_connector(
+        self,
+        target_type: str,
+        name: str,
+        connector: str,
+        reason: str,
+        source_path: str = "",
+        *,
+        clear_journal: bool = True,
+        pins: list[dict[str, Any]] | None = None,
+    ) -> None:
+        """Add an operator allow (asset_policy.<type>.allowed, pinned to
+        ``source_path`` when given, and an MCP allow to each server
+        definition in ``pins``) and, with ``clear_journal``, clear the
+        residual quarantine and runtime-disable journal state so the allow
+        takes full effect."""
+        if self._legacy_rows():
+            if self.store:
+                self.store.set_action_field(target_type, name, "install", "allow", reason, connector)
+        else:
+            asset_lists.write_operator_decision(
+                self.cfg, op=asset_lists.OP_ALLOW, target_type=target_type, name=name,
+                connector=connector, reason=reason, source_path=source_path, pins=pins,
+            )
+        if self.store and clear_journal:
+            self.store.clear_action_field(target_type, name, "file", connector)
+            self.store.clear_action_field(target_type, name, "runtime", connector)
+
+    def unblock(self, target_type: str, name: str, connector: str = "") -> None:
+        """Remove an operator block, and the journal's scan-verdict install
+        block, so a later restore no longer keeps the asset blocked."""
+        self._refuse_if_managed(target_type, name, asset_lists.OP_UNBLOCK)
+        self._drop_operator_entries(target_type, name, connector, asset_lists.OP_UNBLOCK)
+        if self.store:
+            self.store.clear_action_field(target_type, name, "install", connector)
+
+    def _refuse_if_managed(self, target_type: str, name: str, op: str) -> None:
+        """A managed standalone device takes block/allow/unblock from the
+        admin config only, so an unblock is refused before it touches the
+        operator lists or the journal (whose runtime disables the gateway
+        still enforces)."""
+        if not self._legacy_rows():
+            asset_lists.refuse_if_managed(self.cfg, target_type=target_type, op=op, name=name)
+
+    def _drop_operator_entries(self, target_type: str, name: str, connector: str, op: str) -> None:
+        if self._legacy_rows():
+            return
+        # The writer reloads the lists under its lock; the caller snapshot may
+        # predate a concurrent block or allow.
+        asset_lists.write_operator_decision(
+            self.cfg, op=op, target_type=target_type, name=name, connector=connector,
+        )
+
+    # Tool rules (asset_policy.tool) are presented as ActionEntry rows keyed
+    # "@<connector>/<tool>" (scoped) or "<tool>" (unscoped), the shape the
+    # tool commands render.
+
+    def block_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
+        if self._legacy_rows():
+            if self.store:
+                target = f"@{connector}/{tool_name}" if connector else tool_name
+                self.store.set_action_field("tool", target, "install", "block", reason)
+            return
+        self.block_for_connector("tool", tool_name, connector, reason)
+
+    def allow_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
+        if self._legacy_rows():
+            if self.store:
+                target = f"@{connector}/{tool_name}" if connector else tool_name
+                self.store.set_action_field("tool", target, "install", "allow", reason)
+                self.store.clear_action_field("tool", target, "file")
+                self.store.clear_action_field("tool", target, "runtime")
+            return
+        self.allow_for_connector("tool", tool_name, connector, reason)
+
+    def unblock_tool_for_connector(self, tool_name: str, connector: str = "") -> None:
+        """Remove the tool's block or allow at exactly this connector scope."""
+        self._refuse_if_managed("tool", tool_name, asset_lists.OP_CLEAR)
+        if self._legacy_rows():
+            if self.store:
+                target = f"@{connector}/{tool_name}" if connector else tool_name
+                self.store.clear_action_field("tool", target, "install")
+            return
+        self._drop_operator_entries("tool", tool_name, connector, asset_lists.OP_CLEAR)
+
+    def list_blocked_tools(self) -> list[ActionEntry]:
+        return [e for e in self._tool_entries() if e.actions.install == "block"]
+
+    def list_allowed_tools(self) -> list[ActionEntry]:
+        return [e for e in self._tool_entries() if e.actions.install == "allow"]
+
+    def _tool_entries(self) -> list[ActionEntry]:
+        if self._legacy_rows():
+            return self.store.list_actions_by_type("tool") if self.store else []
+        return _tool_policy_entries(getattr(self._asset_policy(), "tool", None))
+
+    # ------------------------------------------------------------------
+    # Enforcement journal (audit.db actions)
+    #
+    # A bare entry (connector="") is GLOBAL; a non-empty connector NARROWS
+    # the entry to that peer. Reads resolve most-specific-wins per field.
+    # ------------------------------------------------------------------
+
+    def record_scan_block(self, target_type: str, name: str, connector: str, reason: str) -> None:
+        """Journal a scan verdict's install block (never operator policy)."""
+        if self.store:
+            self.store.set_action_field(target_type, name, "install", "block", reason, connector)
+
+    def _legacy_tool_install_is(self, name: str, connector: str, want: str) -> bool:
+        if not self.store:
+            return False
+        if connector:
+            scoped = self.store.get_action("tool", f"@{connector}/{name}")
+            if scoped is not None and scoped.actions.install:
+                return scoped.actions.install == want
+        return self.store.has_action("tool", name, "install", want)
+
+    def _journal_install_is(self, target_type: str, name: str, connector: str, want: str) -> bool:
         if not self.store:
             return False
         if connector:
             scoped = self.store.get_action(target_type, name, connector)
             if scoped is not None and scoped.actions.install:
-                return scoped.actions.install == "block"
-        return self.store.has_action(target_type, name, "install", "block")
+                return scoped.actions.install == want
+        return self.store.has_action(target_type, name, "install", want)
 
-    def is_allowed_for_connector(
-        self, target_type: str, name: str, connector: str = "",
-    ) -> bool:
-        """True if allowed for ``connector`` (connector-scoped entry, else global)."""
-        if not self.store:
-            return False
-        if connector:
-            scoped = self.store.get_action(target_type, name, connector)
-            if scoped is not None and scoped.actions.install:
-                return scoped.actions.install == "allow"
-        return self.store.has_action(target_type, name, "install", "allow")
+    def is_quarantined(self, target_type: str, name: str) -> bool:
+        return self.is_quarantined_for_connector(target_type, name, "")
 
-    def is_quarantined_for_connector(
-        self, target_type: str, name: str, connector: str = "",
-    ) -> bool:
-        """True if quarantined for ``connector`` (connector-scoped entry, else global)."""
+    def is_quarantined_for_connector(self, target_type: str, name: str, connector: str = "") -> bool:
         if not self.store:
             return False
         if connector:
@@ -185,197 +277,59 @@ class PolicyEngine:
                 return scoped.actions.file == "quarantine"
         return self.store.has_action(target_type, name, "file", "quarantine")
 
-    def block_for_connector(
-        self, target_type: str, name: str, connector: str, reason: str,
-    ) -> None:
-        """Block ``name`` for ``connector`` (exact-match; connector="" = global)."""
+    def quarantine(self, target_type: str, name: str, reason: str) -> None:
+        self.quarantine_for_connector(target_type, name, "", reason)
+
+    def quarantine_for_connector(self, target_type: str, name: str, connector: str, reason: str) -> None:
         if self.store:
-            self.store.set_action_field(
-                target_type, name, "install", "block", reason, connector,
-            )
+            self.store.set_action_field(target_type, name, "file", "quarantine", reason, connector)
 
-    def allow_for_connector(
-        self, target_type: str, name: str, connector: str, reason: str,
-    ) -> None:
-        """Allow ``name`` for ``connector`` and clear residual file/runtime state.
+    def clear_quarantine(self, target_type: str, name: str) -> None:
+        self.clear_quarantine_for_connector(target_type, name, "")
 
-        Exact-match on connector (connector="" = global). Mirrors :meth:`allow`.
-        """
-        if not self.store:
-            return
-        self.store.set_action_field(
-            target_type, name, "install", "allow", reason, connector,
-        )
-        self.store.clear_action_field(target_type, name, "file", connector)
-        self.store.clear_action_field(target_type, name, "runtime", connector)
-
-    def unblock_for_connector(
-        self, target_type: str, name: str, connector: str = "",
-    ) -> None:
-        """Clear the install action for ``connector`` (exact-match; ""=global)."""
-        if self.store:
-            self.store.clear_action_field(target_type, name, "install", connector)
-
-    def quarantine_for_connector(
-        self, target_type: str, name: str, connector: str, reason: str,
-    ) -> None:
-        """Quarantine ``name`` for ``connector`` (file dimension; exact-match;
-        connector="" = global). Mirrors :meth:`quarantine`."""
-        if self.store:
-            self.store.set_action_field(
-                target_type, name, "file", "quarantine", reason, connector,
-            )
-
-    def clear_quarantine_for_connector(
-        self, target_type: str, name: str, connector: str = "",
-    ) -> None:
-        """Clear the file (quarantine) action for ``connector`` (exact-match;
-        ""=global). Mirrors :meth:`clear_quarantine`."""
+    def clear_quarantine_for_connector(self, target_type: str, name: str, connector: str = "") -> None:
         if self.store:
             self.store.clear_action_field(target_type, name, "file", connector)
 
-    def disable_for_connector(
-        self, target_type: str, name: str, connector: str, reason: str,
-    ) -> None:
-        """Disable ``name`` at runtime for ``connector`` (runtime dimension;
-        exact-match; connector="" = global). Mirrors :meth:`disable`."""
-        if self.store:
-            self.store.set_action_field(
-                target_type, name, "runtime", "disable", reason, connector,
-            )
+    def disable(self, target_type: str, name: str, reason: str) -> None:
+        self.disable_for_connector(target_type, name, "", reason)
 
-    def enable_for_connector(
-        self, target_type: str, name: str, connector: str = "",
-    ) -> None:
-        """Clear the runtime (disable) action for ``connector`` (exact-match;
-        ""=global). Mirrors :meth:`enable`."""
+    def disable_for_connector(self, target_type: str, name: str, connector: str, reason: str) -> None:
+        if self.store:
+            self.store.set_action_field(target_type, name, "runtime", "disable", reason, connector)
+
+    def enable(self, target_type: str, name: str) -> None:
+        self.enable_for_connector(target_type, name, "")
+
+    def enable_for_connector(self, target_type: str, name: str, connector: str = "") -> None:
         if self.store:
             self.store.clear_action_field(target_type, name, "runtime", connector)
 
-    def remove_action_for_connector(
-        self, target_type: str, name: str, connector: str = "",
-    ) -> None:
-        """Remove all enforcement for ``connector`` (exact-match; ""=global)."""
+    def set_source_path(self, target_type: str, name: str, path: str, connector: str = "") -> None:
+        if self.store:
+            self.store.set_source_path(target_type, name, path, connector)
+
+    def get_action(self, target_type: str, name: str, connector: str = "") -> ActionEntry | None:
+        if target_type == "tool" and not self._legacy_rows():
+            return next((e for e in self._tool_entries() if e.target_name == name), None)
+        if not self.store:
+            return None
+        return self.store.get_action(target_type, name, connector)
+
+    def list_by_type(self, target_type: str) -> list[ActionEntry]:
+        if target_type == "tool":
+            return self._tool_entries()
+        if not self.store:
+            return []
+        return self.store.list_actions_by_type(target_type)
+
+    def remove_action(self, target_type: str, name: str) -> None:
+        self.remove_action_for_connector(target_type, name, "")
+
+    def remove_action_for_connector(self, target_type: str, name: str, connector: str = "") -> None:
+        """Remove all enforcement state at exactly this scope: the operator
+        block/allow entries and the journal row."""
+        self._refuse_if_managed(target_type, name, asset_lists.OP_CLEAR)
+        self._drop_operator_entries(target_type, name, connector, asset_lists.OP_CLEAR)
         if self.store:
             self.store.remove_action(target_type, name, connector)
-
-    # ------------------------------------------------------------------
-    # Tool-level helpers (target_type="tool", scoped naming supported)
-    # ------------------------------------------------------------------
-
-    def is_tool_blocked(self, tool_name: str, source: str = "") -> bool:
-        """Return True if the tool is blocked (scoped check first, then global)."""
-        if not self.store:
-            return False
-        if source:
-            scoped = f"{source}/{tool_name}"
-            if self.store.has_action("tool", scoped, "install", "block"):
-                return True
-        return self.store.has_action("tool", tool_name, "install", "block")
-
-    def is_tool_allowed(self, tool_name: str, source: str = "") -> bool:
-        """Return True if the tool is allowed (scoped check first, then global)."""
-        if not self.store:
-            return False
-        if source:
-            scoped = f"{source}/{tool_name}"
-            if self.store.has_action("tool", scoped, "install", "allow"):
-                return True
-        return self.store.has_action("tool", tool_name, "install", "allow")
-
-    def block_tool(self, tool_name: str, source: str, reason: str) -> None:
-        """Block a tool, optionally scoped to a source."""
-        if self.store:
-            target = f"{source}/{tool_name}" if source else tool_name
-            self.store.set_action_field("tool", target, "install", "block", reason)
-
-    def allow_tool(self, tool_name: str, source: str, reason: str) -> None:
-        """Allow a tool, optionally scoped to a source.
-
-        Uses the same cleanup pattern as allow() for consistency.
-        """
-        if not self.store:
-            return
-        target = f"{source}/{tool_name}" if source else tool_name
-        self.store.set_action_field("tool", target, "install", "allow", reason)
-        self.store.clear_action_field("tool", target, "file")
-        self.store.clear_action_field("tool", target, "runtime")
-
-    def list_blocked_tools(self) -> list[ActionEntry]:
-        """List all tool-level block entries."""
-        if not self.store:
-            return []
-        return self.store.list_by_action_and_type("install", "block", "tool")
-
-    def list_allowed_tools(self) -> list[ActionEntry]:
-        """List all tool-level allow entries."""
-        if not self.store:
-            return []
-        return self.store.list_by_action_and_type("install", "allow", "tool")
-
-    # ------------------------------------------------------------------
-    # Connector-scoped tool helpers (target_type="tool", "@<connector>/<tool>")
-    #
-    # The ``@`` sigil keeps connector scoping distinct from the orthogonal
-    # ``<source>/<tool>`` source scoping above. Runtime resolution order
-    # (mirrored by the Go gateway lanes via the policy.go methods of the same
-    # name) is, for request connector ``C`` and tool ``T``:
-    #   block @C/T → allow @C/T → block T → allow T → scan
-    # i.e. a connector-scoped row is authoritative for that connector; only
-    # when no scoped action exists does the global row fall through.
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _tool_connector_target(tool_name: str, connector: str) -> str:
-        """Build the connector-scoped tool key ``@<connector>/<tool>``.
-
-        Centralised here so the read gate and the write surface stay in
-        lockstep on the encoding.
-        """
-        return f"@{connector}/{tool_name}" if connector else tool_name
-
-    def is_tool_blocked_for_connector(self, tool_name: str, connector: str = "") -> bool:
-        """Return True if the tool is blocked for ``connector`` (scoped row, else global)."""
-        if not self.store:
-            return False
-        if connector:
-            scoped = self._tool_connector_target(tool_name, connector)
-            entry = self.store.get_action("tool", scoped)
-            if entry is not None and entry.actions.install:
-                return entry.actions.install == "block"
-        return self.store.has_action("tool", tool_name, "install", "block")
-
-    def is_tool_allowed_for_connector(self, tool_name: str, connector: str = "") -> bool:
-        """Return True if the tool is allowed for ``connector`` (scoped row, else global)."""
-        if not self.store:
-            return False
-        if connector:
-            scoped = self._tool_connector_target(tool_name, connector)
-            entry = self.store.get_action("tool", scoped)
-            if entry is not None and entry.actions.install:
-                return entry.actions.install == "allow"
-        return self.store.has_action("tool", tool_name, "install", "allow")
-
-    def block_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
-        """Block a tool, optionally scoped to a connector (``@<connector>/<tool>``)."""
-        if self.store:
-            target = self._tool_connector_target(tool_name, connector)
-            self.store.set_action_field("tool", target, "install", "block", reason)
-
-    def allow_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
-        """Allow a tool, optionally scoped to a connector.
-
-        Uses the same cleanup pattern as :meth:`allow_tool` for consistency.
-        """
-        if not self.store:
-            return
-        target = self._tool_connector_target(tool_name, connector)
-        self.store.set_action_field("tool", target, "install", "allow", reason)
-        self.store.clear_action_field("tool", target, "file")
-        self.store.clear_action_field("tool", target, "runtime")
-
-    def unblock_tool_for_connector(self, tool_name: str, connector: str = "") -> None:
-        """Clear the install action for a connector-scoped tool row."""
-        if self.store:
-            target = self._tool_connector_target(tool_name, connector)
-            self.store.clear_action_field("tool", target, "install")

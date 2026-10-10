@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -55,6 +56,8 @@ rules:
     tags: [prompt-injection]
 """
 
+_DEFAULT_PACK = os.path.join(os.path.dirname(__file__), "..", "..", "policies", "guardrail", "default")
+
 _SOURCE = '''"""Uploads MEMORY.md; example key sk-ant-docstring0123456789abcdef."""
 NEVER_TRACK = frozenset({"USER.md", "MEMORY.md"})  # MEMORY.md is never touched
 KEY = "sk-ant-abcdefghij0123456789KLM"
@@ -79,12 +82,27 @@ class TestPythonSourceOverlay(unittest.TestCase):
             fh.write(text)
         return {f.id: f.location for f in self.pack.scan_path(self.target)}
 
-    def test_python_skips_docstrings_comments_and_file_names_in_strings(self):
+    def test_python_matches_raw_source_but_file_names_in_strings_are_not_writes(self):
         hits = self._scan("tool.py", _SOURCE)
-        # A file name in a data list is not a write (GAP-2069).
+        # A file name in a data list or a comment is not a write (GAP-2069).
         self.assertNotIn("T-MEMORY", hits)
-        # Other rules still see string literals, but not the docstring.
-        self.assertEqual(hits.get("T-KEY"), "tool.py:3")
+        # Other rules match raw source, the docstring included, as install
+        # admission does (GAP-0488).
+        self.assertEqual(hits.get("T-KEY"), "tool.py:1")
+
+    def test_skill_scan_agrees_with_install_admission_on_python_comments(self):
+        # GAP-0488: the fixture's example key sits only in a docstring and a
+        # comment. internal/guardrail/artifact_scan_test.go checks that the
+        # install watcher reports this same set for the same fixture.
+        root = os.path.join(os.path.dirname(__file__), "..", "..", "testdata", "rulepack_artifact_parity")
+        with open(os.path.join(root, "expected.json"), encoding="utf-8") as fh:
+            want = json.load(fh)["findings"]
+        pack = rulepack.load_rule_pack(os.path.normpath(_DEFAULT_PACK))
+        got = sorted(
+            [f.rule_id, f.severity, f.location.replace("\\", "/")]
+            for f in pack.scan_path(os.path.join(root, "skill"))
+        )
+        self.assertEqual(got, want)
 
     def test_python_write_of_the_file_still_fires(self):
         # GAP-2069 verify: the file name is always a string literal in
@@ -101,9 +119,9 @@ class TestPythonSourceOverlay(unittest.TestCase):
         self.assertEqual(hits.get("T-MEMORY"), "writer.py:4")
 
     def test_non_python_text_is_unchanged(self):
-        hits = self._scan("notes.md", _SOURCE)
-        self.assertEqual(hits.get("T-MEMORY"), "notes.md:1")
-        self.assertEqual(hits.get("T-KEY"), "notes.md:1")
+        hits = self._scan("notes.sh", _SOURCE)
+        self.assertEqual(hits.get("T-MEMORY"), "notes.sh:1")
+        self.assertEqual(hits.get("T-KEY"), "notes.sh:1")
 
     def test_prefilter_keeps_ignorecase_matches(self):
         # U+0130 and U+0131 match "i" under re.IGNORECASE; the literal
@@ -112,6 +130,47 @@ class TestPythonSourceOverlay(unittest.TestCase):
             ids = [f.id for f in self.pack.scan_text(text)]
             self.assertIn("T-IGNORE", ids, text)
         self.assertEqual(self.pack.scan_text("ignore the previous run"), [])
+
+
+class TestArtifactDocsAndCommandLines(unittest.TestCase):
+    def test_doc_mentions_and_cross_line_commands_do_not_fire(self):
+        # GAP-0364: a JSON example's rm -rf joined a "/" lines below into a
+        # CRITICAL CMD-RM-RF, and docs explaining MEMORY.md were COG-MEMORY.
+        root = os.path.join(os.path.dirname(__file__), "..", "..", "policies", "guardrail", "default")
+        pack = rulepack.load_rule_pack(os.path.normpath(root))
+
+        def ids(text, location):
+            return {f.rule_id for f in pack.scan_text(text, location=location)}
+
+        example = '{ "input": { "command": "rm -rf /workspace/reports" },\n  "note": "paths under / are protected" }\n'
+        self.assertNotIn("CMD-RM-RF", ids(example, "shared/tools.md"))
+        self.assertIn("CMD-RM-RF", ids("cleanup:\n\trm -rf /\n", "Makefile"))
+        self.assertNotIn("COG-MEMORY", ids("The memory tool keeps notes in MEMORY.md.\n", "shared/memory.md"))
+        self.assertIn("COG-MEMORY", ids("Write what you learn to MEMORY.md.\n", "SKILL.md"))
+
+
+    def test_anchored_command_matches_after_first_line(self):
+        pack = rulepack.RulePack(source_dir="test", rules=[
+            rulepack._CompiledRule(
+                rule_id="T-COMMAND", pattern=rulepack.re.compile(r"^dc-review-marker"),
+                title="Marker", severity="HIGH", confidence=1, tags=[], category="command",
+            ),
+        ])
+        findings = pack.scan_text("# introduction\ndc-review-marker\n", location="SKILL.md")
+        self.assertEqual([(f.rule_id, f.location) for f in findings], [("T-COMMAND", "SKILL.md:2")])
+
+    def test_utf16_skill_manifest_gets_rule_pack_finding(self):
+        pack = rulepack.RulePack(source_dir="test", rules=[
+            rulepack._CompiledRule(
+                rule_id="T-MARKER", pattern=rulepack.re.compile("dc-review-marker"),
+                title="Marker", severity="HIGH", confidence=1, tags=[], category="command",
+            ),
+        ])
+        with tempfile.TemporaryDirectory() as target:
+            with open(os.path.join(target, "SKILL.md"), "wb") as fh:
+                fh.write("# introduction\ndc-review-marker\n".encode("utf-16"))
+            findings = pack.scan_path(target)
+        self.assertEqual([(f.rule_id, f.location) for f in findings], [("T-MARKER", "SKILL.md:2")])
 
 
 class TestWindowedSearch(unittest.TestCase):

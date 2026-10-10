@@ -1693,7 +1693,7 @@ func TestClaudeCode_SetupRefreshDeduplicatesManagedHooksAcrossBinaryPathChange(t
 			entry, _ := rawEntry.(map[string]interface{})
 			commands, _ := entry["hooks"].([]interface{})
 			for _, rawCommand := range commands {
-				command, _ := rawCommand.(map[string]interface{})
+				command, _ := claudeCodeExecView(rawCommand).(map[string]interface{})
 				value, _ := command["command"].(string)
 				switch value {
 				case secondCommand:
@@ -2061,7 +2061,7 @@ func TestClaudeCode_SetupMigratesPreTrackingWindowsExecMatrixAfterBinaryMove(t *
 	for _, rawGroups := range settings["hooks"].(map[string]interface{}) {
 		for _, rawGroup := range rawGroups.([]interface{}) {
 			for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
-				handler := rawHandler.(map[string]interface{})
+				handler := claudeCodeExecView(rawHandler).(map[string]interface{})
 				switch handler["command"] {
 				case oldBinary:
 					oldCount++
@@ -2142,7 +2142,7 @@ func TestClaudeCode_SetupPreservesForeignSameBasenameExecHook(t *testing.T) {
 	for _, rawEntry := range entries {
 		entry := rawEntry.(map[string]interface{})
 		for _, rawHandler := range entry["hooks"].([]interface{}) {
-			handler := rawHandler.(map[string]interface{})
+			handler := claudeCodeExecView(rawHandler).(map[string]interface{})
 			switch handler["command"] {
 			case foreignCommand:
 				foreignCount++
@@ -2349,7 +2349,7 @@ func TestClaudeCode_SetupRefreshRemovesKnownPreUpgradeCommandWithoutClaimingRepo
 				t.Fatalf("hooks[%q][%d].hooks = %T, want array", eventType, entryIndex, entry["hooks"])
 			}
 			for hookIndex, rawHook := range rawHooks {
-				hook, ok := rawHook.(map[string]interface{})
+				hook, ok := claudeCodeExecView(rawHook).(map[string]interface{})
 				if !ok {
 					t.Fatalf("hooks[%q][%d].hooks[%d] = %T, want object", eventType, entryIndex, hookIndex, rawHook)
 				}
@@ -2730,11 +2730,17 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 	hooks := settings["hooks"].(map[string]interface{})
 	entries := hooks["PreToolUse"].([]interface{})
 	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	if got := handler["command"]; got != defenseclawHookBinaryOverride {
-		t.Fatalf("command = %q, want exact executable path %q", got, defenseclawHookBinaryOverride)
+	// Per-user Setup runs the launcher through cmd.exe so a missing launcher
+	// blocks (GAP-1091); the handler still reads as the exec form it runs.
+	if got := handler["command"]; got != claudeCodeWindowsCommandProcessor() {
+		t.Fatalf("command = %q, want %q", got, claudeCodeWindowsCommandProcessor())
+	}
+	view := claudeCodeExecView(handler).(map[string]interface{})
+	if got := view["command"]; got != defenseclawHookBinaryOverride {
+		t.Fatalf("launcher = %q, want exact executable path %q", got, defenseclawHookBinaryOverride)
 	}
 	wantArgs := []interface{}{"hook", "--connector", "claudecode"}
-	if got := handler["args"]; !reflect.DeepEqual(got, wantArgs) {
+	if got := view["args"]; !reflect.DeepEqual(got, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", got, wantArgs)
 	}
 	if _, present := handler["shell"]; present {
@@ -4652,7 +4658,7 @@ func TestCodexCommandHookHashSelectsWindowsCommandAndStatus(t *testing.T) {
 	}
 }
 
-func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
+func TestRemoveOwnedCodexHookStateKeepsOnlyUnrelatedTrust(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
@@ -4667,7 +4673,7 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 
 	state := map[string]interface{}{
 		key: map[string]interface{}{
-			"trusted_hash": "sha256:user-replacement",
+			"trusted_hash": "sha256:edited-hook",
 		},
 		otherKey: map[string]interface{}{
 			"trusted_hash": "sha256:unrelated",
@@ -4678,15 +4684,20 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 		t.Fatalf("build Codex hooks: %v", err)
 	}
 	hooks["state"] = state
+	// Trust at a position the DefenseClaw hook holds goes with the hook, even
+	// when an edit changed its hash before guardian repaired it (GAP-1032).
 	removed, err := removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
 	if err != nil {
-		t.Fatalf("inspect user replacement trust: %v", err)
+		t.Fatalf("remove edited DefenseClaw trust: %v", err)
 	}
-	if removed {
-		t.Fatalf("user replacement trust state was removed: %v", hooks)
+	if !removed {
+		t.Fatalf("trust at the DefenseClaw hook position was kept: %v", hooks)
 	}
-	if _, ok := state[key]; !ok {
-		t.Fatalf("user replacement trust entry missing: %v", state)
+	if _, ok := state[key]; ok {
+		t.Fatalf("trust entry at the DefenseClaw hook position still present: %v", state)
+	}
+	if _, ok := state[otherKey]; !ok {
+		t.Fatalf("unrelated trust entry removed: %v", state)
 	}
 
 	locations, err := ownedCodexHookLocations(runtime.GOOS, "pre_tool_use", hooks["PreToolUse"], filepath.Dir(hookPath))
@@ -4723,6 +4734,92 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 	}
 	if _, ok := state[otherKey]; !ok {
 		t.Fatalf("unrelated trust entry removed with legacy state: %v", state)
+	}
+}
+
+// GAP-1094: `codex features disable hooks` leaves the DefenseClaw entries in
+// place but Codex runs none of them. Setup must not override the user's
+// switch, so the guard has to hear at once that hooks are off and how to turn
+// them back on, not attempt a repair that can only fail.
+func TestCodexOwnedHooksPresentNamesTurnedOffHooks(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	if err := os.WriteFile(configPath, append(raw, []byte("\n[features]\nhooks = false\n")...), 0o600); err != nil {
+		t.Fatalf("turn hooks off: %v", err)
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if present || err == nil || !strings.Contains(err.Error(), "codex features enable hooks") {
+		t.Fatalf("OwnedHooksPresent = %v, %v; want an error naming codex features enable hooks", present, err)
+	}
+}
+
+// GAP-1102: deleting the DefenseClaw command lines from config.toml leaves
+// hook entries without a command, and Codex then refuses to start. Setup
+// (which the hook self-heal, setup codex and a gateway restart all run) takes
+// those slots back instead of adding a second hook set next to them.
+func TestCodexSetupReplacesHookEntriesLeftWithoutCommand(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+	conn := NewCodexConnector()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+	// Drop every hook command, as deleting the DefenseClaw lines by hand does;
+	// the rest of each entry (type, timeout, matcher) stays.
+	mutateCodexConfig(t, configPath, func(config map[string]interface{}) {
+		for event, rawGroups := range config["hooks"].(map[string]interface{}) {
+			groups, ok := rawGroups.([]interface{})
+			if event == "state" || !ok {
+				continue
+			}
+			for _, rawGroup := range groups {
+				for _, rawHandler := range rawGroup.(map[string]interface{})["hooks"].([]interface{}) {
+					handler := rawHandler.(map[string]interface{})
+					delete(handler, "command")
+					delete(handler, "commandWindows")
+					delete(handler, "command_windows")
+				}
+			}
+		}
+	})
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("OwnedHooksPresent with command-less entries = %v, %v; want false so the guard repairs", present, err)
+	}
+
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	repairedRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read repaired config: %v", err)
+	}
+	repaired := map[string]interface{}{}
+	if err := toml.Unmarshal(repairedRaw, &repaired); err != nil {
+		t.Fatalf("parse repaired config: %v", err)
+	}
+	hooks := repaired["hooks"].(map[string]interface{})
+	if codexHasCommandlessHandlers(hooks) {
+		t.Fatalf("repaired config still has hook entries without a command:\n%s", repairedRaw)
+	}
+	if groups := hooks["PreToolUse"].([]interface{}); len(groups) != 1 {
+		t.Fatalf("PreToolUse has %d groups after repair, want 1:\n%s", len(groups), repairedRaw)
+	}
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
+		t.Fatalf("repaired hooks are not fully trusted: %v", err)
 	}
 }
 
@@ -5254,6 +5351,149 @@ env_key = "OPENAI_API_KEY"
 	// so the operator's config.toml returns to its pre-setup shape.
 	if strings.Contains(rewritten, "codex-hook.sh") {
 		t.Errorf("Teardown left hook script reference in config.toml\nfile:\n%s", rewritten)
+	}
+}
+
+func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows Codex registers the native hook launcher, not hooks/codex-hook.sh (GAP-1032 is the shell-script form)")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	original := []byte("# personal\nmodel = \"gpt-5\"\n[profiles.review]\nmodel = \"gpt-5.1\"\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	CodexConfigPathOverride = path
+	defer func() { CodexConfigPathOverride = "" }()
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, ".defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := bytes.ReplaceAll(installed, []byte("/hooks/codex-hook.sh"), []byte("/xhooks/codex-hook.sh"))
+	if bytes.Equal(edited, installed) {
+		t.Fatal("test did not edit a hook registration")
+	}
+	if err := os.WriteFile(path, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("heal: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "xhooks") || strings.Contains(string(got), "hooks.state") ||
+		!bytes.Contains(got, []byte("# personal")) {
+		t.Fatalf("edited hooks or trust state survived teardown: %s", got)
+	}
+}
+
+// GAP-1248: an edited notify entry breaks the Codex hook contract, so the
+// guard re-runs Setup; Teardown removes a renamed DefenseClaw notifier and
+// restores a notifier the operator chose after Setup.
+func TestCodexNotifyTamperIsHealedAndTornDown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath := CodexConfigPathOverride
+	CodexConfigPathOverride = path
+	t.Cleanup(func() { CodexConfigPathOverride = previousPath })
+	previousInspector := codexPolicyInspector
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{Source: "notify tamper test"}, nil
+	}
+	t.Cleanup(func() { codexPolicyInspector = previousInspector })
+	binDir := filepath.Join(dir, "bin")
+	setHookBinaryOverride(t, filepath.Join(binDir, windowsHookBinaryName))
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	tampered := []interface{}{filepath.Join(binDir, "defenseclaw-hook-TAMPERED.exe"), "notify"}
+	if runtime.GOOS != "windows" {
+		tampered = []interface{}{"bash", filepath.Join(opts.DataDir, "notify-bridge-TAMPERED.sh")}
+	}
+	setNotify := func(v interface{}) {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := map[string]interface{}{}
+		if err := parseCodexTOML(raw, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg["notify"] = v
+		out, err := editCodexOwnedTOML(raw, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, out, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	present := func() bool {
+		t.Helper()
+		ok, err := c.ownedHookContractPresent(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if !present() {
+		t.Fatal("contract not present after Setup")
+	}
+	setNotify(tampered)
+	if present() {
+		t.Fatal("renamed notify entry still reports the hook contract as present")
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("heal: %v", err)
+	}
+	if !present() {
+		t.Fatal("Setup did not restore the notify entry")
+	}
+
+	setNotify(tampered)
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+	if cfg := readCASTOML(t, path); cfg["notify"] != nil {
+		t.Fatalf("renamed DefenseClaw notifier survived teardown: %#v", cfg["notify"])
+	}
+
+	operator := []interface{}{filepath.Join(dir, "tools", "my-notifier"), "--turn"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	setNotify(operator)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("heal over operator notifier: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if got := readCASTOML(t, path)["notify"]; !codexValueMatches(got, operator) {
+		t.Fatalf("operator notifier chosen after Setup was not restored: %#v", got)
 	}
 }
 

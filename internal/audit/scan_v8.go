@@ -318,11 +318,14 @@ func scanSummaryV8Event(
 	observedAt time.Time,
 	correlation ScanCorrelation,
 ) Event {
+	details := fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
+		result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration)
+	if judge := strings.TrimSpace(correlation.JudgeModel); judge != "" {
+		details += " judge=" + judge
+	}
 	event := Event{
 		ID: uuid.NewString(), Timestamp: observedAt, Action: string(ActionScan), Target: result.Target,
-		Actor: "defenseclaw",
-		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
-			result.Scanner, len(result.Findings), result.MaxSeverity(), result.Duration),
+		Actor: "defenseclaw", Details: details,
 		Severity: string(result.MaxSeverity()), RunID: correlation.RunID, SpanID: correlation.SpanID,
 		RequestID: correlation.RequestID, SessionID: correlation.SessionID, TraceID: correlation.TraceID,
 		AgentID: correlation.AgentID, AgentName: correlation.AgentName,

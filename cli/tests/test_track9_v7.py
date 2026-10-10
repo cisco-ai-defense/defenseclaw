@@ -322,6 +322,24 @@ class TestAibomProvenance(unittest.TestCase):
         for item in inv.get("skills", []):
             self.assertIn("provenance", item)
 
+    def test_provenance_generation_is_the_config_generation(self) -> None:
+        import json
+        import os
+        import tempfile
+        from unittest.mock import patch
+
+        from defenseclaw.config import default_config
+        from defenseclaw.provenance import provenance_quartet
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.yaml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("config_version: 9\n")
+            with open(os.path.join(tmp, "config.generation.json"), "w", encoding="utf-8") as f:
+                json.dump({"generation": 41, "config_sha256": "", "actor": "cli:test", "written_at": ""}, f)
+            with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}):
+                self.assertEqual(provenance_quartet(default_config())["generation"], 41)
+
 
 class TestGoScanCodeJSONSchema(unittest.TestCase):
     """The Go `scan code --json` document must validate against the canonical

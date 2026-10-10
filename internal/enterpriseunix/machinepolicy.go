@@ -41,6 +41,10 @@ const (
 	// failure: the hooks are in place, and the floor stops no build older
 	// than 2.1.163, which predates the setting.
 	codeClaudeVersionFloorMissing = "claude_version_floor_missing"
+	// codeMachinePolicyOff names an enabled connector whose machine policy
+	// ownership is off: its sessions run without DefenseClaw's hooks. It is
+	// a warning, not a verify failure: the administrator chose it.
+	codeMachinePolicyOff = "machine_policy_off"
 )
 
 // MachinePolicyManager publishes, verifies and removes DefenseClaw's hooks
@@ -196,23 +200,30 @@ func coveredMachinePolicy(intended []string, result enterprisepolicy.Result) []s
 // reportMachinePolicy copies per-connector machine policy states into the
 // lifecycle result and warns for every intended connector that is not
 // covered.
-func reportMachinePolicy(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error) {
-	reportMachinePolicyExcept(r, intended, result, err, nil)
+func (e *Env) reportMachinePolicy(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error) {
+	e.reportMachinePolicyExcept(r, intended, result, err, nil)
 }
 
 // reportMachinePolicyExcept is reportMachinePolicy for callers that report
-// the connectors in skip themselves.
-func reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error, skip []string) {
+// the connectors in skip themselves. A connector under ownership: verify_only
+// gets a warning of its own that names the export, so a lifecycle failure
+// made only of those does not end with "run repair", which never writes
+// such a file (GAP-0918).
+func (e *Env) reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, result enterprisepolicy.Result, err error, skip []string) {
 	for _, state := range result.States {
 		if state.Route != enterprisepolicy.RouteMachinePolicy {
 			continue
 		}
 		r.MachinePolicy[state.Connector] = state.ToStatus()
 	}
-	missing := []string{}
+	var missing, exportOnly []string
 	covered := coveredMachinePolicy(intended, result)
 	for _, name := range intended {
-		if !contains(covered, name) && !contains(skip, name) {
+		switch {
+		case contains(covered, name) || contains(skip, name):
+		case e.verifyOnlyExport(name, result) != "":
+			exportOnly = append(exportOnly, name)
+		default:
 			missing = append(missing, machinePolicyLabel(name, result))
 		}
 	}
@@ -222,7 +233,16 @@ func reportMachinePolicyExcept(r *enterprisestatus.Result, intended []string, re
 			message += ": " + err.Error()
 		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
-	} else if err != nil && len(skip) == 0 {
+	}
+	for index, name := range exportOnly {
+		message := fmt.Sprintf("DefenseClaw hooks are not in place in vendor machine policy for %s, so %s runs without them; %s",
+			machinePolicyLabel(name, result), name, e.verifyOnlyExport(name, result))
+		if index == 0 && err != nil && len(missing) == 0 {
+			message += " (" + err.Error() + ")"
+		}
+		r.AddWarning(codeMachinePolicyIncomplete, message)
+	}
+	if len(missing) == 0 && len(exportOnly) == 0 && err != nil && len(skip) == 0 {
 		r.AddWarning(codeMachinePolicyIncomplete, err.Error())
 	}
 }
@@ -268,14 +288,37 @@ func isCoded(err error, code string) bool {
 // Invalid options fail the transaction.
 func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error {
 	env, r := l.env, l.result
+	l.machinePolicyPublished = true
 	result, err := env.MachinePolicy.Publish(p.config.Loaded)
 	if isCoded(err, codeMachinePolicy) {
 		return err
 	}
-	reportMachinePolicy(r, p.intended, result, err)
+	// A connector that leaves machine policy while its vendor file cannot be
+	// written keeps DefenseClaw's hooks there, and the new config's gateway
+	// refuses every call they make: retiring Claude Code with
+	// 90-defenseclaw.json held by chattr +i returned ok and locked every
+	// Claude Code user out while status and verify read healthy (GAP-0743).
+	// The transaction fails and rolls back instead; the previous config,
+	// which still serves that connector, stays in force.
+	if retire := (*enterprisepolicy.RetireError)(nil); errors.As(err, &retire) {
+		return &codedError{code: codeMachinePolicy, err: fmt.Errorf(
+			"%s; the previous config stays in force. Make the file writable (another tool holds it, for example with chattr +i) and run ensure again, or keep %s in guardrail.connectors",
+			strings.ReplaceAll(err.Error(), "\n", "; "), retire.Connector)}
+	}
+	l.machinePolicyErr = err
+	env.reportMachinePolicy(r, p.intended, result, err)
 	for _, state := range result.States {
 		if state.Changed {
 			l.noteChange("rewrote DefenseClaw's %s machine policy entries", state.Connector)
+		}
+	}
+	// A connector the config no longer publishes loses its hooks, and with
+	// them DefenseClaw inspection; the result says so, because a removal by
+	// mistake otherwise shows only as an agent that runs uninspected
+	// (GAP-1019).
+	for _, state := range result.Retired {
+		if state.Changed {
+			l.noteChange("removed DefenseClaw's %[1]s machine policy entries: the config no longer publishes %[1]s, so DefenseClaw does not inspect it on this computer until it is back in guardrail.connectors", state.Connector)
 		}
 	}
 	covered := coveredMachinePolicy(p.intended, result)
@@ -307,6 +350,28 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 	return &codedError{code: codeApply, err: errors.New("the plan has no runtime descriptor")}
 }
 
+// restoreMachinePolicy puts vendor machine policy back to the previous
+// deployment's config after a rollback of a transaction that published the
+// new one. Otherwise a connector the failed run added or retired would keep
+// entries the restored gateway does not serve.
+func (l *lifecycle) restoreMachinePolicy(record *Deployment) {
+	env, r := l.env, l.result
+	raw, err := readBounded(env.committedConfigPath(), maxInputBytes)
+	if err != nil || sha256Bytes(raw) != record.ConfigSHA256 {
+		r.AddWarning(codeMachinePolicyIncomplete, "the previous config is not on record, so vendor machine policy was not restored after the rollback; run `"+
+			env.lifecycleCommand(ActionRepair)+"`")
+		return
+	}
+	validated, err := env.validateConfig(raw)
+	if err == nil {
+		_, err = env.MachinePolicy.Publish(validated.Loaded)
+	}
+	if err != nil {
+		r.AddWarning(codeMachinePolicyIncomplete, "restore vendor machine policy for the previous config after the rollback: "+
+			strings.ReplaceAll(err.Error(), "\n", "; ")+"; run `"+env.lifecycleCommand(ActionRepair)+"`")
+	}
+}
+
 // machinePolicyDrift reports whether the vendor machine policy no longer
 // carries the entries the committed deployment recorded, so ensure must
 // re-apply.
@@ -315,7 +380,11 @@ func (l *lifecycle) machinePolicyDrift(p *plan) bool {
 	if isCoded(err, codeMachinePolicy) {
 		return true
 	}
+	// A connector whose hooks came back (the administrator deployed the
+	// export of a verify_only file) is applied too, so the gateway uses them
+	// (GAP-0536).
 	return !sameStrings(coveredMachinePolicy(p.machinePolicy, result), p.machinePolicy) ||
+		!sameStrings(coveredMachinePolicy(p.intended, result), p.machinePolicy) ||
 		missingClaudeVersionFloor(result) != ""
 }
 
@@ -345,6 +414,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		return nil
 	}
 	l.warnNoConnectorsEnabled(validated)
+	l.warnUnenforcedAssetPolicy(validated)
 	intended, err := env.MachinePolicy.Intended(validated.Loaded)
 	if err != nil {
 		r.AddWarning(codeMachinePolicy, err.Error())
@@ -372,15 +442,84 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 			}
 		}
 	}
-	reportMachinePolicyExcept(r, intended, result, verifyErr, removed)
+	env.reportMachinePolicyExcept(r, intended, result, verifyErr, removed)
+	// A connector whose DefenseClaw entries are gone from its vendor file runs
+	// without hooks, so status fails on it as verify does (GAP-0529).
+	var gone []string
 	for index, name := range removed {
 		message := fmt.Sprintf(
 			"vendor machine policy for %s no longer carries the DefenseClaw hooks the last transaction placed, so %s runs without them; run `%s` to restore them",
 			machinePolicyLabel(name, result), name, env.lifecycleCommand("repair"))
+		if drift := driftConflicts(name, result); len(drift) > 0 {
+			// The entries are in place, but agents cannot use them (a
+			// directory users cannot read, a file mode) (GAP-0913).
+			message = fmt.Sprintf("DefenseClaw hooks are in place in vendor machine policy for %s but do not protect %s: %s; run `%s` to restore them",
+				machinePolicyLabel(name, result), name, strings.Join(drift, "; "), env.lifecycleCommand("repair"))
+		}
+		if export := env.verifyOnlyExport(name, result); export != "" {
+			// repair never writes a file the administrator owns (GAP-0536).
+			message = fmt.Sprintf("vendor machine policy for %s no longer carries the DefenseClaw hooks, so %s runs without them; %s",
+				machinePolicyLabel(name, result), name, export)
+		}
 		if index == 0 && verifyErr != nil {
 			message += " (" + verifyErr.Error() + ")"
 		}
 		r.AddWarning(codeMachinePolicyIncomplete, message)
+		gone = append(gone, message)
+	}
+	// Hooks that came back after the last transaction left the connector out
+	// (the administrator deployed the export of a verify_only file) are not
+	// used until ensure applies them (GAP-0536).
+	if record != nil && record.MachinePolicyConnectors != nil {
+		for _, name := range coveredMachinePolicy(intended, result) {
+			if !contains(record.MachinePolicyConnectors, name) {
+				r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
+					"DefenseClaw hooks are in place in vendor machine policy for %s again, but the running deployment does not use them yet; run `%s` to apply them",
+					machinePolicyLabel(name, result), env.lifecycleCommand(ActionEnsure)))
+			}
+		}
+	}
+	// DefenseClaw's entries in place protect nothing when a higher-precedence
+	// source outranks them (a com.anthropic.claudecode or com.openai.codex
+	// managed-preferences profile without the hooks) or the file carries a
+	// conflicting value (Codex allow_managed_hooks_only flipped to false).
+	// enterprise policy verify reports such a connector not covered; status
+	// and verify said nothing while the agent ran without enforcement
+	// (GAP-0534, GAP-0531). Version floor conflicts stay
+	// claude_version_floor_missing, which verify does not fail on.
+	inPlace := coveredMachinePolicy(intended, result)
+	for _, state := range result.States {
+		if state.Route != enterprisepolicy.RouteMachinePolicy || state.Covered || !contains(inPlace, state.Connector) {
+			continue
+		}
+		var reasons []string
+		for _, conflict := range state.Conflicts {
+			if !strings.HasPrefix(conflict, claudeVersionFloorConflict) {
+				reasons = append(reasons, conflict)
+			}
+		}
+		if len(reasons) == 0 && len(state.HigherPrecedence) > 0 {
+			reasons = append(reasons, strings.Join(state.HigherPrecedence, ", ")+" outranks them")
+		}
+		if len(reasons) == 0 {
+			continue
+		}
+		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
+			"DefenseClaw hooks are in place in vendor machine policy for %s but do not protect %s: %s",
+			machinePolicyLabel(state.Connector, result), state.Connector, strings.Join(reasons, "; ")))
+	}
+	// ownership: off for a connector guardrail.connectors still enables
+	// left status and verify fully green while its sessions ran without
+	// DefenseClaw's hooks; only policy show said so (GAP-0922). OpenCode
+	// keeps its per-user plugin under ownership: off.
+	for _, state := range result.States {
+		if state.Ownership != config.MachinePolicyOwnershipOff || state.Connector == enterprisepolicy.ConnectorOpenCode ||
+			enterprisepolicy.RouteFor(state.Connector, env.GOOS) != enterprisepolicy.RouteMachinePolicy {
+			continue
+		}
+		r.AddWarning(codeMachinePolicyOff, fmt.Sprintf(
+			"guardrail.connectors enables %s, but enterprise.machine_policy.connectors.%s.ownership is off: DefenseClaw neither writes nor checks its machine policy and installs no per-user hooks for it, so %s sessions run without DefenseClaw's hooks; set ownership to merge or verify_only to protect it, or disable the connector",
+			state.Connector, state.Connector, state.Connector))
 	}
 	for _, name := range unwanted {
 		r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf(
@@ -403,6 +542,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 	homeOf := map[string]string{}
 	for _, home := range env.accountHomes(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)) {
 		homeOf[enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)] = home
+		homeOf[enterprisepolicy.CopilotPluginHooksPath(home)] = home
 	}
 	// The guardian keeps its record in its data directory (GAP-1761); an
 	// earlier build left it next to the manifest.
@@ -431,6 +571,12 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 			}
 			changed = append(changed, path)
 		}
+		if len(state.UserFileForeign) > 0 {
+			drift = append(drift, fmt.Sprintf(
+				"DefenseClaw's %s plugin holds hooks DefenseClaw did not write for %d enrolled user(s): %s; the hook guardian leaves such a file in place and the foreign-hook guard denies that user's %s calls while it is there: move the file aside, and the guardian writes DefenseClaw's plugin on its next pass",
+				state.Connector, len(state.UserFileForeign), firstPaths(state.UserFileForeign), state.Connector))
+			r.SecurityComplete = false
+		}
 		if len(pending) > 0 {
 			r.AddWarning(codeGuardianUserFilePending, fmt.Sprintf(
 				"DefenseClaw's %s hook file is not written yet for %d newly enrolled user(s): %s; the hook guardian writes it on its first pass for them",
@@ -444,7 +590,42 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 			state.Connector, len(changed), firstPaths(changed)))
 		r.SecurityComplete = false
 	}
-	return drift
+	return append(gone, drift...)
+}
+
+// driftConflicts are the conflicts of a connector whose DefenseClaw entries
+// are in its vendor file but drifted from what a publish writes.
+func driftConflicts(connector string, result enterprisepolicy.Result) []string {
+	for _, state := range result.States {
+		if state.Connector == connector && state.Drift && state.OwnedEntries > 0 {
+			return state.Conflicts
+		}
+	}
+	return nil
+}
+
+// claudeVersionFloorConflict starts every Claude Code version floor conflict.
+const claudeVersionFloorConflict = "Claude Code version floor: "
+
+// verifyOnlyExport is the remedy for a connector whose vendor file DefenseClaw
+// only verifies (ownership verify_only): the administrator deploys the
+// export, then runs ensure so the deployment uses the hooks again. It is ""
+// for a file DefenseClaw writes, which repair restores.
+func (e *Env) verifyOnlyExport(connector string, result enterprisepolicy.Result) string {
+	for _, state := range result.States {
+		if state.Connector == connector && state.Ownership == config.MachinePolicyOwnershipVerifyOnly {
+			return fmt.Sprintf("missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only), so repair does not restore it; deploy the output of `%s enterprise policy export --connector %s` through your policy tool, then run `%s`",
+				filepath.Join(e.Layout.BinDir, binGateway), connector, e.lifecycleCommand(ActionEnsure))
+		}
+	}
+	return ""
+}
+
+// machinePolicyIncomplete reports whether the result warns that a vendor
+// machine policy does not protect a connector, which security_complete
+// cannot be while it is so.
+func machinePolicyIncomplete(r *enterprisestatus.Result) bool {
+	return hasMessageCode(r.Warnings, codeMachinePolicyIncomplete)
 }
 
 // codeGuardianUserFilePending names enrolled users whose guardian-owned
@@ -499,6 +680,36 @@ func (l *lifecycle) warnNoConnectorsEnabled(validated *validatedConfig) {
 		"the enumerator found %d eligible %s, but config.yaml enables no connector the managed deployment protects in guardrail.connector or guardrail.connectors%s, so DefenseClaw protects no agent; enable the connectors to protect (for example guardrail.connectors.claudecode: {}) and run `%s`",
 		len(record.Accounts), users, ignored, env.lifecycleCommand("ensure")))
 	r.SecurityComplete = false
+}
+
+// codeAssetPolicyNotEnforced names an asset_policy default deny or
+// registry_required that nothing on the host applies.
+const codeAssetPolicyNotEnforced = "asset_policy_not_enforced"
+
+// warnUnenforcedAssetPolicy reports an asset_policy default deny or
+// registry_required that blocks nothing: a managed Linux or macOS host runs
+// no install watcher for the users' skills, plugins and MCP servers, unless
+// gateway.watcher names folders, and the hooks apply only the denied lists
+// while runtime_detection is off. ensure, status and verify said nothing
+// and the administrator's deny-by-default was silently inert (GAP-0957).
+func (l *lifecycle) warnUnenforcedAssetPolicy(validated *validatedConfig) {
+	if validated == nil || validated.Loaded == nil {
+		return
+	}
+	watcher := validated.Loaded.Gateway.Watcher
+	watched := func(targetType string) bool {
+		switch targetType {
+		case "skill":
+			return watcher.Enabled && watcher.Skill.Enabled && len(watcher.Skill.Dirs) > 0
+		case "plugin":
+			return watcher.Enabled && watcher.Plugin.Enabled && len(watcher.Plugin.Dirs) > 0
+		default:
+			return false
+		}
+	}
+	for _, message := range validated.Loaded.UnenforcedAssetPolicyRules(watched) {
+		l.result.AddWarning(codeAssetPolicyNotEnforced, message)
+	}
 }
 
 // ignoredConnectorEntries lists the guardrail.connector and
@@ -568,7 +779,7 @@ func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 		r.AddWarning(codeMachinePolicy, publishErr.Error())
 		return
 	}
-	reportMachinePolicy(r, intended, result, publishErr)
+	env.reportMachinePolicy(r, intended, result, publishErr)
 	if record != nil && record.MachinePolicyConnectors != nil &&
 		!sameStrings(coveredMachinePolicy(intended, result), intersectSorted(record.MachinePolicyConnectors, intended)) {
 		r.AddWarning(codeMachinePolicyIncomplete, "the machine-policy connectors in place differ from the runtime descriptor; run ensure")

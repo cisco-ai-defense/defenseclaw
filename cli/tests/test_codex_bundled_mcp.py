@@ -224,7 +224,7 @@ def test_policy_mutations_refuse_resolved_bundled_entry(
         app.cfg.mcp_servers = lambda connector=None: [  # type: ignore[method-assign]
             MCPServerEntry(name=_DOCS_NAME, url=_DOCS_URL, bundled=True)
         ]
-        policy = PolicyEngine(app.store)
+        policy = PolicyEngine(app.store, app.cfg)
         connector = "openclaw" if scoped else ""
         if verb == "unblock":
             if scoped:
@@ -241,9 +241,7 @@ def test_policy_mutations_refuse_resolved_bundled_entry(
         assert "bundled entries are discovery-only" in result.output
         if verb == "unblock":
             if scoped:
-                assert app.store.has_action(
-                    "mcp", target, "install", "block", connector
-                )
+                assert policy.is_blocked_for_connector("mcp", target, connector)
             else:
                 assert policy.is_blocked("mcp", target)
         elif scoped:

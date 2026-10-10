@@ -48,12 +48,12 @@ def test_cursor_notice_is_plain_words_with_a_hanging_indent() -> None:
     assert all(line.startswith(" " * len("Cursor: ")) for line in lines[1:])
 
 
-def test_skill_scanner_row_reads_none_for_an_empty_policy() -> None:
-    # GAP-2562: "--policy none" saves policy '' and the row said "permissive".
+def test_skill_scanner_row_reads_the_effective_policy() -> None:
+    # An unset or empty policy is the recommended quiet preset.
     def row(scanner: dict) -> str:
         cfg = {"scanners": {"skill_scanner": {"binary": "skill-scanner", **scanner}}}
         return task_status(SetupWizard.SKILL_SCANNER, cfg).text
 
-    assert row({"policy": ""}) == "none"
-    assert row({}) == "permissive"
+    assert row({"policy": ""}) == "quiet"
+    assert row({}) == "quiet"
     assert row({"policy": "strict"}) == "strict"

@@ -5,7 +5,9 @@ package gateway
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -44,7 +46,7 @@ func TestSQLDestructiveMutationSemanticOwnerAndCEL(t *testing.T) {
 	}
 }
 
-func TestSQLDestructiveMutationAlertsWithoutBlockingInEveryProfile(t *testing.T) {
+func TestSQLDestructiveMutationAlertsDespiteOperatorBlockAtInEveryProfile(t *testing.T) {
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
@@ -52,6 +54,7 @@ func TestSQLDestructiveMutationAlertsWithoutBlockingInEveryProfile(t *testing.T)
 			installToolCallCorpusProfileConnector(t, connector, profile)
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.BlockAt = "HIGH"
 			cfg.Guardrail.Connector = connector
 			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
 			response := (&APIServer{scannerCfg: cfg}).evaluateCodexHook(
@@ -69,7 +72,9 @@ func TestSQLDestructiveMutationAlertsWithoutBlockingInEveryProfile(t *testing.T)
 			)
 			if response.Action != guardrailActionAlert || response.RawAction != guardrailActionAlert ||
 				response.Severity != "HIGH" || response.WouldBlock ||
-				!findingStringHasRuleID(response.Findings, sqlDestructiveMutationRuleID) {
+				!findingStringHasRuleID(response.Findings, sqlDestructiveMutationRuleID) ||
+				!strings.Contains(response.AdditionalContext, "alert-only; block_at does not turn it into a block") ||
+				!strings.Contains(fmt.Sprint(response.CodexOutput), "alert-only") {
 				t.Fatalf("profile=%s response=%+v", profile, response)
 			}
 		})

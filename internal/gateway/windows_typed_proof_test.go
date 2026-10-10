@@ -262,6 +262,7 @@ func TestWindowsPowerShellWinlogonPersistenceSemanticDispatch(t *testing.T) {
 			}{
 				{"set shell", `Set-ItemProperty -Path ` + key + ` -Name Shell -Value payload.exe`, true},
 				{"new userinit", `New-ItemProperty -Path ` + key + ` -Name:Userinit -Value payload.exe`, true},
+				{"current user Run key", `reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v marker /d "cmd /c rem" /f`, true},
 				{"benign value", `Set-ItemProperty -Path ` + key + ` -Name LegalNoticeText -Value Notice`, false},
 				{"dynamic name", `Set-ItemProperty -Path ` + key + ` -Name $valueName -Value payload.exe`, false},
 			}
@@ -281,9 +282,11 @@ func TestWindowsPowerShellWinlogonPersistenceSemanticDispatch(t *testing.T) {
 						EnforcementCapable: true,
 					})
 					matched := findingWithID(findings, ruleID)
-					dispatched := matched != nil && matched.contributesToEnforcement()
-					if dispatched != test.want {
-						t.Fatalf("semantic dispatch = %t, want %t: %+v", dispatched, test.want, findings)
+					if (matched != nil) != test.want {
+						t.Fatalf("semantic dispatch match = %t, want %t: %+v", matched != nil, test.want, findings)
+					}
+					if matched != nil && matched.contributesToEnforcement() != (profile.name == "strict") {
+						t.Fatalf("profile %s enforcement disposition: %+v", profile.name, matched)
 					}
 					if matched != nil && matched.Severity != profile.severity {
 						t.Fatalf("severity = %q, want %q: %+v", matched.Severity, profile.severity, findings)

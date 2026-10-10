@@ -39,8 +39,10 @@ from defenseclaw import ux
     "--mode",
     type=click.Choice(["observe", "action"], case_sensitive=False),
     default=None,
-    show_default="observe",
-    help="Protection profile. observe logs findings; action blocks.",
+    help=(
+        "Protection profile. observe logs findings; action blocks. "
+        "Omit it to keep the connector's current mode (observe on a new install)."
+    ),
 )
 @click.option(
     "--scanner",
@@ -92,16 +94,6 @@ from defenseclaw import ux
     ),
 )
 @click.option(
-    "--non-interactive",
-    is_flag=True,
-    help="Never prompt. Same as --yes; kept for install-script compat.",
-)
-@click.option(
-    "--yes",
-    is_flag=True,
-    help="Assume yes for confirmations.",
-)
-@click.option(
     "--force",
     is_flag=True,
     help="Re-run all steps even if the environment is already initialized.",
@@ -149,8 +141,6 @@ def quickstart_cmd(
     fail_mode: str | None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
-    non_interactive: bool,
-    yes: bool,
     force: bool,
     agent_name: str | None,
     skip_gateway: bool,
@@ -166,13 +156,14 @@ def quickstart_cmd(
     from defenseclaw import config as cfg_mod
     from defenseclaw import platform_support
     from defenseclaw.bootstrap import FirstRunOptions, run_first_run
-    from defenseclaw.commands.cmd_init import _render_first_run_report
+    from defenseclaw.commands.cmd_init import _render_first_run_report, refuse_first_run_when_managed
     from defenseclaw.commands.cmd_setup import (
         _detect_installed_connectors,
         _read_picked_connector,
     )
     from defenseclaw.ux import CLIRenderer
 
+    refuse_first_run_when_managed()
     connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name
@@ -261,17 +252,32 @@ def quickstart_cmd(
             f"{platform_support.host_os()}: {support.reason}"
         )
 
-    profile = mode or "observe"
+    # A repeat quickstart keeps the configured mode, and with it the fail mode
+    # action implies, instead of silently dropping to observe (GAP-0979).
+    kept_mode = "" if mode else _configured_quickstart_mode(cfg_mod, connector)
+    profile = mode or kept_mode or "observe"
+    if kept_mode and not json_summary:
+        ux.echo(f"  Keeping {_connector_label(connector)} in {kept_mode} mode (pass --mode to change it).")
 
+    # First-run doctor and Inventory must see the same fresh host scan that
+    # selected the connector, including explicit --connector on macOS/Windows.
     from defenseclaw.inventory import agent_discovery
 
     # From here on only the chosen connector's CLI runs as a probe (GAP-0901).
     token = agent_discovery.restrict_probes([connector])
     click.get_current_context().call_on_close(lambda: agent_discovery.end_probe_restriction(token))
 
+    if not (platform_support.host_os() == "windows" and connector == "opencode"):
+        # Native Windows OpenCode uses a protected exact executable selection;
+        # a generic discovery pass before that selection would override it.
+        agent_discovery.discover_agents(
+            use_cache=False, refresh=True, data_dir=str(cfg_mod.default_data_path())
+        )
+
     report = run_first_run(
         FirstRunOptions(
             connector=connector,
+            rerun_command=f"defenseclaw quickstart --connector {connector}",
             connector_settings=[{"connector": connector}],
             profile=profile,
             scanner_mode=scanner_mode,
@@ -325,9 +331,12 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
     must leave the sidecar running. Promote only those warnings before
     rendering so human output, JSON, and the process exit status agree.
     """
-    from defenseclaw.bootstrap import _rollup_status
+    from defenseclaw.bootstrap import _rollup_status, remediate_unwritable_sidecar
 
     if gateway_requested:
+        remediate_unwritable_sidecar(
+            report, command=f"defenseclaw quickstart --connector {report.connector}"
+        )
         for step in report.setup + report.readiness:
             if step.name in {"Connector", "Connector runtime", "Sidecar"} and step.status == "warn":
                 step.status = "fail"
@@ -411,6 +420,19 @@ def _connector_label(name: str) -> str:
 
 def _connector_labels(names) -> str:
     return ", ".join(_connector_label(n) for n in names)
+
+
+def _configured_quickstart_mode(cfg_mod, connector: str) -> str:
+    """The mode *connector* already runs in, or "" when quickstart has not set it up yet."""
+    from defenseclaw import connector_paths, policy_catalog
+
+    wanted = connector_paths.normalize(connector)
+    if wanted not in {connector_paths.normalize(c) for c in _configured_quickstart_connectors(cfg_mod)}:
+        return ""
+    try:
+        return policy_catalog.mode_label(cfg_mod.load().guardrail.effective_mode(wanted))
+    except Exception:  # noqa: BLE001 - an unreadable config falls back to the new-install default.
+        return ""
 
 
 def _configured_quickstart_connectors(cfg_mod) -> list[str]:

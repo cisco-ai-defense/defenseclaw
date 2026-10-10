@@ -12,7 +12,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -20,18 +19,13 @@ import pytest
 from defenseclaw import policy_catalog as pc
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 
-
-def _write_active(policy_dir: Path, name: str) -> None:
-    rego = policy_dir / "rego"
-    rego.mkdir(parents=True, exist_ok=True)
-    (rego / "data.json").write_text(json.dumps({"config": {"policy_name": name}}))
+from tests.helpers import select_pack
 
 
 @pytest.fixture
 def policy_dir(tmp_path: Path) -> Path:
     d = tmp_path / "policies"
     d.mkdir()
-    _write_active(d, "strict")
     return d
 
 
@@ -74,10 +68,33 @@ def test_firewall_template_is_not_a_named_policy(policy_dir: Path) -> None:
     assert not pc.is_named_policy(["not", "a", "mapping"])  # type: ignore[arg-type]
 
 
-def test_active_marked_and_name(policy_dir: Path) -> None:
-    assert pc.active_policy_name(policy_dir) == "strict"
-    active = [p.name for p in pc.list_named_policies(policy_dir) if p.active]
-    assert active == ["strict"]
+def test_active_policy_is_the_preset_the_config_holds(policy_dir: Path) -> None:
+    # config_version 9 records no active policy: it is the preset whose
+    # keys the config holds (no keys set is the shipped default).
+    from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
+
+    cfg = default_config()
+    cfg.policy_dir = str(policy_dir)
+    assert pc.active_policy_name(policy_dir, cfg) == "default"
+    strict = pc.load_policy_yaml(pc.policy_file("strict", policy_dir))
+    cfg.admission = _admission_from_policy(strict)
+    _apply_policy_guardrail(cfg, strict)
+    # `policy activate` also writes the preset watch settings.
+    cfg.watch.rescan_enabled = strict["watch"]["rescan_enabled"]
+    cfg.watch.rescan_interval_min = strict["watch"]["rescan_interval_min"]
+    assert [p.name for p in pc.list_named_policies(policy_dir, cfg) if p.active] == ["strict"]
+    # GAP-0903: the v8 -> v9 migration spells the same preset as per-type
+    # shorthand and leaves built-in-equal values unset; it is still strict.
+    from defenseclaw.config import AdmissionConfig
+
+    migrated = AdmissionConfig()
+    migrated.defaults.allow_list_bypass_scan = False
+    migrated.skill.actions = {"critical": "quarantine", "high": "quarantine", "medium": "quarantine",
+                              "low": "warn", "info": "warn"}
+    cfg.admission = migrated
+    assert pc.active_policy_name(policy_dir, cfg) == "strict"
+    cfg.guardrail.block_at = "LOW"
+    assert pc.active_policy_name(policy_dir, cfg) == ""
 
 
 def test_user_policy_shadows_builtin_and_bad_yaml_skipped(policy_dir: Path) -> None:
@@ -127,14 +144,6 @@ def test_get_policy_rejects_traversal(policy_dir: Path) -> None:
     assert pc.get_policy("default", policy_dir) is not None
 
 
-def test_active_name_empty_when_data_json_unreadable(tmp_path: Path, monkeypatch) -> None:
-    d = tmp_path / "p"
-    (d / "rego").mkdir(parents=True)
-    (d / "rego" / "data.json").write_text("{not json")
-    monkeypatch.setattr(pc, "_bundled_dir", lambda: "")
-    assert pc.active_policy_name(d) == ""
-
-
 # ---------------------------------------------------------------------------
 # Rule packs
 # ---------------------------------------------------------------------------
@@ -144,10 +153,10 @@ def _cfg(tmp_path: Path, *, connectors: dict[str, str] | None = None, global_dir
     cfg = default_config()
     cfg.data_dir = str(tmp_path)
     cfg.policy_dir = str(tmp_path / "policies")
-    cfg.guardrail.rule_pack_dir = global_dir
-    cfg.guardrail.connectors = {
-        name: PerConnectorGuardrailConfig(rule_pack_dir=path) for name, path in (connectors or {}).items()
-    }
+    select_pack(cfg, cfg.guardrail, global_dir)
+    cfg.guardrail.connectors = {name: PerConnectorGuardrailConfig() for name in (connectors or {})}
+    for name, path in (connectors or {}).items():
+        select_pack(cfg, cfg.guardrail.connectors[name], path)
     return cfg
 
 

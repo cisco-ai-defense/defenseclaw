@@ -881,11 +881,12 @@ func TestUnreachable(t *testing.T) {
 		if !strings.Contains(r.stderr, "allowing claude-code tool") {
 			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
-		// GAP-0480: Claude Code hides the stderr of a hook that exits 0, so a
-		// per-user fail-open hook says on screen that nothing is checked.
-		if !strings.HasPrefix(r.stdout, `{"systemMessage":"DefenseClaw is not checking this session`) ||
-			!strings.Contains(r.stdout, "defenseclaw-gateway start") {
-			t.Errorf("stdout = %q, want the gateway-down systemMessage", r.stdout)
+		// GAP-0377: Claude Code hides stderr after exit 0, so the user reads
+		// the per-user outage notice from systemMessage, as on Unix.
+		var notice map[string]string
+		if json.Unmarshal([]byte(r.stdout), &notice) != nil ||
+			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") {
+			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start", r.stdout)
 		}
 		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
 			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"
@@ -2631,7 +2632,7 @@ func TestManagedCopilotHookDeniesWhenDefenseClawCannotDecide(t *testing.T) {
 	stdout.Reset()
 	opts.Event = "preToolUse"
 	if code := failUnreachable(opts, sp, "closed", managedGatewayNotRunningReason); code != 0 ||
-		!strings.Contains(stdout.String(), "ask your administrator to start the DefenseClaw gateway service") {
+		!strings.Contains(stdout.String(), "ask your administrator to check DefenseClaw on this computer") {
 		t.Fatalf("stopped gateway preToolUse = %d %q", code, stdout.String())
 	}
 }

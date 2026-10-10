@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -219,10 +220,12 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	cfg := a.decisionConfig(ctx)
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
+		a.noteProjectSkillFolders(ctx, "codex", req.CWD)
+		if req.ScanComponents || (cfg != nil && cfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
 			count := a.scanCodexComponents(ctx, req)
 			if count > 0 {
 				verdict = &ToolInspectVerdict{
@@ -234,9 +237,20 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			}
 		}
 	case "UserPromptSubmit":
+		if !a.managedAIDOnly() && (cfg == nil || !cfg.SecureClientIntegration()) {
+			if judge := a.judgeFor(ctx); judge != nil {
+				judge.ObserveSessionPrompt(ctx, req.Prompt)
+			}
+		}
+		// Secure Client keeps the prompt of main, so AI Defense is sent the
+		// text it was sent before (issue #1092).
+		prompt := req.Prompt
+		if !a.managedAIDOnly() {
+			prompt = codexPromptForInspection(prompt)
+		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{
 			Tool:         "message",
-			Content:      req.Prompt,
+			Content:      prompt,
 			Direction:    "prompt",
 			Connector:    "codex",
 			contentScope: ruleContentScopeUntrusted,
@@ -258,7 +272,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Args:          toolArgs,
 			Direction:     "tool_call",
 			Connector:     "codex",
-			MCPServerName: firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")),
+			MCPServerName: a.codexMCPServerName(ctx, req),
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		actionInput := actionfacts.Input{
@@ -269,18 +283,21 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
-		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) {
-			actionInput.DialectHint = codexWindowsShellDialect(
+		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) &&
+			(cfg == nil || !cfg.SecureClientIntegration()) {
+			actionInput.DialectHint = selectWindowsShellDialect(
 				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
 			)
 		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input:                     actionInput,
-			LegacyText:                string(toolArgs),
-			Connector:                 "codex",
-			EnforcementCapable:        true,
-			DowngradeReadOnlyDataArgs: mode != "action",
-			record:                    toolChainRecorderFromContext(ctx),
+			Input:                         actionInput,
+			LegacyText:                    string(toolArgs),
+			Connector:                     "codex",
+			EnforcementCapable:            true,
+			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+			DowngradeReadOnlyDataArgs:     mode != "action",
+			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
@@ -297,7 +314,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
 	case "Stop":
-		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnStop {
+		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("codex").ScanOnStop {
 			verdict = a.scanCodexChangedFiles(ctx, req)
 		}
 	}
@@ -369,9 +386,16 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// (issue #1092).
 	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
 	if !a.managedAIDOnly() {
-		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "codex", action, reason, policy)
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "codex", req.HookEventName, action, reason,
+			evalCtx.RuleIDs, policy)
 	}
 	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
+	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
+		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+			resp.AdditionalContext += sqlAlertOnlyHookNotice
+			resp.CodexOutput = codexOutput(req.HookEventName, action, rawAction, resp.Reason, resp.AdditionalContext)
+		}
+	}
 	resp.SourceReason = verdict.Reason
 	if mode != "action" && resp.AdditionalContext != "" {
 		eligible := assetContextEligible || codexObserveContextEnforcementEligible(verdict)
@@ -384,6 +408,31 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
+}
+
+// codexTitleHelperPreamble is the fixed instruction Codex puts in front of its
+// task-title helper request, which reaches the UserPromptSubmit hook like a
+// prompt. It tells the model to name the task and "Do not answer the request",
+// so the injection judge read it, next to the user prompt after it, as an
+// instruction override and blocked a benign prompt (GAP-0230).
+var codexTitleHelperPreamble = regexp.MustCompile(`^\s*` +
+	regexp.QuoteMeta("Generate a concise, single-line task title of at most ") + `\d+` +
+	regexp.QuoteMeta(" characters and under five words where possible. Start with an imperative verb."+
+		" Capitalize only the first word unless the user's language, proper nouns, acronyms, or code terms require otherwise."+
+		" Preserve ticket references exactly. Write in the user's language."+
+		" Do not use quotes, markdown, or trailing punctuation. Do not answer the request.") +
+	`(?:\s*` + regexp.QuoteMeta("Prioritize the current task and latest substantive user request.") + `)?` +
+	`(?:\s*` + regexp.QuoteMeta("Recent conversation messages:") + `)?`)
+
+// codexPromptForInspection drops Codex's own title-helper instruction from the
+// front of a prompt. Only that exact text goes: the conversation and the user
+// prompt after it are inspected as usual, and a prompt that merely resembles
+// the instruction is inspected whole.
+func codexPromptForInspection(prompt string) string {
+	if loc := codexTitleHelperPreamble.FindStringIndex(prompt); loc != nil {
+		return strings.TrimSpace(prompt[loc[1]:])
+	}
+	return prompt
 }
 
 // dispatchCodexHookNotification mirrors the Claude Code path —
@@ -760,29 +809,6 @@ func reasonOrDefault(reason string) string {
 
 func normalizeCodexAction(action string) string {
 	return normalizedGuardrailAction(action)
-}
-
-// codexWindowsShellDialect is the grammar of a Codex shell call on native
-// Windows. Codex names its shell tool Bash everywhere, but on Windows it runs
-// the command in PowerShell, so a PowerShell command such as
-// `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
-// and ran with no finding (GAP-0912), and so was the POSIX-looking
-// `echo k >> $HOME\.ssh\authorized_keys` (GAP-1134). A complete PowerShell
-// reading therefore decides. The PowerShell model leaves an unqualified
-// native program such as curl incomplete, because Windows PowerShell aliases
-// it; such a command keeps its inferred grammar, as before GAP-1134, so its
-// POSIX reading can still enforce instead of every finding turning into
-// detection-only.
-func codexWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
-	if !strings.EqualFold(strings.TrimSpace(tool), "bash") || command == "" {
-		return ""
-	}
-	input.DialectHint = actionfacts.DialectPowerShell
-	if actionfacts.Analyze(input).Authoritative() ||
-		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
-		return actionfacts.DialectPowerShell
-	}
-	return ""
 }
 
 func codexToolName(req codexHookRequest) string {
@@ -3514,8 +3540,8 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 	}
 
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var results []*scanner.ScanResult
 	if req.sandboxView != nil {
@@ -3564,8 +3590,8 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) []string {
 	if req.sandboxView != nil {
 		var scanPaths []string
-		if a.scannerCfg != nil {
-			scanPaths = a.scannerCfg.ConnectorHookConfig("codex").ScanPaths
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			scanPaths = cfg.ConnectorHookConfig("codex").ScanPaths
 		}
 		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
 	}
@@ -3587,8 +3613,8 @@ func (a *APIServer) codexStopTargets(ctx context.Context, req codexHookRequest) 
 			out = append(out, p)
 		}
 	}
-	if a.scannerCfg != nil {
-		for _, p := range a.scannerCfg.ConnectorHookConfig("codex").ScanPaths {
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		for _, p := range cfg.ConnectorHookConfig("codex").ScanPaths {
 			add(p)
 		}
 	}
@@ -3642,15 +3668,28 @@ func sanitizeHookCWD(cwd string) string {
 	if !filepath.IsAbs(s) {
 		return ""
 	}
-	resolved, err := filepath.EvalSymlinks(s)
+	resolved, err := resolveHookCWD(s)
 	if err != nil {
 		return ""
 	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.IsDir() {
-		return ""
-	}
 	return resolved
+}
+
+// resolveHookCWD resolves a hook working directory to the real directory
+// it names; tests stand in for a service account that may not stat it.
+var resolveHookCWD = func(cwd string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", resolved)
+	}
+	return resolved, nil
 }
 
 // validateGitCwd resolves symlinks and ensures the cwd is a real directory.
@@ -3786,7 +3825,7 @@ func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookReques
 		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
-	if !req.ScanComponents && !a.codexComponentScanDue() {
+	if !req.ScanComponents && !a.codexComponentScanDue(ctx) {
 		return 0
 	}
 	targets := codexComponentTargets(req.CWD)
@@ -3857,10 +3896,10 @@ func codexMCPEntryScanTargets(configPaths []string) []string {
 	return out
 }
 
-func (a *APIServer) codexComponentScanDue() bool {
+func (a *APIServer) codexComponentScanDue(ctx context.Context) bool {
 	interval := 60 * time.Minute
-	if a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes > 0 {
-		interval = time.Duration(a.scannerCfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes) * time.Minute
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes > 0 {
+		interval = time.Duration(cfg.ConnectorHookConfig("codex").ComponentScanIntervalMinutes) * time.Minute
 	}
 	a.codexMu.Lock()
 	defer a.codexMu.Unlock()
@@ -4074,25 +4113,30 @@ func (a *APIServer) scanCodexComponent(ctx context.Context, component, target st
 		result *scanner.ScanResult
 		err    error
 	)
-	scanCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	// The live config: scanner and llm edits reload hot.
+	cfg := a.liveConfig()
+	scanCtx, cancel := context.WithTimeout(ctx, componentScanTimeout(cfg, component))
 	defer cancel()
 	switch component {
 	case "skill":
 		ss := scanner.NewSkillScannerFromLLM(
-			a.scannerCfg.Scanners.SkillScanner,
-			a.scannerCfg.ResolveLLM("scanners.skill"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.SkillScanner,
+			cfg.ResolveLLM("scanners.skill"),
+			cfg.CiscoAIDefense,
 		)
+		ss.SecureClient = cfg.SecureClientIntegration()
 		result, err = ss.Scan(scanCtx, target)
 	case "plugin":
-		ps := scanner.NewPluginScanner(a.scannerCfg.Scanners.PluginScanner)
+		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+		ps.Connector = "codex"
 		result, err = ps.Scan(scanCtx, target)
 	case "mcp":
 		ms := scanner.NewMCPScannerFromLLM(
-			a.scannerCfg.Scanners.MCPScanner,
-			a.scannerCfg.ResolveLLM("scanners.mcp"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.MCPScanner,
+			cfg.ResolveLLM("scanners.mcp"),
+			cfg.CiscoAIDefense,
 		)
+		ms.RulePack = scanner.MCPRulePackFor(cfg, "codex")
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		// Agent, rule, and memory targets participate in inventory/discovery,

@@ -204,7 +204,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		)
 	}
 	if len(typedFindings) != 0 {
-		intent := guardrailToolCallActionForConnector(
+		intent := guardrailActionForConnector(
 			a.decisionConfig(ctx),
 			req.ConnectorName,
 			HighestSeverity(typedFindings),
@@ -489,7 +489,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		len(result.DetectedChainIDs) != 0 {
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
-			guardrailToolCallActionForConnector(
+			guardrailActionForConnector(
 				a.decisionConfig(ctx),
 				req.ConnectorName,
 				HighestSeverity(chainFindings),
@@ -530,7 +530,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		// create duplicate finding telemetry.
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
-			guardrailToolCallActionForConnector(
+			guardrailActionForConnector(
 				a.decisionConfig(ctx),
 				req.ConnectorName,
 				HighestSeverity(chainFindings),
@@ -845,7 +845,7 @@ func toolChainProjectionHasBlockIntent(
 		steps := definition.Step1Bit | definition.Step2Bit | definition.Step3Bit |
 			definition.Step4Bit
 		if projection.EnforcementStepMask&steps != 0 &&
-			guardrailToolCallActionForConnector(
+			guardrailActionForConnector(
 				cfg,
 				connectorName,
 				definition.Severity,
@@ -863,7 +863,7 @@ func toolChainBlockEligibleProjection(
 	projection guardrail.ToolChainProjection,
 ) guardrail.ToolChainProjection {
 	for index, definition := range guardrail.ToolChainDefinitions() {
-		if guardrailToolCallActionForConnector(
+		if guardrailActionForConnector(
 			cfg,
 			connectorName,
 			definition.Severity,

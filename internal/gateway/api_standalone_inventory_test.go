@@ -6,44 +6,47 @@
 //
 //     http://www.apache.org/licenses/LICENSE-2.0
 //
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
 // SPDX-License-Identifier: Apache-2.0
 
 package gateway
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// GAP-1142: on a managed standalone deployment (no OpenClaw gateway) /skills
-// failed with 502 "gateway: not connected" and /mcps answered an empty list.
-// The OpenClaw-backed inventory routes now say what to use instead.
-func TestOpenClawInventoryRoutesRefuseOnStandaloneEnterprise(t *testing.T) {
-	standalone := &config.Config{
-		DeploymentMode: managed.DeploymentModeManagedEnterprise,
-		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
-	}
-	api := &APIServer{scannerCfg: standalone}
-	for route, handle := range map[string]http.HandlerFunc{
-		"/skills":        api.handleSkills,
-		"/mcps":          api.handleMCPs,
-		"/tools/catalog": api.handleToolsCatalog,
+// The OpenClaw RPC routes (/skill/*, /plugin/*, /skills, /mcps,
+// /tools/catalog) are registered only for an OpenClaw gateway, and never on
+// a standalone enterprise deployment, which runs no OpenClaw (GAP-1142). The
+// Secure Client path keeps them.
+func TestOpenClawRoutesServedOnlyForOpenClaw(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg  *config.Config
+		want bool
+	}{
+		"openclaw":     {&config.Config{Guardrail: config.GuardrailConfig{Connector: "openclaw"}}, true},
+		"claude code":  {&config.Config{Guardrail: config.GuardrailConfig{Connector: "claudecode"}}, false},
+		"unconfigured": {&config.Config{}, false},
+		"standalone enterprise": {&config.Config{
+			DeploymentMode: managed.DeploymentModeManagedEnterprise,
+			Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+			Guardrail:      config.GuardrailConfig{Connector: "openclaw"},
+		}, false},
+		"secure client": {&config.Config{
+			DeploymentMode: managed.DeploymentModeManagedEnterprise,
+			Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileSecureClient},
+		}, true},
 	} {
-		response := httptest.NewRecorder()
-		handle(response, httptest.NewRequest(http.MethodGet, route, nil))
-		if response.Code != http.StatusNotImplemented || !strings.Contains(response.Body.String(), "AI Discovery") {
-			t.Fatalf("%s = %d %s, want 501 naming AI Discovery", route, response.Code, response.Body.String())
+		if got := (&APIServer{scannerCfg: tc.cfg}).servesOpenClawRoutes(); got != tc.want {
+			t.Errorf("%s: servesOpenClawRoutes() = %v, want %v", name, got, tc.want)
 		}
-	}
-	// A per-user gateway keeps the old answer.
-	response := httptest.NewRecorder()
-	(&APIServer{scannerCfg: &config.Config{}}).handleMCPs(response, httptest.NewRequest(http.MethodGet, "/mcps", nil))
-	if response.Code != http.StatusOK {
-		t.Fatalf("per-user /mcps = %d, want 200", response.Code)
 	}
 }

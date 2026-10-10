@@ -22,6 +22,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
+from defenseclaw.config_writer import restart_required
 from defenseclaw.tui.services.setup_state import ConfigDiffEntry
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 
@@ -42,6 +43,7 @@ class ConfigDiffModalModel:
 
     entries: tuple[ConfigDiffEntry, ...]
     restart_reason: str = DEFAULT_RESTART_REASON
+    secure_client: bool = False
 
     @classmethod
     def from_entries(
@@ -49,12 +51,22 @@ class ConfigDiffModalModel:
         entries: Iterable[ConfigDiffEntry],
         *,
         restart_reason: str = DEFAULT_RESTART_REASON,
+        secure_client: bool = False,
     ) -> ConfigDiffModalModel:
-        return cls(tuple(entries), restart_reason)
+        return cls(tuple(entries), restart_reason, secure_client)
 
     @property
     def has_changes(self) -> bool:
         return bool(self.entries)
+
+    @property
+    def save_label(self) -> str:
+        """The save button's text: a restart is offered only when a changed
+        key is one the gateway reads once at start (everything else applies
+        from the new config generation)."""
+        if self.secure_client or restart_required([entry.key for entry in self.entries]):
+            return "Save and queue restart"
+        return "Save"
 
     def result(self) -> ConfigDiffResult:
         return ConfigDiffResult(save=True, queue_restart_reason=self.restart_reason)
@@ -71,6 +83,8 @@ class ConfigDiffModalModel:
                 lines.append(f"... {len(self.entries) - index} more changes")
                 break
             key = f"{entry.key} (masked)" if entry.secret else entry.key
+            if entry.disk_changed:
+                key += "  (changed on disk; saving replaces it)"
             lines.append(key)
             lines.append(f"  before: {_truncate(entry.before, value_width)}")
             lines.append(f"  after:  {_truncate(entry.after, value_width)}")
@@ -146,8 +160,8 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
         with Vertical(id="config-diff-dialog"):
             yield Static("Review Config Changes", id="config-diff-title")
             # Render EVERY change inside a bounded scroll region: an operator
-            # confirming "Save and queue restart" must be able to inspect
-            # changes 9..N, which the old 8-entry truncation hid.
+            # confirming the save must be able to inspect changes 9..N, which
+            # the old 8-entry truncation hid.
             with VerticalScroll(id="config-diff-scroll"):
                 yield Static(
                     self.model.preview_text(max_entries=len(self.model.entries)),
@@ -157,7 +171,7 @@ class ConfigDiffScreen(ModalScreen[ConfigDiffResult | None]):
             with Horizontal(id="config-diff-buttons"):
                 yield Button("Cancel", id="config-diff-cancel", variant="default")
                 yield Button(
-                    "Save and queue restart",
+                    self.model.save_label,
                     id="config-diff-save",
                     variant="success",
                     disabled=not self.model.has_changes,

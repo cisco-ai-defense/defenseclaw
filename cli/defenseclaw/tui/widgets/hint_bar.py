@@ -156,7 +156,7 @@ class HintEngine:
             if gateway_state in {"", "unknown"}:
                 return "Gateway status is not available yet. Health checks will retry automatically."
             if gateway_state in {"offline", "stopped", "down"}:
-                return 'Gateway is not running. Press : and run "start", or run "doctor" to diagnose.'
+                return 'Gateway is not running. Press G to start it, or d to run doctor.'
         if status and status.guardrail.state in {"disabled", "offline", "unknown"}:
             return 'LLM guardrail is not configured. Press "g" to set it up.'
         if state.critical_alerts > 0:

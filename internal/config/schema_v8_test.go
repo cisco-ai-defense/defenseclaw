@@ -13,6 +13,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -20,6 +21,29 @@ import (
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 	"gopkg.in/yaml.v3"
 )
+
+func TestV9SchemaErrorDoesNotPointToV8(t *testing.T) {
+	err := ValidateV8SchemaBytes("admin.yaml", []byte("config_version: 9\nguardrail:\n  mode: ACTION\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Version != 9 ||
+		strings.Contains(err.Error(), "v8") || !strings.Contains(err.Error(), "config_version 9") {
+		t.Fatalf("v9 schema error = %v", err)
+	}
+}
+
+// GAP-0940: an http_jsonl destination with bearer_env and bearer_credential
+// is reported as those two fields, not as the kind of another destination
+// type ("kind must be the literal jsonl").
+func TestV8SchemaNamesFieldsThatExcludeEachOther(t *testing.T) {
+	err := ValidateV8SchemaBytes("admin.yaml", []byte("config_version: 9\nobservability:\n  destinations:\n"+
+		"    - name: eo3-http\n      kind: http_jsonl\n      endpoint: https://collector.example.test/ingest\n"+
+		"      bearer_credential: eo3-http-token\n      bearer_env: EO3_REF\n"))
+	var schemaErr *V8SchemaError
+	if !errors.As(err, &schemaErr) || schemaErr.Keyword != "not" || schemaErr.Path != "$.observability.destinations[0]" ||
+		schemaErr.Expected != "either bearer_env or bearer_credential, not both" {
+		t.Fatalf("both credential fields = %v (%+v)", err, schemaErr)
+	}
+}
 
 func TestConfigV8SchemaClassifiesEveryTopLevelGoConfigField(t *testing.T) {
 	var schema map[string]any
@@ -137,6 +161,31 @@ func TestConfigV8SchemaMatchesTypedObservabilitySourceFields(t *testing.T) {
 		if _, ok := seen[name]; !ok {
 			t.Errorf("canonical observability schema field %q is dropped by typed decoding", name)
 		}
+	}
+}
+
+func TestConfigV8SchemaRetentionDefaultIsSevenDays(t *testing.T) {
+	compiled, err := compileObservabilityV8Local(ObservabilityV8LocalSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.RetentionDays != 7 {
+		t.Fatalf("compiled default retention = %d days, want 7", compiled.RetentionDays)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	definitions := schema["$defs"].(map[string]any)
+	localStore := definitions["localStore"].(map[string]any)
+	properties := localStore["properties"].(map[string]any)
+	retentionDays, ok := properties["retention_days"].(map[string]any)
+	if !ok {
+		t.Fatal("observability.local.retention_days is absent from canonical schema")
+	}
+	if got := retentionDays["default"]; got != float64(7) {
+		t.Fatalf("observability.local.retention_days default = %v, want 7", got)
 	}
 }
 

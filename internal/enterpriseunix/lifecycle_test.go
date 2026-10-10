@@ -26,6 +26,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	launchdstandalone "github.com/defenseclaw/defenseclaw/packaging/launchd-standalone"
@@ -94,7 +96,7 @@ func TestLinuxInstallCreatesTheStandaloneDeployment(t *testing.T) {
 	}
 	// The gateway refuses to start without a rule pack, so the vendor
 	// defaults ship read-only and the default config points at them.
-	for _, rel := range []string{"guardrail/default/rules/secrets.yaml", "guardrail/strict", "rego/guardrail.rego", "rego/data.json", "default.yaml"} {
+	for _, rel := range []string{"guardrail/default/rules/secrets.yaml", "guardrail/strict", "rego/guardrail.rego", "rego/admission.rego", "default.yaml"} {
 		if !exists(h.env.P(filepath.Join(l.VendorPolicyDir, rel))) {
 			t.Fatalf("vendor policy %s not installed", rel)
 		}
@@ -105,7 +107,7 @@ func TestLinuxInstallCreatesTheStandaloneDeployment(t *testing.T) {
 	if got := h.mode(filepath.Join(l.VendorPolicyDir, "rego", "guardrail.rego")); got != 0o644 {
 		t.Fatalf("vendor policy mode %04o", got)
 	}
-	if !strings.Contains(h.read(l.ConfigPath), "rule_pack_dir: "+filepath.Join(l.VendorPolicyDir, "guardrail", "default")) {
+	if !strings.Contains(h.read(l.ConfigPath), "rule_pack: default") {
 		t.Fatal("default config does not name the vendor rule pack")
 	}
 
@@ -222,6 +224,30 @@ func TestFailedActivationRollsBack(t *testing.T) {
 	}
 }
 
+// A rollback after the transaction recorded the new config's generation
+// records the restored config as the next one: a generation number never
+// names two configs.
+func TestFailedEnsureKeepsTheConfigGenerationMonotonic(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	before, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := h.read(h.env.Layout.ConfigPath)
+	h.healthy = false
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: writeTempConfig(t, previousDefaultConfig(h.env.Layout))})
+	requireError(t, r, codeActivate)
+	after, err := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.read(h.env.Layout.ConfigPath) != installed || after.Generation != before.Generation+2 ||
+		after.ConfigSHA256 != sha256Bytes([]byte(installed)) {
+		t.Fatalf("generation %d -> %+v; want %d naming the restored config", before.Generation, after, before.Generation+2)
+	}
+}
+
 // A failed first install removes what it created, including state the
 // gateway wrote while it briefly ran, so a plain retry succeeds.
 func TestFailedFirstInstallCanBeRetried(t *testing.T) {
@@ -304,6 +330,29 @@ func TestVerifyStartsTheApplyTriggerForAnInterruptedTransaction(t *testing.T) {
 	h.runner.mu.Unlock()
 	if !strings.Contains(calls, "launchctl kickstart system/"+labelApply) {
 		t.Fatalf("runner calls = %s, want the apply job kicked", calls)
+	}
+}
+
+// GAP-0468: after a reset in a config transaction, status blamed a manual
+// edit of config.yaml and named a plain ensure; it now names the
+// interrupted transaction and the commands that finish it.
+func TestStatusNamesAnInterruptedTransactionInsteadOfAnEdit(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	snap, err := h.env.takeSnapshot("reset", []string{h.env.Layout.ConfigPath}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.env.savePending(&Pending{Action: ActionEnsure, StartedAt: "2026-10-08T00:10:00Z", SnapshotDir: snap.Dir, Phase: "activate"}); err != nil {
+		t.Fatal(err)
+	}
+	writeHostFile(t, h, h.env.Layout.ConfigPath, strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1))
+	got := messagesOf(h.run(Options{Action: ActionStatus}).Errors, codeVerify)
+	if !strings.Contains(got, "ensure that started at 2026-10-08T00:10:00Z was interrupted in its activate phase") || !strings.Contains(got, " repair` rolls it back") {
+		t.Fatalf("status does not name the interrupted transaction: %s", got)
+	}
+	if strings.Contains(got, "changed since it was applied") || strings.Contains(got, "was modified after install") {
+		t.Fatalf("status still blames an edit: %s", got)
 	}
 }
 
@@ -418,6 +467,25 @@ func TestInvalidConfigIsRefusedBeforeAnyChange(t *testing.T) {
 	}
 }
 
+// A guardrail.rules layer the gateway would refuse when it starts is refused
+// with its reason before any change, not left to keep the gateway from
+// starting (GAP-0025).
+func TestRuleLayerTheGatewayRefusesIsRefusedBeforeAnyChange(t *testing.T) {
+	h := newTestHost(t, "linux")
+	config.RegisterCandidateAssetCheck(func(*config.Config) error {
+		return errors.New("guardrail.rules: suppression SUPP-IP-PRIVATE already exists in the rule pack or config")
+	})
+	t.Cleanup(func() { config.RegisterCandidateAssetCheck(nil) })
+	r := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+	requireError(t, r, codeConfig)
+	if len(r.Errors) == 0 || !strings.Contains(r.Errors[0].Message, "suppression SUPP-IP-PRIVATE already exists") {
+		t.Fatalf("errors = %+v, want the rule layer's reason", r.Errors)
+	}
+	if exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+		t.Fatal("binaries installed despite a rule layer the gateway refuses")
+	}
+}
+
 // An observability header naming a protected credential is refused before
 // any change until `enterprise secret set` has stored that credential.
 func TestObservabilityCredentialMustBeStoredBeforeAnyChange(t *testing.T) {
@@ -523,7 +591,7 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 		t.Run(goos, func(t *testing.T) {
 			h := newTestHost(t, goos)
 			cfg := filepath.Join(t.TempDir(), "staged-config.yaml")
-			unversioned := strings.Replace(string(DefaultConfig(h.env.Layout)), "config_version: 8\n", "", 1)
+			unversioned := strings.Replace(string(DefaultConfig(h.env.Layout)), "config_version: 9\n", "", 1)
 			if err := os.WriteFile(cfg, []byte(unversioned), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -538,7 +606,7 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 			if !strings.Contains(message, cfg) || strings.Contains(message, h.env.Layout.ConfigPath) {
 				t.Fatalf("the error does not name the --config file: %q", message)
 			}
-			if !strings.Contains(message, "config_version_required") || !strings.Contains(message, "`config_version: 8`") || strings.Contains(message, "defenseclaw migrate") {
+			if !strings.Contains(message, "config_version is required") || !strings.Contains(message, "`config_version: 9`") || strings.Contains(message, "defenseclaw migrate") {
 				t.Fatalf("the error does not say how to fix the file on this host: %q", message)
 			}
 		})
@@ -549,20 +617,33 @@ func TestConfigErrorsNameTheAdministratorFileAndAFixOnTheHost(t *testing.T) {
 // data_dir, is refused before any change instead of failing activation. A
 // missing pack names a source that exists before the first install
 // (GAP-1429: the hint named the vendor folder only an install creates).
+// v8AdminConfig is DefaultConfig as an administrator's config_version 8
+// file, which names its pack by folder.
+func v8AdminConfig(layout managed.StandaloneLayout) string {
+	raw := strings.Replace(string(DefaultConfig(layout)), "config_version: 9\n", "config_version: 8\n", 1)
+	return strings.Replace(raw, "rule_pack: default", "rule_pack_dir: "+filepath.Join(layout.VendorPolicyDir, "guardrail", "default"), 1)
+}
+
 func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
 	cases := map[string]struct {
 		replace, with, want string
 		packMode            os.FileMode
+		v9                  bool
 		untrusted           bool
 	}{
-		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release", 0, false},
-		"pack under umask 077": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "service account cannot read the rule pack", 0o700, false},
-		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0, false},
-		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0, false},
-		"missing profile pack": {"guardrail/default\n", "guardrail/default\n  profiles:\n    contractors:\n      rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom\n", `guardrail.profiles.contractors.rule_pack_dir "/etc/defenseclaw/policies/guardrail/custom" does not exist`, 0, false},
+		"missing admin pack":   {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release", 0, false, false},
+		"pack under umask 077": {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom", "service account cannot read the rule pack", 0o700, false, false},
+		"service-writable":     {"rule_pack_dir: /opt/defenseclaw/share/policies/guardrail/default", "rule_pack_dir: /var/lib/defenseclaw/packs/custom", "inside data_dir", 0, false, false},
+		"unknown vendor pack":  {"guardrail/default", "guardrail/nonexistent", "not a rule pack the product ships", 0, false, false},
+		"missing profile pack": {"guardrail/default\n", "guardrail/default\n  profiles:\n    contractors:\n      rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom\n", `guardrail.profiles.contractors.rule_pack_dir "/etc/defenseclaw/policies/guardrail/custom" does not exist`, 0, false, false},
+		// A v9 config selects the pack by name; the check follows it.
+		"missing v9 custom pack": {"rule_pack: default",
+			"rule_pack: acme\n  custom_packs:\n    acme: {path: /etc/defenseclaw/policies/guardrail/custom, digest: \"" + digest + "\"}",
+			"does not exist; create the pack there", 0, true, false},
 		// GAP-0301: the gateway refuses a pack that is not administrator-
 		// controlled, so ensure refuses it before activation.
-		"user-owned profile pack": {"guardrail/default\n", "guardrail/default\n  profiles:\n    contractors:\n      rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom\n", `guardrail.profiles.contractors.rule_pack_dir "/etc/defenseclaw/policies/guardrail/custom" is not administrator-controlled`, 0o755, true},
+		"user-owned profile pack": {"guardrail/default\n", "guardrail/default\n  profiles:\n    contractors:\n      rule_pack_dir: /etc/defenseclaw/policies/guardrail/custom\n", `guardrail.profiles.contractors.rule_pack_dir "/etc/defenseclaw/policies/guardrail/custom" is not administrator-controlled`, 0o755, false, true},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -586,7 +667,12 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 				}
 			}
 			cfg := filepath.Join(t.TempDir(), "config.yaml")
-			raw := strings.Replace(string(DefaultConfig(h.env.Layout)), tc.replace, tc.with, 1)
+			// The v8 refusals keep their wording for an administrator's v8 file.
+			base := v8AdminConfig(h.env.Layout)
+			if tc.v9 {
+				base = string(DefaultConfig(h.env.Layout))
+			}
+			raw := strings.Replace(base, tc.replace, tc.with, 1)
 			if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -599,6 +685,77 @@ func TestRulePackDirsAreValidatedBeforeAnyChange(t *testing.T) {
 				t.Fatal("binaries installed despite an unusable rule pack")
 			}
 		})
+	}
+}
+
+// GAP-1147: vendor packs need the same trust walk as administrator packs.
+func TestVendorRulePackDriftIsRefusedAndReported(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	pack := filepath.Join(h.env.Layout.VendorPolicyDir, "guardrail", "default")
+	nested := filepath.Join(pack, "rules")
+	if err := os.Chmod(h.env.P(nested), 0o775); err != nil {
+		t.Fatal(err)
+	}
+	h.env.Trust = func(path string, kind TrustKind) error {
+		if kind == TrustRulePack {
+			return rulePackTreeTrust(path, func(uid uint32) bool { return uid == uint32(os.Getuid()) })
+		}
+		return nil
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.OK || !strings.Contains(messagesOf(r.Errors, codeVerify), "group/other writable") {
+			t.Fatalf("%s did not report vendor pack drift: %+v", action, r.Errors)
+		}
+	}
+	r := h.run(Options{Action: ActionEnsure})
+	requireError(t, r, codeConfig)
+	if !strings.Contains(messagesOf(r.Errors, codeConfig), "group/other writable") {
+		t.Fatalf("ensure accepted vendor pack drift: %+v", r.Errors)
+	}
+	if err := os.Chmod(h.env.P(nested), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.runner.acls = map[string][]string{
+		h.env.P(nested): {"user:standard allow write,append"},
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if r.OK || !strings.Contains(messagesOf(r.Errors, codeVerify), nested) ||
+			!strings.Contains(messagesOf(r.Errors, codeVerify), "ACL") {
+			t.Fatalf("%s did not report the nested vendor pack ACL: %+v", action, r.Errors)
+		}
+	}
+}
+
+// GAP-0546: a pack the gateway would refuse as not administrator-controlled
+// (a symlink, group/other write, an ACL, a writable folder above it) is
+// refused before anything changes, with the reason, instead of after a
+// restart into a failed start and a cause-less activation_failed.
+func TestEnsureRefusesAnUntrustedRulePackUpFront(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	const pack = "/etc/defenseclaw/policies/guardrail/custom"
+	if err := os.MkdirAll(h.env.P(pack), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.env.Trust = func(path string, kind TrustKind) error {
+		if kind == TrustRulePack && path == h.env.P(pack) {
+			return errors.New(path + ": group/other writable permissions 0775 are not trusted")
+		}
+		return nil
+	}
+	before := len(h.services.calls)
+	cfg := writeChangedConfig(t, h, "rule_pack: default",
+		"rule_pack: acme\n  custom_packs:\n    acme: {path: "+pack+", digest: \"sha256:"+strings.Repeat("a", 64)+"\"}")
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: cfg})
+	requireError(t, r, codeConfig)
+	if got := messagesOf(r.Errors, codeConfig); !strings.Contains(got, pack+`" is not administrator-controlled`) || !strings.Contains(got, "group/other writable") {
+		t.Fatalf("errors = %s", got)
+	}
+	if calls := touched(h.services.calls[before:], unitGateway); len(calls) > 0 {
+		t.Fatalf("the gateway was touched for a refused pack: %v", calls)
 	}
 }
 
@@ -669,7 +826,7 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 		exists(h.env.P("/etc/systemd/system/"+unitGateway)) || exists(h.env.deploymentPath()) {
 		t.Fatal("uninstall left deployment files behind")
 	}
-	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir, l.LogDir, l.VendorPolicyDir} {
+	for _, dir := range []string{l.ConfigDir, l.DataDir, l.InstallRoot, l.GuardianAuthDir, l.LogDir, l.VendorPolicyDir} {
 		if exists(h.env.P(dir)) {
 			t.Fatalf("uninstall left %s", dir)
 		}
@@ -692,10 +849,9 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	if !again.Noop || again.NoopReason != "not_installed" || hasWarning(again, codeLeftovers) {
 		t.Fatalf("second uninstall should be a clean no-op: %+v", again)
 	}
-	// The rerun (the package preremove after an uninstall, say) leaves no
-	// lifecycle directory holding only its lock.
-	if exists(h.env.P(l.LifecycleDir)) {
-		t.Fatal("a no-op uninstall left the lifecycle directory behind")
+	// A no-op uninstall keeps the same lock inode for other waiting runs.
+	if !exists(h.env.P(filepath.Join(l.LifecycleDir, lockFileName))) {
+		t.Fatal("a no-op uninstall removed the lifecycle lock")
 	}
 
 	// --keep-state keeps all of it, and the account.
@@ -719,7 +875,7 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 		!strings.Contains(summary, "kept the service account") || strings.Contains(summary, "kept: each enrolled account") {
 		t.Fatalf("purge summary:\n%s", summary)
 	}
-	for _, dir := range []string{l.ConfigDir, l.DataDir, l.LifecycleDir, l.InstallRoot, l.GuardianAuthDir} {
+	for _, dir := range []string{l.ConfigDir, l.DataDir, l.InstallRoot, l.GuardianAuthDir} {
 		if exists(h.env.P(dir)) {
 			t.Fatalf("purge left %s", dir)
 		}
@@ -727,12 +883,53 @@ func TestUninstallRemovesTheMachineStateUnlessKeepState(t *testing.T) {
 	if _, ok := h.accounts.accounts["defenseclaw"]; !ok {
 		t.Fatal("--keep-service-account removed the service account")
 	}
-	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true, RemoveServiceAccount: true}))
+	r = h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, r)
 	if _, ok := h.accounts.accounts["defenseclaw"]; ok {
 		t.Fatal("purge kept the service account")
 	}
 	if r := h.run(Options{Action: ActionUninstall, Purge: true, KeepState: true}); r.ExitCode == 0 {
 		t.Fatal("--keep-state with --purge must be refused")
+	}
+}
+
+// The lock pathname must survive cleanup. A waiter can have the old inode
+// open before a failed first install or uninstall finishes; replacing it lets
+// another run take a second exclusive flock.
+func TestLifecycleLockInodeSurvivesCleanup(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			bad := h.payload("1.0.0")
+			if err := os.Remove(filepath.Join(bad, binSensorHelper)); err != nil {
+				t.Fatal(err)
+			}
+			requireError(t, h.run(Options{Action: ActionEnsure, PayloadDir: bad}), codePayload)
+			path := h.env.P(filepath.Join(h.env.Layout.LifecycleDir, lockFileName))
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("failed install removed lifecycle lock: %v", err)
+			}
+			held, err := h.env.acquireLock(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := h.env.acquireLock(t.Context()); !errors.Is(err, errLockBusy) {
+				held.release()
+				t.Fatalf("second lock while first is held: %v", err)
+			}
+			held.release()
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			requireOK(t, h.run(Options{Action: ActionUninstall}))
+			after, err := os.Stat(path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatalf("uninstall replaced lifecycle lock inode: before=%v after=%v err=%v", before, after, err)
+			}
+			entries, err := os.ReadDir(h.env.P(h.env.Layout.LifecycleDir))
+			if err != nil || len(entries) != 1 || entries[0].Name() != lockFileName {
+				t.Fatalf("uninstall left more than its lifecycle lock: %v, %v", entries, err)
+			}
+		})
 	}
 }
 
@@ -1395,16 +1592,135 @@ func TestInstallUnderRestrictiveUmaskKeepsDirectoryModes(t *testing.T) {
 	}
 }
 
-// GAP-1193: a connector that inherits the global rule pack is not checked
-// again, so a refusal names guardrail.rule_pack_dir.
-func TestRulePackCheckOrderNamesTheGlobalKey(t *testing.T) {
-	got := rulePackCheckOrder(map[string]string{
-		"guardrail.rule_pack_dir":                  "/etc/defenseclaw/policies/guardrail/custom",
-		"guardrail.connectors.amp.rule_pack_dir":   "/etc/defenseclaw/policies/guardrail/custom",
-		"guardrail.connectors.codex.rule_pack_dir": "/etc/defenseclaw/policies/guardrail/codex",
-	})
-	want := []string{"guardrail.rule_pack_dir", "guardrail.connectors.codex.rule_pack_dir"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Fatalf("order = %v, want %v", got, want)
+// A refused first install leaves only its persistent lock; the service
+// account is still removed. No-start remains unhealthy (GAP-0542).
+func TestRefusedFirstInstallKeepsOnlyLockAndNoStartIsUnhealthy(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	bad := h.payload("1.0.0")
+	if err := os.Remove(filepath.Join(bad, binSensorHelper)); err != nil {
+		t.Fatal(err)
+	}
+	requireError(t, h.run(Options{Action: ActionEnsure, PayloadDir: bad}), codePayload)
+	entries, err := os.ReadDir(h.env.P(h.env.Layout.InstallRoot))
+	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(h.env.Layout.LifecycleDir) {
+		t.Fatalf("refused install left more than its lifecycle lock: %v, %v", entries, err)
+	}
+	if _, ok, _ := h.accounts.Lookup(t.Context(), h.env.Layout.ServiceUser); ok {
+		t.Fatal("the refused install left the service account behind")
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.0"), NoStart: true}))
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		requireError(t, h.run(Options{Action: action}), codeNotStarted)
+	}
+}
+
+// GAP-1217: a missing hook binary (an antivirus quarantine) was restored
+// neither by the guardian nor by repair, which refused with payload_invalid;
+// verify named no fix and security_complete stayed true while every agent ran
+// tool calls without DefenseClaw. Verify now names the repair and fails
+// security_complete, the guardian finds the missing binary, and ensure (the
+// job the guardian starts) puts it back from the copy the lifecycle sealed.
+// A copy that is not the recorded binary is never made executable.
+func TestMissingHookBinaryIsPutBackFromTheSealedCopy(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	hook := filepath.Join(h.env.Layout.BinDir, binHook)
+	want := h.read(hook)
+	if err := os.Remove(h.env.P(hook)); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if got := messagesOf(verify.Errors, codeVerify); !strings.Contains(got, hook+" is missing") ||
+		!strings.Contains(got, "`"+h.env.lifecycleCommand(ActionRepair)+"`") || verify.SecurityComplete {
+		t.Fatalf("verify: security_complete=%v errors %q", verify.SecurityComplete, got)
+	}
+	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{hook}) {
+		t.Fatalf("the guardian check found %v", got)
+	}
+	ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireOK(t, ensure)
+	if info, err := os.Stat(h.env.P(hook)); err != nil || info.Mode().Perm() != 0o755 || h.read(hook) != want {
+		t.Fatalf("ensure did not put the hook binary back: %v %v", info, err)
+	}
+	if err := os.Remove(h.env.P(hook)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.sealedHookPath(), []byte("not the hook binary"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repair := h.run(Options{Action: ActionRepair})
+	if exists(h.env.P(hook)) || !strings.Contains(messagesOf(repair.Warnings, codeHookBinaryNotRestored), "is not the binary the deployment recorded") {
+		t.Fatalf("a sealed copy that is not the recorded binary was used or not reported: %v", repair.Warnings)
+	}
+}
+
+// GAP-0680: a hook binary left empty by a crash during the package unpack
+// (which agents run through sh as an empty script that allows every call),
+// one that is not executable or not owned by root, and one that is not the
+// recorded binary went unrepaired, and verify read most of them as fine.
+// Each counts as missing now: verify and status name the state and the
+// restore, the guardian check finds it, and ensure (the job the guardian
+// starts) puts the recorded binary back. A package that replaced the
+// gateway with the hook is an upgrade, and the package's own run refuses an
+// empty hook instead of pairing the newer package with the older one.
+func TestDamagedHookBinaryIsPutBackFromTheSealedCopy(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	hook := filepath.Join(h.env.Layout.BinDir, binHook)
+	path := h.env.P(hook)
+	want := h.read(hook)
+	for _, c := range []struct {
+		state  string
+		damage func() error
+	}{
+		{"is empty (0 bytes)", func() error { return os.Truncate(path, 0) }},
+		{"is not executable (mode 0000)", func() error { return os.Chmod(path, 0) }},
+		{"is not executable (mode 0644)", func() error { return os.Chmod(path, 0o644) }},
+		{"is not owned by root (uid 1000)", func() error { h.owners[path] = [2]int{1000, 1000}; return nil }},
+		{"is not the binary the deployment installed (hash mismatch: sha256 ", func() error {
+			return os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}},
+	} {
+		if err := c.damage(); err != nil {
+			t.Fatal(err)
+		}
+		for _, action := range []string{ActionVerify, ActionStatus} {
+			r := h.run(Options{Action: action})
+			got := messagesOf(r.Errors, codeVerify)
+			if !strings.Contains(got, hook+" "+c.state) || !strings.Contains(got, "`"+h.env.lifecycleCommand(ActionRepair)+"`") || r.SecurityComplete {
+				t.Fatalf("%s: %s security_complete=%v errors %q", c.state, action, r.SecurityComplete, got)
+			}
+		}
+		if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{hook}) {
+			t.Fatalf("%s: the guardian check found %v", c.state, got)
+		}
+		requireOK(t, h.run(Options{Action: ActionEnsure, Reason: "path"}))
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o755 || h.read(hook) != want || h.owners[path] != [2]int{0, 0} {
+			t.Fatalf("%s: ensure did not put the hook binary back: %v %v %v", c.state, info, err, h.owners[path])
+		}
+		requireOK(t, h.run(Options{Action: ActionVerify}))
+		if got := h.env.TamperedFiles(); len(got) != 0 {
+			t.Fatalf("%s: the restored binary still counts as tampered: %v", c.state, got)
+		}
+	}
+	newer := h.payload("1.1.0")
+	for _, name := range []string{binGateway, binHook} {
+		if err := h.env.copyFileAtomic(filepath.Join(newer, name), h.env.P(filepath.Join(h.env.Layout.BinDir, name)), 0o755, rootOwner()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := h.env.TamperedFiles(); len(got) != 0 {
+		t.Fatalf("a package upgrade counts as tampered: %v", got)
+	}
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
+	requireError(t, r, codePayload)
+	if got := messagesOf(r.Errors, codePayload); !strings.Contains(got, "is empty (0 bytes)") || h.read(hook) != "" {
+		t.Fatalf("the package run paired the newer package with the older hook or named no cause: %q", got)
 	}
 }

@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 // ErrCredentialDetected is returned by AssertNoCredentials when at least
@@ -170,10 +172,10 @@ func scanForCredentialPrefix(v string) string {
 // scrub guard never crashes a prod sidecar that happens to flap the
 // reveal flag for incident triage.
 func isCredentialScrubDevMode() bool {
-	if v := strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_DEV"))); v == "1" || v == "true" {
+	if v := strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_DEV"))); v == "1" || v == "true" {
 		return true
 	}
-	if v := strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_TEST"))); v == "1" || v == "true" {
+	if v := strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_TEST"))); v == "1" || v == "true" {
 		return true
 	}
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("GO_TEST"))); v == "1" || v == "true" {

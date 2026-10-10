@@ -27,9 +27,6 @@ import (
 
 const (
 	managedEventVerdict            = "verdict"
-	managedEventConnectorInventory = "connector_inventory"
-	managedEventMCPInventory       = "mcp_inventory"
-	managedEventAgentInventory     = "agent_inventory"
 	maxManagedReasonAttributeBytes = 200
 	managedGatewaySchemaURL        = "https://defenseclaw.io/schemas/gateway-event-envelope.json"
 	managedScanSchemaURL           = "https://defenseclaw.io/schemas/scan-event.json"
@@ -73,48 +70,6 @@ type managedCanonicalProjection struct {
 	Body        map[string]any `json:"body"`
 	Correlation map[string]any `json:"correlation"`
 	Provenance  map[string]any `json:"provenance"`
-}
-
-type managedConnectorIdentifier struct {
-	Name string `json:"name"`
-}
-
-type managedConnectorMetadata struct {
-	Source             string `json:"source"`
-	ToolInspectionMode string `json:"tool_inspection_mode"`
-	SubprocessPolicy   string `json:"subprocess_policy"`
-}
-
-type managedConnectorContent struct {
-	Description string `json:"description,omitempty"`
-}
-
-type managedMCPIdentifier struct {
-	Name    string `json:"name"`
-	URLHost string `json:"url_host,omitempty"`
-}
-
-type managedMCPMetadata struct {
-	Transport        string `json:"transport,omitempty"`
-	CommandBasename  string `json:"command_basename,omitempty"`
-	AuthProviderType string `json:"auth_provider_type,omitempty"`
-	Disabled         *bool  `json:"disabled"`
-}
-
-type managedAgentIdentifier struct {
-	Name           string `json:"name"`
-	ConfigPathHash string `json:"config_path_hash,omitempty"`
-	BinaryPathHash string `json:"binary_path_hash,omitempty"`
-}
-
-type managedAgentMetadata struct {
-	Installed      *bool  `json:"installed"`
-	HasConfig      *bool  `json:"has_config"`
-	ConfigBasename string `json:"config_basename,omitempty"`
-	HasBinary      *bool  `json:"has_binary"`
-	BinaryBasename string `json:"binary_basename,omitempty"`
-	Version        string `json:"version,omitempty"`
-	ProbeStatus    string `json:"probe_status"`
 }
 
 func validManagedContentHash(value string) bool {
@@ -182,7 +137,10 @@ func validateManagedGatewayEvent(event gatewaylog.Event) ([]byte, bool) {
 	return encoded, true
 }
 
-func managedResourceSnapshot(source map[string]string) (map[string]string, string, string, bool) {
+func managedResourceSnapshot(
+	source map[string]string,
+	deploymentAliases bool,
+) (map[string]string, string, string, bool) {
 	values := make(map[string]string, len(source)+1)
 	for key, value := range source {
 		values[key] = value
@@ -192,9 +150,24 @@ func managedResourceSnapshot(source map[string]string) (map[string]string, strin
 	if !validManagedAnchor(deviceID) || !validManagedAnchor(hostname) {
 		return nil, "", "", false
 	}
-	// This compatibility alias is release-owned for the managed sink only. It
-	// does not depend on, or mutate, the operator's global compatibility_aliases.
+	// The managed AI Defense wire contract is the resource the sink sent
+	// before telemetry dropped its alias attributes, and no other destination
+	// carries them. The sink always added defenseclaw.device.id itself.
+	// deployment.environment and deployment.mode came from the provider
+	// while trace_policy.compatibility_aliases was on, so they follow that
+	// switch. Drop this when the managed backend keys only on the canonical
+	// names.
 	values["defenseclaw.device.id"] = deviceID
+	if deploymentAliases {
+		for canonical, wire := range map[string]string{
+			"deployment.environment.name": "deployment.environment",
+			"defenseclaw.deployment.mode": "deployment.mode",
+		} {
+			if value := values[canonical]; value != "" {
+				values[wire] = value
+			}
+		}
+	}
 	return values, deviceID, hostname, true
 }
 
@@ -274,15 +247,8 @@ func projectManagedCompatibility(
 		// file). Every ai.discovery record — agent, connector, MCP,
 		// skill, and plugin inventories, plus the ai_discovery scan
 		// summary — flows through as its original v8 OTLP log with
-		// no legacy gatewaylog.Event wrapping. The previous design
-		// projected agent / connector / MCP into schema-v7
-		// envelopes while skill / plugin passed through as v8,
-		// which left managed inventory in a mixed contract. The
-		// three legacy projectors
-		// (projectManagedConnectorInventory / projectManagedMCPInventory /
-		// projectManagedAgentInventory) still live in this package so a
-		// rollback commit could restore them, but they are no longer
-		// wired to the compatibility projector.
+		// no legacy gatewaylog.Event wrapping. The schema-v7
+		// agent / connector / MCP inventory projectors are gone.
 		//
 		// Every ai.discovery action is now v8-passthrough. Records
 		// outside guardrail.evaluation.completed remain fail-closed
@@ -384,204 +350,6 @@ func projectManagedVerdict(
 	return true
 }
 
-func projectManagedConnectorInventory(
-	event *gatewaylog.Event, eventName string, body map[string]any,
-	deviceID, hostname string, projection *managedCompatibilityProjection,
-) bool {
-	if event == nil || projection == nil || eventName != "ai.discovery.completed" {
-		return false
-	}
-	count, active, ok := managedAuthoritativeInventorySummary(body, 128)
-	if !ok {
-		return false
-	}
-	identifiers, ok := decodeManagedArray[managedConnectorIdentifier](
-		body, "defenseclaw.inventory.connector.identifiers", 128, true,
-	)
-	if !ok || len(identifiers) != count {
-		return false
-	}
-	metadata, ok := decodeManagedArray[managedConnectorMetadata](
-		body, "defenseclaw.inventory.connector.metadata", 128, true,
-	)
-	if !ok || len(metadata) != count {
-		return false
-	}
-	content, ok := decodeManagedArray[managedConnectorContent](
-		body, "defenseclaw.inventory.connector.content", 128, false,
-	)
-	_, contentPresent := body["defenseclaw.inventory.connector.content"]
-	if !ok || contentPresent && len(content) != count || active != count {
-		return false
-	}
-	payload := &gatewaylog.ConnectorInventoryPayload{
-		DeviceID: deviceID, Hostname: hostname, Count: count,
-		Connectors: make([]gatewaylog.ConnectorInventoryItem, 0, count),
-	}
-	for index := range identifiers {
-		name := managedSafeString(identifiers[index].Name, 128)
-		source := managedToken(metadata[index].Source, 64)
-		toolMode := managedToken(metadata[index].ToolInspectionMode, 64)
-		subprocess := managedToken(metadata[index].SubprocessPolicy, 64)
-		if name == "" || strings.ContainsAny(name, `/\\`) || source == "" || toolMode == "" || subprocess == "" {
-			return false
-		}
-		description := ""
-		if len(content) != 0 {
-			description = managedSafeString(content[index].Description, 512)
-			if content[index].Description != "" && description == "" {
-				return false
-			}
-		}
-		payload.Connectors = append(payload.Connectors, gatewaylog.ConnectorInventoryItem{
-			Name: name, Description: description, Source: source,
-			ToolInspectionMode: toolMode, SubprocessPolicy: subprocess,
-		})
-	}
-	event.EventType = gatewaylog.EventType(managedEventConnectorInventory)
-	event.ConnectorInventory = payload
-	projection.eventType = managedEventConnectorInventory
-	projection.attributes = append(projection.attributes,
-		managedIntAttribute("defenseclaw.inventory.connector.count", int64(payload.Count)))
-	return true
-}
-
-func projectManagedMCPInventory(
-	event *gatewaylog.Event, eventName string, body map[string]any,
-	deviceID, hostname string, projection *managedCompatibilityProjection,
-) bool {
-	if event == nil || projection == nil || eventName != "ai.discovery.completed" {
-		return false
-	}
-	count, active, ok := managedAuthoritativeInventorySummary(body, 256)
-	if !ok {
-		return false
-	}
-	identifiers, ok := decodeManagedArray[managedMCPIdentifier](
-		body, "defenseclaw.inventory.mcp.identifiers", 256, true,
-	)
-	if !ok || len(identifiers) != count {
-		return false
-	}
-	metadata, ok := decodeManagedArray[managedMCPMetadata](
-		body, "defenseclaw.inventory.mcp.metadata", 256, true,
-	)
-	if !ok || len(metadata) != count {
-		return false
-	}
-	payload := &gatewaylog.MCPInventoryPayload{
-		DeviceID: deviceID, Hostname: hostname, Count: count,
-		Servers: make([]gatewaylog.MCPInventoryItem, 0, count),
-	}
-	computedActive := 0
-	for index := range identifiers {
-		name := managedSafeString(identifiers[index].Name, 256)
-		if name == "" || strings.ContainsAny(name, `/\\`) || metadata[index].Disabled == nil {
-			return false
-		}
-		transport := managedOptionalToken(metadata[index].Transport, 64)
-		command := managedOptionalSafeName(metadata[index].CommandBasename, 256)
-		host := managedOptionalSafeHost(identifiers[index].URLHost, 256)
-		auth := managedOptionalToken(metadata[index].AuthProviderType, 64)
-		if transport == "\x00" || command == "\x00" || host == "\x00" || auth == "\x00" {
-			return false
-		}
-		if !*metadata[index].Disabled {
-			computedActive++
-		}
-		payload.Servers = append(payload.Servers, gatewaylog.MCPInventoryItem{
-			Name: name, Transport: transport, Command: command, URLHost: host,
-			AuthProvider: auth, Disabled: *metadata[index].Disabled,
-		})
-	}
-	if computedActive != active {
-		return false
-	}
-	event.EventType = gatewaylog.EventType(managedEventMCPInventory)
-	event.MCPInventory = payload
-	projection.eventType = managedEventMCPInventory
-	projection.attributes = append(projection.attributes,
-		managedIntAttribute("defenseclaw.inventory.mcp.count", int64(payload.Count)))
-	return true
-}
-
-func projectManagedAgentInventory(
-	event *gatewaylog.Event, eventName string, body map[string]any,
-	deviceID, hostname string, projection *managedCompatibilityProjection,
-) bool {
-	if event == nil || projection == nil || eventName != "ai.discovery.completed" {
-		return false
-	}
-	count, installed, ok := managedAuthoritativeInventorySummary(body, 64)
-	if !ok {
-		return false
-	}
-	identifiers, ok := decodeManagedArray[managedAgentIdentifier](
-		body, "defenseclaw.inventory.agent.identifiers", 64, true,
-	)
-	if !ok || len(identifiers) != count {
-		return false
-	}
-	metadata, ok := decodeManagedArray[managedAgentMetadata](
-		body, "defenseclaw.inventory.agent.metadata", 64, true,
-	)
-	if !ok || len(metadata) != count {
-		return false
-	}
-	scannedAt := managedString(body, "defenseclaw.agent.discovery.scanned_at", 64)
-	if scannedAt != "" {
-		if _, parseErr := time.Parse(time.RFC3339Nano, scannedAt); parseErr != nil {
-			return false
-		}
-	}
-	payload := &gatewaylog.AgentInventoryPayload{
-		DeviceID: deviceID, Hostname: hostname,
-		Source: managedString(body, "defenseclaw.ai.discovery.source", 64), ScannedAt: scannedAt,
-		Count: count, Installed: installed, Agents: make([]gatewaylog.AgentInventoryItem, 0, count),
-	}
-	computedInstalled := 0
-	for index := range identifiers {
-		identifier, agentMetadata := identifiers[index], metadata[index]
-		name := managedSafeString(identifier.Name, 128)
-		if name == "" || agentMetadata.Installed == nil || agentMetadata.HasConfig == nil ||
-			agentMetadata.HasBinary == nil || agentMetadata.ProbeStatus == "" {
-			return false
-		}
-		configBase := managedOptionalSafeName(agentMetadata.ConfigBasename, 128)
-		binaryBase := managedOptionalSafeName(agentMetadata.BinaryBasename, 128)
-		versionValue := managedOptionalSafeString(agentMetadata.Version, 200)
-		probe := managedToken(agentMetadata.ProbeStatus, 64)
-		configHash := managedOptionalHash(identifier.ConfigPathHash)
-		binaryHash := managedOptionalHash(identifier.BinaryPathHash)
-		if configBase == "\x00" || binaryBase == "\x00" || versionValue == "\x00" || probe == "" ||
-			configHash == "\x00" || binaryHash == "\x00" ||
-			(!*agentMetadata.HasConfig && (configBase != "" || configHash != "")) ||
-			(!*agentMetadata.HasBinary && (binaryBase != "" || binaryHash != "" || versionValue != "")) {
-			return false
-		}
-		if *agentMetadata.Installed {
-			computedInstalled++
-		}
-		payload.Agents = append(payload.Agents, gatewaylog.AgentInventoryItem{
-			Name: name, Installed: *agentMetadata.Installed, HasConfig: *agentMetadata.HasConfig,
-			ConfigBasename: configBase, ConfigPathHash: configHash, HasBinary: *agentMetadata.HasBinary,
-			BinaryBasename: binaryBase, BinaryPathHash: binaryHash,
-			Version: versionValue, VersionProbeStatus: probe,
-		})
-	}
-	if computedInstalled != installed {
-		return false
-	}
-	event.EventType = gatewaylog.EventType(managedEventAgentInventory)
-	event.AgentInventory = payload
-	projection.eventType = managedEventAgentInventory
-	projection.attributes = append(projection.attributes,
-		managedIntAttribute("defenseclaw.inventory.agent.count", int64(payload.Count)),
-		managedIntAttribute("defenseclaw.inventory.agent.installed", int64(payload.Installed)),
-	)
-	return true
-}
-
 func applyManagedCompatibility(record *logspb.LogRecord, projection managedCompatibilityProjection) bool {
 	if record == nil || projection.body == "" || projection.eventType == "" {
 		return false
@@ -618,131 +386,6 @@ func managedIntAttribute(key string, value int64) *commonpb.KeyValue {
 	}}
 }
 
-func managedAuthoritativeInventorySummary(body map[string]any, max int) (int, int, bool) {
-	if body == nil || max < 0 ||
-		managedString(body, "defenseclaw.ai.discovery.source", 256) == "" {
-		return 0, 0, false
-	}
-	// The scan emitter uses "ok" for a clean scan and "partial" for a
-	// scan that hit detector errors; the compatibility projector was
-	// wired to accept only "completed", which the emitter never sends.
-	// Accept the emitter's canonical values (fix keeps the empty-string
-	// / other-values rejection unchanged).
-	result := managedString(body, "defenseclaw.ai.discovery.result", 64)
-	if result != "ok" && result != "completed" {
-		return 0, 0, false
-	}
-	count, ok := managedNonnegativeInt(body, "defenseclaw.ai.discovery.signals_total")
-	if !ok || count > max {
-		return 0, 0, false
-	}
-	active, ok := managedNonnegativeInt(body, "defenseclaw.ai.discovery.active_signals")
-	if !ok || active > count {
-		return 0, 0, false
-	}
-	errorsTotal, ok := managedNonnegativeInt(body, "defenseclaw.ai.discovery.errors")
-	if !ok || errorsTotal != 0 {
-		return 0, 0, false
-	}
-	return count, active, true
-}
-
-func decodeManagedArray[T any](
-	body map[string]any,
-	key string,
-	max int,
-	required bool,
-) ([]T, bool) {
-	raw, present := body[key]
-	if !present {
-		return nil, !required
-	}
-	items, ok := raw.([]any)
-	if !ok || len(items) > max {
-		return nil, false
-	}
-	encoded, err := json.Marshal(items)
-	if err != nil {
-		return nil, false
-	}
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
-	var result []T
-	if err := decoder.Decode(&result); err != nil || len(result) != len(items) {
-		return nil, false
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, false
-	}
-	return result, true
-}
-
-func managedSafeString(value string, max int) string {
-	return managedString(map[string]any{"value": value}, "value", max)
-}
-
-func managedOptionalSafeString(value string, max int) string {
-	if value == "" {
-		return ""
-	}
-	if safe := managedSafeString(value, max); safe != "" {
-		return safe
-	}
-	return "\x00"
-}
-
-func managedOptionalToken(value string, max int) string {
-	if value == "" {
-		return ""
-	}
-	if safe := managedToken(value, max); safe != "" {
-		return safe
-	}
-	return "\x00"
-}
-
-func managedOptionalSafeName(value string, max int) string {
-	if value == "" {
-		return ""
-	}
-	safe := managedSafeString(value, max)
-	if safe == "" || strings.ContainsAny(safe, `/\\`) {
-		return "\x00"
-	}
-	return safe
-}
-
-func managedOptionalSafeHost(value string, max int) string {
-	if value == "" {
-		return ""
-	}
-	safe := managedSafeString(value, max)
-	if safe == "" || strings.ContainsAny(safe, `/\\?#@`) {
-		return "\x00"
-	}
-	return safe
-}
-
-func managedOptionalHash(value string) string {
-	if value == "" {
-		return ""
-	}
-	prefix := "sha256:"
-	if strings.HasPrefix(value, "hmac-sha256:") {
-		prefix = "hmac-sha256:"
-	}
-	if len(value) != len(prefix)+64 || !strings.HasPrefix(value, prefix) {
-		return "\x00"
-	}
-	for _, character := range value[len(prefix):] {
-		if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') {
-			return "\x00"
-		}
-	}
-	return value
-}
-
 func managedString(values map[string]any, key string, max int) string {
 	value, ok := values[key].(string)
 	if !ok || value == "" || len(value) > max || !utf8.ValidString(value) {
@@ -769,39 +412,6 @@ func managedToken(value string, max int) string {
 	return value
 }
 
-func managedTokenValue(values map[string]any, key string, max int) string {
-	return managedToken(managedString(values, key, max), max)
-}
-
-func managedSafeName(values map[string]any, key string, max int) string {
-	value := managedString(values, key, max)
-	if strings.ContainsAny(value, `/\\`) {
-		return ""
-	}
-	return value
-}
-
-func managedSafeHost(values map[string]any, key string, max int) string {
-	value := managedString(values, key, max)
-	if strings.ContainsAny(value, `/\\?#@`) {
-		return ""
-	}
-	return value
-}
-
-func managedHash(values map[string]any, key string) string {
-	value := managedString(values, key, 71)
-	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
-		return ""
-	}
-	for _, character := range value[len("sha256:"):] {
-		if !(character >= '0' && character <= '9') && !(character >= 'a' && character <= 'f') {
-			return ""
-		}
-	}
-	return value
-}
-
 func managedStrings(values map[string]any, key string, maxItems, maxItem int) ([]string, bool) {
 	raw, present := values[key]
 	if !present {
@@ -820,19 +430,6 @@ func managedStrings(values map[string]any, key string, maxItems, maxItem int) ([
 		result = append(result, value)
 	}
 	return result, true
-}
-
-func managedBool(values map[string]any, key string) (bool, bool) {
-	value, ok := values[key].(bool)
-	return value, ok
-}
-
-func managedNonnegativeInt(values map[string]any, key string) (int, bool) {
-	value, ok := managedNonnegativeInt64(values, key)
-	if !ok || value > int64(int(^uint(0)>>1)) {
-		return 0, false
-	}
-	return int(value), true
 }
 
 func managedNonnegativeInt64(values map[string]any, key string) (int64, bool) {

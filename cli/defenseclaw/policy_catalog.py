@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -263,33 +263,104 @@ def _is_within(path: str, directory: str) -> bool:
     return real_path == real_dir or real_path.startswith(real_dir + os.sep)
 
 
-def _data_json_candidates(policy_dir: str | os.PathLike[str] | None) -> list[str]:
-    out: list[str] = []
+def _legacy_active_policy_name(policy_dir: str | os.PathLike[str] | None) -> str:
+    """Secure Client v8 keeps its active policy name in OPA data.json."""
+    candidates = []
     if policy_dir:
-        out.append(os.path.join(os.fspath(policy_dir), "rego", "data.json"))
+        candidates.append(os.path.join(os.fspath(policy_dir), "rego", "data.json"))
     bundled = _bundled_dir()
     if bundled:
-        out.append(os.path.join(bundled, "rego", "data.json"))
-    return out
-
-
-def active_policy_name(policy_dir: str | os.PathLike[str] | None) -> str:
-    """Return ``config.policy_name`` from the OPA data.json ("" if unknown).
-
-    Reads ``<policy_dir>/rego/data.json`` (where ``policy activate`` writes),
-    falling back to the bundled copy — the same order the CLI always used.
-    """
-    for candidate in _data_json_candidates(policy_dir):
+        candidates.append(os.path.join(bundled, "rego", "data.json"))
+    for candidate in candidates:
         if not os.path.isfile(candidate):
             continue
         try:
-            with open(candidate, encoding="utf-8") as fh:
-                data = json.load(fh)
+            with open(candidate, encoding="utf-8") as stream:
+                data = json.load(stream)
         except (OSError, ValueError, UnicodeDecodeError):
             continue
-        cfg = data.get("config") if isinstance(data, dict) else None
-        name = cfg.get("policy_name") if isinstance(cfg, dict) else None
+        config = data.get("config") if isinstance(data, dict) else None
+        name = config.get("policy_name") if isinstance(config, dict) else None
         return name if isinstance(name, str) else ""
+    return ""
+
+
+def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> str:
+    """The named policy ``cfg`` runs ("" when none matches or there is no config).
+
+    Since config_version 9 a named policy is a preset: ``policy activate``
+    writes its admission, guardrail levels, watch settings and Cisco trust
+    level as config keys and records nothing else, so the active policy is the one whose
+    values the config holds now. A config that sets none of them runs the
+    shipped defaults, which is the ``default`` policy. Secure Client
+    instead keeps the active name in its v8 OPA data.json.
+    """
+    if cfg is None or getattr(cfg, "guardrail", None) is None:
+        return ""
+    from defenseclaw.enforce import asset_lists
+
+    if asset_lists.is_secure_client(cfg):
+        return _legacy_active_policy_name(policy_dir)
+    import copy
+
+    from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
+    from defenseclaw.config import AdmissionConfig
+    from defenseclaw.enforce.admission import compile_admission
+
+    def admission(config: Any) -> tuple[Any, ...]:
+        # Compare what admission enforces, not how config.yaml spells it: the
+        # v8 -> v9 migration writes a preset's actions per type in shorthand
+        # (admission.skill.actions.high: quarantine) and leaves values equal
+        # to the built-in defaults unset, where `policy activate` writes
+        # admission.defaults triples (GAP-0903).
+        out = []
+        for target_type in ("skill", "mcp", "plugin"):
+            c = compile_admission(config, target_type)
+            first_party = tuple(sorted((name, tuple(sorted(m))) for name, m in c.first_party_allow.items()))
+            out.append((c.scan_on_install, c.allow_list_bypass_scan, c.actions, c.scanner_overrides, first_party))
+        return tuple(out)
+
+    def keys(config: Any) -> tuple[Any, ...]:
+        g = config.guardrail
+        trust = str(getattr(g, "cisco_trust_level", "") or "").strip() or "full"
+        return (
+            admission(config),
+            level_value(getattr(g, "block_at", "")),
+            level_value(getattr(g, "alert_at", "")),
+            trust,
+            getattr(config.watch, "rescan_enabled", None),
+            getattr(config.watch, "rescan_interval_min", None),
+        )
+
+    current = keys(cfg)
+    sources = _policy_sources(policy_dir)
+    if (
+        getattr(cfg, "admission", None) == AdmissionConfig()
+        and current[1:] == ("", "", "full", True, 60)
+        and "default" in sources
+    ):
+        return "default"
+    for stem, (path, _bundled) in sorted(sources.items()):
+        data = load_policy_yaml(path)
+        if data is None or not is_named_policy(data):
+            continue
+        preset = copy.copy(cfg)
+        preset.guardrail = copy.copy(cfg.guardrail)
+        preset.watch = copy.copy(cfg.watch)
+        try:
+            preset.admission = _admission_from_policy(data)
+            _apply_policy_guardrail(preset, data)
+            watch = data.get("watch") or {}
+            if not isinstance(watch, dict):
+                continue
+            if "rescan_enabled" in watch:
+                preset.watch.rescan_enabled = watch["rescan_enabled"]
+            if "rescan_interval_min" in watch:
+                preset.watch.rescan_interval_min = watch["rescan_interval_min"]
+        except (TypeError, ValueError):
+            continue
+        if keys(preset) == current:
+            return stem
     return ""
 
 
@@ -306,26 +377,18 @@ def _policy_sources(policy_dir: str | os.PathLike[str] | None) -> dict[str, tupl
     return sources
 
 
-def _summaries(policy_dir: str | os.PathLike[str] | None) -> list[PolicySummary]:
-    active = active_policy_name(policy_dir)
+def _summaries(policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> list[PolicySummary]:
+    active = active_policy_name(policy_dir, cfg)
     loaded: list[tuple[str, dict[str, Any], str, bool]] = []
     for stem, (path, is_bundled) in sorted(_policy_sources(policy_dir).items()):
         data = load_policy_yaml(path)
         if data is None or not is_named_policy(data):
             continue
         loaded.append((stem, data, path, is_bundled))
-    stems = {stem for stem, *_ in loaded}
     bundled_stems = set(_yaml_files(_bundled_dir()))
     out: list[PolicySummary] = []
     for stem, data, path, is_bundled in loaded:
-        if stem == active:
-            is_active = True
-        elif active and active not in stems:
-            # data.json records the policy's ``name:`` field, which may
-            # differ from its file name.
-            is_active = data.get("name") == active
-        else:
-            is_active = False
+        is_active = stem == active
         out.append(
             summarize_policy(
                 stem,
@@ -339,20 +402,21 @@ def _summaries(policy_dir: str | os.PathLike[str] | None) -> list[PolicySummary]
     return out
 
 
-def list_named_policies(policy_dir: str | os.PathLike[str] | None) -> list[PolicySummary]:
-    """All named policies (user dir + bundled), sorted by name, active marked."""
-    return _summaries(policy_dir)
+def list_named_policies(policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> list[PolicySummary]:
+    """All named policies (user dir + bundled), sorted by name, the one
+    ``cfg`` runs marked active."""
+    return _summaries(policy_dir, cfg)
 
 
 def _safe_policy_name(name: str) -> bool:
     return bool(name) and os.path.basename(name) == name and ".." not in name and "/" not in name and "\\" not in name
 
 
-def get_policy(name: str, policy_dir: str | os.PathLike[str] | None) -> PolicySummary | None:
+def get_policy(name: str, policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> PolicySummary | None:
     """Return the named policy's summary, or ``None`` if absent / not a policy."""
     if not isinstance(name, str) or not _safe_policy_name(name):
         return None
-    for summary in _summaries(policy_dir):
+    for summary in _summaries(policy_dir, cfg):
         if summary.name == name:
             return summary
     return None
@@ -478,10 +542,27 @@ def _guardrail(cfg: Any) -> Any:
     return getattr(cfg, "guardrail", None)
 
 
+def configured_pack_dir(cfg: Any, block: Any) -> str:
+    """The directory a guardrail scope block selects, "" when it selects none.
+
+    A scope selects its ``rule_pack``: a preset name or a
+    ``guardrail.custom_packs`` key (``config.ResolveRulePackDir`` in the gateway).
+    """
+    name = str(getattr(block, "rule_pack", "") or "").strip()
+    if not name:
+        return ""
+    custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
+    if custom is not None:
+        return normalize_pack_path(str(getattr(custom, "path", "") or ""))
+    if name in RULE_PACK_PRESETS:
+        return preset_pack_dir(cfg, name)
+    return ""
+
+
 def global_pack(cfg: Any) -> ConnectorPack:
     """The pack connectors without an override enforce (connector="global")."""
     gc = _guardrail(cfg)
-    configured = normalize_pack_path(str(getattr(gc, "rule_pack_dir", "") or ""))
+    configured = configured_pack_dir(cfg, gc)
     if configured:
         name, _ = pack_name_for_path(cfg, configured)
         return ConnectorPack(connector="global", pack=name, path=configured, source="global")
@@ -493,7 +574,7 @@ def global_pack(cfg: Any) -> ConnectorPack:
     )
 
 
-def _override_dir(gc: Any, connector: str) -> str:
+def _override_dir(gc: Any, connector: str, cfg: Any = None) -> str:
     getter = getattr(gc, "_connector_override", None)
     block = None
     if callable(getter):
@@ -504,18 +585,7 @@ def _override_dir(gc: Any, connector: str) -> str:
     if block is None:
         connectors = getattr(gc, "connectors", None)
         block = connectors.get(connector) if isinstance(connectors, Mapping) else None
-    if block is not None:
-        return normalize_pack_path(str(getattr(block, "rule_pack_dir", "") or ""))
-    if callable(getter) or not callable(getattr(gc, "effective_rule_pack_dir", None)):
-        return ""
-    # Duck-typed configs that only expose the effective resolver: anything
-    # that differs from the global dir is a per-connector override.
-    try:
-        effective = normalize_pack_path(str(gc.effective_rule_pack_dir(connector) or ""))
-    except Exception:  # noqa: BLE001
-        return ""
-    global_dir = normalize_pack_path(str(getattr(gc, "rule_pack_dir", "") or ""))
-    return effective if effective and effective != global_dir else ""
+    return configured_pack_dir(cfg, block)
 
 
 def _active_connectors(cfg: Any) -> list[str]:
@@ -534,7 +604,7 @@ def effective_packs(cfg: Any) -> list[ConnectorPack]:
     fallback = global_pack(cfg)
     out: list[ConnectorPack] = []
     for connector in _active_connectors(cfg):
-        override = _override_dir(gc, connector)
+        override = _override_dir(gc, connector, cfg)
         if override:
             name, _ = pack_name_for_path(cfg, override)
             out.append(ConnectorPack(connector=connector, pack=name, path=override, source="override"))
@@ -576,9 +646,9 @@ def discover_rule_packs(cfg: Any) -> list[RulePack]:
                 continue
             _add(child, full, "custom")
 
-    configured = [normalize_pack_path(str(getattr(gc, "rule_pack_dir", "") or ""))]
+    configured = [configured_pack_dir(cfg, gc)]
     for connector in sorted((getattr(gc, "connectors", None) or {}).keys()):
-        configured.append(_override_dir(gc, connector))
+        configured.append(_override_dir(gc, connector, cfg))
     for path in configured:
         if not path:
             continue
@@ -835,32 +905,26 @@ PACK_PROFILES = ("default", "strict", "permissive")
 
 
 def pack_profile(path: str) -> str:
-    """The posture profile the gateway reads from a rule-pack folder name.
+    """The posture profile the gateway gives a rule-pack directory.
 
-    Mirrors ``guardrailProfileForDir`` in internal/gateway/decision.go: the
-    folder's base name decides tool-call block and alert levels; ``strict``
-    and ``permissive`` keep theirs, every other name reads as ``default``.
+    Mirrors ``packPosture`` in internal/gateway/thresholds.go: the
+    ``posture`` of the pack's ``defenseclaw-pack.json`` manifest when it
+    names one, else the folder's base name (``strict`` and ``permissive``
+    keep theirs, every other name reads as ``default``).
     """
     raw = (path or "").strip().rstrip("/\\")
     if not raw:
         return "default"
+    try:
+        with open(os.path.join(raw, PROTECTION_MANIFEST), encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError, UnicodeDecodeError):
+        manifest = None
+    posture = manifest.get("posture") if isinstance(manifest, dict) else None
+    if isinstance(posture, str) and posture.strip().lower() in PACK_PROFILES:
+        return posture.strip().lower()
     base = os.path.basename(os.path.normpath(raw)).lower()
     return base if base in {"strict", "permissive"} else "default"
-
-
-def protected_pack_dir(cfg: Any, scope: str, profile: str = "default") -> str:
-    """Where ``guardrail protection`` composes *scope*'s pack.
-
-    ``<policy_dir>/guardrail/protected-<scope>/<profile>`` ("" without a
-    policy dir). The last folder is the base pack's profile because the
-    gateway takes tool-call block and alert levels from the folder name, so a
-    strict pack with opt-in packs layered on must still end in ``strict``.
-    """
-    root = policy_root(cfg)
-    if not root:
-        return ""
-    safe = profile if profile in PACK_PROFILES else "default"
-    return os.path.join(root, "guardrail", f"{PROTECTED_PACK_PREFIX}{scope}", safe)
 
 
 def is_protected_pack_path(path: str) -> bool:
@@ -923,6 +987,24 @@ def _pack_rules_by_id(pack_dir: str) -> dict[str, Mapping[str, Any]]:
             if rule_id:
                 out[rule_id] = rule
     return out
+
+
+def pack_rule_defaults(pack_dir: str) -> dict[str, bool]:
+    """Rule id -> shipped on (True) or off (False) for the rule files of *pack_dir*.
+
+    Empty when the directory is missing or has no readable rule file."""
+    return {rule_id: _rule_enabled(rule) for rule_id, rule in _pack_rules_by_id(pack_dir).items()}
+
+
+def rule_defaults_with_protections(pack_dir: str, protections: Iterable[str]) -> dict[str, bool]:
+    """``pack_rule_defaults`` with the named use-case packs layered on, as the gateway composes them
+    (a protection pack's rule replaces the base rule with the same id). Empty when the base has none."""
+    rules = pack_rule_defaults(pack_dir)
+    if not rules:
+        return {}
+    for name in protections:
+        rules.update(pack_rule_defaults(protection_pack_dir(name)))
+    return rules
 
 
 def _raw_rule_text(pack_dir: str) -> str:
@@ -1232,7 +1314,9 @@ def resolve_levels(
 ) -> ScopeLevels:
     """Tool-call levels exactly as the gateway resolves them.
 
-    Mirrors ``guardrailLevelThresholds`` in internal/gateway/decision.go:
+    Mirrors ``resolveThresholds`` in internal/gateway/thresholds.go, which
+    every guardrail surface (prompts, completions, tool calls, the proxy)
+    uses:
     block and alert each take the connector's own value
     (``connector_levels``, None for the global scope), else the global
     ``guardrail.block_at`` / ``alert_at`` (``global_levels``), else the level
@@ -1280,11 +1364,18 @@ def scope_levels(cfg: Any, connector: str = "") -> ScopeLevels:
     in internal/config/application_protection.go), which no catalog scope is.
     """
     gc = _guardrail(cfg)
-    fallback = global_pack(cfg)
+    path = scope_pack_path(cfg, connector)
     if not connector:
-        return resolve_levels(fallback.path, _level_pair(gc))
-    path = _override_dir(gc, connector) or fallback.path
+        return resolve_levels(path, _level_pair(gc))
     return resolve_levels(path, _level_pair(gc), _level_pair(_connector_block(gc, connector)))
+
+
+def scope_pack_path(cfg: Any, connector: str = "") -> str:
+    """The rule-pack directory the global scope ("") or an active connector enforces."""
+    fallback = global_pack(cfg).path
+    if not connector:
+        return fallback
+    return _override_dir(_guardrail(cfg), connector, cfg) or fallback
 
 
 # ---------------------------------------------------------------------------
@@ -1331,6 +1422,27 @@ def hilt_label(hilt: object) -> str:
     return "HIGH+" if label == "none" else label
 
 
+def inert_hilt_warning(hilt: str, block_at: str) -> str:
+    """Explain an approval floor that blocking consumes before it can ask."""
+    minimum = level_value(hilt.rstrip("+"))
+    block = level_value(block_at.rstrip("+"))
+    if not minimum or not block or _SEVERITY_RANK[minimum] < _SEVERITY_RANK[block]:
+        return ""
+    return (
+        f"human approval at {minimum} cannot ask: block_at {block} blocks those findings first; "
+        "lower hilt.min_severity or raise block_at"
+    )
+
+
+def configured_hilt_warnings(cfg: Any) -> list[str]:
+    """Warnings for the configured global and connector postures."""
+    return [
+        f"{row.scope}: {note}"
+        for row in scope_postures(cfg)
+        if (note := inert_hilt_warning(row.hilt, row.block_at))
+    ]
+
+
 def _connector_block(gc: Any, connector: str) -> Any:
     getter = getattr(gc, "_connector_override", None)
     if callable(getter):
@@ -1342,16 +1454,33 @@ def _connector_block(gc: Any, connector: str) -> Any:
     return connectors.get(connector) if isinstance(connectors, Mapping) else None
 
 
-def scope_postures(cfg: Any) -> list[ScopePosture]:
-    """Posture of the global scope, then of every active connector."""
-    gc = _guardrail(cfg)
-    memo: dict[str, tuple[str, ...]] = {}
+def configured_protection(block: Any) -> tuple[str, ...]:
+    """``rules.protections`` of a guardrail scope block (global, connector or
+    profile), in the order config.yaml lists them."""
+    rules = getattr(block, "rules", None) if block is not None else None
+    names = getattr(rules, "protections", None) if rules is not None else None
+    return tuple(str(name) for name in (names or []) if str(name or "").strip())
 
-    def _protection(path: str) -> tuple[str, ...]:
+
+def scope_postures(cfg: Any) -> list[ScopePosture]:
+    """Posture of the global scope, then of every active connector.
+
+    A scope's protection packs are its ``guardrail.rules.protections``
+    (a connector also gets the global ones: the gateway layers them), plus
+    any a v8 composed pack directory still records until the config is
+    migrated to version 9.
+    """
+    gc = _guardrail(cfg)
+    order = {pack.name: index for index, pack in enumerate(protection_packs())}
+    memo: dict[str, tuple[str, ...]] = {}
+    global_on = configured_protection(gc)
+
+    def _protection(path: str, block: Any = None) -> tuple[str, ...]:
         key = os.path.realpath(path) if path else ""
         if key not in memo:
             memo[key] = enabled_protection(path)
-        return memo[key]
+        names = dict.fromkeys((*global_on, *configured_protection(block), *memo[key]))
+        return tuple(sorted(names, key=lambda name: order.get(name, len(order))))
 
     fallback = global_pack(cfg)
     global_levels = _level_pair(gc)
@@ -1391,7 +1520,7 @@ def scope_postures(cfg: Any) -> list[ScopePosture]:
                 pack=row.pack,
                 pack_path=row.path,
                 pack_source=row.source,
-                protection=_protection(row.path),
+                protection=_protection(row.path, block),
                 block_at=levels.block_at,
                 alert_at=levels.alert_at,
                 levels_source=levels.source,
@@ -1425,6 +1554,8 @@ __all__ = [
     "active_policy_name",
     "discover_rule_packs",
     "effective_packs",
+    "configured_pack_dir",
+    "configured_protection",
     "enabled_protection",
     "get_policy",
     "global_pack",
@@ -1446,7 +1577,6 @@ __all__ = [
     "is_protected_pack_path",
     "pack_profile",
     "policy_root",
-    "protected_pack_dir",
     "protection_pack_dir",
     "protection_packs",
     "protection_packs_dir",

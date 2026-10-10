@@ -46,7 +46,7 @@ guardrail:
       block_at: MEDIUM
       alert_at: LOW
       hilt: {enabled: true, min_severity: HIGH}
-      rule_pack_dir: /home/<you>/.defenseclaw/policies/guardrail/strict   # absolute: ~ is not expanded
+      rule_pack: strict
       connectors:
         codex: {mode: observe}   # but Codex only observes for this profile
     ml-team:
@@ -90,9 +90,10 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --connector 
 | --- | --- |
 | `description` | Free text for operators. |
 | `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. The hooks of a sandboxed agent always enforce, whatever `mode` says. |
-| `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`, for tool-call decisions ([tool-call levels](/docs/reference/cli#tool-call-levels)). When unset, the rule pack's level applies. Prompts and responses always use the rule pack's levels (a `strict` pack blocks MEDIUM and above, others CRITICAL), so `block_at: MEDIUM` blocks a MEDIUM finding in a command, not in a prompt. A plain regex rule that only matches text an inert command prints (`echo marker`) is recorded on a tool call but does not block; a rule meant to block a command needs an `expression` over the parsed command ([CEL rules](/docs/policies/cel/authoring)). |
+| `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. These effective thresholds apply to tool calls, prompts, responses and proxy decisions. When unset, the selected rule pack supplies the levels (a `strict` pack blocks MEDIUM and above by default). A profile with `block_at: CRITICAL` can therefore turn a MEDIUM prompt finding from a strict-pack block into an alert, according to its effective `alert_at`. Secure Client rejects profiles and keeps its existing content thresholds. A plain regex rule that only matches text an inert command prints (`echo marker`) is recorded on a tool call but does not block; a rule meant to block a command needs an `expression` over the parsed command ([CEL rules](/docs/policies/cel/authoring)). |
 | `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, stored in upper case) for [human approval](/docs/hitl). |
-| `rule_pack_dir` | A rule pack for this profile: the absolute path of its directory. `~` is not expanded. When the directory does not load as the gateway starts (it is created a moment later, for example by the MDM that delivers it), the profile scans with the base rule set and the gateway retries the pack every 30 seconds; `explain` says so meanwhile. A reload refuses a pack that does not load. |
+| `rule_pack` | A rule pack for this profile: `default`, `strict`, `permissive` or a `guardrail.custom_packs` name. When a custom pack's directory does not load as the gateway starts (it is created a moment later, for example by the MDM that delivers it), the profile scans with the base rule set and the gateway retries the pack every 30 seconds; `explain` says so meanwhile. A reload refuses a pack that does not load. |
+| `rules` | Rule customization for this profile: protections, rules turned on or off, severity overrides and suppressions. Edit it with `defenseclaw guardrail protection`, `rule` and `suppress`, which take `--profile P`. |
 | `block_message` | The text a blocked user sees. |
 | `connectors.<name>` | The same settings for one connector, except `description`. |
 
@@ -115,7 +116,7 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 
 | Key | Matches | Spell it as |
 | --- | --- | --- |
-| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Write it fully qualified then: the bare name selects nobody, and the warning names the spelling the host knows. `id -Gn` separates groups with spaces, and a space can belong to a name: Active Directory's default group prints as `domain users@corp.example.com`, so copy everything up to and including `@domain`, or read the exact name with `getent group <gid>` (`id -G` lists the gids). Quote such a name in YAML (`'domain users@corp.example.com'`). Case does not matter. Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. A standalone enterprise gateway resolves each name to its SID when it loads the config and matches the SIDs of the caller, so a slow domain controller cannot make a group miss; a name that does not resolve selects nobody, and `profile explain`, `status` and `doctor` name it until it does (the gateway retries it every minute). An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: use the exact group name from `dscl` or `dseditgroup`; `id -Gn` splits names containing spaces. For macOS and Windows domain groups in YAML, use single quotes such as `'CORP\ML-Team'` or double the backslash inside double quotes (`"CORP\\ML-Team"`). Obtain Windows names containing spaces from the Windows group tools. Entra groups reach Linux only through Himmelblau or Entra Domain Services, and never reach macOS through Platform SSO ([Entra groups per platform](/docs/enterprise/identity-entra-id#pick-your-setup)). |
+| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Write it fully qualified then: the bare name selects nobody, and the warning names the spelling the host knows. `id -Gn` separates groups with spaces, and a space can belong to a name: Active Directory's default group prints as `domain users@corp.example.com`, so copy everything up to and including `@domain`, or read the exact name with `getent group <gid>` (`id -G` lists the gids). Quote such a name in YAML (`'domain users@corp.example.com'`). Case does not matter. Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. A standalone enterprise gateway resolves each name to its SID when it loads the config and matches the SIDs of the caller, so a slow domain controller cannot make a group miss; a name that does not resolve selects nobody, and `profile explain`, `status` and `doctor` name it until it does (the gateway retries it every minute). The gateway also looks each resolved name up again every minute, so a group that is deleted and created again under the same name (it gets a new SID) is followed within a minute, and a deleted one is named as no longer existing. An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: use the exact group name from `dscl` or `dseditgroup`; `id -Gn` splits names containing spaces. For macOS and Windows domain groups in YAML, use single quotes such as `'CORP\ML-Team'` or double the backslash inside double quotes (`"CORP\\ML-Team"`). Obtain Windows names containing spaces from the Windows group tools. Entra groups reach Linux only through Himmelblau or Entra Domain Services, and never reach macOS through Platform SSO ([Entra groups per platform](/docs/enterprise/identity-entra-id#pick-your-setup)). |
 | `users` | The verified user | A uid or SID, the account name, `DOMAIN\user` (`CORP\alice`, the form winbind and Windows report), or the principal or UPN (`alice@CORP.EXAMPLE.COM`). `DOMAIN` is the account's NetBIOS domain (`CORP`) or its DNS domain. On Windows a local account also matches as `COMPUTER\user` or `.\user`, and an Entra ID account as `AzureAD\name`. On macOS an AD account matches as `DOMAIN\user` when it is in the domain the Mac is bound to, the form macOS uses for its groups. On standalone enterprise Linux the UPN of an SSSD account comes from SSSD InfoPipe (`userPrincipalName` listed in the `[ifp]` `user_attributes`); when InfoPipe stops reporting it, the guardian keeps the UPN it read before, and `status`, `verify`, `profile explain` and the gateway log warn (`profile_assignment_unmatched`), as they do when an entry written as a UPN matches no account while InfoPipe reports none. |
 | `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
@@ -184,7 +185,10 @@ assignment or the default. The gateway looks the groups of your assignments up
 in the operating system, and a group it definitely does not find is a warning in
 `guardrail profile explain`, `guardrail profile list`, `guardrail status` and
 `doctor` (on standalone enterprise, `enterprise <os> status` and `verify`,
-code `profile_assignment_unmatched`), and a line in the gateway log at start,
+code `profile_assignment_unmatched`; the gateway lists these warnings only
+with its credential, because they name groups and accounts, so on Windows
+status run from a prompt that is not elevated says how many there are
+instead), and a line in the gateway log at start,
 at every reload and when a later check (at most once a minute, while the
 gateway is asked for its health or a profile) first finds it, for example after
 an SSSD naming switch
@@ -199,6 +203,16 @@ directory accounts in the guardian's identity records: one note says the
 groups could not be checked, and they are checked again once it answers. On
 Windows the SID of a group survives a rename, so it is the spelling to use
 there; on Linux and macOS a group is matched by its name.
+
+**How many profiles.** A config holds at most 1,024 profiles and 4,096
+assignments. Profiles cost time when the config loads: at gateway start, at
+each reload and in each `defenseclaw` command that reads `config.yaml`. On a
+2 vCPU Linux host, with one assignment of three groups per profile,
+`defenseclaw-gateway start` took about 0.45 seconds longer with 100 or 250
+profiles than without profiles, and about 1 second longer with 1,000.
+Requests do not slow down with the number of profiles: the gateway matches a
+subject once and caches the result. To keep the config small, give one profile to many
+groups in one `match` rather than writing a profile for each group.
 
 ### The match reason
 
@@ -270,7 +284,11 @@ What follows when the identity is missing:
   `guardrail profile
   explain` asks the operating system directly, so it already shows the new
   profile. The per-user CLI's `cache:` line and warning give the age of the
-  facts requests still use; managed `profile-explain` does not print that age.
+  facts requests still use; managed `profile-explain` gives them in its `cache`
+  object (`age_seconds`, `refresh_after_seconds`, `differs`). A config push
+  that changes `guardrail.profiles`, `guardrail.profile_assignments` or
+  `guardrail.default_profile` has each account refresh its facts at its next
+  request, so a pushed assignment applies to a group the user already joined.
   On a bound Mac, flush Open Directory membership with
   `dscacheutil -flushcache` and `dsmemberutil flushcache`, then restart the
   gateway or wait for its 15-minute refresh. On Windows, group profiles use a current desktop sign-in token. After sign-out,
@@ -374,9 +392,8 @@ traffic through the guardrail proxy. The proxy attributes each request to the
 connector it serves and to that connector's install for the user the gateway
 runs as, so an OpenClaw or ZeptoClaw install appears in
 `defenseclaw agent identities` after its first proxied request. On proxied
-traffic the profile sets the mode, the block message, the rule pack (with the
-posture it implies) and `hilt`; `block_at` and `alert_at` apply to hook and
-inspect decisions only, as they do without profiles.
+traffic the profile sets the mode, the block message, the rule pack,
+`block_at`, `alert_at` and `hilt`.
 
 A pin names one install, so keep three things in mind:
 
@@ -467,8 +484,8 @@ the machine config, not in a user's home, and apply to every enrolled user.
 | Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` | Run Setup `/ensure` again with the new file |
 
 1. Add the same `guardrail.profiles`, `profile_assignments` and
-   `default_profile` keys to the machine config. A profile's `rule_pack_dir`
-   should point into the administrator policy folder, as in
+   `default_profile` keys to the machine config. A profile's `rule_pack`
+   names a preset or a `guardrail.custom_packs` entry, as in
    [Custom rule packs](/docs/enterprise/configuration#custom-rule-packs).
 2. Deliver the file the way you deliver the rest of the machine config, with
    your MDM ([Deliver the config](/docs/enterprise/mdm#deliver-the-config)) or

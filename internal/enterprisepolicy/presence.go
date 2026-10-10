@@ -15,8 +15,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -121,7 +119,7 @@ func codexPresent(opts Options) (bool, error) {
 		return false, err
 	}
 	cfg := map[string]any{}
-	if err := toml.Unmarshal(raw, &cfg); err != nil {
+	if err := connector.ParseCodexTOML(raw, &cfg); err != nil {
 		return false, fmt.Errorf("parse Codex requirements: %w", err)
 	}
 	groups, err := connector.ManagedHookGroupsForOS(codexConnector, opts.agentVersion(codexConnector), opts.goos())

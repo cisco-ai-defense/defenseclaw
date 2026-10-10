@@ -11305,6 +11305,13 @@ func classifyDecode(out *parseOutput, command *CommandFact, program string) {
 		_, longDecode := parsed.seen["--decode"]
 		decode := shortDecode || darwinDecode || longDecode || decodeBundle
 		if !decode {
+			if complete && len(parsed.positionals) == 1 {
+				addOperation(command, OperationRead)
+				appendPath(out, command.ID, PathAccessRead, parsed.positionals[0])
+				appendFileToProcessFlow(out, command.ID)
+			} else if len(parsed.positionals) > 1 {
+				out.markPartial(IssueUnknownOperandGrammar)
+			}
 			return
 		}
 		addOperation(command, OperationDecode)

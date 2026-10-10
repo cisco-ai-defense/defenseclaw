@@ -33,6 +33,7 @@ generated artifacts rather than copied into a second implementation.
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import ipaddress
 import json
@@ -228,11 +229,10 @@ CONFIGURABLE_CORE_RESOURCE_ATTRIBUTE_KEYS = frozenset(
         "workspace.id",
     }
 )
-_RESOURCE_ALIAS_PAIRS = (
-    ("deployment.environment.name", "deployment.environment"),
-    ("defenseclaw.deployment.mode", "deployment.mode"),
-    ("defenseclaw.device.public_key_fingerprint", "defenseclaw.device.id"),
-)
+# A config_version 8 source may still spell the environment deployment.environment
+# (read as deployment.environment.name); config_version 9 refuses it. The
+# deployment.mode and defenseclaw.device.id spellings were never configurable.
+_RESOURCE_ALIAS_PAIRS = (("deployment.environment.name", "deployment.environment"),)
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 ENDPOINT_HOST_PUBLIC = "public"
 ENDPOINT_HOST_LOCALHOST = "localhost"
@@ -306,7 +306,9 @@ class V8ConfigError(ValueError):
         self.path = path or "$"
         self.keyword = keyword
         self.corrective_action = corrective_action
-        super().__init__(f"{source_name}: invalid v8 configuration at {self.path} ({keyword}); {corrective_action}")
+        super().__init__(
+            f"{source_name}: invalid configuration at {self.path} ({keyword}); {corrective_action}"
+        )
 
 
 @dataclass(frozen=True)
@@ -475,6 +477,18 @@ def _load_v8_source(text: str) -> Any:
     return yaml.load(text, Loader=_V8SourceLoader)
 
 
+def load_config_value(text: str) -> Any:
+    """Parse one ``config set`` VALUE as the gateway reads config.yaml.
+
+    ``yaml.safe_load`` is YAML 1.1, where ``off`` and ``on`` are booleans, so
+    ``config set ai_discovery.ide_inventory off`` wrote ``false`` and the
+    schema refused it; the core schema keeps them text, as the file reader and
+    Go do.
+    """
+
+    return yaml.load(text, Loader=_V8SourceLoader)
+
+
 def load_validate_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> ValidatedV8Config:
     """Parse and validate one exact-v8 source without reading secrets or network."""
 
@@ -495,6 +509,16 @@ def load_masked_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = 
     """
 
     return _masked_copy(_parse_source(data, source_name))
+
+
+def load_masked_v8_with_source(
+    data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml"
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """load_masked_v8 and the parsed source it masked (secrets included), from
+    one parse, for a caller that also builds the configuration (GAP-0276)."""
+
+    document = _parse_source(data, source_name)
+    return _masked_copy(document), document
 
 
 def validate_v8_source(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> dict[str, Any]:
@@ -602,7 +626,34 @@ def _parse_source(data: str | bytes | Mapping[str, Any], source_name: str) -> di
         raise V8ConfigError(source_name, "$", "max-nodes", "reduce the configuration below 65536 nodes")
     if depth > MAX_YAML_DEPTH:
         raise V8ConfigError(source_name, "$", "max-depth", "reduce nesting depth below 33 levels")
+    drop_retired_scanner_keys(document)
     return document
+
+
+# Scanner keys that no scan path ever read and that config_version 9 dropped
+# (GAP-0295, GAP-0301). 1.0 pre-release builds accepted and wrote them, so a
+# source that still holds one loads with the key ignored, as Go
+# dropRetiredScannerKeys does. A Secure Client document keeps the closed
+# schema of main (issue #1092), which never had them. Remove after 1.1.
+_RETIRED_SCANNER_KEYS: tuple[tuple[str, ...], ...] = (
+    ("scanners", "mcp_scanner", "api"),
+    ("scanners", "mcp_scanner", "timeouts"),
+    ("scanners", "skill_scanner", "timeouts", "llm_s"),
+)
+
+
+def drop_retired_scanner_keys(document: dict[str, Any]) -> None:
+    """Remove the retired scanner keys from *document* in place."""
+    from defenseclaw import config_writer
+
+    if config_writer.secure_client_document(document):
+        return
+    for parts in _RETIRED_SCANNER_KEYS:
+        node: Any = document
+        for part in parts[:-1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(parts[-1], None)
 
 
 def _preflight_python_structure(value: Any, source_name: str) -> None:
@@ -757,12 +808,12 @@ def _validate_preflight_values(value: Any, source_name: str, path: str = "$") ->
             _validate_preflight_values(child, source_name, child_path)
         if path == "$":
             version = value.get("config_version")
-            if type(version) is not int or version != 8:
+            if type(version) is not int or version not in (8, 9):
                 raise V8ConfigError(
                     source_name,
                     "$.config_version",
                     "exact-version",
-                    "use the integer config_version: 8 after running defenseclaw upgrade",
+                    "use the integer config_version: 9 after running defenseclaw upgrade",
                 )
         return
     if isinstance(value, list):
@@ -946,29 +997,239 @@ def _assert_schema_parity(schema: dict[str, Any]) -> None:
         raise RuntimeError("Python v8 default policy drifted from the canonical schema")
 
 
+# v8 keys that config_version 9 replaced, as Go's rejectV9RemovedKeys names them:
+# (path of the removed key, what to use instead).
+_V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("otel",), "observability.destinations"),
+    (("skill_actions",), "admission.skill.actions"),
+    (("mcp_actions",), "admission.mcp.actions"),
+    (("plugin_actions",), "admission.plugin.actions"),
+    (("update_check",), "update.check"),
+    (("watch", "allow_list_bypass_scan"), "admission.<type>.allow_list_bypass_scan"),
+    (("scanners", "skill_scanner", "binary"), "the managed scanner install"),
+    (("scanners", "skill_scanner", "use_virustotal"), "scanners.skill_scanner.analyzers.virustotal.enabled"),
+    (("scanners", "skill_scanner", "use_aidefense"), "scanners.skill_scanner.analyzers.aidefense.enabled"),
+    (("scanners", "skill_scanner", "virustotal_api_key"), "a key stored with defenseclaw keys set"),
+    (
+        ("scanners", "skill_scanner", "virustotal_api_key_env"),
+        "scanners.skill_scanner.analyzers.virustotal.api_key_env",
+    ),
+    (("scanners", "mcp_scanner", "binary"), "the managed scanner install"),
+)
+
+# v8 keys config_version 9 dropped with nothing in their place, with what
+# rejectV9RemovedKeys (Go) tells the reader to do.
+_V9_DROPPED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("privacy",), "remove it: config_version 9 has no privacy section"),
+    (
+        ("observability", "trace_policy", "compatibility_aliases"),
+        "remove it: telemetry carries only canonical attribute names",
+    ),
+)
+
+
+# The corrective action of a retired key in a config_version 8 source;
+# cmd_config words it plainly for config set.
+RETIRED_KEY_ACTION_PREFIX = "this key was replaced by "
+
+
+def retired_key_replacement(field: str) -> str:
+    """What replaced the config_version 8 key at dotted ``field``, or ""."""
+
+    for parts, target in _V9_REMOVED_KEYS:
+        if field == ".".join(parts):
+            return target
+    if field.startswith("guardrail.") and field.endswith(".rule_pack_dir"):
+        return "rule_pack or custom_packs"
+    return ""
+
+
+def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
+    """Name the replacement for a v8 key a config_version 9 source still carries."""
+
+    def lookup(parts: tuple[str, ...]) -> bool:
+        node: Any = document
+        for part in parts:
+            if not isinstance(node, dict) or part not in node:
+                return False
+            node = node[part]
+        return True
+
+    def refuse(parts: tuple[str, ...], action: str) -> None:
+        raise V8ConfigError(
+            source_name,
+            _json_path(parts),
+            "legacy-key-forbidden",
+            f"a retired configuration key is not accepted in config_version 9; {action}",
+        )
+
+    for parts, target in _V9_REMOVED_KEYS:
+        if lookup(parts):
+            refuse(parts, f"use {target}")
+    for parts, action in _V9_DROPPED_KEYS:
+        if lookup(parts):
+            refuse(parts, action)
+    guardrail = document.get("guardrail")
+    if not isinstance(guardrail, dict):
+        return
+
+    def children(scope_path: tuple[str, ...], scope: Any, key: str) -> list[tuple[tuple[str, ...], Any]]:
+        table = scope.get(key) if isinstance(scope, dict) else None
+        return [((*scope_path, key, name), body) for name, body in table.items()] if isinstance(table, dict) else []
+
+    scopes: list[tuple[tuple[str, ...], Any]] = [(("guardrail",), guardrail)]
+    scopes += children(("guardrail",), guardrail, "connectors")
+    for profile_path, profile in children(("guardrail",), guardrail, "profiles"):
+        scopes.append((profile_path, profile))
+        scopes += children(profile_path, profile, "connectors")
+    for scope_path, scope in scopes:
+        if isinstance(scope, dict) and "rule_pack_dir" in scope:
+            refuse((*scope_path, "rule_pack_dir"), "use rule_pack or custom_packs")
+
+
 def _validate_schema(document: dict[str, Any], source_name: str) -> None:
+    v9 = document.get("config_version") == 9
+    if v9:
+        _reject_v9_removed_keys(document, source_name)
     errors = sorted(
         _schema_validator().iter_errors(document),
         key=lambda error: tuple(str(part) for part in error.absolute_path),
     )
     if not errors:
         return
-    error = errors[0]
-    path = _json_path(tuple(error.absolute_path))
+    error = _narrow_one_of(errors[0], source_name)
     keyword = str(error.validator or "schema")
+    parts = tuple(error.absolute_path)
+    if keyword == "additionalProperties":
+        # Name the key the schema does not know, not just the object that
+        # holds it ("$.no.such", not "$").
+        parts += _first_unexpected_key(error)
+    path = _json_path(parts)
     action = {
-        "additionalProperties": "remove unsupported or legacy fields and run defenseclaw upgrade",
-        "required": "add the required field shown by the v8 reference",
-        "const": "use the exact v8 value from the canonical reference",
-        "enum": "choose a value from the canonical v8 vocabulary",
-        "oneOf": "use exactly one supported v8 source shape",
-        "type": "use the value type documented by the canonical v8 schema",
-    }.get(keyword, "correct the field using the canonical v8 schema and reference")
+        "additionalProperties": "remove unsupported fields; see the configuration reference",
+        "const": "use the exact value from the configuration reference",
+        "enum": "choose a value from the documented vocabulary",
+        "oneOf": "use exactly one supported source shape",
+        "type": "use the value type documented by the configuration schema",
+    }.get(keyword, "correct the field using the configuration schema and reference")
+    if keyword == "required":
+        action = _required_field_action(error)
+    elif keyword == "additionalProperties" and v9:
+        action = _unknown_field_action(error, parts)
+    elif keyword == "additionalProperties" and (
+        replacement := retired_key_replacement(".".join(str(part) for part in parts))
+    ):
+        # A config_version 8 source still carrying a key version 9 moved:
+        # migrating carries its value over, deleting it loses the value.
+        action = f"{RETIRED_KEY_ACTION_PREFIX}{replacement} in config_version 9; run: defenseclaw migrate"
     raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
+
+
+def _narrow_one_of(error: Any, source_name: str) -> Any:
+    """Narrow a ``oneOf`` over ``kind``-pinned shapes to the shape the source chose.
+
+    Without this the reader gets every shape's key list in one line. A ``kind``
+    no shape declares is named with the kinds that exist; a declared ``kind``
+    reports the first problem inside its own shape.
+    """
+
+    while error.validator == "oneOf" and isinstance(error.instance, Mapping):
+        kinds: dict[str, int] = {}
+        for index, branch in enumerate(error.validator_value if isinstance(error.validator_value, list) else []):
+            const = ((_resolve_branch(branch).get("properties") or {}).get("kind") or {}).get("const")
+            if not isinstance(const, str):
+                return error
+            kinds[const] = index
+        if not kinds:
+            return error
+        kind = error.instance.get("kind")
+        chosen = kinds.get(kind) if isinstance(kind, str) else None
+        if chosen is None:
+            raise V8ConfigError(
+                source_name,
+                _json_path((*error.absolute_path, "kind")),
+                "enum",
+                "use one of " + ", ".join(kinds),
+            )
+        inner = sorted(
+            (item for item in error.context or () if item.relative_schema_path[0] == chosen),
+            key=lambda item: tuple(str(part) for part in item.absolute_path),
+        )
+        if not inner:
+            return error
+        error = inner[0]
+    return error
+
+
+def _resolve_branch(branch: Any) -> Mapping[str, Any]:
+    """A oneOf branch with a local $ref followed; {} when it is not a mapping."""
+
+    if isinstance(branch, Mapping) and str(branch.get("$ref", "")).startswith("#/$defs/"):
+        branch = _schema_validator().schema.get("$defs", {}).get(str(branch["$ref"])[len("#/$defs/"):], {})
+    return branch if isinstance(branch, Mapping) else {}
+
+
+_PLAIN_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _required_field_action(error: Any) -> str:
+    """Name the field a required-property error is missing."""
+
+    required = error.validator_value if isinstance(error.validator_value, list) else []
+    present = error.instance if isinstance(error.instance, Mapping) else {}
+    missing = [str(name) for name in required if name not in present and _PLAIN_KEY.match(str(name))]
+    if not missing:
+        return "add the required field"
+    return "add the required " + ("field " if len(missing) == 1 else "fields ") + ", ".join(missing)
+
+
+def _unknown_field_action(error: Any, parts: tuple[str, ...]) -> str:
+    """Say a v9 key is unknown, with the closest known key when there is one.
+
+    ``parts`` already names the key when it is a plain name; otherwise the
+    object holding it is all the path can say.
+    """
+
+    schema = error.schema if isinstance(error.schema, Mapping) else {}
+    if len(parts) == len(tuple(error.absolute_path)):
+        return "remove the unsupported fields"
+    close = difflib.get_close_matches(parts[-1], [str(name) for name in schema.get("properties") or {}], n=1)
+    return "unknown field" + (f' (did you mean "{close[0]}"?)' if close else "")
+
+
+def _first_unexpected_key(error: Any) -> tuple[str, ...]:
+    """The first key an additionalProperties error rejects, or () when it is not a plain name."""
+
+    schema = error.schema if isinstance(error.schema, Mapping) else {}
+    instance = error.instance if isinstance(error.instance, Mapping) else {}
+    known = schema.get("properties") or {}
+    patterns = [re.compile(pattern) for pattern in (schema.get("patternProperties") or {})]
+    extras = sorted(
+        str(key)
+        for key in instance
+        if key not in known and not any(pattern.search(str(key)) for pattern in patterns)
+    )
+    return (extras[0],) if extras and _PLAIN_KEY.match(extras[0]) else ()
 
 
 # An enum longer than this is left to the reference rather than listed.
 _MAX_LISTED_ENUM_VALUES = 16
+
+
+def _enum_action(values: Any) -> str:
+    """The words an enum allows, or "" when it is not a short list of strings."""
+
+    if not (
+        isinstance(values, list)
+        and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
+        and all(isinstance(value, str) for value in values)
+    ):
+        return ""
+    # An empty value is how a field inherits; list the words only.
+    words = [value for value in values if value]
+    if not words:
+        return ""
+    return "use one of " + ", ".join(words) + (" (empty inherits)" if len(words) < len(values) else "")
 
 
 def _declared_action(keyword: str, error: Any) -> str:
@@ -979,14 +1240,23 @@ def _declared_action(keyword: str, error: Any) -> str:
     """
 
     if keyword == "enum":
-        values = error.validator_value
-        if (
-            isinstance(values, list)
-            and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
-            and all(isinstance(value, str) for value in values)
-        ):
-            return "use one of " + ", ".join(values)
-        return ""
+        return _enum_action(error.validator_value)
+    if keyword == "pattern":
+        return _pattern_action(error.validator_value)
+    if keyword == "oneOf":
+        return _one_of_action(error.validator_value)
+    if keyword == "type":
+        types = error.validator_value if isinstance(error.validator_value, list) else [error.validator_value]
+        if not types:
+            return ""
+        # A number typed for an enum or pattern key learns the words it takes,
+        # as a wrong string does (GAP-0222).
+        schema = error.schema if isinstance(error.schema, Mapping) else {}
+        return (
+            _enum_action(schema.get("enum"))
+            or _pattern_action(schema.get("pattern"))
+            or "use a value of type " + " or ".join(str(t) for t in types)
+        )
     if keyword not in ("minimum", "maximum") or not isinstance(error.schema, Mapping):
         return ""
 
@@ -1004,6 +1274,64 @@ def _declared_action(keyword: str, error: Any) -> str:
     if high:
         return f"use a number at or below {high}"
     return ""
+
+
+def _pattern_action(pattern: Any) -> str:
+    """The words a ``^(a|b|c)$`` pattern allows (``[Cc][Rr]...`` spellings
+    mean any case, an empty alternative means empty inherits); "" for any
+    other pattern."""
+
+    if not isinstance(pattern, str) or not (pattern.startswith("^(") and pattern.endswith(")$")):
+        return ""
+    words: list[str] = []
+    any_case = empty = False
+    for part in pattern[2:-2].split("|"):
+        if not part:
+            empty = True
+        elif re.fullmatch(r"(?:\[[A-Za-z][A-Za-z]\])+", part):
+            words.append("".join(pair[1] for pair in re.findall(r"\[[A-Za-z][A-Za-z]\]", part)).upper())
+            any_case = True
+        elif re.fullmatch(r"[A-Za-z0-9_-]+", part):
+            words.append(part)
+        else:
+            return ""
+    if not words:
+        return ""
+    return "use one of " + ", ".join(words) + (" in any case" if any_case else "") + (
+        " (empty inherits)" if empty else ""
+    )
+
+
+def _one_of_action(branches: Any) -> str:
+    """The shapes a ``oneOf`` allows, for example ``one of a, b or a mapping
+    with x, y``; "" when a branch is not a string list or a mapping."""
+
+    if not isinstance(branches, list) or not branches:
+        return ""
+    resolved = [_resolve_branch(branch) for branch in branches]
+    objects = [branch for branch in resolved if branch.get("type") == "object"]
+    if len(objects) > 2:
+        # Many shapes (the destination kinds): name the keys every shape needs, not each
+        # shape's whole key list, which ran to 759 bytes for ``destinations: [5]`` (GAP-0211).
+        common = [
+            name
+            for name in objects[0].get("required") or []
+            if all(name in (other.get("required") or []) for other in objects)
+        ]
+        if common:
+            names = ", ".join(common[:-1]) + " and " + common[-1] if len(common) > 1 else common[0]
+            return "use a mapping with " + names
+    parts: list[str] = []
+    for branch in resolved:
+        values = branch.get("enum")
+        if isinstance(values, list) and values and all(isinstance(value, str) for value in values):
+            parts.append("one of " + ", ".join(values))
+        elif branch.get("type") == "object":
+            names = list(branch.get("properties") or {})
+            parts.append("a mapping with " + ", ".join(names) if names else "a mapping")
+        else:
+            return ""
+    return "use " + " or ".join(parts)
 
 
 def _json_path(parts: tuple[Any, ...]) -> str:

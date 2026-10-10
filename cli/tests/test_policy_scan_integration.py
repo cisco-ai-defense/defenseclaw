@@ -47,6 +47,12 @@ class PolicyScanIntegrationBase(unittest.TestCase):
     def invoke(self, args: list[str]):
         return self.runner.invoke(policy, args, obj=self.app, catch_exceptions=False)
 
+    def _action(self, severity: str):
+        """The live skill admission action for a severity (config admission:)."""
+        from defenseclaw.enforce.admission import compile_admission, effective_action_for
+
+        return effective_action_for(compile_admission(self.app.cfg, "skill"), severity=severity)[0]
+
     def _make_scan_result(self, severity: str, num_findings: int = 1) -> ScanResult:
         findings = [
             Finding(
@@ -76,7 +82,7 @@ class TestDefaultPolicyScanActions(PolicyScanIntegrationBase):
         result = self._make_scan_result("CRITICAL")
         self.assertEqual(result.max_severity(), "CRITICAL")
 
-        action = self.app.cfg.skill_actions.for_severity("CRITICAL")
+        action = self._action("CRITICAL")
         self.assertEqual(action.file, "quarantine")
         self.assertEqual(action.runtime, "disable")
         self.assertEqual(action.install, "block")
@@ -85,7 +91,7 @@ class TestDefaultPolicyScanActions(PolicyScanIntegrationBase):
         self.invoke(["activate", "default"])
 
         result = self._make_scan_result("HIGH")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "quarantine")
         self.assertEqual(action.install, "block")
 
@@ -93,7 +99,7 @@ class TestDefaultPolicyScanActions(PolicyScanIntegrationBase):
         self.invoke(["activate", "default"])
 
         result = self._make_scan_result("MEDIUM")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "none")
         self.assertEqual(action.runtime, "enable")
         self.assertEqual(action.install, "none")
@@ -112,7 +118,7 @@ class TestStrictPolicyScanActions(PolicyScanIntegrationBase):
         self.invoke(["activate", "strict"])
 
         result = self._make_scan_result("MEDIUM")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "quarantine")
         self.assertEqual(action.runtime, "disable")
         self.assertEqual(action.install, "block")
@@ -121,7 +127,7 @@ class TestStrictPolicyScanActions(PolicyScanIntegrationBase):
         self.invoke(["activate", "strict"])
 
         result = self._make_scan_result("LOW")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "none")
         self.assertEqual(action.install, "none")
 
@@ -133,7 +139,7 @@ class TestPermissivePolicyScanActions(PolicyScanIntegrationBase):
         self.invoke(["activate", "permissive"])
 
         result = self._make_scan_result("HIGH")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "none")
         self.assertEqual(action.install, "none")
 
@@ -141,7 +147,7 @@ class TestPermissivePolicyScanActions(PolicyScanIntegrationBase):
         self.invoke(["activate", "permissive"])
 
         result = self._make_scan_result("CRITICAL")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "quarantine")
         self.assertEqual(action.install, "block")
 
@@ -159,7 +165,7 @@ class TestCustomPolicyScanActions(PolicyScanIntegrationBase):
         self.invoke(["activate", "block-medium"])
 
         result = self._make_scan_result("MEDIUM")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "quarantine")
         self.assertEqual(action.install, "block")
 
@@ -175,13 +181,13 @@ class TestCustomPolicyScanActions(PolicyScanIntegrationBase):
 
         # HIGH should be warn (allow)
         result = self._make_scan_result("HIGH")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "none")
         self.assertEqual(action.install, "none")
 
         # CRITICAL should still block
         result = self._make_scan_result("CRITICAL")
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "quarantine")
         self.assertEqual(action.install, "block")
 
@@ -195,19 +201,19 @@ class TestSameScanDifferentPolicies(PolicyScanIntegrationBase):
 
         # Default: MEDIUM → allow
         self.invoke(["activate", "default"])
-        action = self.app.cfg.skill_actions.for_severity(sev)
-        self.assertFalse(self.app.cfg.skill_actions.should_quarantine(sev))
-        self.assertFalse(self.app.cfg.skill_actions.should_install_block(sev))
+        action = self._action(sev)
+        self.assertFalse(self._action(sev).file == "quarantine")
+        self.assertFalse(self._action(sev).install == "block")
 
         # Strict: MEDIUM → block+quarantine
         self.invoke(["activate", "strict"])
-        self.assertTrue(self.app.cfg.skill_actions.should_quarantine(sev))
-        self.assertTrue(self.app.cfg.skill_actions.should_install_block(sev))
+        self.assertTrue(self._action(sev).file == "quarantine")
+        self.assertTrue(self._action(sev).install == "block")
 
         # Permissive: MEDIUM → allow
         self.invoke(["activate", "permissive"])
-        self.assertFalse(self.app.cfg.skill_actions.should_quarantine(sev))
-        self.assertFalse(self.app.cfg.skill_actions.should_install_block(sev))
+        self.assertFalse(self._action(sev).file == "quarantine")
+        self.assertFalse(self._action(sev).install == "block")
 
 
 class TestPluginScannerOutputToActions(PolicyScanIntegrationBase):
@@ -293,14 +299,14 @@ class TestPluginScannerOutputToActions(PolicyScanIntegrationBase):
 
         # Activate default policy and check action
         self.invoke(["activate", "default"])
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "quarantine")
         self.assertEqual(action.runtime, "disable")
         self.assertEqual(action.install, "block")
 
         # Switch to permissive: HIGH would be allowed, but CRITICAL still blocked
         self.invoke(["activate", "permissive"])
-        action = self.app.cfg.skill_actions.for_severity(result.max_severity())
+        action = self._action(result.max_severity())
         self.assertEqual(action.file, "quarantine")
         self.assertEqual(action.install, "block")
 

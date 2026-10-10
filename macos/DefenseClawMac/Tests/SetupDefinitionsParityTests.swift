@@ -103,6 +103,7 @@ struct SetupDefinitionsParityTests {
         seedsDiscoveryFromTheSelectedConfig()
         validatesDiscoveryCLIRanges()
         observabilityNeverEmitsAnUnsupportedConnectorOption()
+        guardrailSetupNeverEmitsTheRetiredVerifyOption()
         includesAmpAcrossSetupSurfaces()
         includesOnlyCanonicalDevinAcrossSetupAndCatalogSurfaces()
         bundledSkillsRemainDiscoveryOnlyAcrossNativeCatalogSurfaces()
@@ -221,6 +222,27 @@ struct SetupDefinitionsParityTests {
         ], false)
         expect(commands.count == 1, "observability add is one command")
         expect(!commands[0].contains("--connector"), "global observability CLI has no connector option")
+    }
+
+    /// `setup guardrail`, `setup openclaw` and `setup zeptoclaw` no longer take
+    /// --verify / --no-verify (the option did nothing); `defenseclaw doctor` is the check.
+    private static func guardrailSetupNeverEmitsTheRetiredVerifyOption() {
+        let connector = TUIWizards.all.first { $0.id == "connector" }
+        expect(connector?.fields.contains { $0.key == "verify" } == false, "connector wizard has no verify field")
+        for name in ["openclaw", "zeptoclaw"] {
+            let commands = connector?.commandBuilder?(["action": "setup", "connector": name, "verify": "no"], false) ?? []
+            expect(
+                commands.count == 1 && !commands[0].contains("--verify") && !commands[0].contains("--no-verify"),
+                "\(name) setup emits no verify option"
+            )
+        }
+        let aiDefense = TUIWizards.all.first { $0.id == "ai-defense" }
+        let commands = aiDefense?.commandBuilder?(["verify": "no", "skill-scanner": "yes", "restart": "yes"], false) ?? []
+        let guardrail = commands.first { $0.contains("guardrail") } ?? []
+        expect(!guardrail.isEmpty && !guardrail.contains("--verify") && !guardrail.contains("--no-verify"),
+               "AI Defense guardrail setup emits no verify option")
+        let scanner = commands.first { $0.contains("skill-scanner") } ?? []
+        expect(scanner.contains("--no-verify"), "the skill scanner still takes its own verify option")
     }
 
     private static func includesAmpAcrossSetupSurfaces() {

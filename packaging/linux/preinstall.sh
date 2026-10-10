@@ -28,7 +28,7 @@ esac
 # which left the new binaries next to the old deployment and services, with
 # verify reporting them modified until a manual downgrade (GAP-0392). Refuse
 # before any file is replaced instead.
-max_config_version=8
+max_config_version=9
 config=/etc/defenseclaw/config.yaml
 if [ -f "$config" ]; then
     found=$(sed -n "s/^config_version:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$config" 2>/dev/null | head -n 1)

@@ -144,10 +144,14 @@ plugin is loaded before the turn starts.
 
 ## Startup behavior
 
-The gateway runs as a background process for the signed-in user. It starts
-when you run `defenseclaw quickstart`, `defenseclaw setup`, or
-`defenseclaw-gateway start`, and a hook starts it when an agent calls it while
-it is stopped. There is no Windows service, Scheduled Task, or sign-in entry.
+The gateway runs as a background process for the signed-in user and ends when
+you sign out. It starts when you run `defenseclaw quickstart`,
+`defenseclaw setup`, or `defenseclaw-gateway start`, and a hook starts it when
+an agent calls it while it is stopped. There is no Windows service, Scheduled
+Task, or sign-in entry. As on Linux and macOS, a hook does not start it after
+`defenseclaw-gateway stop` (until you run `defenseclaw-gateway start`), while an
+install or upgrade runs, for 60 seconds after a hook start failed, or when
+`DEFENSECLAW_GATEWAY_AUTOSTART=0` is set in the agent's environment.
 
 ## Upgrade
 
@@ -158,7 +162,8 @@ defenseclaw upgrade
 The installer continues in a new PowerShell window so the running command can
 release its files. It stops the gateway, keeps the current install in
 `%USERPROFILE%\.defenseclaw\previous`, swaps in the new version, migrates your
-configuration, and restarts the gateway. If any step fails it restores the
+configuration (a version 8 `config.yaml` becomes version 9, and the old file stays as
+`config.yaml.v8.bak`), and restarts the gateway. If any step fails it restores the
 previous install. Close the TUI and other DefenseClaw commands first; the
 installer waits up to a minute for them and changes nothing if they stay open.
 

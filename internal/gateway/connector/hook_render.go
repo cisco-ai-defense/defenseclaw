@@ -16,7 +16,49 @@
 
 package connector
 
-import "fmt"
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"strings"
+)
+
+// derivedHookHeader is the first comment of every per-user (unmanaged)
+// connector hook script: the digest of the config values rendered into it
+// and the hook fail mode it bakes in, so doctor can tell a script rendered
+// from another config apart from the current one (spec section 6). Managed
+// installs compare the whole render instead (HookScriptRenderDrift).
+const derivedHookHeader = "# defenseclaw-derived:"
+
+// derivedHookLine is the header line for a connector script rendered from data.
+func derivedHookLine(data templateData) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("defenseclaw-hook-render-v1\nconnector=%s\nfail_mode=%s\napi_addr=%s\n",
+		data.ConnectorName, data.FailMode, data.APIAddr)))
+	return fmt.Sprintf("%s sha256=%s fail_mode=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]), data.FailMode)
+}
+
+// withDerivedHeader inserts the derived-from line after the shebang and the
+// "# defenseclaw-managed-hook vN" marker, which stays the second line
+// (scripts and setup read it there).
+func withDerivedHeader(script []byte, data templateData) []byte {
+	line := []byte(derivedHookLine(data))
+	at := 0
+	for _, prefix := range []string{"#!", hookSchemaVersionMarker} {
+		if !bytes.HasPrefix(script[at:], []byte(prefix)) {
+			break
+		}
+		end := bytes.IndexByte(script[at:], '\n')
+		if end < 0 {
+			return script
+		}
+		at += end + 1
+	}
+	out := make([]byte, 0, len(script)+len(line))
+	out = append(out, script[:at]...)
+	out = append(out, line...)
+	return append(out, script[at:]...)
+}
 
 // renderedHookFile is one generated hook-directory file, rendered in memory.
 type renderedHookFile struct {
@@ -55,6 +97,9 @@ func renderHookScriptSet(connectorData, sharedData templateData, extras []string
 		rendered, err := renderHookTemplate(name, data)
 		if err != nil {
 			return nil, err
+		}
+		if i >= len(genericHookScripts) && !data.Managed && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
+			rendered = withDerivedHeader(rendered, data)
 		}
 		out = append(out, renderedHookFile{Name: name, Data: rendered})
 	}

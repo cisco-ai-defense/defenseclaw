@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -325,6 +326,34 @@ func TestRunEnterpriseSetupHelpMatchesEmbeddedFlavor(t *testing.T) {
 	}
 }
 
+// GAP-0353: the standalone Setup printed the Secure Client Setup name and
+// --action flags for /?, and "unexpected positional argument BOGUS=1" for an
+// unknown property, while windows.mdx documents /ensure NAME=value.
+func TestStandaloneSetupUsageAndErrorsSpeakTheDocumentedSyntax(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	var usage, stderr bytes.Buffer
+	if code := runEnterpriseSetup([]string{"/?"}, &usage, &stderr); code != 0 {
+		t.Fatalf("help exit=%d", code)
+	}
+	for _, want := range []string{standaloneSetupArtifactName + " /ensure [NAME=value ...]", "CONFIG=", "MANIFEST=", "JSON=1", "NOSTART=1",
+		"PURGE=1", "TIMEOUTSECONDS=", "ALLOWEDSIGNERS=", "ATTESTCLAUDEEFFECTIVEPOLICY=1"} {
+		if !strings.Contains(usage.String(), want) {
+			t.Errorf("standalone usage lacks %q:\n%s", want, usage.String())
+		}
+	}
+	if strings.Contains(usage.String(), enterpriseSetupArtifactName) || strings.Contains(usage.String(), "--action") {
+		t.Errorf("standalone usage names the Secure Client Setup or --action:\n%s", usage.String())
+	}
+	var stdout bytes.Buffer
+	stderr.Reset()
+	runEnterpriseSetup([]string{"/ensure", "BOGUS=1", "JSON=0"}, &stdout, &stderr)
+	if got := stderr.String(); !strings.HasPrefix(got, standaloneSetupArtifactName+": unknown property BOGUS; run ") || !strings.Contains(got, " /? ") {
+		t.Fatalf("unknown property error = %q", got)
+	}
+}
+
 func TestEmbeddedSetupFlavorDefaultsToSecureClient(t *testing.T) {
 	// The source tree embeds only the placeholder, which is not a
 	// standalone manifest.
@@ -451,5 +480,99 @@ func TestRunEnterpriseSetupReportsBadCommandLinesByFlavor(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// GAP-0920, GAP-1041: the standalone Setup takes FORCE=1 with /uninstall, the
+// last resort for a transaction no run can recover, and refuses it with
+// another action; the Secure Client Setup has no such property.
+func TestStandaloneSetupForceIsAnUninstallProperty(t *testing.T) {
+	opts, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/uninstall", "FORCE=1", "JSON=1"}, true)
+	if err != nil || !opts.Force || opts.Action != "uninstall" {
+		t.Fatalf("standalone /uninstall FORCE=1: opts %+v, err %v", opts, err)
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/ensure", "FORCE=1"}, true); err == nil {
+		t.Fatal("FORCE=1 with /ensure was accepted")
+	}
+	if _, _, err := parseEnterpriseSetupOptionsForFlavor([]string{"/uninstall", "FORCE=1"}, false); err == nil {
+		t.Fatal("the Secure Client Setup accepted FORCE=1")
+	}
+}
+
+// GAP-0562: with JSON=1 the standalone Setup reports a refusal of its own in
+// the lifecycle's schema-2 shape (code, message, exit_code 1639), so an MDM
+// reads one shape whoever refused; the Secure Client Setup keeps schema 1.
+func TestStandaloneSetupNormalizationFailurePreservesJSON(t *testing.T) {
+	previous := enterpriseSetupStandaloneFlavor
+	t.Cleanup(func() { enterpriseSetupStandaloneFlavor = previous })
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	original := enterpriseSetupPayloadLoader
+	t.Cleanup(func() { enterpriseSetupPayloadLoader = original })
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { return loadEnterprisePayload(payloadFS) }
+	var stdout, stderr bytes.Buffer
+	code := runEnterpriseSetup([]string{"/ensure", "BOGUS=1", "JSON=1"}, &stdout, &stderr)
+	var result struct {
+		SchemaVersion int    `json:"schema_version"`
+		Action        string `json:"action"`
+		ExitCode      int    `json:"exit_code"`
+		Errors        []struct {
+			Code string `json:"code"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || code != enterpriseInvalidArgsExitCode ||
+		result.SchemaVersion != 2 || result.Action != "ensure" || result.ExitCode != code ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" || stderr.Len() != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q parse=%v", code, stdout.String(), stderr.String(), err)
+	}
+}
+
+func TestStandaloneSetupFailureUsesTheLifecycleResultShape(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true}
+	refusal := enterpriseSetupInvalidArguments{errors.New("the config C:\\stage\\config.yaml is not protected")}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts, refusal, enterpriseInvalidArgsExitCode)
+	var result struct {
+		SchemaVersion int    `json:"schema_version"`
+		Action        string `json:"action"`
+		ExitCode      int    `json:"exit_code"`
+		Errors        []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.SchemaVersion != 2 || result.Action != "ensure" ||
+		result.ExitCode != enterpriseInvalidArgsExitCode || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		result.Errors[0].Message != refusal.Error() {
+		t.Fatalf("standalone failure = %s (%v)", stdout.String(), err)
+	}
+	stdout.Reset()
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, false, enterpriseSetupArtifactName, opts, refusal, enterpriseFailureExitCode)
+	if !strings.HasPrefix(stdout.String(), `{"schema_version":1,`) {
+		t.Fatalf("Secure Client failure shape changed: %s", stdout.String())
+	}
+}
+
+// GAP-0509: a run Setup stopped at TIMEOUTSECONDS can leave a transaction
+// pending with the services stopped; its result says so and names the
+// LocalSystem /ensure that recovers it, with the longest limit: leaving
+// TIMEOUTSECONDS out keeps the default the run hit (GAP-1063).
+func TestStandaloneSetupTimeoutNamesTheRecovery(t *testing.T) {
+	opts := enterpriseSetupOptions{Action: "ensure", JSON: true, Config: `C:\stage\config.yaml`, LifecycleTimeout: time.Minute}
+	var stdout, stderr bytes.Buffer
+	writeEnterpriseSetupFailureFor(&stdout, &stderr, true, standaloneSetupArtifactName, opts,
+		standaloneEnterpriseSetupTimeout(opts, context.DeadlineExceeded), enterpriseFailureExitCode)
+	var result struct {
+		ExitCode int `json:"exit_code"`
+		Errors   []struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.ExitCode != enterpriseFailureExitCode ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_timeout" ||
+		!strings.Contains(result.Errors[0].Message, `as LocalSystem with /ensure CONFIG=C:\stage\config.yaml JSON=1 TIMEOUTSECONDS=7200`) ||
+		!strings.Contains(result.Errors[0].Message, "TIMEOUTSECONDS=60") || strings.Contains(result.Errors[0].Message, "leaving TIMEOUTSECONDS out") {
+		t.Fatalf("timeout result = %s (%v)", stdout.String(), err)
 	}
 }

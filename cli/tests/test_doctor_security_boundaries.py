@@ -39,6 +39,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
         "DEFENSECLAW_DAEMON",
         "DEFENSECLAW_DISABLE_REDACTION",
+        "DEFENSECLAW_DEPLOYMENT_MODE",
         "DEFENSECLAW_ENTERPRISE_PROFILE",
         "CLAUDE_CONFIG_DIR",
         "SSL_CERT_FILE",
@@ -65,6 +66,7 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         b"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n"
         b"DEFENSECLAW_DAEMON=1\n"
         b"DEFENSECLAW_DISABLE_REDACTION=1\n"
+        b"DEFENSECLAW_DEPLOYMENT_MODE=oss\n"
         b"DEFENSECLAW_ENTERPRISE_PROFILE=standalone\n"
         b"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n"
         b"SSL_CERT_FILE=/tmp/attacker-ca.pem\n"
@@ -83,6 +85,26 @@ def test_python_dotenv_loader_ignores_process_control_and_malformed_entries(
         assert os.environ.get(name) == value
     for name in rejected:
         assert name not in os.environ
+
+
+def test_dotenv_control_keys_are_named_with_their_replacement_not_on_every_command(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path,
+) -> None:
+    # GAP-0387: every command warned "ignored unsafe process-control key" with
+    # no fix, and the upgrade never said fail-open hooks were now fail-closed.
+    (tmp_path / ".env").write_bytes(b"DEFENSECLAW_FAIL_MODE=open\nDEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1\n")
+
+    with caplog.at_level("WARNING"):
+        config_module._load_dotenv_into_os(os.fspath(tmp_path))
+    keys = config_module.ignored_dotenv_control_keys(os.fspath(tmp_path))
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_ignored_dotenv_keys(SimpleNamespace(data_dir=os.fspath(tmp_path)), result)
+
+    assert "process-control" not in caplog.text
+    assert keys[0] == "DEFENSECLAW_FAIL_MODE (set it in config.yaml instead: defenseclaw guardrail fail-mode open)"
+    assert keys[1].startswith("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT (") and "defenseclaw-gateway restart" in keys[1]
+    assert [row["status"] for row in result.checks] == ["warn"]
 
 
 def test_python_dotenv_loader_warns_when_safe_read_is_refused(

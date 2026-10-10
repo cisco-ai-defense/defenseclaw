@@ -4,7 +4,7 @@
 """Small v8-only helpers shared by destination setup commands.
 
 This module resolves authored preset inputs into canonical destination fields;
-it never reads or writes a pre-v8 observability block.
+it never reads or writes a released 0.8.x observability block.
 """
 
 from __future__ import annotations
@@ -93,14 +93,16 @@ def adapter_destination_fields(preset: Preset, inputs: dict[str, str]) -> dict[s
             "source": inputs.get("source", "defenseclaw"),
             "sourcetype": inputs.get("sourcetype", "_json"),
         }
-        insecure_default = preset.id != "splunk-enterprise"
-        insecure = insecure_default
-        if "verify_tls" in inputs:
-            insecure = not parse_bool(inputs["verify_tls"])
-        if insecure:
+        # GAP-0208: every HEC preset verifies TLS and stays off private
+        # networks unless the operator opts out (--no-verify-tls,
+        # --allow-private-networks), as splunk-enterprise and otlp do.
+        # Skipping certificate checks only means something over https: on an
+        # http:// endpoint the config check refused tls.insecure_skip_verify with a
+        # JSON path and an error code (GAP-0209), so plain http (the local Splunk
+        # bridge, --no-verify-tls) gets no tls block.
+        insecure = "verify_tls" in inputs and not parse_bool(inputs["verify_tls"])
+        if insecure and not endpoint.lower().startswith("http://"):
             fields["tls"] = {"insecure_skip_verify": True}
-        if preset.id == "splunk-hec":
-            fields["network_safety"] = {"allow_private_networks": True}
         return fields
     if preset.adapter_kind == "http_jsonl":
         endpoint = inputs.get("url", "").strip()
@@ -161,6 +163,29 @@ def apply_secret(
     return [f"{preset.token_env}: written to {path}"]
 
 
+def restore_secret(
+    data_dir: str, key: str, previous: str | None, previous_environ: str | None, written: str
+) -> None:
+    """Restore our write only if a newer setup has not replaced its value."""
+
+    def merge(payload: bytes) -> bytes:
+        existing = _load_dotenv(payload)
+        if existing.get(key) != written:
+            return payload
+        if previous is None:
+            existing.pop(key, None)
+        else:
+            existing[key] = previous
+        return _write_dotenv(existing)
+
+    update_private_file(os.path.join(data_dir, DOTENV_FILE_NAME), owner_directory=data_dir, transform=merge)
+    if os.environ.get(key) == written:
+        if previous_environ is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous_environ
+
+
 def secret_note_is_info(preset: Preset, message: str) -> bool:
     """Whether an :func:`apply_secret` message reports a write, not a problem."""
 
@@ -215,5 +240,6 @@ __all__ = [
     "render_header_template",
     "render_template",
     "resolve_inputs",
+    "restore_secret",
     "secret_note_is_info",
 ]

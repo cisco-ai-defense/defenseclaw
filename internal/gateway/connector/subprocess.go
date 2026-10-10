@@ -1709,8 +1709,41 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 	// A managed Windows hook folder holds only files with the managed runtime
 	// DACL; the generic private descriptor made a later rollback refuse to
 	// remove the tombstone, which left the deployment pending.
+	body := disabledHookTombstone(vendorLabel)
+	if opts.FailedSetupFailClosed && failedSetupPlaceholderBlocks[scriptName] {
+		body = failedSetupHookPlaceholder(vendorLabel)
+	}
 	return hookRuntimeFileWriter(opts.ManagedEnterprise)(
-		filepath.Join(hookDir, scriptName), []byte(disabledHookTombstone(vendorLabel)), 0o700)
+		filepath.Join(hookDir, scriptName), []byte(body), 0o700)
+}
+
+// failedSetupPlaceholderBlocks lists the hook scripts whose agents treat
+// exit 2 as a block and show its stderr to the user.
+var failedSetupPlaceholderBlocks = map[string]bool{
+	"claude-code-hook.sh": true,
+	"codex-hook.sh":       true,
+}
+
+// failedSetupHookPlaceholder is the hook body a rollback leaves for a
+// fail-closed connector whose setup failed at gateway start. It keeps the
+// tombstone marker, so teardown and doctor still recognise it, but blocks
+// every call and says why (GAP-0367).
+func failedSetupHookPlaceholder(vendorLabel string) string {
+	return "#!/bin/sh\n" +
+		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+		"# The gateway could not set up the fail-closed " + vendorLabel + " connector when it\n" +
+		"# started. Block every call until a gateway start sets it up again.\n" +
+		"echo \"defenseclaw: " + vendorLabel + " is not guarded: the gateway failed to set it up when it started, so this call is blocked (fail mode closed). Run defenseclaw-gateway status to see the error, fix it, then run defenseclaw-gateway start.\" >&2\n" +
+		"exit 2\n"
+}
+
+// HookFailClosed reports whether conn blocks agent calls when its gateway is
+// unavailable under opts.
+func HookFailClosed(opts SetupOpts, conn Connector) bool {
+	if provider, ok := conn.(HookCapabilityProvider); ok && !provider.HookCapabilities(opts).SupportsFailClosed {
+		return false
+	}
+	return resolveHookFailMode(opts, conn) == "closed"
 }
 
 // disabledHookTombstone is the body writeDisabledHookTombstone writes.

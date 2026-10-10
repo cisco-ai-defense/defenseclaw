@@ -14,9 +14,7 @@ Two connectors are gone: the pre-rename Devin Desktop connector (now covered by
 ``devin``) and Google's retired command-line connector (replaced by
 Antigravity). Only these files may still name them:
 
-* the old Desktop connector: the two legacy-migration modules and their tests,
-  and the two native Windows install-state compatibility lists, which let Setup
-  and the uninstaller read state written by pre-release builds;
+* the old Desktop connector: the two legacy-migration modules and their tests;
 * both connectors: ``CHANGELOG.md``, the "Renamed and removed connectors"
   section of the upgrade guide, and the enterprise manual test plan, whose
   migration rows configure the retired ids.
@@ -46,8 +44,7 @@ _CASCADE_RESPONSE = "post_" + "cascade" + "_response"
 _GEMINI = "gemini"
 _CLI = "cli"
 
-# Desktop patterns: allowed in the legacy modules, their tests and the
-# install-state compatibility lists.
+# Desktop patterns: allowed in the legacy modules and their tests.
 DESKTOP_PATTERNS = (
     re.escape(_DESKTOP_ID),
     re.escape(_DESKTOP_PUBLISHER),
@@ -82,9 +79,7 @@ GEMINI_LIST_RE = re.compile(rf"\b{_LISTED}{_LIST_SEP}{_HOOK_AGENTS}\b|\b{_HOOK_A
 DESKTOP_ONLY_FILES = frozenset(
     {
         "cli/defenseclaw/legacy_connector.py",
-        "cli/defenseclaw/retired_install_state.py",
         "cli/tests/test_legacy_connector.py",
-        "cmd/defenseclaw-setup/retired_install_state.go",
         "internal/legacyconnector/legacyconnector.go",
         "internal/legacyconnector/legacyconnector_test.go",
         # IDE inventory: legacy Desktop folders are reported as Devin Desktop,

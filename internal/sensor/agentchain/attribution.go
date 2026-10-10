@@ -36,7 +36,10 @@
 // findings would be five alerts nobody joins up. The sequence is the finding.
 package agentchain
 
-import "math"
+import (
+	"math"
+	"time"
+)
 
 // Attribution states classify a process's observed topology.
 const (
@@ -69,7 +72,17 @@ func AncestralAuthority(depth int) float64 {
 
 // Attribution says which agent is answerable for a process, and how strongly.
 type Attribution struct {
-	RootPID   int
+	RootPID int
+	// RootStart is when the root process was created, zero when unknown.
+	// With RootPID it identifies the root when known. RootInstance keeps
+	// sessions distinct when the kernel start was initially unavailable.
+	RootStart time.Time
+	// RootKeyStart is the first known kernel start used for the session key.
+	// RootInstance separates generations even when the start is unavailable.
+	RootKeyStart time.Time
+	RootInstance uint64
+	// RootName is the root process's image name.
+	RootName  string
 	AgentName string
 	// Depth is 0 when the process is the agent, 1 for a direct child, and so on.
 	Depth int

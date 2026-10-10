@@ -6,6 +6,7 @@
 package hookexec
 
 import (
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -39,8 +40,8 @@ func TestManagedEnterpriseTransportRejectsForeignListenerBeforeHTTPBytes(t *test
 		"application/json",
 		strings.NewReader(`{"secret":"must-not-leak"}`),
 	)
-	if err == nil || !strings.Contains(err.Error(), errManagedGatewayPeerUnverified.Error()) {
-		t.Fatalf("foreign listener error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), errManagedGatewayPeerUnverified.Error()) || !errors.Is(err, errManagedGatewayPortHeld) {
+		t.Fatalf("foreign listener error = %v, want a peer failure that names the held port (GAP-1029)", err)
 	}
 	if got := <-bytesRead; len(got) != 0 {
 		t.Fatalf("foreign listener received %d request bytes: %q", len(got), got)

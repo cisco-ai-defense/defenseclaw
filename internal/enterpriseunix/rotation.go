@@ -97,6 +97,10 @@ import (
 // ActionRotateCredentials rotates the per-user credential key.
 const ActionRotateCredentials = "rotate-credentials"
 
+// NoopNoCredentials is the noop reason of a rotation on a host where no
+// enrolled user holds a per-user credential yet.
+const NoopNoCredentials = "no_credentials"
+
 const (
 	codeRotation           = "rotation_failed"
 	codeRotationRecovered  = "rotation_recovered"
@@ -767,7 +771,13 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 	case err != nil:
 		return refuse("the per-user credential key is not trusted: %v", err)
 	case !present:
-		return refuse("there is no per-user credential key to rotate yet; the hook guardian creates it when it enrolls the first user")
+		// No user holds a credential yet: hooks use the peer-authorized hook
+		// socket, and the guardian creates the key only when it first gives
+		// a user one (agent telemetry, an in-agent plugin or ACP). There is
+		// nothing to rotate, which is not a failure on a healthy host
+		// (GAP-0541).
+		r.Noop, r.NoopReason = true, NoopNoCredentials
+		return 0
 	}
 	if intent, err := env.loadRotationIntent(); err != nil || intent != nil {
 		return refuse("an earlier credential rotation is still rolling back; rotate again once `enterprise %s status` no longer reports it", platformName(env.GOOS))
@@ -871,15 +881,19 @@ func (l *lifecycle) rotateCredentials(ctx context.Context, record *Deployment) i
 			}
 		}
 	}()
-	if prepareErr == nil && ctx.Err() != nil {
+	if ctx.Err() != nil {
 		// An interrupt rolls back even when every user is ready to commit.
+		// The error it caused (a killed systemctl: "exit -1:" with no
+		// reason) is not the cause, so it is not shown (GAP-0513).
 		prepareErr = errors.New("the run was interrupted")
 	}
 	if prepareErr != nil {
-		r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; key %s stays in use", operation, prepareErr, shortKeyID(idA)))
 		if err := l.abortRotation(ctx, gateway, record, keyA, intent, selected, preflight.ManifestSHA256); err != nil {
+			r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; key %s stays in use", operation, prepareErr, shortKeyID(idA)))
 			r.AddError(codeRollbackFailed, err.Error())
+			return 0
 		}
+		r.AddError(codeRotation, fmt.Sprintf("rotation %s did not commit: %v; it was rolled back and key %s stays in use", operation, prepareErr, shortKeyID(idA)))
 		return 0
 	}
 

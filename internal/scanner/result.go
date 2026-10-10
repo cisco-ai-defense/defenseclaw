@@ -159,6 +159,9 @@ type ScanResult struct {
 	// FindingLifecycle is populated by the canonical audit persistence path.
 	// It is process-local projection metadata, never part of scanner JSON.
 	FindingLifecycle *FindingLifecycleDelta `json:"-"`
+	// JudgeModel is the LLM judge model the scan ran with ("" without a
+	// judge). Process-local, never part of scanner JSON.
+	JudgeModel string `json:"-"`
 }
 
 // EffectiveTargetType returns TargetType when set, otherwise InferTargetType(Scanner).

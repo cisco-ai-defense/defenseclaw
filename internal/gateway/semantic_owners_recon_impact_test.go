@@ -303,6 +303,7 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			name:   "workspace permission change",
 			ruleID: "CMD-CHMOD-WORLD",
 			input:  reconImpactCommand("chmod 0777 /tmp/build-output"),
+			want:   true,
 		},
 		{
 			name:   "protected ownership change",

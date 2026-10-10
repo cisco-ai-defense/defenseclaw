@@ -15,6 +15,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // TestHandleAgentHook_FullChain_PerConnector is the M6 end-to-end
@@ -834,5 +836,62 @@ func TestHandleAgentHook_KiroPromptBlockFollowsInvokingSurface(t *testing.T) {
 				t.Errorf("hook_output.decision=%q want %q body=%s", decision, tc.wantDecision, w.Body.String())
 			}
 		})
+	}
+}
+
+// A connector a hot reload adds is evaluated from that reload on, and one it
+// disables is not (GAP-0968): the enablement gate read the start-time
+// configuration, so Kiro and Hermes added by `enterprise windows ensure`
+// were answered allow without a scan until the gateway restarted. The Kiro
+// preToolUse body is the shape kiro-cli 2.x sends on Windows.
+func TestAgentHookEnabledFollowsTheLiveGeneration(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	if err := ApplyRulePackOverrides(&guardrail.RulePack{RuleFiles: []*guardrail.RulesFileYAML{{
+		Version: 1, Category: "reload-marker", Rules: []guardrail.RuleDefYAML{{
+			ID: "RELOAD-MARKER", ToolCallOnly: true, Severity: "CRITICAL", Confidence: 0.99,
+			Expression: "f.commands.exists(c, 'dc-reload-marker' in c.argv)", Pattern: "dc-reload-marker", Title: "marker",
+		}},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	off := false
+	start := &config.Config{}
+	start.Guardrail.Mode = "action"
+	start.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
+	live := cloneConfig(start)
+	live.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: &off}, "kiro": {}}
+	api := &APIServer{scannerCfg: start, health: NewSidecarHealth(),
+		generationSource: func() *Generation { return &Generation{Config: live} }}
+	if !api.agentHookEnabled(t.Context(), "kiro") || api.agentHookEnabled(t.Context(), "codex") {
+		t.Fatal("hook enablement did not follow the live configuration")
+	}
+	body := `{"hook_event_name":"preToolUse","cwd":"C:\\Users\\u\\proj","session_id":"s1","tool_name":"shell",` +
+		`"tool_input":{"__tool_use_purpose":"Run the exact command requested by the user","command":"echo dc-reload-marker"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/kiro/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	http.HandlerFunc(api.handleAgentHook("kiro")).ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), `"raw_action":"block"`) {
+		t.Fatalf("a Kiro shell call matching a CRITICAL tool-call rule was not evaluated after the reload: %s", w.Body.String())
+	}
+}
+
+// A standalone hook's report of a prompt it refused as too large is recorded
+// as a block under HOOK-PAYLOAD-TOO-LARGE and never evaluated (GAP-0965,
+// GAP-1042): the report has no content to judge.
+func TestHandleAgentHookRecordsAHookSideRefusal(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook",
+		strings.NewReader(`{"session_id":"sess-1","hook_event_name":"UserPromptSubmit"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(hookexec.HookRefusalHeader, hookexec.HookRefusalPayloadTooLarge)
+	w := httptest.NewRecorder()
+	http.HandlerFunc(api.handleAgentHook("claudecode")).ServeHTTP(w, req)
+	body := w.Body.String()
+	if !strings.Contains(body, `"raw_action":"block"`) || !strings.Contains(body, hookPayloadTooLargeRuleID) {
+		t.Fatalf("refusal report = %d %s, want a recorded block", w.Code, body)
 	}
 }

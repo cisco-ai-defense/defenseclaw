@@ -28,6 +28,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
@@ -93,7 +94,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Println(fleetBannerLine(cfg))
 	fmt.Printf("  Auto-approve: %v\n", cfg.Gateway.AutoApprove)
-	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg.Gateway.Token))
+	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg))
 	fmt.Printf("  API port:     %d\n", cfg.Gateway.APIPort)
 	for _, line := range watcherBannerLines(cfg) {
 		fmt.Println(line)
@@ -310,8 +311,8 @@ func bootstrapConfiguredObservabilityRuntime(
 	if c == nil {
 		return fmt.Errorf("sidecar: observability bootstrap: config is unavailable")
 	}
-	if c.ConfigVersion != 8 {
-		return fmt.Errorf("sidecar: observability bootstrap requires schema v8; run 'defenseclaw upgrade' first")
+	if !config.CurrentSchemaVersion(c.ConfigVersion) {
+		return fmt.Errorf("sidecar: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	if ctx == nil || startup == nil || strings.TrimSpace(startup.sourceName) == "" || len(startup.raw) == 0 || bootstrapper == nil {
 		return fmt.Errorf("sidecar: observability v8 bootstrap state is incomplete")
@@ -331,16 +332,24 @@ func bootstrapConfiguredObservabilityRuntime(
 // signal capture, and defer/return diagnostics to stderr. These are
 // intended for CI troubleshooting only — never enable in production.
 func sidecarDiagEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("DEFENSECLAW_SIDECAR_DIAG"))) {
+	switch strings.ToLower(strings.TrimSpace(envvars.Getenv("DEFENSECLAW_SIDECAR_DIAG"))) {
 	case "1", "true", "yes", "on":
 		return true
 	}
 	return false
 }
 
-func tokenStatus(token string) string {
+// tokenStatus says whether the gateway has a token, never any part of it: the
+// banner reaches the service journal and the lifecycle copies journal lines
+// into the package manager's log. Secure Client keeps the banner of main, the
+// token masked to its first and last 4 characters (GAP-0105, issue #1092).
+func tokenStatus(cfg *config.Config) string {
+	token := cfg.Gateway.Token
 	if token == "" {
 		return "none (will use device identity only)"
+	}
+	if !cfg.SecureClientIntegration() {
+		return "set"
 	}
 	if len(token) > 8 {
 		return token[:4] + "..." + token[len(token)-4:]

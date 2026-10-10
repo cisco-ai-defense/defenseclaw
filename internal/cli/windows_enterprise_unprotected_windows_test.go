@@ -264,9 +264,12 @@ func TestWindowsStandaloneInspectionNamesAPendingTransaction(t *testing.T) {
 func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
 	previousListeners, previousPID, previousIdentity, previousFailure := windowsEnterpriseAPIListeners, windowsEnterpriseServicePID, windowsEnterpriseProcessIdentity, windowsEnterpriseGatewayStartFailure
+	previousPort := windowsEnterpriseConfigAPIPort
 	t.Cleanup(func() {
 		windowsEnterpriseAPIListeners, windowsEnterpriseServicePID, windowsEnterpriseProcessIdentity, windowsEnterpriseGatewayStartFailure = previousListeners, previousPID, previousIdentity, previousFailure
+		windowsEnterpriseConfigAPIPort = previousPort
 	})
+	windowsEnterpriseConfigAPIPort = func(string) (int, error) { return 18970, nil }
 	windowsEnterpriseGatewayStartFailure = func() (string, string) { return "", "" }
 	loopback, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -324,6 +327,46 @@ func TestWindowsStandaloneStatusNamesAPIPortHolders(t *testing.T) {
 		status.APIPortHolders[0].Account == "" || status.APIPortHolders[2].Image != "" {
 		t.Fatalf("holders = %+v, message %q; want this process twice and the hidden holder, not the gateway", status.APIPortHolders, message)
 	}
+
+	// GAP-1029: another process answered the readiness probe's /health, so
+	// the report says ready, but the gateway holds no listener: status
+	// still names the holder and the gateway is not ready. With its own
+	// listener present a ready gateway names none.
+	ready := &windowsEnterpriseInstallerReport{Installed: true, OK: true, GatewayReady: true,
+		GatewayService: "DefenseClawGateway", GatewayServiceState: "running"}
+	allListeners := windowsEnterpriseAPIListeners
+	windowsEnterpriseAPIListeners = func(string, int) ([]daemon.Listener, error) {
+		return []daemon.Listener{{Address: "127.0.0.1:18970", PID: hiddenPID}}, nil
+	}
+	fooled := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(fooled, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
+	if len(fooled.Errors) != 1 || fooled.Errors[0].Code != "api_port_held" || fooled.Readiness.Gateway ||
+		len(fooled.APIPortHolders) != 1 || fooled.APIPortHolders[0].PID != hiddenPID {
+		t.Fatalf("probe answered by a holder: errors = %+v readiness = %+v holders = %+v", fooled.Errors, fooled.Readiness, fooled.APIPortHolders)
+	}
+	windowsEnterpriseAPIListeners = allListeners
+	served := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(served, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
+	if len(served.Errors) != 0 || !served.Readiness.Gateway {
+		t.Fatalf("a ready gateway on its own port: errors = %+v readiness = %+v", served.Errors, served.Readiness)
+	}
+	// A foreign listener on the default port does not hold a gateway whose
+	// installed config uses another port.
+	windowsEnterpriseConfigAPIPort = func(string) (int, error) { return 18971, nil }
+	windowsEnterpriseAPIListeners = func(_ string, port int) ([]daemon.Listener, error) {
+		if port != 18971 {
+			return []daemon.Listener{{Address: "127.0.0.1:18970", PID: hiddenPID}}, nil
+		}
+		return []daemon.Listener{{Address: "127.0.0.1:18971", PID: gatewayPID}}, nil
+	}
+	custom := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
+	applyWindowsEnterpriseInstallerReport(custom, &windowsEnterpriseLifecycleOptions{}, ready, windowsEnterpriseStandaloneRun{})
+	if len(custom.Errors) != 0 || !custom.Readiness.Gateway || len(custom.APIPortHolders) != 0 {
+		t.Fatalf("healthy custom-port gateway: errors = %+v readiness = %+v holders = %+v",
+			custom.Errors, custom.Readiness, custom.APIPortHolders)
+	}
+	windowsEnterpriseConfigAPIPort = func(string) (int, error) { return 18970, nil }
+	windowsEnterpriseAPIListeners = allListeners
 
 	// A lifecycle that failed before it read the deployment (a CLI from
 	// another build, GAP-1658) names no gateway service: the installed

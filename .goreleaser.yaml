@@ -272,6 +272,33 @@ nfpms:
         dst: /usr/lib/sysusers.d/defenseclaw.conf
       - src: packaging/systemd/defenseclaw.conf
         dst: /usr/lib/tmpfiles.d/defenseclaw.conf
+      # The managed OpenCode plugin holds no host value, so the package owns
+      # it: application control that trusts the package database (fapolicyd's
+      # rpm and deb backends) then trusts the file OpenCode loads, as it does
+      # the hook binary. A plugin only the lifecycle wrote was refused to
+      # OpenCode under fapolicyd while status stayed green (GAP-0763). The
+      # lifecycle renders the same bytes and leaves the file to the package.
+      - src: internal/enterprisepolicy/opencode_managed_plugin.js
+        dst: /opt/defenseclaw/share/opencode/defenseclaw.js
+        file_info:
+          mode: 0644
+      # apt hook that refuses a package downgrade before dpkg replaces any
+      # file. Not a conffile: it must go away with the package, or apt would
+      # keep calling a script that is no longer there.
+      - src: packaging/linux/apt-downgrade-guard.sh
+        dst: /usr/lib/defenseclaw-enterprise/apt-downgrade-guard
+        packager: deb
+        file_info:
+          mode: 0755
+      - src: packaging/linux/apt-downgrade-guard.conf
+        dst: /etc/apt/apt.conf.d/50defenseclaw-enterprise
+        packager: deb
+      # An rpm owns only the directories it lists, so without this entry an
+      # erase leaves /usr/share/doc/defenseclaw-enterprise behind, empty.
+      - dst: /usr/share/doc/defenseclaw-enterprise
+        type: dir
+        file_info:
+          mode: 0755
       - src: packaging/systemd/hook-guardian-targets.example.yaml
         dst: /usr/share/doc/defenseclaw-enterprise/hook-guardian-targets.example.yaml
       - src: LICENSE

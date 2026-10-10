@@ -25,6 +25,7 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,9 +116,12 @@ func TestBindManagedHookSocketWaitsForALiveListenerToLeave(t *testing.T) {
 	apiListenRetryBudget = 10 * time.Second
 	hookSocketHeldRetryInterval = 20 * time.Millisecond
 	const hold = 300 * time.Millisecond
+	var closing atomic.Bool
 	released := make(chan struct{})
 	go func() {
 		time.Sleep(hold)
+		// Set before Close: the bind below may return before close(released) runs.
+		closing.Store(true)
 		_ = live.Close()
 		close(released)
 	}()
@@ -126,11 +130,10 @@ func TestBindManagedHookSocketWaitsForALiveListenerToLeave(t *testing.T) {
 		t.Fatalf("bind after the live listener left: %v", err)
 	}
 	defer listener.Close()
-	select {
-	case <-released:
-	default:
+	if !closing.Load() {
 		t.Fatal("the hook socket was bound while another listener still served it")
 	}
+	<-released
 	conn, err := net.DialTimeout("unix", path, time.Second)
 	if err != nil {
 		t.Fatalf("the new hook socket does not answer: %v", err)
@@ -357,7 +360,7 @@ func TestManagedHookSocketServesOnlyAuthorizedHookRoutes(t *testing.T) {
 		map[string]interface{}{"tool": "Bash", "args": map[string]interface{}{"command": "id"}}); status == http.StatusForbidden || status == http.StatusUnauthorized {
 		t.Fatalf("inspect for the enrolled connector refused: %d %s", status, body)
 	}
-	for _, path := range []string{"/status", "/config/patch", "/enforce/allow", "/v1/guardrail/config", "/api/v1/admin/shutdown"} {
+	for _, path := range []string{"/status", "/enforce/allow", "/v1/guardrail/config", "/api/v1/admin/shutdown"} {
 		if status, _ := post(path, map[string]string{"Authorization": "Bearer anything"}, map[string]string{}); status != http.StatusNotFound && status != http.StatusForbidden {
 			t.Fatalf("management route %s reachable on the hook socket: %d", path, status)
 		}

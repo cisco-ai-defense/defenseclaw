@@ -30,6 +30,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
@@ -46,6 +48,7 @@ type configV8WireResponse struct {
 	PlanDigest        string          `json:"plan_digest"`
 	NetworkValidation string          `json:"network_validation"`
 	Valid             *bool           `json:"valid,omitempty"`
+	Warnings          []string        `json:"warnings,omitempty"`
 	Effective         json.RawMessage `json:"effective,omitempty"`
 }
 
@@ -76,7 +79,17 @@ var configV8ValidateCmd = &cobra.Command{
 	Short: "Validate configuration v8 and emit a machine-readable result",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		compiled, source, gatewayAPIPort, err := compileConfigV8File(configV8ConfigPath, configV8DataDir)
+		loaded, err := loadConfigV8File(configV8ConfigPath, configV8DataDir)
+		if err == nil {
+			// The writers' validator: the rule packs and rule IDs the
+			// candidate references must load, as the gateway's reload needs.
+			err = config.CheckCandidateAssets(loaded.runtime)
+		}
+		if err == nil {
+			// Every jsonl destination must be a file the gateway may write
+			// (GAP-0890).
+			err = checkJSONLDestinationPaths(loaded.compiled, "")
+		}
 		if err != nil {
 			failure := configV8ValidationFailure(err)
 			if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(failure); encodeErr != nil {
@@ -88,13 +101,14 @@ var configV8ValidateCmd = &cobra.Command{
 		result := configV8WireResponse{
 			WireVersion:       configV8WireVersion,
 			Kind:              "validation",
-			ConfigVersion:     8,
-			Source:            source,
-			DataDir:           compiled.DataDir,
-			GatewayAPIPort:    gatewayAPIPort,
-			PlanDigest:        compiled.Plan.Digest(),
+			ConfigVersion:     loaded.runtime.ConfigVersion,
+			Source:            loaded.source,
+			DataDir:           loaded.compiled.DataDir,
+			GatewayAPIPort:    loaded.gatewayAPIPort,
+			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
 			Valid:             &valid,
+			Warnings:          gateway.ConfigHILTWarnings(loaded.runtime),
 		}
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
@@ -137,6 +151,9 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 		result.Path = configV8DiagnosticPath(yamlError.Path)
 		result.Reason = configV8DiagnosticReason(string(yamlError.Code), yamlError.Summary, "", yamlError.Action)
 	case errors.As(err, &schemaError):
+		if schemaError.Version >= config.ConfigVersionV9 {
+			result.ConfigVersion = schemaError.Version
+		}
 		result.Path = configV8DiagnosticPath(schemaError.Path)
 		detail := schemaError.Expected
 		if schemaError.Suggestion != "" {
@@ -234,20 +251,20 @@ var configV8EffectiveCmd = &cobra.Command{
 	Short: "Emit the secret-masked effective observability plan as JSON",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		compiled, source, gatewayAPIPort, err := compileConfigV8File(configV8ConfigPath, configV8DataDir)
+		loaded, err := loadConfigV8File(configV8ConfigPath, configV8DataDir)
 		if err != nil {
 			return err
 		}
 		response := configV8WireResponse{
 			WireVersion:       configV8WireVersion,
 			Kind:              "effective",
-			ConfigVersion:     8,
-			Source:            source,
-			DataDir:           compiled.DataDir,
-			GatewayAPIPort:    gatewayAPIPort,
-			PlanDigest:        compiled.Plan.Digest(),
+			ConfigVersion:     loaded.runtime.ConfigVersion,
+			Source:            loaded.source,
+			DataDir:           loaded.compiled.DataDir,
+			GatewayAPIPort:    loaded.gatewayAPIPort,
+			PlanDigest:        loaded.compiled.Plan.Digest(),
 			NetworkValidation: "offline_syntax_and_literal_policy_only",
-			Effective:         compiled.Plan.EffectiveJSON(),
+			Effective:         loaded.compiled.Plan.EffectiveJSON(),
 		}
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetEscapeHTML(false)
@@ -357,6 +374,23 @@ func loadConfigV8File(path, defaultDataDir string) (*loadedConfigV8File, error) 
 // credential references from credentialsDir; empty derives it from a
 // standalone source's own path.
 func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string) (*loadedConfigV8File, error) {
+	return loadConfigV8Source(path, defaultDataDir, credentialsDir, false)
+}
+
+// loadConfigV8Source loads and strict-parses the file. With migrate, a
+// config_version 8 file is first converted in memory to a config_version 9
+// document, and that document is what is parsed
+// and compiled (loaded.raw is it too): the keys the migration moves
+// (skill_actions and the like) are not in the current schema, so the strict
+// parse of the raw file would refuse the very file the migration exists to
+// fix. A failed migration refuses the file.
+//
+// migrate also marks the load of a process that runs the file (the gateway
+// and the watchdog): loaded.runtime is then the strict runtime decode
+// (managed trust, provenance) the caller runs, instead of an inspection decode
+// the caller would decode again. Each decode is a full pass over every
+// guardrail profile (GAP-0276).
+func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate bool) (*loadedConfigV8File, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = config.ConfigPath()
@@ -368,6 +402,12 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 	raw, err := readConfigV8Source(absPath)
 	if err != nil {
 		return nil, err
+	}
+	legacyV8 := migrate && config.NeedsMigrationV9(raw)
+	if migrate {
+		if raw, err = config.MigrateV8InMemory(absPath, raw, guardrail.RulePackDigest); err != nil {
+			return nil, config.InMemoryMigrationError(absPath, err)
+		}
 	}
 
 	// Resolve the data directory from the already strict YAML projection before
@@ -401,10 +441,15 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 	if err != nil {
 		return nil, err
 	}
-	runtimeCandidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(absPath, raw)
+	loadRuntime := config.LoadRuntimeV8InspectionCandidateFromBytes
+	if migrate {
+		loadRuntime = config.LoadRuntimeV8FromBytes
+	}
+	runtimeCandidate, err := loadRuntime(absPath, raw)
 	if err != nil {
 		return nil, err
 	}
+	runtimeCandidate.RuntimeV8RulePackRebase = legacyV8 && !runtimeCandidate.SecureClientIntegration()
 	compiled.Plan, err = config.WithObservabilityV8ManagedAIDDestination(
 		compiled.Plan, config.ObservabilityV8ManagedAIDOptionsFromConfig(runtimeCandidate, raw))
 	if err != nil {
@@ -499,13 +544,13 @@ func validateRuntimeV8ConnectorRoster(document *config.V8YAMLDocument, candidate
 func readConfigV8Source(path string) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("read v8 config %s: %w", path, err)
+		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	defer file.Close()
 	limit := int64(config.ObservabilityV8MaxSourceBytes) + 1
 	raw, err := io.ReadAll(io.LimitReader(file, limit))
 	if err != nil {
-		return nil, fmt.Errorf("read v8 config %s: %w", path, err)
+		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 	if len(raw) > config.ObservabilityV8MaxSourceBytes {
 		// Feed a bounded over-limit value to the canonical parser so callers get

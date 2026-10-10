@@ -22,7 +22,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -222,9 +221,7 @@ func TestStandaloneHookLaneBlocksOnTheLocalEngine(t *testing.T) {
 			t.Fatal(err)
 		}
 		store, logger := testStoreAndLogger(t)
-		if err := enforce.NewPolicyEngine(store).BlockToolForConnector(markerTool, "", "marker"); err != nil {
-			t.Fatal(err)
-		}
+		denyTool(cfg, markerTool, "", "marker")
 		a := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 		if inspector != nil {
 			a.SetCiscoInspector(inspector)

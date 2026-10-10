@@ -226,9 +226,9 @@ func readClaudeFileSources(opts Options) ([]claudeSource, error) {
 	if data, exists, err := readPolicyFile(opts, base); err != nil {
 		return nil, err
 	} else if exists {
-		doc, err := decodeOrderedObject(data)
+		doc, err := decodeOrderedObject(bytes.TrimPrefix(data, utf8BOM))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w (Claude Code refuses to start with an unparsable managed settings file)", base, err)
+			return nil, fmt.Errorf("%s: %w; DefenseClaw cannot check Claude Code's managed settings until this file parses as JSON: fix it, then rerun", base, err)
 		}
 		sources = append(sources, claudeSource{name: base, doc: doc})
 	}
@@ -255,14 +255,20 @@ func readClaudeFileSources(opts Options) ([]claudeSource, error) {
 		if !exists {
 			continue
 		}
-		doc, err := decodeOrderedObject(data)
+		doc, err := decodeOrderedObject(bytes.TrimPrefix(data, utf8BOM))
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w (Claude Code refuses to start with an unparsable managed drop-in)", file, err)
+			return nil, fmt.Errorf("%s: %w; DefenseClaw cannot check Claude Code's managed settings until this drop-in parses as JSON: fix it, then rerun", file, err)
 		}
 		sources = append(sources, claudeSource{name: file, doc: doc})
 	}
 	return sources, nil
 }
+
+// utf8BOM starts a file a Windows editor saved as "UTF-8 with BOM". Claude
+// Code and Codex read such a managed file (and its CRLF line ends), so
+// DefenseClaw does too: it refused one, failed verify for every user and
+// claimed Claude Code would not start (GAP-0914, GAP-0917).
+var utf8BOM = []byte("\xef\xbb\xbf")
 
 // claudeEffectiveScalar returns the last file-based value for key.
 func claudeEffectiveScalar(sources []claudeSource, key string) (any, string) {
@@ -321,7 +327,7 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 	}
 	for _, event := range events {
 		if missingAll[event] {
-			state.conflict("Claude Code event %s has no DefenseClaw managed hook", event)
+			state.entryConflict("Claude Code event %s has no DefenseClaw managed hook", event)
 		}
 	}
 	if value, from := claudeEffectiveScalar(sources, "disableAllHooks"); value == true {
@@ -365,7 +371,12 @@ func inspectClaude(opts Options, policy config.ResolvedConnectorPolicy, state *S
 			}
 		default:
 			state.HigherPrecedence = append(state.HigherPrecedence, source.name)
-			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format claude-hklm-json` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, claudeMergeMinimumVersion)
+			// A macOS managed-preferences profile takes the plist export.
+			format := "claude-hklm-json"
+			if opts.goos() == "darwin" {
+				format = "plist"
+			}
+			message := fmt.Sprintf("%s has higher precedence than file-based managed settings and does not include DefenseClaw's hooks; add \"managedSourcesBehavior\": \"merge\" to it (Claude Code %s+) or deploy `defenseclaw-gateway enterprise policy export --connector claudecode --format %s` through it (the export also sets requiredMinimumVersion under version_floor: enforce)", source.name, claudeMergeMinimumVersion, format)
 			if policy.HigherPrecedenceSources == config.HigherPrecedenceWarn {
 				state.detail("%s", message)
 				state.HigherPrecedence = state.HigherPrecedence[:len(state.HigherPrecedence)-1]
@@ -478,8 +489,12 @@ func (t claudeTarget) RemoveOwned(opts Options) (State, error) {
 	return state, errors.Join(floorErr, err)
 }
 
-// claudeStrip treats a drop-in carrying DefenseClaw's hooks as DefenseClaw's
-// whole file; any other content under the drop-in name is left alone.
+// claudeStrip treats a drop-in carrying DefenseClaw hooks as a whole file
+// DefenseClaw owns; any other content under the drop-in name is left alone.
+// It only decides a file DefenseClaw has no record of publishing: once the
+// ownership record names the drop-in, the file is DefenseClaw's whatever it
+// holds (reservedDropIn), so an edited hook command is never taken for an
+// administrator's content (GAP-1099).
 func claudeStrip(opts Options) stripFunc {
 	return wholeFileStrip(func(current []byte) bool {
 		doc, err := decodeOrderedObject(current)

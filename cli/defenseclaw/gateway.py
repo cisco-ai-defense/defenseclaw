@@ -33,6 +33,7 @@ import json
 import os
 import shutil
 import socket
+import subprocess
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache
@@ -102,6 +103,98 @@ def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: fl
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
         return {"user": label, "error": str(exc)}
     return {**result, "user": label, "overrides": overrides}
+
+
+def policy_reload_rejection(policy: dict) -> str:
+    """``policy.last_reload_error`` when the gateway rejected a reload, or "".
+
+    A generation built without its Rego modules (``policy.opa_unavailable``)
+    was applied, with config.yaml deciding admission and levels; the gateway
+    reports it as ``last_reload_error`` "opa: ..." too, but no change was
+    rejected (GAP-1033).
+    """
+    error = str(policy.get("last_reload_error") or "").strip()
+    fallback = str(policy.get("opa_unavailable") or "").strip()
+    return "" if fallback and error == f"opa: {fallback}" else error
+
+
+def gateway_reload_notice(cfg: Any, *, timeout: float = 3) -> str:
+    """Say when the running gateway has not applied config.yaml as written, or "".
+
+    ``config validate``, ``guardrail status`` and ``guardrail profile explain``
+    describe the file, but the gateway may still run an earlier generation: it
+    rejected the last reload (``policy.last_reload_error``), some changed keys
+    apply only after a restart (``policy.pending_restart``), or a moved
+    ``gateway.api_port`` left it on its previous port until it restarts
+    (GAP-0352, GAP-0363). "" when it applied the file or cannot be asked.
+    """
+    try:
+        return _gateway_reload_notice(cfg, timeout)
+    except Exception:  # noqa: BLE001 - a notice never fails the command.
+        return ""
+
+
+def _gateway_reload_notice(cfg: Any, timeout: float) -> str:
+    gateway = getattr(cfg, "gateway", None)
+    port = getattr(gateway, "api_port", 0)
+    if gateway is None or not port:
+        return ""
+    host = gateway_api_client_host(cfg)
+    # /health takes no token, so check the holder first: another account's
+    # gateway must not answer for this one.
+    foreign = foreign_loopback_listener(host, int(port))
+    if foreign:
+        return f"The gateway this config.yaml names is not this account's: {foreign}."
+    client = OrchestratorClient(host=host, port=port, timeout=timeout)
+    try:
+        health = client.health()
+    except requests.exceptions.ConnectionError:
+        return _gateway_off_configured_port_notice(host, int(port))
+    finally:
+        client.close()
+    policy = health.get("policy") if isinstance(health, dict) else None
+    if not isinstance(policy, dict):
+        return ""
+    error = policy_reload_rejection(policy)
+    if error:
+        return (
+            f"The running gateway has NOT applied this config.yaml: it rejected the last reload ({error}) "
+            f"and still enforces generation {policy.get('generation')}. Fix the file; the gateway reloads it "
+            "when it is saved."
+        )
+    pending = [str(key) for key in policy.get("pending_restart") or [] if str(key).strip()]
+    if pending:
+        return (
+            f"The running gateway applied this config.yaml except {', '.join(pending)}, which takes effect "
+            "after `defenseclaw-gateway restart`."
+        )
+    return ""
+
+
+def current_gateway_reload_notice() -> str:
+    """gateway_reload_notice for the config.yaml in use, or "" when it does not load."""
+    try:
+        from defenseclaw import config as config_module
+
+        return gateway_reload_notice(config_module.load())
+    except Exception:  # noqa: BLE001 - a file that does not load has no gateway to ask about.
+        return ""
+
+
+def _gateway_off_configured_port_notice(host: str, port: int) -> str:
+    """This account's gateway is running but not on the configured port, or ""."""
+    from defenseclaw.config import default_data_path
+    from defenseclaw.doctor_gateway import read_pid_record
+    from defenseclaw.process_liveness import pid_alive
+
+    record = read_pid_record(os.path.join(str(default_data_path()), "gateway.pid"))
+    if record.status != "ok" or record.pid <= 0 or not pid_alive(record.pid):
+        return ""
+    return (
+        f"This account's gateway (PID {record.pid}) is running but does not answer on "
+        f"{_url_host(host)}:{port}, the port config.yaml names: a gateway.api_port change takes effect "
+        "after `defenseclaw-gateway restart`, and until then it enforces the configuration it last applied."
+    )
 
 
 def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
@@ -761,28 +854,9 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
-    def patch_config(self, path: str, value: Any) -> dict[str, Any]:
-        resp = self._session.post(
-            f"{self.base_url}/config/patch",
-            json={"path": path, "value": value},
-            timeout=self.timeout,
-            allow_redirects=False,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
     def list_skills(self) -> dict[str, Any]:
         resp = self._session.get(
             f"{self.base_url}/skills",
-            timeout=self.timeout,
-            allow_redirects=False,
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def get_tools_catalog(self) -> dict[str, Any]:
-        resp = self._session.get(
-            f"{self.base_url}/tools/catalog",
             timeout=self.timeout,
             allow_redirects=False,
         )
@@ -809,16 +883,18 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
-    def scan_skill(self, target: str, name: str = "") -> dict[str, Any]:
+    def scan_skill(self, target: str, name: str = "", timeout: float = 120) -> dict[str, Any]:
         """Request a skill scan on the remote sidecar host.
 
         The sidecar runs the skill-scanner locally against the target path
-        on that machine and returns the ScanResult JSON.
+        on that machine and returns the ScanResult JSON. The gateway bounds
+        the scan by scanners.skill_scanner.timeouts.scan_s, so the caller
+        passes a timeout a little longer than that.
         """
         resp = self._session.post(
             f"{self.base_url}/v1/skill/scan",
             json={"target": target, "name": name},
-            timeout=120,
+            timeout=timeout,
             allow_redirects=False,
         )
         resp.raise_for_status()
@@ -1443,6 +1519,7 @@ def resolve_gateway_binary() -> str | None:
     4. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
+    5. The enterprise package's gateway on a managed Linux or macOS host.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
@@ -1465,7 +1542,27 @@ def resolve_gateway_binary() -> str | None:
     if _is_runnable_file(canonical):
         return canonical
 
-    return None
+    return _managed_gateway_binary()
+
+
+#: The gateway each managed runtime descriptor's package installs.
+_MANAGED_GATEWAY_BINARIES = {
+    "/etc/defenseclaw/managed-runtime.json": "/opt/defenseclaw/bin/defenseclaw-gateway",
+    "/opt/cisco/defenseclaw/etc/managed-runtime.json": "/opt/cisco/defenseclaw/bin/defenseclaw-gateway",
+}
+
+
+def _managed_gateway_binary() -> str | None:
+    """The enterprise package's gateway on a managed Linux or macOS host.
+
+    An administrator's shell has it on no PATH, and the answer to "gateway
+    not found" there must not be ``defenseclaw upgrade``, which a managed
+    device refuses (GAP-0168).
+    """
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    binary = _MANAGED_GATEWAY_BINARIES.get(managed_descriptor() or "")
+    return binary if binary and _is_runnable_file(binary) else None
 
 
 def resolve_trusted_gateway_binary() -> str | None:
@@ -1543,3 +1640,37 @@ def _is_runnable_file(path: str) -> bool:
         return os.path.isfile(path) and os.access(path, os.X_OK)
     except OSError:
         return False
+
+
+def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
+    """Compute effective_policy_digest from disk with the installed gateway
+    (``defenseclaw-gateway policy digest --json``); None when it cannot."""
+    try:
+        binary = resolve_trusted_gateway_binary()
+    except OSError:
+        return None
+    if not binary:
+        return None
+    env = dict(os.environ)
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if data_dir:
+        env["DEFENSECLAW_HOME"] = data_dir
+    try:
+        proc = subprocess.run(
+            [binary, "policy", "digest", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        report = json.loads(proc.stdout)
+    except ValueError:
+        return None
+    return report if isinstance(report, dict) and report.get("effective_digest") else None
+

@@ -6,6 +6,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +21,8 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -41,6 +44,11 @@ const (
 	enterpriseSetupScratchDirName = "scratch"
 	maximumLifecycleOutput        = 2 << 20
 	enterpriseBusyExitCode        = 1618 // ERROR_INSTALL_ALREADY_RUNNING
+	// enterpriseSetupStageStaleAge is the age after which a staging folder
+	// belongs to no Setup still staging: unpacking the payload takes
+	// seconds to minutes. A Setup whose lifecycle still runs holds its
+	// folder as the working directory, which the rename below needs free.
+	enterpriseSetupStageStaleAge = 30 * time.Minute
 )
 
 func executeEnterpriseSetup(
@@ -96,6 +104,14 @@ func executeEnterpriseSetup(
 		// Refuse a too-full volume before anything is staged. The Secure
 		// Client Setup keeps its historical behavior.
 		if programData, err := winpath.TrustedProgramData(); err == nil {
+			// A removed folder is progress, not a failure: an MDM reads any
+			// stderr output as a failed script (GAP-1353, GAP-1069), and in
+			// a JSON run stdout is the result alone.
+			progress := stdout
+			if opts.JSON {
+				progress = io.Discard
+			}
+			removeStaleEnterpriseSetupStages(programData, time.Now(), progress, stderr)
 			if err := requireEnterpriseSetupFreeSpace(programData, payload, opts.Action); err != nil {
 				return 0, err
 			}
@@ -127,7 +143,21 @@ func executeEnterpriseSetup(
 	child := processutil.CommandContext(ctx, cliPath, arguments...)
 	child.Dir = stageRoot
 	child.Env = childEnvironment
-	output, runErr := processutil.CombinedOutputTree(child, false)
+	var output []byte
+	var runErr error
+	if opts.Standalone {
+		// Pass the lifecycle's stderr (diagnostics of a failing run) on at
+		// once. Its scanner runtime progress goes to stdout for a person and
+		// to the lifecycle log in a JSON run, never to stderr, which an MDM
+		// reads as a failed script (GAP-0642, GAP-1069). stdout is the result.
+		var captured bytes.Buffer
+		child.Stdout = &captured
+		child.Stderr = lifecycleProgress{stderr}
+		runErr = processutil.RunTree(child)
+		output = captured.Bytes()
+	} else {
+		output, runErr = processutil.CombinedOutputTree(child, false)
+	}
 	if len(output) > maximumLifecycleOutput {
 		return 0, fmt.Errorf("enterprise lifecycle output exceeded %d bytes", maximumLifecycleOutput)
 	}
@@ -143,12 +173,17 @@ func executeEnterpriseSetup(
 		}
 		return 0, cleanupErr
 	}
+	timedOut := ctx.Err() != nil
 	if len(output) != 0 {
 		destination := stdout
 		if runErr != nil && !opts.JSON {
 			destination = stderr
 		}
-		if opts.Standalone && opts.JSON {
+		if opts.Standalone && opts.JSON && timedOut {
+			// A stopped run printed no result: what it wrote is diagnostics,
+			// and stdout carries the timeout result alone (GAP-0509).
+			destination = stderr
+		} else if opts.Standalone && opts.JSON {
 			// The lifecycle child's stderr is merged into this capture. An MDM
 			// parses stdout, so only the lifecycle's JSON result goes there.
 			document, diagnostics := splitStandaloneLifecycleJSON(output)
@@ -163,7 +198,10 @@ func executeEnterpriseSetup(
 			return 0, fmt.Errorf("publish enterprise lifecycle output: %w", err)
 		}
 	}
-	if ctx.Err() != nil {
+	if timedOut {
+		if opts.Standalone {
+			return 0, standaloneEnterpriseSetupTimeout(opts, ctx.Err())
+		}
 		return 0, fmt.Errorf("enterprise %s exceeded the bounded %s timeout: %w", opts.Action, opts.LifecycleTimeout, ctx.Err())
 	}
 	if runErr == nil {
@@ -195,11 +233,36 @@ type enterpriseSetupPathError struct{ error }
 
 func (err enterpriseSetupPathError) Unwrap() error { return err.error }
 
-// standaloneEnterpriseSetupInputError reports a malformed or missing input
-// path as invalid arguments (1639) for the standalone Setup only.
+// enterpriseSetupUntrustedInput is an existing CONFIG=/MANIFEST= file Setup
+// will not take: a link or other non-regular file, or one a principal other
+// than Administrators, SYSTEM or TrustedInstaller owns or can change. Its
+// text is unchanged.
+type enterpriseSetupUntrustedInput struct {
+	label string
+	path  string
+	error
+}
+
+func (err enterpriseSetupUntrustedInput) Unwrap() error { return err.error }
+
+// standaloneEnterpriseSetupInputError reports, for the standalone Setup
+// only, a malformed or missing input path and an input it will not take as
+// invalid arguments (1639), as the lifecycle reports every config it
+// refuses; an ownership or write-access refusal names the account and the
+// icacls fix (GAP-0528, GAP-0562). The Secure Client Setup keeps 1603.
 func standaloneEnterpriseSetupInputError(standalone bool, err error) error {
+	if !standalone {
+		return err
+	}
 	var path enterpriseSetupPathError
-	if standalone && errors.As(err, &path) {
+	if errors.As(err, &path) {
+		return enterpriseSetupInvalidArguments{err}
+	}
+	var untrusted enterpriseSetupUntrustedInput
+	if errors.As(err, &untrusted) {
+		if text, ok := managed.DescribeUntrustedSource(untrusted.label, untrusted.path, untrusted.error); ok {
+			return enterpriseSetupInvalidArguments{errors.New(text)}
+		}
 		return enterpriseSetupInvalidArguments{err}
 	}
 	return err
@@ -228,10 +291,10 @@ func validateEnterpriseSetupInput(value, label string) (string, error) {
 		return "", fmt.Errorf("inspect %s: %w", label, err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("%s is not a regular non-link file: %s", label, full)
+		return "", enterpriseSetupUntrustedInput{label, full, fmt.Errorf("%s is not a regular non-link file: %s", label, full)}
 	}
 	if err := managed.ValidateTrustedFilePath(full, label); err != nil {
-		return "", fmt.Errorf("refusing untrusted %s: %w", label, err)
+		return "", enterpriseSetupUntrustedInput{label, full, fmt.Errorf("refusing untrusted %s: %w", label, err)}
 	}
 	return filepath.Clean(full), nil
 }
@@ -399,23 +462,81 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	if err != nil {
 		return err
 	}
-	allowed := make(map[string]bool, len(requiredPayloadFiles)+1)
-	for _, name := range requiredPayloadFiles {
+	stagedNames := append(append(append([]string{}, requiredPayloadFiles...), standalonePayloadFiles...), standalonePayloadTrustName)
+	allowed := make(map[string]bool, len(stagedNames))
+	for _, name := range stagedNames {
 		allowed[name] = true
 	}
-	allowed[standalonePayloadTrustName] = true
 	for _, entry := range entries {
 		if !allowed[entry.Name()] || entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("refusing enterprise Setup cleanup with unexpected staged object: %s", entry.Name())
 		}
 	}
-	for _, name := range append(append([]string{}, requiredPayloadFiles...), standalonePayloadTrustName) {
+	for name := range allowed {
 		path := filepath.Join(cleanStage, name)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	return os.Remove(cleanStage)
+}
+
+// cleanupStaleEnterpriseSetupStage removes a renamed stale staging folder.
+// A seam for tests: a test folder is not owned by the administrators group,
+// so the real cleanup keeps it.
+var cleanupStaleEnterpriseSetupStage = cleanupEnterpriseSetupStage
+
+// removeStaleEnterpriseSetupStages removes the staging folders that
+// interrupted standalone Setup runs left in ProgramData (a stopped Setup
+// cannot clean up; each holds the whole payload, GAP-0525). Only a folder
+// older than enterpriseSetupStageStaleAge that can be renamed is taken: a
+// Setup whose lifecycle still runs holds its folder as the working
+// directory, so the rename fails for it. The renamed folder keeps the stage
+// prefix, so one this run cannot clean (unexpected content) is swept by a
+// later run or by uninstall. A removed folder is reported to progress, one
+// it had to keep to diagnostics.
+func removeStaleEnterpriseSetupStages(programData string, now time.Time, progress, diagnostics io.Writer) {
+	entries, err := os.ReadDir(programData)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		capability, found := strings.CutPrefix(name, enterpriseSetupStagePrefix)
+		if !found || !entry.IsDir() || len(capability) != 32 || strings.Trim(capability, "0123456789abcdef") != "" {
+			continue
+		}
+		path := filepath.Join(programData, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		attributes, ok := info.Sys().(*syscall.Win32FileAttributeData)
+		if !ok || now.Sub(time.Unix(0, attributes.CreationTime.Nanoseconds())) < enterpriseSetupStageStaleAge {
+			continue
+		}
+		retired := ""
+		for attempt := 0; attempt < 4 && retired == ""; attempt++ {
+			next := make([]byte, 16)
+			if _, err := rand.Read(next); err != nil {
+				return
+			}
+			candidate := filepath.Join(programData, enterpriseSetupStagePrefix+hex.EncodeToString(next))
+			if err := os.Rename(path, candidate); err == nil {
+				retired = candidate
+			} else if !errors.Is(err, os.ErrExist) {
+				break
+			}
+		}
+		if retired == "" {
+			continue
+		}
+		if err := cleanupStaleEnterpriseSetupStage(retired, programData); err != nil {
+			fmt.Fprintf(diagnostics, "%s: kept the staging folder an interrupted Setup run left, %s: %v\n", standaloneSetupArtifactName, retired, err)
+			continue
+		}
+		fmt.Fprintf(progress, "%s: removed the staging folder an interrupted Setup run left, %s\n", standaloneSetupArtifactName, path)
+	}
 }
 
 func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions) []string {
@@ -454,6 +575,9 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	}
 	if opts.Purge {
 		arguments = append(arguments, "--purge")
+	}
+	if opts.Force {
+		arguments = append(arguments, "--force")
 	}
 	if opts.JSON {
 		arguments = append(arguments, "--json")
@@ -530,4 +654,14 @@ func trustedEnterpriseSetupEnvironment(stageRoot string) ([]string, error) {
 		environment = append(environment, key+"="+allowed[key])
 	}
 	return environment, nil
+}
+
+// lifecycleProgress passes the lifecycle stderr on. It is not an *os.File,
+// so the child always gets a pipe: a scheduled task can start Setup with no
+// usable stderr, and a failed write must not end the copy or the lifecycle.
+type lifecycleProgress struct{ w io.Writer }
+
+func (p lifecycleProgress) Write(b []byte) (int, error) {
+	_, _ = p.w.Write(b)
+	return len(b), nil
 }

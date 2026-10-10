@@ -25,12 +25,15 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
 
 // ---------------------------------------------------------------------------
@@ -38,12 +41,9 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestInspectTool_GlobalMCPBlock_RejectsToolsEverywhere(t *testing.T) {
-	api, store := toolPolicyAPI(t, "action")
-	pe := enforce.NewPolicyEngine(store)
+	api, _ := toolPolicyAPI(t, "action")
 	// Bare/global block of the "jira" MCP server.
-	if err := pe.Block("mcp", "jira", "global"); err != nil {
-		t.Fatalf("Block mcp: %v", err)
-	}
+	denyAsset(api.scannerCfg, "mcp", "jira", "", "global")
 
 	// A blocked MCP server's tool is rejected at the Go gateway, on every
 	// connector and globally — not just at the Python CLI.
@@ -66,12 +66,9 @@ func TestInspectTool_GlobalMCPBlock_RejectsToolsEverywhere(t *testing.T) {
 }
 
 func TestInspectTool_ConnectorScopedMCPBlock_Isolated(t *testing.T) {
-	api, store := toolPolicyAPI(t, "action")
-	pe := enforce.NewPolicyEngine(store)
+	api, _ := toolPolicyAPI(t, "action")
 	// Block the "jira" MCP server only for codex.
-	if err := pe.BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
-		t.Fatalf("BlockForConnector mcp: %v", err)
-	}
+	denyAsset(api.scannerCfg, "mcp", "jira", "codex", "scoped")
 
 	// Rejected for codex…
 	_, v := postInspectForConnector(t, api, "codex", `{"tool":"mcp__jira__createIssue","connector":"codex","args":{}}`)
@@ -91,15 +88,10 @@ func TestInspectTool_ConnectorScopedMCPBlock_Isolated(t *testing.T) {
 }
 
 func TestInspectTool_MCPServerBlock_WinsOverToolAllow(t *testing.T) {
-	api, store := toolPolicyAPI(t, "action")
-	pe := enforce.NewPolicyEngine(store)
+	api, _ := toolPolicyAPI(t, "action")
 	// Operator allow-lists the specific tool but blocks the whole MCP server.
-	if err := pe.AllowToolForConnector("mcp__jira__createIssue", "", "vetted tool"); err != nil {
-		t.Fatalf("AllowToolForConnector: %v", err)
-	}
-	if err := pe.Block("mcp", "jira", "server-wide block"); err != nil {
-		t.Fatalf("Block mcp: %v", err)
-	}
+	allowTool(api.scannerCfg, "mcp__jira__createIssue", "", "vetted tool")
+	denyAsset(api.scannerCfg, "mcp", "jira", "", "server-wide block")
 
 	// The server-level block must win over the tool-level allow.
 	_, v := postInspectForConnector(t, api, "codex", `{"tool":"mcp__jira__createIssue","connector":"codex","args":{}}`)
@@ -114,11 +106,11 @@ func TestInspectTool_MCPServerBlock_WinsOverToolAllow(t *testing.T) {
 
 func TestHandleToolCall_GlobalMCPBlock(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
-	if err := enforce.NewPolicyEngine(store).Block("mcp", "jira", "global"); err != nil {
-		t.Fatalf("Block mcp: %v", err)
-	}
+	cfg := &config.Config{}
+	denyAsset(cfg, "mcp", "jira", "", "global")
 
 	r := NewEventRouter(nil, store, logger, false)
+	r.policy = configPolicy(store, cfg)
 	payload, _ := json.Marshal(ToolCallPayload{Tool: "mcp__jira__createIssue", Args: json.RawMessage(`{}`), Status: "running"})
 	r.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
 	if !hasAction(t, store, "gateway-tool-call-blocked") {
@@ -129,10 +121,10 @@ func TestHandleToolCall_GlobalMCPBlock(t *testing.T) {
 func TestHandleToolCall_ConnectorScopedMCPBlock(t *testing.T) {
 	// Blocked for codex.
 	storeA, loggerA := testStoreAndLogger(t)
-	if err := enforce.NewPolicyEngine(storeA).BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
-		t.Fatalf("BlockForConnector mcp: %v", err)
-	}
+	cfg := &config.Config{}
+	denyAsset(cfg, "mcp", "jira", "codex", "scoped")
 	rCodex := NewEventRouter(nil, storeA, loggerA, false)
+	rCodex.policy = configPolicy(storeA, cfg)
 	rCodex.SetGuardrailConfig(&config.GuardrailConfig{Connector: "codex"})
 	payload, _ := json.Marshal(ToolCallPayload{Tool: "mcp__jira__createIssue", Args: json.RawMessage(`{}`), Status: "running"})
 	rCodex.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
@@ -142,10 +134,8 @@ func TestHandleToolCall_ConnectorScopedMCPBlock(t *testing.T) {
 
 	// Same block must NOT fire for a different connector.
 	storeB, loggerB := testStoreAndLogger(t)
-	if err := enforce.NewPolicyEngine(storeB).BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
-		t.Fatalf("BlockForConnector mcp: %v", err)
-	}
 	rOther := NewEventRouter(nil, storeB, loggerB, false)
+	rOther.policy = configPolicy(storeB, cfg)
 	rOther.SetGuardrailConfig(&config.GuardrailConfig{Connector: "claudecode"})
 	rOther.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
 	if hasAction(t, storeB, "gateway-tool-call-blocked") {
@@ -159,10 +149,9 @@ func TestHandleToolCall_ConnectorScopedMCPBlock(t *testing.T) {
 
 func TestMCPServerRuntimeBlock_NonMCPAndUnblocked(t *testing.T) {
 	store, _ := testStoreAndLogger(t)
-	pe := enforce.NewPolicyEngine(store)
-	if err := pe.Block("mcp", "jira", "global"); err != nil {
-		t.Fatalf("Block mcp: %v", err)
-	}
+	cfg := &config.Config{}
+	denyAsset(cfg, "mcp", "jira", "", "global")
+	pe := configPolicy(store, cfg)
 
 	// Plain (non-MCP) tool name: never an MCP-server decision.
 	if deny, _, _ := mcpServerRuntimeBlock(pe, "shell", "", ""); deny {
@@ -176,14 +165,27 @@ func TestMCPServerRuntimeBlock_NonMCPAndUnblocked(t *testing.T) {
 	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__jira__createIssue", "", ""); !deny || server != "jira" {
 		t.Errorf("blocked mcp server: deny=%v server=%q, want deny=true server=jira", deny, server)
 	}
+	// GAP-0963: a server its install admission disabled says so, with the
+	// journal's reason, so it is not read as an asset_policy decision.
+	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "claudecode", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	if deny, _, reason := mcpServerRuntimeBlock(pe, "mcp__wiki-rogue__count_words", "claudecode", ""); !deny ||
+		!strings.Contains(reason, "install admission rejected it (scanner failure (fail-closed): loopback)") {
+		t.Errorf("disabled mcp server: deny=%v reason=%q, want the admission verdict named", deny, reason)
+	}
+	// Codex passes the configured name its hook resolved (GAP-0939).
+	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "codex", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__wiki_rogue__count_words", "codex", "wiki-rogue"); !deny || server != "wiki-rogue" {
+		t.Errorf("codex disabled mcp server: deny=%v server=%q, want it refused as in Claude Code", deny, server)
+	}
 }
 
 func TestInspectTool_MCPServerBlock_UsesExplicitServerName(t *testing.T) {
-	api, store := toolPolicyAPI(t, "action")
-	pe := enforce.NewPolicyEngine(store)
-	if err := pe.BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
-		t.Fatalf("BlockForConnector mcp: %v", err)
-	}
+	api, _ := toolPolicyAPI(t, "action")
+	denyAsset(api.scannerCfg, "mcp", "jira", "codex", "scoped")
 
 	_, v := postInspectForConnector(t, api, "codex", `{"tool":"createIssue","mcp_server_name":"jira","connector":"codex","args":{}}`)
 	if v.Action != "block" {
@@ -203,10 +205,9 @@ func TestOpenCodeHook_ConnectorScopedMCPBlockUsesMappedServerIdentity(t *testing
 	if err := store.Init(); err != nil {
 		t.Fatal(err)
 	}
-	policy := enforce.NewPolicyEngine(store)
-	if err := policy.BlockForConnector("mcp", "jira.prod", "opencode", "scoped"); err != nil {
-		t.Fatal(err)
-	}
+	cfg := &config.Config{}
+	denyAsset(cfg, "mcp", "jira.prod", "opencode", "scoped")
+	policy := configPolicy(store, cfg)
 	deny, server, _ := mcpServerRuntimeBlock(policy, "jira_prod_createIssue", "opencode", "jira.prod")
 	if !deny || server != "jira.prod" {
 		t.Fatalf("opencode mapped identity: deny=%v server=%q, want scoped deny for jira.prod", deny, server)
@@ -223,4 +224,46 @@ func hasFinding(findings []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// A URL block entered by the CLI must follow the configured server name into
+// the tool hook; the hook never supplies the endpoint itself.
+func TestMCPServerRuntimeBlock_URLRule(t *testing.T) {
+	store, _ := testStoreAndLogger(t)
+	path := filepath.Join(t.TempDir(), "openclaw.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"filesystem":{"url":"https://server.example/mcp"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Claw.ConfigFile = path
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "https://server.example/mcp"}}
+	pe := configPolicy(store, cfg)
+	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__filesystem__read", "", ""); !deny {
+		t.Fatal("URL block did not deny the configured server tool")
+	}
+}
+
+// A reload between the MCP and tool checks must not combine permissions
+// from two policy generations into an allow.
+func TestInspectToolPolicyUsesOneConfigAcrossMCPAndToolChecks(t *testing.T) {
+	api, _ := toolPolicyAPI(t, "action")
+	old := api.scannerCfg
+	denyTool(old, "mcp__jira__createIssue", "codex", "old tool block")
+	newCfg := &config.Config{}
+	denyAsset(newCfg, "mcp", "jira", "codex", "new server block")
+	reads := 0
+	api.configSnapshot = func() *config.Config {
+		reads++
+		if reads <= 2 {
+			return old
+		}
+		return newCfg
+	}
+	ctx := withPinnedGeneration(context.Background(), &Generation{Config: old, N: 1})
+	verdict := api.inspectTrustedToolPolicyCtx(ctx, &ToolInspectRequest{
+		Tool: "mcp__jira__createIssue", Connector: "codex", Args: json.RawMessage(`{}`),
+	}, trustedActionRequest{})
+	if verdict.Action != "block" || !hasFinding(verdict.Findings, "STATIC-BLOCK") {
+		t.Fatalf("mixed-generation verdict = %+v, want the pinned tool block", verdict)
+	}
 }

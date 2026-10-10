@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -65,6 +66,12 @@ type skillRuntimeProbe struct {
 	// lookup. It must not widen ordinary asset-policy matching or record a
 	// loaded asset when no disable record exists.
 	RuntimeDisableOnly bool
+	// DeclaredNames are the names the skill declares in its SKILL.md
+	// (declaredSkillNames); a denied rule matches them too.
+	DeclaredNames []string
+	// SourcePaths are the folders a skill selected by name alone loads
+	// from (skillSourcePaths); each is judged with its path.
+	SourcePaths []string
 }
 
 type runtimeAssetDecision struct {
@@ -80,17 +87,155 @@ const (
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	rawServer := probe.ServerName
+	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
+	if decision, refused := a.claudeStateUnreadableDecision(ctx, req.HookEventName, probe); refused {
+		return decision, true
+	}
+	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.liveConfig(), rawServer, probe); refused {
+		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "claudecode", req.HookEventName)
+		a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+rawServer, "action=block source=mcp-definition-unproven")
+		return decision, true
+	}
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
 
+// claudeCodePluginMCPServerName is the configured name of an MCP server a
+// Claude Code plugin bundles, plugin:<plugin>:<server>, for a tool call that
+// spells it plugin_<plugin>_<server>, so asset_policy.mcp rules written for
+// it match whatever asset_policy.enabled says (GAP-1191). Other servers keep
+// their name. Secure Client keeps main (issue #1092).
+func (a *APIServer) claudeCodePluginMCPServerName(ctx context.Context, probe mcpRuntimeProbe) string {
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" ||
+		!strings.HasPrefix(probe.ServerName, "plugin_") {
+		return probe.ServerName
+	}
+	if entry, ok := a.lookupCallerMCPServer(ctx, cfg, "claudecode", probe.WorkspaceDir, probe.ServerName); ok &&
+		strings.HasPrefix(entry.Name, "plugin:") {
+		return entry.Name
+	}
+	return probe.ServerName
+}
+
+// claudeStateUnreadableDecision refuses a Claude Code MCP tool call of an
+// enrolled user whose ~/.claude.json the hook enumerator could not read or
+// parse. The gateway service cannot read that file itself, so it does not
+// know the user's servers and cannot admit one: a server changed while the
+// file was unreadable would otherwise run unscanned (GAP-0829, fail closed).
+// The refusal names the file; status names it too. Secure Client has no
+// enrolled-user watcher (issue #1092).
+func (a *APIServer) claudeStateUnreadableDecision(ctx context.Context, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" {
+		return config.AssetPolicyDecision{}, false
+	}
+	state, ok := claudeStateUnreadableFor(trustedActiveHome(ctx))
+	if !ok {
+		return config.AssetPolicyDecision{}, false
+	}
+	reason := fmt.Sprintf("the Claude Code MCP servers of %s are blocked: DefenseClaw could not read %s (%s), so it cannot admit them; "+
+		"give SYSTEM read access to the file again or repair its JSON", state.Account(), state.Path, state.Reason)
+	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, "claudecode", "hook", reason, "claude-state-unreadable")
+	decision.RegistryStatus = "unknown"
+	a.logAssetPolicyAudit(ctx, "claudecode", "mcp:"+probe.ServerName, fmt.Sprintf(
+		"action=block source=%s hook=%s tool=%s connector=claudecode reason=%s", decision.Source, hookEvent, probe.ToolName, reason))
+	return decision, true
+}
+
+// A plugin tool name does not prove its command or URL. If the installed
+// plugin definition cannot be resolved, an endpoint-pinned deny cannot be
+// evaluated safely. This is independent of asset_policy.enabled, like the
+// explicit deny itself. Secure Client retains its original lookup behavior.
+func unresolvedPluginMCPDefinitionDecision(cfg *config.Config, rawServer string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	if cfg == nil || cfg.SecureClientIntegration() || !probe.Matched || probe.Surface != "hook" ||
+		!strings.HasPrefix(rawServer, "plugin_") || strings.HasPrefix(probe.ServerName, "plugin:") ||
+		!rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, "claudecode", rawServer) {
+		return config.AssetPolicyDecision{}, false
+	}
+	return config.AssetPolicyDecision{
+		Enabled: true, Mode: config.AssetPolicyModeAction, Action: "block", RawAction: "block",
+		Source: "mcp-definition-unproven", RegistryStatus: "unknown",
+		TargetType: "mcp", TargetName: rawServer, Connector: "claudecode", RuntimeSurface: "hook",
+		Reason: fmt.Sprintf("mcp %q: plugin server definition could not be resolved, so its endpoint cannot be checked against asset_policy", rawServer),
+	}, true
+}
+
 func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
-	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, req.ToolInput)
+	if a.codexMCPServerAmbiguous(ctx, req) {
+		name := serverFromMCPToolName(req.ToolName)
+		decision := config.AssetPolicyDecision{
+			Enabled: true, Mode: config.AssetPolicyModeAction, Action: "block", RawAction: "block",
+			Source: "mcp-server-ambiguous", RegistryStatus: "unknown",
+			TargetType: "mcp", TargetName: name, Connector: "codex", RuntimeSurface: "hook",
+			Reason: fmt.Sprintf("mcp %q: multiple configured Codex servers use this tool name; the server cannot be identified", name),
+		}
+		a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", "codex", req.HookEventName)
+		a.logAssetPolicyAudit(ctx, "codex", "mcp:"+name, "action=block source=mcp-server-ambiguous")
+		return decision, true
+	}
+	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
+// codexMCPServerAmbiguous applies only when the hook did not provide an
+// explicit server name. Codex normalizes punctuation in MCP tool names, so
+// an exact configured name is not enough to identify a server on collision.
+func (a *APIServer) codexMCPServerAmbiguous(ctx context.Context, req codexHookRequest) bool {
+	if strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name"))) != "" {
+		return false
+	}
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return false
+	}
+	toolServer := serverFromMCPToolName(req.ToolName)
+	if toolServer == "" {
+		return false
+	}
+	home, serviceAccount := callerHomeForAssets(ctx)
+	if !serviceAccount {
+		return cfg.CodexMCPToolServerAmbiguous(req.CWD, toolServer)
+	}
+	return home != "" && config.CodexMCPToolServerAmbiguousUnderHome(home, req.CWD, toolServer)
+}
+
+// codexMCPServerName is the MCP server a Codex tool call names, spelled as
+// the caller's Codex configures it. Codex shows hooks mcp__<server>__<tool>
+// with every character other than a letter, digit or underscore turned into
+// "_", so an approved acme-notes was looked up as acme_notes: refused as
+// unregistered, while a deny or a scan-verdict disable of a hyphenated server
+// missed it (GAP-0939, GAP-0462). It is resolved whatever asset_policy.enabled
+// says, because the lists and runtime disables always apply. "" when the call
+// names no server. Secure Client keeps main: only the payload field (#1092).
+func (a *APIServer) codexMCPServerName(ctx context.Context, req codexHookRequest) string {
+	explicit := strings.TrimSpace(firstNonEmpty(req.MCPServerName, payloadString(req.Payload, "mcp_server_name")))
+	cfg := a.liveConfig()
+	if explicit != "" || cfg == nil || cfg.SecureClientIntegration() {
+		return explicit
+	}
+	server := serverFromMCPToolName(req.ToolName)
+	if !strings.Contains(server, "_") {
+		return server
+	}
+	if entry, ok := a.lookupCallerMCPServer(ctx, cfg, "codex", req.CWD, server); ok && strings.TrimSpace(entry.Name) != "" {
+		return strings.TrimSpace(entry.Name)
+	}
+	return server
+}
+
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
+	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	if !probe.Matched {
+		return a.skillFolderAccessDecision(ctx, "claudecode", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
+	}
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
+	if skill := pluginBundledSkillName(a.liveConfig(), probe.SkillName); skill != "" {
+		probe.DeclaredNames = append(probe.DeclaredNames, skill)
+	}
+	probe.SourcePaths = a.skillSourcePaths(ctx, "claudecode", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe)
 }
 
@@ -115,6 +260,7 @@ func (a *APIServer) claudeCodePromptExpansionAssetDecisions(ctx context.Context,
 }
 
 func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, req claudeCodeHookRequest) []runtimeAssetDecision {
+	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	targetType := slashCommandAssetType(req.CommandSource)
 	trustedAssetPolicySource := claudeCodeSlashSourceTrustsAssetPolicy(req.CommandSource)
 	commandName := strings.TrimSpace(req.CommandName)
@@ -130,12 +276,21 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 		(promptPresent && !promptOK) ||
 		(commandOK && promptOK && !commandIdentity.sameAsset(promptIdentity)))
 
-	identities := make([]claudeCodeSlashIdentity, 0, 2)
+	identities := make([]claudeCodeSlashIdentity, 0, 3)
 	if commandOK {
 		identities = append(identities, commandIdentity)
 	}
 	if promptOK && (!commandOK || !commandIdentity.sameAsset(promptIdentity)) {
 		identities = append(identities, promptIdentity)
+	}
+	if targetType == "plugin" && commandOK && !identityMalformed {
+		// /plugin:skill runs a skill the plugin bundles: a skill on
+		// asset_policy.skill.denied is refused there too (GAP-1104).
+		if skill := pluginBundledSkillName(a.liveConfig(), commandName); skill != "" {
+			if bundled, ok := claudeCodeSlashAssetIdentity("skill", skill); ok {
+				identities = append(identities, bundled)
+			}
+		}
 	}
 
 	// Only literal skill/plugin provenance with a non-conflicting identity
@@ -157,6 +312,20 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 			Matched:            true,
 			RuntimeDisableOnly: runtimeDisableOnly,
 		}
+		if runtimeDisableOnly && !identityMalformed && identity.targetType == "skill" {
+			// A settings-origin command that is a skill folder (a user or
+			// project skill typed as /name) is held to asset_policy at
+			// that folder as the Skill tool is; it used to get the
+			// runtime-disable lookup only, so a skill on
+			// asset_policy.skill.denied ran (GAP-0968). A custom command
+			// with no skill folder of its name keeps that lookup.
+			if folders := a.installedSkillFolders(ctx, "claudecode", req.CWD, identity.name); len(folders) > 0 {
+				probe.RuntimeDisableOnly = false
+				probe.SourcePath = ""
+				probe.SourcePaths = folders
+			}
+		}
+		probe.DeclaredNames = a.declaredSkillNames(ctx, "claudecode", req.CWD, probe)
 		if decision, matched := a.evaluateNativeRuntimeSkillSelection(
 			ctx, "claudecode", req.SessionID, req.HookEventName,
 			runtimeProvenanceClaudeExpansion, probe,
@@ -177,7 +346,7 @@ func (a *APIServer) claudeCodeSlashCommandAssetDecisions(ctx context.Context, re
 			Matched:    true,
 		}
 		decision := a.runtimeAssetIdentityDecision(
-			targetType, name, "claudecode", "prompt_expansion",
+			ctx, targetType, name, "claudecode", "prompt_expansion",
 		)
 		a.emitRuntimeSkillAssetPolicyDecision(
 			ctx, decision, "claudecode", req.HookEventName, probe,
@@ -205,7 +374,13 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 }
 
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
+	a.noteProjectSkillFolders(ctx, "codex", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	if !probe.Matched {
+		return a.skillFolderAccessDecision(ctx, "codex", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
+	}
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
+	probe.SourcePaths = a.skillSourcePaths(ctx, "codex", req.CWD, probe)
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, "codex", req.HookEventName, probe)
 }
 
@@ -216,6 +391,9 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 	if !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
+	a.noteProjectSkillFolders(ctx, "codex", req.CWD)
+	probe.DeclaredNames = a.declaredSkillNames(ctx, "codex", req.CWD, probe)
+	probe.SourcePaths = a.skillSourcePaths(ctx, "codex", req.CWD, probe)
 	return a.evaluateNativeRuntimeSkillSelection(
 		ctx, "codex", req.SessionID, req.HookEventName,
 		runtimeProvenanceCodexPromptSelection, probe,
@@ -223,27 +401,35 @@ func (a *APIServer) codexPromptSkillAssetDecision(
 }
 
 func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
-	if a.scannerCfg == nil || !probe.Matched {
+	cfg := a.liveConfig()
+	if cfg == nil || !probe.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
-	runtimeDetection, _ := a.scannerCfg.AssetRuntimeDetectionFor("mcp")
-	if !runtimeDetection.Enabled {
+	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor("mcp")
+	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands && cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
-	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
+	if !runtimeDetection.Enabled && cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
-	probe = a.resolveMCPProbeEndpoint(connector, probe)
-	decision := a.scannerCfg.EvaluateAssetPolicy(config.AssetPolicyInput{
-		TargetType:     "mcp",
-		Name:           probe.ServerName,
-		Connector:      connector,
-		URL:            probe.URL,
-		Command:        probe.Command,
-		Args:           probe.Args,
-		Transport:      probe.Transport,
-		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
-	})
+	probe = a.resolveMCPProbeEndpoint(ctx, cfg, connector, probe)
+	decision, unproven := unprovenMCPDefinitionDecision(ctx, cfg, connector, probe)
+	if !unproven {
+		input := config.AssetPolicyInput{
+			TargetType:     "mcp",
+			Name:           probe.ServerName,
+			Connector:      connector,
+			URL:            probe.URL,
+			Command:        probe.Command,
+			Args:           probe.Args,
+			Transport:      probe.Transport,
+			RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
+		}
+		if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
+			return config.AssetPolicyDecision{}, false
+		}
+		decision = cfg.EvaluateAssetPolicy(input)
+	}
 	// when MCP.Default is "deny" and the asset
 	// policy is itself in action mode, an unknown terminal MCP
 	// command MUST NOT be silently downgraded to allow just
@@ -254,7 +440,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	// already covered by the operator's default-deny posture
 	// (i.e. when the asset policy is in observe mode OR
 	// MCP.Default isn't deny).
-	mcpAssetMode, mcpDefaultDeny := assetMCPModeFor(a, decision)
+	mcpAssetMode, mcpDefaultDeny := assetMCPModeFor(cfg, decision)
 	if isUnknownTerminalMCP(probe) &&
 		!assetRuntimeModeIsAction(runtimeDetection.UnknownTerminalMCP) &&
 		decision.RawAction == "block" &&
@@ -283,22 +469,119 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 // this an approved server never matched at runtime and registry-required
 // blocked every MCP tool call (GAP-2488). A server the connector does not
 // list keeps the bare name and matches only name-only rules.
-func (a *APIServer) resolveMCPProbeEndpoint(connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
-	if a == nil || a.scannerCfg == nil || !a.scannerCfg.AssetPolicy.Enabled {
+//
+// The explicit lists apply with asset_policy disabled, so the server is
+// resolved whatever enabled says, and a standalone gateway resolves it in
+// the caller's configuration, not its own service profile: a url rule
+// never matched at the hook of a managed device (GAP-0576). Secure Client
+// keeps main: enabled gates the lookup, which reads the gateway's own home
+// (issue #1092).
+func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
+	if cfg == nil {
+		return probe
+	}
+	secureClient := cfg.SecureClientIntegration()
+	if !cfg.AssetPolicy.Enabled && (secureClient || !mcpListsPinEndpoint(cfg.AssetPolicy.MCP)) {
 		return probe
 	}
 	if probe.Surface != "hook" || probe.URL != "" || probe.Command != "" || probe.ServerName == "" {
 		return probe
 	}
-	entry, ok := a.scannerCfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	var entry config.MCPServerEntry
+	var ok bool
+	if secureClient {
+		entry, ok = cfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
+	} else {
+		entry, ok = a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
+	}
 	if !ok {
 		return probe
+	}
+	if !secureClient && strings.TrimSpace(entry.Name) != "" {
+		// The configured name, not the form the agent's tool name carries
+		// (acme_notes for acme-notes in Codex), is what the lists and the
+		// registry name (GAP-0939).
+		probe.ServerName = strings.TrimSpace(entry.Name)
 	}
 	probe.URL = strings.TrimSpace(entry.URL)
 	probe.Command = strings.TrimSpace(entry.Command)
 	probe.Args = entry.Args
 	probe.Transport = strings.TrimSpace(entry.Transport)
 	return probe
+}
+
+// unprovenMCPDefinitionDecision refuses an MCP tool call whose server the
+// agent loads from a command-line source the standalone hook could not read
+// (claude --mcp-config, codex -c mcp_servers.*) when a rule decides on where
+// a server points: the server the call reaches cannot be proven, so the call
+// fails closed rather than being judged on a config file the agent ignores
+// (GAP-0954). A url, command or transport rule in the denied list applies in
+// every mode; one in the allowed list or the registry decides only under a
+// default deny or registry_required, in asset_policy.mode.
+func unprovenMCPDefinitionDecision(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	unproven := claimedAssetFactsFromContext(ctx).MCPUnproven
+	if unproven == "" || cfg == nil || cfg.SecureClientIntegration() || probe.Surface != "hook" ||
+		!config.SameMCPToolServer(connector, probe.ServerName, unproven) {
+		return config.AssetPolicyDecision{}, false
+	}
+	policy, _ := cfg.EffectiveAssetTypePolicy(connector, "mcp")
+	mode := config.AssetPolicyModeAction
+	if !rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
+		gated := cfg.AssetPolicy.Enabled && (policy.RegistryRequired || strings.EqualFold(strings.TrimSpace(policy.Default), "deny"))
+		if !gated || !(rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName) ||
+			rulesPinEndpointForServer(policy.Registry, connector, probe.ServerName)) {
+			return config.AssetPolicyDecision{}, false
+		}
+		mode = cfg.EffectiveAssetPolicyModeForConnector(connector)
+	}
+	decision := config.AssetPolicyDecision{
+		Enabled: true, Mode: mode, Action: "block", RawAction: "block",
+		Source: "mcp-definition-unproven", RegistryStatus: "unknown",
+		TargetType: "mcp", TargetName: probe.ServerName, Connector: connector, RuntimeSurface: "hook",
+		Reason: fmt.Sprintf("mcp %q: the agent loads its MCP servers from its command line (--mcp-config or -c mcp_servers) "+
+			"and that definition could not be read, so where the server points cannot be checked against asset_policy", probe.ServerName),
+	}
+	if !strings.EqualFold(mode, config.AssetPolicyModeAction) {
+		decision.Action, decision.WouldBlock = "allow", true
+	}
+	return decision, true
+}
+
+// rulesPinEndpoint reports whether a rule matches on where an MCP server
+// points or how it starts.
+func rulesPinEndpoint(rules []config.AssetPolicyRule) bool {
+	for _, rule := range rules {
+		if rule.URL != "" || rule.Command != "" || rule.Transport != "" || len(rule.ArgsPrefix) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// rulesPinEndpointForServer checks only constraints that remain provable when
+// the command-line definition is unavailable. An unrelated name or connector
+// cannot make this call fail closed.
+func rulesPinEndpointForServer(rules []config.AssetPolicyRule, connector, server string) bool {
+	for _, rule := range rules {
+		if rule.Name != "" && !config.SameAssetName(rule.Name, server) &&
+			!config.SameMCPToolServer(connector, rule.Name, server) {
+			continue
+		}
+		if rule.Connector != "" && !config.SameConnector(rule.Connector, connector) {
+			continue
+		}
+		if rulesPinEndpoint([]config.AssetPolicyRule{rule}) {
+			return true
+		}
+	}
+	return false
+}
+
+// mcpListsPinEndpoint reports whether a denied or allowed MCP rule matches
+// on how a server starts (url, command, args_prefix, transport), which a
+// name-only probe needs resolving for.
+func mcpListsPinEndpoint(p config.AssetTypePolicy) bool {
+	return rulesPinEndpoint(p.Denied) || rulesPinEndpoint(p.Allowed)
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
@@ -330,23 +613,65 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 	if probe.RuntimeDisableOnly {
 		return config.AssetPolicyDecision{}, false
 	}
-	if a.scannerCfg == nil {
+	cfg := a.liveConfig()
+	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
-	runtimeDetection, _ := a.scannerCfg.AssetRuntimeDetectionFor(targetType)
-	if !runtimeDetection.Enabled {
-		return config.AssetPolicyDecision{}, false
+	if targetType == "plugin" && !cfg.SecureClientIntegration() {
+		if decision, blocked := a.pluginJournalBlockDecision(probe.SkillName, connector, runtimeSurface); blocked {
+			return decision, true
+		}
+		probe.DeclaredNames = append(probe.DeclaredNames, deniedPluginMarketplaceNames(cfg, probe.SkillName)...)
 	}
-	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
-		return config.AssetPolicyDecision{}, false
+	paths := []string{probe.SourcePath}
+	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
+		paths = probe.SourcePaths
+		if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
+			return decision, true
+		}
+		// A folder of another name that the call loads (its SKILL.md
+		// declares the name) answers to that folder's runtime disable.
+		for _, path := range probe.SourcePaths {
+			if folder := filepath.Base(path); !config.SameAssetName(folder, probe.SkillName) {
+				if decision, disabled := a.runtimeAssetDisableDecision(targetType, folder, connector, runtimeSurface); disabled {
+					return decision, true
+				}
+			}
+		}
 	}
-	decision := a.scannerCfg.EvaluateAssetPolicy(config.AssetPolicyInput{
+	var last config.AssetPolicyDecision
+	for _, path := range paths {
+		decision, applies := runtimeSkillPathDecision(cfg, targetType, connector, runtimeSurface, path, probe)
+		if !applies {
+			continue
+		}
+		if decision.Enabled && decision.RawAction == "block" {
+			return decision, true
+		}
+		last = decision
+	}
+	return last, false
+}
+
+// runtimeSkillPathDecision is the asset_policy decision for one folder a
+// skill call can load (path "" when the call names none). applies is false
+// when the hook does not evaluate asset_policy for it.
+func runtimeSkillPathDecision(
+	cfg *config.Config, targetType, connector, runtimeSurface, path string, probe skillRuntimeProbe,
+) (config.AssetPolicyDecision, bool) {
+	input := config.AssetPolicyInput{
 		TargetType:     targetType,
 		Name:           probe.SkillName,
+		DeclaredNames:  probe.DeclaredNames,
 		Connector:      connector,
-		SourcePath:     probe.SourcePath,
+		SourcePath:     path,
 		RuntimeSurface: runtimeSurface,
-	})
+	}
+	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor(targetType)
+	if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
+		return config.AssetPolicyDecision{}, false
+	}
+	decision := cfg.EvaluateAssetPolicy(input)
 	// a Claude Code agent can pass a crafted
 	// skill_name like "/tmp/attacker/trusted-skill/SKILL.md" and
 	// the previous code stripped it down to the basename
@@ -378,9 +703,6 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		if strings.TrimSpace(decision.Source) == "" {
 			decision.Source = "skill-path-shaped"
 		}
-	}
-	if !decision.Enabled || decision.RawAction != "block" {
-		return decision, false
 	}
 	return decision, true
 }
@@ -439,6 +761,26 @@ func (a *APIServer) evaluateNativeRuntimeSkillSelection(
 	return decision, matched
 }
 
+// runtimeAssetPolicyApplies reports whether a hook evaluates asset_policy
+// for an asset it identified. runtime_detection (enabled, terminal_commands)
+// governs the default, registry and approval rules; an explicit denied entry
+// applies whatever it says, as it does on the install watcher and the policy
+// API (GAP-0566). Secure Client keeps the runtime_detection gate of main for
+// every rule (issue #1092).
+func runtimeAssetPolicyApplies(cfg *config.Config, detection config.AssetRuntimeDetection, surface string, in config.AssetPolicyInput) bool {
+	if cfg == nil {
+		return false
+	}
+	if cfg.SecureClientIntegration() {
+		return detection.Enabled && (surface != "terminal" || detection.TerminalCommands)
+	}
+	if detection.Enabled && (surface != "terminal" || detection.TerminalCommands) {
+		return true
+	}
+	verdict, _ := cfg.AssetListDecision(in)
+	return verdict == config.AssetListDeny
+}
+
 func runtimeSkillAssetTargetType(probe skillRuntimeProbe) string {
 	switch strings.ToLower(strings.TrimSpace(probe.TargetType)) {
 	case "plugin":
@@ -471,6 +813,125 @@ func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, run
 		"runtime-disable"), true
 }
 
+// claudeCodePluginAssetDecision refuses a Claude Code tool call that runs
+// part of a plugin, an MCP tool (mcp__plugin_<plugin>_<server>__<tool>), a
+// skill (Skill "<plugin>:<skill>") or an agent (subagent_type
+// "<plugin>:<agent>"), when the plugin is denied by asset_policy or blocked
+// by admission. Claude Code runs a plugin installed from a local
+// marketplace folder from that folder: quarantining the cache copy did not
+// stop it, and a denied plugin's MCP tool still answered (GAP-1189).
+// Secure Client keeps main (issue #1092).
+func (a *APIServer) claudeCodePluginAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
+	cfg := a.liveConfig()
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return config.AssetPolicyDecision{}, false
+	}
+	for _, plugin := range a.claudeCodeToolPlugins(ctx, req) {
+		probe := skillRuntimeProbe{
+			TargetType: "plugin", SkillName: plugin, ToolName: req.ToolName, Surface: "hook", Matched: true,
+		}
+		if decision, matched := a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, probe); matched {
+			return decision, true
+		}
+	}
+	return config.AssetPolicyDecision{}, false
+}
+
+// claudeCodeToolPlugins obtains MCP plugin ownership from the configured
+// server. An underscore split is only usable when it has one boundary;
+// otherwise plugin and server names cannot be distinguished from the hook.
+func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHookRequest) []string {
+	var out []string
+	add := func(name string) {
+		if name = strings.TrimSpace(name); validNativeSkillSelectionName(name) && !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	server := strings.TrimSpace(req.MCPServerName)
+	if server == "" {
+		server = serverFromMCPToolName(req.ToolName)
+	}
+	if rest, ok := strings.CutPrefix(server, "plugin_"); ok {
+		cfg := a.liveConfig()
+		resolved := false
+		if cfg != nil {
+			if entry, found := a.lookupCallerMCPServer(ctx, cfg, "claudecode", req.CWD, server); found {
+				if pluginServer, ok := strings.CutPrefix(entry.Name, "plugin:"); ok {
+					if plugin, _, ok := strings.Cut(pluginServer, ":"); ok {
+						add(plugin)
+						resolved = true
+					}
+				}
+			}
+		}
+		if !resolved && strings.Count(rest, "_") == 1 {
+			plugin, _, _ := strings.Cut(rest, "_")
+			add(plugin)
+		}
+	}
+	key := ""
+	switch strings.TrimSpace(req.ToolName) {
+	case "Skill":
+		key = "skill"
+	case "Task", "Agent":
+		key = "subagent_type"
+	}
+	if value, _ := req.ToolInput[key].(string); key != "" {
+		if plugin, rest, ok := strings.Cut(strings.TrimPrefix(strings.TrimSpace(value), "/"), ":"); ok && rest != "" {
+			add(plugin)
+		}
+	}
+	return out
+}
+
+// pluginJournalBlockDecision refuses a plugin whose journal entry, under
+// its name or plugin@marketplace as the watcher records a Claude Code
+// marketplace plugin, holds an install block or a runtime disable. The hook
+// sees the plugin name only, and a blocked plugin's files can stay where
+// the agent runs them, so its block is enforced here too (GAP-1189).
+func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface string) (config.AssetPolicyDecision, bool) {
+	if a == nil || a.store == nil || strings.TrimSpace(name) == "" {
+		return config.AssetPolicyDecision{}, false
+	}
+	entries, err := a.store.ListActionsByType("plugin")
+	if err != nil {
+		return runtimeAssetDisableBlockDecision("plugin", name, connector, runtimeSurface,
+			fmt.Sprintf("plugin %q block check failed - failing closed: %v", name, err), "runtime-disable-error"), true
+	}
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Connector) != "" && !config.SameConnector(entry.Connector, connector) {
+			continue
+		}
+		plugin, _, _ := strings.Cut(entry.TargetName, "@")
+		if !config.SameAssetName(plugin, name) && !config.SameAssetName(entry.TargetName, name) {
+			continue
+		}
+		if entry.Actions.Install != "block" && entry.Actions.Runtime != "disable" {
+			continue
+		}
+		reason := fmt.Sprintf("plugin %q is blocked by install admission", entry.TargetName)
+		if detail := strings.TrimSpace(entry.Reason); detail != "" {
+			reason += ": " + detail
+		}
+		return runtimeAssetDisableBlockDecision("plugin", name, connector, runtimeSurface, reason, "install-block"), true
+	}
+	return config.AssetPolicyDecision{}, false
+}
+
+// deniedPluginMarketplaceNames are the plugin@marketplace names of the
+// denied plugin rules for plugin. The hook sees no marketplace, so a deny
+// written as plugin@marketplace refuses the plugin from any of them; these
+// names only ever match denied rules.
+func deniedPluginMarketplaceNames(cfg *config.Config, plugin string) []string {
+	var names []string
+	for _, rule := range cfg.AssetPolicy.Plugin.Denied {
+		if name, _, ok := strings.Cut(rule.Name, "@"); ok && config.SameAssetName(name, plugin) {
+			names = append(names, rule.Name)
+		}
+	}
+	return names
+}
+
 func runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface, reason, source string) config.AssetPolicyDecision {
 	return config.AssetPolicyDecision{
 		Enabled:            true,
@@ -489,10 +950,10 @@ func runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurfac
 	}
 }
 
-func (a *APIServer) runtimeAssetIdentityDecision(targetType, name, connector, runtimeSurface string) config.AssetPolicyDecision {
+func (a *APIServer) runtimeAssetIdentityDecision(ctx context.Context, targetType, name, connector, runtimeSurface string) config.AssetPolicyDecision {
 	mode := config.AssetPolicyModeObserve
-	if a != nil && a.scannerCfg != nil && assetRuntimeModeIsAction(
-		a.scannerCfg.EffectiveAssetPolicyModeForConnector(connector),
+	if cfg := a.decisionConfig(ctx); cfg != nil && assetRuntimeModeIsAction(
+		cfg.EffectiveAssetPolicyModeForConnector(connector),
 	) {
 		mode = config.AssetPolicyModeAction
 	}
@@ -620,18 +1081,18 @@ func isUnknownTerminalMCP(probe mcpRuntimeProbe) bool {
 // the operator's MCP.Default is "deny". Used by to refuse the
 // `unknown_terminal_mcp=observe` downgrade when the operator has
 // already opted into MCP default-deny in action mode.
-func assetMCPModeFor(a *APIServer, decision config.AssetPolicyDecision) (string, bool) {
-	if a == nil || a.scannerCfg == nil {
+func assetMCPModeFor(cfg *config.Config, decision config.AssetPolicyDecision) (string, bool) {
+	if cfg == nil {
 		return decision.Mode, false
 	}
 	// Resolve mode + MCP.Default per-connector (OTHER-7) so a connector with
 	// an override gets its own posture rather than the global one. The
 	// connector travels on the decision (set from AssetPolicyInput.Connector).
-	mode := strings.TrimSpace(a.scannerCfg.EffectiveAssetPolicyModeForConnector(decision.Connector))
+	mode := strings.TrimSpace(cfg.EffectiveAssetPolicyModeForConnector(decision.Connector))
 	if mode == "" {
 		mode = decision.Mode
 	}
-	mcpPolicy, _ := a.scannerCfg.EffectiveAssetTypePolicy(decision.Connector, "mcp")
+	mcpPolicy, _ := cfg.EffectiveAssetTypePolicy(decision.Connector, "mcp")
 	defaultDeny := strings.EqualFold(strings.TrimSpace(mcpPolicy.Default), "deny")
 	return mode, defaultDeny
 }
@@ -706,6 +1167,22 @@ func cursorMCPProbeFromPayload(payload map[string]interface{}, toolName string) 
 		Surface:    "hook",
 		Matched:    true,
 	}
+}
+
+// pluginBundledSkillName is the skill part of a plugin-qualified name
+// (usm-kit:notes, as Claude Code names a skill or command a plugin bundles),
+// or "". A denied skill name matches it, so "skill block notes" stops the
+// plugin's copy as well as a standalone one (GAP-1104). Secure Client keeps
+// main's name match (issue #1092).
+func pluginBundledSkillName(cfg *config.Config, name string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	plugin, skill, namespaced := strings.Cut(strings.TrimPrefix(strings.TrimSpace(name), "/"), ":")
+	if !namespaced || !validNativeSkillSelectionName(plugin) || !validNativeSkillSelectionName(skill) {
+		return ""
+	}
+	return skill
 }
 
 func slashCommandAssetType(commandSource string) string {
@@ -937,6 +1414,54 @@ func skillProbeFromFields(toolName string, toolInput, payload map[string]interfa
 		}
 	}
 	return skillRuntimeProbe{ToolName: toolName}
+}
+
+// nativeSkillLoaderTools are the skill-loading tools of hook connectors
+// whose input names the skill under a plain "name" key, which
+// skillProbeFromFields does not read (an ordinary tool's "name" argument is
+// not a skill). Measured shapes: Amp skill {"name": <skill>} and Hermes
+// skill_view {"name": "<category>:<skill>"} (live audit, GAP-1234); OpenCode
+// skill {"name": <skill>} (its tool/skill.ts); Kiro CLI v3 disclose_context
+// {"name": <skill>} (live capture, kiro-cli 2.26.1 --v3: it loads the skill
+// with no file read, so the folder fallback saw nothing, GAP-1249).
+var nativeSkillLoaderTools = map[string]string{
+	"amp":      "skill",
+	"hermes":   "skill_view",
+	"kiro":     "disclose_context",
+	"opencode": "skill",
+}
+
+// nativeSkillToolProbe recognizes a call of the connector's own skill
+// loader. A qualified "<plugin or category>:<skill>" name is matched as the
+// skill and keeps the qualified form as a declared name, so a denied rule
+// written either way refuses it. An Amp skill on asset_policy.skill.denied
+// was loaded and followed because the probe saw no skill (GAP-1234).
+func nativeSkillToolProbe(connector, toolName string, toolInput map[string]interface{}) skillRuntimeProbe {
+	loader, ok := nativeSkillLoaderTools[strings.ToLower(strings.TrimSpace(connector))]
+	if !ok || !strings.EqualFold(strings.TrimSpace(toolName), loader) {
+		return skillRuntimeProbe{}
+	}
+	raw := firstMapString(toolInput, "name")
+	bare := raw
+	if i := strings.LastIndex(bare, ":"); i >= 0 {
+		bare = bare[i+1:]
+	}
+	name := normalizeSkillRuntimeName(bare)
+	if name == "" {
+		return skillRuntimeProbe{}
+	}
+	probe := skillRuntimeProbe{
+		TargetType: "skill",
+		SkillName:  name,
+		ToolName:   strings.TrimSpace(toolName),
+		RawName:    skillRawNameIfNormalized(raw, name),
+		Surface:    "hook",
+		Matched:    true,
+	}
+	if qualified := normalizeSkillRuntimeName(raw); qualified != "" && !config.SameAssetName(qualified, name) {
+		probe.DeclaredNames = []string{qualified}
+	}
+	return probe
 }
 
 // codexSkillProbeFromPrompt recognizes Codex's native fresh-session skill

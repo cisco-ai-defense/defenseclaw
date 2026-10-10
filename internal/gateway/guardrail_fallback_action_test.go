@@ -16,7 +16,14 @@
 
 package gateway
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
+)
 
 // TestGuardrailFallbackActionForSeverity pins the contract used by
 // every gateway path that doesn't go through the Rego engine:
@@ -25,8 +32,8 @@ import "testing"
 //   - the API server's evaluate endpoint when no engine is wired
 //     (api.go::evaluateGuardrailPolicy)
 //
-// The chain mirrors the canonical Rego defaults
-// (block_threshold=4, alert_threshold=2, see policies/rego/data.json):
+// The chain is the default rule pack's posture (block CRITICAL, alert
+// MEDIUM), the same levels guardrail.rego applies without input.thresholds:
 //
 //	CRITICAL          -> block
 //	HIGH, MEDIUM      -> alert   (HIGH does NOT hard-block here)
@@ -41,11 +48,8 @@ import "testing"
 // posture (a HIGH finding is not block-worthy by itself) while
 // still giving CRITICAL findings the brake they need.
 //
-// If you intentionally change this mapping, also update:
-//   - policies/rego/data.json (block_threshold / alert_threshold)
-//   - the comment block above guardrailFallbackActionForSeverity in
-//     internal/gateway/guardrail.go
-//   - the documentation for `defenseclaw guardrail status`
+// If you intentionally change this mapping, also update the guardrail.rego
+// defaults and the documentation for `defenseclaw guardrail status`.
 func TestGuardrailFallbackActionForSeverity(t *testing.T) {
 	cases := []struct {
 		severity string
@@ -75,6 +79,30 @@ func TestGuardrailFallbackActionForSeverity(t *testing.T) {
 	}
 }
 
+// The evaluate route without a policy_dir applies the thresholds the request
+// carries, as the inspector fallback does; Secure Client keeps the default
+// posture of main.
+func TestEvaluateGuardrailPolicyWithoutPolicyDirUsesTheRequestThresholds(t *testing.T) {
+	input := policy.GuardrailInput{
+		Mode:        "action",
+		LocalResult: &policy.GuardrailScanResult{Severity: "HIGH"},
+		Thresholds:  &policy.ThresholdsInput{Block: severityHigh, Alert: severityMedium, CiscoTrustLevel: "full"},
+	}
+	api := &APIServer{scannerCfg: &config.Config{}}
+	out, err := api.evaluateGuardrailPolicy(context.Background(), input)
+	if err != nil || out.Action != "block" {
+		t.Fatalf("block_at HIGH: action = %v, err = %v; want block", out, err)
+	}
+	api.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
+	if out, err = api.evaluateGuardrailPolicy(context.Background(), input); err != nil || out.Action != "alert" {
+		t.Fatalf("Secure Client: action = %v, err = %v; want the default-posture alert", out, err)
+	}
+}
+
+// defaultFallbackThresholds are the default pack's levels (block CRITICAL,
+// alert MEDIUM).
+var defaultFallbackThresholds = policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium}
+
 // TestFallbackGuardrailVerdict_PreservesScannerMetadata covers the
 // wrapper used to coerce a scanner verdict's action to the canonical
 // fallback chain without losing the rest of the verdict (severity,
@@ -91,7 +119,7 @@ func TestFallbackGuardrailVerdict_PreservesScannerMetadata(t *testing.T) {
 		Scanner:  "regex",
 	}
 
-	out := fallbackGuardrailVerdict(in)
+	out := fallbackGuardrailVerdictForThresholds(in, nil, defaultFallbackThresholds, "action", nil)
 	if out == nil {
 		t.Fatal("fallbackGuardrailVerdict(non-nil) returned nil")
 	}
@@ -126,12 +154,85 @@ func TestFallbackGuardrailVerdict_PreservesScannerMetadata(t *testing.T) {
 // keeps the fallback path safe for call sites that haven't decided
 // whether the scanner produced anything yet.
 func TestFallbackGuardrailVerdict_NilInput(t *testing.T) {
-	out := fallbackGuardrailVerdict(nil)
+	out := fallbackGuardrailVerdictForThresholds(nil, nil, defaultFallbackThresholds, "action", nil)
 	if out == nil {
-		t.Fatal("fallbackGuardrailVerdict(nil) must return a usable allow verdict, not nil")
+		t.Fatal("fallbackGuardrailVerdictForThresholds(nil, defaultFallbackThresholds) must return a usable allow verdict, not nil")
 	}
 	if out.Action != "allow" || out.Severity != "NONE" {
 		t.Errorf("nil verdict should map to allow/NONE; got action=%q severity=%q",
 			out.Action, out.Severity)
+	}
+}
+
+// TestFallbackGuardrailVerdict_FollowsRego pins that guardrail.cisco_trust_level
+// and HILT decide the same without the Rego module as with it
+// (guardrail.rego): a managed standalone host ships no .rego.
+func TestFallbackGuardrailVerdict_FollowsRego(t *testing.T) {
+	none := &ScanVerdict{Action: "allow", Severity: "NONE"}
+	critical := &ScanVerdict{Action: "block", Severity: "CRITICAL"}
+	high := &ScanVerdict{Action: "alert", Severity: "HIGH"}
+	hilt := &policy.GuardrailHILTInput{Enabled: true, MinSeverity: "HIGH"}
+	thresholds := func(trust string) policy.ThresholdsInput {
+		return policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium, CiscoTrustLevel: trust}
+	}
+	for _, tc := range []struct {
+		name         string
+		local, cisco *ScanVerdict
+		trust, mode  string
+		hilt         *policy.GuardrailHILTInput
+		want         string
+	}{
+		{"full trust blocks a Cisco-only critical", none, critical, "full", "action", nil, "block"},
+		{"full trust blocks without a local verdict", nil, critical, "full", "action", nil, "block"},
+		{"advisory downgrades a Cisco-only block", none, critical, "advisory", "action", nil, "alert"},
+		{"advisory keeps a local block", critical, critical, "advisory", "action", nil, "block"},
+		{"none ignores the Cisco verdict", none, critical, "none", "action", nil, "allow"},
+		{"HILT confirms at its minimum severity", high, nil, "full", "action", hilt, "confirm"},
+		{"HILT does not confirm in observe mode", high, nil, "full", "observe", hilt, "alert"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fallbackGuardrailVerdictForThresholds(tc.local, tc.cisco, thresholds(tc.trust), tc.mode, tc.hilt)
+			if got.Action != tc.want {
+				t.Errorf("action = %q, want %q", got.Action, tc.want)
+			}
+		})
+	}
+}
+
+// Secure Client keeps the 1.0 threshold-only answer without Rego (issue #1092).
+func TestFallbackVerdict_SecureClientKeepsThresholdOnlyAnswer(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	previous := liveGeneration.Load()
+	liveGeneration.Store(&Generation{Config: cfg})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+
+	critical := &ScanVerdict{Action: "block", Severity: "CRITICAL"}
+	none := &ScanVerdict{Action: "allow", Severity: "NONE"}
+	inspector := NewGuardrailInspector("local", nil, nil)
+	inspector.SetHILTConfig(true, "HIGH")
+	thresholds := policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium, CiscoTrustLevel: "none"}
+	if got := inspector.fallbackVerdict(context.Background(), none, none, critical, thresholds, "action"); got.Action != "allow" {
+		t.Errorf("Cisco-only critical = %q, want the 1.0 answer allow", got.Action)
+	}
+	high := &ScanVerdict{Action: "alert", Severity: "HIGH"}
+	if got := inspector.fallbackVerdict(context.Background(), high, high, nil, thresholds, "action"); got.Action != "alert" {
+		t.Errorf("HIGH with HILT on = %q, want the 1.0 answer alert", got.Action)
+	}
+}
+
+// A Cisco verdict excluded by the local trust policy cannot supply reported findings.
+func TestFallbackVerdictExcludesUntrustedCiscoMetadata(t *testing.T) {
+	cfg := &config.Config{}
+	previous := liveGeneration.Load()
+	liveGeneration.Store(&Generation{Config: cfg})
+	t.Cleanup(func() { liveGeneration.Store(previous) })
+	local := &ScanVerdict{Action: "allow", Severity: "NONE"}
+	merged := &ScanVerdict{Action: "block", Severity: "CRITICAL", Findings: []string{"cloud-only"}}
+	cisco := &ScanVerdict{Action: "block", Severity: "CRITICAL", Findings: []string{"cloud-only"}}
+	thresholds := policy.ThresholdsInput{Block: severityCritical, Alert: severityMedium, CiscoTrustLevel: "none"}
+	got := NewGuardrailInspector("local", nil, nil).fallbackVerdict(t.Context(), local, merged, cisco, thresholds, "action")
+	if got.Action != "allow" || got.Severity != "NONE" || len(got.Findings) != 0 {
+		t.Fatalf("untrusted Cisco result leaked into fallback: %+v", got)
 	}
 }

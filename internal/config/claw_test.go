@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -310,6 +311,52 @@ func TestKiroWatchDirsDoNotFallBackToOpenClaw(t *testing.T) {
 	}
 }
 
+func TestReadMCPServersKiroKeepsUserAndWorkspaceScopes(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "project")
+	userPath := filepath.Join(home, ".kiro", "settings", "mcp.json")
+	projectPath := filepath.Join(workspace, ".kiro", "settings", "mcp.json")
+	for path, body := range map[string]string{
+		userPath:    `{"mcpServers":{"shared":{"command":"user-server"},"global":{"url":"https://example.test/mcp"}}}`,
+		projectPath: `{"mcpServers":{"shared":{"command":"project-server"}}}`,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = workspace
+	entries, err := cfg.ReadMCPServersForConnector("kiro")
+	if err != nil || len(entries) != 3 {
+		t.Fatalf("Kiro entries = %+v, err = %v; want both scopes and same-name entries", entries, err)
+	}
+	var project, user, global bool
+	for _, entry := range entries {
+		switch {
+		case entry.Name == "shared" && entry.SourceScope == "project":
+			project = entry.Source == projectPath && entry.Project == workspace && entry.Command == "project-server"
+		case entry.Name == "shared" && entry.SourceScope == "user":
+			user = entry.Source == userPath && entry.Project == "" && entry.Command == "user-server"
+		case entry.Name == "global" && entry.SourceScope == "user":
+			global = entry.URL == "https://example.test/mcp"
+		}
+	}
+	if !project || !user || !global {
+		t.Fatalf("Kiro scope provenance = %+v", entries)
+	}
+	if managed := ReadUserMCPServersForHome("kiro", home); len(managed) != 2 || managed[0].Connector != "kiro" {
+		t.Fatalf("managed Kiro user entries = %+v", managed)
+	}
+	cfg.Claw.WorkspaceDir = home
+	if entries, err := cfg.ReadMCPServersForConnector("kiro"); err != nil || len(entries) != 2 {
+		t.Fatalf("home workspace duplicate = %+v, err = %v", entries, err)
+	}
+}
+
 func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "foo")
 	cfg := &Config{}
@@ -484,6 +531,32 @@ func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
 	}
 	if hasMCPEntry(entries, "daemon-cwd") {
 		t.Fatalf("entries = %+v, should not read daemon cwd MCP server", entries)
+	}
+}
+
+func TestClaudeStateMCPServersIncludesProjectsAfterFirst512(t *testing.T) {
+	root := t.TempDir()
+	projects := make(map[string]any)
+	for i := 0; i < 512; i++ {
+		projects[filepath.Join(root, fmt.Sprintf("a%03d", i))] = map[string]any{}
+	}
+	active := filepath.Join(root, "z-active")
+	projects[active] = map[string]any{}
+	data, err := json.Marshal(map[string]any{"projects": projects})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ClaudeStateMCPServers(data, func(project string) ([]byte, error) {
+		if project == active {
+			return []byte(`{"mcpServers":{"active":{"command":"echo"}}}`), nil
+		}
+		return nil, os.ErrNotExist
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "active" || entries[0].Project != active {
+		t.Fatalf("active project MCP server missing: %+v", entries)
 	}
 }
 

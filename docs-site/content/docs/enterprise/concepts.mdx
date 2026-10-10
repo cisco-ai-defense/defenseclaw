@@ -67,7 +67,10 @@ The one action an MDM needs to run. It installs when nothing is installed. When
 the payload, the config, the secrets (Linux and macOS), or any file or service
 differs from what should be there, it applies the change. When everything matches, it changes
 nothing and exits `0`. Windows `ensure` refuses to replace a newer installed
-version with an older one.
+version with an older one. It also migrates a `config_version: 8` config to
+version 9 and records the result as a new
+[config generation](#config-generation); see
+[What `ensure` does with the config](/docs/enterprise/lifecycle#what-ensure-does-with-the-config).
 
 ### Transaction and rollback
 
@@ -112,6 +115,84 @@ SHA-256 you pass it.
 must carry a valid Authenticode signature. You can also require specific
 signers by their SHA-256 certificate thumbprints. It is the default of
 `defenseclaw.exe enterprise windows`.
+
+## Policy and config
+
+### Admin config
+
+The `config.yaml` that an administrator or an MDM installs, with the policy
+assets it names by digest (custom rule packs, for example). It is the only
+policy a managed host enforces. Everything else a host holds is
+[derived](#derived-evidence-and-runtime-state), evidence, or runtime state.
+See [Configure a standalone deployment](/docs/enterprise/configuration).
+
+### Derived, evidence and runtime state
+
+DefenseClaw sorts the files and records on a host into four kinds. The model
+is the same on every install; see
+[Configuration: one source of truth](/docs/reference/source-of-truth) for the
+per-user view.
+
+| Kind | Examples | Rule |
+| --- | --- | --- |
+| Admin intent | `config.yaml`, the policy assets it names | Written only by the administrator's tools: the lifecycle on a managed host |
+| Derived | Service definitions, the runtime descriptor, machine-policy entries, per-user hook scripts | Regenerated from the config by `ensure`, `repair` or the guardian. Never read back, never edited by hand |
+| Evidence | `config.generation.json`, `migration-v9.json`, `config.yaml.v8.bak`, `policy-state.json`, `committed-config.yaml`, `rejected-config.yaml`, the audit database | Records of what was applied or decided. They never change policy |
+| Runtime state | The enforcement journal for quarantine and runtime disable, approvals, discovery results | Reported, never policy |
+
+### Config writer
+
+The one code path that writes `config.yaml`, in Go and in the `defenseclaw`
+CLI. It takes the lock `config.yaml.lock`, validates the new bytes before
+writing, writes them atomically and records the write in
+`config.generation.json` with an actor (`lifecycle`, `migration`, or a
+`cli:`, `tui:` or `api:` user). On a managed standalone host it refuses every
+actor but `lifecycle` and `migration`, which is why `defenseclaw config set`
+and the other local writers exit `3` there. Under the Secure Client profile it
+does not refuse. See
+[Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
+
+### Config generation
+
+A counter in `config.generation.json`, next to `config.yaml`, that the config
+writer increases on every write. The file also holds the SHA-256 of the
+written bytes, the actor, a short reason and the time. If the file does not
+record the current bytes, the config was edited outside the writer.
+
+### Effective policy digest
+
+`sha256:` and the hash of the canonical config and the policy assets it names.
+The gateway stamps it on `/health` and `/status` and on its decision events;
+the lifecycle reports it as `policy.effective_digest` with the
+[config generation](#config-generation) and whether the running gateway
+reports the same value (`policy.applied`). Hosts of one OS that run the same
+config and assets should report the same digest. See
+[Effective policy digest and config generation](/docs/enterprise/operations#effective-policy-digest-and-config-generation).
+
+### Committed config and rejected config
+
+`committed-config.yaml` is a root-only copy of the last config a lifecycle
+transaction applied, kept in the lifecycle directory. When a run rejects an
+in-place edit of `config.yaml`, the lifecycle puts the committed copy back and
+keeps the edit as `rejected-config.yaml`. See
+[Edits made on the host](/docs/enterprise/lifecycle#edits-made-on-the-host).
+
+### Managed environment policy
+
+On a managed standalone host the admin config is the policy, so a user's
+environment cannot weaken it. Every `DEFENSECLAW_*` variable in the registry
+(`internal/envvars/registry.json`) has a `managed` setting: `allow` (read as
+set), `ignore` (read as unset, from the process environment and from `.env`)
+or `tighten_only` (honored only when it makes the setting stricter). See
+[Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host).
+
+### Release trust root
+
+The identity that signs every release: the Release workflow of the
+DefenseClaw repository on `main`. It is compiled into the installers and the
+upgrade command. A mirror set in `update.source` changes only where the
+bytes come from, never who must have signed them. See
+[Where releases come from](/docs/enterprise/rollout#where-releases-come-from).
 
 ## Services
 

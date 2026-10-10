@@ -1004,3 +1004,4 @@ class IDEPluginsTests(unittest.TestCase):
             result = runner.invoke(cmd_agent.agent, ["ide-plugins"], obj=_make_ctx())
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn("ide_inventory: off", result.output)
+            self.assertIn("defenseclaw config set ai_discovery.ide_inventory all", result.output)

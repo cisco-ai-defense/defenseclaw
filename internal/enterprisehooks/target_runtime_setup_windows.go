@@ -746,6 +746,96 @@ func resolveWindowsManagedRuntimeTarget(userHome, rawSID, rawDataDir string) (wi
 	return windowsManagedRuntimeTarget{home: home, data: dataDir, sid: target}, nil
 }
 
+// PreflightWindowsManagedRuntimeRoots inspects, without changing anything,
+// the .defenseclaw folder of every enabled manifest target the way the
+// standalone install plan does, and returns the refusal the plan would
+// return for the first folder it would not take: one DefenseClaw did not
+// create, such as the data folder a per-user install left. The install
+// found it only after minutes of work, and a run that got further committed
+// and then failed on it (GAP-0741). A folder the plan takes over (one a
+// standalone purge kept, or one the account created itself before
+// enrollment) passes.
+func PreflightWindowsManagedRuntimeRoots(manifest Manifest) error {
+	if err := windowsManagedRuntimeSetupAuthorize(); err != nil {
+		return err
+	}
+	targets, err := resolveWindowsManagedRuntimeTargets(manifest)
+	if err != nil {
+		return err
+	}
+	return windowsManagedRuntimeSetupPrivilege(func() error {
+		for _, target := range targets {
+			if err := inspectWindowsManagedRuntimeRoot(target); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// inspectWindowsManagedRuntimeRoot is the read-only half of
+// planWindowsManagedRuntimeRoot for a standalone install plan.
+func inspectWindowsManagedRuntimeRoot(target windowsManagedRuntimeTarget) error {
+	parent, err := openWindowsManagedRuntimeProfile(target)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(parent)
+	final, err := openWindowsManagedRuntimeChild(parent, ".defenseclaw", windowsManagedRuntimeFinalReadAccess(), false)
+	if windowsManagedRuntimeRootMissing(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect managed runtime baseline: %w", err)
+	}
+	defer windows.CloseHandle(final)
+	// The data folder of a per-user 1.0 install carries the same private
+	// DACL as a managed one, so the DACL checks below took it over and the
+	// first install enrolled the account (GAP-1047); what it holds tells it
+	// apart.
+	if leftover := windowsPerUserInstallLeftover(target.data); leftover != "" {
+		return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %s holds %s, which a per-user DefenseClaw install leaves", target.data, leftover)
+	}
+	err = validateWindowsTargetOwnedDirectoryHandle(final, target.data, target.sid)
+	if err == nil || windowsManagedRuntimePurgeKeptAdoptable(final, target) || windowsManagedRuntimeAccountCreatedBaseline(final, target) {
+		return nil
+	}
+	return fmt.Errorf("enterprise hooks: reject noncanonical managed runtime baseline: %w", err)
+}
+
+// windowsPerUserInstallLeftovers are the entries a per-user DefenseClaw
+// install keeps in %USERPROFILE%\.defenseclaw (its config, audit database,
+// Python environment and installer state) and the managed runtime never
+// writes there.
+var windowsPerUserInstallLeftovers = []string{"config.yaml", "audit.db", ".venv", "installer"}
+
+// windowsPerUserInstallLeftover names the first per-user install entry in
+// dataDir, or "".
+func windowsPerUserInstallLeftover(dataDir string) string {
+	for _, name := range windowsPerUserInstallLeftovers {
+		if _, err := os.Lstat(filepath.Join(dataDir, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// windowsManagedRuntimePurgeKeptAdoptable reports the folder shape
+// adoptWindowsManagedRuntimePurgeKeptRoot takes over: owned by the target
+// account, with the owner-private DACL a standalone purge leaves.
+func windowsManagedRuntimePurgeKeptAdoptable(final windows.Handle, target windowsManagedRuntimeTarget) bool {
+	descriptor, err := windows.GetSecurityInfo(final, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil || !owner.Equals(target.sid) {
+		return false
+	}
+	relaxed, err := windowsSetupRelaxedDirectoryDACL(descriptor)
+	return err == nil && relaxed
+}
+
 // windowsManagedRuntimeAccountCreatedBaseline reports whether the opened
 // data directory is one the account created itself before enrollment
 // (windowsAccountCreatedDataDir), which the guardian adopts at enrollment.

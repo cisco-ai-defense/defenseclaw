@@ -26,7 +26,8 @@ func TestLoadRegistriesFromYAML(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", tmpDir)
 
 	configFile := filepath.Join(tmpDir, DefaultConfigName)
-	data := []byte(`registries:
+	data := []byte(`config_version: 9
+registries:
   sources:
     - id: corp-skills
       kind: http_yaml
@@ -34,7 +35,6 @@ func TestLoadRegistriesFromYAML(t *testing.T) {
       content: skill
       auth_env: DEFENSECLAW_REGISTRY_TOKEN
       enabled: true
-      sync_interval_hours: 12
     - id: smithery-public
       kind: smithery
       content: mcp
@@ -44,7 +44,7 @@ func TestLoadRegistriesFromYAML(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -71,9 +71,6 @@ func TestLoadRegistriesFromYAML(t *testing.T) {
 	if !first.Enabled {
 		t.Error("Sources[0].Enabled should be true")
 	}
-	if first.SyncIntervalHours != 12 {
-		t.Errorf("Sources[0].SyncIntervalHours = %d, want 12", first.SyncIntervalHours)
-	}
 
 	second := cfg.Registries.Sources[1]
 	if second.ID != "smithery-public" {
@@ -93,14 +90,13 @@ func TestLoadRegistriesFromYAML(t *testing.T) {
 func TestLoadEmptyRegistriesIsZeroValue(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", tmpDir)
+	if err := os.WriteFile(ConfigPath(), []byte("config_version: 9\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
-	cfg, err := Load()
+	cfg, err := LoadFromFile(ConfigPath())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Registries.Sources == nil {
-		// Sources is allowed to be nil OR an empty slice — both are
-		// "no registries configured". Just assert len.
 	}
 	if got := len(cfg.Registries.Sources); got != 0 {
 		t.Fatalf("expected zero registry sources, got %d", got)

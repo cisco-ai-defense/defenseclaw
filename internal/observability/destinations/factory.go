@@ -228,6 +228,19 @@ func (factory *Factory) PrepareDestination(
 			Compress: rotation.Compress, FailOnOpenError: factory.secureClient,
 		})
 		if err != nil {
+			// Secure Client keeps the origin/main startup refusal without
+			// this line (GAP-1018).
+			if !nilInterface(factory.stderr) && !factory.secureClient {
+				// The destination, the path and the rule: start failed with
+				// only runtime_unavailable (GAP-0890).
+				reason := local.JSONLPathProblem(destination.Transport.Path)
+				if reason == "" {
+					reason = "cannot be opened safely: the file or its folder belongs to an account the gateway does not trust, or the folder cannot be created"
+				}
+				_, _ = fmt.Fprintf(factory.stderr,
+					"defenseclaw: observability destination %q: %s %s; fix the path or remove the destination\n",
+					destination.Name, destination.Transport.Path, reason)
+			}
 			return nil, cleanup, newError(ErrorAdapterPrepare)
 		}
 		if adapter.OpenDeferred() && !nilInterface(factory.stderr) {
@@ -284,8 +297,9 @@ func (factory *Factory) prepareManagedAID(
 			SchemaURL: resourceContext.SchemaURL(), Values: resourceContext.Values(),
 			DroppedAttributesCount: resourceContext.ResourceDroppedAttributesCount(),
 		},
-		Network:  push.NetworkOptions{Resolver: factory.resolver, Dialer: factory.dialer},
-		Warnings: factory.warnings,
+		DeploymentAliases: config.ObservabilityV8ManagedAIDDeploymentAliases(destination),
+		Network:           push.NetworkOptions{Resolver: factory.resolver, Dialer: factory.dialer},
+		Warnings:          factory.warnings,
 	}, factory.managedProvider)
 	if err != nil {
 		return nil, noResource, newError(ErrorAdapterPrepare)

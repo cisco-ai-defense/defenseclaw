@@ -112,6 +112,12 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # splitting trips the regex. The values are explained in the
     # registry-backed env-vars page.
     "docs-site/content/docs/reference/fail-modes.mdx",
+    # The 1.0.0 release notes, and the test that checks them, name the 0.8.x
+    # environment variable 1.0 removed (DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE)
+    # to tell operators what replaces it. They document a removal; nothing
+    # reads the name.
+    "CHANGELOG.md",
+    "cli/tests/test_cmd_config.py",
     # Test fixtures that use synthetic env-var names as labels for
     # --auth-env / --token-env flags. The labels are example operator
     # configuration, not env vars DefenseClaw itself reads.
@@ -212,8 +218,6 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
         {
             "cli/defenseclaw/observability/v8_migration.py",
             "docs-site/content/docs/observability/index.mdx",
-            "internal/config/config.go",
-            "internal/config/config_test.go",
         }
     ),
     "DEFENSECLAW_TEST_LLM_KEY_": frozenset({"internal/gateway/passthrough_hydration_test.go"}),
@@ -325,6 +329,26 @@ class CodebaseCoverageTests(unittest.TestCase):
             "than reading them.",
         ]
         self.fail("\n".join(msg_lines))
+
+    def test_managed_ignored_opt_outs_are_read_through_lookup(self) -> None:
+        """A variable a managed device ignores (security opt-outs, debug,
+        telemetry, discovery, ...) is read with ``envvars.lookup``, so the
+        managed-mode policy applies to it. The deployment pins (runtime_path)
+        decide managed mode, and test fixtures only steer tests."""
+        names = [
+            re.escape(e.name)
+            for e in self.registry.entries
+            if e.managed == "ignore" and e.category not in ("runtime_path", "test_fixture")
+        ]
+        direct = re.compile(r'os\.(?:environ\.get|getenv)\(\s*"(?:' + "|".join(names) + r')"')
+        offenders = []
+        for path in (_REPO_ROOT / "cli" / "defenseclaw").rglob("*.py"):
+            rel = path.relative_to(_REPO_ROOT).as_posix()
+            if rel.endswith("observability/v8_migration.py") or "/_data/" in rel:
+                continue  # the 0.x migration reads the retired values once; _data runs outside DefenseClaw
+            if direct.search(path.read_text(encoding="utf-8", errors="replace")):
+                offenders.append(rel)
+        self.assertEqual(offenders, [], "read these variables with defenseclaw.envvars.lookup")
 
     def test_test_only_entries_are_explicitly_scoped(self) -> None:
         expected = {

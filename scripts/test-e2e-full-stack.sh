@@ -2818,7 +2818,7 @@ phase_guardrail() {
     echo "=== Phase 6: Guardrail Proxy [API] ==="
     phase_timer_start
 
-    if ! wait_for_url "$GUARDRAIL_URL/health/liveliness" 10 2; then
+    if ! wait_for_url "$GUARDRAIL_URL/health" 10 2; then
         skip_or_fail "$E2E_REQUIRE_GUARDRAIL" "guardrail proxy" "not reachable on port 4000"
         phase_timer_end "Phase 6"
         return
@@ -2965,7 +2965,7 @@ phase_provider_detection() {
     gateway_token="$(get_gateway_token)"
 
     # Guardrail proxy must be running for these tests.
-    if ! wait_for_url "$GUARDRAIL_URL/health/liveliness" 5 1; then
+    if ! wait_for_url "$GUARDRAIL_URL/health" 5 1; then
         skip "provider detection" "guardrail proxy not reachable"
         phase_timer_end "Phase 6B"
         return

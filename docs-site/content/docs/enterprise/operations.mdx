@@ -26,7 +26,7 @@ Two lifecycle actions report on a deployment. Neither one changes the host.
 | Action | What it does | Use it for |
 | --- | --- | --- |
 | `status` | Reports the recorded state: installed version, services, readiness, machine policy, and enrollment counts. On Linux and macOS it also runs the basic checks (files, services, gateway health); each problem is an error, and the command exits non-zero | Inventory and dashboards |
-| `verify` | Runs every check. On Linux and macOS: file digests, owners and modes, the config and credentials against what was last applied, the runtime descriptor, the service account, required services, gateway health, and the guardian's authorization ledger. On Windows: files, DACLs, service settings, the mode pin, and readiness. Each problem is an error, and the command exits non-zero | Compliance and alerting |
+| `verify` | Runs every check. On Linux and macOS: file digests, owners and modes (also of the gateway and hook guardian state files), the config and credentials against what was last applied, the runtime descriptor, the service account, required services, gateway health, and the guardian's authorization ledger. On Windows: files, DACLs, service settings, the mode pin, and readiness. Each problem is an error, and the command exits non-zero | Compliance and alerting |
 
 ```bash title="Linux"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
@@ -103,7 +103,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --co
 | --- | --- |
 | `status` | The gateway's health, its subsystems, and its connectors and their modes |
 | `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment` |
-| `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output (it refuses to replace an existing file unless you pass `--force`, and reports how many lines it wrote) |
+| `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent ones. `--connector` keeps one agent's rows, and `--output` writes a file instead of standard output (it refuses to replace an existing file unless you pass `--force`, and reports how many lines it wrote). An administrator can use `--db <copied-audit.db>` to read a retained database copy read-only after decommission; keep its WAL and SHM companions with it. |
 | `audit findings` | The distinct scan findings that are current: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions (hook rules, the LLM guardrail) are not tracked here; use `alerts` or `audit export` for them |
 
 On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
@@ -139,7 +139,7 @@ The MDM wrapper scripts print the same document.
 | `ok` | `true` only when `errors` is empty |
 | `exit_code` | The process exit code |
 | `installed`, `installed_version` | Whether a deployment is recorded, and its version |
-| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first. On Linux and macOS the scheduled `verify` also starts the apply trigger, which rolls it back and starts the stopped services again; the verify job stays loaded while a run applies. On Windows, see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction) |
+| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first, by rolling back to the last committed deployment; to apply the config the interrupted run was applying, run `ensure --config <file>` again. On Linux and macOS `status` and `verify` name the interrupted action, its start time and phase instead of reporting its half-written files as edits. The scheduled `verify` also starts the apply trigger, which rolls it back and starts the stopped services again; the verify job stays loaded while a run applies. On Windows, see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction) |
 | `services[]` | Each managed service or unit, with its state |
 | `readiness` | `gateway`, `guardian`, `enumerator`, `sensor_helper`: each `true` when that component is ready |
 | `coverage_complete` | The core services are ready (definition per OS below) |
@@ -147,6 +147,7 @@ The MDM wrapper scripts print the same document.
 | `machine_policy.<connector>` | `ownership`, `lock`, `effective_lock`, `owned_entries`, `foreign_entries`, and any `higher_precedence` sources or `conflicts` |
 | `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table); on Windows standalone also `accounts`: each enrolled account (`account`, `sid`) with each connector's state from the guardian's last reconcile (`enrolled`, `pending` or `failed`), which status and verify also print one line per account |
 | `inspection` | `local` and `ai_defense` (see the note below the next table) |
+| `policy` | The effective policy the host runs. `effective_digest` and `config_generation` say which config, `applied` says whether the running gateway reports it. Omitted when the lifecycle cannot compute it. See [Effective policy digest](#effective-policy-digest-and-config-generation) |
 | `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/enterprise/troubleshooting) |
 | `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the account running the command can identify it |
 | `destinations[]` | `status` only: each observability destination the installed `config.yaml` compiles to, with its `name`, `kind`, `enabled`, `preset`, `signals` and `redaction_profiles` (the effective profiles of its send routes, from the same compiler as `defenseclaw observability plan`). The human `status` prints one line per destination |
@@ -178,6 +179,12 @@ A healthy `status` from a Linux host, trimmed to two of its eleven
   "coverage_complete": true,
   "security_complete": true,
   "errors": [],
+  "policy": {
+    "effective_digest": "sha256:7b38f1df3862914135b0f9e70f9e679793a35e53018b115784002d9c55b8fce2",
+    "config_generation": 3,
+    "applied": true,
+    "gateway_reported_digest": "sha256:7b38f1df3862914135b0f9e70f9e679793a35e53018b115784002d9c55b8fce2"
+  },
   "exit_code": 0
 }
 ```
@@ -239,7 +246,9 @@ The two summary fields are computed differently on each OS:
 | `verify` exit code | Not `0` |
 | `coverage_complete` | `false` |
 | `security_complete` | `false` for longer than one enumerator cycle. On Windows with Claude Code enabled, it stays `false` until you complete the Claude Code attestation, so every such host alerts until then |
-| `warnings[].code` | `machine_policy_incomplete` (Linux and macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected` and `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux and macOS): the config you pushed is not the one running. `verify` reports each as an error, except `agent_unprotected` and `hook_contract_unverified`, which stay warnings for that account |
+| `warnings[].code` | `machine_policy_incomplete` (Linux and macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected` and `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux and macOS): the config you pushed is not the one running. `policy_not_applied` (changing actions only, not `verify`): the gateway reports another effective policy than the installed config computes to. `policy_reload_rejected`: the gateway rejected its last policy reload and keeps enforcing the previous policy; the message gives its reason. On Windows also `policy_not_buildable` (the installed config and its assets no longer build into a policy) and `config_edited_outside_lifecycle` (see [Troubleshooting](/docs/enterprise/troubleshooting)). These policy warnings leave the `verify` exit code at `0`; alert on `warnings[].code` directly |
+| `policy.applied` | `false` for more than one reload (Linux and macOS). `status` and `verify` report it but do not fail on it, so alert on the field |
+| `policy.effective_digest` | Differs between hosts of one OS that received the same config |
 | `machine_policy.<connector>.conflicts` or `.higher_precedence` | Not empty |
 | `enrollment.failed` | Greater than `0` (Linux and macOS) |
 | `transaction_pending` | `true` on two runs in a row |
@@ -251,6 +260,165 @@ managed hooks. After that check, run `repair` with
 `--attest-claude-effective-policy`. A later change to the Claude Code policy
 or the hook binary makes the attestation stale, and `security_complete`
 returns to `false`.
+
+## Effective policy digest and config generation
+
+The administrator config, with the policy assets it names, is the only
+policy a host enforces. To prove that a host runs the config you pushed,
+compare digests instead of files. Two numbers identify it:
+
+- The **config generation** counts the writes to `config.yaml`. The single
+  config writer bumps it and records the write in `config.generation.json`
+  next to the config: `generation`, `config_sha256`, `actor`, `reason` and
+  `written_at`. On a managed host only the lifecycle (actor `lifecycle`) and a
+  migration (actor `migration`) write; an `ensure` that changes the config, or
+  finds that no generation records its bytes, writes the next generation.
+- The **effective policy digest** is `sha256:` and the hash of the canonical
+  config and the policy assets it names (rule packs, Rego modules, signature
+  packs, scanner policies). Secret values and the `ai_discovery.home_dirs`
+  list the enumerator fills in are left out, and a path under `data_dir` is
+  written as `${data_dir}`. The gateway computes it every time it builds a
+  new policy generation and stamps it on `/health` and `/status`
+  (`policy.effective_digest`) and on its decision events.
+
+On every OS every lifecycle result (`status`, `verify`, `ensure` and the other
+actions) carries both in the `policy` object:
+
+| Field | Meaning |
+| --- | --- |
+| `effective_digest` | The digest the installed config computes to. The lifecycle runs the installed gateway binary's `policy digest` with the service environment, so the binary the gateway runs computes it from the config and assets it loads |
+| `config_generation` | The generation recorded in `config.generation.json`. `0` means none recorded |
+| `applied` | `true` when the running gateway reports the same digest on `/health` and has no `policy.last_reload_error` |
+| `gateway_reported_digest` | The digest `/health` reported. Omitted when the gateway did not answer |
+| `last_reload_error` | `policy.last_reload_error` from `/health`: why the gateway rejected its last reload. Omitted when there is none |
+| `config_unrecorded` | `true` when `config.yaml` was changed outside the lifecycle: `config.generation.json` does not record it, and the running gateway may already enforce it. Omitted otherwise |
+
+```json title="policy (a healthy host)"
+"policy": {
+  "effective_digest": "sha256:7b38f1df3862914135b0f9e70f9e679793a35e53018b115784002d9c55b8fce2",
+  "config_generation": 3,
+  "applied": true,
+  "gateway_reported_digest": "sha256:7b38f1df3862914135b0f9e70f9e679793a35e53018b115784002d9c55b8fce2"
+}
+```
+
+The digests above are examples. The schema is
+`#/$defs/policyState` in
+[`lifecycle-result.schema.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/packaging/mdm/contract/lifecycle-result.schema.json).
+The human output of `status` and `verify` prints the readiness line, the
+inspection line and the services, not the digest; use `--json` and read the
+`policy` object (for example with `jq .policy`):
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+```
+
+Run it as root; a standard account gets `not_root` and no `policy`.
+
+What the lifecycle does with it:
+
+- **`status` and `verify` report; they do not fail.** `applied: false` means
+  the gateway runs another policy than the config on disk computes to, for
+  example because it rejected the change (`policy.last_reload_error` in its
+  `/health`) or has not reloaded yet. A rejected reload also adds the warning
+  `policy_reload_rejected` with the gateway's reason to every action,
+  `status` and `verify` included, and the field `last_reload_error`. The
+  gateway clears it when a later reload succeeds, for example once an edited
+  rule pack is restored. Alert on the field ([What to alert on](#what-to-alert-on)).
+- **Changing actions warn and record.** After `install`, `upgrade`, `repair`
+  or `ensure`, when the gateway is ready, a different gateway digest adds the
+  warning `policy_not_applied` ("the gateway reports effective policy
+  `sha256:...` but the installed config computes to `sha256:...`; it applies
+  the config on its next reload"). When the digests match, the lifecycle
+  writes `policy-state.json` (`effective_digest`, `config_generation`,
+  `applied_at`, root-only) next to `deployment.json`: `/var/lib/defenseclaw-enterprise`
+  on Linux, `/opt/cisco/defenseclaw/lifecycle` on macOS. It stands in for the
+  digest when the installed gateway binary cannot compute it (an earlier
+  release). `deployment.json` itself is not extended, because an earlier
+  release decodes it strictly and must still read it after a rollback.
+- **Windows.** The Windows lifecycle migrates a `config_version: 8` config and
+  records the generation as actor `lifecycle`. Its `status`, `verify` and
+  `ensure` results carry the same `policy` object, and a changing action that
+  applied the policy writes `policy-state.json` next to `deployment.json` in
+  `C:\ProgramData\Cisco\DefenseClaw\install` with the same access control. You can also
+  read the digest with `enterprise policy show`, which prints a line such as
+  `Effective policy sha256:7b38f1df3862, config generation 3` (and adds `policy`
+  to `--json`), as in [Machine policy status](#machine-policy-status).
+- **Warnings on every action.** `policy_reload_rejected` says the gateway rejected
+  the last policy change (a rule pack edited away from its pinned digest, for
+  example) and keeps enforcing an earlier one. `policy_not_buildable` says the
+  installed config and its assets no longer build into a policy; the gateway
+  keeps enforcing the earlier one. `config_edited_outside_lifecycle` says
+  `config.yaml` was changed by hand; run `ensure` with the intended config to
+  put the managed config back. On Windows that `ensure` keeps the edited file
+  as `rejected-config.yaml` next to `config.yaml` (administrators only) and
+  warns `config_reverted`. None of them changes `ok`.
+- **Secure Client.** Nothing changes under the Secure Client profile: the
+  gateway omits `policy` from `/health` and `/status`, and the lifecycle result
+  has no `policy` object.
+
+The gateway reports the same digest, with its own policy generation, on
+`/health` and `/status`. This is the `policy` object of a test home:
+
+```json title="/health (policy)"
+"policy": {
+  "effective_digest": "sha256:77ef51dce35bdc753cf9417609695b6e9eee40c83f551274104d0b08e7281f6a",
+  "generation": 1,
+  "config_generation": 7,
+  "config_generation_recorded": true,
+  "built_at": "2026-10-06T18:32:07Z",
+  "component_count": 6
+}
+```
+
+`generation` counts the policies this gateway process has built, so it restarts
+at 1 with the process; `config_generation` is the counter in
+`config.generation.json`. `component_count` is the number of inputs the digest
+covers; `policy digest` (below) lists each input with its own digest.
+`config_generation_recorded: false` means the file was edited and no writer
+recorded it. A change that does not build adds
+`last_reload_error` and leaves the previous generation in force.
+
+The same digest is available without the lifecycle, as root on the host:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway policy digest
+```
+
+```text
+Effective policy: sha256:bf9017898a4816b6199c92a10cf289d2559397bfa9f579e150a65f0e91e5d172
+Config generation: 2
+  builtin                          sha256:31191aec6bcc38a8d63e718a5a6cf9c3bce38229b275f0cf408239901350c6e1
+  config                           sha256:9b0c6e11839fec0fcbcc337777ce4c7272e0625431d46e2336b2a1cae60ff77c
+  guardrail_policy                 sha256:9586a9559a2578251671e8b3b62b0cffc39d2afacab0a389317b7dd8cebc160b
+  providers                        sha256:a23435dc7a50229547fe0cecb4a3c24f5127a2ec8277a498032ef8bff4490dcb
+  rego                             sha256:1394e701de498838fa07251f7d5d3c858ed6ce44dcc164536fd13dc58d2a38b3
+  rule_pack:global                 sha256:46ece6be297f9c9b221524923b4baf2035c810503ddfa1b83a1024ee3c55c6e0
+```
+
+That output is from a per-user test home, not from a managed host; a managed
+host prints its own digests and component lines. The component lines
+say which part changed when two digests differ. When `config.yaml` was
+edited and no writer recorded it, the second line reads
+`Config generation: 3, but config.yaml changed outside the DefenseClaw writer since`.
+On a managed host a lifecycle run records an administrator's in-place edit
+as the next generation, so the line clears once the apply trigger has run.
+
+**Compare a fleet by digest.** Collect `policy.effective_digest` from each
+host's `status --json` (or from the `policy` object of your MDM wrapper's
+result) and group by value. Hosts of one OS that run the same release and
+received the same admin config and policy assets should report the same
+digest: the layout fixes their paths, and a path under `data_dir` is
+rewritten before hashing. A host with another digest has another config or
+other assets, or has not applied the change yet; its `config_generation`,
+`applied` and `gateway_reported_digest` say which, and the component lines of
+`policy digest` on that host and on a reference host say which part differs.
+Do not compare Linux with macOS: the config names different paths on each OS,
+so the digests differ for the same intent.
 
 ## Machine policy status
 
@@ -279,6 +447,11 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --jso
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --json
 ```
 
+- `policy show` prints the effective policy line after its header, for
+  example `Effective policy sha256:7b38f1df3862, config generation 3`, and
+  adds a `policy` object (`effective_digest`, `config_generation`) to
+  `--json`. It is the only way to read the digest on Windows. `policy verify`
+  does not print it.
 - `policy verify` exits `1` when coverage is incomplete.
 - Add `--connector <name>` to check one connector, and `--user <name>` to
   also check that user's own agent config for hooks DefenseClaw has not
@@ -391,6 +564,12 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux rotate-credential
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos rotate-credentials --json
 ```
 
+If no enrolled user holds a credential yet, there is nothing to rotate: the
+command exits `0` with `"noop": true` and `"noop_reason": "no_credentials"`
+and changes nothing. That is the normal state on Linux and macOS while users
+run only hook-based agents and the config enables no agent telemetry. The
+guardian creates the per-machine key when it first gives a user a credential.
+
 The rotation moves every user to the new key before the key takes effect:
 
 1. **Check.** Nothing changes until the gateway reports that it serves the
@@ -462,6 +641,45 @@ effect, and replacing the key would fail the hooks of every signed-out user
 closed until they sign in again. To cut off one Windows user, remove them
 from enrollment as described in
 [Contain an incident](/docs/enterprise/lifecycle#contain-an-incident).
+
+## Golden images and VM templates
+
+A host cloned from an image or VM template that already runs the managed
+deployment (Linux and macOS) starts with a copy of that host's machine
+state:
+
+- the gateway's device key (`/var/lib/defenseclaw/device.key` on Linux,
+  `/opt/cisco/defenseclaw/runtime/device.key` on macOS), so every clone
+  reports the same device in its telemetry;
+- the per-machine key the guardian derives each enrolled user's credentials
+  from, so the same user gets the same credentials on every clone;
+- the machine ID, unless the imaging tool resets it.
+
+Prefer an image without that state: capture the template before you install
+DefenseClaw and install it on each clone at first boot (through your MDM or
+the first-boot script), or run `enterprise linux uninstall --json` (macOS:
+`enterprise macos uninstall --json`) on the template just before you capture
+it. The plain uninstall removes the machine state, the keys included; keep
+`--keep-state` off.
+
+For clones that already run it, on each clone:
+
+1. Give it its own machine ID first. On Linux that is the imaging tool's job
+   (for example `cloud-init clean --machine-id`, or an empty
+   `/etc/machine-id` that systemd fills at the next boot); on EC2, systemd
+   derives the ID from the instance UUID again, so each instance already has
+   its own. Each Mac has its own hardware UUID.
+2. Reinstall: uninstall, then install the same package or payload again. That
+   gives the clone a new device key and a new per-machine key. To keep the
+   deployment instead, run `enterprise linux rotate-credentials --json`
+   (macOS: `enterprise macos rotate-credentials --json`, see
+   [Rotate per-user credentials](#rotate-per-user-credentials)): the users'
+   credentials then differ per clone, but the device key stays shared.
+
+A new machine ID changes every agent ID: an `agt-` ID hashes the machine ID
+([Agent identity](/docs/enterprise/identity-and-authentication#agent-identity)),
+so after the change each agent install gets a new `agt-` ID. Records from
+before keep the old IDs. `status`, `verify` and the hooks are not affected.
 
 ## Logs and events
 

@@ -117,7 +117,7 @@ from defenseclaw.tui.policy_panel import PolicyPanelMixin
 from defenseclaw.tui.registry import CmdEntry, build_registry
 from defenseclaw.tui.sandbox_panel import SandboxPanelMixin
 from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
-from defenseclaw.tui.screens.config_diff import ConfigDiffScreen
+from defenseclaw.tui.screens.config_diff import ConfigDiffModalModel, ConfigDiffScreen
 from defenseclaw.tui.screens.consequence import (
     ConsequenceAction,
     ConsequenceModalModel,
@@ -168,6 +168,7 @@ from defenseclaw.tui.services.overview_state import (
     HealthSnapshot,
     SubsystemHealth,
     _rule_pack_label,
+    admission_action_overrides,
     format_duration,
 )
 from defenseclaw.tui.services.read_repository import (
@@ -310,6 +311,14 @@ def _widen_windows_default_executor(loop: asyncio.AbstractEventLoop, *, platform
 
 
 TOKENS = DEFAULT_TOKENS
+
+
+def _config_error_summary(path: Path, error: Exception) -> str:
+    """Keep the actionable config failure visible at 80 columns."""
+
+    lines = re.findall(r"\bline (\d+)\b", str(error))
+    location = f" line {lines[-1]}" if lines else ""
+    return f"{path.name}{location} is invalid; run defenseclaw config validate"
 
 
 class _ConfigGenerationChangedError(RuntimeError):
@@ -625,6 +634,8 @@ class _OverviewRenderSnapshot:
     audit_version: object | None
     hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
     last_good_hook_stats: tuple[tuple[str, int, int, int, object | None], ...]
+    # The terminal size the body was laid out for (_overview_layout_key).
+    layout: tuple[int, bool]
 
 
 @dataclass(frozen=True)
@@ -1331,6 +1342,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._config_watcher = ConfigChangeWatcher(config_path) if config_path is not None else None
         self._config_poll_running = False
         self._config_reload_count = 0
+        self._config_error = ""
         # Set on each config-editor save: saved sections the CLI already applies.
         self._setup_cli_live_sections = ""
         self.data_dir = _resolve_data_dir(config, data_dir)
@@ -1397,7 +1409,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.skills_model = skills_model or SkillsPanelModel(connector=connector)
         self.mcps_model = mcps_model or MCPsPanelModel(connector=connector)
         self.plugins_model = plugins_model or PluginsPanelModel(connector=connector)
-        self.tools_model = tools_model or ToolsPanelModel(audit_store)
+        self.tools_model = tools_model or ToolsPanelModel(audit_store, config=config)
         self.logs_model = logs_model or LogsPanelModel(self.data_dir, store=audit_store)
         self.audit_model = audit_model or AuditPanelModel(audit_store)
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
@@ -1443,7 +1455,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._last_data_refresh_error = ""
         audit_db = _audit_db_from_config(config)
         self._read_repository = (
-            TUIReadRepository(audit_db) if audit_db else None
+            TUIReadRepository(audit_db, config=config) if audit_db else None
         )
         self._set_history_loading(self._read_repository is not None)
         self._slow_refresh_running = False
@@ -1903,12 +1915,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         (
                             "policies-block",
                             "Block at",
-                            "Pick the block level: the scope's tool calls, or the policy's LLM traffic (b)",
+                            "Pick the block level of the scope, or of the policy (b)",
                         ),
                         (
                             "policies-alert",
                             "Alert at",
-                            "Pick the alert level: the scope's tool calls, or the policy's LLM traffic (a)",
+                            "Pick the alert level of the scope, or of the policy (a)",
                         ),
                         ("policies-approval", "Approval", "Pick when the scope asks a human first (h)"),
                         ("policies-rule-pack", "Rule pack", "Switch the scope's rule pack (p)"),
@@ -3381,6 +3393,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         worker_store = self._attach_worker_audit_store(detached, store_source)
         try:
+            # Read before the render: the copy shares the live driver size,
+            # so a resize while this runs changes it mid-render.
+            layout = detached._overview_layout_key()
             with detached._connector_hook_event_render_cache():
                 renderable = detached._overview_renderable()
                 metrics = detached._overview_metric_data()
@@ -3427,6 +3442,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                         detached._connector_hook_event_stats_last_good or {}
                     ).items()
                 ),
+                layout=layout,
             )
         finally:
             if worker_store is not None:
@@ -3482,6 +3498,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     self._connector_hook_event_stats_last_good or {}
                 ).items()
             ),
+            layout=self._overview_layout_key(),
         )
 
     @staticmethod
@@ -3571,17 +3588,22 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self._applying_panel_snapshot = True
         try:
             current_scroll_y = float(scroller.scroll_y)
-            self.body_text = snapshot.body_text
-            if (
-                snapshot.body_signature != self._last_body_signature
-                or snapshot.connector_rows_signature != self._overview_connector_rows_signature_cache
-                or snapshot.live_data_signature != self._overview_live_data_signature_cache
-            ):
-                body_widget.update(snapshot.body_renderable)
-                current_scroll_y = self._restore_overview_scroll(scroller, current_scroll_y) or 0.0
-            self._last_body_signature = snapshot.body_signature
-            self._overview_connector_rows_signature_cache = snapshot.connector_rows_signature
-            self._overview_live_data_signature_cache = snapshot.live_data_signature
+            # A sample prepared before a resize is laid out for the old size.
+            # Landing after 80x45 -> 80x24 it put the wrapped notice back
+            # under the button bar until the next sample (slow Windows
+            # runners). The resize renders the body for the new size itself.
+            if snapshot.layout == self._overview_layout_key():
+                self.body_text = snapshot.body_text
+                if (
+                    snapshot.body_signature != self._last_body_signature
+                    or snapshot.connector_rows_signature != self._overview_connector_rows_signature_cache
+                    or snapshot.live_data_signature != self._overview_live_data_signature_cache
+                ):
+                    body_widget.update(snapshot.body_renderable)
+                    current_scroll_y = self._restore_overview_scroll(scroller, current_scroll_y) or 0.0
+                self._last_body_signature = snapshot.body_signature
+                self._overview_connector_rows_signature_cache = snapshot.connector_rows_signature
+                self._overview_live_data_signature_cache = snapshot.live_data_signature
             self._overview_last_render_scroll_y = current_scroll_y
             self._overview_audit_version_cache = snapshot.audit_version
             self._connector_hook_event_stats_version = snapshot.audit_version
@@ -4933,6 +4955,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("j/k or PgUp/PgDn", "Scroll the dashboard"),
                 ("s", "Scan all skills"),
                 ("d", "Run doctor"),
+                ("G", "Start or restart the gateway"),
+                ("z", "Enable or run AI Discovery"),
                 ("g", "Setup guardrail"),
                 ("m", overview_m),
                 ("i / l / p", "Jump to Inventory / Logs / Policies"),
@@ -9448,6 +9472,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             keys_color = TOKENS.accent_amber
             keys_dot = "●"
         scanner_rows.append(("keys", keys_label, keys_color, keys_dot))
+        admission_overrides = self.overview_model.scanner_overrides_summary()
+        if admission_overrides:
+            scanner_rows.append(("overrides", admission_overrides, TOKENS.accent_cyan, "●"))
         # 8.13: scanner *binaries* are machine-wide (same for every connector),
         # so the rows above don't change with the filter. What IS per-connector
         # is the enforcement policy the scanners apply — surface that as a
@@ -9742,6 +9769,11 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         stable_text = re.sub(r"\buptime=\d+s\b", "uptime=<live>", self.body_text)
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
+        return ("overview", self.help_open, *self._overview_layout_key(), stable_text)
+
+    def _overview_layout_key(self) -> tuple[int, bool]:
+        """The part of the terminal size the Overview layout depends on."""
+
         # The CONFIGURATION card is laid out for the width at render time, so
         # a new width is new content: after a resize it kept the old width's
         # wrapping until the next data change (GAP-2509).
@@ -9750,7 +9782,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # height band is content too: 160x45 -> 80x45 -> 80x24 kept the
         # wrapped notice, its end hidden under the button bar (GAP-2519).
         short = 0 < int(getattr(self.size, "height", 0) or 0) < 32
-        return ("overview", self.help_open, width, short, stable_text)
+        return (width, short)
 
     def _runtime_sample_time(self) -> str:
         """When the last runtime sample was taken ("14:02:11", "Oct 02 14:02"), or "".
@@ -10255,6 +10287,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         connector_scope = self._overview_connector_scope_text()
 
         notice_lines = []
+        if self._config_error:
+            notice_lines.append(f"[{TOKENS.accent_red}][ERROR][/] {rich_escape(self._config_error)}")
         for notice in notices[:4]:
             color = TOKENS.accent_red if notice.level == "error" else TOKENS.accent_amber
             if notice.level == "info":
@@ -10464,8 +10498,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # rendered overview, so the operator sees ``Scan all`` with
         # no key to press.
         quick = (
-            "\\[s] Scan all   \\[d] Doctor   \\[i] Inventory   "
-            "\\[g] Guardrail   \\[m] Mode   \\[l] Logs"
+            "\\[s] Scan  \\[d] Doctor  \\[G] Gateway  \\[z] AI Discovery  "
+            "\\[i] Inventory  \\[g] Setup"
         )
         return (
             "[bold #22D3EE]Overview[/]  [#9FB2CC]Command center for live risk, setup health, and next actions.[/]\n"
@@ -10632,9 +10666,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     "changes are recorded here as they happen.[/]"
                 )
         elif not self.audit_model.filtered and not self.audit_model.filtering:
-            # A search with no matches showed an empty table and no text
-            # (GAP-1631).
-            lines.append(f"[{TOKENS.text_muted}]No events match the search or filter. Esc clears it.[/]")
+            if not self.audit_model.filter_text and self.audit_model.hidden_routine_count():
+                lines.append(f"[{TOKENS.text_muted}]Only routine events exist. Press l to show them.[/]")
+            else:
+                # A search with no matches showed an empty table and no text
+                # (GAP-1631).
+                lines.append(f"[{TOKENS.text_muted}]No events match the search or filter. Esc clears it.[/]")
         return "\n".join(lines)
 
     def _set_status(self, text: str) -> None:
@@ -10648,7 +10685,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.status_text = text
         strip = render_status_strip(self._hint_status_model())
         rendered = f"{text}  [#444444]│[/]  {strip}"
-        if _status_text_fills_line(text, self.size.width):
+        if self._config_error:
+            rendered = f"[bold {TOKENS.accent_red}]{rich_escape(self._config_error)}[/]"
+        elif _status_text_fills_line(text, self.size.width):
             # A "Done: ..." fitted to the line lost its last cell to the "…"
             # of the cut-off health strip ("press i for readines…", GAP-2133).
             rendered = text
@@ -10965,6 +11004,13 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             elif mode:
                 policy_posture = f"policy {mode}"
 
+        # The applied generation and digest sit next to the gateway in the
+        # strip, so the one-line bar cuts the ambient pills, not this, on a
+        # narrow terminal (GAP-0042); an 80-column bar gets a shorter digest.
+        health = self.overview_model.health
+        compact = int(getattr(self.size, "width", 0) or 0) < 100
+        applied = health.applied_policy_label(8 if compact else 12) if health is not None else ""
+
         return StatusModel(
             gateway=ServiceStatus("Gateway", gateway_state, gateway_detail),
             watchdog=ServiceStatus("Watchdog", self.overview_model.subsystem_state("watcher")),
@@ -10974,6 +11020,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             redaction_label=redaction_label,
             redaction_on=redaction_on,
             policy_posture=policy_posture,
+            applied_policy=applied,
             commands_run=int(self.commands_run),
             active_alerts=(
                 self.alerts_model.connector_scope_count()
@@ -11848,6 +11895,15 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             action = self.audit_model.handle_key(_vim_key(key))
             return self._apply_audit_action(action)
         if self.active_panel == "overview":
+            if key == "G":
+                command = "start" if self.overview_model.gateway_down() else "restart"
+                self._submit_command_text(f"defenseclaw-gateway {command}")
+                return True
+            if key == "z":
+                ai_status = (self.overview_model.ai_discovery_box().status or "").lower()
+                command = "enable --yes" if ai_status in {"disabled", "offline"} else "scan"
+                self._submit_command_text(f"defenseclaw agent discovery {command}")
+                return True
             if key == "m":
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
@@ -12639,7 +12695,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         return setup_center.task_statuses(self.setup_model)
 
     def _setup_header(self) -> str:
-        """``Setup · 19 tasks ok · 1 needs attention — i readiness checks``.
+        """``Setup · 19 tasks ok · 1 needs attention — i task details``.
 
         Tasks by status (see setup_catalog.task_status), then the ``i`` hint
         when it fits. The count says "tasks": "11 ok — i readiness details"
@@ -12656,7 +12712,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         room = self._body_width() - len("Setup · ")
         plain = " · ".join(text for text, _style in parts)
         tail = next(
-            (tail for tail in (" — i readiness checks", " — i checks", "") if len(plain) + len(tail) <= room),
+            (tail for tail in (" — i task details", " — i details", "") if len(plain) + len(tail) <= room),
             "",
         )
         counts = " · ".join("[" + style + "]" + rich_escape(text) + "[/]" for text, style in parts)
@@ -13153,13 +13209,42 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if not self.setup_model.has_changes():
             return SetupPanelAction(True, hint="No config changes to save.")
         saved_entries = self.setup_model.config_diff()
+        restart_keys: list[str] | None = None
+        check_saveable = getattr(self.config, "check_saveable", None)
+        if callable(check_saveable):
+            from defenseclaw.config_writer import ConfigUnparseableError
+
+            try:
+                check_saveable()
+            except ConfigUnparseableError as exc:
+                # Saving would replace the file with only the edited fields
+                # (GAP-0370); the draft stays for a save once the file is fixed.
+                return SetupPanelAction(
+                    True, hint=f"Config not saved: {exc}. Your draft is kept: fix the file and press S again, or r to discard it."
+                )
+        original_config = self.config
         try:
-            self.setup_model.apply_changes_to_config()
-            save = getattr(self.config, "save", None)
+            # Stage the draft so a failed write cannot change the authoritative
+            # config that the editor uses when the operator discards edits.
+            staged_config = copy.deepcopy(original_config)
+            self.setup_model.config = staged_config
+            self.setup_model.apply_changes_to_config(mark_applied=False)
+            save = getattr(staged_config, "save", None)
             if callable(save):
-                save()
+                from defenseclaw.config_writer import ACTOR_PREFIX_TUI, current_actor
+
+                result = save(actor=current_actor(ACTOR_PREFIX_TUI), reason=restart_reason)
+                restart_keys = getattr(result, "restart_required", None)
+            self.setup_model.accept_applied_changes()
+            from defenseclaw.enforce import asset_lists
+
+            secure_client = asset_lists.is_secure_client(staged_config)
+            if secure_client:
+                # A Secure Client gateway reads its policy at start, so every
+                # save keeps the restart of main (issue #1092).
+                restart_keys = None
             roster_changed, storage_changed = self._apply_config_snapshot(
-                self.config,
+                staged_config,
                 external=False,
                 refresh_disk=False,
             )
@@ -13171,15 +13256,20 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 self._schedule_signal_data_refresh()
             self._schedule_active_panel_refresh("config-save")
             # Record the gateway's current start time so the next health poll
-            # can clear the banner once the gateway really restarted.
-            self.setup_model.queue_restart(
-                restart_reason, last_started_at=str(getattr(self, "_last_gateway_started_at", "") or "")
-            )
+            # can clear the banner once the gateway really restarted. The
+            # writer names the changed keys that need a restart; the gateway
+            # applies every other key from the new config generation.
+            if restart_keys is None or restart_keys:
+                self.setup_model.queue_restart(
+                    restart_reason, last_started_at=str(getattr(self, "_last_gateway_started_at", "") or "")
+                )
             self.setup_model.mark_saved()
         except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
+            if self.config is original_config:
+                self.setup_model.config = original_config
             return SetupPanelAction(True, hint=f"Config save failed: {exc}")
         self._schedule_config_save_audit(saved_entries)
-        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries)
+        self._setup_cli_live_sections = _cli_live_config_sections(saved_entries) if secure_client else ""
         if self._setup_cli_live_sections:
             return SetupPanelAction(
                 True,
@@ -13192,6 +13282,8 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # "restart queued if gateway is running" (GAP-2433).
         if self.overview_model.gateway_down():
             return SetupPanelAction(True, hint="Config changes saved; they apply when the gateway starts.")
+        if restart_keys is not None and not restart_keys:
+            return SetupPanelAction(True, hint="Config changes saved; the gateway applies them without a restart.")
         return SetupPanelAction(True, hint="Config changes saved. Restart the gateway (G) to apply them.")
 
     def _schedule_config_save_audit(self, entries: tuple[Any, ...]) -> None:
@@ -13220,7 +13312,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.run_worker(record, thread=True, exclusive=False, group="config-save-audit")
 
     async def _open_config_diff(self) -> None:
-        result = await self.push_screen_wait(ConfigDiffScreen(self.setup_model.config_diff()))
+        from defenseclaw.enforce import asset_lists
+
+        diff = ConfigDiffModalModel.from_entries(
+            self.setup_model.config_diff(), secure_client=asset_lists.is_secure_client(self.config)
+        )
+        result = await self.push_screen_wait(ConfigDiffScreen(diff))
         if result is None:
             self._set_status("Config save cancelled.")
             return
@@ -13551,6 +13648,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # evaluates the new generation; the current snapshot remains.
                 return
             except Exception as exc:  # noqa: BLE001 - malformed/locked config is retryable.
+                summary = _config_error_summary(watcher.path, exc)
+                if summary != self._config_error:
+                    self._config_error = summary
+                    self._render_chrome()
                 if watcher.reject(generation, now=now):
                     self._write_activity(
                         f"[#FBBF24]external config reload deferred:[/] "
@@ -13573,6 +13674,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 return
 
             watcher.accept(generation)
+            self._config_error = ""
             self._config_reload_count += 1
             self._set_status("Configuration refreshed from disk.")
             self._schedule_active_panel_refresh("config-generation")
@@ -13634,6 +13736,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         try:
             new_cfg: object | None = config_module.load()
         except Exception as exc:  # noqa: BLE001 — bad YAML must not crash the TUI.
+            if self._config_watcher is not None:
+                self._config_error = _config_error_summary(self._config_watcher.path, exc)
+                self._render_chrome()
             self._write_activity(
                 f"[#FBBF24]config reload failed:[/] {rich_escape(str(exc))}; keeping current snapshot."
             )
@@ -13644,6 +13749,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             external=False,
             refresh_disk=True,
         )
+        self._config_error = ""
         if self._config_watcher is not None:
             self._config_watcher.sync_to_disk()
         self._schedule_active_panel_refresh("internal-config-generation")
@@ -13697,6 +13803,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         self.setup_model.set_config(new_cfg, external=external)
         self.sandbox_model.set_config(new_cfg)
         self.policy_model.set_config(new_cfg)
+        self.tools_model.config = new_cfg
         if self.policy_model.loaded:
             # Scope postures (mode, approval, packs) come from config.yaml.
             self._schedule_policy_load()
@@ -13769,7 +13876,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             old_repository.close()
         new_audit_db = _audit_db_from_config(new_cfg)
         self._read_repository = (
-            TUIReadRepository(new_audit_db)
+            TUIReadRepository(new_audit_db, config=new_cfg)
             if new_audit_db
             else None
         )
@@ -13966,7 +14073,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 results.append((name, stdout.decode(errors="replace")))
         self.inventory_model.apply_merged(results)
         if not any(text for _name, text in results):
-            self.inventory_model.message = "Could not load inventory for any connector."
+            self.inventory_model.message = self._config_error or "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
         self._end_load("inventory", loading, announce, self.inventory_model.message, "Inventory updated.")
         self._render_chrome()
@@ -14316,7 +14423,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             return
         model.apply_merged(results)
         if not any(text for _name, text in results):
-            model.message = f"Could not load {panel} for any connector."
+            model.message = self._config_error or f"Could not load {panel} for any connector."
         model.set_connector_filter(self._connector_filter())
         self._end_load(panel, loading, announce, model.message, _catalog_loaded_text(panel, model))
         self._render_chrome()
@@ -15335,7 +15442,12 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 # the operator changed any setting that triggers a
                 # restart (e.g. toggling redaction off via setup) the
                 # whole TUI tore down.
-                self.setup_model.mark_restart_started(snapshot.started_at)
+                if self.setup_model.mark_restart_started(snapshot.started_at) and self.status_text.startswith(
+                    "Config changes saved"
+                ):
+                    # The status line still asked for the restart that just
+                    # happened (GAP-0342).
+                    self._set_status("Gateway restarted; it applies the saved config changes.")
             except (AttributeError, TypeError):
                 # Older SetupPanelModel without this method (or with a
                 # different signature) — fall back to clearing the
@@ -15430,7 +15542,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         store = getattr(self.alerts_model, "store", None) or getattr(self.audit_model, "store", None)
         if store is not None and hasattr(store, "get_enforcement_counts"):
             try:
-                current = store.get_enforcement_counts()  # type: ignore[attr-defined]
+                current = store.get_enforcement_counts(cfg=self.config)  # type: ignore[attr-defined]
             except Exception as count_exc:  # noqa: BLE001 - degraded counts must not break alerts.
                 self._write_activity(
                     f"[#FBBF24]enforcement counts unavailable:[/] {count_exc}"
@@ -15719,6 +15831,13 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     snapshot = _health_snapshot_from_mapping(payload)
     if snapshot is None:
         return GatewayHealthResult("error", "authenticated sidecar health is invalid")
+    policy = document.get("policy")
+    if isinstance(policy, dict) and policy.get("effective_digest"):
+        snapshot = replace(
+            snapshot,
+            policy_generation=_coerce_int(policy.get("generation")),
+            policy_digest=_coerce_str(policy.get("effective_digest")),
+        )
     snapshot = _project_omnigent_effective_readiness(config, snapshot)
     state = _gateway_state_from_snapshot(snapshot)
     detail = _gateway_snapshot_detail(snapshot, state)
@@ -15758,7 +15877,7 @@ def _fetch_v8_operator_status(
         if isinstance(path, str) and isinstance(keyword, str) and path and keyword:
             safe_path = re.sub(r"[^A-Za-z0-9_.$\[\]-]", "?", path)[:256]
             safe_keyword = re.sub(r"[^A-Za-z0-9_.-]", "?", keyword)[:64]
-            return None, f"invalid v8 configuration at {safe_path} ({safe_keyword})"
+            return None, f"invalid configuration at {safe_path} ({safe_keyword})"
         return None, "telemetry status could not be loaded; run defenseclaw observability validate"
 
 
@@ -16122,55 +16241,6 @@ def _overview_connector_names(cfg: OverviewConfig | None) -> tuple[str, ...]:
     return (active,) if active else ()
 
 
-def _flatten_scanner_overrides(
-    overrides: object,
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Flatten a ``data.json`` ``scanner_overrides`` block (N3).
-
-    Input shape: ``{scanner_type: {severity: {install|file|runtime: action}}}``
-    (what ``policy show`` reads). Output: ``(scanner_type, severity, surface,
-    action)`` tuples for :func:`format_scanner_overrides_summary`. Malformed
-    branches are skipped so a bad payload degrades to a partial list, never a
-    raise.
-    """
-
-    flat: list[tuple[str, str, str, str]] = []
-    if not isinstance(overrides, dict):
-        return ()
-    for scanner_type, sevs in overrides.items():
-        if not isinstance(sevs, dict):
-            continue
-        for severity, surface_actions in sevs.items():
-            if not isinstance(surface_actions, dict):
-                continue
-            for surface in ("install", "file", "runtime"):
-                action = surface_actions.get(surface)
-                if action:
-                    flat.append((str(scanner_type), str(severity), surface, str(action)))
-    return tuple(flat)
-
-
-def _active_policy_scanner_overrides(
-    policy_dir: str,
-) -> tuple[tuple[str, str, str, str], ...]:
-    """Read the active policy's synced ``data.json`` scanner overrides (N3).
-
-    Uses the same reader as the enforcement lane (``rego/data.json``, with the
-    flat ``data.json`` fallback). Any read/parse failure degrades to an empty
-    tuple so the Overview simply renders nothing.
-    """
-
-    try:
-        from defenseclaw.enforce.admission import _read_policy_data
-
-        data = _read_policy_data(policy_dir or "")
-    except Exception:  # noqa: BLE001 - the override summary is purely informational.
-        return ()
-    if not isinstance(data, dict):
-        return ()
-    return _flatten_scanner_overrides(data.get("scanner_overrides", {}))
-
-
 def _overview_config(config: object | None) -> OverviewConfig | None:
     if config is None:
         return None
@@ -16212,7 +16282,13 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     # while the TUI keeps rendering the inherited global observe/defaults.
     effective_guardrail_enabled = bool(getattr(guardrail, "enabled", False))
     effective_guardrail_mode = str(getattr(guardrail, "mode", "") or "observe")
-    effective_rule_pack_dir = str(getattr(guardrail, "rule_pack_dir", "") or "")
+    effective_rule_pack_dir = ""
+    if hasattr(guardrail, "effective_rule_pack_dir"):
+        try:
+            # The global pack: its config_version 9 rule_pack.
+            effective_rule_pack_dir = str(guardrail.effective_rule_pack_dir() or "")
+        except Exception:  # noqa: BLE001 - leave the pack unset.
+            pass
     effective_hilt = hilt
     if len(actives) == 1 and guardrail is not None:
         connector = actives[0]
@@ -16268,8 +16344,8 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
                         mode = (guardrail.effective_mode(conn) or "").strip()
                     except Exception:
                         mode = ""
-                # Effective rule-pack label = basename of the per-connector
-                # rule_pack_dir (falling back to the global one), so the
+                # Effective rule-pack label = basename of the connector's
+                # pack directory (falling back to the global one), so the
                 # roster shows "strict"/"permissive"/"default" per connector.
                 pack = ""
                 if guardrail is not None and hasattr(guardrail, "effective_rule_pack_dir"):
@@ -16324,18 +16400,10 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         ai_discovery_enabled=getattr(getattr(config, "ai_discovery", None), "enabled", False) is True,
         # A2: visible diagnostic when the roster enumeration failed.
         roster_error=roster_error,
-        # N3: active-policy scanner action overrides (data.json), so the
-        # Overview/status surface a policy that downgrades a scanner surface.
-        scanner_overrides=_active_policy_scanner_overrides(
-            str(getattr(config, "policy_dir", "") or "")
-        ),
+        # N3: per-type admission actions, so the Overview/status surface a
+        # policy that changes one asset type's enforcement.
+        scanner_overrides=admission_action_overrides(config),
     )
-
-
-class _HandledAction:
-    def __init__(self, handled: bool, hint: str = "") -> None:
-        self.handled = handled
-        self.hint = hint
 
 
 def _menu_action(action: CatalogMenuAction) -> MenuAction:
@@ -16459,7 +16527,8 @@ def _typed_character(event: events.Key) -> str | None:
 
 # Config keys the CLI reads from config.yaml on every command, so CLI
 # admission (mcp set, skill and plugin install) enforces a saved change at
-# once; only the gateway's own checks wait for the restart (GAP-2145).
+# once (GAP-2145). Only a Secure Client gateway waits for a restart to apply
+# them; every other gateway reloads asset_policy hot (GAP-0056).
 _CLI_LIVE_CONFIG_SECTIONS = ("asset_policy",)
 
 
@@ -16578,14 +16647,6 @@ def _fit_section_value(value: str, width: int) -> str:
     if len(wrapped) <= _SECTION_VALUE_MAX_LINES:
         return "\n".join(wrapped)
     return "\n".join(_truncate_ellipsis(line, width) for line in lines)
-
-
-def _truncate_display(value: str, width: int) -> str:
-    if len(value) <= width:
-        return value
-    if width <= 3:
-        return value[:width]
-    return value[: width - 3] + "..."
 
 
 def _styled_cell(column: str, value: str) -> Text:

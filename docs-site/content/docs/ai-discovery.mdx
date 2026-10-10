@@ -226,7 +226,7 @@ ai_discovery:
   lookup_model_provenance_online: false
 ```
 
-Enable it by editing that value to `true`, interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
+Enable it with `defenseclaw config set ai_discovery.lookup_model_provenance_online true` (the gateway applies an `ai_discovery` change without a restart), interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
 
 ### Model lifecycle and bounded scans
 
@@ -247,7 +247,7 @@ monitoring planes A and B. Use these commands to make the intended state explici
 defenseclaw agent discovery enable --restart --scan
 ```
 
-Toggles `ai_discovery.*` in `~/.defenseclaw/config.yaml`, restarts the gateway, and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning.
+Sets `ai_discovery.enabled` and the other `ai_discovery.*` settings you pass in `~/.defenseclaw/config.yaml`, restarts the gateway (the default; `--no-restart` skips it), and runs an immediate full scan so the dashboards are populated in seconds. Use `--yes` for non-interactive provisioning. The gateway also applies any `ai_discovery` change made with `defenseclaw config set` by itself, so a single setting needs no restart.
   </Tab>
   <Tab value="Status">
 ```bash
@@ -272,7 +272,7 @@ the companion managed endpoint inventory. No restart needed.
 defenseclaw agent discovery disable
 ```
 
-Stops the scanner and clears the `ai_discovery.*` block. Existing audit events are preserved.
+Sets `ai_discovery.enabled` to `false` and stops the scanner. Your other `ai_discovery.*` settings stay in the file, so `enable` brings the same configuration back. Existing audit events are preserved.
   </Tab>
 </Tabs>
 
@@ -330,7 +330,9 @@ profile. A folder on an enrolled connector's hook path
 stays at the guardian's protected permissions, so the service is not granted
 it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
 `.gemini` for Antigravity, `.copilot` for Copilot and
-`%APPDATA%\devin` for Devin. The Kiro IDE plugins in `.kiro\extensions` are
+`%APPDATA%\devin` for Devin. Devin's user MCP servers are still listed:
+the service is granted read on `%APPDATA%\devin\mcp_config.json` alone, not
+on the folder or the hook file `config.json` beside it. The Kiro IDE plugins in `.kiro\extensions` are
 still listed: the service is granted that folder alone and reads it without
 any access to `.kiro`. Kiro CLI is then found by its install folder
 `%LOCALAPPDATA%\Kiro-Cli`, Copilot CLI by its package cache
@@ -390,6 +392,15 @@ defenseclaw agent signatures enable codex
 in [Capability matrix](/docs/connectors/capability-matrix). Custom packs are useful when
 you ship internal AI tooling and want it surfaced as a first-party signal
 rather than `unknown`.
+
+A pack whose sha256 is not the one pinned in `ai_discovery.signature_pack_digests` (or, on a
+managed standalone device, a pack with no pin) is not loaded. `signatures list` prints a
+`Not loaded:` line with both digests and leaves its signatures out, `agent discovery status`
+counts it, and `defenseclaw doctor` warns. A configured pack whose file is gone is reported the same
+way (`file not found`); `signatures list` still prints the rest of the catalog, and the gateway keeps
+enforcing the last catalog it built until the file is restored or removed from
+`ai_discovery.signature_packs`. A pack edited on disk while the gateway runs is checked again within
+a few seconds.
 
 ## IDE plugin inventory
 
@@ -1339,7 +1350,8 @@ inventory verdict including `unobserved`.
 ## Use it alongside Registry
 
 Discovery tells you *what's there*. The [Registry](/docs/scanning/registries)
-tells you *what's allowed*. The runtime planes tell you *what actually ran*.
+tells you *what's approved*, and the [block and allow lists](/docs/policies/admission)
+say what is never or always allowed. The runtime planes tell you *what actually ran*.
 
 A common production pattern:
 
@@ -1351,10 +1363,13 @@ A common production pattern:
     Promote the entries you trust into your registry: `defenseclaw registry sync --all` after curating the manifests.
   </Step>
   <Step>
-    Flip on registry-required mode: `defenseclaw registry require --type skill --enabled`. Now anything *new* that discovery finds — but the registry doesn't recognise — is admission-blocked by default.
+    Flip on registry-required mode with enforcement: `defenseclaw registry require --type skill --enabled --enforce`. `--enforce` turns on `asset_policy.enabled` and sets `asset_policy.mode` to `action`; without it the requirement is recorded but nothing is blocked. Now a new skill that the registry doesn't list is blocked by the install watcher when it appears.
   </Step>
   <Step>
     Approve specific entries as you go: `defenseclaw registry approve <source-id> <entry-name> --type skill` (or `--type mcp`). Approval is per entry, not per source — the source ID identifies the registry, and the entry name picks one cached skill or MCP server inside it. Discovery + admission are now closed-loop.
+  </Step>
+  <Step>
+    Keep a short list of names you never want, whatever a catalog says: `defenseclaw skill block <name>` or `defenseclaw mcp block <name>`. These write `asset_policy` `denied` rules, which apply even when asset policy is off. See [Admission and the block/allow list](/docs/policies/admission).
   </Step>
 </Steps>
 

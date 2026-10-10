@@ -204,13 +204,12 @@ def _any_llm_component_uses_default_key(cfg: Config) -> bool:
     if sc is not None:
         ss = getattr(sc, "skill_scanner", None)
         # Skill and plugin scan commands use their resolved model as the
-        # default-on signal. Surface the missing key in Setup/Keys before the
+        # default-on signal (use_llm is on by default, and a judge without a
+        # model never runs). Surface the missing key in Setup/Keys before the
         # operator encounters a scan-time skip warning.
         if ss is not None:
             skill_llm = cfg.resolve_llm("scanners.skill")
-            if (
-                getattr(ss, "use_llm", False) or skill_llm.model
-            ) and needs_key("scanners.skill"):
+            if skill_llm.model and needs_key("scanners.skill"):
                 return True
         plugin_llm = cfg.resolve_llm("scanners.plugin")
         if plugin_llm.model and needs_key("scanners.plugin"):
@@ -315,7 +314,9 @@ def _virustotal_key(cfg: Config) -> Requirement:
     if sc is None:
         return Requirement.NOT_USED
     ss = getattr(sc, "skill_scanner", None)
-    if ss is None or not getattr(ss, "use_virustotal", False):
+    from defenseclaw.scanner.settings import virustotal_enabled
+
+    if ss is None or not virustotal_enabled(ss):
         return Requirement.NOT_USED
     return Requirement.REQUIRED
 
@@ -378,14 +379,15 @@ def _load_v8_observability_credential_refs(
 ) -> _ObservabilityCredentialRefs:
     """Return validated enabled destination refs, or ``None`` off the v8 path.
 
-    The legacy Python dataclass intentionally does not model the canonical v8
+    The Python dataclass intentionally does not model the canonical v8
     destination graph. Read the active source through the existing offline v8
-    validator instead of guessing from retired Splunk/OTel compatibility DTOs.
-    Validation retains environment-reference names while masking literal header
+    validator. Validation retains environment-reference names while masking literal header
     values and performs no secret resolution or network I/O.
     """
 
-    if getattr(cfg, "_source_config_version", None) != 8:
+    from defenseclaw.config import is_current_schema
+
+    if not is_current_schema(getattr(cfg, "_source_config_version", None)):
         return None
     try:
         from defenseclaw.config import config_path  # noqa: PLC0415
@@ -456,55 +458,24 @@ def _v8_observability_credential_refs(
 def _v8_refs_for_feature(
     cfg: Config,
     feature: str,
-) -> tuple[_ObservabilityCredentialRef, ...] | None:
+) -> tuple[_ObservabilityCredentialRef, ...]:
     refs = _v8_observability_credential_refs(cfg)
     if refs is None:
-        return None
+        return ()
     return tuple(ref for ref in refs if ref.feature == feature)
 
 
 def _splunk_token(cfg: Config) -> Requirement:
-    refs = _v8_refs_for_feature(cfg, "observability.splunk")
-    if refs is not None:
-        return Requirement.REQUIRED if refs else Requirement.NOT_USED
-    # Upgrade/preview compatibility for callers still holding a v7 DTO.
-    sp = getattr(cfg, "splunk", None)
-    if sp is None or not getattr(sp, "enabled", False):
-        return Requirement.NOT_USED
-    return Requirement.REQUIRED
+    return Requirement.REQUIRED if _v8_refs_for_feature(cfg, "observability.splunk") else Requirement.NOT_USED
 
 
 def _galileo_key(cfg: Config) -> Requirement:
-    refs = _v8_refs_for_feature(cfg, "observability.galileo")
-    if refs is not None:
-        return Requirement.REQUIRED if refs else Requirement.NOT_USED
-    # Upgrade/preview compatibility for callers still holding a v7 DTO.
-    otel = getattr(cfg, "otel", None)
-    if not getattr(otel, "enabled", False):
-        return Requirement.NOT_USED
-    for destination in getattr(otel, "destinations", ()) or ():
-        if (
-            getattr(destination, "preset", "") == "galileo"
-            and getattr(destination, "enabled", False)
-        ):
-            return Requirement.REQUIRED
-    return Requirement.NOT_USED
+    return Requirement.REQUIRED if _v8_refs_for_feature(cfg, "observability.galileo") else Requirement.NOT_USED
 
 
 def _galileo_endpoint(cfg: Config) -> str:
     refs = _v8_refs_for_feature(cfg, "observability.galileo")
-    if refs is not None:
-        return refs[0].endpoint if refs else ""
-    otel = getattr(cfg, "otel", None)
-    if not getattr(otel, "enabled", False):
-        return ""
-    for destination in getattr(otel, "destinations", ()) or ():
-        if (
-            getattr(destination, "preset", "") == "galileo"
-            and getattr(destination, "enabled", False)
-        ):
-            return str(getattr(destination, "endpoint", "") or "")
-    return ""
+    return refs[0].endpoint if refs else ""
 
 
 def _inspect_llm_key(cfg: Config) -> Requirement:
@@ -564,22 +535,18 @@ def _virustotal_env(cfg: Config) -> str:
     if sc is None:
         return ""
     ss = getattr(sc, "skill_scanner", None)
-    return getattr(ss, "virustotal_api_key_env", "") or ""
+    vt = getattr(getattr(ss, "analyzers", None), "virustotal", None)
+    return getattr(vt, "api_key_env", "") or ""
 
 
 def _splunk_env(cfg: Config) -> str:
     refs = _v8_refs_for_feature(cfg, "observability.splunk")
-    if refs is not None:
-        return refs[0].env_name if refs else ""
-    sp = getattr(cfg, "splunk", None)
-    return getattr(sp, "hec_token_env", "") if sp is not None else ""
+    return refs[0].env_name if refs else ""
 
 
 def _galileo_env(cfg: Config) -> str:
     refs = _v8_refs_for_feature(cfg, "observability.galileo")
-    if refs is not None:
-        return refs[0].env_name if refs else ""
-    return ""
+    return refs[0].env_name if refs else ""
 
 
 def _inspect_llm_env(cfg: Config) -> str:
@@ -713,8 +680,6 @@ def _observability_ref_predicate(
 ) -> Callable[[Config], Requirement]:
     def _check(cfg: Config) -> Requirement:
         refs = _v8_refs_for_feature(cfg, feature)
-        if refs is None:
-            return Requirement.NOT_USED
         return (
             Requirement.REQUIRED
             if any(ref.env_name == env_name for ref in refs)
@@ -729,10 +694,7 @@ def _observability_ref_endpoint(
     env_name: str,
 ) -> Callable[[Config], str]:
     def _resolve(cfg: Config) -> str:
-        refs = _v8_refs_for_feature(cfg, feature)
-        if refs is None:
-            return ""
-        for ref in refs:
+        for ref in _v8_refs_for_feature(cfg, feature):
             if ref.env_name == env_name:
                 return ref.endpoint
         return ""
@@ -772,7 +734,7 @@ def discover_observability_credentials(cfg: Config) -> list[CredentialSpec]:
 # Custom-provider overlay env discovery
 # ---------------------------------------------------------------------------
 #
-# ``~/.defenseclaw/custom-providers.json`` lets operators declare an
+# config.yaml ``llm_providers.custom`` lets operators declare an
 # arbitrary number of internal/self-hosted LLM endpoints, each with its
 # own ``env_keys`` list (e.g. ``ACME_INTERNAL_LLM_KEY``). Surfacing these
 # alongside the static CREDENTIALS table means ``defenseclaw keys list``
@@ -780,44 +742,29 @@ def discover_observability_credentials(cfg: Config) -> list[CredentialSpec]:
 # pester about ``DEFENSECLAW_LLM_KEY`` — without us hard-coding every
 # custom env var.
 #
-# The check is best-effort: a missing overlay returns ``[]`` and a
-# malformed JSON file is silently ignored (the ``setup provider`` write
-# path raises hard on parse errors, so a corrupt overlay would have
-# been caught earlier).
-
-
-def _custom_provider_overlay_path(cfg: Config) -> str:
-    data_dir = getattr(cfg, "data_dir", "") or ""
-    if not data_dir:
-        return ""
-    return os.path.join(data_dir, "custom-providers.json")
+# The entries come from config (``derived_providers.configured_providers``),
+# as ``resolve_llm`` reads them: the derived custom-providers.json is never
+# read back, so a migration that folded the overlay into config and renamed
+# the file loses no key. A legacy operator overlay counts only while config
+# declares no providers.
 
 
 def _custom_provider_env_keys(cfg: Config) -> dict[str, str]:
-    """Return ``{ENV_VAR: provider_name}`` for every env_key declared in
-    the overlay. Order follows file order; provider names later in the
-    file win on duplicate env_key, which matches the merge semantics on
-    the Go side (last entry wins).
+    """Return ``{ENV_VAR: provider_name}`` for every env_key a custom
+    provider declares. Order follows the provider order; provider names
+    later in the list win on duplicate env_key, which matches the merge
+    semantics on the Go side (last entry wins).
     """
-    path = _custom_provider_overlay_path(cfg)
-    if not path or not os.path.isfile(path):
+    from defenseclaw import derived_providers  # noqa: PLC0415
+
+    if not (getattr(cfg, "data_dir", "") or ""):
         return {}
     try:
-        import json  # noqa: PLC0415
-
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
+        providers = derived_providers.configured_providers(cfg)
+    except Exception:  # noqa: BLE001 - discovery is best-effort
         return {}
     out: dict[str, str] = {}
-    if not isinstance(data, dict):
-        return {}
-    providers = data.get("providers") or []
-    if not isinstance(providers, list):
-        return {}
     for entry in providers:
-        if not isinstance(entry, dict):
-            continue
         pname = str(entry.get("name") or "").strip()
         keys = entry.get("env_keys") or []
         if not isinstance(keys, list):
@@ -873,7 +820,7 @@ def _custom_provider_predicate(env_key: str) -> Callable[[Config], Requirement]:
 
 def discover_custom_provider_credentials(cfg: Config) -> list[CredentialSpec]:
     """Return ad-hoc :class:`CredentialSpec` entries for every env_key
-    declared in ``custom-providers.json``.
+    a custom provider (``llm_providers.custom``) declares.
 
     These are *runtime* specs — not part of the static ``CREDENTIALS``
     tuple — because they depend on operator overlay state. ``classify``
@@ -893,7 +840,7 @@ def discover_custom_provider_credentials(cfg: Config) -> list[CredentialSpec]:
             continue
         feature = f"llm.custom.{provider_name}" if provider_name else "llm.custom"
         description = (
-            f"Custom-provider key declared in custom-providers.json "
+            f"Custom-provider key declared in llm_providers "
             f"({provider_name or 'unnamed'} → {env_key})."
         )
         out.append(

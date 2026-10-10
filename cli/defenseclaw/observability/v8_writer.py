@@ -55,22 +55,30 @@ def mutate_v8_config(
     dry_run: bool = False,
     expected_before_sha256: str | None = None,
     backup_path: str | Path | None = None,
+    actor: str | None = None,
 ) -> V8PolicyWriteResult:
     """Prepare, validate, and atomically install one ordinary v8 edit.
 
     The shared sibling lock covers the full read/prepare/validate/replace cycle.
     Validation runs first in the strict Python parser and then in the canonical
     Go compiler against a private sibling candidate.  The original file is
-    unchanged on every failure.  This is the ordinary setup/TUI mutation path;
+    unchanged on every failure. It is the single config writer's protocol
+    (``config_writer``): the same lock, the managed gate, and a new
+    ``config.generation.json`` generation.  This is the ordinary setup/TUI mutation path;
     full-version upgrade activation continues to use ``v8_activation``.
     """
 
+    from defenseclaw import config_writer
+
     path = os.path.abspath(os.fspath(config_path))
     validate = validator or _validate_candidate
+    writer_actor = actor or config_writer.current_actor(config_writer.ACTOR_PREFIX_CLI)
     with locked_config_yaml(path):
         _assert_safe_target(path)
         _assert_config_write_allowed(path)
         original = Path(path).read_bytes()
+        if config_writer.managed_refuses(original, writer_actor):
+            raise config_writer.ManagedConfigWriteError(config_writer.MANAGED_REFUSAL)
         original_sha256 = hashlib.sha256(original).hexdigest()
         if expected_before_sha256 is not None and original_sha256 != expected_before_sha256:
             raise RuntimeError("config.yaml changed after the observability policy preview")
@@ -99,8 +107,16 @@ def mutate_v8_config(
             installed_backup = ""
             if backup_path is not None:
                 installed_backup = _write_private_backup(path, os.fspath(backup_path), original)
-            replace_file_durable(candidate_path, path)
-            candidate_path = ""
+            original_mode = stat.S_IMODE(os.stat(path).st_mode)
+            try:
+                replace_file_durable(candidate_path, path)
+                candidate_path = ""
+                config_writer.record_generation(
+                    path, prepared.candidate_sha256, writer_actor, "observability policy edit"
+                )
+            except Exception:
+                config_writer._undo_failed_commit(path, prepared.candidate, original, original_mode, True)
+                raise
         finally:
             if candidate_path:
                 try:
@@ -118,14 +134,14 @@ def mutate_v8_config(
 def _validate_candidate(path: str, data_dir: str | None) -> None:
     result = inspect_v8_config("validate", config_path=path, data_dir=data_dir)
     if result.valid is not True:
-        raise RuntimeError("canonical v8 configuration validator rejected the candidate")
+        raise RuntimeError("the configuration validator rejected the candidate")
 
 
 def _assert_safe_target(path: str) -> None:
     try:
         metadata = os.lstat(path)
     except FileNotFoundError as exc:
-        raise FileNotFoundError("config.yaml does not exist; initialize DefenseClaw before editing v8 policy") from exc
+        raise FileNotFoundError("config.yaml does not exist; initialize DefenseClaw before editing its policy") from exc
     if stat.S_ISLNK(metadata.st_mode):
         raise OSError("refusing to edit config.yaml through a symbolic link")
     if not stat.S_ISREG(metadata.st_mode):

@@ -39,9 +39,11 @@ def test_enable_header_names_only_the_connectors_it_sets_up(
     # GAP-1809: the header listed codex although it stays disabled.
     cfg, _home = _codex_off(monkeypatch, tmp_path)
     cfg.guardrail.enabled = False
+    # Windows verifies the Claude Code executable first; the runner has none.
     with (
         patch.object(cmd_guardrail, "_resolve_active_connector", return_value="claudecode"),
         patch.object(cmd_setup, "_restart_services"),
+        patch.object(cmd_setup, "_record_windows_setup_agent_selections", return_value=None),
     ):
         result = CliRunner().invoke(cmd_guardrail.enable_cmd, ["--yes", restart], obj=_app(cfg))
     assert result.exit_code == 0, result.output
@@ -49,6 +51,7 @@ def test_enable_header_names_only_the_connectors_it_sets_up(
     assert header.strip() == "Enabling guardrail for Claude Code (claudecode), Cursor (cursor)", header
     assert result.output.count("Codex (codex) stays disabled; turn it on with:") == 1
     assert "guardrail enable --connector codex" in result.output
+    assert "Restart any running affected agent (for example Codex)" in result.output
 
 
 def test_status_shows_no_fail_mode_for_a_disabled_connector(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

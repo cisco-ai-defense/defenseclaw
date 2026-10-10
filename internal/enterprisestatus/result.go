@@ -16,6 +16,7 @@ package enterprisestatus
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"sort"
 )
 
@@ -161,6 +162,12 @@ type Result struct {
 	// nothing to repair.
 	Changes        []string     `json:"changes,omitempty"`
 	APIPortHolders []PortHolder `json:"api_port_holders,omitempty"`
+	// Policy is the effective policy state; nil (omitted) under the Secure
+	// Client integration and when the gateway did not report it.
+	Policy *PolicyState `json:"policy,omitempty"`
+	// Scanners is the standalone Windows scanner runtime (skill, MCP and
+	// plugin scanners); nil (omitted) everywhere else.
+	Scanners *ScannerRuntime `json:"scanners,omitempty"`
 	// Destinations lists, for status, the observability destinations of the
 	// installed config.yaml with their effective redaction profiles, from the
 	// compiler `defenseclaw observability plan` uses (GAP-1105).
@@ -170,6 +177,87 @@ type Result struct {
 	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
 	// shape for an unelevated macOS lifecycle command.
 	PreserveNotRootDeploymentState bool `json:"-"`
+}
+
+// ScannerRuntime reports the scanners a standalone Windows deployment runs.
+type ScannerRuntime struct {
+	// State: ready, not_prepared (installed but not unpacked), untrusted
+	// (not the executable the payload trust policy admitted, so not run),
+	// missing.
+	State string `json:"state"`
+	// Versions of the pinned components (skill-scanner, mcp-scanner,
+	// litellm, python, ...).
+	Versions map[string]string `json:"versions,omitempty"`
+	// Policy is scanners.skill_scanner.policy; JudgeModel the resolved
+	// scanner LLM judge model ("" when no judge is configured).
+	Policy     string `json:"policy,omitempty"`
+	JudgeModel string `json:"judge_model,omitempty"`
+}
+
+// PolicyState reports the effective policy a lifecycle step left in place.
+type PolicyState struct {
+	// EffectiveDigest is effective_policy_digest computed from the
+	// committed config and its assets ("sha256:<hex>").
+	EffectiveDigest string `json:"effective_digest"`
+	// ConfigGeneration is config_generation from config.generation.json.
+	ConfigGeneration uint64 `json:"config_generation"`
+	// Applied is true when the gateway reports the same digest.
+	Applied bool `json:"applied"`
+	// GatewayReportedDigest is the digest /health reported; empty when the
+	// gateway was not reachable.
+	GatewayReportedDigest string `json:"gateway_reported_digest,omitempty"`
+	// LastReloadError is policy.last_reload_error from /health: why the
+	// gateway rejected its last reload. While it is set the gateway enforces
+	// an older policy than the installed config, so Applied is false.
+	LastReloadError string `json:"last_reload_error,omitempty"`
+	// ConfigUnrecorded is true when config.yaml was changed outside the
+	// lifecycle: its generation is not the one config.generation.json
+	// records, and the running gateway may already enforce it.
+	ConfigUnrecorded bool `json:"config_unrecorded,omitempty"`
+}
+
+// ShortDigest is "sha256:" and the first 12 hex digits of a digest, or "none".
+func ShortDigest(digest string) string {
+	if digest == "" {
+		return "none"
+	}
+	if len(digest) > len("sha256:")+12 {
+		return digest[:len("sha256:")+12]
+	}
+	return digest
+}
+
+// Line is the one human-readable line status, verify and ensure print for the
+// policy: the config generation, the effective digest and whether the gateway
+// enforces it. The same facts are in --json under "policy".
+func (p *PolicyState) Line() string {
+	line := fmt.Sprintf("policy: config generation %d, effective digest %s", p.ConfigGeneration, ShortDigest(p.EffectiveDigest))
+	switch {
+	case p.LastReloadError != "":
+		line += "; the gateway rejected its last reload (" + p.LastReloadError + ") and keeps enforcing the policy it last built"
+	case p.Applied:
+		line += "; applied by the gateway"
+	case p.GatewayReportedDigest == "":
+		line += "; the gateway did not report a policy, so it is not confirmed as applied"
+	default:
+		line += "; the gateway reports " + ShortDigest(p.GatewayReportedDigest) + " and applies this one on its next reload"
+	}
+	if p.ConfigUnrecorded {
+		line += "; config.yaml was changed outside the lifecycle"
+	}
+	return line
+}
+
+// PolicyStateFileName is the lifecycle state file holding the last applied
+// policy state (PolicyStateRecord), next to deployment.json.
+const PolicyStateFileName = "policy-state.json"
+
+// PolicyStateRecord is policy-state.json.
+type PolicyStateRecord struct {
+	EffectiveDigest  string `json:"effective_digest"`
+	ConfigGeneration uint64 `json:"config_generation"`
+	// AppliedAt is RFC 3339 UTC.
+	AppliedAt string `json:"applied_at"`
 }
 
 // New returns a result with the schema version and empty collections set,

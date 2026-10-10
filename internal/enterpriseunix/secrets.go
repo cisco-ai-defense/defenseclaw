@@ -72,6 +72,22 @@ func (e *Env) listSecrets() ([]string, string, error) {
 	return names, sha256Bytes(digest.Bytes()), nil
 }
 
+// TrustedSecretSource refuses a --from-file credential that another account
+// could have changed: a symlink, a file that group or others can write or
+// that another account owns, or one in a folder another account can write.
+// The Windows CLI and the MDM wrapper refuse such a file; the Unix CLI read
+// it (GAP-0334).
+func TrustedSecretSource(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("--from-file %s does not exist", path)
+	}
+	return trustedInputFile(abs, "--from-file")
+}
+
 // ReadSecretValue reads a credential from r, stripping one trailing line
 // ending so `echo key |` works.
 func ReadSecretValue(r io.Reader) ([]byte, error) {
@@ -141,16 +157,17 @@ func (e *Env) WriteSecret(ctx context.Context, name string, value []byte) error 
 	return e.writeFileAtomic(filepath.Join(e.P(e.Layout.SecretsDir), name), value, mode, owner)
 }
 
-// RemoveSecret deletes one protected credential. It refuses one that an
-// enabled observability destination of the installed config references:
-// the gateway could not start on that config without it.
+// RemoveSecret deletes one protected credential. It refuses one the
+// installed config still names: an enabled observability destination (the
+// gateway could not start on that config without it) or the LLM judge and AI
+// Defense keys (the judge would run without its key, GAP-0674).
 func (e *Env) RemoveSecret(name string) error {
 	e.fillDefaults()
 	if !config.ValidEnterpriseCredentialName(name) {
 		return fmt.Errorf("credential name %q is not valid", name)
 	}
 	if raw, err := readBounded(e.P(e.Layout.ConfigPath), maxInputBytes); err == nil {
-		if at := config.ObservabilityV8CredentialReference(e.Layout.ConfigPath, raw, e.Layout.DataDir, name); at != "" {
+		if at := config.InstalledCredentialReference(e.Layout.ConfigPath, raw, e.Layout.DataDir, name); at != "" {
 			return fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", name, at)
 		}
 	}

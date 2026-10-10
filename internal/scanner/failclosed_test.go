@@ -38,11 +38,11 @@ func TestScanners_FailClosedOnNonZeroExitWithParseableStdout(t *testing.T) {
 	}{
 		{
 			name:    "skill",
-			scanner: NewSkillScanner(config.SkillScannerConfig{Binary: bin}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{}),
+			scanner: NewSkillScannerFromLLM(config.SkillScannerConfig{Binary: bin}, config.LLMConfig{}, config.CiscoAIDefenseConfig{}),
 		},
 		{
 			name:    "mcp",
-			scanner: NewMCPScanner(config.MCPScannerConfig{Binary: bin}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{}),
+			scanner: NewMCPScannerFromLLM(config.MCPScannerConfig{Binary: bin}, config.LLMConfig{}, config.CiscoAIDefenseConfig{}),
 		},
 		{
 			name:    "plugin",
@@ -86,5 +86,27 @@ func TestScanners_PartialResultPreservedOnFailure(t *testing.T) {
 	}
 	if result.ExitCode == 0 {
 		t.Errorf("ExitCode should be set on failure, got 0")
+	}
+}
+
+// A scanner that dies on a Python exception reports the exception line, not
+// the traceback with interpreter paths and source lines (GAP-0229).
+func TestScannerFailureTextCutsPythonTraceback(t *testing.T) {
+	stderr := "Traceback (most recent call last):\n" +
+		"  File \"C:\\Runtime\\skill_scanner\\cli\\cli.py\", line 557, in scan_command\n" +
+		"    if not skill_dir.exists():\n" +
+		"PermissionError: [WinError 5] Access is denied: 'C:\\Staging\\skill'\n"
+	want := "PermissionError: [WinError 5] Access is denied: 'C:\\Staging\\skill'"
+	if got := scannerFailureText(stderr); got != want {
+		t.Fatalf("scannerFailureText = %q, want %q", got, want)
+	}
+	if got := scannerFailureText(" Error: Directory does not exist: x\n"); got != "Error: Directory does not exist: x" {
+		t.Fatalf("plain stderr = %q", got)
+	}
+	// Secure Client keeps the stderr of main (GAP-0280).
+	KeepFullFailureText(true)
+	t.Cleanup(func() { KeepFullFailureText(false) })
+	if got := scannerFailureText(stderr); got != stderr {
+		t.Fatalf("Secure Client scannerFailureText = %q, want the stderr unchanged", got)
 	}
 }

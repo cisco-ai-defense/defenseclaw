@@ -24,6 +24,8 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/cli"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/nativeinstallstate"
 )
 
@@ -54,6 +56,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "defenseclaw: apply native install environment: %v\n", err)
 			os.Exit(1)
 		}
+	}
+	// A stray deployment pin exported in a user's shell is not a managed host
+	// (a managed service loads a machine-owned config, never a per-user one).
+	if home, err := os.UserHomeDir(); err == nil {
+		managed.IgnoreUnmanagedPins(config.ConfigPath(), home)
 	}
 	cli.SetVersion(version)
 	cli.SetBuildInfo(commit, date)

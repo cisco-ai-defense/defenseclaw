@@ -25,20 +25,19 @@ import (
 
 // unixLifecycleOptions are the flags of `enterprise linux|macos <action>`.
 type unixLifecycleOptions struct {
-	payload              string
-	fromPackage          bool
-	config               string
-	noStart              bool
-	adoptExisting        bool
-	allowDowngrade       bool
-	purge                bool
-	removeServiceAccount bool
-	keepState            bool
-	keepServiceAccount   bool
-	productVersion       string
-	reason               string
-	lockWait             time.Duration
-	json                 bool
+	payload            string
+	fromPackage        bool
+	config             string
+	noStart            bool
+	adoptExisting      bool
+	allowDowngrade     bool
+	purge              bool
+	keepState          bool
+	keepServiceAccount bool
+	productVersion     string
+	reason             string
+	lockWait           time.Duration
+	json               bool
 }
 
 // enterpriseSecretOptions are the flags of `enterprise secret <action>`.
@@ -220,7 +219,6 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		flags.BoolVar(&opts.purge, "purge", false, "also remove each enrolled account's ~/.defenseclaw, the empty agent folders DefenseClaw created in its home, its per-user binaries in ~/.local/bin and DefenseClaw's entries in its uv cache ~/.cache/uv (after stopping its per-user gateway); the result names every enrolled account whose data it removed, and warns for each one whose data it kept; accounts the deployment never enrolled have no DefenseClaw per-user data and are not listed")
 		flags.BoolVar(&opts.keepState, "keep-state", false, "keep the machine state (config, secrets, gateway and guardian state, logs, lifecycle state) and the service account, so a reinstall resumes with them; without it uninstall removes all of it")
 		flags.BoolVar(&opts.keepServiceAccount, "keep-service-account", false, "keep the gateway service account, which uninstall deletes otherwise")
-		flags.BoolVar(&opts.removeServiceAccount, "remove-service-account", false, "delete the gateway service account (the default now; kept for older scripts)")
 		addLockWaitFlag(flags, &opts.lockWait)
 	case "reconcile", "rotate-credentials":
 		addLockWaitFlag(flags, &opts.lockWait)

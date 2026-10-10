@@ -73,8 +73,7 @@ enterprise-wide authority or native human approval.
 
 The table highlights convenience options rather than the complete alias
 surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
-approval, block-message, add/replace, workspace, and rule-pack-directory
-options. See the [quick-alias reference](/docs/guardrail/aliases); use
+approval, block-message, add/replace, and workspace options. See the [quick-alias reference](/docs/guardrail/aliases); use
 [full guardrail setup](/docs/guardrail) for scanner, detection-strategy,
 and judge-provider configuration.
 
@@ -240,6 +239,20 @@ hooks still ran and blocked; their fail-closed behavior does not protect a
 prompt that never enters a hook. Check `hook_decision` audit rows for
 `beforeSubmitPrompt` before claiming prompt coverage on a particular Agent
 build. DefenseClaw status and enterprise verify warn about this limitation.
+</Callout>
+
+<Callout type="warn" title="Cursor Agent CLI: a refused prompt has no message">
+When the DefenseClaw gateway is down and the hook fails closed (action mode),
+Cursor Agent CLI (seen with 2026.10.01-14929f9) drops a submitted prompt
+without showing why: the input clears and the start screen returns. The hook
+does answer `beforeSubmitPrompt` with `continue: false` and a reason ("DefenseClaw
+gateway unreachable; run defenseclaw-gateway start", or on a managed host
+"DefenseClaw blocked this prompt: the DefenseClaw gateway service is not
+running on this computer..."), but the CLI does not display `user_message` for
+that event. Tool calls show their reason. When prompts vanish this way, run
+`defenseclaw-gateway status` (or `defenseclaw-gateway start` on a per-user
+install). On a per-user install the refusals are the `"connector":"cursor"`
+lines with `"fail_mode":"closed"` in `~/.defenseclaw/logs/hook-failures.jsonl`.
 </Callout>
 
 The hook payload's `cursor_version` is the Cursor application version, not the

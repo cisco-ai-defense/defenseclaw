@@ -139,6 +139,54 @@ var v8YAMLParseCache struct {
 	doc    *V8YAMLDocument
 }
 
+// sourceYAMLCache holds the plain YAML parse of the last configuration source
+// a key reader decoded. One load reads config_version, deployment_mode,
+// enterprise.profile and ai_discovery.signature_pack_digests through separate
+// helpers, and each parsed the whole file again for its key: with 1,000
+// guardrail profiles those parses were a fifth of every config load, paid by
+// gateway start, the watchdog and each CLI command (GAP-0276). The node is
+// shared: read it, never change it.
+var sourceYAMLCache struct {
+	sync.Mutex
+	sum  [sha256.Size]byte
+	node *yaml.Node
+	err  error
+}
+
+// decodeSourceYAML is yaml.Unmarshal(raw, out) through sourceYAMLCache.
+func decodeSourceYAML(raw []byte, out any) error {
+	node, err := sourceYAMLNode(raw)
+	if err != nil {
+		return err
+	}
+	return node.Decode(out)
+}
+
+// sourceYAMLNode is the yaml.Unmarshal parse of raw into a document node,
+// kept for the next reader of the same bytes. The result is read-only.
+func sourceYAMLNode(raw []byte) (*yaml.Node, error) {
+	if len(raw) > v8YAMLParseCacheMaxBytes {
+		var node yaml.Node
+		err := yaml.Unmarshal(raw, &node)
+		return &node, err
+	}
+	sum := sha256.Sum256(raw)
+	cache := &sourceYAMLCache
+	cache.Lock()
+	if cache.node != nil && cache.sum == sum {
+		node, err := cache.node, cache.err
+		cache.Unlock()
+		return node, err
+	}
+	cache.Unlock()
+	var node yaml.Node
+	err := yaml.Unmarshal(raw, &node)
+	cache.Lock()
+	cache.sum, cache.node, cache.err = sum, &node, err
+	cache.Unlock()
+	return &node, err
+}
+
 // ParseV8YAML performs source-safety, exact-version, and targeted legacy-key
 // checks. It does not apply defaults, migrations, environment overrides, schema
 // validation, or observability compilation. The result is shared between
@@ -204,8 +252,24 @@ func parseV8YAML(source string, data []byte) (*V8YAMLDocument, error) {
 	if err := validateV8YAMLVersion(source, root); err != nil {
 		return nil, err
 	}
-	if err := rejectV8YAMLLegacyKeys(source, root); err != nil {
+	if v9SecureClientDocument(root) {
+		// Secure Client stays on v8 and rejects v9-only provider routing.
+		if node := v8YAMLMapValue(root, "llm_providers"); node != nil {
+			return nil, v8Error(source, V8YAMLErrorLegacyKeyForbidden, "$.llm_providers", node,
+				"llm_providers is not accepted in Secure Client config_version 8",
+				"remove llm_providers from the Secure Client source")
+		}
+		// Keep the legacy-key errors of main (issue #1092); elsewhere
+		// the schema refuses those keys.
+		if err := rejectV8YAMLLegacyKeys(source, root); err != nil {
+			return nil, err
+		}
+	}
+	if err := rejectV9RemovedKeys(source, root); err != nil {
 		return nil, err
+	}
+	if !v9SecureClientDocument(root) {
+		dropRetiredScannerKeys(root)
 	}
 	plainValue, err := projectV8YAML(source, root, "$")
 	if err != nil {
@@ -235,15 +299,15 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 	}
 	if node.Kind == yaml.AliasNode {
 		return v8Error(w.source, V8YAMLErrorAliasForbidden, path, node,
-			"YAML aliases are not allowed in v8 configuration", "replace the alias with explicit configuration")
+			"YAML aliases are not allowed in config.yaml", "replace the alias with explicit configuration")
 	}
 	if v8YAMLIsMerge(node) {
 		return v8Error(w.source, V8YAMLErrorMergeKeyForbidden, path, node,
-			"YAML merge keys are not allowed in v8 configuration", "write every merged key explicitly")
+			"YAML merge keys are not allowed in config.yaml", "write every merged key explicitly")
 	}
 	if !v8YAMLTagAllowed(node) {
 		return v8Error(w.source, V8YAMLErrorCustomTagForbidden, path, node,
-			"custom or unsupported YAML tags are not allowed in v8 configuration",
+			"custom or unsupported YAML tags are not allowed in config.yaml",
 			"use ordinary mappings, sequences, and scalar values")
 	}
 
@@ -263,7 +327,7 @@ func (w *v8YAMLWalker) validate(node *yaml.Node, path string, depth int) error {
 			key, value := node.Content[index], node.Content[index+1]
 			if v8YAMLIsMerge(key) {
 				return v8Error(w.source, V8YAMLErrorMergeKeyForbidden, path, key,
-					"YAML merge keys are not allowed in v8 configuration", "write every merged key explicitly")
+					"YAML merge keys are not allowed in config.yaml", "write every merged key explicitly")
 			}
 			// Report aliases/custom tags with their specific code before the
 			// more general string-key diagnostic.
@@ -323,7 +387,7 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	value := v8YAMLMapValue(root, "config_version")
 	if value == nil {
 		return v8Error(source, V8YAMLErrorVersionRequired, "$.config_version", root,
-			"config_version is required by the v8 configuration entrypoint",
+			"config_version is required in config.yaml",
 			"run `defenseclaw migrate` to create a current source")
 	}
 	if value.Kind != yaml.ScalarNode || value.ShortTag() != "!!int" {
@@ -337,6 +401,10 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 			"config_version must be an integer", "run `defenseclaw migrate` to create a current source")
 	}
 	switch {
+	case version > v8YAMLConfigVersion && v9SecureClientDocument(root):
+		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
+			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
+			newerConfigAction)
 	case version >= v8YAMLConfigVersion && version <= MaxSupportedConfigVersion:
 		return nil
 	case version >= 0 && version < v8YAMLConfigVersion:
@@ -346,11 +414,139 @@ func validateV8YAMLVersion(source string, root *yaml.Node) error {
 	case version > MaxSupportedConfigVersion:
 		return v8Error(source, V8YAMLErrorVersionUnsupported, "$.config_version", value,
 			fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d)", version),
-			"upgrade DefenseClaw or restore ~/.defenseclaw/previous")
+			newerConfigAction)
 	default:
 		return v8Error(source, V8YAMLErrorVersionInvalid, "$.config_version", value,
 			"config_version must be a non-negative integer", "run `defenseclaw migrate` to create a current source")
 	}
+}
+
+// newerConfigAction is the way out of a config_version this release does not
+// read: a managed host keeps the pre-upgrade copy next to the config, a
+// per-user install in its previous folder.
+const newerConfigAction = "upgrade DefenseClaw, or restore the config saved before the upgrade " +
+	"(config.yaml.v8.bak next to the config file on a managed host, ~/.defenseclaw/previous on a per-user install)"
+
+// rejectV9RemovedKeys refuses, in a config_version 9 source, the v8 keys
+// that config_version 9 replaced. A v8 source keeps them: they are the
+// input of the v8 to v9 migration (MigrateV9).
+func rejectV9RemovedKeys(source string, root *yaml.Node) error {
+	version := v8YAMLMapValue(root, "config_version")
+	var number int64
+	if version == nil || version.Decode(&number) != nil || number < ConfigVersionV9 {
+		return nil
+	}
+	for _, removed := range []struct{ key, target string }{
+		{"otel", "observability.destinations"},
+		{"skill_actions", "admission.skill.actions"},
+		{"mcp_actions", "admission.mcp.actions"},
+		{"plugin_actions", "admission.plugin.actions"},
+	} {
+		if node := v8YAMLMapValue(root, removed.key); node != nil {
+			return v9RemovedKeyError(source, v8YAMLChildPath("$", removed.key), node, removed.target)
+		}
+	}
+	if node := v8YAMLMapValue(root, "privacy"); node != nil {
+		return v9RemovedKeyAction(source, "$.privacy", node, "remove it: config_version 9 has no privacy section")
+	}
+	if node := v8YAMLMapValue(v8YAMLMapValue(root, "watch"), "allow_list_bypass_scan"); node != nil {
+		return v9RemovedKeyError(source, "$.watch.allow_list_bypass_scan", node,
+			"admission.<type>.allow_list_bypass_scan")
+	}
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	if err := rejectV9RulePackDir(source, guardrail, "$.guardrail"); err != nil {
+		return err
+	}
+	if err := rejectV9ConnectorRulePackDirs(source, guardrail, "$.guardrail"); err != nil {
+		return err
+	}
+	if profiles := v8YAMLMapValue(guardrail, "profiles"); profiles != nil && profiles.Kind == yaml.MappingNode {
+		for index := 0; index+1 < len(profiles.Content); index += 2 {
+			path := v8YAMLChildPath("$.guardrail.profiles", profiles.Content[index].Value)
+			profile := profiles.Content[index+1]
+			if err := rejectV9RulePackDir(source, profile, path); err != nil {
+				return err
+			}
+			if err := rejectV9ConnectorRulePackDirs(source, profile, path); err != nil {
+				return err
+			}
+		}
+	}
+	observability := v8YAMLMapValue(root, "observability")
+	if node := v8YAMLMapValue(v8YAMLMapValue(observability, "trace_policy"), "compatibility_aliases"); node != nil {
+		return v9RemovedKeyAction(source, "$.observability.trace_policy.compatibility_aliases", node,
+			"remove it: telemetry carries only canonical attribute names")
+	}
+	attributes := v8YAMLMapValue(v8YAMLMapValue(observability, "resource"), "attributes")
+	if node := v8YAMLMapValue(attributes, "deployment.environment"); node != nil {
+		return v9RemovedKeyError(source, v8YAMLChildPath("$.observability.resource.attributes", "deployment.environment"),
+			node, "deployment.environment.name")
+	}
+	scanners := v8YAMLMapValue(root, "scanners")
+	for _, removed := range []struct{ scanner, key, target string }{
+		{"skill_scanner", "binary", "the managed scanner install"},
+		{"skill_scanner", "use_virustotal", "scanners.skill_scanner.analyzers.virustotal.enabled"},
+		{"skill_scanner", "use_aidefense", "scanners.skill_scanner.analyzers.aidefense.enabled"},
+		{"skill_scanner", "virustotal_api_key", "a key stored with defenseclaw keys set"},
+		{"skill_scanner", "virustotal_api_key_env", "scanners.skill_scanner.analyzers.virustotal.api_key_env"},
+		{"mcp_scanner", "binary", "the managed scanner install"},
+	} {
+		if node := v8YAMLMapValue(v8YAMLMapValue(scanners, removed.scanner), removed.key); node != nil {
+			return v9RemovedKeyError(source, "$.scanners."+removed.scanner+"."+removed.key, node, removed.target)
+		}
+	}
+	return nil
+}
+
+// retiredScannerKeys are scanner keys that no scan path ever read and that
+// config_version 9 dropped (GAP-0295, GAP-0301). 1.0 pre-release builds
+// accepted and wrote them, so a source that still holds one loads with the
+// key ignored, and the next write leaves it out. A Secure Client document
+// keeps the closed schema of main (issue #1092), which never had them.
+// Remove this after 1.1, when no pre-release config is left to load.
+var retiredScannerKeys = [][]string{
+	{"scanners", "mcp_scanner", "api"},
+	{"scanners", "mcp_scanner", "timeouts"},
+	{"scanners", "skill_scanner", "timeouts", "llm_s"},
+}
+
+func dropRetiredScannerKeys(root *yaml.Node) {
+	for _, path := range retiredScannerKeys {
+		parent := root
+		for _, key := range path[:len(path)-1] {
+			parent = v8YAMLMapValue(parent, key)
+		}
+		if parent == nil || parent.Kind != yaml.MappingNode {
+			continue
+		}
+		for index := 0; index+1 < len(parent.Content); index += 2 {
+			if parent.Content[index].Value == path[len(path)-1] {
+				parent.Content = append(parent.Content[:index], parent.Content[index+2:]...)
+				break
+			}
+		}
+	}
+}
+
+func rejectV9RulePackDir(source string, scope *yaml.Node, path string) error {
+	if node := v8YAMLMapValue(scope, "rule_pack_dir"); node != nil {
+		return v9RemovedKeyError(source, path+".rule_pack_dir", node, "rule_pack or custom_packs")
+	}
+	return nil
+}
+
+func rejectV9ConnectorRulePackDirs(source string, scope *yaml.Node, path string) error {
+	connectors := v8YAMLMapValue(scope, "connectors")
+	if connectors == nil || connectors.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(connectors.Content); index += 2 {
+		connectorPath := v8YAMLChildPath(path+".connectors", connectors.Content[index].Value)
+		if err := rejectV9RulePackDir(source, connectors.Content[index+1], connectorPath); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func rejectV8YAMLLegacyKeys(source string, root *yaml.Node) error {
@@ -405,6 +601,15 @@ func v8YAMLLegacyError(source, path string, node *yaml.Node, target string) erro
 	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
 		"a legacy v7 configuration key is not accepted by the v8 entrypoint",
 		"run defenseclaw upgrade; use "+target)
+}
+
+func v9RemovedKeyError(source, path string, node *yaml.Node, target string) error {
+	return v9RemovedKeyAction(source, path, node, "use "+target)
+}
+
+func v9RemovedKeyAction(source, path string, node *yaml.Node, action string) error {
+	return v8Error(source, V8YAMLErrorLegacyKeyForbidden, path, node,
+		"a retired configuration key is not accepted in config_version 9", action)
 }
 
 func projectV8YAML(source string, node *yaml.Node, path string) (any, error) {

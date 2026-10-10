@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import defenseclaw.doctor_hooks as doctor_hooks
 import yaml
+from defenseclaw.hook_integrity import _read_agent_config
 
 try:
     import tomllib
@@ -55,6 +56,13 @@ from defenseclaw.doctor_hooks import (
 
 
 class WindowsHookDoctorTests(unittest.TestCase):
+    def test_codex_bom_config_is_read_by_hook_inspectors(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root, "config.toml")
+            path.write_bytes(b"\xef\xbb\xbf# user comment\n[features]\nhooks = true\n")
+            self.assertTrue(doctor_hooks._read_config(str(path), "codex")["features"]["hooks"])
+            self.assertTrue(_read_agent_config(path)["features"]["hooks"])
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="doctor-win-hooks-")
         self.root = Path(self.temp.name)
@@ -1041,6 +1049,30 @@ class WindowsHookDoctorTests(unittest.TestCase):
         check = self._validate("claudecode", config)
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+
+    def test_claude_launcher_guard_form_is_healthy_and_edits_are_not(self) -> None:
+        # GAP-1091: per-user Setup runs the launcher through cmd.exe so a
+        # missing launcher blocks; doctor must read it as the exec form it runs.
+        runtime = self._runtime()
+        processor = ntpath.join(os.environ.get("SystemRoot") or "C:\\Windows", "System32", "cmd.exe")
+        guard = [
+            "/d", "/c", "if", "exist", str(runtime), "(", str(runtime), "hook", "--connector", "claudecode", ")",
+            "else", "(", "echo", *doctor_hooks._CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
+        ]
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["command"] = processor
+            entries[0]["hooks"][0]["args"] = guard
+        config.write_text(json.dumps(document), encoding="utf-8")
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["args"] = [*guard[:-2], "0", ")"]
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self.assertNotEqual(self._validate("claudecode", config).state, "healthy")
 
     def test_claude_exec_form_rejects_malformed_args(self) -> None:
         runtime = self._runtime()

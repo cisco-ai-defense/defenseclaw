@@ -21,8 +21,29 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+func TestInertHILTValidationWarningUsesProfileAndConnectorThresholds(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"team": {
+			BlockAt: "MEDIUM", HILT: &config.HILTConfig{Enabled: true, MinSeverity: "HIGH"},
+			Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {BlockAt: "CRITICAL"}},
+		},
+	}
+	warnings := ConfigHILTWarnings(cfg)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "guardrail.profiles.team:") ||
+		!strings.Contains(warnings[0], "block_at MEDIUM blocks") {
+		t.Fatalf("warnings = %v, want only the inert profile scope", warnings)
+	}
+	if !config.HILTBlockedByThreshold(config.HILTConfig{Enabled: true, MinSeverity: "HIGH"}, "HIGH") ||
+		config.HILTBlockedByThreshold(config.HILTConfig{Enabled: true, MinSeverity: "HIGH"}, "CRITICAL") {
+		t.Fatal("HILT threshold ordering is wrong")
+	}
+}
 
 // An inspect verdict must use the authenticated connector profile settings.
 func TestInspectVerdictUsesAuthenticatedConnectorProfile(t *testing.T) {
@@ -89,7 +110,7 @@ func TestGuardrailProfileRemovalUsesReloadedBaseForUnmatchedHook(t *testing.T) {
 	}
 	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, startup)
 	live := startup
-	api.SetConfigRuntime(nil, func() *config.Config { return live })
+	api.SetGenerationSource(func() *Generation { return &Generation{Config: live} })
 	ctx := api.withGuardrailProfileDecision(t.Context(), "opencode")
 	if got := hookModeForConfig(api.decisionConfig(ctx), "opencode"); got != "observe" {
 		t.Fatalf("startup unmatched hook mode = %q", got)
@@ -151,6 +172,42 @@ func TestGuardrailProfileTelemetryFollowsReloadedSet(t *testing.T) {
 	}
 	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "watch" {
 		t.Fatalf("telemetry profile = %q, want enforced watch", name)
+	}
+}
+
+// A request that pinned a generation keeps that generation's profile when a
+// reload publishes another set before the request decides (GAP-1295).
+func TestPinnedGenerationKeepsItsGuardrailProfile(t *testing.T) {
+	stubProfileSources(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action"}, "watch": {Mode: "observe"},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	pinned := &Generation{N: 1, Config: cfg, Profiles: api.guardrailProfileSet()}
+	live := pinned
+	api.SetGenerationSource(func() *Generation { return live })
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	ctx = api.withGuardrailProfileDecision(ctx, "")
+
+	next := *cfg
+	next.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "watch", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	set, err := newGuardrailProfileSet(&next, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live = &Generation{N: 2, Config: &next, Profiles: set}
+	api.setGuardrailProfiles(set)
+	if got := api.decisionConfig(ctx).Guardrail.Mode; got != "action" {
+		t.Fatalf("pinned decision mode = %q, want the pinned generation's action", got)
+	}
+	if got := api.decisionConfig(context.WithValue(ctx, resolvedGuardrailProfileKey{}, nil)).Guardrail.Mode; got != "action" {
+		t.Fatalf("re-resolved pinned decision mode = %q, want action", got)
 	}
 }
 
@@ -222,7 +279,7 @@ func TestGuardrailWaitsForAPIProfilePublication(t *testing.T) {
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"strict": {Mode: "action"}}
 	cfg.Guardrail.DefaultProfile = "strict"
-	api := newAPIServer(nil, "127.0.0.1:0", nil, nil, nil, nil, cfg)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
 	s.setAPIServer(api)
 	if err := <-done; err != nil {
 		t.Fatal(err)
@@ -233,8 +290,8 @@ func TestGuardrailWaitsForAPIProfilePublication(t *testing.T) {
 }
 
 // The guardrail proxy scans the requests a profile selects with the
-// profile's rule pack, under the posture that pack implies, and applies its
-// HILT, as explain says it does (GAP-0313).
+// profile's rule pack and applies its HILT, as explain says it does
+// (GAP-0313). Its thresholds come from requestThresholds.
 func TestGuardrailProxyAppliesTheProfileRulePackAndHILT(t *testing.T) {
 	stubProfileSources(t)
 	resetConnectorRuleCategories(t)
@@ -248,7 +305,7 @@ rules:
   - id: PROXY-PROFILE-MARKER
     pattern: "proxy_profile_marker_token"
     title: proxy profile fixture
-    severity: MEDIUM
+    severity: HIGH
     confidence: 0.99
     tags: [test]
 `)
@@ -263,7 +320,7 @@ rules:
 		{Profile: "contractors", Match: config.ProfileMatch{Connectors: []string{"openclaw"}}},
 	}
 	NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
-	inspector := NewGuardrailInspector("local", nil, nil, "")
+	inspector := NewGuardrailInspector("local", nil, nil)
 	inspector.SetHILTConfig(false, "HIGH")
 	proxy := &GuardrailProxy{cfg: &config.GuardrailConfig{Connector: "openclaw"}, gatewayToken: "owner-token"}
 	subject := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
@@ -273,10 +330,11 @@ rules:
 	if name, _ := guardrailProfileTelemetryFor(ctx).Name.Get(); name != "contractors" {
 		t.Fatalf("proxy profile = %q, want contractors", name)
 	}
-	// A completion: the prompt surface reports and never blocks.
+	// A completion: the prompt surface reports and never blocks. The
+	// profile's HILT (MEDIUM) turns the HIGH finding into a confirm.
 	verdict := inspector.Inspect(ctx, "completion", "please keep proxy_profile_marker_token safe", nil, "test-model", "action")
-	if verdict == nil || verdict.Action != "block" || !strings.Contains(strings.Join(verdict.Findings, ","), "PROXY-PROFILE-MARKER") {
-		t.Fatalf("proxy verdict = %+v, want a block by the profile's strict rule pack", verdict)
+	if verdict == nil || verdict.Action != "confirm" || !strings.Contains(strings.Join(verdict.Findings, ","), "PROXY-PROFILE-MARKER") {
+		t.Fatalf("proxy verdict = %+v, want a confirm by the profile's rule pack and HILT", verdict)
 	}
 	if hilt := inspector.hiltInputFor(ctx); hilt == nil || !hilt.Enabled || hilt.MinSeverity != "MEDIUM" {
 		t.Fatalf("proxy HILT input = %+v, want the profile's (enabled, MEDIUM)", hilt)
@@ -693,6 +751,15 @@ rules:
     confidence: 0.99
     tags: [test]
 `)
+	writeRulePackFixtureFile(t, packDir, "suppressions.yaml", `version: 1
+pre_judge_strips: []
+finding_suppressions:
+  - id: PROFILE-SUPPRESSION
+    finding_pattern: "PROFILE-MARKER"
+    entity_pattern: "profile_marker_token"
+    reason: allowed in this profile
+tool_suppressions: []
+`)
 	for _, retry := range set.missing {
 		retry.mu.Lock()
 		retry.nextTry = time.Time{}
@@ -703,6 +770,13 @@ rules:
 	}
 	if note := set.pendingRulePackNote("strict", set.profiles["strict"].Config, "codex"); note != "" {
 		t.Fatalf("explain note = %q after the pack loaded", note)
+	}
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	ctx = api.withGuardrailProfileDecision(ctx, "codex")
+	pack := api.connectorRulePack(ctx, "codex")
+	if pack == nil || pack.Suppressions == nil || len(pack.Suppressions.FindingSupps) != 1 ||
+		pack.Suppressions.FindingSupps[0].ID != "PROFILE-SUPPRESSION" {
+		t.Fatalf("retry did not supply the profile judge suppression: %+v", pack)
 	}
 }
 
@@ -988,6 +1062,18 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	if late := set.unknownGroupWarnings(2 * time.Second); len(late) != 2 {
 		t.Fatalf("warnings = %q after the pass finished, want 2", late)
 	}
+	// status and verify read /health right after a gateway restart: it
+	// waits for the first pass as profile-explain does (GAP-0830).
+	slow := make(chan struct{})
+	profileGroupExists = func(ctx context.Context, name string) (bool, error) {
+		<-slow
+		return exists(ctx, name)
+	}
+	set = &guardrailProfileSet{assignments: assignments}
+	time.AfterFunc(50*time.Millisecond, func() { close(slow) })
+	if got := set.healthProfileWarnings(); len(got) != 2 {
+		t.Fatalf("health warnings = %q right after start, want the 2 profile-explain lists", got)
+	}
 
 	// GAP-0229: an SSSD that is offline with a cold cache answers "no such
 	// group" for groups that exist. While lookups fail, or the explained
@@ -1119,6 +1205,51 @@ func TestExplainShowsTheProfileRequestsStillGet(t *testing.T) {
 	cachedDirectoryFacts = func(string) (useridentity.DirectoryFacts, time.Time, bool) { return cached, time.Time{}, false }
 	if view, _ := explainCacheView(set, explained, decision, "", "", now); view != nil {
 		t.Fatalf("view = %v for an account nothing is cached for", view)
+	}
+}
+
+// After a hot reload, Secure Client decides with the start-time
+// configuration, as before the configuration generation (GAP-0140, issue
+// #1092); every other profile decides with the live generation.
+func TestSecureClientDecidesWithTheStartTimeConfig(t *testing.T) {
+	start := &config.Config{DeploymentMode: "managed_enterprise"}
+	live := &config.Config{DeploymentMode: "managed_enterprise"}
+	api := &APIServer{scannerCfg: start, generationSource: func() *Generation { return &Generation{Config: live} }}
+	if got := api.decisionConfig(context.Background()); got != start {
+		t.Fatal("Secure Client decided with the reloaded configuration")
+	}
+	start.DeploymentMode, live.DeploymentMode = "", ""
+	if got := api.decisionConfig(context.Background()); got != live {
+		t.Fatal("a per-user gateway decided with the start-time configuration")
+	}
+}
+
+// TestProfileExplainReportsTheLiveMode pins GAP-0895: after guardrail.mode
+// was hot-applied from observe to action, profile-explain still printed the
+// start-time mode while the hooks enforced the new one.
+func TestProfileExplainReportsTheLiveMode(t *testing.T) {
+	t.Cleanup(func() { liveGuardrailProfiles.Store(nil) })
+	liveGuardrailProfiles.Store(nil)
+	start := &config.Config{}
+	start.Guardrail.Mode = "observe"
+	live := &config.Config{}
+	live.Guardrail.Mode = "action"
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, start)
+	api.SetGenerationSource(func() *Generation { return &Generation{Config: live} })
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?connector=codex", nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	rec := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(rec, req)
+	var out struct {
+		Effective struct {
+			Mode string `json:"mode"`
+		} `json:"effective"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("%v: %s", err, rec.Body.String())
+	}
+	if out.Effective.Mode != hookModeForConfig(live, "codex") || out.Effective.Mode != "action" {
+		t.Fatalf("effective mode = %q, want the live action mode: %s", out.Effective.Mode, rec.Body.String())
 	}
 }
 
@@ -1533,6 +1664,38 @@ func TestWindowsGroupAssignmentRetryOnFirstHook(t *testing.T) {
 	}
 }
 
+// GAP-1144: a local group deleted and recreated under the same name gets a
+// new SID; the set kept the deleted one, so the recreated group selected
+// nobody until the gateway restarted. A resolved name is looked up again
+// once a minute and the first hook after that follows the new SID.
+func TestWindowsGroupAssignmentFollowsARecreatedGroup(t *testing.T) {
+	var current atomic.Value
+	current.Store("S-1-5-21-860-1-2-1117")
+	assignments := []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Groups: []string{`w5-contractors`}}},
+	}
+	set := &guardrailProfileSet{
+		defaultProfile: "default", assignments: assignments, matches: newProfileMatchCache(),
+		profiles: map[string]config.DerivedGuardrailProfile{"default": {}, "strict": {}},
+		groupSIDs: newProfileGroupSIDs(assignments, func(string) (string, error) {
+			return current.Load().(string), nil
+		}, time.Second),
+	}
+	subject := &profileSubject{UserID: "S-1-5-21-860-1-2-1001", IDKind: useridentity.KindWindowsSID,
+		Groups: []string{"S-1-5-21-860-1-2-1119"}}
+	if got := set.match(subject, profileSubjectVerified, "codex", ""); got.Name != "default" {
+		t.Fatalf("member of the recreated group before the re-check selected %+v, want default", got)
+	}
+	current.Store("S-1-5-21-860-1-2-1119")
+	set.groupSIDs.nextCheck.Store(0)
+	set.groupSIDs.mu.Lock()
+	set.groupSIDs.entries[foldKey(`w5-contractors`)].checkAt = time.Time{}
+	set.groupSIDs.mu.Unlock()
+	if got := set.match(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchGroup {
+		t.Fatalf("member of the recreated group after the re-check selected %+v, want strict group profile", got)
+	}
+}
+
 // GAP-0860: stalled SID-to-name lookups left the caller groups bare SIDs, so
 // a standalone Windows assignment that names the group missed. Assignment
 // group names resolve to SIDs once per profile set and match the SIDs of the
@@ -1604,6 +1767,45 @@ func TestWindowsGroupAssignmentsMatchOnResolvedSIDs(t *testing.T) {
 	named := &profileSubject{UserID: subject.UserID, IDKind: subject.IDKind, Groups: []string{`CORP\gap0860-devs`}}
 	if got := set.match(named, profileSubjectVerified, "codex", ""); got.Name != "default" {
 		t.Fatalf("a group name without its SID matched: %+v", got)
+	}
+}
+
+// A stale pin for one name must not suppress a different, valid name that
+// resolves to the same pack directory.
+func TestProfilePackPinIsValidatedPerName(t *testing.T) {
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeRulePackFixtureFile(t, packDir, "rules/marker.yaml", `version: 1
+category: secret
+rules:
+  - id: PROFILE-PIN-MARKER
+    pattern: "profile_pin_marker_token"
+    title: pinned pack fixture
+    severity: HIGH
+    confidence: 0.99
+    tags: [test]
+`)
+	digest, err := guardrail.RulePackDigest(packDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{
+		"a-stale": {Path: packDir, Digest: "sha256:" + strings.Repeat("0", 64)},
+		"b-valid": {Path: packDir, Digest: "sha256:" + digest},
+	}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"a-stale": {RulePack: "a-stale"},
+		"b-valid": {RulePack: "b-valid"},
+	}
+	set, err := newGuardrailProfileSet(cfg, guardrail.NewRulePackCache(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badKey := effectiveRulePackKey(set.profiles["a-stale"].Config, "")
+	goodKey := effectiveRulePackKey(set.profiles["b-valid"].Config, "")
+	if badKey == goodKey || set.missing[badKey] == nil || set.rules[goodKey] == nil {
+		t.Fatalf("shared directory did not validate each pin: bad=%q good=%q missing=%v valid rules=%v",
+			badKey, goodKey, set.missing[badKey] != nil, set.rules[goodKey] != nil)
 	}
 }
 

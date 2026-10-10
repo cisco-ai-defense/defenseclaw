@@ -110,11 +110,11 @@ SKIP_LOAD_COMMANDS = {
 SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "version"}
 
 # These commands are the only top-level boundaries permitted to operate on an
-# existing pre-v8 document. They either create/replace a configuration,
-# migrate or replace the installation, remove it, or (for ``config``)
-# delegate the read-only/mutation boundary to that group's subcommand guard.
-# Every other group preflights the raw schema discriminator before a Python
-# compatibility dataclass can be constructed.
+# existing unconverted 0.8.x document. They either create/replace a configuration,
+# migrate or replace the installation, remove it, or (for ``config``) hand the
+# decision to that group's own guard, which lets only ``validate`` explain such
+# a file. Every other group preflights the raw schema discriminator and stops
+# with one instruction, `defenseclaw migrate`.
 LEGACY_CONFIG_BOUNDARY_COMMANDS = {
     "config",
     "init",
@@ -132,6 +132,32 @@ LEGACY_CONFIG_BOUNDARY_COMMANDS = {
 ALLOW_MISSING_V8_PREFLIGHT = {"agent", "config", "observability", "quickstart", "tui"}
 
 
+def _cli_audit_db(cfg) -> str:
+    """The audit database this CLI opens: ``cfg.audit_db``, except in the
+    managed configuration folder.
+
+    The enterprise lifecycle owns that folder (root, 0755, read by every
+    enrolled user's hooks). A CLI pointed at it with ``DEFENSECLAW_HOME`` would
+    create an ``audit.db`` there, and the store drops the folder's world bits
+    when it creates one, so it gets an in-memory store instead (GAP-0062). On a
+    managed host a database whose folder does not exist gets one too.
+    """
+
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    descriptor = managed_descriptor()
+    audit_db = cfg.audit_db
+    if descriptor:
+        folder = os.path.dirname(os.path.abspath(audit_db))
+        # An administrator's shell aimed at the managed config has no data
+        # folder of its own (root's home has no .defenseclaw), and a local
+        # writer must still reach its managed refusal instead of failing to
+        # open a store (GAP-0168).
+        if folder == os.path.dirname(descriptor) or not os.path.isdir(folder):
+            return ":memory:"
+    return audit_db
+
+
 def _is_help_invocation(ctx: click.Context) -> bool:
     # Allow `defenseclaw --help` and `<cmd> --help` to work even before init.
     if getattr(ctx, "resilient_parsing", False):
@@ -140,26 +166,67 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
-def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
-    """Return whether the nested command is ``guardrail validate-pack``.
+#: Commands a managed device still runs for an account with a leftover
+#: per-user install: removing it, the version, and doctor (which reports the
+#: device as managed and names the leftover).
+MANAGED_LEFTOVER_COMMANDS = {"uninstall", "version", "doctor"}
+
+
+def _refuse_managed_leftover(ctx: click.Context) -> None:
+    """Exit 3 when a per-user install left on a managed device would answer.
+
+    Its config and gateway are not what the device enforces, so config get,
+    guardrail mode, status and the other per-user views must not present them
+    as the policy (GAP-0986, GAP-0987). ``config validate`` still checks a
+    file an administrator is about to push.
+    """
+    invoked = ctx.invoked_subcommand
+    if invoked in MANAGED_LEFTOVER_COMMANDS or (invoked == "config" and _group_child(ctx, "config") == "validate"):
+        return
+    from defenseclaw.config_writer import managed_leftover_config, managed_leftover_message
+
+    if leftover := managed_leftover_config():
+        ux.echo(managed_leftover_message(leftover), err=True)
+        raise SystemExit(3)
+
+
+def _group_child(ctx: click.Context, group: str) -> str:
+    """The token after ``group`` in argv when ``group`` is the invoked command."""
+    if ctx.invoked_subcommand != group:
+        return ""
+    argv = sys.argv[1:]
+    try:
+        index = argv.index(group)
+    except ValueError:
+        return ""
+    return argv[index + 1] if index + 1 < len(argv) else ""
+
+
+def _guardrail_child(ctx: click.Context) -> str:
+    """The exact ``guardrail`` subcommand token, or "" for anything else.
 
     Click exposes only the top-level ``guardrail`` name while the root callback
     is running. Use that parsed name as the trust anchor, then locate its exact
     argv token so root-option and ``--`` prefixes do not change the result. The
-    next token must be the exact nested command; intervening options or a
-    different subcommand do not receive the config-independent bypass.
+    next token must be the nested command; intervening options or a different
+    subcommand do not receive a bypass.
     """
-    if ctx.invoked_subcommand != "guardrail":
-        return False
-    argv = sys.argv[1:]
-    try:
-        guardrail_index = argv.index("guardrail")
-    except ValueError:
-        return False
-    return (
-        guardrail_index + 1 < len(argv)
-        and argv[guardrail_index + 1] == "validate-pack"
-    )
+    return _group_child(ctx, "guardrail")
+
+
+def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail validate-pack``."""
+    return _guardrail_child(ctx) == "validate-pack"
+
+
+def _is_pack_repin(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail use-pack``.
+
+    It re-pins an edited custom pack, so it must run while config.yaml still
+    carries the stale digest. It loads the config but skips the pre-command
+    validation; the writer validates the candidate it saves.
+    """
+    return _guardrail_child(ctx) == "use-pack"
 
 
 def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
@@ -275,6 +342,7 @@ def cli(ctx: click.Context) -> None:
 
     from defenseclaw import config as cfg_mod
 
+    _refuse_managed_leftover(ctx)
     if invoked in SKIP_LOAD_COMMANDS:
         if invoked not in LEGACY_CONFIG_BOUNDARY_COMMANDS:
             try:
@@ -283,7 +351,7 @@ def cli(ctx: click.Context) -> None:
                 )
             except cfg_mod.ConfigVersionError as exc:
                 ux.echo(str(exc), err=True)
-                raise SystemExit(1) from exc
+                raise SystemExit(exc.exit_code) from exc
         return
 
     if invoked == "setup":
@@ -296,13 +364,20 @@ def cli(ctx: click.Context) -> None:
             cfg_mod.require_v8_config(allow_missing=True)
         except cfg_mod.ConfigVersionError as exc:
             ux.echo(str(exc), err=True)
-            raise SystemExit(1) from exc
+            raise SystemExit(exc.exit_code) from exc
     elif invoked not in SKIP_AUTO_VALIDATE:
         try:
             cfg_mod.require_v8_config()
         except cfg_mod.ConfigVersionError as exc:
+            if isinstance(exc, cfg_mod.ManagedNotInitializedError):
+                from defenseclaw.enforce.asset_lists import MANAGED_REFUSAL, audit_first_run_refusal
+
+                audit_first_run_refusal(ctx.command, sys.argv[1:])
+                if invoked in {"skill", "mcp", "plugin", "tool"}:
+                    ux.echo(f"error: {MANAGED_REFUSAL}", err=True)
+                    raise SystemExit(exc.exit_code) from exc
             ux.echo(str(exc), err=True)
-            raise SystemExit(1) from exc
+            raise SystemExit(exc.exit_code) from exc
 
     if invoked == "doctor" and (damage := cfg_mod.config_damage_message()):
         # An empty config.yaml loads as built-in defaults; judging the install
@@ -335,8 +410,8 @@ def cli(ctx: click.Context) -> None:
             # GAP-0288: the file is there and refused; `init` would not fix it.
             ux.echo(
                 f"Failed to load config: {exc}. Fix it in {cfg_mod.config_path()}; "
-                "'defenseclaw config validate' shows the line. If the gateway is running, "
-                "it keeps its last good config.",
+                "'defenseclaw config validate' shows the line. "
+                "A running gateway keeps its last good configuration.",
                 err=True,
             )
         else:
@@ -353,16 +428,18 @@ def cli(ctx: click.Context) -> None:
     if invoked == "doctor":
         return
 
+    from defenseclaw.config import is_current_schema
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
-    source_is_v8 = getattr(app.cfg, "_source_config_version", None) == 8
+    source_is_v8 = is_current_schema(getattr(app.cfg, "_source_config_version", None))
 
     if invoked == "setup" and not source_is_v8:
         # A missing config is represented by an in-memory source version of
         # zero. Do not create audit/runtime state before the setup group proves
         # that the requested child is the trusted-paths bootstrap. Config.save
-        # will promote this fresh document to v8 while holding its file lock.
+        # will write this fresh document at the current version while holding
+        # its file lock.
         app.preinit_setup_bootstrap = True
         return
 
@@ -370,7 +447,7 @@ def cli(ctx: click.Context) -> None:
     # see a clear diagnostic instead of a deep stack trace. Skipped for
     # recovery commands (doctor/config/keys/upgrade) so a broken config
     # doesn't lock them out of the tools that would fix it.
-    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup":
+    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup" and not _is_pack_repin(ctx):
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()
@@ -396,7 +473,7 @@ def cli(ctx: click.Context) -> None:
             elif status_continues:
                 ux.echo(
                     "  A gateway that is already running keeps the config it started with; "
-                    "its status follows. Fix the problem above, then run: defenseclaw-gateway restart",
+                    "its status follows. Fix the problem above and the gateway applies the change on its own.",
                     err=True,
                 )
             else:
@@ -419,7 +496,7 @@ def cli(ctx: click.Context) -> None:
         return
 
     try:
-        app.store = Store(app.cfg.audit_db)
+        app.store = Store(_cli_audit_db(app.cfg))
         app.store.init()
     except Exception as exc:
         from defenseclaw.audit_capacity import audit_open_failure_notice
@@ -575,11 +652,6 @@ def _whole_words_help_tree(command: click.Command, seen: set[int] | None = None)
 _whole_words_help_tree(cli)
 
 
-def _ensure_codeguard_skill(cfg) -> None:
-    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
-    _ = cfg
-
-
 def _try_launch_tui() -> bool:
     """When invoked with no arguments on a TTY, launch the Textual TUI.
 
@@ -594,7 +666,7 @@ def _try_launch_tui() -> bool:
         return False
 
     if not ux.terminal_supports_tui():
-        ux.echo(ux.TUI_UNAVAILABLE_MESSAGE, err=True)
+        ux.echo(ux.tui_unavailable_message(), err=True)
         return True
 
     from defenseclaw.tui import run_textual_tui
@@ -699,13 +771,20 @@ def main() -> None:
     ux.configure_console_output()
     _keep_console_width_when_piped()
     _force_utf8_io()
+    from defenseclaw.config_writer import ConfigWriteError, ManagedConfigWriteError, plain_error
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
+    from defenseclaw.observability.v8_config import V8ConfigError
 
     try:
         if not _try_launch_tui():
             # GAP-2580: the TUI runs "python -m defenseclaw.main"; usage errors
             # must still name the command the user types.
             cli(prog_name="defenseclaw")
+    except KeyboardInterrupt:
+        # Ctrl+C outside Click's own handling (an import, the TUI handoff, the
+        # upgrade's migration step) printed a Python traceback (GAP-0408).
+        click.echo("\nInterrupted.", err=True)
+        sys.exit(130)
     except CanonicalObservabilityUnavailableError as exc:
         # The command's audit event needs the gateway (for example after
         # init --no-start-gateway): one line with the fix, no traceback
@@ -719,6 +798,18 @@ def main() -> None:
         sys.exit(1)
     except CanonicalObservabilityError as exc:
         click.echo(f"Error: the audit event was not recorded: {exc}.", err=True)
+        sys.exit(1)
+    except ManagedConfigWriteError as exc:
+        # Every command that saves config.yaml ends here when a managed
+        # standalone host refuses the write: one line and the documented
+        # exit 3, never a traceback.
+        click.echo(f"error: {exc}", err=True)
+        sys.exit(3)
+    except (ConfigWriteError, V8ConfigError) as exc:
+        # A change the config writer refuses (a value the schema rejects, a
+        # config.yaml that changed underneath) ends here as one plain line, never
+        # a traceback (GAP-0055). The file is left as it was.
+        click.echo(f"Error: config.yaml was not changed: {plain_error(exc)}", err=True)
         sys.exit(1)
     except OSError as exc:
         from defenseclaw.config import ConfigSaveError

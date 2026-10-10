@@ -110,19 +110,14 @@ EXPECTED_CANARY_ATTRIBUTE = "defenseclaw.telemetry.canary"
 EXPECTED_CANARY_FILTER_CONDITION = 'span.attributes["defenseclaw.telemetry.canary"] == true'
 EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS = [
     {"key": "service.namespace", "value": "defenseclaw", "action": "insert"},
-    {
-        "key": "deployment.environment",
-        "from_attribute": "deployment.environment.name",
-        "action": "insert",
-    },
-    {"key": "deployment.environment", "value": "local-dev", "action": "insert"},
+    {"key": "deployment.environment.name", "value": "local-dev", "action": "insert"},
 ]
 EXPECTED_VOLUMES = {"prometheus-data", "loki-data", "tempo-data", "grafana-data"}
 
 EXPECTED_HISTOGRAM_SHA256 = "000945027326672c0d24e939d7812ccce07174cde37940b1291744b00b2f6fe9"
 
 PROMETHEUS_RESOURCE_LABELS = {
-    "deployment_environment",
+    "deployment_environment_name",
     "host_arch",
     "host_name",
     "instance",
@@ -537,13 +532,6 @@ def tempo_inputs() -> set[str]:
             for ref in resources.get("fixed_keys", [])
             if isinstance(ref, str) and "." in ref
         )
-        for alias in resources.get("compatibility_aliases", []):
-            if isinstance(alias, dict):
-                result.update(
-                    ref
-                    for ref in (alias.get("alias"), alias.get("canonical"))
-                    if isinstance(ref, str) and "." in ref
-                )
 
     for path in (ROOT / "schemas/otel").glob("*.json"):
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -673,8 +661,8 @@ def _collector_errors() -> list[str]:
     resource_actions = collector.get("processors", {}).get("resource", {}).get("attributes")
     if resource_actions != EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS:
         errors.append(
-            "Collector resource aliases must preserve explicit legacy values, derive "
-            "deployment.environment from deployment.environment.name, and default only when both are absent",
+            "Collector resource processor must default deployment.environment.name to local-dev "
+            "only when the sender supplied none",
         )
     spanmetrics = collector.get("connectors", {}).get("spanmetrics/agent360", {})
     dimensions = {item.get("name") for item in spanmetrics.get("dimensions", [])}

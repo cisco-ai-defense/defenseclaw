@@ -23,13 +23,14 @@
 # /var/lib/defenseclaw-enterprise for the administrator.
 
 set -u
-case "${1:-}" in
-    remove | 0) ;;
-    *) exit 0 ;; # deb upgrade/deconfigure, rpm upgrade ($1 = 1)
-esac
-
 gateway=/opt/defenseclaw/bin/defenseclaw-gateway
 state=/var/lib/defenseclaw-enterprise
+
+case "${1:-}" in
+    remove | 0) ;;
+    *) exit 0 ;; # deb upgrade and deconfigure, rpm upgrade ($1 = 1)
+esac
+
 if [ -x "$gateway" ] && [ -d /run/systemd/system ]; then
     umask 077
     work=$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-preremove.XXXXXX") || exit 1

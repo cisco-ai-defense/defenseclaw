@@ -105,7 +105,7 @@ observe mode; build yours from
 ```sh
 dc_inline_config() {
     cat <<'DEFENSECLAW_CONFIG'
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /opt/cisco/defenseclaw/runtime
 policy_dir: /opt/cisco/defenseclaw/etc/policies
@@ -239,9 +239,28 @@ requirement (`codesign -dr - /opt/cisco/defenseclaw/bin/defenseclaw-gateway`
 prints it). This works only for a Developer ID-signed release: an unsigned
 release's code requirement is a hash that changes with every release.
 
+## Deliver a custom macOS rule pack
+
+When using `DC_SOURCE_URL`, use a direct HTTPS file URL. A GitHub release
+link may answer HTTP 302; the wrapper refuses redirects and reports that
+status instead of treating the empty response as a hash mismatch.
+
+Before the first pkg install, add a root **stage-pack** script that copies the
+pack into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with
+`root:wheel` ownership, `0755` directories and `0644` files. Use the exact
+[stage-pack script and pin example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack).
+Run it before the config and pkg steps. In `config.yaml`, set
+`guardrail.rule_pack` to the pack name and
+`guardrail.custom_packs.<name>` to that absolute path and its
+`sha256:<digest>` pin. Stage the pack again before reinstalling after purge.
+
 ## Remove DefenseClaw
 
-First remove the Macs from the install script's assignment. Then assign a root
+First remove the Macs from the install script's assignment. Wait until
+each device has checked in and no longer reports the install script as assigned before assigning uninstall. The Intune agent can run a
+cached recurring install script after unassignment and reinstall the pkg
+after uninstall. Confirm the install script has stopped running on the device
+and that removal stays in effect at the next check-in. Then assign a root
 shell script, set to run once, with `packaging/mdm/macos/uninstall.sh`. It
 stops and removes the LaunchDaemons, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), removes the binaries and
@@ -256,7 +275,7 @@ it exits `0`.
 | --- | --- |
 | **Scripts** > your script > **Device status** | Intune's run status per Mac (Success for exit `0`) |
 | `/Library/Logs/Microsoft/Intune` | The Intune agent's logs, including script runs |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | The wrapper's steps and every result document (root, `0600`) |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure results (root, `0600`); uninstall removes this log, so use the Intune script output for its result |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The pkg's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | Config-change runs and the daily `verify` |
 

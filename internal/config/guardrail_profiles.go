@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
 	"strings"
@@ -49,8 +50,12 @@ type GuardrailProfile struct {
 	// HILT overrides the human-in-the-loop block; nil inherits.
 	HILT *HILTConfig `mapstructure:"hilt" yaml:"hilt,omitempty"`
 	// RulePackDir selects a rule pack for subjects of this profile; empty
-	// inherits.
+	// inherits. It is a v8 key, rejected in config_version 9 (use RulePack).
 	RulePackDir string `mapstructure:"rule_pack_dir" yaml:"rule_pack_dir,omitempty"`
+	// RulePack and Rules override the pack and its customisation for
+	// subjects of this profile; empty / nil inherit.
+	RulePack string                `mapstructure:"rule_pack" yaml:"rule_pack,omitempty"`
+	Rules    *GuardrailRulesConfig `mapstructure:"-"         yaml:"rules,omitempty"`
 	// BlockMessage overrides the message shown when a decision blocks.
 	BlockMessage string `mapstructure:"block_message" yaml:"block_message,omitempty"`
 	// Connectors holds per-connector overrides inside the profile, keyed by
@@ -281,71 +286,27 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("guardrail profile %q is not defined", name)
 	}
-	out, err := copyConfigSharingProfiles(c)
+	base, err := copyConfigSharingProfiles(c)
 	if err != nil {
 		return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
 	}
-	applyGuardrailProfile(out, profile)
-	return out, nil
+	return deriveProfileFrom(base, profile), nil
 }
 
-// RulePackSetting is a configuration key that selects a guardrail rule pack
-// and the directory it names.
-type RulePackSetting struct {
-	Key string
-	Dir string
-}
-
-// RulePackSettings lists the keys that select the rule packs the gateway
-// loads, in check order: guardrail.rule_pack_dir, every
-// guardrail.connectors.<c>.rule_pack_dir (resolved through
-// EffectiveRulePackDirForConnector), then every rule_pack_dir a guardrail
-// profile sets, guardrail.profiles.<p>.rule_pack_dir and
-// guardrail.profiles.<p>.connectors.<c>.rule_pack_dir. A configuration
-// DerivedForProfile resolves to one of these or to a directory the base
-// configuration selects without any profile, so the managed checks that
-// walk this list cover every profile (they used to stop at the base keys,
-// and a pack standard users could write passed as a profile's). Dirs may
-// be empty or repeat; callers skip what they need not check.
-func (c *Config) RulePackSettings() []RulePackSetting {
-	if c == nil {
-		return nil
-	}
-	settings := []RulePackSetting{{Key: "guardrail.rule_pack_dir", Dir: c.Guardrail.RulePackDir}}
-	connectors := make([]string, 0, len(c.Guardrail.Connectors))
-	for name := range c.Guardrail.Connectors {
-		connectors = append(connectors, name)
-	}
-	sort.Strings(connectors)
-	for _, name := range connectors {
-		settings = append(settings, RulePackSetting{
-			Key: "guardrail.connectors." + name + ".rule_pack_dir",
-			Dir: c.EffectiveRulePackDirForConnector(name),
-		})
-	}
-	profiles := make([]string, 0, len(c.Guardrail.Profiles))
-	for name := range c.Guardrail.Profiles {
-		profiles = append(profiles, name)
-	}
-	sort.Strings(profiles)
-	for _, name := range profiles {
-		profile := c.Guardrail.Profiles[name]
-		prefix := "guardrail.profiles." + name
-		if strings.TrimSpace(profile.RulePackDir) != "" {
-			settings = append(settings, RulePackSetting{Key: prefix + ".rule_pack_dir", Dir: profile.RulePackDir})
-		}
-		tuned := make([]string, 0, len(profile.Connectors))
-		for connector := range profile.Connectors {
-			tuned = append(tuned, connector)
-		}
-		sort.Strings(tuned)
-		for _, connector := range tuned {
-			if dir := profile.Connectors[connector].RulePackDir; strings.TrimSpace(dir) != "" {
-				settings = append(settings, RulePackSetting{Key: prefix + ".connectors." + connector + ".rule_pack_dir", Dir: dir})
-			}
-		}
-	}
-	return settings
+// deriveProfileFrom applies profile to a shallow copy of base, a private
+// copy of the configuration (copyConfigSharingProfiles) that every profile
+// derived from it shares read-only. applyGuardrailProfile writes entries of
+// guardrail.connectors, application_protection.connectors and
+// connector_hooks, so the copy gets its own of those maps. One copy for all
+// profiles instead of one each: with 1,000 profiles the copies took a fifth
+// of the gateway start (GAP-0276).
+func deriveProfileFrom(base *Config, profile GuardrailProfile) *Config {
+	out := *base
+	out.Guardrail.Connectors = maps.Clone(base.Guardrail.Connectors)
+	out.ApplicationProtection.Connectors = maps.Clone(base.ApplicationProtection.Connectors)
+	out.ConnectorHooks = maps.Clone(base.ConnectorHooks)
+	applyGuardrailProfile(&out, profile)
+	return &out
 }
 
 // DerivedGuardrailProfile is one precomputed profile: its derived
@@ -367,12 +328,13 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	base, err := copyConfigSharingProfiles(c)
+	if err != nil {
+		return nil, fmt.Errorf("guardrail profiles: %w", err)
+	}
 	out := make(map[string]DerivedGuardrailProfile, len(names))
 	for _, name := range names {
-		derived, err := c.DerivedForProfile(name)
-		if err != nil {
-			return nil, err
-		}
+		derived := deriveProfileFrom(base, c.Guardrail.Profiles[name])
 		digest, err := GuardrailPolicyDigest(derived)
 		if err != nil {
 			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
@@ -394,6 +356,9 @@ type guardrailPolicyDigestView struct {
 	AlertAt               string                                 `json:"alert_at"`
 	HILT                  HILTConfig                             `json:"hilt"`
 	RulePackDir           string                                 `json:"rule_pack_dir"`
+	RulePack              string                                 `json:"rule_pack,omitempty"`
+	Rules                 *GuardrailRulesConfig                  `json:"rules,omitempty"`
+	ProfileRules          *GuardrailRulesConfig                  `json:"profile_rules,omitempty"`
 	BlockMessage          string                                 `json:"block_message"`
 	Connectors            map[string]PerConnectorGuardrailConfig `json:"connectors"`
 	ProfileConnectors     map[string]PerConnectorGuardrailConfig `json:"profile_connectors"`
@@ -419,14 +384,20 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 		AlertAt:               canonicalGuardrailLevel(g.AlertAt),
 		HILT:                  g.HILT,
 		RulePackDir:           g.RulePackDir,
+		RulePack:              g.RulePack,
+		ProfileRules:          g.profileRules,
 		BlockMessage:          g.BlockMessage,
-		Connectors:            g.Connectors,
+		Connectors:            digestConnectors(g.Connectors),
 		AutoProtectionEnabled: cfg.ApplicationProtection.Enabled,
 		AutoProtection:        cfg.ApplicationProtection.Guardrail,
 		HookModes: map[string]string{
 			"claude_code": cfg.ClaudeCode.Mode,
 			"codex":       cfg.Codex.Mode,
 		},
+	}
+	if !g.Rules.IsZero() {
+		rules := g.Rules
+		view.Rules = &rules
 	}
 	if len(g.profileConnectors) > 0 {
 		view.ProfileConnectors = g.profileConnectors
@@ -448,6 +419,54 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
+// digestConnectors is the connector overrides with enabled: true cleared
+// (true is the default, so it digests like the unset key, GAP-0032) and the
+// block_at and alert_at levels upper-cased.
+func digestConnectors(in map[string]PerConnectorGuardrailConfig) map[string]PerConnectorGuardrailConfig {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string]PerConnectorGuardrailConfig, len(in))
+	for name, pc := range in {
+		if pc.Enabled != nil && *pc.Enabled {
+			pc.Enabled = nil
+		}
+		// The levels take any case, as the global ones do (GAP-0329).
+		pc.BlockAt, pc.AlertAt = canonicalGuardrailLevel(pc.BlockAt), canonicalGuardrailLevel(pc.AlertAt)
+		out[name] = pc
+	}
+	return out
+}
+
+// HILTBlockedByThreshold reports a valid but inert approval setting. Blocking
+// takes precedence over confirmation, so no finding at or above min_severity
+// can reach an approval prompt when the block threshold is at or below it.
+// Callers pass the resolved block level, including the selected pack default.
+func HILTBlockedByThreshold(hilt HILTConfig, blockAt string) bool {
+	if !hilt.Enabled {
+		return false
+	}
+	rank := func(level string) int {
+		switch canonicalGuardrailLevel(level) {
+		case "LOW":
+			return 1
+		case "MEDIUM":
+			return 2
+		case "HIGH":
+			return 3
+		case "CRITICAL":
+			return 4
+		default:
+			return 0
+		}
+	}
+	minimum := rank(hilt.MinSeverity)
+	if minimum == 0 {
+		minimum = rank("HIGH")
+	}
+	return rank(blockAt) > 0 && minimum >= rank(blockAt)
+}
+
 // policyFields returns the profile's policy fields in the per-connector
 // shape the overlay helpers take.
 func (p GuardrailProfile) policyFields() PerConnectorGuardrailConfig {
@@ -456,6 +475,7 @@ func (p GuardrailProfile) policyFields() PerConnectorGuardrailConfig {
 		HILT:         p.HILT,
 		BlockMessage: p.BlockMessage,
 		RulePackDir:  p.RulePackDir,
+		RulePack:     p.RulePack,
 		BlockAt:      p.BlockAt,
 		AlertAt:      p.AlertAt,
 	}
@@ -476,8 +496,15 @@ func overlayGuardrailPolicy(dst, src PerConnectorGuardrailConfig, withLevels boo
 	if src.BlockMessage != "" {
 		dst.BlockMessage = src.BlockMessage
 	}
+	// One scope selects one pack: a rule_pack replaces an inherited
+	// rule_pack_dir and the other way round.
 	if strings.TrimSpace(src.RulePackDir) != "" {
 		dst.RulePackDir = src.RulePackDir
+		dst.RulePack = ""
+	}
+	if strings.TrimSpace(src.RulePack) != "" {
+		dst.RulePack = src.RulePack
+		dst.RulePackDir = ""
 	}
 	if withLevels {
 		if level := canonicalGuardrailLevel(src.BlockAt); level != "" {
@@ -506,6 +533,16 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 	}
 	if strings.TrimSpace(fields.RulePackDir) != "" {
 		g.RulePackDir = fields.RulePackDir
+		g.RulePack = ""
+	}
+	if strings.TrimSpace(fields.RulePack) != "" {
+		g.RulePack = fields.RulePack
+		g.RulePackDir = ""
+	}
+	g.profileRules = nil
+	if profile.Rules != nil && !profile.Rules.IsZero() {
+		rules := *profile.Rules
+		g.profileRules = &rules
 	}
 	if level := canonicalGuardrailLevel(fields.BlockAt); level != "" {
 		g.BlockAt = level
@@ -534,7 +571,9 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 		if g.profileConnectors == nil {
 			g.profileConnectors = make(map[string]PerConnectorGuardrailConfig, len(profile.Connectors))
 		}
-		g.profileConnectors[key] = overlayGuardrailPolicy(PerConnectorGuardrailConfig{}, pc, true)
+		entry := overlayGuardrailPolicy(PerConnectorGuardrailConfig{}, pc, true)
+		entry.Rules = pc.Rules
+		g.profileConnectors[key] = entry
 		if strings.TrimSpace(pc.Mode) != "" {
 			clearHookModes(out, key)
 		}
@@ -606,7 +645,10 @@ func copyConfigSharingProfiles(c *Config) (*Config, error) {
 }
 
 // deepCopyConfig copies c through JSON, which keeps nil and empty maps and
-// slices apart (the gateway's cloneConfig uses the same encoding).
+// slices apart (the gateway's cloneConfig uses the same encoding). JSON
+// drops RuntimeV8RulePackRebase (json:"-"), so it is copied explicitly: a
+// derived profile without it scanned with the 0.8.x pack unrebased while
+// every other user got the rebased one (GAP-1359).
 func deepCopyConfig(c *Config) (*Config, error) {
 	data, err := json.Marshal(c)
 	if err != nil {
@@ -616,5 +658,6 @@ func deepCopyConfig(c *Config) (*Config, error) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("copy configuration: %w", err)
 	}
+	out.RuntimeV8RulePackRebase = c.RuntimeV8RulePackRebase
 	return &out, nil
 }

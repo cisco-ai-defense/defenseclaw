@@ -359,6 +359,8 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             for target in targets:
                 Path(target).write_text("owned", encoding="utf-8")
             managed_venv = profile / ".defenseclaw" / ".venv"
+            # The shim reader takes UTF-8 and the OEM and ANSI code pages
+            # (GAP-0751); the Unicode-profile test covers the code pages.
             Path(targets[0]).write_text(
                 f'@echo off\n"{managed_venv / "Scripts" / "defenseclaw.exe"}" %*\n',
                 encoding="utf-8",
@@ -1185,6 +1187,24 @@ class RenderPlanConnectorTests(unittest.TestCase):
         self.assertIn("connector teardown:  no", text)
         self.assertNotIn("openclaw", text)
 
+    def test_render_names_the_quarantined_copies_all_deletes(self):
+        # GAP-0422: --all deleted the quarantine with every skill and plugin
+        # DefenseClaw had moved there, and neither the plan nor the help said so.
+        with tempfile.TemporaryDirectory() as data_dir:
+            for name in ("skills/claudecode/anthropic-skills", "skills/claudecode/docx", "plugins/codex/helper"):
+                os.makedirs(os.path.join(data_dir, "quarantine", name))
+            plan = cmd_uninstall.UninstallPlan(
+                remove_data_dir=True,
+                data_dir=data_dir,
+                quarantined=cmd_uninstall._quarantined_copies(data_dir),
+            )
+            with capture_click_output() as buf:
+                cmd_uninstall._render_plan(plan, dry_run=True)
+        self.assertIn("3 quarantined skill/plugin copies", buf.getvalue())
+        self.assertIn("defenseclaw skill restore NAME", buf.getvalue())
+        all_help = next(p for p in cmd_uninstall.uninstall_cmd.params if p.name == "wipe_data").help
+        self.assertIn("quarantined", all_help)
+
     def test_render_shows_connector_specific_line_for_codex(self):
         plan = cmd_uninstall.UninstallPlan(
             connector="codex",
@@ -1474,6 +1494,25 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
             self.assertTrue(unrelated.exists())
             self.assertTrue(config.exists())
             self.assertIn(str(backup), buf.getvalue())
+
+    def test_full_uninstall_removes_only_empty_legacy_codex_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}):
+            codex = Path(tmp) / ".codex"
+            codex.mkdir()
+            prefix = "..defenseclaw-config.toml.bak.observability-v8-candidate-"
+            candidate = codex / f"{prefix}{'a' * 32}.tmp"
+            nonempty = codex / f"{prefix}{'b' * 32}.tmp"
+            unrelated = codex / f"{prefix}invalid.tmp"
+            candidate.touch()
+            nonempty.write_text("keep")
+            unrelated.touch()
+
+            with capture_click_output():
+                cmd_uninstall._remove_legacy_codex_candidate()
+
+            self.assertFalse(candidate.exists())
+            self.assertTrue(nonempty.exists())
+            self.assertTrue(unrelated.exists())
 
 
 class GatewayTeardownOutputTests(unittest.TestCase):

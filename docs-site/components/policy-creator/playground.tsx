@@ -180,7 +180,7 @@ const SECTION_DEFS: SectionDef[] = [
   },
   {
     id: 'firewall',
-    title: 'Firewall',
+    title: 'Firewall (planning only)',
     subtitle: (p) =>
       `${p.firewall.default_action} · ${p.firewall.allowed_domains.length} allow · ${p.firewall.blocked_destinations.length} block`,
     status: (p) =>
@@ -219,7 +219,7 @@ const SECTION_DEFS: SectionDef[] = [
   },
   {
     id: 'audit',
-    title: 'Audit',
+    title: 'Audit (planning only)',
     subtitle: (p) => `${p.audit.retention_days} day retention`,
     status: () => 'untouched',
     render: (p, set) => <AuditSection policy={p} onPolicyChange={set} />,
@@ -275,7 +275,7 @@ const SECTION_DEFS: SectionDef[] = [
   {
     id: 'review',
     title: 'Review & export',
-    subtitle: () => 'Generated YAML + data.json',
+    subtitle: () => 'Generated YAML and Rego',
     status: () => 'untouched',
     render: (p) => <ReviewSection policy={p} />,
   },

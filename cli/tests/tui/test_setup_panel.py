@@ -38,7 +38,7 @@ from defenseclaw.tui.panels.setup import (
     _guardrail_actions_wizard_fields,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
-    action_matrix_fields,
+    admission_action_fields,
     build_setup_sections,
     build_wizard_args,
     connector_setup_command,
@@ -114,9 +114,9 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Gateway Watchdog",
         "Observability",
         "Webhooks",
-        "Skill Actions",
-        "MCP Actions",
-        "Plugin Actions",
+        "Skill Admission",
+        "MCP Admission",
+        "Plugin Admission",
         "Watch",
         "OpenShell Sandboxes",
         "Inspect LLM (legacy - read-only)",
@@ -127,7 +127,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
 
 
 def test_exact_v8_setup_replaces_legacy_observability_editors_with_effective_plan() -> None:
-    model = SetupPanelModel({"config_version": 8, "privacy": {"disable_redaction": True}})
+    model = SetupPanelModel({"config_version": 8})
     names = tuple(section.name for section in model.sections)
 
     assert "Privacy" not in names
@@ -432,15 +432,30 @@ def test_windows_notifications_enabled_field_is_native_and_editable() -> None:
     assert "desktop toasts" in section.summary.lower()
 
 
-def test_action_matrix_has_header_and_severity_triplets() -> None:
-    fields = action_matrix_fields("skill_actions", {})
+def test_admission_fields_edit_the_v9_admission_actions() -> None:
+    from defenseclaw.config import default_config
+    from defenseclaw.tui.services.setup_state import apply_config_field
 
-    assert len(fields) == 16
-    assert fields[0].kind == "header"
-    assert fields[1].key == "skill_actions.critical.file"
-    assert fields[1].options == ("none", "quarantine")
-    assert fields[2].options == ("enable", "disable")
-    assert fields[3].options == ("none", "block", "allow")
+    fields = admission_action_fields("skill", {})
+    assert fields[0].kind == "header" and len(fields) == 6
+    assert fields[2].key == "admission.skill.actions.high"
+    assert fields[2].options == ("", "block", "quarantine", "warn", "allow")
+
+    cfg = default_config()
+    apply_config_field(cfg, "admission.skill.actions.high", "allow")
+    assert cfg.admission.skill.actions == {"high": "allow"}
+    apply_config_field(cfg, "admission.skill.actions.high", "")
+    assert cfg.admission.skill.actions == {}
+
+    # policy activate writes exact triples: a known one reads as its shorthand
+    # (as config get shows it), a custom one stays selectable.
+    cfg.admission.skill.actions = {
+        "critical": {"install": "block", "file": "quarantine", "runtime": "disable"},
+        "high": {"install": "block", "file": "none", "runtime": "enable"},
+    }
+    critical, high = admission_action_fields("skill", cfg)[1:3]
+    assert critical.value == "quarantine" and critical.options == ("", "block", "quarantine", "warn", "allow")
+    assert "file=none" in high.value and high.value in high.options
 
 
 def test_config_validation_matches_go_setup_state_rules() -> None:
@@ -549,7 +564,8 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
     fields = _with_field(fields, "Guardrail Mode", "action")
     fields = _with_field(fields, "Scanner Mode", "both")
     fields = _with_field(fields, "Restart Gateway", "no")
-    fields = _with_field(fields, "Verify After Setup", "no")
+    # GAP-0226: the retired Verify After Setup row is gone; doctor is the check.
+    assert "Verify After Setup" not in {field.label for field in fields}
     assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
         "setup",
         "openclaw",
@@ -559,7 +575,6 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "--no-restart",
         "--scanner-mode",
         "both",
-        "--no-verify",
     )
     fields = connector_setup_wizard_fields({})
     fields = _with_field(fields, "Connector", "codex")
@@ -1032,7 +1047,7 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
     assert built == ("keys", "set", "OPENAI_API_KEY", "--value-stdin")
     assert "--value" not in built
     assert "sk-live" not in built
-    assert render_wizard_value(set_fields[2]) == "****live"
+    assert render_wizard_value(set_fields[2]) == "********"
     assert render_wizard_value(set_fields[2], reveal=True) == "sk-live"
 
     # GAP-1176: a stored credential can be removed from the wizard.
@@ -1441,6 +1456,9 @@ def test_setup_review_save_action_and_saved_hint_are_model_level() -> None:
     assert review.hint == "Review 1 config change before saving."
 
     model.mark_saved(datetime(2026, 5, 20, 12, 0, tzinfo=timezone.utc))
+    # A new draft is not saved yet, so no earlier save shows (GAP-0342).
+    assert model.save_restart_hints().saved_hint == ""
+    model.sections = (ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "9091", "9091"),), ""),)
     hints = model.save_restart_hints()
     assert hints.saved_hint == "Saved 12:00 UTC"
     assert hints.saved_hint in hints.action_bar
@@ -2579,7 +2597,7 @@ def _multi_connector_cfg() -> object:
         guardrail=GuardrailConfig(
             enabled=True,
             mode="observe",
-            rule_pack_dir="/global/pack",
+            rule_pack="strict",
             connectors={
                 "codex": PerConnectorGuardrailConfig(mode="action"),
                 "hermes": PerConnectorGuardrailConfig(),
@@ -2594,22 +2612,24 @@ def test_guardrail_section_renders_per_connector_override_groups() -> None:
 
     # Both active connectors get an editable mode + rule-pack override row.
     assert "guardrail.connectors.codex.mode" in fields
-    assert "guardrail.connectors.codex.rule_pack_dir" in fields
+    assert "guardrail.connectors.codex.rule_pack" in fields
     assert "guardrail.connectors.hermes.mode" in fields
-    assert "guardrail.connectors.hermes.rule_pack_dir" in fields
+    assert "guardrail.connectors.hermes.rule_pack" in fields
+    # config_version 9 selects packs by name (guardrail.rule_pack).
+    assert fields["guardrail.rule_pack"].value == "strict"
 
     # codex pins its own mode; the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.mode"].value == "action"
     assert fields["guardrail.connectors.codex.mode"].options == ("observe", "action")
     # hermes has no override → inherits the global mode/rule-pack.
     assert fields["guardrail.connectors.hermes.mode"].value == "observe"
-    assert fields["guardrail.connectors.hermes.rule_pack_dir"].value == "/global/pack"
+    assert fields["guardrail.connectors.hermes.rule_pack"].value == "strict"
 
     # B4/E4c/E4d: every per-connector guardrail control is now exposed.
     for connector in ("codex", "hermes"):
         for leaf in (
             "mode",
-            "rule_pack_dir",
+            "rule_pack",
             "enabled",
             "hook_fail_mode",
             "hilt.enabled",
@@ -2644,11 +2664,11 @@ def test_per_connector_guardrail_field_creates_missing_entry() -> None:
     from defenseclaw.tui.services.setup_state import apply_config_field
 
     cfg = Config(guardrail=GuardrailConfig(enabled=True, mode="observe", connector="codex"))
-    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack_dir", "/codex/pack")
+    apply_config_field(cfg, "guardrail.connectors.codex.rule_pack", "strict")
 
     entry = cfg.guardrail.connectors["codex"]
     assert isinstance(entry, PerConnectorGuardrailConfig)
-    assert entry.rule_pack_dir == "/codex/pack"
+    assert entry.rule_pack == "strict"
 
 
 def test_guardrail_section_single_connector_omits_per_connector_groups() -> None:

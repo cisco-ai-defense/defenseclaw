@@ -5,8 +5,11 @@ package envvars
 
 import (
 	"encoding/json"
+	"io/fs"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -252,6 +255,52 @@ print(json.dumps(sorted(r.names())))
 				"This usually means the JSON file is malformed differently by the two parsers.",
 			onlyInPython, onlyInGo,
 		)
+	}
+}
+
+// TestManagedIgnoredOptOutsAreReadThroughLookup keeps the managed-mode
+// policy enforceable: a variable that a managed standalone host ignores
+// (security opt-outs, debug, telemetry, discovery, ...) must be read with
+// envvars.Getenv/Lookup, never os.Getenv. The deployment pins
+// (runtime_path) are what decide managed mode, and test fixtures only
+// steer tests.
+func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
+	SetManagedStandalone(true)
+	t.Cleanup(func() { SetManagedStandalone(false) })
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "1")
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
+	if got := Getenv("DEFENSECLAW_REVEAL_PII"); got != "" {
+		t.Fatalf("an ignored opt-out read %q on a managed host", got)
+	}
+	if got := Getenv("DEFENSECLAW_FAIL_MODE"); got != "closed" {
+		t.Fatalf("a tighten_only variable read %q, want the raw value", got)
+	}
+	if names := IgnoredNames(); len(names) != 1 || names[0] != "DEFENSECLAW_REVEAL_PII" {
+		t.Fatalf("IgnoredNames = %v", names)
+	}
+
+	var ignored []string
+	registry := MustLoad()
+	for _, name := range registry.Names() {
+		e, _ := registry.Get(name)
+		if e.Managed == ManagedIgnore && e.Category != CategoryRuntimePath && e.Category != CategoryTestFixture {
+			ignored = append(ignored, regexp.QuoteMeta(e.Name))
+		}
+	}
+	direct := regexp.MustCompile(`os\.(Getenv|LookupEnv)\("(` + strings.Join(ignored, "|") + `)"\)`)
+	_, thisFile, _, _ := runtime.Caller(0)
+	root, _ := filepath.Abs(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	for _, dir := range []string{"internal", "cmd"} {
+		_ = filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			raw, readErr := os.ReadFile(path)
+			if readErr == nil && direct.Match(raw) {
+				t.Errorf("%s reads a managed-ignored variable with os.Getenv; use envvars.Getenv", path)
+			}
+			return nil
+		})
 	}
 }
 

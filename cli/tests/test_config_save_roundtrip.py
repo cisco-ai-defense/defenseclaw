@@ -200,7 +200,7 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
             with open(os.path.join(tmpdir, "config.yaml"), encoding="utf-8") as stream:
                 persisted = yaml.safe_load(stream)
 
-            self.assertEqual(persisted["config_version"], 8)
+            self.assertEqual(persisted["config_version"], 9)
             self.assertEqual(persisted["guardrail"]["mode"], "action")
             self.assertEqual(persisted["observability"], {})
             for removed in ("audit_sinks", "otel", "privacy", "splunk"):
@@ -214,7 +214,7 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
             with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
                 cfg = default_config()
                 cfg.data_dir = tmpdir
-                with self.assertRaisesRegex(ConfigVersionError, "schema v8"):
+                with self.assertRaisesRegex(ConfigVersionError, "older DefenseClaw"):
                     cfg.save()
 
     def test_fresh_v8_save_emits_only_canonical_observability(self):
@@ -227,7 +227,7 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
             with open(os.path.join(tmpdir, "config.yaml"), encoding="utf-8") as stream:
                 persisted = yaml.safe_load(stream)
 
-            self.assertEqual(persisted["config_version"], 8)
+            self.assertEqual(persisted["config_version"], 9)
             self.assertEqual(persisted["observability"], {})
             for removed in ("audit_sinks", "otel", "privacy", "splunk"):
                 self.assertNotIn(removed, persisted)
@@ -447,45 +447,130 @@ class TestGatewayFleetModeRoundTrip(unittest.TestCase):
             self.assertEqual(persisted, original)
 
 
+
+class TestConfigVersion9KeysRoundTrip(unittest.TestCase):
+    def test_v9_keys_load_and_survive_an_unrelated_save(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            original = {
+                "config_version": 8,
+                "data_dir": tmpdir,
+                "environment": "linux",
+                "claw": {"mode": "codex"},
+                "admission": {
+                    "skill": {
+                        "scan_on_install": False,
+                        "actions": {"high": "block", "low": {"install": "none", "file": "none", "runtime": "disable"}},
+                    }
+                },
+                "guardrail": {
+                    "rule_pack": "strict",
+                    "rules": {"severity_overrides": {"SEC-AWS-SECRET": "HIGH"}},
+                    "connectors": {"codex": {"rules": {"disable": ["CMD-GIT-PUSH-FORCE"]}}},
+                },
+                "asset_policy": {"tool": {"denied": [{"name": "shell", "connector": "codex"}]}},
+                "llm_providers": {"custom": [{"name": "gw", "domains": ["llm.example.internal"]}]},
+                "update": {"check": False},
+                "observability": {},
+            }
+            with open(config_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump(original, stream, sort_keys=False)
+
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                os.environ.pop("DEFENSECLAW_CONFIG", None)
+                cfg = load()
+                self.assertIs(cfg.admission.skill.scan_on_install, False)
+                self.assertEqual(cfg.admission.skill.actions["high"], "block")
+                self.assertEqual(cfg.guardrail.rules.severity_overrides, {"SEC-AWS-SECRET": "HIGH"})
+                self.assertEqual(cfg.guardrail.connectors["codex"].rules.disable, ["CMD-GIT-PUSH-FORCE"])
+                self.assertEqual(cfg.asset_policy.tool.denied[0].connector, "codex")
+                self.assertEqual(cfg.llm_providers.custom[0].domains, ["llm.example.internal"])
+                self.assertIs(cfg.update.check, False)
+                cfg.guardrail.rules.disable = ["ENT-DATA-EMPLOYEE-ID"]
+                cfg.save()
+
+            with open(config_path, encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+            original["guardrail"]["rules"]["disable"] = ["ENT-DATA-EMPLOYEE-ID"]
+            self.assertEqual(persisted, original)
+
+class TestConfigSaveExpandsHomePolicyDir(unittest.TestCase):
+    def test_a_save_writes_a_home_policy_dir_as_the_folder_it_names(self):
+        """The gateway reads policy_dir as written, so a migrated or hand-set
+        "~/team-policies" made every reload fail; any save expands it (GAP-1033)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            with open(config_path, "w", encoding="utf-8") as stream:
+                yaml.safe_dump({"config_version": 8, "data_dir": tmpdir, "environment": "linux",
+                                "policy_dir": "~/team-policies", "observability": {}}, stream, sort_keys=False)
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False), \
+                    patch.object(config_module, "_home", return_value=config_module.Path(tmpdir)):
+                os.environ.pop("DEFENSECLAW_CONFIG", None)
+                cfg = load()
+                cfg.guardrail.block_at = "HIGH"
+                cfg.save()
+            with open(config_path, encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+            self.assertEqual(persisted["policy_dir"], os.path.join(tmpdir, "team-policies"))
+            self.assertEqual(persisted["guardrail"]["block_at"], "HIGH")
+
+
 class TestConfigSaveResilienceContinued(unittest.TestCase):
-    def test_corrupt_yaml_falls_back_to_dataclass_only(self):
-        """Operator with a half-edited YAML must still be able to recover
-        by re-running setup. We log a warning but do NOT raise."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            # Write something yaml.safe_load can't parse.
-            with open(cfg_path, "w") as f:
-                f.write("config_version: 8\nobservability: [unclosed_list\n - {bad: yaml")
+    def test_corrupt_or_non_mapping_yaml_refuses_the_save(self):
+        """A save over a file that no longer parses kept only the changed
+        fields and dropped every other setting (GAP-0370): it is refused,
+        naming the line, and the file is left as it was."""
+        from defenseclaw.config_writer import ConfigUnparseableError
 
-            cfg = _make_cfg(tmpdir)
-            with self.assertLogs("defenseclaw.config", level="WARNING") as logs:
-                cfg.save()
-            self.assertTrue(
-                any("failed to parse" in m for m in logs.output),
-                msg=f"expected parse-failure warning, got {logs.output!r}",
-            )
+        for broken, words in (
+            ("config_version: 9\ngateway:\n  api_port: 19020\nbroken: [unclosed\n", "not valid YAML (line"),
+            ("- not\n- a\n- mapping\n", "not a mapping"),
+        ):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                cfg_path = os.path.join(tmpdir, "config.yaml")
+                with open(cfg_path, "w") as f:
+                    f.write(broken)
+                cfg = _make_cfg(tmpdir)
+                with self.assertRaises(ConfigUnparseableError) as refused:
+                    cfg.save()
+                self.assertIn(words, str(refused.exception))
+                with open(cfg_path) as f:
+                    self.assertEqual(f.read(), broken)
 
-            # The malformed source is unrecoverable, but the fallback produces
-            # a well-formed, schema-v8 document that setup can repair further.
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-            self.assertEqual(after["data_dir"], tmpdir)
 
-    def test_non_mapping_yaml_falls_back(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            cfg_path = os.path.join(tmpdir, "config.yaml")
-            # Top-level YAML list — invalid for our schema.
-            with open(cfg_path, "w") as f:
-                f.write("- not\n- a\n- mapping\n")
+def test_bom_crlf_config_loads_and_saves_with_the_windows_locale(tmp_path, monkeypatch):
+    """GAP-0386: Notepad and PowerShell 5 start config.yaml with a UTF-8 BOM.
+    Read with the Windows locale encoding the mark became a prefix on the
+    first key, and a save wrote that unknown key back (refused). A BOM and
+    CRLF file loads and saves like any other."""
+    import builtins
 
-            cfg = _make_cfg(tmpdir)
-            with self.assertLogs("defenseclaw.config", level="WARNING"):
-                cfg.save()
+    from defenseclaw import config as config_module
+    from defenseclaw.config import PerConnectorGuardrailConfig
 
-            with open(cfg_path) as f:
-                after = yaml.safe_load(f)
-            self.assertIsInstance(after, dict)
-            self.assertEqual(after["data_dir"], tmpdir)
+    real_open = builtins.open
+
+    def windows_open(file, mode="r", *args, encoding=None, **kwargs):
+        if "b" not in mode and encoding is None:
+            encoding = "cp1252"
+        return real_open(file, mode, *args, encoding=encoding, **kwargs)
+
+    monkeypatch.setattr(config_module, "open", windows_open, raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    cfg = _make_cfg(str(tmp_path))
+    cfg.guardrail.connectors = {"opencode": PerConnectorGuardrailConfig()}
+    cfg.save()
+    path = tmp_path / "config.yaml"
+    path.write_bytes(b"\xef\xbb\xbf" + path.read_bytes().replace(b"\n", b"\r\n"))
+
+    loaded = config_module.load()
+    loaded.guardrail.connectors["opencode"].mode = "action"
+    loaded.save()
+
+    saved = yaml.safe_load(path.read_bytes())
+    assert loaded.data_dir == str(tmp_path) and not any(str(key).startswith("\u00ef") for key in saved)
+    assert saved["guardrail"]["connectors"]["opencode"]["mode"] == "action"
 
 
 class TestConfigSaveAtomicity(unittest.TestCase):

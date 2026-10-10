@@ -71,22 +71,31 @@ func writeOnce(t *testing.T, h *testHost, unit, canonical string, data []byte) f
 // had planned from back over the change (or leave a later write on disk
 // unapplied, with the apply trigger stopped), and the next ensure was a
 // no-op: the change was silently lost. The run now keeps the newer bytes and
-// applies them in a follow-up transaction before it releases the lock.
+// applies them in a follow-up transaction before it releases the lock. A
+// run given --config is no different: it wrote its own file over one
+// written in place while it ran, and the later writer lost (GAP-0745).
 func TestConfigWrittenDuringATransactionIsApplied(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
-		for _, moment := range []string{"quiesce", "activation"} {
+		for _, moment := range []string{"quiesce", "activation", "quiesce-with-config-flag"} {
 			t.Run(goos+"-"+moment, func(t *testing.T) {
 				h := newTestHost(t, goos)
 				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 				edited := []byte(strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1))
 				hooked := &hookedServices{fakeServices: h.services}
-				if moment == "quiesce" {
+				if strings.HasPrefix(moment, "quiesce") {
 					hooked.onStop = writeOnce(t, h, unitOf(goos, "enumerator"), h.env.Layout.ConfigPath, edited)
 				} else {
 					hooked.onStart = writeOnce(t, h, unitOf(goos, "gateway"), h.env.Layout.ConfigPath, edited)
 				}
 				h.env.Services = hooked
-				r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")})
+				opts := Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")}
+				if moment == "quiesce-with-config-flag" {
+					opts.ConfigFile = filepath.Join(t.TempDir(), "pushed.yaml")
+					if err := os.WriteFile(opts.ConfigFile, append(DefaultConfig(h.env.Layout), "# pushed\n"...), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r := h.run(opts)
 				requireOK(t, r)
 				if !strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
 					t.Fatal("the transaction wrote its planned config over the administrator's change")
@@ -157,6 +166,79 @@ func TestConfigWrittenDuringAFailedTransactionRetriggersApply(t *testing.T) {
 	}
 }
 
+// GAP-1379: configuration management pushes config.yaml while a failed
+// --config run restarts the previous deployment, after the rollback put the
+// previous file back. The push is a newer input: the apply trigger is
+// started for it, and putting back a config.yaml written earlier in the run
+// must not overwrite it.
+func TestConfigPushedAfterAFailedConfigRollbackIsKeptAndRetriggersApply(t *testing.T) {
+	trigger := "systemctl start --no-block " + unitApplyService
+	for _, earlier := range []bool{false, true} {
+		t.Run(map[bool]string{false: "push-after-restore", true: "earlier-push-kept"}[earlier], func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			applied := h.read(h.env.Layout.ConfigPath)
+			early := []byte(applied + "# early push\n")
+			late := []byte(applied + "# push after the rollback restored config.yaml\n")
+			configPath := h.env.P(h.env.Layout.ConfigPath)
+			replace := func(data []byte) {
+				tmp := configPath + ".push"
+				if err := os.WriteFile(tmp, data, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(tmp, configPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hooked := &hookedServices{fakeServices: h.services}
+			if earlier {
+				pushed := false
+				hooked.onStop = func(unit string) {
+					if unit == unitEnumerator && !pushed {
+						pushed = true
+						replace(early)
+					}
+				}
+			}
+			// The rollback's restart is the first gateway start that sees
+			// the restored file after the transaction's own.
+			sawOwn, done := false, false
+			hooked.onStart = func(unit string) {
+				if unit != unitGateway || done {
+					return
+				}
+				if h.read(h.env.Layout.ConfigPath) != applied {
+					sawOwn = true
+				} else if sawOwn {
+					done = true
+					replace(late)
+				}
+			}
+			h.env.Services = hooked
+			h.healthy = false
+			configFile := filepath.Join(t.TempDir(), "pushed.yaml")
+			if err := os.WriteFile(configFile, []byte(applied+"# --config\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			failed := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("2.0.0"), ConfigFile: configFile})
+			requireError(t, failed, codeActivate)
+			if !done {
+				t.Fatal("the rollback did not restart the gateway with the restored config.yaml")
+			}
+			if got := h.read(h.env.Layout.ConfigPath); got != string(late) {
+				t.Fatalf("the push made after the restore was overwritten:\n%s", got)
+			}
+			found := false
+			for _, call := range h.runner.calls {
+				found = found || call == trigger
+			}
+			if !found || !hasWarning(failed, "input_changed") {
+				t.Fatalf("the apply trigger was not started for the push (%v): %+v", found, failed.Warnings)
+			}
+		})
+	}
+}
+
 // The documented MDM flow: edit E1 is written into config.yaml and the apply
 // trigger runs ensure; E2 is written while that run is under way and the
 // run then fails. The rollback reverts to the last applied config for its
@@ -217,7 +299,9 @@ func TestConfigPushedDuringAFailedInPlaceEditIsAppliedNext(t *testing.T) {
 func TestAFollowUpTransactionReportsEachWarningOnce(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	h.services.failed[unitVerifyService] = true
+	// The guardian reconcile oneshot: a committing run clears a failed apply
+	// or verify oneshot (GAP-0423), not this one.
+	h.services.failed[unitGuardianOneshot] = true
 	edited := []byte(strings.Replace(h.read(h.env.Layout.ConfigPath), "mode: observe", "mode: action", 1))
 	h.env.Services = &hookedServices{fakeServices: h.services, onStart: writeOnce(t, h, unitOf("linux", "gateway"), h.env.Layout.ConfigPath, edited)}
 	r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1")})

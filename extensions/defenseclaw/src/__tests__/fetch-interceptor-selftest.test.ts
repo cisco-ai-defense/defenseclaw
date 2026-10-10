@@ -11,6 +11,8 @@
  * local proxy without leaving the box.
  */
 
+import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -57,6 +59,54 @@ describe("OpenClaw interception self-test", () => {
     expect(forwarded.some((url) => url.includes("api.openai.com"))).toBe(false);
   });
 
+  it("intercepts a request that carries its own dispatcher (GAP-0190)", async () => {
+    // OpenClaw sends every model request through an SSRF-guarded fetch that hands undici a
+    // per-request dispatcher, which skips globalThis.fetch and the global dispatcher.
+    const { Agent, request } = createRequire(import.meta.url)("undici") as typeof import("undici");
+    const agent = new Agent();
+    try {
+      const response = await request("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", [INTERCEPTION_PROBE_HEADER]: "1" },
+        body: "{}",
+        dispatcher: agent,
+      });
+      expect(response.headers[INTERCEPTION_PROBE_HEADER.toLowerCase()]).toBe("1");
+      await response.body.text();
+    } finally {
+      await agent.close();
+    }
+    expect(forwarded.some((url) => url.includes("api.openai.com"))).toBe(false);
+  });
+
+  it("sends the origin only as X-DC-Target-URL from the undici layer (GAP-0242)", async () => {
+    // The proxy appends the request path to X-DC-Target-URL; a path in the header too sent
+    // allowed model calls to .../openai/v1/responses/openai/v1/responses.
+    const { Agent, request } = createRequire(import.meta.url)("undici") as typeof import("undici");
+    const seen: { path?: string; target?: string } = {};
+    const proxy = createServer((req, res) => {
+      seen.path = req.url;
+      seen.target = String(req.headers["x-dc-target-url"]);
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => proxy.listen(guardrailPort, "127.0.0.1", resolve));
+    const agent = new Agent();
+    try {
+      const response = await request("https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+        dispatcher: agent,
+      });
+      await response.body.text();
+    } finally {
+      await agent.close();
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    }
+    expect(seen.path).toBe("/openai/v1/responses");
+    expect(seen.target).toBe("https://bedrock-runtime.us-east-1.amazonaws.com");
+  });
+
   it("records fetch, http, https, and undici layers on the startup banner", () => {
     const layers = interceptor.describeLayers();
     expect(layers.fetch).toBe(true);
@@ -64,6 +114,7 @@ describe("OpenClaw interception self-test", () => {
     expect(layers.httpRequest).toBe(true);
     expect(layers.httpGet).toBe(true);
     expect(layers.undiciDispatcher).toBe(true);
+    expect(layers.hostUndiciDispatcher).toBe(true);
     const banner = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
     expect(banner.some((line) => line.includes("interceptor layers") && line.includes("undici=true"))).toBe(true);
   });

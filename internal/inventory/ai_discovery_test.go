@@ -18,6 +18,8 @@ package inventory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -427,8 +429,10 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
   }]
 }`)
 
+	// A pack loads only when configured; another file in the folder does not.
+	mustWrite(t, filepath.Join(packDir, "unlisted.json"), `{"version": 1, "signatures": [{"id": "unlisted-ai", "name": "Unlisted", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`)
 	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
-		DataDir:              tmp,
+		SignaturePacks:       []string{filepath.Join(packDir, "custom.json")},
 		DisabledSignatureIDs: []string{"codex"},
 	})
 	if err != nil {
@@ -443,6 +447,128 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
 	}
 	if seen["codex"] {
 		t.Fatalf("disabled built-in signature still present")
+	}
+	if seen["unlisted-ai"] {
+		t.Fatalf("an unlisted pack under signature-packs/ was loaded")
+	}
+}
+
+func TestLoadAISignaturesResolvesPackPinSymlink(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"version": 1, "signatures": [{"id": "linked-ai", "name": "Linked", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`
+	target := filepath.Join(dir, "target.json")
+	mustWrite(t, target, body)
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		SignaturePacks: []string{link},
+		PackDigests:    map[string]string{target: "sha256:" + hex.EncodeToString(sum[:])},
+		RequireDigests: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "linked-ai" }) {
+		t.Fatal("pack with a resolved-path pin was not loaded")
+	}
+	legacy, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		SignaturePacks: []string{link},
+		PackDigests:    map[string]string{target: "sha256:" + hex.EncodeToString(sum[:])},
+		RequireDigests: true,
+		SecureClient:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(legacy, func(sig AISignature) bool { return sig.ID == "linked-ai" }) {
+		t.Fatal("Secure Client changed its legacy pin lookup")
+	}
+}
+
+// TestLoadAISignaturesPinnedByDigest: a pack pinned in
+// ai_discovery.signature_pack_digests loads only when it matches, and a
+// managed device loads no unpinned pack (a file dropped into a glob).
+func TestLoadAISignaturesPinnedByDigest(t *testing.T) {
+	packDir := filepath.Join(t.TempDir(), "packs")
+	body := `{"version": 1, "signatures": [{"id": "pinned-ai", "name": "Pinned", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`
+	pack := filepath.Join(packDir, "pinned.json")
+	mustWrite(t, pack, body)
+	mustWrite(t, filepath.Join(packDir, "dropped.json"), `{"version": 1, "signatures": [{"id": "dropped-ai", "name": "Dropped", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`)
+	sum := sha256.Sum256([]byte(body))
+	load := func(digest string, require bool) map[string]bool {
+		sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+			SignaturePacks: []string{filepath.Join(packDir, "*.json")},
+			PackDigests:    map[string]string{pack: digest},
+			RequireDigests: require,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, sig := range sigs {
+			seen[sig.ID] = true
+		}
+		return seen
+	}
+	if seen := load("sha256:"+hex.EncodeToString(sum[:]), true); !seen["pinned-ai"] || seen["dropped-ai"] {
+		t.Fatalf("managed load = %v, want only the pinned pack", seen)
+	}
+	if seen := load("sha256:"+strings.Repeat("0", 64), false); seen["pinned-ai"] || !seen["dropped-ai"] {
+		t.Fatalf("mismatched pin = %v, want the pinned pack refused", seen)
+	}
+
+	// An apply refuses what the loader would skip, instead of accepting it
+	// with only a log line (GAP-0173); a host that is not managed standalone
+	// is left alone.
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.AIDiscovery.SignaturePacks = []string{pack}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + hex.EncodeToString(sum[:])}
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("matching pin refused: %v", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + strings.Repeat("0", 64)}
+	if err := CheckSignaturePackPins(cfg); err == nil || !strings.Contains(err.Error(), "does not match the pinned") {
+		t.Fatalf("mismatched pin: err = %v, want a refusal naming the mismatch", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = nil
+	if err := CheckSignaturePackPins(cfg); err == nil {
+		t.Fatal("an unpinned pack on a managed standalone host was accepted")
+	}
+	cfg.DeploymentMode = ""
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("an unmanaged host was refused: %v", err)
+	}
+}
+
+func TestConfidencePolicyPinnedByDigest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "confidence.yaml")
+	body := "version: 1\ndetectors:\n  process:\n    identity_lr: 12\n    presence_lr: 75\n"
+	mustWrite(t, path, body)
+	sum := sha256.Sum256([]byte(body))
+	pin := "sha256:" + hex.EncodeToString(sum[:])
+	identityLR := func(digest string, required bool) (float64, string) {
+		policy, refusal, err := loadPinnedConfidencePolicy(path, digest, required)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return policy.Detectors["process"].IdentityLR, refusal
+	}
+	if lr, refusal := identityLR(pin, true); lr != 12 || refusal != "" {
+		t.Fatalf("pinned load = %v %q, want the file applied", lr, refusal)
+	}
+	if lr, refusal := identityLR("sha256:"+strings.Repeat("0", 64), false); lr == 12 || refusal == "" {
+		t.Fatalf("mismatched pin = %v %q, want the built-in default", lr, refusal)
+	}
+	// A pinned file that cannot be read is refused, never loaded later.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if lr, refusal := identityLR(pin, true); lr == 12 || refusal == "" {
+		t.Fatalf("unreadable pinned file = %v %q, want a refusal", lr, refusal)
 	}
 }
 
@@ -490,9 +616,23 @@ func TestLoadAISignaturesWithOptionsRejectsDuplicatePackID(t *testing.T) {
   }]
 }`)
 
-	_, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{DataDir: tmp})
+	_, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{filepath.Join(tmp, "signature-packs", "dup.json")}})
 	if err == nil || !strings.Contains(err.Error(), "duplicate id") {
 		t.Fatalf("expected duplicate id error, got %v", err)
+	}
+}
+
+// A configured pack whose file is gone is left out and the rest of the
+// catalog loads, so a missing optional pack does not reject every later
+// config reload; Secure Client keeps the refusal it shipped (GAP-0232).
+func TestLoadAISignaturesWithOptionsLeavesOutAMissingPack(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.json")
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{missing}})
+	if err != nil || len(sigs) == 0 {
+		t.Fatalf("missing pack: %d signatures, err %v; want the embedded catalog", len(sigs), err)
+	}
+	if _, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{missing}, SecureClient: true}); err == nil {
+		t.Fatal("Secure Client loaded a catalog with a configured pack that matches nothing")
 	}
 }
 
@@ -551,7 +691,8 @@ func TestNewContinuousDiscoveryServiceUsesConfiguredSignaturePacks(t *testing.T)
 	cfg := &config.Config{
 		DataDir: tmp,
 		AIDiscovery: config.AIDiscoveryConfig{
-			Enabled: true,
+			Enabled:        true,
+			SignaturePacks: []string{filepath.Join(tmp, "signature-packs", "custom.json")},
 		},
 	}
 	svc, err := NewContinuousDiscoveryService(cfg)
@@ -2704,6 +2845,28 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 					opts.ProcessInterval, tc.want, tc.managed, tc.input)
 			}
 		})
+	}
+}
+
+// A Secure Client host still loads the packs in <data_dir>/signature-packs
+// (GAP-0146, issue #1092); every other profile loads only the packs that
+// ai_discovery.signature_packs lists.
+func TestSecureClientLoadsTheDataDirSignaturePacks(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite(t, filepath.Join(tmp, "signature-packs", "custom.json"),
+		`{"version": 1, "signatures": [{"id": "custom-data-dir-ai", "name": "Custom", "vendor": "Example", "category": "ai_cli", "confidence": 0.8}]}`)
+	loaded := func(cfg *config.Config) bool {
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "custom-data-dir-ai" })
+	}
+	if !loaded(&config.Config{DeploymentMode: "managed_enterprise", DataDir: tmp}) {
+		t.Fatal("Secure Client did not load the data directory pack")
+	}
+	if loaded(&config.Config{DataDir: tmp}) {
+		t.Fatal("a per-user host loaded an unlisted data directory pack")
 	}
 }
 

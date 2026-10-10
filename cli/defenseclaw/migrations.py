@@ -62,8 +62,6 @@ from defenseclaw.file_permissions import (
     set_file_mode,
 )
 
-_OBSERVABILITY_V8_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
 if TYPE_CHECKING:
     from defenseclaw.observability.v8_migration import V8MigrationResult
 
@@ -142,7 +140,6 @@ def _ver_tuple(v: str) -> tuple[int, ...]:
     return tuple(out)
 
 
-
 # ---------------------------------------------------------------------------
 # MigrationContext
 # ---------------------------------------------------------------------------
@@ -197,7 +194,6 @@ class _PreparedObservabilityV8Migration:
     environment: dict[str, str] = field(repr=False)
     environment_file_present: bool
     environment_file_sha256: str = field(repr=False)
-
 
 
 def _prepare_observability_v8_migration(
@@ -363,7 +359,6 @@ def _read_stable_observability_v8_upgrade_file(
                 pass
 
 
-
 def _migrate_observability_v8(ctx: MigrationContext) -> None:
     """Convert, target-validate, and activate config v8 (the 0.8.5 hard cut).
 
@@ -454,7 +449,6 @@ def _preflight_observability_v8(
     )
 
 
-
 def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
     """Create one descriptor-pinned private bundle recovery directory."""
 
@@ -504,7 +498,6 @@ def _allocate_observability_v8_bundle_backup(data_dir: str) -> str:
             os.close(root_descriptor)
         if data_descriptor >= 0:
             os.close(data_descriptor)
-
 
 
 def _assert_observability_v8_upgrade_quiesced(data_dir: str) -> None:
@@ -565,13 +558,6 @@ def _observability_v8_upgrade_environment_snapshot(
         if _ENVIRONMENT_NAME.fullmatch(name) is not None
     )
     return snapshot, present, digest
-
-
-def _read_observability_v8_upgrade_dotenv(environment_path: str) -> dict[str, str]:
-    """Read the exact active dotenv without the legacy parser's silent loss."""
-
-    snapshot, _present, _sha256 = _read_observability_v8_upgrade_dotenv_snapshot(environment_path)
-    return snapshot
 
 
 def _read_observability_v8_upgrade_dotenv_snapshot(
@@ -1526,6 +1512,22 @@ def _dotenv_update_keys_locked(
 
 
 def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
+    """Write ``body`` to ``path``; a config.yaml write takes the config
+    writer's lock and records a ``config.generation.json`` generation (actor
+    ``migration``). The 0.x import steps write config shapes the v8
+    validator does not accept, so they skip the writer's validation."""
+    if os.path.basename(path) != "config.yaml":
+        return _atomic_write_text_unlocked(path, body, mode=mode)
+    from defenseclaw.config_writer import ACTOR_MIGRATION, hold_lock, record_generation
+
+    with hold_lock(path, timeout_s=None):
+        if not _atomic_write_text_unlocked(path, body, mode=mode):
+            return False
+        record_generation(path, hashlib.sha256(body.encode("utf-8")).hexdigest(), ACTOR_MIGRATION, "0.x import")
+    return True
+
+
+def _atomic_write_text_unlocked(path: str, body: str, *, mode: int = 0o644) -> bool:
     """Atomically write ``body`` to ``path``.
 
     The temp-file creation is hardened: it uses :func:`tempfile.mkstemp`
@@ -1643,7 +1645,9 @@ def _read_config_text(cfg_path: str) -> str | None:
     (and occasionally forgotten) per migration.
     """
     try:
-        with open(cfg_path, encoding="utf-8", newline="") as f:
+        # utf-8-sig drops a byte order mark (GAP-0386), so a rewrite of the
+        # first key matches and the file is written back without it.
+        with open(cfg_path, encoding="utf-8-sig", newline="") as f:
             return f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
@@ -1733,9 +1737,10 @@ def _read_active_connector_from_yaml(cfg_path: str) -> str:
     """
     if not os.path.isfile(cfg_path):
         return ""
+    from defenseclaw.config import read_config_text
+
     try:
-        with open(cfg_path) as f:
-            text = f.read()
+        text = read_config_text(cfg_path)
     except OSError:
         return ""
 
@@ -3372,18 +3377,208 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
 ]
 
 
-
-
 # ---------------------------------------------------------------------------
 # defenseclaw migrate
 # ---------------------------------------------------------------------------
 
 # Steps that move config.yaml from ``config_version`` N to N+1, keyed by N.
-# Empty at 1.0.0. Adding a key only needs a loader default; renaming or
+# 8 -> 9 is the single-source-of-truth migration. Adding a key only needs a
+# loader default; renaming or
 # removing one needs a step here plus a bump of
 # ``config.CURRENT_CONFIG_VERSION`` and the Go gateway's
 # MaxSupportedConfigVersion.
-CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {}
+def _migrate_config_v9(ctx: MigrationContext) -> None:
+    """config_version 8 -> 9: config.yaml becomes the single source of truth.
+
+    The one implementation is Go (``defenseclaw-gateway config migrate --to
+    9``, ``internal/config/migrate_v9.go``): it moves data.json admission and
+    guardrail values, the *_actions keys, rule_pack_dir, the v8 scanner keys,
+    update_check, a leftover privacy section and the operator block/allow
+    rows of audit.db into config.yaml, keeps ``config.yaml.v8.bak`` and
+    writes ``migration-v9.json``.
+    """
+    from defenseclaw.config_inspect import ConfigInspectError, migrate_config_v9
+
+    config_path = os.path.abspath(os.path.expanduser(ctx.active_config_path()))
+    try:
+        result = migrate_config_v9(config_path=config_path)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"the config_version 9 migration failed: {exc}") from exc
+    record = result.get("record") or {}
+    moved = len(record.get("moved") or [])
+    conflicts = len(record.get("conflicts") or [])
+    if result.get("migrated"):
+        ctx.changes.append(
+            f"moved {moved} policy values into config.yaml (config_version 9); {conflicts} conflicts "
+            f"recorded in {os.path.join(os.path.dirname(config_path), 'migration-v9.json')}"
+        )
+        # GAP-1225: these custom rules blocked a tool call on 0.8.x with their
+        # pattern alone; with no expression they only record it in 1.0.
+        detection_only = [
+            rule for rule in record.get("detection_only_rules") or [] if isinstance(rule, str) and rule.isprintable()
+        ]
+        if detection_only:
+            ux.warn(
+                f"{len(detection_only)} custom rule(s) now detection-only for tool calls: "
+                f"{', '.join(detection_only)}; add an expression, see policies/rules",
+                indent="    ",
+            )
+        # GAP-1358: a custom pack whose 1.0 copy could not be made is pinned
+        # as it is, and its pattern-only rules no longer block a tool call.
+        for failure in record.get("rule_pack_rebase_failures") or []:
+            if isinstance(failure, str) and failure.isprintable():
+                ux.warn(failure, indent="    ")
+        # GAP-1314/GAP-1344: name each rule of the operator's the rebase kept
+        # blocking (a renamed built-in by both IDs), and the ones that block
+        # less than on 0.8.x.
+        changed = [line for kind, line in migrated_rule_lines(record) if kind != "alert-only" or " (your edited " in line]
+        if changed:
+            ux.warn(f"{len(changed)} rule(s) of your custom pack changed by the 1.0 upgrade (see migration-v9.json):",
+                    indent="    ")
+            for line in changed:
+                ux.warn(line, indent="      ", marker="-")
+        # GAP-1339: 1.0 refuses two rule files of one category, which 0.8.x
+        # took; the 1.0 copy of the pack merged them.
+        for merge in record.get("rule_file_merges") or []:
+            if isinstance(merge, str) and merge.isprintable():
+                ctx.changes.append(f"rule pack {merge}")
+        # MCP servers already configured keep running after the upgrade; the
+        # gateway records their baselines at its first start (GAP-1227). Name
+        # the ones a block entry keeps blocked.
+        blocked = sorted({
+            str(move.get("value")) for move in record.get("moved") or []
+            if move.get("to") == "asset_policy.mcp.denied" and move.get("value")
+        })
+        if blocked:
+            ctx.changes.append(f"MCP servers that stay blocked (asset_policy.mcp.denied): {', '.join(blocked)}")
+        _note_unscannable_mcp(ctx, config_path, set(blocked))
+
+
+def migrated_rule_lines(record: dict) -> list[tuple[str, str]]:
+    """One ``(kind, line)`` per rule of the operator's the custom-pack rebase
+    changed, from migration-v9.json; the Go ``config.MigratedRuleLines`` prints
+    the same lines in ``config migrate``. ``kind`` is ``expressed`` (still
+    blocks, with an expression derived from its literal pattern),
+    ``whole-argument`` (blocks only a command argument equal to the literal)
+    or ``alert-only``. A built-in rule the operator gave a pattern of their own
+    is kept under an ID of theirs and named by both IDs (GAP-1314)."""
+
+    def strings(key: str) -> list[str]:
+        return [item for item in record.get(key) or [] if isinstance(item, str) and item.isprintable()]
+
+    was = {}
+    for renamed in strings("renamed_rules"):
+        old, sep, own = renamed.partition(" -> ")
+        if sep:
+            was[own] = old
+
+    def name(rule: str) -> str:
+        old = was.get(rule)
+        return f"{rule} (your edited {old}; {old} is the shipped 1.0 rule)" if old else rule
+
+    whole = set(strings("whole_argument_rules"))
+    lines = []
+    for rule in strings("expressed_rules"):
+        if rule in whole:
+            lines.append((
+                "whole-argument",
+                f"{name(rule)}: blocks only a command argument equal to its literal "
+                "(the pack's semantic cost budget was full)",
+            ))
+        else:
+            lines.append(("expressed", f"{name(rule)}: enforced as on 0.8.x (its severity decides block or alert), "
+                "with an expression derived from its literal pattern"))
+    for rule in strings("detection_only_rules"):
+        lines.append((
+            "alert-only",
+            f"{name(rule)}: alert-only for tool calls in 1.0 (its pattern is not a literal); add an expression to block",
+        ))
+    return lines
+
+
+def _note_unscannable_mcp(ctx: MigrationContext, config_path: str, blocked: set[str]) -> None:
+    """Name the MCP servers the 1.0 scanner refuses to start (GAP-1340).
+
+    0.8.x ran a command path such as /usr/bin/true; 1.0 scans only npx or uvx
+    with a package, or a URL. Such a server keeps running (its baseline is
+    recorded without admission, GAP-1227) but is never scanned, so the summary,
+    migration-v9.json (``unscannable_mcp``) and doctor name it with the fix.
+    """
+    try:
+        from defenseclaw import config as config_mod
+        from defenseclaw.scanner.mcp import unscannable_mcp_servers
+
+        rows = [
+            row for row in unscannable_mcp_servers(config_mod.load(data_dir=ctx.data_dir))
+            if row["name"] not in blocked
+        ]
+    except Exception as exc:  # noqa: BLE001 - the notice is advisory; the migration already committed
+        ux.warn(f"could not list the MCP servers a scan refuses to start: {exc}", indent="    ")
+        return
+    if not rows:
+        return
+    record_path = os.path.join(os.path.dirname(config_path), "migration-v9.json")
+    try:
+        with open(record_path, encoding="utf-8") as f:
+            record = json.load(f)
+        if isinstance(record, dict):
+            record["unscannable_mcp"] = rows
+            from defenseclaw.file_permissions import atomic_write_private_bytes
+
+            atomic_write_private_bytes(record_path, (json.dumps(record, indent=2) + "\n").encode("utf-8"))
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        ux.warn(f"could not add the MCP servers a scan refuses to start to {record_path}: {exc}", indent="    ")
+    ctx.changes.append(
+        f"MCP servers that can no longer be scanned ({len(rows)}): the scanner starts only npx or uvx "
+        "with a package, or a URL"
+    )
+    for row in rows:
+        ctx.changes.append(
+            f"  {row['name']} ({row['connector']}): command {row['command']!r} {row['runtime_effect']}; "
+            f"fix: {row['fix']}"
+        )
+
+
+CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {8: _migrate_config_v9}
+_V9_STEP_NAME = "config_version 8 → 9"
+
+
+def _preview_config_v9(config_path: str, gateway_binary: str) -> None:
+    """Dry-run the 8 -> 9 migration with the staged gateway (upgrade check).
+
+    A config the new release can not migrate fails the check before the
+    installer swaps anything; otherwise the operator sees what will move.
+    """
+    from defenseclaw.config_inspect import ConfigInspectError, migrate_config_v9
+
+    try:
+        preview = migrate_config_v9(config_path=config_path, dry_run=True, gateway_binary=gateway_binary)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"the config_version 9 migration check failed: {exc}") from exc
+    record = preview.get("record") or {}
+    ux.echo(
+        f"  {ux.dim('→')} config_version 9: {len(record.get('moved') or [])} policy values move into "
+        f"config.yaml, {len(record.get('conflicts') or [])} conflicts"
+    )
+
+def _check_staged_gateway_accepts(config_path: str, data_dir: str, gateway_binary: str) -> None:
+    """Fail the upgrade check when the staged gateway would refuse this config.
+
+    The staged gateway loads the config the way it will at start, rule packs and
+    their ``custom_packs`` pins included, so a pin it refuses ends the check
+    before the installer stops the gateway or swaps anything (GAP-0158). The
+    dry-run migration above validates the document only, not the packs it names.
+    """
+    from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
+    from defenseclaw.config_writer import plain_error
+
+    try:
+        inspect_v8_config("validate", config_path=config_path, data_dir=data_dir, gateway_binary=gateway_binary)
+    except ConfigInspectError as exc:
+        raise MigrationError(f"the new release would refuse your configuration: {plain_error(exc)}") from exc
+
 
 # The schema written by the 0.8.5 hard cut. Anything older is a 0.x install
 # that the frozen ``MIGRATIONS`` chain imports.
@@ -3471,7 +3666,12 @@ def migrate(
         )
     ctx.openclaw_home = os.path.expanduser(openclaw_home or _configured_openclaw_home(config_path))
 
-    steps = _pending_migration_steps(version, from_version, data_dir, config_path, CURRENT_CONFIG_VERSION)
+    target = (
+        _FIRST_V8_CONFIG_VERSION
+        if version <= _FIRST_V8_CONFIG_VERSION and _secure_client_stays_on_v8(config_path)
+        else CURRENT_CONFIG_VERSION
+    )
+    steps = _pending_migration_steps(version, from_version, data_dir, config_path, target)
     names = [name for name, _step in steps]
     if check:
         _check_connector_roster(
@@ -3489,7 +3689,15 @@ def migrate(
                 raise
             except Exception as exc:  # noqa: BLE001 - reported like a failed step
                 raise MigrationError(f"the v8 conversion check failed: {exc}") from exc
-        return MigrateResult(version, CURRENT_CONFIG_VERSION, names)
+        if version >= _FIRST_V8_CONFIG_VERSION and gateway_binary:
+            if _V9_STEP_NAME in names:
+                # The staged migration validates the resulting v9 document and
+                # its assets. The original v8 document may still contain keys
+                # that the migration removes, such as update_check.
+                _preview_config_v9(config_path, gateway_binary)
+            else:
+                _check_staged_gateway_accepts(config_path, data_dir, gateway_binary)
+        return MigrateResult(version, target, names)
 
     if steps:
         _tighten_group_writable(ctx, [config_path, os.path.join(data_dir, ".env")])
@@ -3505,17 +3713,16 @@ def migrate(
         reached = source_config_version(path=config_path)
     except ConfigVersionError as exc:
         raise MigrationError(str(exc)) from exc
-    if reached != CURRENT_CONFIG_VERSION:
-        raise MigrationError(
-            f"{config_path} is at config_version {reached} after migrating; expected {CURRENT_CONFIG_VERSION}"
-        )
+    if reached != target:
+        raise MigrationError(f"{config_path} is at config_version {reached} after migrating; expected {target}")
     _refresh_local_observability_bundle(data_dir, __version__)
     _refresh_guardrail_profiles(data_dir, config_path)
+    _refresh_rego_policies(data_dir, config_path)
     # A 0.8.x release may already have written config_version 8 (GAP-1390), so
     # the writer's version decides too: no 0.x release recorded the agents.
     if version < _FIRST_V8_CONFIG_VERSION or _version_before(from_version or "", (1, 0, 0)):
         _select_windows_agents(data_dir)
-    return MigrateResult(version, CURRENT_CONFIG_VERSION, names, changed=bool(names))
+    return MigrateResult(version, target, names, changed=bool(names))
 
 
 def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
@@ -3526,14 +3733,7 @@ def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
 
     from defenseclaw.guardrail_profiles import refresh_stock_profiles
 
-    policy_dir = os.path.join(data_dir, "policies")
-    try:
-        raw = yaml.safe_load(_read_config_text(config_path) or "") or {}
-    except yaml.YAMLError:
-        raw = {}
-    configured = raw.get("policy_dir") if isinstance(raw, dict) else None
-    if isinstance(configured, str) and configured.strip():
-        policy_dir = os.path.expanduser(configured.strip())
+    policy_dir = _configured_policy_dir(data_dir, _read_config_text(config_path) or "")
     result = refresh_stock_profiles(policy_dir, os.path.join(data_dir, "backups"))
     if result.refreshed:
         ux.ok(
@@ -3551,6 +3751,85 @@ def _refresh_guardrail_profiles(data_dir: str, config_path: str) -> None:
         )
     for error in result.errors:
         ux.warn(f"guardrail rule pack was not updated ({error})", indent="    ")
+
+
+def _configured_policy_dir(data_dir: str, config_text: str) -> str:
+    """The config's policy_dir, else <data_dir>/policies."""
+
+    try:
+        raw = yaml.safe_load(config_text) or {}
+    except yaml.YAMLError:
+        raw = {}
+    configured = raw.get("policy_dir") if isinstance(raw, dict) else None
+    if isinstance(configured, str) and configured.strip():
+        return os.path.expanduser(configured.strip())
+    return os.path.join(data_dir, "policies")
+
+
+def _refresh_rego_policies(data_dir: str, config_path: str) -> None:
+    """Bring the shipped Rego modules in policy_dir to this release (GAP-0776).
+
+    init only wrote missing modules, so an upgraded install kept enforcing
+    the modules of the release that first seeded it. Best effort, like the
+    rule packs: a module that fails to update keeps the previous one, which
+    still loads. A managed host is left alone: its administrator owns
+    policy_dir, and Secure Client keeps its version 8 policy (issue #1092).
+    So is a policy_dir outside the data home, which the upgrade's rollback
+    copy does not cover (as the v9 migration does).
+    """
+
+    from defenseclaw.paths import bundled_rego_dir
+    from defenseclaw.rego_policies import refresh_rego, stale_modules
+
+    text = _read_config_text(config_path) or ""
+    if _guardrail_runtime_migration_is_managed(text):
+        return
+    policy_dir = _configured_policy_dir(data_dir, text)
+    if not _path_within(os.path.join(policy_dir, "rego"), data_dir):
+        stale = stale_modules(policy_dir)
+        if stale:
+            ux.warn(
+                f"did not update the Rego policies {', '.join(stale)} in {os.path.join(policy_dir, 'rego')}: "
+                "a rollback restores only the data home, and that folder is outside it. "
+                f"Copy this release's modules from {bundled_rego_dir()} to use its policy changes",
+                indent="    ",
+            )
+        return
+    result = refresh_rego(policy_dir, os.path.join(data_dir, "backups"))
+    if result.refreshed:
+        ux.ok(
+            f"Updated the Rego policies {', '.join(result.refreshed)} to this release "
+            f"(previous copies in {result.backup_dir})",
+            indent="    ",
+        )
+    if result.replaced_edited:
+        ux.warn(
+            f"replaced the edited Rego policies {', '.join(result.replaced_edited)} in {result.dest} with this "
+            f"release's; your copies are in {result.backup_dir}. Re-apply your changes, or keep your own rules "
+            "in a file of another name, which upgrades do not touch",
+            indent="    ",
+        )
+    if result.retired:
+        ux.ok(
+            f"Moved {', '.join(result.retired)}, which this release no longer ships, to {result.backup_dir}",
+            indent="    ",
+        )
+    if result.kept:
+        ux.warn(
+            f"kept {', '.join(result.kept)} in {result.dest}: not a regular file, so it does not get this "
+            "release's policy changes",
+            indent="    ",
+        )
+    for error in result.errors:
+        ux.warn(f"Rego policy was not updated ({error})", indent="    ")
+
+
+def _path_within(path: str, root: str) -> bool:
+    path, root = (os.path.normcase(os.path.realpath(os.path.expanduser(p))) for p in (path, root))
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:  # different drives on Windows
+        return False
 
 
 def _select_windows_agents(data_dir: str) -> None:
@@ -3628,6 +3907,15 @@ def display_step_name(name: str) -> str:
     return _LEGACY_STEP_PREFIX.sub("", name)
 
 
+def _secure_client_stays_on_v8(config_path: str) -> bool:
+    """A Secure Client config stays on config_version 8 (issue #1092): the
+    8 -> 9 step has nothing to do for it, as when 8 was the current version."""
+    from defenseclaw.config_writer import secure_client_managed
+
+    text = _read_config_text(config_path)
+    return text is not None and secure_client_managed(text.encode("utf-8"))
+
+
 def _pending_migration_steps(
     version: int,
     from_version: str | None,
@@ -3670,12 +3958,20 @@ def _config_version_step(
     config_path: str,
 ) -> Callable[[MigrationContext], None]:
     def run(ctx: MigrationContext) -> None:
+        from defenseclaw.config import source_config_version
+        from defenseclaw.config_writer import ACTOR_MIGRATION, ConfigWriteError, replace_document
+
         step(ctx)
+        if source_config_version(path=config_path) == target:
+            return
         text = _read_config_text(config_path)
         if text is None or _CONFIG_VERSION_LINE.search(text) is None:
             raise MigrationError(f"{config_path} has no top-level config_version")
-        if not _atomic_write_text(config_path, _CONFIG_VERSION_LINE.sub(f"config_version: {target}", text, count=1)):
-            raise MigrationError(f"could not write config_version {target} to {config_path}")
+        updated = _CONFIG_VERSION_LINE.sub(f"config_version: {target}", text, count=1)
+        try:
+            replace_document(updated.encode("utf-8"), ACTOR_MIGRATION, f"config_version {target}", path=config_path)
+        except (ConfigWriteError, OSError, ValueError) as exc:
+            raise MigrationError(f"could not write config_version {target} to {config_path}: {exc}") from exc
 
     return run
 

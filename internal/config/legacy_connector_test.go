@@ -45,7 +45,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	replacement := legacyconnector.Replacement
 
 	t.Run("primary", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nclaw:\n  mode: "+retired+"\nguardrail:\n  connector: "+retired+"\n")
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nclaw:\n  mode: "+retired+"\nguardrail:\n  connector: "+retired+"\n")
 		if cfg.Guardrail.Connector != replacement || string(cfg.Claw.Mode) != replacement {
 			t.Fatalf("connector=%q claw.mode=%q, want %q", cfg.Guardrail.Connector, cfg.Claw.Mode, replacement)
 		}
@@ -55,7 +55,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("map", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n  connectors:\n    codex:\n      mode: observe\n    "+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: codex\n  connectors:\n    codex:\n      mode: observe\n    "+
 			retired+":\n      mode: action\n      hook_fail_mode: open\n")
 		if _, ok := cfg.Guardrail.Connectors[retired]; ok {
 			t.Fatalf("retired key survived: %v", cfg.Guardrail.Connectors)
@@ -70,7 +70,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("both keys present", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n  connectors:\n    "+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: "+replacement+"\n  connectors:\n    "+
 			replacement+":\n      mode: observe\n    "+retired+":\n      mode: action\n")
 		if len(cfg.Guardrail.Connectors) != 1 {
 			t.Fatalf("connectors = %v, want only %s", cfg.Guardrail.Connectors, replacement)
@@ -84,7 +84,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("other per-connector maps", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n"+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: "+replacement+"\n"+
 			"asset_policy:\n  connectors:\n    "+retired+":\n      mode: action\n"+
 			"application_protection:\n  connectors:\n    "+retired+":\n      min_confidence: 0.7\n"+
 			"observability:\n  connectors:\n    "+replacement+":\n      webhooks: []\n    "+retired+":\n      webhooks: []\n")
@@ -110,7 +110,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("connector_hooks", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+retired+"\n  mode: observe\n"+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: "+retired+"\n  mode: observe\n"+
 			"connector_hooks:\n  "+retired+":\n    enabled: true\n    mode: action\n")
 		if _, ok := cfg.ConnectorHooks[retired]; ok {
 			t.Fatalf("connector_hooks kept the retired key: %v", cfg.ConnectorHooks)
@@ -124,7 +124,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("connector_hooks keeps an explicit replacement", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n"+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: "+replacement+"\n"+
 			"connector_hooks:\n  "+replacement+":\n    mode: observe\n  "+retired+":\n    mode: action\n")
 		if len(cfg.ConnectorHooks) != 1 || cfg.ConnectorHookConfig(replacement).Mode != "observe" {
 			t.Fatalf("connector_hooks = %+v, want only the explicit %s entry", cfg.ConnectorHooks, replacement)
@@ -135,7 +135,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("guardrail.judge.hook_connectors", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+replacement+"\n"+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: "+replacement+"\n"+
 			"  judge:\n    enabled: true\n    hook_connectors: [codex, "+retired+", "+replacement+"]\n")
 		if got := strings.Join(cfg.Guardrail.Judge.HookConnectors, ","); got != "codex,"+replacement {
 			t.Fatalf("hook_connectors = %v, want codex and %s once", cfg.Guardrail.Judge.HookConnectors, replacement)
@@ -149,7 +149,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("application_protection.include_connectors", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: codex\n"+
 			"application_protection:\n  include_connectors: ["+retired+"]\n")
 		if got := strings.Join(cfg.ApplicationProtection.IncludeConnectors, ","); got != replacement {
 			t.Fatalf("include_connectors = %v, want [%s]", cfg.ApplicationProtection.IncludeConnectors, replacement)
@@ -163,7 +163,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("application_protection.exclude_connectors", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: codex\n"+
 			"application_protection:\n  exclude_connectors: ["+retired+", "+retired+"]\n")
 		if got := strings.Join(cfg.ApplicationProtection.ExcludeConnectors, ","); got != replacement {
 			t.Fatalf("exclude_connectors = %v, want [%s]", cfg.ApplicationProtection.ExcludeConnectors, replacement)
@@ -177,7 +177,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("asset_policy rule connectors", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: "+retired+"\n"+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: "+retired+"\n"+
 			"asset_policy:\n  enabled: true\n  mode: action\n  mcp:\n    default: allow\n"+
 			"    denied:\n      - name: marker-server\n        connector: "+retired+"\n"+
 			"    registry:\n      - name: approved-server\n        connector: "+retired+"\n"+
@@ -203,7 +203,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("observability route selector connectors", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: codex\n"+
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: codex\n"+
 			"observability:\n  destinations:\n    - name: console\n      kind: console\n      routes:\n"+
 			"        - name: codex-only\n          signals: [logs]\n          selector:\n            connectors: [codex]\n"+
 			"        - name: desktop\n          signals: [logs]\n          selector:\n            connectors: ["+retired+"]\n")
@@ -215,7 +215,7 @@ func TestLoadCanonicalizesRetiredConnectorID(t *testing.T) {
 	})
 
 	t.Run("unaffected config has no notice", func(t *testing.T) {
-		cfg := loadLegacyConnectorFixture(t, "config_version: 6\nguardrail:\n  connector: cursor\n")
+		cfg := loadLegacyConnectorFixture(t, "config_version: 9\nguardrail:\n  connector: cursor\n")
 		if cfg.Guardrail.Connector != "cursor" || len(cfg.LegacyConnectorNotices) != 0 {
 			t.Fatalf("connector=%q notices=%v", cfg.Guardrail.Connector, cfg.LegacyConnectorNotices)
 		}

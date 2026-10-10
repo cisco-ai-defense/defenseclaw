@@ -103,14 +103,56 @@ def test_help_lists_the_permanent_flags(tmp_path: Path) -> None:
         assert flag in result.stdout
 
 
-def test_unknown_flags_are_ignored_not_fatal(tmp_path: Path) -> None:
+def test_an_unknown_option_stops_and_value_options_take_the_equals_form(tmp_path: Path) -> None:
+    # GAP-0361: a typo or the --name=value form was ignored with a warning,
+    # so an unattended install went on without the option and exited 0.
     empty = tmp_path / "assets"
     empty.mkdir()
+    script = _stamped(tmp_path)
 
-    result = _run([str(_stamped(tmp_path)), "--local", str(empty), "--from-the-future"], tmp_path)
+    typo = _run([str(script), "--local", str(empty), "--quickstrat"], tmp_path)
+    assert typo.returncode == 2
+    assert "Unknown option: --quickstrat; nothing was changed" in typo.stderr
+    assert "checksums.txt" not in typo.stdout + typo.stderr
 
-    assert "Ignoring unknown option: --from-the-future" in result.stdout + result.stderr
-    assert "checksums.txt" in result.stdout + result.stderr  # got past argument parsing
+    equals = _run([str(script), f"--local={empty}", "--connector=claudecode", "--quickstart-mode=action"], tmp_path)
+    assert "Unknown option" not in equals.stdout + equals.stderr
+    assert "checksums.txt" in equals.stdout + equals.stderr  # got past argument parsing
+
+    # The copy defenseclaw upgrade runs accepts a newer client's flags.
+    upgrade_copy = tmp_path / "defenseclaw-upgrade-x1"
+    upgrade_copy.mkdir()
+    shutil.copy(script, upgrade_copy / "install.sh")
+    newer = _run([str(upgrade_copy / "install.sh"), "--local", str(empty), "--from-the-future"], tmp_path)
+    assert "Ignoring unknown option: --from-the-future" in newer.stdout + newer.stderr
+    assert "checksums.txt" in newer.stdout + newer.stderr
+
+
+@pytest.mark.parametrize(("answer", "rc", "expected"), [("ClaudeCode", 0, "Connector: claudecode"), ("99", 2, "No agent picked")])
+def test_the_agent_prompt_takes_a_name_and_never_swaps_an_unknown_answer(
+    tmp_path: Path, answer: str, rc: int, expected: str
+) -> None:
+    # GAP-0333: claudecode or 99 at the prompt installed codex without a word.
+    tty = tmp_path / "tty"
+    tty.write_text(answer + "\n", encoding="utf-8")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "pick.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + text[text.index("readonly CONNECTOR_CHOICES=") : text.index("\n", text.index("readonly CONNECTOR_CHOICES="))]
+        + '\nBOLD="" NC="" STAGING="/nonexistent" UV_DIR_NEW="" UV_INSTALLED=""\n'
+        + 'step() { :; }\nok() { echo "$*"; }\nwarn() { echo "$*"; }\nerr() { echo "$*" >&2; }\ndrop_new_uv() { :; }\n'
+        + text[text.index("usage_error() {") : text.index("\n", text.index("usage_error() {")) + 1]
+        + _install_sh_functions("read_tty_line", "connector_choice", "pick_connector").replace("/dev/tty", str(tty))
+        + "pick_connector\n",
+        encoding="utf-8",
+    )
+
+    result = _run([str(script)], tmp_path)
+
+    assert result.returncode == rc, result.stdout + result.stderr
+    assert expected in result.stdout + result.stderr
+    assert "Connector: codex" not in result.stdout
 
 
 def test_version_before_1_0_is_refused_without_network(tmp_path: Path) -> None:
@@ -142,8 +184,8 @@ def test_both_installers_refresh_agent_discovery_after_the_migration() -> None:
     windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     posix_refresh = posix.index("agent discover --refresh --no-emit-otel")
     windows_refresh = windows.index('@("agent", "discover", "--refresh", "--no-emit-otel")')
-    assert posix.rindex("migrate --yes", 0, posix_refresh) > 0
-    assert windows.rindex('@("migrate", "--yes")', 0, windows_refresh) > 0
+    assert posix.rindex("args=(migrate)", 0, posix_refresh) > 0
+    assert windows.rindex('@("migrate")', 0, windows_refresh) > 0
     # GAP-1294: the upgraded ACP guard is re-pinned in locks that pinned the
     # guard it replaced, so configured editor entries keep working.
     assert posix.index('acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")"') > posix_refresh
@@ -311,6 +353,42 @@ def test_handoff_plan_changes_nothing(tmp_path: Path) -> None:
     assert "ran" not in result.stdout
 
 
+def test_handoff_checks_a_fork_against_the_official_release_identity(tmp_path: Path) -> None:
+    # DEFENSECLAW_REPO moves the downloads, never the trust root. A validly
+    # signed installer of another release served under the tag is refused.
+    release = _release(tmp_path, '#!/bin/bash\nreadonly DC_VERSION="1.0.0"\necho ran\n')
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    (fake / "curl").write_text(
+        "#!/bin/bash\nout=''\nwhile [ $# -gt 1 ]; do [ \"$1\" = -o ] && out=$2; shift; done\n"
+        'case "$1" in */latest) echo "location: https://github.com/fork/defenseclaw/releases/tag/1.0.1" ;;\n'
+        f'*) cp "{release}/${{1##*/}}" "$out" 2>/dev/null || : > "$out" ;; esac\n',
+        encoding="utf-8",
+    )
+    (fake / "cosign").write_text(
+        f'#!/bin/bash\n[ "$1" = version ] && {{ echo "GitVersion: v2.4.1"; exit 0; }}\necho "$*" > "{tmp_path}/cosign.args"\n',
+        encoding="utf-8",
+    )
+    for tool in ("curl", "cosign"):
+        (fake / tool).chmod(0o755)
+
+    def handoff() -> subprocess.CompletedProcess[str]:
+        return _run(
+            [str(HANDOFF_SH), "--plan"], tmp_path, PATH=f"{fake}:/usr/bin:/bin", DEFENSECLAW_REPO="fork/defenseclaw",
+        )
+
+    result = handoff()
+    assert result.returncode == 1 and "is release 1.0.0" in result.stderr, result.stderr
+
+    script = '#!/bin/bash\nreadonly DC_VERSION="1.0.1"\necho ran\n'
+    (release / "install.sh").write_text(script, encoding="utf-8")
+    (release / "checksums.txt").write_text(f"{hashlib.sha256(script.encode()).hexdigest()}  install.sh\n", encoding="utf-8")
+    result = handoff()
+    assert result.returncode == 0, result.stderr
+    signer = r"^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$"
+    assert f"--certificate-identity-regexp {signer}" in (tmp_path / "cosign.args").read_text(encoding="utf-8")
+
+
 def test_downloads_under_a_staging_name_are_checked_by_their_release_name() -> None:
     # checksums.txt lists release asset names; a file saved under another name
     # must pass the asset name to verify, or the lookup finds nothing.
@@ -371,7 +449,7 @@ def test_a_failed_first_run_quickstart_keeps_the_install_and_exits_4(tmp_path: P
     completed = _run([str(script)], tmp_path)
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    rerun = "defenseclaw quickstart --non-interactive --yes --connector codex --mode action"
+    rerun = "defenseclaw quickstart --connector codex --mode action"
     assert completed.stdout.strip() == f"7|{rerun}"
     summary = text[text.index('if [[ -n "${QUICKSTART_RERUN}" ]]; then') :]
     assert summary.index("exit 4") < summary.index("exit ${START_RC}")
@@ -578,6 +656,8 @@ def test_a_restored_0_8_gateway_is_launched_and_waited_for(tmp_path: Path) -> No
         + funcs
         + f"gateway_pid() {{ kill -0 \"$(cat '{pid_file}')\" 2>/dev/null && cat '{pid_file}'; }}\n"
         + f'DEFENSECLAW_HOME="{tmp_path}" BIN_DIR="{bin_dir}"\n'
+        # GAP-1241: the failed new gateway's start has already explained itself.
+        + "START_EXPLAINED=1\n"
         + f'rc=0; start_gateway || rc=$?; echo "rc=$rc"; kill "$(cat \'{pid_file}\')"\n',
         encoding="utf-8",
     )
@@ -597,30 +677,30 @@ def test_a_rollback_whose_gateway_does_not_start_says_so_and_exits_1(tmp_path: P
     dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
     (dc_home / "previous" / "bin").mkdir(parents=True)
     bin_dir.mkdir(parents=True)
-    for folder, version, start in ((bin_dir, "1.0.1", "exit 0"), (dc_home / "previous" / "bin", "0.8.10", "exit 1")):
+    for folder, version, start in ((bin_dir, "1.0.2", "exit 0"), (dc_home / "previous" / "bin", "1.0.1", "exit 1")):
         gateway = folder / "defenseclaw-gateway"
         gateway.write_text(
             f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) {start} ;; esac\n',
             encoding="utf-8",
         )
         gateway.chmod(0o755)
-    (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    (dc_home / "previous" / "VERSION").write_text("1.0.1\n", encoding="utf-8")
     (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
-    script = _stamped(tmp_path, "1.0.1")
+    script = _stamped(tmp_path, "1.0.2")
     env = {"DEFENSECLAW_APP_PATH": "none"}
 
     back = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert back.returncode == 1, back.stdout + back.stderr
-    assert "Rolling back to DefenseClaw 0.8.10" in back.stdout
-    assert "Now running DefenseClaw 0.8.10, but its gateway is not up" in back.stdout
+    assert "Rolling back to DefenseClaw 1.0.1" in back.stdout
+    assert "Now running DefenseClaw 1.0.1, but its gateway is not up" in back.stdout
     assert "✓ Now running" not in back.stdout
 
     forward = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert forward.returncode == 0, forward.stdout + forward.stderr
-    assert "Rolling forward to DefenseClaw 1.0.1" in forward.stdout
-    assert "Now running DefenseClaw 1.0.1." in forward.stdout
+    assert "Rolling forward to DefenseClaw 1.0.2" in forward.stdout
+    assert "Now running DefenseClaw 1.0.2." in forward.stdout
     # GAP-1497: rolling forward asked to replace 0.8.10 "with the previous
     # install (1.0.1)", though 1.0.1 is the newer one.
     for path in (INSTALL_SH, ROOT / "scripts" / "install.ps1"):
@@ -674,6 +754,107 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     assert not calls.exists()
 
 
+def _damaged_audit_db(path: Path) -> bytes:
+    import sqlite3
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE audit_events (detail TEXT)")
+        conn.executemany("INSERT INTO audit_events VALUES (?)", [("x" * 500,)] * 2000)
+    conn.close()
+    with path.open("r+b") as handle:  # overwrite b-tree pages: integrity_check fails
+        handle.seek(4096 * 2)
+        handle.write(b"\xff" * 4096 * 3)
+    return path.read_bytes()
+
+
+def _rollback_to_0_8_with_a_damaged_store(tmp_path: Path, starts: bool) -> tuple[subprocess.CompletedProcess[str], Path]:
+    # A 1.0.1 install with a connector over a saved 0.8.10 install whose
+    # audit.db SQLite reports damaged (GAP-1388). The 0.8.10 gateway, like the
+    # real one, starts only on a store it can write.
+    home = tmp_path / "home"
+    dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
+    (dc_home / "previous" / "bin").mkdir(parents=True)
+    (dc_home / "previous" / "data").mkdir()
+    (dc_home / ".venv" / "bin").mkdir(parents=True)
+    (dc_home / ".venv" / "bin" / "python").symlink_to(sys.executable)
+    bin_dir.mkdir(parents=True)
+    shutil.copy(shutil.which("sleep") or "/bin/sleep", tmp_path / "defenseclaw-sleep")
+    calls = tmp_path / "calls.txt"
+    log = f"echo \"$V $*\" >> '{calls}'"
+    pid = '"$DEFENSECLAW_HOME/gateway.pid"'
+    new = f"connector|start) {log} ;; esac\n"
+    guard = '[ ! -e "$DEFENSECLAW_HOME/audit.db" ] || ' if starts else ""
+    old = (
+        f"start) {log}; {guard}exit 1\n"
+        f"  '{tmp_path}/defenseclaw-sleep' 60 >/dev/null 2>&1 & echo $! > {pid} ;;\n"
+        f"status) kill -0 \"$(cat {pid})\" ;;\nstop) {log}; kill \"$(cat {pid})\"; rm -f {pid} ;; esac\n"
+    )
+    for folder, version, body in ((bin_dir, "1.0.1", new), (dc_home / "previous" / "bin", "0.8.10", old)):
+        gateway = folder / "defenseclaw-gateway"
+        gateway.write_text(
+            f'#!/bin/sh\nV={version}\ncase "$1" in --version) echo "defenseclaw-gateway version $V" ;;\n{body}',
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    (dc_home / "active_connector.json").write_text('{"version": 3, "names": ["claudecode"]}', encoding="utf-8")
+    (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
+    _damaged_audit_db(dc_home / "previous" / "data" / "audit.db")
+    try:
+        result = _run([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+    finally:
+        subprocess.run(["pkill", "-f", str(tmp_path / "defenseclaw-sleep")], check=False)
+    return result, dc_home
+
+
+def test_a_rollback_to_0_x_moves_a_damaged_audit_store_aside(tmp_path: Path) -> None:
+    # GAP-1388: the rollback restored a damaged 0.8.10 audit.db; 0.8.10's
+    # gateway then failed (local_write_failed), with the 1.0 hooks removed.
+    back, dc_home = _rollback_to_0_8_with_a_damaged_store(tmp_path, starts=True)
+
+    out = back.stdout + back.stderr
+    assert back.returncode == 0, out
+    archives = [path.name for path in dc_home.glob("audit.db.corrupt-*")]
+    assert len(archives) == 1 and re.fullmatch(r"audit\.db\.corrupt-\d{8}T\d{6}Z", archives[0]), archives
+    assert not (dc_home / "audit.db").exists()
+    assert out.count("failed SQLite's integrity check") == 1, out
+    assert "Now running DefenseClaw 0.8.10." in out
+    assert (tmp_path / "calls.txt").read_text(encoding="utf-8").splitlines() == [
+        "1.0.1 connector teardown --connector claudecode",
+        "0.8.10 start",
+    ]
+    # The check runs before anything of the 1.0 install changes.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    block = text[text.index('if [[ "${ROLLBACK}" == true ]]; then') :]
+    assert block.index("check_rollback_data") < block.index("stop_gateway") < block.index(
+        "remove_connector_registrations_for_legacy"
+    )
+
+
+def test_a_rollback_to_0_x_whose_gateway_does_not_start_is_undone(tmp_path: Path) -> None:
+    # GAP-1388: left with 0.8.10 files, no gateway and no hooks. Now the 1.0.1
+    # install comes back and its gateway start writes its registrations again.
+    back, dc_home = _rollback_to_0_8_with_a_damaged_store(tmp_path, starts=False)
+
+    out = back.stdout + back.stderr
+    assert back.returncode == 1, out
+    assert "the rollback is being undone" in out
+    assert "run 'defenseclaw rollback' again" in out
+    assert (tmp_path / "calls.txt").read_text(encoding="utf-8").splitlines() == [
+        "1.0.1 connector teardown --connector claudecode",
+        "0.8.10 start",
+        "1.0.1 start",
+    ]
+    assert "1.0.1" in (dc_home.parent / ".local" / "bin" / "defenseclaw-gateway").read_text(encoding="utf-8")
+    assert (dc_home / "active_connector.json").is_file()
+    previous = dc_home / "previous"
+    assert (previous / "VERSION").read_text(encoding="utf-8").strip() == "0.8.10"
+    assert not (previous / "ROLLED_BACK").exists()
+    # The saved store is back as it was, so a later upgrade keeps it.
+    assert (previous / "data" / "audit.db").is_file()
+    assert not list((previous / "data").glob("audit.db.corrupt-*"))
+
+
 def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_path: Path) -> None:
     # GAP-0012: after naming the drift and its restart fix, the rollback also
     # said "Start it with: defenseclaw-gateway start", which does nothing then.
@@ -702,6 +883,8 @@ def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_pat
     out = back.stdout + back.stderr
     assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart" in out
     assert "Start it with: defenseclaw-gateway start" not in out
+    # GAP-1388: 0.8.10 is not left down; the retry that accepts the drift is named.
+    assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw rollback" in out
 
 
 def test_both_installers_say_when_an_upgrade_leaves_the_gateway_stopped() -> None:
@@ -713,6 +896,8 @@ def test_both_installers_say_when_an_upgrade_leaves_the_gateway_stopped() -> Non
         # GAP-2481: after 'uninstall --binaries' the guardrail is off, and a
         # gateway start alone does not guard the hooks again.
         assert "Turn it back on with:" in text and "defenseclaw setup guardrail" in text, path
+        # GAP-0384: a port another process holds fails that start too; say so.
+        assert '"check-api-port", "--installed"' in text or "check-api-port --installed" in text, path
 
 _GUARDRAIL_CONFIGS = {
     # What 'uninstall --binaries' and 'setup guardrail --disable' save.
@@ -825,7 +1010,7 @@ def _uv_bootstrap(tmp_path: Path, free_kb: int, cache_mb: int | None = None) -> 
         'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ninfo() { echo "info: $*"; }\n'
         "has() { command -v \"$1\" >/dev/null 2>&1; }\n"
         f'OS=darwin ARCH=arm64 UV_VERSION=0 DEFENSECLAW_HOME="{data_dir}" BIN_DIR="{bin_dir}"\n'
-        f'STAGING="{data_dir}/.staging" VENV="{data_dir}/.venv" NOT_DATA=".venv .uv .staging"\n'
+        f'STAGING="{data_dir}/.staging" VENV="{data_dir}/.venv" NOT_DATA=".venv .uv .staging .failed-* backups"\n'
         f'PATH="{fake}:/usr/bin:/bin"\nunset UV_CACHE_DIR UV_PYTHON_INSTALL_DIR\n'
         + install_uv
         + preflight
@@ -906,12 +1091,17 @@ def test_an_upgrade_counts_the_rollback_copy_before_staging_or_stopping(tmp_path
     data_dir = tmp_path / "home" / ".defenseclaw"
     (data_dir / ".venv").mkdir(parents=True)
     (data_dir / "audit.db").write_bytes(b"x" * (3 * 1024 * 1024))
+    failed = data_dir / ".failed-20261007T191408"
+    failed.mkdir()
+    (failed / "venv").write_bytes(b"x" * (2 * 1024 * 1024))
     proc = _uv_bootstrap(tmp_path, free_kb=450 * 1024, cache_mb=700)
 
     assert proc.returncode == 1, proc.stdout
     assert "the upgrade needs about 503 MB (400 MB for the new version and 103 MB for a rollback copy" in proc.stdout
     assert "450 MB is free" in proc.stdout and "Free at least 53 MB" in proc.stdout
-    assert f"The largest item is {data_dir}/audit.db (3 MB)" in proc.stdout
+    # GAP-0389: a 3 MB item is no answer to a 53 MB shortfall; what can go is named.
+    assert "The largest item" not in proc.stdout
+    assert f"You can remove {failed} (" in proc.stdout and "MB), the copy a failed install kept for" in proc.stdout
     assert "nothing was changed" in proc.stdout
 
 
@@ -961,6 +1151,62 @@ def test_a_failed_python_build_removes_the_uv_it_installed_and_names_the_kept_ca
     assert (data_dir / ".uv").is_dir()
     assert f"uv's download cache {data_dir}/.uv (" in proc.stdout and "MB) is kept" in proc.stdout
     assert "nothing was changed" not in proc.stdout
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root writes any folder")
+def test_an_unwritable_install_folder_is_refused_before_anything_changes(tmp_path: Path) -> None:
+    # GAP-0381, GAP-0420: a read-only ~/.local(/bin) failed the swap after the
+    # gateway stopped, or a first install only said uv could not be installed,
+    # and left ~/.defenseclaw/logs behind.
+    empty = tmp_path / "assets"
+    empty.mkdir()
+    local = tmp_path / "home" / ".local"
+    local.mkdir(parents=True)
+    local.chmod(0o555)
+    try:
+        result = _run([str(_stamped(tmp_path)), "--local", str(empty), "--yes"], tmp_path)
+    finally:
+        local.chmod(0o755)
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert f"{local} is not writable by" in result.stderr
+    assert "then rerun; nothing was changed" in result.stderr
+    assert not (tmp_path / "home" / ".defenseclaw").exists()
+
+
+def test_an_upgrade_names_a_port_another_account_holds_before_building(tmp_path: Path) -> None:
+    # GAP-0130: the upgrade of a second account on a host failed only at the
+    # gateway restart, 2.5 minutes and 562 MB later, because the first
+    # account's gateway holds the API port.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index('if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \\')
+    block = text[start : text.index("\nfi\n", text.index("\n    fi\n", start)) + 4]
+    assert text.index(block) < text.index('info "Building the Python environment')
+    staging = tmp_path / "staging"
+    (staging / "bin").mkdir(parents=True)
+    gateway = staging / "bin" / "defenseclaw-gateway"
+
+    def run(gateway_body: str, running: str) -> subprocess.CompletedProcess[str]:
+        gateway.write_text("#!/bin/sh\n" + gateway_body, encoding="utf-8")
+        gateway.chmod(0o755)
+        script = tmp_path / "preflight.sh"
+        script.write_text(
+            'set -euo pipefail\nerr() { echo "err: $*"; }\ndie() { err "$@"; exit 1; }\ndrop_new_uv() { :; }\n'
+            f'gateway_pid() {{ {running}; }}\nSTAGING="{staging}" PREV_VERSION=0.8.4\n' + block + 'echo "passed"\n',
+            encoding="utf-8",
+        )
+        return _run([str(script)], tmp_path)
+
+    held = '[ "$2" = --help ] && exit 0\necho "Error: 127.0.0.1:18970 is held by another account; use --api-port 19010" >&2\nexit 1\n'
+    proc = run(held, "echo 4242")
+    assert proc.returncode == 1 and "passed" not in proc.stdout, proc.stdout
+    assert "err: 127.0.0.1:18970 is held by another account; use --api-port 19010; nothing was changed" in proc.stdout
+    assert not staging.exists()
+    (staging / "bin").mkdir(parents=True)
+
+    # No running gateway is not restarted; a staged gateway without the check is not asked.
+    assert "passed" in run(held, "return 1").stdout
+    assert "passed" in run('echo "Error: unknown command" >&2\nexit 1\n', "echo 4242").stdout
 
 
 def test_a_full_disk_is_checked_before_the_lock() -> None:
@@ -1042,8 +1288,8 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
-def _legacy_0_8_home(home: Path, receipt_age: int) -> tuple[Path, Path]:
-    """Lay out a 0.8.x install with uv and a temporary Cosign cache."""
+def _legacy_0_8_home(home: Path, receipt_age: int, cache_age: int, cache_wheel: str) -> tuple[Path, Path]:
+    """Lay out a 0.8.10 install that ran uv's installer and a temporary Cosign, without a marker."""
     bin_dir, dc_home = home / ".local" / "bin", home / ".defenseclaw"
     bin_dir.mkdir(parents=True)
     (bin_dir / "uv").write_text("#!/bin/sh\necho 'uv 0.12.24 (x86_64-unknown-linux-gnu)'\n", encoding="utf-8")
@@ -1054,33 +1300,56 @@ def _legacy_0_8_home(home: Path, receipt_age: int) -> tuple[Path, Path]:
     receipt.write_text(
         f'{{"binaries":["uv","uvx"],"install_prefix":"{bin_dir}","version":"0.12.24"}}', encoding="utf-8"
     )
-    python = home / ".local" / "share" / "uv" / "python" / "cpython-3.12.14-linux-x86_64-gnu"
-    (dc_home / ".venv").mkdir(parents=True)
+    site = dc_home / ".venv" / "lib" / "python3.12" / "site-packages"
+    for wheel in ("defenseclaw-0.8.10", "litellm-1.91.5"):
+        (site / f"{wheel}.dist-info").mkdir(parents=True)
     cfg = dc_home / ".venv" / "pyvenv.cfg"
-    cfg.write_text(f"home = {python}/bin\nuv = 0.12.24\nversion_info = 3.12.14\n", encoding="utf-8")
+    cfg.write_text("home = /usr/bin\nuv = 0.12.24\nversion_info = 3.12.14\n", encoding="utf-8")
+    cache = home / ".cache" / "uv"
+    for archive, wheel in (("a1", "defenseclaw-0.8.10"), ("a2", cache_wheel)):
+        (cache / "archive-v0" / archive / f"{wheel}.dist-info").mkdir(parents=True)
+    (cache / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f06886806bc55\n", encoding="utf-8")
     tuf = home / ".sigstore" / "root" / "tuf-repo-cdn.sigstore.dev"
     tuf.mkdir(parents=True)
     (tuf / "root.json").write_text("{}", encoding="utf-8")
     venv_t = 1_700_000_000
     for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
         os.utime(path, (venv_t - 5, venv_t - 5))
+    (cache / "CACHEDIR.TAG").touch()
+    os.utime(cache / "CACHEDIR.TAG", (venv_t - 1, venv_t - 1))
+    for path in (*cache.glob("archive-v0/*/*"), *cache.glob("archive-v0/*"), cache / "archive-v0", cache):
+        os.utime(path, (venv_t - cache_age, venv_t - cache_age))
     os.utime(receipt, (venv_t - receipt_age, venv_t - receipt_age))
     os.utime(cfg, (venv_t, venv_t))
     return bin_dir, dc_home
 
 
-def test_upgrade_from_0_8_does_not_claim_uv_from_recent_receipt(tmp_path: Path) -> None:
-    # A user-installed uv can have a receipt only seconds older than the
-    # 0.8.x venv: that installer reused uv instead of installing it.
+@pytest.mark.parametrize(
+    ("cache_age", "cache_wheel", "claimed"),
+    [
+        (-5, "litellm-1.91.5", True),  # the 0.8.10 installer's uv: wheels unpacked for its venv
+        (3600, "litellm-1.91.5", False),  # the user's uv: its cache predates the receipt
+        (30, "litellm-1.91.5", False),  # the user's uv, used just before the 0.8.10 install
+        (-5, "ruff-0.15.7", False),  # the user's uv, used for something DefenseClaw never installed
+    ],
+)
+def test_upgrade_from_0_8_records_uv_only_when_the_0_8_installer_placed_it(
+    tmp_path: Path, cache_age: int, cache_wheel: str, claimed: bool
+) -> None:
+    # GAP-0908: the 0.8.10 installer ran uv's installer and kept no marker,
+    # and it also reused a uv the user already had. The upgrade records the
+    # uv (the digests install_uv writes) and its cache only on evidence that
+    # user's own uv cannot meet.
     home = tmp_path / "home"
-    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=7)
+    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=60, cache_age=cache_age, cache_wheel=cache_wheel)
     text = INSTALL_SH.read_text(encoding="utf-8")
     script = tmp_path / "legacy.sh"
     script.write_text(
         'set -euo pipefail\nhas() { [[ "$1" != cosign ]] && command -v "$1" >/dev/null 2>&1; }\n'
         + text[text.index("readonly LEGACY_WINDOW") : text.index("find_legacy_leftovers() {")].replace("readonly ", "")
-        + _install_sh_functions("find_legacy_leftovers", "record_legacy_leftovers")
-        + f'HOME="{home}" BIN_DIR="{bin_dir}" DEFENSECLAW_HOME="{dc_home}"\nunset XDG_CONFIG_HOME XDG_DATA_HOME\n'
+        + _install_sh_functions("sha256_of", "find_legacy_leftovers", "record_legacy_leftovers")
+        + f'HOME="{home}" BIN_DIR="{bin_dir}" DEFENSECLAW_HOME="{dc_home}"\n'
+        + "unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME UV_CACHE_DIR\n"
         + "find_legacy_leftovers\nrecord_legacy_leftovers\n",
         encoding="utf-8",
     )
@@ -1088,9 +1357,182 @@ def test_upgrade_from_0_8_does_not_claim_uv_from_recent_receipt(tmp_path: Path) 
     proc = _run([str(script)], tmp_path)
 
     assert proc.returncode == 0, proc.stderr
-    assert not (bin_dir / "defenseclaw-uv.sha256").exists()
     assert (bin_dir / "uv").exists() and (bin_dir / "uvx").exists()
-    assert (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8") == "sigstore\n"
+    record = bin_dir / "defenseclaw-uv.sha256"
+    leftovers = (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8")
+    if not claimed:
+        assert not record.exists()
+        assert leftovers == "sigstore\n"
+        return
+    uv_digest = hashlib.sha256((bin_dir / "uv").read_bytes()).hexdigest()
+    uvx_digest = hashlib.sha256(b"uvx").hexdigest()
+    assert record.read_text(encoding="utf-8") == f"{uv_digest}  uv\n{uvx_digest}  uvx\n"
+    assert leftovers == "uv-cache\nsigstore\n"
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
+def test_a_restore_that_stopped_part_way_keeps_the_restored_data(tmp_path: Path) -> None:
+    # GAP-0624: a restore that failed on a full disk kept its snapshot; the
+    # next run set the data it had put back aside as the failed install and
+    # put nothing back, so config.yaml was left only in .failed-<time>.
+    dc_home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = dc_home / "previous.new"
+    for root in (dc_home, snap / "data"):
+        (root / "policies").mkdir(parents=True)
+        (root / "config.yaml").write_text("config_version: 7\n", encoding="utf-8")
+        (root / "policies" / "custom.rego").write_text("package custom\n", encoding="utf-8")
+    (snap / "bin").mkdir()
+    (snap / "bin" / "defenseclaw-gateway").write_text("0.8.4\n", encoding="utf-8")
+    (snap / "venv").mkdir()
+    (snap / "COMPLETE").touch()
+    (dc_home / ".venv").mkdir()
+    bin_dir.mkdir()
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        'set -euo pipefail\ninfo() { :; }\nwarn() { :; }\nerr() { echo "err: $*"; }\nrestart_old() { :; }\n'
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + f'DEFENSECLAW_HOME="{dc_home}" SNAP="{snap}" VENV="{dc_home}/.venv" BIN_DIR="{bin_dir}"\n'
+        + f'INSTALLER_DIR="{dc_home}/installer" APP_PATH="" VERSION=1.0.0 PREV_VERSION=0.8.4\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + "restore_snapshot\n",
+        encoding="utf-8",
+    )
+    bin_dir.chmod(0o555)
+    try:
+        first = _run([str(script)], tmp_path)
+    finally:
+        bin_dir.chmod(0o755)
+    assert "back completely" in first.stdout and snap.is_dir(), first
+
+    _run([str(script)], tmp_path)
+
+    assert not snap.exists()
+    assert (dc_home / "config.yaml").read_text(encoding="utf-8") == "config_version: 7\n"
+    assert (dc_home / "policies" / "custom.rego").is_file()
+    assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "0.8.4\n"
+
+
+def test_interrupted_venv_restore_keeps_the_previous_cli(tmp_path: Path) -> None:
+    # The old venv has already left the snapshot, but VENV_BACK was never
+    # written. A retry must leave it live instead of moving it aside again.
+    home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = home / "previous.new"
+    for path in (snap / "bin", snap / "data", snap / "venv", home / ".venv", bin_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    (snap / "venv" / "version").write_text("old", encoding="utf-8")
+    (home / ".venv" / "version").write_text("failed", encoding="utf-8")
+    (snap / "data" / "config.yaml").write_text("old", encoding="utf-8")
+    (home / "config.yaml").write_text("failed", encoding="utf-8")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + 'info() { :; }\nwarn() { :; }\nerr() { :; }\nrestart_old() { :; }\n'
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" SNAP="{snap}" VENV="{home}/.venv" '
+        + f'INSTALLER_DIR="{home}/installer" APP_PATH="" VERSION=1.0.1 PREV_VERSION=1.0.0\n'
+        + 'mv() {\n'
+        + '  if [[ "${STOP_AFTER_VENV_MOVE:-}" == 1 && "$1" == "${SNAP}/venv" ]]; then\n'
+        + '    command mv "$@"; exit 99\n'
+        + '  fi\n'
+        + '  command mv "$@"\n'
+        + '}\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + "restore_snapshot\n",
+        encoding="utf-8",
+    )
+
+    first = _run([str(script)], tmp_path, STOP_AFTER_VENV_MOVE="1")
+    assert first.returncode == 99, first
+    assert (home / ".venv" / "version").read_text(encoding="utf-8") == "old"
+    assert not (snap / "VENV_BACK").exists()
+
+    second = _run([str(script)], tmp_path)
+    assert second.returncode == 0, second
+    assert (home / ".venv" / "version").exists()
+    assert (home / ".venv" / "version").read_text(encoding="utf-8") == "old"
+    assert (home / "config.yaml").read_text(encoding="utf-8") == "old"
+    assert not snap.exists()
+
+
+def test_the_cli_says_an_install_is_running_during_the_swap(tmp_path: Path) -> None:
+    # GAP-0391: while the swap moved the venv, a second `defenseclaw rollback`
+    # (or any command after a killed run) failed with "command not found".
+    bin_dir, snap = tmp_path / "bin", tmp_path / "snap"
+    (snap / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    (bin_dir / "defenseclaw").symlink_to(tmp_path / "venv" / "bin" / "defenseclaw")
+    (snap / "bin" / "defenseclaw").symlink_to(tmp_path / "venv" / "bin" / "defenseclaw")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "swap.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_LINKS", "readonly BUSY_")))
+        + f'BIN_DIR="{bin_dir}" INSTALL_AGAIN="bash install.sh --local /assets"\n'
+        + _install_sh_functions("write_busy_shim", "restore_links")
+        + 'write_busy_shim\n"${BIN_DIR}/defenseclaw" --version || echo "rc=$?"\n',
+        encoding="utf-8",
+    )
+
+    during = _run([str(script)], tmp_path)
+    after = subprocess.run([str(bin_dir / "defenseclaw")], capture_output=True, text=True, check=False)
+
+    assert "a DefenseClaw install is running (pid " in during.stderr and "rc=1" in during.stdout, during
+    assert "stopped before it finished; run the installer again to finish or undo it: bash install.sh" in after.stderr
+    restore = tmp_path / "restore.sh"
+    restore.write_text(script.read_text(encoding="utf-8").replace("write_busy_shim\n", f'restore_links "{snap}"\n'))
+    _run([str(restore)], tmp_path)
+    assert (bin_dir / "defenseclaw").is_symlink()
+
+
+def test_an_undone_install_drops_what_it_staged() -> None:
+    # GAP-0388: after a rolled-back upgrade .staging (722 MB) and the new .uv
+    # (478 MB) stayed next to the .failed-<time> copy, and only that was named.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    swap = text[text.index("if ! swap_in; then") : text.index("\nfinish_swap\n")]
+    restores = swap.count("restore_snapshot\n")
+    assert restores == 2 and swap.count("restore_snapshot\n    drop_staging\n") + swap.count(
+        "restore_snapshot\n        drop_staging\n"
+    ) == restores
+    body = text[text.index("drop_staging() {") : text.index("\n}\n", text.index("drop_staging() {"))]
+    assert 'rm -rf "${STAGING}"' in body and "drop_new_uv" in body
+
+
+def test_a_full_disk_does_not_stop_the_restore_of_the_previous_install(tmp_path: Path) -> None:
+    # GAP-0375: with no room for the .failed-<time> copy, its mkdir ended the
+    # restore under set -e: no CLI, no gateway, and no word of what to do.
+    home, bin_dir = tmp_path / "dc", tmp_path / "bin"
+    snap = home / "previous.new"
+    for path in (snap / "bin", snap / "venv" / "bin", snap / "data", home / ".venv" / "bin", bin_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    (snap / "data" / "config.yaml").write_text("old\n", encoding="utf-8")
+    (home / "config.yaml").write_text("new\n", encoding="utf-8")
+    (snap / "venv" / "OLD").write_text("", encoding="utf-8")
+    (snap / "bin" / "defenseclaw-gateway").write_text("old gateway", encoding="utf-8")
+    (snap / "bin" / "defenseclaw").symlink_to(home / ".venv" / "bin" / "defenseclaw")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    script = tmp_path / "restore.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + "".join(line + "\n" for line in text.splitlines() if line.startswith(("readonly MANAGED_", "readonly NOT_DATA")))
+        + 'info() { echo "info: $*"; }\nwarn() { echo "warn: $*"; }\nerr() { echo "err: $*"; }\nrestart_old() { :; }\n'
+        # The disk is full: a new folder cannot be made.
+        + 'mkdir() { case "$*" in *.failed-*) echo "mkdir: No space left on device" >&2; return 1 ;; esac; command mkdir "$@"; }\n'
+        + _install_sh_functions("is_machinery", "data_entries", "restore_external_config", "restore_snapshot")
+        + f'DEFENSECLAW_HOME="{home}" BIN_DIR="{bin_dir}" SNAP="{snap}" VENV="{home}/.venv" INSTALLER_DIR="{home}/installer"\n'
+        + 'APP_PATH="" VERSION=1.0.1 PREV_VERSION=1.0.0\nrestore_snapshot\necho "done"\n',
+        encoding="utf-8",
+    )
+
+    out = _run([str(script)], tmp_path).stdout
+
+    assert out.rstrip().endswith("done"), out
+    assert "warn: There was no room to keep the failed 1.0.1 install for troubleshooting, so it was deleted" in out
+    assert (home / ".venv" / "OLD").exists() and (home / "config.yaml").read_text(encoding="utf-8") == "old\n"
+    assert (bin_dir / "defenseclaw-gateway").read_text(encoding="utf-8") == "old gateway"
+    assert (bin_dir / "defenseclaw").is_symlink() and not snap.exists()
+    assert not list(home.glob(".failed-*"))
 
 
 def test_a_restore_that_leaves_the_old_gateway_down_says_so(tmp_path: Path) -> None:
@@ -1221,3 +1663,62 @@ def test_installed_version_is_the_gateway_on_path_not_a_stale_release_venv(tmp_p
     ps1 = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
     body = ps1[ps1.index("function Get-InstalledVersion {") :]
     assert body.index('"defenseclaw-gateway.exe"') < body.index("dist-info")
+
+
+@pytest.mark.parametrize(
+    "repo,base",
+    [
+        ("", "https://github.com/cisco-ai-defense/defenseclaw"),
+        ("https://mirror.example/defenseclaw/", "https://mirror.example/defenseclaw"),
+    ],
+)
+def test_handoff_uses_requested_release_when_latest_is_newer(tmp_path: Path, repo: str, base: str) -> None:
+    releases = tmp_path / "releases"
+    for version in ("1.0.0", "1.0.1"):
+        target = releases / version
+        target.mkdir(parents=True)
+        installer = f'#!/bin/bash\nreadonly DC_VERSION="{version}"\n'
+        (target / "install.sh").write_text(installer, encoding="utf-8")
+        digest = hashlib.sha256(installer.encode()).hexdigest()
+        (target / "checksums.txt").write_text(f"{digest}  install.sh\n", encoding="utf-8")
+        (target / "checksums.txt.bundle").write_text("{}", encoding="utf-8")
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    curl = tools / "curl"
+    curl.write_text(
+        '#!/bin/sh\n'
+        'previous=""\n'
+        'for arg in "$@"; do\n'
+        '  [ "$previous" = "-o" ] && output="$arg"\n'
+        '  case "$arg" in https://*) url="$arg";; esac\n'
+        '  previous="$arg"\n'
+        'done\n'
+        'echo "$url" >> "$CURL_LOG"\n'
+        'case "$url" in\n'
+        '  */releases/latest) printf "HTTP/2 302\\r\\nlocation: https://github.com/cisco-ai-defense/defenseclaw/releases/tag/1.0.1\\r\\n";;\n'
+        '  */releases/download/*) cp "$FAKE_RELEASES/${url#*/releases/download/}" "$output";;\n'
+        '  *) exit 1;;\n'
+        'esac\n',
+        encoding="utf-8",
+    )
+    curl.chmod(0o755)
+    cosign = tools / "cosign"
+    cosign.write_text('#!/bin/sh\n[ "$1" = version ] && echo "GitVersion: v2.6.3"\nexit 0\n', encoding="utf-8")
+    cosign.chmod(0o755)
+    curl_log = tmp_path / "curl.log"
+
+    result = _run(
+        [str(HANDOFF_SH), "--plan", "--version", "1.0.0"],
+        tmp_path,
+        PATH=f"{tools}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        FAKE_RELEASES=str(releases),
+        CURL_LOG=str(curl_log),
+        DEFENSECLAW_REPO=repo,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "would upgrade to DefenseClaw 1.0.0" in result.stdout
+    urls = curl_log.read_text(encoding="utf-8").splitlines()
+    assert all("/releases/latest" not in url for url in urls)
+    assert f"{base}/releases/download/1.0.0/install.sh" in urls

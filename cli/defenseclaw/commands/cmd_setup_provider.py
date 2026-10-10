@@ -14,9 +14,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""defenseclaw setup provider — operator overlay for the LLM provider
-registry consumed by the Go sidecar's passthrough + shape-detection
-rails.
+"""defenseclaw setup provider — the custom LLM providers (``llm_providers``
+in config.yaml) added to the registry the Go sidecar's passthrough +
+shape-detection rails consume.
 
 Background
 ----------
@@ -36,18 +36,20 @@ not (yet) in the embedded list, the request would land in the
 the egress telemetry rail). Until a release ships with the new domain
 baked in, operators need an **in-place** way to extend the registry.
 
-``~/.defenseclaw/custom-providers.json`` is that surface. It is read by
-the Go side (:func:`internal/configs.LoadProviders`) on every call and
-merged additively over the embedded baseline — same Provider name is
+``llm_providers`` in config.yaml is that surface. The gateway merges it
+additively over the embedded baseline — same Provider name is
 case-insensitively unioned on Domains + EnvKeys; OllamaPorts are
-unioned; a malformed overlay is logged to stderr but *never* takes the
-guardrail offline.
+unioned. ``~/.defenseclaw/custom-providers.json`` is derived from it and
+rewritten on every change; the gateway ignores edits to that file, and
+``defenseclaw doctor`` fails the "Custom-provider overlay" row on one.
 
 The ``defenseclaw setup provider add`` / ``remove`` / ``list`` / ``show``
-commands below drive that file safely. They:
+commands below change ``llm_providers`` through the config writer, then
+regenerate the derived file. They:
 
-* read & write atomically via a temp file + rename, with a
-  ``~/.defenseclaw/custom-providers.json.bak`` backup on write;
+* write config.yaml atomically through the config writer (refused on a
+  managed device) and regenerate the derived file with a
+  ``~/.defenseclaw/custom-providers.json.bak`` backup;
 * refuse malformed inputs *before* touching disk;
 * strip leading ``https://`` / ``http://`` and any path from entered
   domains (common operator mistake — they paste a URL);
@@ -65,6 +67,7 @@ who need to disable one should use ``guardrail.disabled_providers``
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json as _json
 import os
 import re
@@ -79,7 +82,7 @@ import click
 import requests
 
 from defenseclaw import connector_paths, platform_support, ux
-from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.context import AppContext, mark_setup_restart_handled, pass_ctx
 from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
 OVERLAY_FILENAME = "custom-providers.json"
@@ -343,6 +346,109 @@ def _write_overlay(path: str, overlay: _Overlay) -> None:
                 os.unlink(tmp_path)
 
 
+def _config_backed(app: AppContext | None) -> bool:
+    """True when providers are config-owned on this installation."""
+    from defenseclaw.config import Config
+    from defenseclaw.enforce.asset_lists import is_secure_client
+
+    return (
+        app is not None
+        and isinstance(getattr(app, "cfg", None), Config)
+        and not is_secure_client(app.cfg)
+    )
+
+
+def _refresh_provider_config(app: AppContext) -> None:
+    """Read the latest config after acquiring the provider edit lock."""
+    if not _config_backed(app):
+        return
+    from defenseclaw.config import config_path_for_data_dir, load
+
+    if os.path.exists(config_path_for_data_dir(app.cfg.data_dir)):
+        app.cfg = load(data_dir=app.cfg.data_dir)
+
+
+def _load_providers(app: AppContext | None, path: str, *, seed_legacy: bool = True) -> _Overlay:
+    """Read config-owned providers; edit commands may seed a legacy overlay once."""
+    if not _config_backed(app):
+        return _read_overlay(path)
+    from defenseclaw import derived_providers
+
+    llm_providers = app.cfg.llm_providers
+    if llm_providers.custom or llm_providers.ollama_ports:
+        rendered = derived_providers.render(app.cfg)
+        providers = []
+        for entry, provider in zip(rendered["providers"], llm_providers.custom, strict=True):
+            entry = dict(entry)
+            entry.pop("tls", None)
+            if provider.tls is not None:
+                entry["tls"] = _compact_tls(dataclasses.asdict(provider.tls))
+            providers.append(entry)
+        return _Overlay(providers=providers, ollama_ports=list(llm_providers.ollama_ports))
+    if not seed_legacy:
+        return _Overlay.empty()
+    state, _ = derived_providers.overlay_state(app.cfg, path)
+    if state != derived_providers.STATE_LEGACY:
+        return _Overlay.empty()
+    legacy = _read_overlay(path)
+    for entry in legacy.providers:
+        tls = entry.get("tls")
+        if isinstance(tls, dict) and tls.get("ca_cert_pem"):
+            tls = dict(tls)
+            tls["ca_cert_file"] = _store_legacy_ca(app, str(entry.get("name") or "provider"), tls.pop("ca_cert_pem"))
+            entry["tls"] = tls
+    return legacy
+
+
+def _compact_tls(tls: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in tls.items() if v not in ("", None)}
+
+
+def _store_legacy_ca(app: AppContext, name: str, pem: str) -> str:
+    """Write an inline CA bundle from a legacy overlay to a file config can
+    reference (``llm_providers.custom[].tls.ca_cert_file``)."""
+    directory = os.path.join(app.cfg.data_dir, "provider-ca")
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", name) or "provider"
+    target = os.path.join(directory, f"{safe}.pem")
+    with open(target, "w", encoding="utf-8") as f:
+        f.write(pem)
+    with contextlib.suppress(OSError):
+        os.chmod(target, 0o600)
+    return target
+
+
+def _save_providers(app: AppContext | None, path: str, overlay: _Overlay) -> str:
+    """Persist the provider set: config.yaml ``llm_providers`` through the
+    config writer (refused on a managed device), then the derived overlay.
+    Returns what was written, for the confirmation line."""
+    if not _config_backed(app):
+        _write_overlay(path, overlay)
+        return path
+    from defenseclaw import derived_providers
+    from defenseclaw.config import _merge_llm_providers
+
+    providers = []
+    for entry in overlay.providers:
+        entry = {k: v for k, v in entry.items() if v is not None}
+        tls = entry.get("tls")
+        if isinstance(tls, dict):
+            entry["tls"] = {k: v for k, v in tls.items() if k != "ca_cert_pem"}
+        providers.append(entry)
+    app.cfg.llm_providers = _merge_llm_providers({"custom": providers, "ollama_ports": overlay.ollama_ports})
+    app.cfg.save()
+    derived_providers.write(app.cfg, path)
+    kept = derived_providers.legacy_request_override_providers(path)
+    if kept:
+        ux.subhead(
+            f"{path} sets request_overrides for {', '.join(kept)} and stays a live input that the gateway "
+            "merges with llm_providers; edit or remove it by hand once those overrides are no longer needed.",
+            indent="  ",
+        )
+        return "config.yaml llm_providers"
+    return f"config.yaml llm_providers (derived {path})"
+
+
 # ---------------------------------------------------------------------------
 # Input validation
 # ---------------------------------------------------------------------------
@@ -487,6 +593,9 @@ def _report_reload_outcome(app: AppContext | None, persisted_action: str) -> Non
     status = _reload_sidecar(app)
     if status == _RELOAD_OK:
         ux.ok("sidecar reloaded provider registry; disk and live state match.")
+        # The registry swap is hot; the setup group's restart would only
+        # interrupt in-flight calls (GAP-0030).
+        mark_setup_restart_handled()
         return
 
     if status == _RELOAD_UNAUTHORIZED:
@@ -528,13 +637,14 @@ def _provider_registry(app: AppContext) -> tuple[dict[str, Any], str | None]:
         except (requests.ConnectionError, requests.Timeout, OSError):
             live_error = "management API unavailable"
 
-    overlay = _read_overlay(_overlay_path(app))
+    overlay = _load_providers(app, _overlay_path(app), seed_legacy=False)
     fallback = {
         "providers": overlay.providers,
         "ollama_ports": overlay.ollama_ports,
-        "source": "disk-fallback",
+        "source": "config-fallback" if _config_backed(app) else "disk-fallback",
         "live": False,
-        "warning": "disk fallback may not match the running sidecar registry",
+        "warning": "config fallback may not match the running sidecar registry"
+        if _config_backed(app) else "disk fallback may not match the running sidecar registry",
     }
     if live_error:
         fallback["live_error"] = live_error
@@ -549,7 +659,7 @@ def _display_provider_registry(app: AppContext, as_json: bool) -> None:
         if data["live"]:
             ux.ok("source: live sidecar registry")
         else:
-            ux.warn("DISK FALLBACK — this may not match the running sidecar registry.")
+            ux.warn(f"{data['source'].replace('-', ' ').upper()} — this may not match the running sidecar registry.")
             if live_error:
                 click.echo(f"  live query: {live_error}")
         for item in data.get("providers", []):
@@ -568,12 +678,14 @@ def _display_provider_registry(app: AppContext, as_json: bool) -> None:
 
 @click.group("provider")
 def provider() -> None:
-    """Manage the custom provider overlay (~/.defenseclaw/custom-providers.json).
+    """Manage the custom LLM providers (llm_providers in config.yaml).
 
-    The overlay additively extends the domains / env-vars / Ollama
+    Custom providers additively extend the domains / env-vars / Ollama
     ports the guardrail treats as "known LLM endpoints". Use this when
     you deploy an internal or self-hosted LLM and do not want to wait
-    for its domain to land in a DefenseClaw release.
+    for its domain to land in a DefenseClaw release. The settings live
+    in config.yaml; ~/.defenseclaw/custom-providers.json is derived from
+    them, so edit with these commands, not that file.
     """
 
 
@@ -797,9 +909,8 @@ def _provider_add_interactive() -> dict[str, Any]:
     click.echo()
     ux.section("Add a custom LLM provider")
     ux.subhead(
-        "This walkthrough writes a new entry to "
-        "~/.defenseclaw/custom-providers.json. Every prompt accepts a "
-        "blank line to skip optional fields."
+        "This walkthrough adds a new entry to llm_providers in config.yaml. "
+        "Every prompt accepts a blank line to skip optional fields."
     )
     click.echo()
 
@@ -1160,7 +1271,7 @@ def _provider_add_interactive() -> dict[str, Any]:
     help=(
         "Canonical provider name (case-insensitive match against built-ins). "
         "When omitted and stdin is a tty, an interactive wizard prompts for "
-        "every field. Under --non-interactive this becomes a hard error."
+        "every field. Without a terminal, a missing --name is an error."
     ),
 )
 @click.option(
@@ -1385,9 +1496,9 @@ def provider_add(
     azure_deployment_aliases: tuple[str, ...],
     no_reload: bool,
 ) -> None:
-    """Add a provider entry to the operator overlay.
+    """Add a custom provider to llm_providers in config.yaml.
 
-    Additive: if ``NAME`` already exists in the overlay, its Domains
+    Additive: if ``NAME`` already exists there, its Domains
     and EnvKeys are unioned; duplicates are collapsed so repeated
     ``add`` calls are idempotent.
     """
@@ -1485,7 +1596,12 @@ def provider_add(
     if insecure_skip_verify and ca_cert_file:
         raise click.BadParameter("--insecure-skip-verify and --ca-cert-file are mutually exclusive.")
     if ca_cert_file:
-        tls_block["ca_cert_pem"] = _read_ca_cert_file(ca_cert_file)
+        pem = _read_ca_cert_file(ca_cert_file)
+        if _config_backed(app):
+            # config.yaml references the CA file; the derived overlay inlines it.
+            tls_block["ca_cert_file"] = os.path.abspath(ca_cert_file)
+        else:
+            tls_block["ca_cert_pem"] = pem
         # A CA pin replaces any prior skip-verify on this provider (F-0141).
         tls_block["insecure_skip_verify"] = False
     if insecure_skip_verify:
@@ -1545,7 +1661,8 @@ def provider_add(
     # lose entries. The lock is released on exit of the `with` block,
     # after `os.replace` has made the new overlay visible.
     with _OverlayLock(path):
-        overlay = _read_overlay(path)
+        _refresh_provider_config(app)
+        overlay = _load_providers(app, path)
 
         entry: dict[str, Any] | None = None
         for p in overlay.providers:
@@ -1610,10 +1727,10 @@ def provider_add(
         if clean_ports:
             overlay.ollama_ports = sorted({*overlay.ollama_ports, *clean_ports})
 
-        _write_overlay(path, overlay)
+        written = _save_providers(app, path, overlay)
 
     click.echo()
-    ux.ok(f"provider {clean_name!r} written to {path}")
+    ux.ok(f"provider {clean_name!r} written to {written}")
     if entry.get("domains"):
         click.echo(f"  {ux.dim('domains:')} {', '.join(entry['domains'])}")
     if entry.get("env_keys"):
@@ -1636,6 +1753,8 @@ def provider_add(
     if entry.get("tls"):
         tls_info = entry["tls"]
         bits: list[str] = []
+        if tls_info.get("ca_cert_file"):
+            bits.append(f"ca_cert_file={tls_info['ca_cert_file']}")
         if tls_info.get("ca_cert_pem"):
             bits.append("ca_cert_pem=<inline>")
         if tls_info.get("insecure_skip_verify"):
@@ -1698,15 +1817,16 @@ def provider_add(
 )
 @pass_ctx
 def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
-    """Remove an entry from the operator overlay.
+    """Remove a custom provider from llm_providers in config.yaml.
 
-    Only overlay entries are removable — the embedded baseline is
+    Only custom entries are removable — the embedded baseline is
     always in effect. If the name isn't present, exit 1 so scripts
     can tell removal from no-op.
     """
     path = _overlay_path(app)
     with _OverlayLock(path):
-        overlay = _read_overlay(path)
+        _refresh_provider_config(app)
+        overlay = _load_providers(app, path)
 
         before = len(overlay.providers)
         overlay.providers = [p for p in overlay.providers if str(p.get("name", "")).lower() != name.strip().lower()]
@@ -1714,8 +1834,8 @@ def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
             ux.warn(f"no overlay provider named {name!r}")
             sys.exit(1)
 
-        _write_overlay(path, overlay)
-    ux.ok(f"removed overlay provider {name!r} from {path}")
+        written = _save_providers(app, path, overlay)
+    ux.ok(f"removed overlay provider {name!r} from {written}")
 
     if no_reload:
         ux.subhead("disk-only operation (--no-reload): running sidecar registry was not changed.")

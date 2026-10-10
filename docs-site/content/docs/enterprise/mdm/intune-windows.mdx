@@ -46,6 +46,10 @@ in the trusted PowerShell 7, never inside the Intune host.
 - **Devices**: Windows x64 enrolled in Intune. The lifecycle refuses ARM64 and
   32-bit Windows. Intune cannot enroll Windows Server, so test on Windows 10 or
   11 clients.
+- **WDAC/AppLocker**: allow or sign the DefenseClaw Intune launcher, detection,
+  and Remediations scripts so they run in PowerShell `FullLanguage`. Under
+  `ConstrainedLanguage` they stop before calling Setup or checking health;
+  install reports failure, and detection reports not detected.
 - **Release**: download `DefenseClawSetup-Enterprise-Standalone-x64.exe`,
   verify `checksums.txt` with cosign, and read the Setup's SHA-256 pin, as in
   [What you deliver](/docs/enterprise/mdm#what-you-deliver).
@@ -191,12 +195,36 @@ from the installed payload. Create it in **Devices** > **Manage devices** >
   and repairs from the installed payload, or does nothing. A repair
   re-applies the deployment and stops every DefenseClaw service, so the
   gateway is down for one to two minutes and hooks fail closed meanwhile. It
-  exits with the lifecycle's code.
+  exits with the lifecycle's code. After an upgrade that a restart or a power
+  loss cut off, the installed (older) CLI rolls the change back: the line says
+  `repaired: ensure rolled back an interrupted lifecycle change`, names the
+  release that runs again, and asks you to run the newer Setup `/ensure` again
+  (the Win32 app retries it). Status, verify and the install record then report
+  the release that is installed.
 
 Both print one short line, because Intune keeps 2,048 characters of output.
 The full result is in `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`.
 Remediations cannot install, upgrade or change the config: the installed CLI
-has no payload to install from. The Win32 app does those.
+has no payload to install from. The Win32 app does those. Nor can they put
+back a missing scanner runtime (for example one an antivirus quarantined
+from `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`): `Remediate-Fix.ps1`
+then exits `1603`, reports `scanner_runtime_unavailable` and names Setup
+`/repair`. Deploy `DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1`
+from the Win32 app content (for example as a second Win32 app, or a
+platform script that runs it as SYSTEM) to install it again.
+
+A missing DefenseClaw binary is the same case. If an antivirus quarantines
+`C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`, Claude Code
+treats the hook that cannot start as a non-blocking error and runs the tool
+call: until the file is back, that is a fail-open window. The hook guardian
+checks for the file every 5 seconds and puts the recorded binary back from
+its own protected copy, and Setup `/ensure` and `/repair` restore it from
+their payload. The agent behaviour is upstream: a vendor that treated a hook
+that cannot start as a blocking error would close the window.
+`Remediate-Fix.ps1` names Setup `/repair` when the installed CLI
+cannot. Exclude `C:\Program Files\Cisco\DefenseClaw\bin` from quarantine in
+your EDR policy (allow-list the signed DefenseClaw binaries) so the window
+does not open.
 
 On a computer installed from the unsigned Setup, the Remediations script's
 `ensure` keeps the marker's `hash_pinned` trust mode, so `detect.ps1`,
@@ -363,7 +391,8 @@ To see the current state on a device, run from an elevated PowerShell:
 | Symptom | Likely cause |
 | --- | --- |
 | Install fails with `1639` | No config in the package, or its `enterprise.profile` is not `standalone`. |
-| Install fails with `1603` and a config error | The config does not parse or validate. Read `errors[].code` and `errors[].message` in the lifecycle log. |
+| Install fails with `1639` and `invalid_arguments` | The config does not parse, is not UTF-8, does not validate, or sits where a standard user can change it. `errors[].message` names the line or the folder and the fix. |
+| First install fails with `1603`: enumerating the user profiles did not finish within 900 seconds | On a cold device, antivirus scanning the new DefenseClaw binaries can make the first run slow; the lifecycle rolled back. Run the install again (sync the device, or let Intune retry it at a later check-in). |
 | Install fails with `1603` and `powershell7_required` | The PowerShell 7 dependency did not install, or is a preview build. |
 | Install fails with `1603` and `mdm_hash_mismatch` | The package content changed after `New-DefenseClawIntunePackage.ps1` pinned it. Rebuild it. |
 | Intune reports `1618` and retries | Another lifecycle run held the lock. Intune retries three times, five minutes apart. |

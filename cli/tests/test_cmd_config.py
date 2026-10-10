@@ -34,6 +34,19 @@ from defenseclaw.config import default_config
 from defenseclaw.config_inspect import ConfigInspectError
 
 
+def test_config_set_hilt_false_names_connector_override(monkeypatch) -> None:
+    guardrail = SimpleNamespace(
+        _connector_override=lambda _name: SimpleNamespace(hilt=SimpleNamespace(enabled=True))
+    )
+    cfg = SimpleNamespace(active_connectors=lambda: ["codex"], guardrail=guardrail)
+    monkeypatch.setattr(cmd_config.config_module, "load", lambda: cfg)
+    notes = cmd_config._shadowed_hilt_notes(  # noqa: SLF001 - config message regression.
+        [SimpleNamespace(path="guardrail.hilt.enabled", value=False)]
+    )
+    assert "HILT remains on for codex" in notes[0]
+    assert "guardrail hilt off" in notes[0]
+
+
 class _IsolatedHome:
     """Context manager that redirects ``DEFENSECLAW_HOME`` to a tmpdir.
 
@@ -293,7 +306,7 @@ class ValidateConfigTests(unittest.TestCase):
             with patch.object(
                 cmd_config,
                 "inspect_v8_config",
-                return_value=SimpleNamespace(valid=True),
+                return_value=SimpleNamespace(valid=True, warnings=()),
             ):
                 res = cmd_config.validate_config()
             # The canonical Go validator owns any advisory diagnostics. The
@@ -307,14 +320,14 @@ class ConfigShowTests(unittest.TestCase):
         cfg = default_config()
         cfg._loaded_authoritative_dicts = {
             "guardrail.connectors": {
-                "codex": {"mode": "observe", "rule_pack_dir": ""}
+                "codex": {"mode": "observe", "rule_pack": ""}
             }
         }
         cfg._loaded_owned_nested_values = {
             "guardrail.connectors": {"codex": {"hilt": {"enabled": True}}}
         }
 
-        rendered = cmd_config._config_to_masked_dict(cfg, reveal=False)
+        rendered = cmd_config._config_to_masked_dict(cfg)
         blob = json.dumps(rendered)
 
         self.assertNotIn("_loaded_authoritative_dicts", rendered)
@@ -331,6 +344,35 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
         "inspect the canonical v8 schema or generated reference and correct this field"
     )
 
+    def test_retired_registry_auto_sync_is_named_by_config_set(self):
+        from defenseclaw.context import AppContext
+
+        result = CliRunner().invoke(
+            cmd_config.config_cmd,
+            ["set", "registries.sources[0].auto_sync", "true"],
+            obj=AppContext(),
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("auto_sync was retired in config_version 9", result.output)
+
+    def test_config_set_control_character_is_plain(self):
+        from defenseclaw.context import AppContext
+
+        result = CliRunner().invoke(
+            cmd_config.config_cmd, ["set", "guardrail.block_message", "a\x01b"], obj=AppContext()
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("guardrail.block_message contains a control character", result.output)
+        self.assertNotIn("unacceptable character", result.output)
+
+    def test_reference_block_message_names_its_bound(self):
+        schema = '{"$defs":{"guardrail":{"properties":{"block_message":{"$ref":"#/$defs/boundedString"}}}}}'
+        with patch.object(cmd_config, "config_v8_schema", return_value=schema):
+            result = CliRunner().invoke(cmd_config.config_cmd, ["reference", "--format", "json-schema"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        field = json.loads(result.output)["$defs"]["guardrail"]["properties"]["block_message"]
+        self.assertIn("4096", field["description"])
+
     def test_typo_reads_unknown_field_with_suggestion(self):
         raw = b"config_version: 8\nguardrail:\n  mdoe: observe\n"
         self.assertEqual(
@@ -346,6 +388,138 @@ class UndeclaredKeyWordingTests(unittest.TestCase):
             cmd_config._plain_v8_issue(raw, "$.gateway2", reason),
             "line 2: gateway2: unknown field. All fields: defenseclaw config reference --format json-schema",
         )
+
+    def test_retired_key_names_its_replacement(self):
+        v8 = b"config_version: 8\nskill_actions:\n  medium: {install: block}\n"
+        self.assertEqual(
+            cmd_config._plain_v8_issue(v8, "$.skill_actions", self.REASON),
+            "line 2: skill_actions was replaced by admission.skill.actions in config_version 9; "
+            "run: defenseclaw migrate",
+        )
+        v9 = v8.replace(b"8", b"9", 1)
+        self.assertIn("move it to admission.skill.actions", cmd_config._plain_v8_issue(v9, "$.skill_actions", self.REASON))
+
+    def test_v9_otel_names_its_destination_without_a_suggestion(self):
+        raw = b"config_version: 9\notel:\n  endpoint: https://example.invalid\n"
+        message = cmd_config._plain_v8_issue(raw, "$.otel", self.REASON)
+        self.assertIn("observability.destinations", message)
+        self.assertIn("config_version 9", message)
+        self.assertNotIn("did you mean", message)
+
+    def test_maximum_length_names_value_and_bound(self):
+        raw = b"config_version: 9\nguardrail:\n  block_message: " + b"B" * 4097 + b"\n"
+        message = cmd_config._plain_v8_issue(
+            raw, "$.guardrail.block_message", "[maxLength] configuration violates the maxLength constraint"
+        )
+        self.assertIn("4097 characters", message)
+        self.assertIn("4096", message)
+
+    def test_empty_config_set_points_to_unset(self):
+        result = CliRunner().invoke(cmd_config.config_set, ["guardrail.block_at", ""], obj=SimpleNamespace())
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("defenseclaw config unset guardrail.block_at", result.output)
+
+    def test_hook_self_heal_get_reports_builtin_default(self):
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 9\n", encoding="utf-8")
+            result = CliRunner().invoke(
+                cmd_config.config_get,
+                ["guardrail.hook_self_heal"],
+                obj=SimpleNamespace(cfg=default_config()),
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("true", result.output)
+        self.assertIn("config.yaml does not set guardrail.hook_self_heal", result.output)
+
+    def test_effective_get_explains_invalid_source(self):
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 9\nguardrail:\n  block_at: BOGUS\n", encoding="utf-8")
+            with patch.object(cmd_config.config_module, "load", side_effect=ValueError("guardrail.block_at is invalid")):
+                result = CliRunner().invoke(
+                    cmd_config.config_get,
+                    ["guardrail.block_at", "--effective"],
+                    obj=SimpleNamespace(cfg=None),
+                )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("guardrail.block_at is invalid", result.output)
+        self.assertIn("last good configuration", result.output)
+        self.assertNotIn("Traceback", result.output)
+
+    def test_set_and_unset_invalid_yaml_report_the_line(self):
+        with _IsolatedHome() as env:
+            env.config_path.write_text("config_version: 9\nguardrail: [oops\n", encoding="utf-8")
+            for command, args in (
+                (cmd_config.config_set, ["guardrail.alert_at", "LOW"]),
+                (cmd_config.config_unset, ["guardrail.alert_at"]),
+            ):
+                result = CliRunner().invoke(command, args, obj=SimpleNamespace(cfg=None))
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("invalid YAML", result.output)
+                self.assertIn("line 2", result.output)
+                self.assertNotIn("Traceback", result.output)
+
+    def test_config_get_and_set_send_a_retired_key_to_migrate(self):
+        # A v8 file is migrated, not hand-edited: deleting the key loses its value.
+        from defenseclaw import config_writer
+        from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+
+        # update_check is a key the config_version 8 schema still rejects; skill_actions and its
+        # siblings are accepted there so the upgrade check can read a 1.0.0 file before it migrates.
+        raw = b"config_version: 8\nupdate_check: true\n"
+        with self.assertRaises(V8ConfigError) as caught:
+            load_validate_v8(raw, source_name="config.yaml")
+        self.assertIn("run: defenseclaw migrate", str(caught.exception))
+        self.assertEqual(
+            config_writer.plain_error(_chained(caught.exception)),
+            "update_check was replaced by update.check in config_version 9; run: defenseclaw migrate",
+        )
+
+    def test_changelog_does_not_tell_users_to_set_a_retired_key(self):
+        from defenseclaw.observability.v8_config import _V9_REMOVED_KEYS
+
+        changelog = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
+        release = changelog.split("\n## [1.0.0]", 1)[1].split("\n## [", 1)[0]
+        for parts, replacement in _V9_REMOVED_KEYS:
+            key = ".".join(parts)
+            self.assertFalse(f"`{key}: " in release, f"the 1.0.0 notes tell users to set {key}; use {replacement}")
+
+    def test_changelog_names_what_a_0_8_operator_loses(self):
+        from defenseclaw.observability.v8_config import _V9_REMOVED_KEYS
+
+        changelog = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text(encoding="utf-8")
+        release = changelog.split("\n## [1.0.0]", 1)[1].split("\n## [", 1)[0]
+        keys = [".".join(parts) for parts, _ in _V9_REMOVED_KEYS] + ["guardrail.rule_pack_dir"]
+        # Removals with no key table behind them: CLI options, environment variables and routes of 0.8.10,
+        # and the threshold change that has no removed name.
+        others = (
+            "--add-pattern",
+            "DEFENSECLAW_JUDGE_TRACE",
+            "DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE",
+            "/config/patch",
+            "/v1/guardrail/config",
+            "/policy/evaluate/skill-actions",
+            "/health/liveliness",
+            "data.json.migrated-v9",
+            "asset_policy",
+            "block_at",
+        )
+        self.assertEqual([name for name in keys + list(others) if name not in release], [])
+
+    def test_a_newer_config_version_is_not_sent_to_migrate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.yaml")
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("config_version: 10\n")
+            self.assertIn("newer DefenseClaw (config_version 10)", cmd_config._not_current_message(path))
+            with open(path, "w", encoding="utf-8") as stream:
+                stream.write("config_version: 7\n")
+            self.assertIn("run 'defenseclaw migrate'", cmd_config._not_current_message(path))
+
+
+def _chained(cause: BaseException) -> BaseException:
+    error = ValueError("refused")
+    error.__cause__ = cause
+    return error
 
 
 if __name__ == "__main__":

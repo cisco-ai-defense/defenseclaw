@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -304,6 +305,14 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			sessionActive: sessionActive,
 			user:          filepath.Base(filepath.Clean(profile.Home)),
 			report:        opts.ReportUnprotected,
+		}
+		if standalone && !sessionActive && windowsDisabledLocalAccount(profile.SID, lookupAccount) {
+			// A disabled account cannot start a new session, but an existing
+			// session can still run its agents. Suppress the stale warning
+			// only after the account has signed out (GAP-1034).
+			logfSafely(opts.Logger, profile.SID,
+				"the local account is disabled and has no active session; its installed agents are not reported as unprotected")
+			rowContext.report = nil
 		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
@@ -711,6 +720,51 @@ func windowsDeletedLocalAccount(sid string, lookup windowsEnrollmentAccountLooku
 	return errors.Is(err, windows.ERROR_NONE_MAPPED)
 }
 
+// windowsUserInfo1 is USER_INFO_1, the NetUserGetInfo level that carries
+// the account flags.
+type windowsUserInfo1 struct {
+	Name        *uint16
+	Password    *uint16
+	PasswordAge uint32
+	Priv        uint32
+	HomeDir     *uint16
+	Comment     *uint16
+	Flags       uint32
+	ScriptPath  *uint16
+}
+
+// windowsUFAccountDisable is UF_ACCOUNTDISABLE.
+const windowsUFAccountDisable = 0x0002
+
+// windowsLocalAccountDisabled reports whether the local account named
+// account is disabled (NetUserGetInfo); tests replace it.
+var windowsLocalAccountDisabled = func(account string) (bool, error) {
+	name, err := windows.UTF16PtrFromString(account)
+	if err != nil {
+		return false, err
+	}
+	var buf *byte
+	if err := windows.NetUserGetInfo(nil, name, 1, &buf); err != nil {
+		return false, err
+	}
+	defer windows.NetApiBufferFree(buf)
+	return (*windowsUserInfo1)(unsafe.Pointer(buf)).Flags&windowsUFAccountDisable != 0, nil
+}
+
+// windowsDisabledLocalAccount reports a local account that exists but is
+// disabled. Only local accounts are judged, and a failed lookup is no proof.
+func windowsDisabledLocalAccount(sid string, lookup windowsEnrollmentAccountLookup) bool {
+	if !WindowsLocalAccountSID(sid) {
+		return false
+	}
+	account, _, err := lookup(sid)
+	if err != nil || strings.TrimSpace(account) == "" {
+		return false
+	}
+	disabled, err := windowsLocalAccountDisabled(account)
+	return err == nil && disabled
+}
+
 // windowsProfileEnrollmentDecision applies enterprise.enrollment to one
 // profile. Exclusion wins over exemption. SID and profile-directory entries
 // are decided without a lookup; a name-form entry that did not already match
@@ -1103,7 +1157,24 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 // `guardrail.connectors.claudecode.enabled: false` emits ZERO
 // per-user rows for claudecode — the disabled map entry is
 // authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
+//
+// The per-user connectors count only in a standalone process (one that
+// carries the profile pin); use EffectiveWindowsStandaloneHookConnectors
+// where the caller already knows the config is a standalone one.
 func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
+	return effectiveWindowsHookConnectors(cfg, windowsEnterpriseStandaloneProcess())
+}
+
+// EffectiveWindowsStandaloneHookConnectors is EffectiveWindowsHookConnectors
+// for a config the caller loaded from the standalone layout. A CLI or Setup
+// lifecycle process does not carry the profile pin, so without this its
+// per-user-only config (opencode, copilot, hermes) counted no connector and
+// verify failed no_connectors_enabled (GAP-1230).
+func EffectiveWindowsStandaloneHookConnectors(cfg *config.Config) []string {
+	return effectiveWindowsHookConnectors(cfg, true)
+}
+
+func effectiveWindowsHookConnectors(cfg *config.Config, standalone bool) []string {
 	seen := make(map[string]struct{})
 	// disabledNames captures every name the operator explicitly
 	// disabled in cfg.Guardrail.Connectors. The scalar-connector
@@ -1119,7 +1190,7 @@ func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
 		if trimmed == "" {
 			return
 		}
-		if !windowsEnumeratorHookConnector(trimmed) {
+		if !windowsEnumeratorHookConnector(trimmed, standalone) {
 			return
 		}
 		if explicitlyDisabled {

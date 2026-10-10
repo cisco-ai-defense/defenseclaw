@@ -29,7 +29,6 @@ VERSION_PATHS = (
     "release/source-install-identity.json",
 )
 SOURCE_FIXTURE_PATHS = VERSION_PATHS + (
-    "internal/config/config.go",
     "internal/config/observability_v8_types.go",
     "cli/defenseclaw/install_publish.py",
     "scripts/source-install-publish.py",
@@ -126,7 +125,6 @@ def test_reviewed_source_identity_binds_every_canonical_version_source() -> None
         "runtime_config_version": 8,
     }
     assert set(source_release_identity.checked_in_version_sources(ROOT).values()) == {CHECKED_IN_RELEASE}
-    assert source_release_identity.compatibility_config_version(ROOT) == 7
     assert source_release_identity.observability_v8_config_version(ROOT) == 8
     assert source_release_identity.runtime_config_version(ROOT) == 8
 
@@ -226,37 +224,18 @@ def test_hard_cut_source_cannot_be_restamped_as_the_bridge(tmp_path: Path) -> No
     assert "release 0.8.4 must use source-install compatibility epoch 1" in (completed.stdout + completed.stderr)
 
 
-@pytest.mark.parametrize(
-    ("relative", "old", "new", "message"),
-    (
-        (
-            "internal/config/config.go",
-            "const CurrentConfigVersion = 7",
-            "const CurrentConfigVersion = 8",
-            "compatibility ceiling",
-        ),
-        (
-            "internal/config/observability_v8_types.go",
-            "ObservabilityV8ConfigVersion        = 8",
-            "ObservabilityV8ConfigVersion        = 9",
-            "runtime_config_version does not match gateway source",
-        ),
-    ),
-)
-def test_hard_cut_source_identity_rejects_either_config_literal_drifting(
-    tmp_path: Path,
-    relative: str,
-    old: str,
-    new: str,
-    message: str,
-) -> None:
+def test_hard_cut_source_identity_rejects_the_config_literal_drifting(tmp_path: Path) -> None:
     repo = _copy_source_fixture(tmp_path)
-    path = repo / relative
+    path = repo / "internal/config/observability_v8_types.go"
     source = path.read_text(encoding="utf-8")
+    old = "ObservabilityV8ConfigVersion        = 8"
     assert source.count(old) == 1
-    path.write_text(source.replace(old, new), encoding="utf-8")
+    path.write_text(source.replace(old, "ObservabilityV8ConfigVersion        = 9"), encoding="utf-8")
 
-    with pytest.raises(source_release_identity.SourceIdentityError, match=message):
+    with pytest.raises(
+        source_release_identity.SourceIdentityError,
+        match="runtime_config_version does not match gateway source",
+    ):
         source_release_identity.validate_source_tree(repo, expected_release=CHECKED_IN_RELEASE)
 
 

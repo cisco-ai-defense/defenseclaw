@@ -85,9 +85,10 @@ remove|disable|block|quarantine defenseclaw --connector amp` refuse it, because
 Amp runs unguarded without it. To stop guarding Amp, run `defenseclaw setup
 remove amp`.
 
-The shipped policy allow-list matches only
-`.config/amp/plugins/defenseclaw.ts`. It does not trust sibling files or the
-whole Amp plugins directory.
+The built-in `admission.plugin.first_party_allow_list` entry for `defenseclaw`
+matches the Amp bridge only at `.config/amp/plugins/defenseclaw.ts`. It does
+not trust sibling files or the whole Amp plugins directory. See
+[first-party assets](/docs/policies/admission#first-party-assets).
 
 <Callout type="warning" title="Amp plugin trust boundary">
 Amp executes project and user plugin TypeScript, including top-level code,

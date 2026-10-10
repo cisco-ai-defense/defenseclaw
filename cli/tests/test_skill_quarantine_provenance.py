@@ -107,7 +107,7 @@ class TestSkillQuarantineProvenance(unittest.TestCase):
         original = self.create_skill("codex")
         enforcer = SkillEnforcer(self.app.cfg.quarantine_dir)
         legacy_quarantine = enforcer.quarantine("dangerous", original)
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.quarantine_for_connector("skill", "dangerous", "codex", "legacy scan")
         pe.set_source_path("skill", "dangerous", original, "codex")
         self.assertEqual(self.records("codex"), [])
@@ -164,7 +164,7 @@ class TestSkillQuarantineProvenance(unittest.TestCase):
         )
         record = self.records("codex")[0]
         self.app.store.associate_quarantine_connector(record.id, "claudecode")
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.quarantine_for_connector("skill", "dangerous", "claudecode", "shared quarantine")
         pe.set_source_path("skill", "dangerous", original, "claudecode")
 
@@ -295,6 +295,40 @@ class TestSkillQuarantineProvenance(unittest.TestCase):
         self.assertIn("configured skill directory", result.output)
         self.assertTrue(os.path.isdir(record.quarantine_path))
         self.assertEqual(len(self.records("codex")), 1)
+
+    # GAP-1007: the watcher records a skill whose name ends with a dot or a
+    # space by its extended path; restore refused that path as outside the
+    # configured skill folders.
+    @unittest.skipUnless(os.name == "nt", "only Windows drops a final dot or space of a path")
+    def test_restore_keeps_exact_windows_trailing_name(self) -> None:
+        enforcer = SkillEnforcer(self.app.cfg.quarantine_dir)
+        sibling = self.create_skill("claudecode", "tdot")
+        created: list[str] = []
+        try:
+            for name in ("tdot.", "tsp "):
+                original = "\\\\?\\" + os.path.join(os.path.abspath(self.claude_root), name)
+                stored = "\\\\?\\" + os.path.join(enforcer.quarantine_dir, "claudecode", name)
+                created += [original, stored]
+                os.makedirs(stored)
+                with open(stored + "\\SKILL.md", "w", encoding="utf-8") as handle:
+                    handle.write("exact\n")
+                self.app.store.create_quarantine_record(
+                    "skill", name, original, stored, enforcer.content_hash(stored),
+                    "watcher enforcement", "claudecode", state="active",
+                )
+
+                restored = self.invoke(["restore", name, "--connector", "claudecode"])
+
+                self.assertEqual(restored.exit_code, 0, restored.output)
+                self.assertTrue(os.path.isfile(original + "\\SKILL.md"))
+                self.assertFalse(os.path.lexists(stored))
+            self.assertTrue(os.path.isfile(os.path.join(sibling, "SKILL.md")))
+        finally:
+            # Only the extended path reaches these folders; the ordinary
+            # clean-up of the temporary folder can not remove them.
+            for path in created:
+                if os.path.lexists(path):
+                    shutil.rmtree(path)
 
     @requires_symlink_privilege
     def test_restore_through_symlinked_parent_is_rejected(self) -> None:

@@ -366,9 +366,9 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
         try:
             inspected_source = snapshot_path.read_bytes()
         except OSError:
-            raise ValueError("canonical v8 status snapshot changed during inspection") from None
+            raise ValueError("the status snapshot changed during inspection") from None
         if inspected_source != source:
-            raise ValueError("canonical v8 status snapshot changed during inspection")
+            raise ValueError("the status snapshot changed during inspection")
     finally:
         try:
             if descriptor >= 0:
@@ -379,7 +379,7 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
             except FileNotFoundError:
                 pass
     if result.effective is None:  # defensive; the wire decoder already checks
-        raise ValueError("canonical v8 effective plan is missing")
+        raise ValueError("the effective plan is missing")
     return operator_status_from_effective(
         result.effective,
         source=str(path.absolute()),

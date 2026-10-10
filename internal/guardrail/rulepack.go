@@ -33,6 +33,7 @@ import (
 	"reflect"
 	"regexp"
 	"regexp/syntax"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -64,6 +65,12 @@ type RulePack struct {
 	// defaults" — explicitly different from an empty struct, which
 	// would override every field to empty.
 	LocalPatterns *LocalPatterns
+	// filesDigest is FilesDigest, set by LoadRulePack.
+	filesDigest string
+	// manifestDigest is the sha256 of the pack's defenseclaw-pack.json, ""
+	// without one. Its posture sets the pack's default levels, so it is
+	// part of the pin and of Summary (GAP-0431).
+	manifestDigest string
 }
 
 // RulePackError is the safe, machine-readable error returned by the strict
@@ -90,15 +97,25 @@ func (e *RulePackError) Error() string {
 // RulePack, but none of the source regexes, prompts, suppression values, tool
 // names, or filesystem paths are exposed.
 type RulePackSummary struct {
-	JudgeCount         int    `json:"judge_count"`
-	JudgeCategoryCount int    `json:"judge_category_count"`
-	RuleFileCount      int    `json:"rule_file_count"`
-	RuleCount          int    `json:"rule_count"`
-	EnabledRuleCount   int    `json:"enabled_rule_count"`
-	LocalPatternCount  int    `json:"local_pattern_count"`
-	SuppressionCount   int    `json:"suppression_count"`
-	SensitiveToolCount int    `json:"sensitive_tool_count"`
+	JudgeCount         int `json:"judge_count"`
+	JudgeCategoryCount int `json:"judge_category_count"`
+	RuleFileCount      int `json:"rule_file_count"`
+	RuleCount          int `json:"rule_count"`
+	EnabledRuleCount   int `json:"enabled_rule_count"`
+	LocalPatternCount  int `json:"local_pattern_count"`
+	SuppressionCount   int `json:"suppression_count"`
+	SensitiveToolCount int `json:"sensitive_tool_count"`
+	// StaleRuleCount counts enabled action rules (command, sensitive-path,
+	// cognitive-file, c2) that are 0.8.x copies of built-in rules without
+	// the expression 1.0 needs to block; AlertOnlyRuleCount the operator's
+	// own rules, of any category, without one: on a tool call they record a
+	// match and never block (GAP-1225).
+	StaleRuleCount     int    `json:"stale_rule_count"`
+	AlertOnlyRuleCount int    `json:"alert_only_rule_count"`
 	Digest             string `json:"digest"`
+	// FilesDigest is FilesDigest: the pin guardrail.custom_packs.<name>.digest
+	// holds (hex).
+	FilesDigest string `json:"files_digest"`
 }
 
 // LocalPatterns mirrors `rules/local-patterns.yaml`. Each field corresponds
@@ -274,6 +291,8 @@ type rulePackInventory struct {
 	files     map[string]diskRulePackFile
 	ruleFiles []string
 	totalSize int64
+	// manifest is the pack's defenseclaw-pack.json, nil without one.
+	manifest *diskRulePackFile
 }
 
 // LoadRulePack loads and validates a rule pack. An empty dir selects the
@@ -282,6 +301,16 @@ type rulePackInventory struct {
 // present unreadable, malformed, unsupported, or invalid component fails
 // closed. At least one recognized component must be present.
 func LoadRulePack(dir string) (*RulePack, error) {
+	return loadRulePack(dir, true)
+}
+
+// LoadRulePackForSecureClient preserves the pre-v9 Secure Client loader's
+// treatment of optional manifests until that profile adopts v9 (#1092).
+func LoadRulePackForSecureClient(dir string) (*RulePack, error) {
+	return loadRulePack(dir, false)
+}
+
+func loadRulePack(dir string, validateManifest bool) (*RulePack, error) {
 	rp, err := loadEmbeddedRulePack()
 	if err != nil {
 		return nil, err
@@ -302,6 +331,7 @@ func LoadRulePack(dir string) (*RulePack, error) {
 	}
 
 	var bytesRead int64
+	fileSums := make(map[string]string, len(inventory.files))
 	decode := func(rel string, out any) error {
 		file, ok := inventory.files[rel]
 		if !ok {
@@ -311,6 +341,8 @@ func LoadRulePack(dir string) (*RulePack, error) {
 		if err != nil {
 			return err
 		}
+		sum := sha256.Sum256(data)
+		fileSums[rel] = hex.EncodeToString(sum[:])
 		bytesRead += int64(len(data))
 		if bytesRead > maxRulePackAggregateBytes {
 			return rulePackErr(".", "aggregate_size_limit", "rule-pack YAML exceeds the aggregate byte limit")
@@ -369,7 +401,61 @@ func LoadRulePack(dir string) (*RulePack, error) {
 	if err := rp.Validate(); err != nil {
 		return nil, err
 	}
+	// The manifest's posture changes the levels the gateway enforces, so a
+	// manifest added or edited changes the pin and the effective policy
+	// digest like any rule file (GAP-0431).
+	if manifest := inventory.manifest; manifest != nil {
+		data, err := readRulePackFile(*manifest)
+		if err != nil {
+			return nil, err
+		}
+		if validateManifest {
+			var parsed struct {
+				Posture string `json:"posture"`
+			}
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must be valid JSON with a known posture")
+			}
+			switch strings.ToLower(strings.TrimSpace(parsed.Posture)) {
+			case "default", "strict", "permissive":
+			default:
+				return nil, rulePackErr(PackManifestFile, "invalid_manifest", "manifest must name default, strict or permissive posture")
+			}
+		}
+		sum := sha256.Sum256(data)
+		rp.manifestDigest = hex.EncodeToString(sum[:])
+		fileSums[PackManifestFile] = rp.manifestDigest
+	}
+	rp.filesDigest = filesDigest(fileSums)
 	return rp, nil
+}
+
+// filesDigest hashes the pack's own component files: each relative path
+// and the sha256 of its bytes, in path order.
+func filesDigest(sums map[string]string) string {
+	rels := make([]string, 0, len(sums))
+	for rel := range sums {
+		rels = append(rels, rel)
+	}
+	sort.Strings(rels)
+	h := sha256.New()
+	for _, rel := range rels {
+		fmt.Fprintf(h, "%s\n%s\n", rel, sums[rel])
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// FilesDigest is the hex digest of the files the pack was loaded from (each
+// relative path and the sha256 of its bytes). guardrail.custom_packs pins a
+// custom pack by it. Unlike Summary().Digest it leaves out the components
+// the pack inherits from the binary's embedded defaults, so a release that
+// changes those defaults does not break a pinned pack; the effective policy
+// digest covers them separately (builtin). The embedded pack has no files.
+func (rp *RulePack) FilesDigest() string {
+	if rp == nil || rp.filesDigest == "" {
+		return filesDigest(nil)
+	}
+	return rp.filesDigest
 }
 
 func loadEmbeddedRulePack() (*RulePack, error) {
@@ -481,6 +567,16 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return rulePackErr(safeInventoryPath(rel), "file_type", "component must be a regular file")
 		}
+		if isPackManifestName(rel) {
+			if !entry.Type().IsRegular() {
+				return rulePackErr(PackManifestFile, "file_type", "component must be a regular file")
+			}
+			if inventory.manifest != nil {
+				return rulePackErr(PackManifestFile, "inventory_unexpected", "rule pack has more than one manifest")
+			}
+			inventory.manifest = &diskRulePackFile{relPath: PackManifestFile, full: full}
+			return nil
+		}
 		extension := strings.ToLower(path.Ext(rel))
 		if extension != ".yaml" && extension != ".yml" {
 			return nil
@@ -520,6 +616,20 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		return nil, rulePackErr(".", "inventory_unreadable", "rule-pack inventory cannot be inspected")
 	}
 	return inventory, nil
+}
+
+// isPackManifestName reports whether rel names the pack manifest. Windows
+// and macOS volumes are normally case-insensitive, so ReadPackPosture opens a
+// differently cased manifest there and the pin must cover it (GAP-1313).
+func isPackManifestName(rel string) bool {
+	return packManifestNameMatches(rel, runtime.GOOS == "windows" || runtime.GOOS == "darwin")
+}
+
+func packManifestNameMatches(rel string, caseInsensitive bool) bool {
+	if caseInsensitive {
+		return strings.EqualFold(rel, PackManifestFile)
+	}
+	return rel == PackManifestFile
 }
 
 func isRecognizedRulePackYAML(rel string) bool {
@@ -847,13 +957,19 @@ func (c *JudgeCategory) EffectiveSeverity(direction, fallback string) string {
 // the first error is returned as a value-safe RulePackError and no invalid
 // pack is returned by LoadRulePack.
 func (rp *RulePack) Validate() error {
+	return rp.validate(false)
+}
+
+// validate permits an empty enabled category only in a composed in-memory pack.
+// On-disk packs still require an enabled rule in every category.
+func (rp *RulePack) validate(allowEmptyCategories bool) error {
 	if rp == nil {
 		return rulePackErr(".", "validation", "rule pack must not be nil")
 	}
 	if err := rp.validateJudges(); err != nil {
 		return err
 	}
-	if err := rp.validateRuleFiles(); err != nil {
+	if err := rp.validateRuleFiles(allowEmptyCategories); err != nil {
 		return err
 	}
 	if err := rp.validateLocalPatterns(); err != nil {
@@ -865,8 +981,8 @@ func (rp *RulePack) Validate() error {
 	return rp.validateSensitiveTools()
 }
 
-func (rp *RulePack) validateRuleFiles() error {
-	seenCategories := make(map[string]struct{}, len(rp.RuleFiles))
+func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
+	seenCategories := make(map[string]string, len(rp.RuleFiles))
 	seenIDs := make(map[string]struct{})
 	totalRules := 0
 	semanticRules := 0
@@ -884,10 +1000,12 @@ func (rp *RulePack) validateRuleFiles() error {
 		if category == "" {
 			return rulePackErr(rel, "validation", "category must not be blank")
 		}
-		if _, exists := seenCategories[category]; exists {
-			return rulePackErr(rel, "duplicate_category", "category duplicates another rule file")
+		if first, exists := seenCategories[category]; exists {
+			// Name the edit: 0.8.x took such a pack (GAP-1339).
+			return rulePackErr(rel, "duplicate_category", fmt.Sprintf("category repeats %s; categories must be "+
+				"unique: move the rules of %s into %s and delete %s", first, rel, first, rel))
 		}
-		seenCategories[category] = struct{}{}
+		seenCategories[category] = rel
 		if len(ruleFile.Rules) > maxRulesPerFile {
 			return rulePackErr(rel, "rule_count_limit", "rule file contains too many rules")
 		}
@@ -974,7 +1092,7 @@ func (rp *RulePack) validateRuleFiles() error {
 				enabled++
 			}
 		}
-		if enabled == 0 {
+		if enabled == 0 && !allowEmptyCategories {
 			return rulePackErr(rel, "empty_category", "category must contain at least one enabled rule")
 		}
 	}
@@ -1356,6 +1474,17 @@ func safeJudgeName(name string) string {
 	return "component"
 }
 
+// RulePackDigest is the FilesDigest of the valid pack in dir, the value
+// config.yaml pins a custom pack by (the v9 migration's
+// MigrateV9Input.RulePackDigest).
+func RulePackDigest(dir string) (string, error) {
+	pack, err := LoadRulePack(dir)
+	if err != nil {
+		return "", err
+	}
+	return pack.FilesDigest(), nil
+}
+
 // Summary returns deterministic counts and a SHA-256 fingerprint of the
 // complete loaded RulePack configuration. Rule counts cover loaded YAML
 // overrides, not compiled gateway fallback rules. Source paths are excluded.
@@ -1364,6 +1493,7 @@ func (rp *RulePack) Summary() RulePackSummary {
 		var summary RulePackSummary
 		sum := sha256.Sum256([]byte("null"))
 		summary.Digest = hex.EncodeToString(sum[:])
+		summary.FilesDigest = filesDigest(nil)
 		return summary
 	}
 	summary := rp.counts()
@@ -1383,12 +1513,14 @@ func (rp *RulePack) Summary() RulePackSummary {
 		SensitiveTools *SensitiveToolsConfig
 		RuleFiles      []RulesFileYAML
 		LocalPatterns  *LocalPatterns
+		Manifest       string `json:",omitempty"`
 	}{
 		Suppressions:   rp.Suppressions,
 		JudgeConfigs:   rp.JudgeConfigs,
 		SensitiveTools: rp.SensitiveTools,
 		RuleFiles:      ruleFiles,
 		LocalPatterns:  rp.LocalPatterns,
+		Manifest:       rp.manifestDigest,
 	}
 	encoded, err := json.Marshal(canonical)
 	if err != nil {
@@ -1396,6 +1528,7 @@ func (rp *RulePack) Summary() RulePackSummary {
 	}
 	sum := sha256.Sum256(encoded)
 	summary.Digest = hex.EncodeToString(sum[:])
+	summary.FilesDigest = rp.FilesDigest()
 	return summary
 }
 
@@ -1440,6 +1573,7 @@ func (rp *RulePack) counts() RulePackSummary {
 	if tools := rp.SensitiveTools; tools != nil {
 		summary.SensitiveToolCount = len(tools.Tools)
 	}
+	summary.StaleRuleCount, summary.AlertOnlyRuleCount = rp.ruleGaps()
 	return summary
 }
 

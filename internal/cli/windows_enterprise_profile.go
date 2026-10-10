@@ -126,14 +126,18 @@ func resolveWindowsEnterpriseLifecycleProfile(action string, opts *windowsEnterp
 	}
 	if path := strings.TrimSpace(opts.configPath); path != "" {
 		configured, err := readWindowsEnterpriseConfigProfile(path)
-		var syntax *windowsEnterpriseConfigSyntaxError
-		if err != nil && requested == managed.ProfileStandalone && errors.As(err, &syntax) {
-			// A config the gateway cannot load is refused like every other
-			// one, with the line and the reason (GAP-0607): 1639, which MDMs
-			// do not retry, not the 1603 a failed install returns.
-			return windowsEnterpriseInvalidArguments("%s; nothing was changed", err)
-		}
 		if err != nil {
+			var content windowsEnterpriseConfigContentError
+			if requested == managed.ProfileStandalone && errors.As(err, &content) {
+				// A file that does not parse (a tab-indented line, GAP-0607),
+				// is not UTF-8 or is too large is the administrator's to fix: refuse it as invalid
+				// arguments (1639) with the gateway compiler's explanation,
+				// as every other config refusal (GAP-0562, GAP-0571).
+				if compiled := windowsEnterpriseStandaloneConfigPreflight(path); compiled != nil {
+					err = compiled
+				}
+				return fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
+			}
 			return err
 		}
 		if configured != "" {
@@ -401,7 +405,14 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 		} `yaml:"enterprise"`
 	}
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
-		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("parse enterprise.trust in %s: %w", path, err)
+		if !supplied {
+			// A run that keeps the installed config cannot heal it; one given
+			// the config to install keeps this file aside (GAP-0948).
+			return windowsEnterpriseConfiguredTrust{}, fmt.Errorf(
+				"the installed config.yaml (%s) does not parse %s, so a run that keeps it cannot heal it: run %s /ensure CONFIG=<config.yaml> JSON=1 (or /repair CONFIG=) first, with the config to install, which keeps this file as rejected-config.yaml",
+				path, windowsEnterpriseYAMLProblem(err), windowsEnterpriseStandaloneSetupName)
+		}
+		return windowsEnterpriseConfiguredTrust{}, fmt.Errorf("the config %s does not parse %s; fix it and run again", path, windowsEnterpriseYAMLProblem(err))
 	}
 	configured := windowsEnterpriseConfiguredTrust{path: path}
 	switch mode := strings.ToLower(strings.TrimSpace(document.Enterprise.Trust.Mode)); mode {
@@ -424,6 +435,54 @@ func readWindowsEnterpriseConfiguredTrust(action string, opts *windowsEnterprise
 	return configured, nil
 }
 
+var (
+	windowsEnterpriseYAMLTypeEntry = regexp.MustCompile(`^line ([0-9]+): cannot unmarshal (!![a-z]+)`)
+	windowsEnterpriseYAMLLineEntry = regexp.MustCompile(`^(?:yaml: )?line ([0-9]+): (.+)$`)
+)
+
+// windowsEnterpriseYAMLProblem says in plain words where a config does not
+// parse: "at line N (...)". A type mismatch names the Go struct the reader
+// decodes into ("cannot unmarshal !!str ... into struct { Enterprise struct
+// ..."), which tells an administrator nothing (GAP-1119), so it says what the
+// line holds and what was expected instead; a syntax error keeps the
+// parser reason.
+func windowsEnterpriseYAMLProblem(err error) string {
+	message := strings.TrimSpace(err.Error())
+	var typeErr *yaml.TypeError
+	if errors.As(err, &typeErr) && len(typeErr.Errors) != 0 {
+		message = strings.TrimSpace(typeErr.Errors[0])
+		if match := windowsEnterpriseYAMLTypeEntry.FindStringSubmatch(message); match != nil {
+			want := "another kind of value"
+			if index := strings.LastIndex(message, " into "); index >= 0 {
+				want = windowsEnterpriseYAMLKind(strings.TrimSpace(message[index+len(" into "):]))
+			}
+			return fmt.Sprintf("at line %s (it holds %s where %s is expected)", match[1], windowsEnterpriseYAMLKind(match[2]), want)
+		}
+	}
+	if match := windowsEnterpriseYAMLLineEntry.FindStringSubmatch(message); match != nil {
+		return fmt.Sprintf("at line %s (%s)", match[1], match[2])
+	}
+	return "(" + strings.TrimPrefix(message, "yaml: ") + ")"
+}
+
+// windowsEnterpriseYAMLKind names a YAML tag or a Go destination type the
+// way the configuration guide does.
+func windowsEnterpriseYAMLKind(kind string) string {
+	switch {
+	case kind == "!!str" || kind == "string":
+		return "text"
+	case kind == "!!seq" || strings.HasPrefix(kind, "[]"):
+		return "a list"
+	case kind == "!!map" || strings.HasPrefix(kind, "struct") || strings.HasPrefix(kind, "map["):
+		return "a mapping of keys"
+	case kind == "!!bool" || kind == "bool":
+		return "true or false"
+	case kind == "!!int" || kind == "!!float" || strings.HasPrefix(kind, "int") || strings.HasPrefix(kind, "uint") || strings.HasPrefix(kind, "float"):
+		return "a number"
+	}
+	return "another kind of value"
+}
+
 func sameWindowsEnterpriseSignerSet(left, right []string) bool {
 	set := func(values []string) map[string]bool {
 		out := make(map[string]bool, len(values))
@@ -444,12 +503,12 @@ func sameWindowsEnterpriseSignerSet(left, right []string) bool {
 	return true
 }
 
-// windowsEnterpriseConfigSyntaxError is a managed config that is not valid
-// YAML. Its text is the parse error, unchanged.
-type windowsEnterpriseConfigSyntaxError struct{ err error }
+// windowsEnterpriseConfigContentError is an administrator config whose
+// content cannot be read for its profile (too large, or not YAML). Its text
+// is unchanged.
+type windowsEnterpriseConfigContentError struct{ error }
 
-func (e *windowsEnterpriseConfigSyntaxError) Error() string { return e.err.Error() }
-func (e *windowsEnterpriseConfigSyntaxError) Unwrap() error { return e.err }
+func (err windowsEnterpriseConfigContentError) Unwrap() error { return err.error }
 
 // readWindowsEnterpriseConfigProfile reads enterprise.profile from an
 // administrator-supplied config. The lifecycle validates the whole file
@@ -465,7 +524,7 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		return "", fmt.Errorf("read managed config %s: %w", path, err)
 	}
 	if len(body) > windowsEnterpriseConfigProfileLimit {
-		return "", fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)
+		return "", windowsEnterpriseConfigContentError{fmt.Errorf("managed config %s exceeds %d bytes", path, windowsEnterpriseConfigProfileLimit)}
 	}
 	var document struct {
 		Enterprise struct {
@@ -473,7 +532,7 @@ func readWindowsEnterpriseConfigProfile(path string) (string, error) {
 		} `yaml:"enterprise"`
 	}
 	if err := yaml.Unmarshal(trimWindowsJSONBOM(body), &document); err != nil {
-		return "", &windowsEnterpriseConfigSyntaxError{err: fmt.Errorf("parse managed config %s: %w", path, err)}
+		return "", windowsEnterpriseConfigContentError{fmt.Errorf("parse managed config %s: %w", path, err)}
 	}
 	profile := managed.NormalizeEnterpriseProfile(document.Enterprise.Profile)
 	if profile != "" && profile != managed.ProfileSecureClient && profile != managed.ProfileStandalone {
@@ -561,27 +620,28 @@ func parseWindowsEnterprisePayloadManifest(body []byte) (map[string]string, erro
 }
 
 // verifyWindowsEnterpriseHashPinnedInstaller admits an unsigned installer
-// and module only when both digests are pinned. PowerShell 7 cannot verify
-// the script it is about to run, so the CLI does it before launching.
-func verifyWindowsEnterpriseHashPinnedInstaller(script, manifestPath string) error {
+// and module only when both digests are pinned, and returns the pins.
+// PowerShell 7 cannot verify the script it is about to run, so the CLI does
+// it before launching.
+func verifyWindowsEnterpriseHashPinnedInstaller(script, manifestPath string) (map[string]string, error) {
 	pins, err := loadWindowsEnterprisePayloadManifest(manifestPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, path := range []string{script, filepath.Join(filepath.Dir(script), "DefenseClawEnterprise.psm1")} {
 		want, ok := pins[strings.ToLower(filepath.Base(path))]
 		if !ok {
-			return fmt.Errorf("payload manifest does not pin %s", filepath.Base(path))
+			return nil, fmt.Errorf("payload manifest does not pin %s", filepath.Base(path))
 		}
 		got, err := windowsEnterpriseFileSHA256(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if got != want {
-			return fmt.Errorf("%s SHA-256 %s does not match the payload manifest", filepath.Base(path), got)
+			return nil, fmt.Errorf("%s SHA-256 %s does not match the payload manifest", filepath.Base(path), got)
 		}
 	}
-	return nil
+	return pins, nil
 }
 
 func windowsEnterpriseFileSHA256(path string) (string, error) {

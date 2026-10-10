@@ -206,7 +206,7 @@ assets on every platform before publishing them. See the
 | `.github/workflows/ci.yml` | Language, parity and lint checks on every PR, plus `install-smoke`: the install lifecycle lanes on Linux and Windows against assets built from the PR, and the enterprise install lanes (deb, rpm, macOS pkg and Windows services). Each push to a pull request cancels its running CI, so on a busy branch run `gh workflow run ci.yml --ref <branch>` (and `windows-native.yml`): a dispatch tests that commit to the end and later pushes do not cancel it |
 | `.github/workflows/telemetry-registry.yml` | Exhaustive telemetry-registry mutation, provenance, and failure-atomicity suites for telemetry-sensitive PRs, nightly, and manual dispatch |
 | `.github/workflows/e2e.yml` | Self-hosted end-to-end suites and scheduled validation |
-| `.github/workflows/release.yaml` | One manual build, sign, install-gate and publish pipeline for a reviewed `main` commit |
+| `.github/workflows/release.yaml` | One manual build, sign, install-gate, `enterprise-upgrade-gate` and publish pipeline for a reviewed `main` commit. The `enterprise-upgrade-gate` job upgrades the previous 1.x enterprise package on a deb, rpm, pkg and Windows host and checks that the administrator config kept its intent; see [The enterprise upgrade gate](RELEASE_RUNBOOK.md#the-enterprise-upgrade-gate) |
 
 Ordinary PR and main CI always run `make telemetry-check`, which compiles the
 real registry and rejects stale generated runtime or Go outputs. The two

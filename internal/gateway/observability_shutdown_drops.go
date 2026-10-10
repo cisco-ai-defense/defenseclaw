@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // observabilityShutdownDropsFile is the small content-free note a gateway
@@ -57,7 +57,7 @@ func writeObservabilityShutdownDropNote(dataDir string, losses []observabilityru
 	if err != nil {
 		return err
 	}
-	return config.WriteFileAtomic(filepath.Join(dataDir, observabilityShutdownDropsFile), append(data, '\n'), 0o600)
+	return safefile.Write(filepath.Join(dataDir, observabilityShutdownDropsFile), append(data, '\n'))
 }
 
 // takeObservabilityShutdownDropNote reads and removes the note. A note that

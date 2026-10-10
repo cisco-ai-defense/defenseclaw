@@ -54,8 +54,9 @@ type localLogFactory struct {
 	recordBuilder  *observability.RecordBuilder
 	healthReporter audit.EventHistoryHealthReporter
 	// lostWrites counts, across generations, the log records whose mandatory
-	// SQLite append failed and that no sqlite.write_failed record reported yet.
-	lostWrites *atomic.Uint64
+	// SQLite append failed and that no sqlite.write_failed record reported
+	// yet, in the loss journal that survives a restart (GAP-1129).
+	lostWrites *localWriteLossJournal
 }
 
 func (factory *localLogFactory) Name() string { return LocalLogComponentName }
@@ -153,7 +154,7 @@ type localLogComponent struct {
 	// writes are this generation's mandatory SQLite appends, reported as the
 	// local-sqlite destination's counters (GAP-1100).
 	writes     localWriteCounters
-	lostWrites *atomic.Uint64
+	lostWrites *localWriteLossJournal
 }
 
 type localWriteCounters struct {
@@ -184,9 +185,7 @@ func (component *localLogComponent) countWrite(outcome pipeline.LocalLogOutcome,
 	case localWriteFailed(err):
 		component.writes.accepted.Add(1)
 		component.writes.dropped.Add(1)
-		if component.lostWrites != nil {
-			component.lostWrites.Add(1)
-		}
+		component.lostWrites.add(localWriteFailureReason(err))
 	case err == nil && outcome.LocalPersisted():
 		component.writes.accepted.Add(1)
 		component.writes.delivered.Add(1)

@@ -24,6 +24,7 @@ import click
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup_observability import (
+    _add_v8_destination,
     _build_v8_preset_destination,
     _print_v8_destination_list,
     _remove_v8_destination,
@@ -124,6 +125,18 @@ def _stub_canonical_v8_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_add_reserved_destination_name_is_plain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_canonical_v8_gateway(monkeypatch)
+    result = CliRunner().invoke(
+        observability,
+        ["add", "otlp", "--non-interactive", "--name", "local-sqlite", "--endpoint", "https://otel.example.test"],
+        obj=_setup_app(tmp_path),
+    )
+    assert result.exit_code != 0
+    assert "local-sqlite is a reserved destination name; pick another name" in result.output
+    assert "$." not in result.output
+
+
 def test_setup_v8_accepts_observability_token_from_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -187,6 +200,92 @@ def test_setup_v8_loopback_otlp_needs_and_accepts_allow_private_networks(
     assert source["observability"]["destinations"][0]["tls"] == {"insecure": True}
 
 
+def test_setup_v8_splunk_hec_verifies_tls_and_refuses_private_networks_unless_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0208: splunk-hec wrote insecure_skip_verify and allow_private_networks without either flag.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    args = ["add", "splunk-hec", "--non-interactive", "--name", "hec", "--token", "dummy-hec"]
+    args += ["--endpoint", "https://hec.example.com:8088/services/collector"]
+
+    for extra, tls, network in (
+        ([], None, None),
+        (["--no-verify-tls", "--allow-private-networks"], {"insecure_skip_verify": True}, {"allow_private_networks": True}),
+    ):
+        result = CliRunner().invoke(observability, [*args, *extra], obj=_setup_app(tmp_path), catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
+        destination = source["observability"]["destinations"][0]
+        assert (destination.get("tls"), destination.get("network_safety")) == (tls, network)
+
+
+def test_setup_v8_failed_add_takes_the_new_key_back_out_of_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0210: a failed add left the token it was given in .env although config.yaml was unchanged.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setattr(
+        "defenseclaw.observability.v8_writer.inspect_v8_config",
+        lambda *_args, **_kwargs: SimpleNamespace(valid=False),
+    )
+    monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN")
+    app = _setup_app(tmp_path)
+    # Seed .env the way DefenseClaw writes it (private DACL on Windows). A hand-made file keeps
+    # inherited ACEs that the config-lock directory protection later invalidates, and the
+    # key-restore publish then fails on Windows.
+    v8_activation_module.update_private_file(
+        tmp_path / ".env", owner_directory=tmp_path, transform=lambda _payload: b"OTHER_KEY=kept\n"
+    )
+    before = (tmp_path / "config.yaml").read_bytes()
+
+    result = CliRunner().invoke(
+        observability,
+        ["add", "splunk-hec", "--non-interactive", "--name", "hec", "--token", "dummy-hec",
+         "--endpoint", "https://hec.example.com:8088/services/collector"],
+        obj=app,
+    )
+
+    assert result.exit_code != 0
+    assert (tmp_path / "config.yaml").read_bytes() == before
+    assert dotenv_values(tmp_path / ".env") == {"OTHER_KEY": "kept"}
+    assert "DEFENSECLAW_SPLUNK_HEC_TOKEN" not in os.environ
+
+
+def test_setup_v8_failed_add_keeps_its_error_when_the_key_cannot_be_taken_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # GAP-0374: a hand-made .env refused the restore on Windows, and the
+    # rollback error hid why the add failed while the token stayed set.
+    _stub_canonical_v8_gateway(monkeypatch)
+    monkeypatch.setattr(
+        "defenseclaw.observability.v8_writer.inspect_v8_config",
+        lambda *_args, **_kwargs: SimpleNamespace(valid=False),
+    )
+
+    def refuse(*_args, **_kwargs):
+        raise v8_activation_module.V8ActivationRollbackError("rollback_incomplete", "windows_publish_verification")
+
+    monkeypatch.setattr("defenseclaw.commands.cmd_setup_observability.restore_secret", refuse)
+    monkeypatch.setenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    monkeypatch.delenv("DEFENSECLAW_SPLUNK_HEC_TOKEN")
+    result = CliRunner().invoke(
+        observability,
+        ["add", "splunk-hec", "--non-interactive", "--name", "hec", "--token", "dummy-hec",
+         "--endpoint", "https://hec.example.com:8088/services/collector"],
+        obj=_setup_app(tmp_path),
+    )
+
+    assert result.exit_code != 0
+    assert "rollback_incomplete" not in result.output
+    assert "is still in" in result.output
+    assert "DEFENSECLAW_SPLUNK_HEC_TOKEN" not in os.environ
+
+
 def test_setup_v8_interactive_loopback_otlp_asks_instead_of_failing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -230,7 +329,6 @@ def test_setup_v8_add_environment_tags_gateway_telemetry(
     assert result.exit_code == 0, result.output
     source = load_validate_v8((tmp_path / "config.yaml").read_bytes()).source
     assert source["observability"]["resource"]["attributes"] == {
-        "deployment.environment": "lab-win2",
         "deployment.environment.name": "lab-win2",
     }
     blank = CliRunner().invoke(observability, [*args[:-1], "  "], obj=app)
@@ -1058,6 +1156,37 @@ def test_v8_secret_dry_run_sanitizes_and_reports_selected_data_dir(tmp_path: Pat
     assert not (selected / ".env").exists()
 
 
+def test_a_destination_that_is_not_a_mapping_gets_one_short_line() -> None:
+    # GAP-0211: the message listed every destination kind's keys (759 bytes).
+    from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
+
+    with pytest.raises(V8ConfigError) as refused:
+        load_validate_v8(b"config_version: 9\nobservability:\n  destinations: [5]\n", source_name="config.yaml")
+    assert refused.value.corrective_action == "use a mapping with name and kind"
+
+
+def test_galileo_project_with_a_dollar_sign_is_refused_in_plain_words() -> None:
+    # GAP-0212: this guard is reachable (a --project such as "a${B}c"); only its wording was internal.
+    with pytest.raises(ValueError, match="may contain '[$]' only as one whole"):
+        _build_v8_preset_destination(
+            PRESETS["galileo"], {"endpoint": "", "project": "a${B}c", "logstream": "x"},
+            name="g", enabled=True, signals=None, target=None,
+        )
+
+
+def test_splunk_hec_http_endpoint_is_one_plain_sentence() -> None:
+    # GAP-0209: the config check named tls.insecure_skip_verify, a field the user never set.
+    # Certificates are verified by default (GAP-0208), so an http:// endpoint gets plain
+    # http with no tls block, whatever the TLS setting (the local Splunk bridge sets false).
+    def build(**inputs: str):
+        return _build_v8_preset_destination(
+            PRESETS["splunk-hec"], {"endpoint": "http://hec.example.test:8088", **inputs},
+            name="hec", enabled=True, signals=None, target=None,
+        )
+
+    assert "tls" not in build() and "tls" not in build(verify_tls="true") and "tls" not in build(verify_tls="false")
+
+
 def test_splunk_verify_tls_rejects_non_boolean_input() -> None:
     with pytest.raises(ValueError, match="verify_tls must be a boolean"):
         _build_v8_preset_destination(
@@ -1087,39 +1216,37 @@ def test_v8_enable_mutates_exact_source_index() -> None:
     result = V8PolicyWriteResult(True, "a" * 64, "b" * 64)
     with (
         patch(
-            "defenseclaw.commands.cmd_setup_observability._v8_source_destination_index",
-            return_value=3,
+            "defenseclaw.commands.cmd_setup_observability._v8_source_destination_snapshot",
+            return_value=(3, "a" * 64, []),
         ),
         patch(
             "defenseclaw.observability.v8_writer.mutate_v8_config",
             return_value=result,
         ) as mutate,
     ):
-        _set_v8_destination_enabled("/tmp/dc", "collector", True, "")
+        _set_v8_destination_enabled("/tmp/dc", "collector", True)
     args, kwargs = mutate.call_args
     assert Path(args[0]) == Path("/tmp/dc/config.yaml")
     assert args[1][0].path == ("observability", "destinations", 3, "enabled")
     assert args[1][0].value is True
-    assert kwargs == {"data_dir": "/tmp/dc"}
+    assert kwargs == {"data_dir": "/tmp/dc", "expected_before_sha256": "a" * 64}
 
 
-def test_v8_remove_mutates_exact_source_index_and_rejects_connector_scope() -> None:
+def test_v8_remove_mutates_exact_source_index() -> None:
     result = V8PolicyWriteResult(True, "a" * 64, "b" * 64)
     with (
         patch(
-            "defenseclaw.commands.cmd_setup_observability._v8_source_destination_index",
-            return_value=1,
+            "defenseclaw.commands.cmd_setup_observability._v8_source_destination_snapshot",
+            return_value=(1, "a" * 64, []),
         ),
         patch(
             "defenseclaw.observability.v8_writer.mutate_v8_config",
             return_value=result,
         ) as mutate,
     ):
-        _remove_v8_destination("/tmp/dc", "archive", "")
+        _remove_v8_destination("/tmp/dc", "archive")
     mutation = mutate.call_args.args[1][0]
     assert mutation.path == ("observability", "destinations", 1)
-    with pytest.raises(click.ClickException, match="process-wide"):
-        _remove_v8_destination("/tmp/dc", "archive", "codex")
 
 
 @pytest.mark.parametrize("emit_json", [False, True])
@@ -1149,7 +1276,7 @@ def test_v8_destination_list_exposes_signals_policy_and_unredacted_default(emit_
         (
             "splunk-hec",
             {
-                "host": "localhost",
+                "host": "hec.example.test",
                 "port": "8088",
                 "index": "defenseclaw",
                 "source": "defenseclaw",
@@ -1638,3 +1765,125 @@ def test_setup_v8_add_with_only_a_new_key_restarts_the_gateway(
         result = CliRunner().invoke(key_only, [], obj=app)
     assert result.exit_code == 0, result.output
     assert restart.called and "Auto-restarting defenseclaw-gateway" in result.output
+
+
+def test_setup_restarts_the_gateway_only_for_a_key_it_reads_at_start(tmp_path: Path) -> None:
+    # GAP-0072: a webhook is a hot key (the gateway applies it from the next
+    # config generation), so setup no longer bounces the gateway for it.
+    from defenseclaw.commands import cmd_setup
+
+    app = _setup_app(tmp_path)
+    config_path = tmp_path / "config.yaml"
+
+    def run(edit: str) -> tuple[bool, str]:
+        @click.command()
+        @click.pass_context
+        def change(ctx: click.Context) -> None:
+            ctx.meta[cmd_setup._SETUP_CFG_MTIME_KEY] = 0.0
+            ctx.meta[cmd_setup._SETUP_CFG_BYTES_KEY] = config_path.read_bytes()
+            config_path.write_text(edit)
+            cmd_setup._auto_restart_sidecar_after_setup()
+
+        with (
+            patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+            patch.object(cmd_setup, "_restart_defense_gateway", return_value=True) as restart,
+        ):
+            result = CliRunner().invoke(change, [], obj=app)
+        assert result.exit_code == 0, result.output
+        return restart.called, result.output
+
+    restarted, output = run("config_version: 8\nobservability: {}\nwebhooks: [{url: https://example.com/h, type: generic}]\n")
+    assert not restarted and "without a restart" in output
+    restarted, _ = run("config_version: 8\nobservability: {}\ngateway: {port: 18971}\n")
+    assert restarted
+
+
+def test_no_restart_connector_setup_says_a_hot_change_applies_on_its_own(tmp_path: Path) -> None:
+    # GAP-0199: a rule pack on a connector that is already in the roster is a
+    # hot key, and so is a new roster entry (GAP-0072); a stopped gateway
+    # waits for a start.
+    from defenseclaw.commands import cmd_setup
+
+    app = _setup_app(tmp_path)
+    config_path = tmp_path / "config.yaml"
+    base = "config_version: 8\nobservability: {}\nguardrail: {connectors: {codex: {mode: observe}}}\n"
+
+    def run(edit: str, *, gateway_running: bool = True) -> str:
+        config_path.write_text(base)
+
+        @click.command()
+        @click.pass_context
+        def change(ctx: click.Context) -> None:
+            ctx.meta[cmd_setup._SETUP_CFG_BYTES_KEY] = config_path.read_bytes()
+            config_path.write_text(edit)
+            cmd_setup._echo_saved_without_restart()
+
+        with patch.object(cmd_setup, "_is_pid_alive", return_value=gateway_running):
+            result = CliRunner().invoke(change, [], obj=app)
+        assert result.exit_code == 0, result.output
+        return result.output
+
+    rule_pack = base.replace("{mode: observe}", "{mode: observe, rule_pack: strict}")
+    assert "applies it on its own, without a restart" in run(rule_pack)
+    # GAP-0204: a stopped gateway is told to start, not restart.
+    stopped = run(rule_pack, gateway_running=False)
+    assert "once the gateway starts" in stopped and "defenseclaw-gateway start" in stopped
+    assert "restart" not in stopped
+    roster = base.replace("{codex: {mode: observe}}", "{codex: {mode: observe}, claudecode: {mode: observe}}")
+    assert "applies it on its own, without a restart" in run(roster)
+
+
+def test_failed_setup_rollback_keeps_a_newer_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.observability import v8_writer
+
+    _stub_canonical_v8_gateway(monkeypatch)
+    (tmp_path / "config.yaml").write_text("config_version: 8\nobservability: {}\n")
+    key = PRESETS["splunk-hec"].token_env
+    monkeypatch.delenv(key, raising=False)
+    original_mutate = v8_writer.mutate_v8_config
+    inside_first = False
+
+    def add(token: str):
+        return _add_v8_destination(
+            str(tmp_path), PRESETS["splunk-hec"],
+            {"endpoint": "https://hec.example.com:8088/services/collector"},
+            name="hec", enabled=True, signals=None, token_value=token,
+            target=None, dry_run=False,
+        )
+
+    def concurrent_commit(*args, **kwargs):
+        nonlocal inside_first
+        if not inside_first:
+            inside_first = True
+            add("newer")
+            raise RuntimeError("first setup failed")
+        return original_mutate(*args, **kwargs)
+
+    monkeypatch.setattr(v8_writer, "mutate_v8_config", concurrent_commit)
+    with pytest.raises(RuntimeError, match="first setup failed"):
+        add("first")
+
+    assert dotenv_values(tmp_path / ".env")[key] == "newer"
+    assert os.environ[key] == "newer"
+    source = load_validate_v8((tmp_path / "config.yaml").read_bytes(), source_name="config.yaml").source
+    assert source["observability"]["destinations"][0]["name"] == "hec"
+
+
+def test_remove_refuses_a_reordered_destination_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.observability import v8_writer
+
+    source = _source() + "    - name: third\n      kind: console\n"
+    path = tmp_path / "config.yaml"
+    path.write_text(source)
+    original_mutate = v8_writer.mutate_v8_config
+
+    def concurrent_edit(*args, **kwargs):
+        path.write_text(source.replace("    - name: terminal\n      kind: console\n", ""))
+        return original_mutate(*args, **kwargs)
+
+    monkeypatch.setattr(v8_writer, "mutate_v8_config", concurrent_edit)
+    with pytest.raises(RuntimeError, match="changed after"):
+        _remove_v8_destination(str(tmp_path), "archive")
+    assert [d["name"] for d in load_validate_v8(path.read_bytes(), source_name=str(path)).source["observability"]["destinations"]] == [
+        "archive", "third"
+    ]

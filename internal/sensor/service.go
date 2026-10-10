@@ -95,6 +95,9 @@ type Options struct {
 	// plane is testable without a kernel event source. When set it overrides
 	// whatever the Acquirer would have supplied.
 	NewPlaneSource func(homeDirs []string) plane.Source
+	// Owners are the account lookups that attribute a finding whose process
+	// owner the probe could not read. The zero value skips them.
+	Owners OwnerLookups
 	// Acquirer is where the privileged reads come from: directly from this
 	// process, or brokered by a helper that holds the privilege the gateway
 	// deliberately does not. Defaults to reading directly.
@@ -138,7 +141,16 @@ type Service struct {
 	// reading, first-seen time, and how many distinct unnamed public peers the
 	// process has reached. Escalation depends on that history, so it cannot be
 	// derived from a single poll.
-	episodes map[int]*episode
+	//
+	// Keyed by process instance, not pid: a process that reuses an exited
+	// process's pid starts its own episode, and so its own finding
+	// (GAP-1372).
+	episodes map[procprobe.ProcKey]*episode
+
+	// owners remembers the owner of each process instance the polls have
+	// seen, so a finding keeps the owner of the process it saw after that
+	// process exits and its pid is reused.
+	owners *ownerBook
 }
 
 type episode struct {
@@ -245,7 +257,9 @@ func New(options Options) (*Service, error) {
 	service := &Service{
 		options:  options,
 		tracker:  agentchain.NewTracker(),
-		episodes: make(map[int]*episode),
+		episodes: make(map[procprobe.ProcKey]*episode),
+		owners: newOwnerBook(options.Owners,
+			options.Config.EffectiveChainWindow()+2*options.Config.EffectivePollInterval()),
 		dnsCache: dnsCache,
 		dnsCap:   dnsCap,
 	}
@@ -376,7 +390,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	for _, process := range processes {
 		rows = append(rows, agentchain.ProcessRow{
 			PID: process.PID, PPID: process.PPID,
-			Name: process.Name, Cmdline: process.Cmdline,
+			Name: process.Name, Cmdline: process.Cmdline, Start: process.StartedAt,
 		})
 	}
 	s.tracker.ObserveProcessTable(rows)
@@ -397,11 +411,13 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 	minRisk := s.options.Config.EffectiveMinRisk()
 	findings := make([]Finding, 0, 8)
-	live := make(map[int]bool, len(processes))
+	live := make(map[procprobe.ProcKey]bool, len(processes))
+	s.owners.observe(processes, now)
+	owners := s.owners.resolver()
 
 	for _, process := range processes {
-		live[process.PID] = true
-		state := s.episodeFor(process.PID, now)
+		live[process.Key()] = true
+		state := s.episodeFor(process.Key(), now)
 		cpuDelta, scoreCPU := state.observeCPU(process.CPUTime, now)
 
 		var signals []scoring.Signal
@@ -441,32 +457,40 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 			continue
 		}
 		agentName := ""
+		instances := []procRef{{PID: process.PID, Start: process.StartedAt, Name: process.Name, At: now}}
 		if attribution, ok := s.tracker.Attribute(process.PID); ok {
 			agentName = attribution.AgentName
+			instances = append(instances, procRef{
+				PID: attribution.RootPID, Start: attribution.RootStart, Name: attribution.RootName, At: now,
+			})
 		}
+		account := owners.resolve(instances, nil)
 		findings = append(findings, Finding{
-			FindingID:   findingID(process, state.firstSeen),
-			PID:         process.PID,
-			Process:     process.Name,
-			Cmdline:     process.Cmdline,
-			User:        process.User,
-			AgentName:   agentName,
-			Score:       score,
-			Severity:    scoring.SeverityFor(score),
-			Signals:     signals,
-			Providers:   result.providers,
-			Correlation: correlation,
-			FirstSeen:   state.firstSeen,
-			LastSeen:    now,
+			FindingID:         findingID(process, state.firstSeen),
+			PID:               process.PID,
+			Process:           process.Name,
+			Cmdline:           process.Cmdline,
+			User:              account.User,
+			UserSID:           account.SID,
+			Attribution:       account.Attribution,
+			AttributionReason: account.Reason,
+			AgentName:         agentName,
+			Score:             score,
+			Severity:          scoring.SeverityFor(score),
+			Signals:           signals,
+			Providers:         result.providers,
+			Correlation:       correlation,
+			FirstSeen:         state.firstSeen,
+			LastSeen:          now,
 		})
 	}
 
-	for pid := range s.episodes {
-		if !live[pid] {
-			delete(s.episodes, pid)
+	for key := range s.episodes {
+		if !live[key] {
+			delete(s.episodes, key)
 		}
 	}
-	findings = append(findings, s.hostPlaneFindings(now, minRisk, correlator)...)
+	findings = append(findings, s.hostPlaneFindings(now, minRisk, correlator, owners)...)
 	sortFindings(findings)
 
 	snapshot := Snapshot{
@@ -556,11 +580,11 @@ func namingBudget(interval time.Duration) time.Duration {
 	return budget
 }
 
-func (s *Service) episodeFor(pid int, now time.Time) *episode {
-	state, ok := s.episodes[pid]
+func (s *Service) episodeFor(key procprobe.ProcKey, now time.Time) *episode {
+	state, ok := s.episodes[key]
 	if !ok {
 		state = &episode{firstSeen: now}
-		s.episodes[pid] = state
+		s.episodes[key] = state
 	}
 	return state
 }
@@ -734,8 +758,12 @@ func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool,
 // A host-plane finding is per agent session rather than per process: the whole
 // point is that five separate per-process findings for one credential-read-to-
 // exfiltration sequence would be five alerts nobody joins up.
+//
+// Each session is attributed to the account that runs its agent (GAP-1250):
+// a session no lookup ties to an account is labelled unattributed rather
+// than left with an empty user.
 func (s *Service) hostPlaneFindings(
-	now time.Time, minRisk int, correlator *correlate.Correlator,
+	now time.Time, minRisk int, correlator *correlate.Correlator, owners *ownerResolver,
 ) []Finding {
 	if s.hostPlane == nil {
 		return nil
@@ -745,18 +773,24 @@ func (s *Service) hostPlaneFindings(
 	for _, session := range harvested {
 		correlation := correlator.Connector(correlate.Observation{
 			PID: session.RootPID, AgentName: session.AgentName, ExeName: session.AgentName,
+			StartedAt: session.RootStart,
 		})
+		account := owners.resolve(session.Processes, session.ConfigPaths)
 		findings = append(findings, Finding{
-			FindingID:   hostFindingID(session),
-			PID:         session.RootPID,
-			Process:     session.AgentName,
-			AgentName:   session.AgentName,
-			Score:       session.Score,
-			Severity:    scoring.SeverityFor(session.Score),
-			Signals:     session.Signals,
-			Correlation: correlation,
-			FirstSeen:   session.FirstSeen,
-			LastSeen:    session.LastSeen,
+			FindingID:         hostFindingID(session),
+			PID:               session.RootPID,
+			Process:           session.AgentName,
+			User:              account.User,
+			UserSID:           account.SID,
+			Attribution:       account.Attribution,
+			AttributionReason: account.Reason,
+			AgentName:         session.AgentName,
+			Score:             session.Score,
+			Severity:          scoring.SeverityFor(session.Score),
+			Signals:           session.Signals,
+			Correlation:       correlation,
+			FirstSeen:         session.FirstSeen,
+			LastSeen:          session.LastSeen,
 		})
 	}
 	return findings
@@ -765,8 +799,9 @@ func (s *Service) hostPlaneFindings(
 // hostFindingID is stable for an agent session so repeated emissions update
 // rather than accumulate.
 func hostFindingID(session hostFinding) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("host|%d|%s|%d",
-		session.RootPID, session.AgentName, session.FirstSeen.UnixNano())))
+	digest := sha256.Sum256([]byte(fmt.Sprintf("host|%d|%d|%s|%d",
+		session.RootPID, procprobe.KeyOf(session.RootPID, session.RootStart).Start,
+		session.AgentName, session.FirstSeen.UnixNano())))
 	return "chain-" + hex.EncodeToString(digest[:8])
 }
 
@@ -841,7 +876,7 @@ func hasLocalInference(signals []scoring.Signal) bool {
 	return false
 }
 
-func isScriptable(name string) bool { return scriptableRuntimes[strings.ToLower(name)] }
+func isScriptable(name string) bool { return scriptableRuntimes[normalizeRuntimeName(name)] }
 
 // findingID is stable for a process episode so repeated emissions update
 // rather than accumulate.
@@ -858,8 +893,8 @@ func isScriptable(name string) bool { return scriptableRuntimes[strings.ToLower(
 // re-scoring of the same episode a new finding, which is the opposite
 // failure.
 func findingID(process procprobe.Process, episodeStart time.Time) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s|%d",
-		process.PID, process.Name, process.User, episodeStart.UnixNano())))
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%d|%d|%s|%s|%d",
+		process.PID, process.Key().Start, process.Name, process.User, episodeStart.UnixNano())))
 	return "run-" + hex.EncodeToString(digest[:8])
 }
 

@@ -660,9 +660,10 @@ def _print_write_result(result: WebhookWriteResult, *, connector: str = "") -> N
 
 
 def _wh_load_raw(path: str) -> dict[str, Any]:
+    from defenseclaw.config import read_config_text
+
     try:
-        with open(path) as f:
-            data = parse_config_yaml(f.read()) or {}
+        data = parse_config_yaml(read_config_text(path)) or {}
     except FileNotFoundError:
         return {}
     if not isinstance(data, dict):

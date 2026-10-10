@@ -20,6 +20,45 @@ var connectorConfigRootPins = []struct {
 }{
 	{"claudecode", "CLAUDE_CONFIG_DIR", "settings.json", []string{".claude"}, []string{"settings.json"}},
 	{"opencode", "OPENCODE_CONFIG_DIR", "config", []string{".config", "opencode"}, []string{"plugins", "defenseclaw.js"}},
+	{"codex", "CODEX_HOME", "config.toml", []string{".codex"}, []string{"config.toml"}},
+}
+
+// PinConnectorConfigRootsForCommand pins the config roots for one connector
+// command and returns a func that puts the variables back, so the pin does not
+// outlive the command in a longer-lived process.
+func PinConnectorConfigRootsForCommand(dataDir string) func() {
+	saved := make(map[string]*string, len(connectorConfigRootPins))
+	for _, pin := range connectorConfigRootPins {
+		if value, ok := os.LookupEnv(pin.variable); ok {
+			saved[pin.variable] = &value
+		} else {
+			saved[pin.variable] = nil
+		}
+	}
+	PinConnectorConfigRootsToSetup(dataDir)
+	return func() {
+		for variable, value := range saved {
+			if value == nil {
+				_ = os.Unsetenv(variable)
+			} else {
+				_ = os.Setenv(variable, *value)
+			}
+		}
+	}
+}
+
+// An explicit setup command passes its selected root to the gateway it starts.
+// Other gateway starts keep the root recorded in the managed backup.
+func codexExplicitSetupTarget() string {
+	requested := strings.TrimSpace(os.Getenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP"))
+	if requested == "" || !filepath.IsAbs(requested) {
+		return ""
+	}
+	current := codexHomeDir()
+	if !sameManagedTargetPath(requested, current) {
+		return ""
+	}
+	return current
 }
 
 // PinConnectorConfigRootsToSetup points the gateway process at the connector
@@ -34,6 +73,9 @@ func PinConnectorConfigRootsToSetup(dataDir string) []string {
 	}
 	var notes []string
 	for _, pin := range connectorConfigRootPins {
+		if pin.connector == "codex" && codexExplicitSetupTarget() != "" {
+			continue
+		}
 		b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, pin.connector, pin.logical))
 		if err != nil || b.Connector != pin.connector || b.LogicalName != pin.logical {
 			continue

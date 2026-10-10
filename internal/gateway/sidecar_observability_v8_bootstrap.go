@@ -129,11 +129,12 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 	if err != nil {
 		return false, err
 	}
-	if configVersion != 8 {
+	// config_version 9 keeps the v8 observability document.
+	if !config.CurrentSchemaVersion(configVersion) {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	cfg := s.currentConfig()
-	if cfg == nil || cfg.ConfigVersion != 8 || strings.TrimSpace(cfg.DataDir) == "" {
+	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) || strings.TrimSpace(cfg.DataDir) == "" {
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	s.observabilityV8Mu.Lock()
@@ -153,6 +154,11 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 			return false, err
 		}
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, nil)
+	}
+	// A jsonl destination whose folder the gateway account cannot reach
+	// starts deferred; say which path and why (GAP-1265).
+	for _, warning := range compiled.PathWarnings {
+		_, _ = fmt.Fprintf(os.Stderr, "defenseclaw: warning: %s: %s\n", warning.Path, warning.Summary)
 	}
 	if err := applySidecarObservabilityV8ManagedDestination(
 		compiled, sidecarObservabilityV8ManagedOptionsFromConfig(cfg, raw),
@@ -186,7 +192,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapInvalid, nil)
 	}
 	version, err := sidecarObservabilityConfigVersion(raw)
-	if err != nil || version != 8 {
+	if err != nil || !config.CurrentSchemaVersion(version) {
 		if err != nil {
 			return runtimegraph.ReloadResult{}, err
 		}
@@ -210,7 +216,7 @@ func (s *Sidecar) ReloadObservabilityRuntime(
 		}
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, nil)
 	}
-	candidateConfig, candidateErr := config.LoadRuntimeV8CandidateFromBytes(sourceName, raw)
+	candidateConfig, candidateErr := loadRuntimeConfigCandidate(sourceName, raw)
 	if candidateErr != nil || candidateConfig == nil {
 		return runtimegraph.ReloadResult{}, newSidecarObservabilityV8BootstrapError(
 			sidecarObservabilityV8BootstrapCompile, candidateErr,
@@ -349,6 +355,9 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 			DestinationAdapterFactory:  destinationFactory,
 			DestinationObserver:        deliveryObserver,
 			TelemetryProviderFactory:   providerFactory,
+			LocalWriteLossJournalPath: filepath.Join(
+				compiled.DataDir, observabilityruntime.LocalWriteLossJournalFile,
+			),
 		},
 	)
 	if err != nil {
@@ -1192,7 +1201,8 @@ func (observer sidecarV8EventHistoryObserver) ReportEventHistoryHealth(
 	}
 	observer.s.health.observeObservabilityV8EventHistory(transition)
 	if transition.Code == audit.EventHistoryHealthWriteFailed && transition.State == audit.EventHistoryHealthRecovered {
-		// Writes resumed: report the records local history lacks (GAP-1100).
+		// Writes resumed (or the first write of this run succeeded): report
+		// the records local history lacks (GAP-1100, GAP-1129).
 		// Off this callback, which the writer's health queue delivers.
 		go observer.s.recordLocalWriteGapV8()
 	}

@@ -18,6 +18,11 @@
 [CmdletBinding()]
 param()
 
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    Write-Output 'DefenseClaw remediation detection cannot run in PowerShell ConstrainedLanguage. Allow or sign the DefenseClaw kit scripts in WDAC/AppLocker.'
+    exit 1
+}
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 

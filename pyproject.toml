@@ -44,15 +44,18 @@ dependencies = [
     # Used by `defenseclaw setup galileo test` to emit a real, minimal OTLP
     # protobuf canary span without starting the gateway.
     "opentelemetry-proto>=1.28.0,<2",
-    # PyPI's Simple API has returned package-specific 503s for this
-    # project while the JSON API and locked file URL remain healthy.
-    # Pin the exact audited wheel URL so fresh CI venvs do not depend on
-    # resolving this package through /simple/.
-    # 2.0.5 through 2.0.9 pin older LiteLLM/Textual releases, while 2.0.10
-    # through 2.0.13 cap Textual below 8. 2.0.4 is the newest non-yanked
-    # release whose wheel metadata permits both Textual 8 and the secure
-    # LiteLLM floor. Keep the audited PyPI wheel URL and hash explicit.
-    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/ad/c0/90b74836fd9a9e5b6530cbd1b3fe778266e863e9a8bc214db96d08c0e0ee/cisco_ai_skill_scanner-2.0.4-py3-none-any.whl#sha256=8ac399d4542870fad7b09027b9d45f0668788dfff3a5a95603c6f195430a5d74",
+    # Skill scanner 2.2.1 ships only platform wheels (each bundles a CEL
+    # helper; there is no py3-none-any wheel or Windows arm64/musl wheel) and
+    # requires Python >=3.11, so Python 3.10 installs have no skill scanning.
+    # Its metadata allows the secure LiteLLM floor and Textual 8. Keep the
+    # audited PyPI wheel URLs and hashes explicit: PyPI's Simple API has
+    # returned package-specific 503s while the file URLs stayed healthy.
+    # Windows CPython reports AMD64; uv's windows install target reports x86_64.
+    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/81/20/b0d6458007fbac82cb76f1f7dfe139eb2cd6df63ed2ae997459b57b91204/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_arm64.whl#sha256=233189ed423e343448d0e324979c521d65cfba69cf8a07f8f0207170161ed6fa ; python_version >= '3.11' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/23/21/b52e8b105cdfb0b1f9f8c12ec49e90ceaee0c371180aa0a6e9e1a5bef2f3/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-macosx_13_0_x86_64.whl#sha256=e09940589bb93b7b49f131352b1581a030d180fa3775cee676442cf0aebffa59 ; python_version >= '3.11' and sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/8d/96/9386b30d14702d8a73616db100d5d2c8587a85848350b899ce916a6663e0/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_aarch64.whl#sha256=e5e6a3d7f956afccae73c7326e3a1a2d43203a431b7cbd598333f6098b3190e6 ; python_version >= '3.11' and sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/52/1a/843c79746aaf75efebc68a14c34112a426db74d167be165792060ad01992/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-manylinux_2_17_x86_64.whl#sha256=cd6ab22b72c4c8124c7a20f8d0b10582408336f17d340ace1fe7d9e3ba256680 ; python_version >= '3.11' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "cisco-ai-skill-scanner @ https://files.pythonhosted.org/packages/4c/4c/ae046769e2e9dc051c8c0ecc93a0b1e8abd56493a6ba0f1a9a2ed349842e/cisco_ai_skill_scanner-2.2.1-cp311.cp312.cp313.cp314-none-win_amd64.whl#sha256=d1bf7bb295f314627c7f6a58d9debba05dce72e9251d65aaad48ca77736e8655 ; python_version >= '3.11' and sys_platform == 'win32' and (platform_machine == 'AMD64' or platform_machine == 'x86_64')",
     # Magika 1.0.2 removes its obsolete Windows onnxruntime<=1.20.1 cap and
     # selects a supported ONNX Runtime for each Python line. Keep that floor in
     # published-wheel metadata as well as the native installer's uv lock.
@@ -60,7 +63,11 @@ dependencies = [
     # MCP scanner >=4.3.1 pins vulnerable LiteLLM releases exactly. 4.3.0 is
     # the newest trusted release whose METADATA permits the project's secure
     # LiteLLM floor. Pin its PyPI-attested wheel and hash until upstream ships
-    # a release compatible with LiteLLM >=1.84.0.
+    # a release compatible with LiteLLM >=1.91.5.
+    # TODO(mcp-scanner 4.8.x): every 4.8.x release (4.8.5 included) pins
+    # litellm==1.93.0, which is vulnerable to CVE-2026-84377 (fixed on that
+    # line in 1.93.2). Move to 4.8.x only when upstream publishes a release
+    # that relaxes the LiteLLM pin (for example litellm>=1.91.5,<2).
     "cisco-ai-mcp-scanner @ https://files.pythonhosted.org/packages/af/40/d42943f9e3da40ee9b5f00439fda38b62fc379034383f85a6e06d7825796/cisco_ai_mcp_scanner-4.3.0-py3-none-any.whl#sha256=ea1a30d6bc282f2b4081bc4eced4287a20326891588624d5b2e07b388710b812 ; python_version>='3.11'",
     # CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950 affect older MCP
     # SDK releases. DefenseClaw imports the SDK directly for stdio scanning,
@@ -135,7 +142,6 @@ exclude = ["tests", "tests.*"]
 defenseclaw = [
     "_data/policies/*.yaml",
     "_data/policies/rego/*.rego",
-    "_data/policies/rego/*.json",
     "_data/policies/yara/mcp-tools/*.yara",
     "_data/envvars/*.json",
     "_data/plugin/*.json",
@@ -212,7 +218,7 @@ override-dependencies = [
     # CVE-2026-84377 fixed in 1.91.5.
     "litellm>=1.91.5,<1.92.0",
     # litellm pins exact transitive versions that conflict with what
-    # cisco-ai-skill-scanner 2.0.11 (and our own pins) expect. We
+    # the scanners (and our own pins) expect. We
     # override to a single compatible version per package — the newer
     # of the two — and rely on litellm's runtime API surface being
     # compatible with the bumped versions (verified via Python tests

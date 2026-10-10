@@ -36,13 +36,9 @@ from typing import Any
 
 import yaml
 
-try:  # Python 3.11+
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
-
-from defenseclaw import connector_paths
+from defenseclaw import codex_toml, connector_paths
 from defenseclaw.connector_contracts import resolve_connector_contract
+from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 
 _SAFE_PATHEXT = (".exe", ".cmd")
@@ -448,206 +444,6 @@ def _windows_system_powershell_path() -> str:
     )
 
 
-def _codex_system_requirements_path() -> str:
-    # FOLDERID_ProgramData = {62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}
-    program_data = _windows_known_folder_path("62ab5d82-fdc1-4dc3-a9dd-070d1d495d97")
-    return os.path.join(program_data, "OpenAI", "Codex", "requirements.toml") if program_data else ""
-
-
-def _cached_codex_executable(data_dir: str) -> tuple[str, bool]:
-    path = os.path.join(data_dir, "agent_discovery.json")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, UnicodeError, ValueError):
-        return "", False
-    signal = (payload.get("agents") or {}).get("codex") if isinstance(payload, dict) else None
-    if not isinstance(signal, dict):
-        return "", False
-    installed = signal.get("installed") is True
-    executable = str(signal.get("binary_path") or "").strip()
-    if not executable:
-        return "", installed
-    if any(char in executable for char in "\x00\r\n") or not os.path.isabs(executable):
-        raise _InspectionError("stale", f"Codex discovery cached a non-absolute binary path: {executable!r}")
-    try:
-        from defenseclaw.inventory.agent_discovery import _is_trusted_binary_path
-
-        trusted = _is_trusted_binary_path(executable, data_dir=data_dir)
-    except (OSError, ValueError):
-        trusted = False
-    if not trusted:
-        raise _InspectionError("foreign", f"Codex policy inspector binary is outside trusted prefixes: {executable}")
-    return executable, installed
-
-
-def _wait_for_codex_rpc(
-    messages: queue.Queue[str],
-    overflow: threading.Event,
-    request_id: int,
-    *,
-    timeout: float,
-) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    while True:
-        if overflow.is_set():
-            raise _InspectionError("malformed", "Codex app-server exceeded the bounded response queue")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise _InspectionError("stale", f"Codex app-server timed out waiting for response {request_id}")
-        try:
-            line = messages.get(timeout=min(remaining, 0.25))
-        except queue.Empty:
-            continue
-        if len(line.encode("utf-8", errors="replace")) > 2 * 1024 * 1024:
-            raise _InspectionError("malformed", "Codex app-server response exceeds 2 MiB")
-        try:
-            envelope = json.loads(line)
-        except ValueError as exc:
-            raise _InspectionError("malformed", f"Codex app-server returned invalid JSON: {exc}") from exc
-        if not isinstance(envelope, dict) or envelope.get("id") != request_id:
-            continue
-        error = envelope.get("error")
-        if error:
-            raise _InspectionError("stale", f"Codex app-server RPC {request_id} failed: {error}")
-        result = envelope.get("result")
-        if not isinstance(result, dict):
-            raise _InspectionError("malformed", f"Codex app-server RPC {request_id} returned no result")
-        return result
-
-
-def _inspect_codex_app_server_policy(executable: str, codex_home: str) -> tuple[bool | None, str]:
-    env = os.environ.copy()
-    env["CODEX_HOME"] = codex_home
-    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-    try:
-        process = subprocess.Popen(
-            [executable, "app-server", "--stdio"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-            env=env,
-            creationflags=creationflags,
-        )
-    except OSError as exc:
-        raise _InspectionError("stale", f"cannot start Codex policy inspector {executable}: {exc}") from exc
-
-    messages: queue.Queue[str] = queue.Queue(maxsize=64)
-    overflow = threading.Event()
-    stderr_parts: list[str] = []
-
-    def read_stdout() -> None:
-        assert process.stdout is not None
-        for line in process.stdout:
-            try:
-                messages.put_nowait(line)
-            except queue.Full:
-                overflow.set()
-                return
-
-    def read_stderr() -> None:
-        assert process.stderr is not None
-        remaining = 64 * 1024
-        for chunk in iter(lambda: process.stderr.read(4096), ""):
-            if remaining > 0:
-                stderr_parts.append(chunk[:remaining])
-                remaining -= len(chunk)
-
-    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
-    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-    stdout_thread.start()
-    stderr_thread.start()
-    try:
-        assert process.stdin is not None
-        initialize = {
-            "method": "initialize",
-            "id": 1,
-            "params": {
-                "clientInfo": {"name": "defenseclaw", "title": "DefenseClaw", "version": "1"},
-            },
-        }
-        process.stdin.write(json.dumps(initialize, separators=(",", ":")) + "\n")
-        process.stdin.flush()
-        _wait_for_codex_rpc(messages, overflow, 1, timeout=20.0)
-        process.stdin.write('{"method":"initialized"}\n')
-        process.stdin.write('{"method":"configRequirements/read","id":2,"params":{}}\n')
-        process.stdin.flush()
-        result = _wait_for_codex_rpc(messages, overflow, 2, timeout=20.0)
-        requirements = result.get("requirements")
-        if requirements is None:
-            return None, f"Codex app-server {executable} effective requirements"
-        if not isinstance(requirements, dict):
-            raise _InspectionError("malformed", "Codex app-server returned malformed requirements")
-        value = requirements.get("allowManagedHooksOnly")
-        if value is not None and type(value) is not bool:
-            raise _InspectionError("malformed", "Codex allowManagedHooksOnly is not boolean")
-        return value, f"Codex app-server {executable} effective requirements"
-    except (BrokenPipeError, OSError) as exc:
-        detail = "".join(stderr_parts).strip()
-        suffix = f" ({detail})" if detail else ""
-        raise _InspectionError("stale", f"Codex policy inspection failed: {exc}{suffix}") from exc
-    finally:
-        if process.stdin is not None:
-            try:
-                process.stdin.close()
-            except OSError:
-                pass
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2.0)
-
-
-def _validate_codex_effective_policy(data_dir: str, config_path: str) -> str:
-    executable, installed = _cached_codex_executable(data_dir)
-    if executable:
-        value, source = _inspect_codex_app_server_policy(executable, os.path.dirname(config_path))
-    else:
-        requirements_path = _codex_system_requirements_path()
-        value = None
-        source = requirements_path or "no system requirements source on this platform"
-        if requirements_path:
-            try:
-                with open(requirements_path, "rb") as handle:
-                    raw = handle.read(2 * 1024 * 1024 + 1)
-            except FileNotFoundError:
-                raw = b""
-            except OSError as exc:
-                raise _InspectionError("access-denied", f"cannot read {requirements_path}: {exc}") from exc
-            if len(raw) > 2 * 1024 * 1024:
-                raise _InspectionError("malformed", f"{requirements_path} exceeds 2 MiB")
-            if raw:
-                try:
-                    document = tomllib.loads(raw.decode("utf-8"))
-                except (UnicodeError, tomllib.TOMLDecodeError) as exc:
-                    raise _InspectionError("malformed", f"cannot parse {requirements_path}: {exc}") from exc
-                value = document.get("allow_managed_hooks_only")
-                if value is not None and type(value) is not bool:
-                    raise _InspectionError(
-                        "malformed",
-                        f"allow_managed_hooks_only in {requirements_path} is not boolean",
-                    )
-        if installed:
-            raise _InspectionError(
-                "stale",
-                "Codex is installed but its trusted executable is absent from agent_discovery.json; "
-                "effective cloud policy cannot be verified",
-            )
-    if value is True:
-        raise _InspectionError(
-            "foreign",
-            f"Codex allow_managed_hooks_only from {source} disables DefenseClaw's user hook registration",
-        )
-    return source
-
-
 def _repair_detail(connector: str, detail: str, *, configured_mode: str = "") -> str:
     repair = _REPAIR[connector]
     if connector == "copilot" and configured_mode in {"action", "observe"}:
@@ -1013,14 +809,14 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
         raise _InspectionError("stale", f"hook registration file changed during inspection: {path}")
     try:
         if connector == "codex":
-            document = tomllib.loads(raw.decode("utf-8"))
+            document = codex_toml.loads(raw)
         elif connector == "hermes":
             document = yaml.safe_load(raw.decode("utf-8"))
         elif connector == "devin":
             document = json.loads(connector_paths._normalize_jsonc(raw.decode("utf-8")))
         else:
             document = json.loads(raw)
-    except (UnicodeError, ValueError, tomllib.TOMLDecodeError, yaml.YAMLError) as exc:
+    except (UnicodeError, ValueError, yaml.YAMLError) as exc:
         raise _InspectionError("malformed", f"cannot parse hook registration file {path}: {exc}") from exc
     if not isinstance(document, dict):
         raise _InspectionError("malformed", f"hook registration file does not contain an object: {path}")
@@ -2176,6 +1972,8 @@ def _commands_from_hooks(
                 continue
             for hook in nested:
                 command = None
+                if connector == "claudecode":
+                    hook = _claude_launcher_guard_view(hook)
                 if isinstance(hook, dict):
                     command = hook.get("command_windows") if connector == "codex" else None
                     if not isinstance(command, str) or not command.strip():
@@ -2252,6 +2050,44 @@ def _validate_devin_hook_matrix(document: dict[str, Any]) -> tuple[str, int]:
     return commands[0], len(commands)
 
 
+# Per-user Windows Claude Code registers its launcher through cmd.exe so a
+# missing launcher blocks instead of failing open (GAP-1091). Keep this
+# sentence and argv identical to internal/gateway/connector/claudecode_launcher_guard.go.
+_CLAUDE_LAUNCHER_GUARD_WORDS = (
+    "DefenseClaw blocked this: its Claude Code hook launcher is missing. "
+    "Run the DefenseClaw installer again to repair it."
+).split()
+
+
+def _claude_launcher_guard_view(handler: Any) -> Any:
+    """The exec-form handler a generated cmd.exe launcher guard runs, else *handler* unchanged."""
+    if not isinstance(handler, dict):
+        return handler
+    command, args = handler.get("command"), handler.get("args")
+    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return handler
+    system_root = os.environ.get("SystemRoot") or "C:\\Windows"
+    processor = ntpath.join(system_root, "System32", "cmd.exe")
+    if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
+        return handler
+    if len(args) < 8 or args[:4] != ["/d", "/c", "if", "exist"] or args[5] != "(" or args[6] != args[4]:
+        return handler
+    end = next((i for i in range(7, len(args) - 1) if args[i] == ")" and args[i + 1] == "else"), -1)
+    if end < 0:
+        return handler
+    launcher, inner = args[4], args[7:end]
+    expected = [
+        "/d", "/c", "if", "exist", launcher, "(", launcher, *inner, ")", "else", "(", "echo",
+        *_CLAUDE_LAUNCHER_GUARD_WORDS, "1>&2", "&", "exit", "/b", "2", ")",
+    ]
+    if args != expected:
+        return handler
+    view = dict(handler)
+    view["command"] = launcher
+    view["args"] = list(inner)
+    return view
+
+
 def _handler_command_line(handler: dict[str, Any], connector: str, *, windows: bool) -> str:
     command = handler.get("command_windows") if connector == "codex" and windows else handler.get("command")
     if not isinstance(command, str) or not command.strip():
@@ -2265,6 +2101,8 @@ def _handler_command_line(handler: dict[str, Any], connector: str, *, windows: b
 
 
 def _handler_targets_defenseclaw(handler: Any, connector: str) -> bool:
+    if connector == "claudecode":
+        handler = _claude_launcher_guard_view(handler)
     if not isinstance(handler, dict):
         return False
     candidates = []
@@ -2499,6 +2337,7 @@ def _claude_native_handler_identity(
     managed_enterprise: bool,
 ) -> str:
     """Validate Claude's native Windows command form without flattening away its schema."""
+    handler = _claude_launcher_guard_view(handler)
     raw_command = handler.get("command")
     if not isinstance(raw_command, str) or not raw_command.strip():
         raise _InspectionError("malformed", f"Claude Code event {event} has no executable command")
@@ -3251,11 +3090,6 @@ def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
     return None
 
 
-def _copilot_powershell_target(command: str) -> str | None:
-    binding = _copilot_powershell_binding(command)
-    return binding[0] if binding is not None else None
-
-
 def _validate_copilot_hook_matrix(
     document: dict[str, Any],
     contract_id: str,
@@ -3575,6 +3409,13 @@ def validate_windows_hook_registration(
         )
         resolved = _resolve_target(raw_target, kind, search_path=search_path, pathext=pathext)
         if not resolved:
+            if not managed_enterprise and ntpath.basename(raw_target).casefold() == "defenseclaw-hook.exe":
+                # Only the per-user installer puts the launcher back (GAP-0378);
+                # managed installs keep their own repair text.
+                raise _InspectionError(
+                    "launcher-missing",
+                    f"the DefenseClaw hook launcher {raw_target} is missing, so every hook call fails",
+                )
             raise _InspectionError("missing", f"registered hook target cannot be resolved with PATHEXT: {raw_target}")
         target = resolved
         basename = ntpath.basename(resolved).casefold()
@@ -3683,6 +3524,8 @@ def validate_windows_hook_registration(
             exc.state,
             exc.detail
             if exc.state in {"policy-blocked", CODEX_PROBE_TIMEOUT_STATE}
+            else f"{exc.detail}; {LAUNCHER_REINSTALL_STEP}"
+            if exc.state == "launcher-missing"
             else _repair_detail(connector, exc.detail),
             command,
             target,

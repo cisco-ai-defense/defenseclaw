@@ -26,8 +26,13 @@
 # installed. Config and data in ~/.defenseclaw are kept; the replaced install
 # is kept in ~/.defenseclaw/previous for `--rollback`.
 #
-# Permanent interface (never remove or change these; unknown flags are
-# ignored with a warning): --yes, --version X.Y.Z, --local DIR, --rollback.
+# Permanent interface (never remove or change these): --yes, --version X.Y.Z,
+# --local DIR, --rollback. An unknown option stops the installer with exit 2
+# before it changes anything, so a typo never installs something other than
+# what was asked (GAP-0361). Only the copy that defenseclaw upgrade or
+# rollback runs (from a defenseclaw-upgrade-* or defenseclaw-rollback-*
+# folder) ignores one with a warning, so an older release's installer
+# accepts the flags of a newer client.
 #
 set -euo pipefail
 umask 077
@@ -41,6 +46,17 @@ umask 077
 readonly DC_VERSION="__DEFENSECLAW_VERSION__"
 readonly DEFAULT_REPO="cisco-ai-defense/defenseclaw"
 REPO="${DEFENSECLAW_REPO:-${DEFAULT_REPO}}"
+# DEFENSECLAW_REPO (the deprecated alias of config.yaml update.source) is a
+# GitHub owner/name or an https mirror base URL. It only changes where release
+# bytes come from: signatures are always checked against the official release
+# identity, and a mirror's downloads are refused without cosign.
+case "${REPO}" in
+    https://*) RELEASE_BASE="${REPO%/}" ;;
+    *) RELEASE_BASE="https://github.com/${REPO}" ;;
+esac
+readonly RELEASE_BASE
+readonly OFFICIAL_RELEASE_BASE="https://github.com/${DEFAULT_REPO}"
+readonly RELEASE_SIGNER='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 export DEFENSECLAW_HOME
 readonly VENV="${DEFENSECLAW_HOME}/.venv"
@@ -53,8 +69,9 @@ readonly LOCK_DIR="${DEFENSECLAW_HOME}/.install.lock"
 # temporary directory removes that directory when it finishes, but only when
 # the directory holds nothing else.
 SELF_TMP="$(dirname "${BASH_SOURCE[0]:-.}")"
+RUN_BY_UPGRADE=""
 case "$(basename "${SELF_TMP}")" in
-    defenseclaw-upgrade-*|defenseclaw-rollback-*) ;;
+    defenseclaw-upgrade-*|defenseclaw-rollback-*) RUN_BY_UPGRADE=1 ;;
     *) SELF_TMP="" ;;
 esac
 if [[ -n "${SELF_TMP}" && -n "$(find "${SELF_TMP}" -mindepth 1 -maxdepth 1 \
@@ -71,6 +88,8 @@ readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
+# The first line of the defenseclaw script the swap puts in place of the link.
+readonly BUSY_SHIM_MARK="# Written by the DefenseClaw installer while it replaces the install"
 # Data-dir entries that are install machinery, not user data.
 readonly NOT_DATA=".venv .uv previous previous.new .repair .rollback-hold .rollback-hold.done .staging .failed-* installer logs .install.lock backups"
 readonly CONNECTOR_CHOICES="codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none"
@@ -88,6 +107,8 @@ warn() { printf "${YELLOW}  !${NC} %s\n" "$*"; }
 err()  { printf "${RED}  ✗${NC} %s\n" "$*" >&2; }
 step() { printf "\n${BOLD}${CYAN}─── %s${NC}\n" "$*"; }
 die()  { err "$@"; exit 1; }
+# A wrong option or value: exit 2, before anything changed.
+usage_error() { err "$*; nothing was changed"; printf "  Run with --help for the options.\n" >&2; exit 2; }
 has()  { command -v "$1" >/dev/null 2>&1; }
 
 # uname reports x86_64 for a shell running under Rosetta; ask the kernel.
@@ -188,6 +209,7 @@ Options:
 
 Exit codes:
   0  Installed        1  Not installed (a previous install is restored)
+  2  Not installed: an unknown option or value (nothing was changed)
   3  Installed; a connector needs attention before it is guarded again
   4  Installed; the first-run quickstart failed (re-run it as shown)
 
@@ -198,31 +220,39 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --version=*|--local=*|--connector=*|--quickstart-mode=*)
+            # --name=value is the same option as --name value (GAP-0361).
+            opt_name="${1%%=*}" opt_value="${1#*=}"
+            shift
+            set -- "${opt_name}" "${opt_value}" "$@" ;;
+    esac
+    case "$1" in
         --yes|-y) YES=true ;;
         --version)
-            [[ $# -ge 2 ]] || die "--version needs a value such as 1.2.3"
+            [[ $# -ge 2 ]] || usage_error "--version needs a value such as 1.2.3"
             TARGET_VERSION="${2#v}"; shift ;;
-        --version=*) TARGET_VERSION="${1#--version=}"; TARGET_VERSION="${TARGET_VERSION#v}" ;;
         --local)
-            [[ $# -ge 2 ]] || die "--local needs a directory"
-            LOCAL_DIR="$(cd "$2" 2>/dev/null && pwd)" || die "Directory not found: $2"
+            [[ $# -ge 2 ]] || usage_error "--local needs a directory"
+            LOCAL_DIR="$(cd "$2" 2>/dev/null && pwd)" || usage_error "--local: directory not found: $2"
             shift ;;
         --rollback) ROLLBACK=true ;;
         --connector)
-            [[ $# -ge 2 ]] || die "--connector needs a value (${CONNECTOR_CHOICES})"
+            [[ $# -ge 2 ]] || usage_error "--connector needs a value (${CONNECTOR_CHOICES// /, })"
             CONNECTOR="$2"; shift
-            is_valid_connector "${CONNECTOR}" || die "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES}"
+            is_valid_connector "${CONNECTOR}" || usage_error "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES// /, }"
             PASSTHROUGH+=(--connector "${CONNECTOR}") ;;
         --no-openclaw) NO_OPENCLAW=true; PASSTHROUGH+=(--no-openclaw) ;;
         --quickstart) RUN_QUICKSTART=true; PASSTHROUGH+=(--quickstart) ;;
         --quickstart-mode)
-            [[ $# -ge 2 ]] || die "--quickstart-mode needs observe or action"
+            [[ $# -ge 2 ]] || usage_error "--quickstart-mode needs observe or action"
             QUICKSTART_MODE="$2"; shift
-            case "${QUICKSTART_MODE}" in observe|action) ;; *) die "invalid --quickstart-mode: ${QUICKSTART_MODE}" ;; esac
+            case "${QUICKSTART_MODE}" in observe|action) ;; *) usage_error "Invalid --quickstart-mode '${QUICKSTART_MODE}': use observe or action" ;; esac
             RUN_QUICKSTART=true; PASSTHROUGH+=(--quickstart-mode "${QUICKSTART_MODE}") ;;
         --sandbox) die "--sandbox was removed with the legacy openshell-sandbox installer. Install without it; to run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup' afterwards; to remove an old standalone sandbox first, run 'defenseclaw sandbox legacy-cleanup --dry-run'." ;;
         --help|-h) usage; exit 0 ;;
-        *) warn "Ignoring unknown option: $1" ;;
+        *)
+            [[ -n "${RUN_BY_UPGRADE}" ]] || usage_error "Unknown option: $1"
+            warn "Ignoring unknown option: $1" ;;
     esac
     shift
 done
@@ -286,13 +316,13 @@ fetch() {
         cp "${LOCAL_DIR}/${asset}" "${dest}"
     else
         curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${dest}" \
-            "https://github.com/${REPO}/releases/download/${version}/${asset}"
+            "${RELEASE_BASE}/releases/download/${version}/${asset}"
     fi
 }
 
 latest_release() {
     local location
-    location="$(curl -fsSI --proto '=https' --tlsv1.2 "https://github.com/${REPO}/releases/latest" 2>/dev/null \
+    location="$(curl -fsSI --proto '=https' --tlsv1.2 "${RELEASE_BASE}/releases/latest" 2>/dev/null \
         | tr -d '\r' | awk 'tolower($1)=="location:"{print $2}' | tail -1)"
     location="${location##*/tag/}"
     location="${location#v}"
@@ -308,10 +338,10 @@ run_release_installer() {
     tmp="$(mktemp -d "${base%/}/defenseclaw-upgrade-XXXXXX")"
     info "Fetching the installer for DefenseClaw ${version}"
     curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/install.sh" \
-        "https://github.com/${REPO}/releases/download/${version}/install.sh" \
+        "${RELEASE_BASE}/releases/download/${version}/install.sh" \
         || die "Release ${version} has no install.sh (1.x releases start at 1.0.0)"
     curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt" \
-        "https://github.com/${REPO}/releases/download/${version}/checksums.txt" \
+        "${RELEASE_BASE}/releases/download/${version}/checksums.txt" \
         || die "Release ${version} has no checksums.txt"
     [[ "$(awk '$2=="install.sh"||$2=="*install.sh"{print $1}' "${tmp}/checksums.txt")" == "$(sha256_of "${tmp}/install.sh")" ]] \
         || die "install.sh for ${version} does not match its checksums.txt"
@@ -320,14 +350,22 @@ run_release_installer() {
     major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
     if [[ "${major:-0}" =~ ^[0-9]+$ && "${major:-0}" -ge 2 ]]; then
         curl -fsSL --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/checksums.txt.bundle" \
-            "https://github.com/${REPO}/releases/download/${version}/checksums.txt.bundle" \
+            "${RELEASE_BASE}/releases/download/${version}/checksums.txt.bundle" \
             || die "Release ${version} has no checksums.txt.bundle to verify with cosign"
         cosign verify-blob --bundle "${tmp}/checksums.txt.bundle" \
-            --certificate-identity-regexp "^https://github\.com/${REPO//./\\.}/\.github/workflows/release\.yaml@refs/heads/main$" \
+            --certificate-identity-regexp "${RELEASE_SIGNER}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${tmp}/checksums.txt" >/dev/null 2>&1 \
             || die "The release signature on ${version}'s checksums.txt did not verify"
+    elif [[ "${RELEASE_BASE}" != "${OFFICIAL_RELEASE_BASE}" ]]; then
+        die "Releases from ${RELEASE_BASE} are verified by their signature: install cosign 2.0 or later"
     fi
+    # Every release is signed by the same identity, so the signature alone
+    # would let a mirror serve another (older) release under this version.
+    local stamped
+    stamped="$(sed -n 's/^readonly DC_VERSION="\(.*\)"$/\1/p' "${tmp}/install.sh" | head -1)"
+    [[ "${stamped#v}" == "${version#v}" ]] \
+        || die "The installer served for ${version} is release ${stamped:-unknown}; refusing a mismatched release"
     [[ -z "${SELF_TMP}" ]] || rm -rf "${SELF_TMP}"
     exec bash "${tmp}/install.sh" "$@"
 }
@@ -347,18 +385,25 @@ if ! is_version "${VERSION}"; then
     elif [[ "${ROLLBACK}" != true ]]; then
         target="${TARGET_VERSION:-$(latest_release)}"
         version_lt "${target}" 1.0.0 \
-            && die "DefenseClaw ${target} predates this installer; see https://github.com/${REPO}/releases/tag/${target}"
+            && die "DefenseClaw ${target} predates this installer; see ${RELEASE_BASE}/releases/tag/${target}"
         run_release_installer "${target}" ${FORWARD[@]+"${FORWARD[@]}"}
     fi
 fi
 if [[ -n "${TARGET_VERSION}" && "${TARGET_VERSION}" != "${VERSION}" && "${ROLLBACK}" != true ]]; then
     version_lt "${TARGET_VERSION}" 1.0.0 \
-        && die "DefenseClaw ${TARGET_VERSION} predates this installer; see https://github.com/${REPO}/releases/tag/${TARGET_VERSION}"
+        && die "DefenseClaw ${TARGET_VERSION} predates this installer; see ${RELEASE_BASE}/releases/tag/${TARGET_VERSION}"
     [[ -z "${LOCAL_DIR}" ]] || die "--local ${LOCAL_DIR} holds ${VERSION}, not ${TARGET_VERSION}"
     run_release_installer "${TARGET_VERSION}" ${FORWARD[@]+"${FORWARD[@]}"}
 fi
+# The command that runs this install again, for the recovery hints.
+if [[ -n "${LOCAL_DIR}" && -f "${LOCAL_DIR}/install.sh" ]]; then
+    INSTALL_AGAIN="bash ${LOCAL_DIR}/install.sh --local ${LOCAL_DIR}"
+else
+    INSTALL_AGAIN="curl -LsSf ${RELEASE_BASE}/releases/download/${VERSION}/install.sh | bash"
+fi
 
 [[ "${ROLLBACK}" == true ]] || require_free_space
+require_writable_dirs
 
 # ── Lock and log ─────────────────────────────────────────────────────────────
 
@@ -474,23 +519,37 @@ if [[ "${ROLLBACK}" == true ]]; then
         question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
     fi
     ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
+    # GAP-1388: a 0.x release cannot start on a damaged audit store, so check
+    # the saved data before anything of this install changes.
+    AUDIT_DAMAGED=""
+    if version_lt "${back_to}" 1.0.0; then check_rollback_data; fi
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
+    saved_was_running="$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null || true)"
     restart="${was_running}"
-    [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
+    [[ "${saved_was_running}" == true ]] && restart=true
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
         remove_connector_registrations_for_legacy
+    elif [[ -z "${current}" ]] || ! version_lt "${current}" "${back_to}"; then
+        convert_hooks_for_rollback
     fi
     swapped=0
     swap_with_previous || swapped=$?
     if [[ "${swapped}" -ne 0 ]]; then
         # 1: the swap undid itself, so this install is back and may run again.
-        [[ "${swapped}" -eq 1 && "${was_running}" == true ]] && { start_gateway || true; }
+        # Its start also writes the connector registrations removed above.
+        if [[ "${swapped}" -eq 1 && ( "${was_running}" == true || -n "${LEGACY_TORN_DOWN:-}" ) ]]; then
+            start_gateway || true
+        fi
         die "Rollback failed part-way; see ${LOG}"
     fi
     rollback_rc=0
+    QUARANTINED=""
+    if [[ -n "${AUDIT_DAMAGED}" ]] && ! quarantine_rolled_back_audit; then
+        undo_rollback "The damaged audit store of DefenseClaw ${back_to} could not be moved aside"
+    fi
     if [[ "${restart}" == true ]]; then
         start_gateway || rollback_rc=$?
         case "${rollback_rc}" in
@@ -498,6 +557,11 @@ if [[ "${ROLLBACK}" == true ]]; then
             3) warn "A connector needs attention before it is guarded again (see the gateway output above)"; restart_openclaw ;;
             *) rollback_rc=1 ;;
         esac
+    fi
+    # A 0.x release has no rollback command, and its gateway writes its own
+    # connector registrations only once it runs: never leave it down.
+    if [[ ${rollback_rc} -eq 1 ]] && version_lt "${back_to}" 1.0.0; then
+        undo_rollback "The gateway of DefenseClaw ${back_to} did not start"
     fi
     if [[ ${rollback_rc} -eq 1 ]]; then
         # The swap is done, but the hooks are unguarded: say so, and exit 1.
@@ -598,7 +662,7 @@ cosign_major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 
 if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; then
     if fetch checksums.txt.bundle "${STAGING}/checksums.txt.bundle" 2>/dev/null; then
         cosign verify-blob --bundle "${STAGING}/checksums.txt.bundle" \
-            --certificate-identity-regexp "^https://github\.com/${REPO//./\\.}/\.github/workflows/release\.yaml@refs/heads/main$" \
+            --certificate-identity-regexp "${RELEASE_SIGNER}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             "${STAGING}/checksums.txt" >/dev/null 2>&1 \
             || die "The release signature on checksums.txt did not verify; nothing was changed"
@@ -610,6 +674,8 @@ if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; t
     else
         warn "No checksums.txt.bundle to verify with cosign; relying on checksums"
     fi
+elif [[ -z "${LOCAL_DIR}" && "${RELEASE_BASE}" != "${OFFICIAL_RELEASE_BASE}" ]]; then
+    die "Releases from ${RELEASE_BASE} are verified by their signature: install cosign 2.0 or later; nothing was changed"
 elif [[ -z "${LOCAL_DIR}" ]]; then
     info "cosign 2.0 or later is not installed; downloads are checked against checksums.txt only"
 fi
@@ -635,6 +701,19 @@ for binary in ${MANAGED_BINARIES}; do
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The downloaded gateway does not report version ${VERSION}"
+
+# When another account's process holds this account's API port, the upgrade
+# only fails at the gateway restart, after the build, the migration and the
+# swap. The staged gateway (a release that has the check) names it first
+# (GAP-0130). A gateway that was not running is not restarted, so it is not checked.
+if [[ -n "${PREV_VERSION}" && -n "$(gateway_pid || true)" ]] \
+    && "${STAGING}/bin/defenseclaw-gateway" check-api-port --help >/dev/null 2>&1; then
+    if ! port_problem="$("${STAGING}/bin/defenseclaw-gateway" check-api-port 2>&1)"; then
+        rm -rf "${STAGING}"
+        drop_new_uv
+        die "${port_problem#Error: }; nothing was changed"
+    fi
+fi
 
 info "Building the Python environment (a first install can take several minutes)"
 make_venv() {
@@ -720,6 +799,7 @@ fi
 if ! swap_in; then
     err "Installing ${VERSION} failed; restoring ${PREV_VERSION:-the previous state}"
     restore_snapshot
+    drop_staging
     die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
 fi
 START_RC=0
@@ -737,6 +817,7 @@ if [[ "${WAS_RUNNING}" == true ]]; then
         err "The ${VERSION} gateway did not become healthy; restoring ${PREV_VERSION:-the previous state}"
         stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
         restore_snapshot
+        drop_staging
         die "DefenseClaw ${VERSION} was not installed. ${RESTORED_NOTE} Log: ${LOG}"
     fi
 fi
@@ -802,7 +883,12 @@ if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
         printf "  Turn it back on with: ${CYAN}defenseclaw setup guardrail${NC}\n"
     else
         warn "The gateway is not running, so agent hooks are not guarded until it is"
-        printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+        # GAP-0384: when another process holds its API port, that start fails too.
+        if port_problem="$("${BIN_DIR}/defenseclaw-gateway" check-api-port --installed 2>&1)"; then
+            printf "  Start it with: ${CYAN}defenseclaw-gateway start${NC}\n"
+        else
+            info "${port_problem#Error: }"
+        fi
     fi
 fi
 if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
@@ -889,18 +975,72 @@ install_uv() {
     return 1
 }
 
-# A 0.8.x installer could reuse an existing uv, so its receipt and the
-# venv's creation time cannot prove DefenseClaw owns uv, uvx, their cache or
-# downloaded Python. Leave all of them with the user on upgrade. That installer
-# also ran a temporary Cosign; its public Sigstore TUF cache can be claimed
-# only when it matches the narrow window and contents below (GAP-0908).
+# What a 0.8.x install left outside the data dir without a record (GAP-0908).
+# When uv was missing, the 0.8.x installer ran uv's own installer into BIN_DIR
+# and that uv filled uv's default cache; when Cosign was missing it ran a
+# temporary one that left ~/.sigstore. It kept no marker, and it reused a uv
+# the user already had, so the upgrade from 0.8.x records these for
+# `defenseclaw uninstall --all --binaries` only on evidence a user's own uv
+# or Cosign cannot meet. LEGACY_WINDOW covers the 0.8.x steps between uv's
+# installer and the venv: the Python check, the release policy and Cosign,
+# the connector menu and the gateway download.
+#   uv, uvx and uv's cache: legacy_uv_from_0_8 below.
+#   ~/.sigstore: no cosign on PATH, it holds only the public Sigstore TUF
+#     cache, and nothing in it is older than that window or newer than the
+#     venv, so no other Cosign has used it.
 readonly LEGACY_WINDOW=600
-LEGACY_LEFTOVERS=""
+LEGACY_UV_RECORD="" LEGACY_LEFTOVERS=""
 mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+# legacy_uv_from_0_8 succeeds only when all of this holds:
+#   - uv's receipt is a plain file of this account that names BIN_DIR, only
+#     uv and uvx, and the version BIN_DIR/uv reports and the 0.8.x venv was
+#     made with (pyvenv.cfg "uv ="); it was written at most LEGACY_WINDOW
+#     seconds before that venv;
+#   - BIN_DIR/uv and uvx are plain files of this account;
+#   - uv's default cache is a plain folder of this account; nothing in it is
+#     older than the receipt (a uv the user had before has a history there);
+#     every unpacked wheel in it was unpacked after the 0.8.x venv was made
+#     (the 0.8.x installer installs only into that venv) and is one that venv
+#     holds, DefenseClaw's among them; and uv has no tools installed.
+# A uv the user had earlier, used for anything else, or updated since fails
+# this and stays the user's; uninstall then names what it leaves.
+legacy_uv_from_0_8() {
+    local cfg=$1 venv_t=$2 version receipt receipt_t cache site entry info name
+    version="$(awk -F' *= *' '$1 == "uv" {print $2}' "${cfg}")"
+    receipt="${XDG_CONFIG_HOME:-${HOME}/.config}/uv/uv-receipt.json"
+    cache="${XDG_CACHE_HOME:-${HOME}/.cache}/uv"
+    [[ -n "${version}" ]] || return 1
+    [[ -z "${UV_CACHE_DIR:-}" || "${UV_CACHE_DIR}" == "${DEFENSECLAW_HOME}/.uv/cache" ]] || return 1
+    [[ -f "${receipt}" && ! -L "${receipt}" && -O "${receipt}" ]] || return 1
+    receipt_t="$(mtime_of "${receipt}")" || return 1
+    (( venv_t >= receipt_t && venv_t - receipt_t <= LEGACY_WINDOW )) || return 1
+    grep -qF '"binaries":["uv","uvx"]' "${receipt}" || return 1
+    grep -qF "\"install_prefix\":\"${BIN_DIR}\"" "${receipt}" || return 1
+    grep -qF "\"version\":\"${version}\"" "${receipt}" || return 1
+    for name in uv uvx; do
+        [[ -f "${BIN_DIR}/${name}" && ! -L "${BIN_DIR}/${name}" && -O "${BIN_DIR}/${name}" ]] || return 1
+    done
+    [[ "$("${BIN_DIR}/uv" --version 2>/dev/null | awk '{print $2}')" == "${version}" ]] || return 1
+    [[ ! -e "${XDG_DATA_HOME:-${HOME}/.local/share}/uv/tools" ]] || return 1
+    [[ -d "${cache}" && ! -L "${cache}" && -O "${cache}" ]] || return 1
+    [[ -z "$(find "${cache}" -maxdepth 2 ! -newer "${receipt}" -print -quit 2>/dev/null || echo error)" ]] || return 1
+    [[ -z "$(find "${cache}" -mindepth 2 -maxdepth 2 -path '*/archive-v*/*' ! -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] || return 1
+    site="$(find "${cfg%/*}/lib" -mindepth 2 -maxdepth 2 -name site-packages -type d -print -quit 2>/dev/null)"
+    [[ -n "${site}" ]] && compgen -G "${cache}/archive-v*/*/defenseclaw-*.dist-info" >/dev/null || return 1
+    for entry in "${cache}"/archive-v*/*; do
+        for info in "${entry}"/*.dist-info; do
+            [[ -d "${info}" && ! -L "${info}" && -d "${site}/${info##*/}" ]] || return 1
+        done
+    done
+}
 find_legacy_leftovers() {
     local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore_t sigstore
     [[ -f "${cfg}" && ! -L "${cfg}" ]] || return 0
     venv_t="$(mtime_of "${cfg}")" || return 0
+    if legacy_uv_from_0_8 "${cfg}" "${venv_t}"; then
+        LEGACY_UV_RECORD="$(sha256_of "${BIN_DIR}/uv")  uv"$'\n'"$(sha256_of "${BIN_DIR}/uvx")  uvx"
+        LEGACY_LEFTOVERS="uv-cache"
+    fi
     sigstore="${HOME}/.sigstore"
     if [[ -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
         && sigstore_t="$(mtime_of "${sigstore}")" && (( venv_t - sigstore_t <= LEGACY_WINDOW )) \
@@ -911,7 +1051,12 @@ find_legacy_leftovers() {
         LEGACY_LEFTOVERS+="${LEGACY_LEFTOVERS:+$'\n'}sigstore"
     fi
 }
+# After the swap. `defenseclaw uninstall --binaries` removes the 0.8.x uv
+# while it still matches this record, the one install_uv writes too.
 record_legacy_leftovers() {
+    if [[ -n "${LEGACY_UV_RECORD}" && ! -e "${BIN_DIR}/defenseclaw-uv.sha256" ]]; then
+        printf '%s\n' "${LEGACY_UV_RECORD}" > "${BIN_DIR}/defenseclaw-uv.sha256" || true
+    fi
     [[ -z "${LEGACY_LEFTOVERS}" ]] || printf '%s\n' "${LEGACY_LEFTOVERS}" > "${DEFENSECLAW_HOME}/legacy-install-leftovers" || true
 }
 
@@ -920,6 +1065,14 @@ record_legacy_leftovers() {
 drop_new_uv() {
     [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"
     [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"
+}
+
+# drop_staging: an install that was undone leaves only the .failed-<time>
+# copy it names. The staged release and the uv files this run added went
+# unmentioned next to it: about 1.2 GB after a rolled-back upgrade (GAP-0388).
+drop_staging() {
+    rm -rf "${STAGING}" || true
+    drop_new_uv || true
 }
 
 is_machinery() {
@@ -939,6 +1092,21 @@ data_entries() {
         is_machinery "${name}" && continue
         [[ -S "${path}" || -p "${path}" ]] && continue
         printf '%s\n' "${name}"
+    done
+}
+
+# name_removable names what DefenseClaw itself keeps that can go to make room:
+# the copy a failed install kept and the data earlier upgrades kept.
+name_removable() {
+    local item size what
+    for item in "${DEFENSECLAW_HOME}"/.failed-* "${DEFENSECLAW_HOME}/backups"; do
+        [[ -d "${item}" && ! -L "${item}" ]] || continue
+        size="$(du -sk "${item}" 2>/dev/null | awk '{print int(($1 + 1023) / 1024)}')"
+        case "${item}" in
+            */backups) what="what earlier upgrades kept (old audit history, a replaced app)" ;;
+            *) what="the copy a failed install kept for troubleshooting" ;;
+        esac
+        info "You can remove ${item} (${size:-?} MB), ${what}: rm -rf '${item}'"
     done
 }
 
@@ -980,11 +1148,34 @@ require_free_space() {
     [[ "${free_kb}" -lt "${need_kb}" ]] || return 0
     if [[ ${copy_kb} -gt 0 ]]; then
         err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the upgrade needs about $(((need_kb + 1023) / 1024)) MB ($((space_needed_kb / 1024)) MB for the new version and $(((copy_kb + 1023) / 1024)) MB for a rollback copy of your data) and $((free_kb / 1024)) MB is free"
-        [[ -z "${biggest}" ]] || err "The largest item is ${DEFENSECLAW_HOME}/${biggest} ($(((biggest_kb + 1023) / 1024)) MB)"
+        # A 1 MB audit.db is no answer to a 462 MB shortfall (GAP-0389).
+        if [[ -n "${biggest}" && $((biggest_kb * 10)) -ge $((need_kb - free_kb)) ]]; then
+            err "The largest item is ${DEFENSECLAW_HOME}/${biggest} ($(((biggest_kb + 1023) / 1024)) MB)"
+        fi
     else
         err "Not enough free disk space next to ${DEFENSECLAW_HOME}: the install needs about $((need_kb / 1024)) MB and $((free_kb / 1024)) MB is free"
     fi
+    name_removable
     die "Free at least $(((need_kb - free_kb + 1023) / 1024)) MB on that filesystem (df -h ${dir}), then rerun; nothing was changed"
+}
+
+# require_writable_dirs refuses before anything is written, the gateway
+# stopped or the lock taken, when a folder the install replaces files in
+# cannot be written: an upgrade stopped the gateway, then failed to copy the
+# binaries and to put the old ones back (GAP-0381), and a first install only
+# said it could not install uv (GAP-0420). A folder that does not exist yet is
+# checked where it would be created.
+require_writable_dirs() {
+    local dir probe owner
+    for dir in "${BIN_DIR}" "${DEFENSECLAW_HOME}" "${VENV}" "${PREVIOUS}" "${INSTALLER_DIR}"; do
+        probe="${dir}"
+        while [[ ! -e "${probe}" && ! -L "${probe}" && "${probe}" == */* ]]; do probe="${probe%/*}"; done
+        [[ -n "${probe}" ]] || probe=/
+        [[ -d "${probe}" && -w "${probe}" && -x "${probe}" ]] && continue
+        owner="$(stat -c '%U, mode %a' "${probe}" 2>/dev/null || stat -f '%Su, mode %Lp' "${probe}" 2>/dev/null || true)"
+        err "${probe} is not writable by $(id -un)${owner:+ (owner ${owner})}, and the install replaces files there"
+        die "Make it writable (chmod u+w '${probe}', or sudo chown -R $(id -un) '${probe}' when another account owns it), then rerun; nothing was changed"
+    done
 }
 
 snapshot() {
@@ -1014,6 +1205,7 @@ snapshot() {
     for link in ${MANAGED_LINKS}; do
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${SNAP}/bin/${link}" || return 1; }
     done
+    write_busy_shim
     while IFS= read -r name; do
         cp -Rp "${DEFENSECLAW_HOME}/${name}" "${SNAP}/data/" || return 1
     done < <(data_entries)
@@ -1056,6 +1248,8 @@ recover_interrupted_run() {
             VERSION_BEFORE="${VERSION}"; VERSION="(interrupted)"
             restore_snapshot
             VERSION="${VERSION_BEFORE}"
+            # A restore that could not finish keeps the slot: never install over it.
+            [[ ! -e "${slot}" ]] || die "Could not finish putting back the install an earlier run replaced; ${slot} holds it (see above)"
         else
             # The snapshot never finished, so live data was only copied, not changed.
             undo_snapshot
@@ -1103,7 +1297,7 @@ recover_interrupted_run() {
             fi
         else
             # Setting it aside stopped part-way; the live binaries were only copied.
-            unstash_tree "${slot}" && drop_hold "${slot}"
+            unstash_tree "${slot}" && restore_links "${slot}" && drop_hold "${slot}"
         fi
     fi
     [[ ! -e "${slot}" ]] || die "Could not recover an interrupted rollback; ${slot} holds the install it set aside (see ${LOG})"
@@ -1116,7 +1310,47 @@ recover_interrupted_run() {
 undo_snapshot() {
     if [[ -d "${SNAP}/venv" && ! -e "${VENV}" ]]; then mv "${SNAP}/venv" "${VENV}"; fi
     if [[ -d "${SNAP}/installer" && ! -e "${INSTALLER_DIR}" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}"; fi
+    restore_links "${SNAP}"
     rm -rf "${SNAP}"
+}
+
+# write_busy_shim: during the swap the defenseclaw link points into a venv
+# that is being moved, so a command typed meanwhile, or after the run was
+# killed, failed with "command not found" (GAP-0391). This script stands in
+# for it: it says an install is running, or how to finish one that stopped.
+# The new link, or restore_links, replaces it.
+write_busy_shim() {
+    local shim="${BIN_DIR}/.defenseclaw.busy"
+    mkdir -p "${BIN_DIR}" 2>/dev/null || return 0
+    if cat > "${shim}" 2>/dev/null <<EOF
+#!/bin/sh
+${BUSY_SHIM_MARK} (pid $$).
+if kill -0 $$ 2>/dev/null; then
+    echo "defenseclaw: a DefenseClaw install is running (pid $$); run the command again when it has finished" >&2
+else
+    echo "defenseclaw: a DefenseClaw install (pid $$) stopped before it finished; run the installer again to finish or undo it: ${INSTALL_AGAIN:-the install command}" >&2
+fi
+exit 1
+EOF
+    then
+        chmod 755 "${shim}" && mv -f "${shim}" "${BIN_DIR}/defenseclaw" && return 0
+    fi
+    rm -f "${shim}"
+    return 0
+}
+
+# restore_links SLOT: put back the CLI links SLOT saved, over the busy shim.
+restore_links() {
+    local link
+    for link in ${MANAGED_LINKS}; do
+        if [[ -L "$1/bin/${link}" ]]; then
+            rm -f "${BIN_DIR:?}/${link}" && cp -P "$1/bin/${link}" "${BIN_DIR}/${link}" || true
+        elif [[ -f "${BIN_DIR}/${link}" && ! -L "${BIN_DIR}/${link}" ]] \
+            && [[ "$(head -n 2 "${BIN_DIR}/${link}" 2>/dev/null)" == *"${BUSY_SHIM_MARK}"* ]]; then
+            rm -f "${BIN_DIR:?}/${link}"
+        fi
+    done
+    return 0
 }
 
 # private_bin_dir: drop group and other write from BIN_DIR and its parent when
@@ -1157,21 +1391,19 @@ swap_in() {
     fi
     if [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]]; then
         info "Migrating config and data"
-        local args=(migrate --yes)
+        local args=(migrate)
         [[ -n "${PREV_VERSION}" ]] && args+=(--from-version "${PREV_VERSION}")
-        DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" </dev/null || return 1
+        DEFENSECLAW_GATEWAY_BIN="${BIN_DIR}/defenseclaw-gateway" "${VENV}/bin/defenseclaw" "${args[@]}" || return 1
         # The previous version's agent discovery is absent or stale. Refresh
         # it (bounded --version probes, no telemetry) before the gateway
         # starts, so the gateway records each agent's version in the hook
         # contract lock and doctor can check compatibility. Best effort.
         info "Refreshing agent discovery"
-        # stdin from /dev/null: a vendor --version probe that reads the
-        # terminal stopped a background (&) upgrade here (GAP-0376).
-        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel </dev/null >/dev/null 2>&1 || true
+        "${VENV}/bin/defenseclaw" agent discover --refresh --no-emit-otel >/dev/null 2>&1 || true
         # The new defenseclaw-acp has a new digest: re-pin it in configured
         # editor entries, which would otherwise fail closed. Best effort.
         if [[ -f "${SNAP}/bin/defenseclaw-acp" ]]; then
-            "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" </dev/null || true
+            "${VENV}/bin/defenseclaw" acp refresh --from-sha256 "$(sha256_of "${SNAP}/bin/defenseclaw-acp")" || true
         fi
     fi
 }
@@ -1197,43 +1429,109 @@ swap_app() {
 }
 
 restore_snapshot() {
-    local failed binary link name
-    # Only the latest failed install is kept: with a large audit database
-    # each copy holds gigabytes, and an earlier one is not used again.
-    for failed in "${DEFENSECLAW_HOME}"/.failed-*; do
-        if [[ -d "${failed}" && ! -L "${failed}" ]]; then rm -rf "${failed}"; fi
-    done
-    failed="${DEFENSECLAW_HOME}/.failed-$(date +%Y%m%dT%H%M%S)"
-    mkdir -p "${failed}/data"
+    local failed="" binary link name dest kept=true restored=true moved free_mb
+    # A restore that stops part-way (a full disk) keeps the snapshot, and the
+    # next run finishes it from what this one recorded there: FAILED_DIR names
+    # the folder that keeps the failed install, VENV_BACK and DATA_ASIDE mark
+    # the steps that are done. Running a done step again set the data it had
+    # put back aside as the failed install and put nothing back, so
+    # config.yaml, .env and the policies were left only in .failed-<time> and
+    # the upgrade started from no configuration (GAP-0624).
+    [[ -f "${SNAP}/FAILED_DIR" ]] && failed="$(cat "${SNAP}/FAILED_DIR" 2>/dev/null || true)"
+    if [[ -z "${failed}" || ! -d "${failed}/data" ]]; then
+        # Only the latest failed install is kept: with a large audit database
+        # each copy holds gigabytes, and an earlier one is not used again.
+        for failed in "${DEFENSECLAW_HOME}"/.failed-*; do
+            if [[ -d "${failed}" && ! -L "${failed}" ]]; then rm -rf "${failed}" || true; fi
+        done
+        failed="${DEFENSECLAW_HOME}/.failed-$(date +%Y%m%dT%H%M%S)"
+        # Putting the snapshot back only renames; keeping the failed install needs
+        # a new folder. On a full disk that mkdir failed and, under set -e, ended
+        # the restore before it began: no CLI, no gateway, no word (GAP-0375).
+        # Then the failed install is deleted instead, which also frees space.
+        mkdir -p "${failed}/data" 2>/dev/null || { kept=false; rm -rf "${failed}" 2>/dev/null || true; }
+        [[ "${kept}" != true ]] || printf '%s\n' "${failed}" > "${SNAP}/FAILED_DIR" 2>/dev/null || true
+    fi
+    if [[ ! -f "${SNAP}/VENV_BACK" ]]; then
+        moved=true
+        # Record that the snapshot contains an old venv before moving either
+        # side. If the final marker cannot be written (or the process stops),
+        # the missing snapshot venv then means the live one is already restored.
+        if [[ -d "${SNAP}/venv" ]]; then
+            : > "${SNAP}/VENV_RESTORING" 2>/dev/null || moved=false
+        fi
+        if [[ "${moved}" == true && -f "${SNAP}/VENV_RESTORING" && ! -d "${SNAP}/venv" ]]; then
+            [[ -d "${VENV}" ]] || moved=false
+        elif [[ "${moved}" == true ]]; then
+            if [[ -d "${VENV}" ]]; then
+                { [[ "${kept}" == true ]] && mv "${VENV}" "${failed}/venv"; } || rm -rf "${VENV}" || moved=false
+            fi
+            if [[ "${moved}" == true && -d "${SNAP}/venv" ]]; then mv "${SNAP}/venv" "${VENV}" || moved=false; fi
+        fi
+        if [[ "${moved}" == true ]]; then
+            : > "${SNAP}/VENV_BACK" 2>/dev/null || restored=false
+        else
+            restored=false
+        fi
+    fi
     for binary in ${MANAGED_BINARIES}; do
         if [[ -f "${SNAP}/bin/${binary}" ]]; then
-            cp -p "${SNAP}/bin/${binary}" "${BIN_DIR}/.${binary}.old" && mv -f "${BIN_DIR}/.${binary}.old" "${BIN_DIR}/${binary}"
+            { cp -p "${SNAP}/bin/${binary}" "${BIN_DIR}/.${binary}.old" && mv -f "${BIN_DIR}/.${binary}.old" "${BIN_DIR}/${binary}"; } \
+                || { rm -f "${BIN_DIR}/.${binary}.old"; restored=false; }
         else
-            rm -f "${BIN_DIR:?}/${binary}"
+            rm -f "${BIN_DIR:?}/${binary}" || restored=false
         fi
     done
     for link in ${MANAGED_LINKS}; do
-        rm -f "${BIN_DIR:?}/${link}"
-        [[ -L "${SNAP}/bin/${link}" ]] && cp -P "${SNAP}/bin/${link}" "${BIN_DIR}/${link}"
+        rm -f "${BIN_DIR:?}/${link}" || restored=false
+        if [[ -L "${SNAP}/bin/${link}" ]]; then cp -P "${SNAP}/bin/${link}" "${BIN_DIR}/${link}" || restored=false; fi
     done
-    if [[ -d "${VENV}" ]]; then mv "${VENV}" "${failed}/venv"; fi
-    if [[ -d "${SNAP}/venv" ]]; then mv "${SNAP}/venv" "${VENV}"; fi
-    rm -rf "${INSTALLER_DIR}"
-    if [[ -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}"; fi
-    while IFS= read -r name; do
-        mv "${DEFENSECLAW_HOME}/${name}" "${failed}/data/" 2>/dev/null || rm -rf "${DEFENSECLAW_HOME:?}/${name}"
-    done < <(data_entries)
-    for name in "${SNAP}/data"/* "${SNAP}/data"/.[!.]* "${SNAP}/data"/..?*; do
-        [[ -e "${name}" || -L "${name}" ]] && mv "${name}" "${DEFENSECLAW_HOME}/"
-    done
-    if [[ -n "${APP_PATH}" && -d "${SNAP}/DefenseClawMac.app" ]]; then
-        rm -rf "${APP_PATH}" && mv "${SNAP}/DefenseClawMac.app" "${APP_PATH}"
+    rm -rf "${INSTALLER_DIR}" || restored=false
+    if [[ -d "${SNAP}/installer" ]]; then mv "${SNAP}/installer" "${INSTALLER_DIR}" || restored=false; fi
+    if [[ ! -f "${SNAP}/DATA_ASIDE" ]]; then
+        moved=true
+        while IFS= read -r name; do
+            { [[ "${kept}" == true ]] && mv "${DEFENSECLAW_HOME}/${name}" "${failed}/data/" 2>/dev/null; } \
+                || rm -rf "${DEFENSECLAW_HOME:?}/${name}" || moved=false
+        done < <(data_entries)
+        if [[ "${moved}" == true ]]; then : > "${SNAP}/DATA_ASIDE" 2>/dev/null || true; else restored=false; fi
     fi
-    restore_external_config "${SNAP}"
-    rm -rf "${SNAP}"
+    # The saved data goes back only over a data folder the failed install has
+    # left; a name made since an interrupted restore goes aside first.
+    if [[ -f "${SNAP}/DATA_ASIDE" ]]; then
+        for name in "${SNAP}/data"/* "${SNAP}/data"/.[!.]* "${SNAP}/data"/..?*; do
+            [[ -e "${name}" || -L "${name}" ]] || continue
+            dest="${DEFENSECLAW_HOME}/${name##*/}"
+            if [[ -e "${dest}" || -L "${dest}" ]]; then
+                { [[ "${kept}" == true ]] && mv "${dest}" "${failed}/data/${name##*/}.after-restore"; } \
+                    || rm -rf "${dest}" || { restored=false; continue; }
+            fi
+            mv "${name}" "${DEFENSECLAW_HOME}/" || restored=false
+        done
+    else
+        restored=false
+    fi
+    if [[ -n "${APP_PATH}" && -d "${SNAP}/DefenseClawMac.app" ]]; then
+        { rm -rf "${APP_PATH}" && mv "${SNAP}/DefenseClawMac.app" "${APP_PATH}"; } || restored=false
+    fi
+    restore_external_config "${SNAP}" || restored=false
+    if [[ "${restored}" != true ]]; then
+        # The snapshot stays (with COMPLETE), so the next run puts the rest back first.
+        free_mb="$(df -Pk "${DEFENSECLAW_HOME}" 2>/dev/null | awk 'NR==2{print int($4/1024)}')"
+        RESTORED_NOTE="Your previous install is NOT back yet: ${SNAP} still holds it."
+        err "Could not put ${PREV_VERSION:-the previous install} back completely (see the errors above); ${free_mb:-?} MB is free next to ${DEFENSECLAW_HOME}"
+        err "Free some space on that filesystem (df -h ${DEFENSECLAW_HOME}), then run the install command again (${INSTALL_AGAIN:-the same command}): it puts the previous install back before anything else"
+        return 0
+    fi
+    rm -rf "${SNAP}" || true
     restart_old
-    warn "The failed ${VERSION} install was kept in ${failed} ($(du -sh "${failed}" 2>/dev/null | awk '{print $1}')) for troubleshooting"
-    info "Your previous install and its data are back; it is safe to remove the copy with: rm -rf '${failed}'"
+    if [[ "${kept}" == true ]]; then
+        warn "The failed ${VERSION} install was kept in ${failed} ($(du -sh "${failed}" 2>/dev/null | awk '{print $1}')) for troubleshooting"
+        info "Your previous install and its data are back; it is safe to remove the copy with: rm -rf '${failed}'"
+    else
+        warn "There was no room to keep the failed ${VERSION} install for troubleshooting, so it was deleted"
+        info "Your previous install and its data are back"
+    fi
 }
 
 restart_old() {
@@ -1260,6 +1558,10 @@ reset_audit_journal_mode() {
 
 start_gateway() {
     local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
+    # Each start explains only itself: the explanation of a failed new
+    # gateway skipped the wait for the restored one, which was then
+    # reported as not running while it came up (GAP-1241).
+    START_EXPLAINED=""
     info "Starting the gateway"
     # A 0.8.x start gives up after 60 seconds and stops the gateway it
     # launched, so one restored on a large audit database is stopped before it
@@ -1270,9 +1572,9 @@ start_gateway() {
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
     if [[ -n "${delegate}" ]]; then
-        PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start </dev/null || rc=$?
+        PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
     else
-        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start </dev/null || rc=$?
+        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
     fi
     if [[ -n "${delegate}" && ${rc} -eq 0 ]]; then
         # Launched, not yet ready: it is up only once the loop below says so.
@@ -1332,6 +1634,7 @@ explain_start_failure() {
             # restart, not start: a gateway that refused its connector can
             # still be running, and start then only says it is (GAP-0012).
             info "To accept the new agent version and refresh the lock, restart it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
+            START_DRIFT=1
         else
             info "Refresh the lock with: defenseclaw setup ${conn:-<connector>}"
         fi
@@ -1402,6 +1705,7 @@ stash_live() {
     for link in ${MANAGED_LINKS}; do
         [[ -L "${BIN_DIR}/${link}" ]] && { cp -P "${BIN_DIR}/${link}" "${slot}/bin/${link}" || return 1; }
     done
+    write_busy_shim
     while IFS= read -r name; do
         mv "${DEFENSECLAW_HOME}/${name}" "${slot}/data/" || return 1
     done < <(data_entries)
@@ -1474,6 +1778,7 @@ swap_with_previous() {
     printf '%s\n' "${was_running}" > "${hold}/GATEWAY_WAS_RUNNING"
     if ! stash_live "${hold}"; then
         if unstash_tree "${hold}"; then
+            restore_links "${hold}"
             drop_hold "${hold}"
             err "Could not set the current install aside; nothing was changed"
             return 1
@@ -1508,6 +1813,117 @@ swap_with_previous() {
     mv "${hold}" "${PREVIOUS}"
 }
 
+# GAP-1388: check_rollback_data runs SQLite's integrity check on each database
+# in previous/data before a rollback to 0.x, which has no recovery for a
+# damaged audit store, and prints the damaged ones. Nothing is written beside
+# them: opening a store that has a -wal or -journal, even read-only, writes
+# there, so such a store is checked on a copy. install.ps1 runs the same code.
+ROLLBACK_DB_CHECK_PY='import os, shutil, sqlite3, sys, tempfile
+from pathlib import Path
+
+
+def damaged(path):
+    logs = [suffix for suffix in ("-wal", "-journal") if os.path.exists(path + suffix)]
+    with tempfile.TemporaryDirectory() as tmp:
+        uri = Path(os.path.abspath(path)).as_uri() + "?immutable=1"
+        if logs:
+            copy = os.path.join(tmp, "check.db")
+            for suffix in ["", *logs]:
+                shutil.copyfile(path + suffix, copy + suffix)
+            uri = Path(copy).as_uri()
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                result = conn.execute("pragma integrity_check(1)").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError as exc:
+            result = str(exc)
+            if "malformed" not in result and "not a database" not in result:
+                return False
+    if result != "ok":
+        print(path + ": " + " ".join(result.split()), file=sys.stderr)
+    return result != "ok"
+
+
+for path in sys.argv[1:]:
+    try:
+        bad = os.path.isfile(path) and not os.path.islink(path) and damaged(path)
+    except OSError:
+        bad = False
+    if bad:
+        print(path)
+'
+
+check_rollback_data() {
+    local python="${VENV}/bin/python" db
+    [[ -x "${python}" && -d "${PREVIOUS}/data" ]] || return 0
+    while IFS= read -r db; do
+        if [[ "${db}" == "${PREVIOUS}/data/audit.db" ]]; then
+            AUDIT_DAMAGED=1
+        elif [[ -n "${db}" ]]; then
+            warn "The saved database ${db} of DefenseClaw ${back_to} failed SQLite's integrity check; ${back_to} may not start with it (see ${LOG})"
+        fi
+    done < <("${python}" -I -c "${ROLLBACK_DB_CHECK_PY}" "${PREVIOUS}"/data/*.db 2>>"${LOG}" || true)
+}
+
+# quarantine_rolled_back_audit: after the swap, move the damaged audit store
+# aside under the name the 1.0 gateway and doctor use (audit.db.corrupt-<UTC
+# time>), so the restored release starts on a new one.
+quarantine_rolled_back_audit() {
+    local db="${DEFENSECLAW_HOME}/audit.db" moved suffix
+    [[ -f "${db}" ]] || return 0
+    moved="${db}.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
+    [[ ! -e "${moved}" ]] || moved="${moved}-$$"
+    for suffix in -wal -shm -journal; do
+        [[ ! -e "${db}${suffix}" ]] || mv "${db}${suffix}" "${moved}${suffix}" || return 1
+    done
+    mv "${db}" "${moved}" || return 1
+    QUARANTINED="${moved}"
+    warn "The saved ${back_to} audit store failed SQLite's integrity check; it was kept as ${moved} and ${back_to} starts on a new audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)"
+}
+
+# undo_rollback REASON: put back the install the rollback replaced, and exit 1
+# (GAP-1388). The restored 0.x gateway is not running, and the connector
+# registrations of this install were removed for it: agents would be unguarded.
+undo_rollback() {
+    local left="${current}" undone=0 kept suffix
+    warn "$1, so the rollback is being undone"
+    stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
+    # The same swap the other way: previous/ holds the install just left.
+    current="${back_to}" was_running=false restart=true
+    swap_with_previous || undone=$?
+    current="${left}"
+    if [[ ${undone} -ne 0 ]]; then
+        err "DefenseClaw ${back_to} is installed, but its gateway is not running, so agent hooks are not guarded"
+        [[ ${undone} -ne 1 ]] || info "To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
+        exit 1
+    fi
+    # previous/ is again the install this rollback started from, as it was.
+    rm -f "${PREVIOUS}/ROLLED_BACK" "${PREVIOUS}/START_AFTER"
+    printf '%s\n' "${saved_was_running:-false}" > "${PREVIOUS}/GATEWAY_WAS_RUNNING"
+    if [[ -n "${QUARANTINED}" && ! -e "${PREVIOUS}/data/audit.db" ]]; then
+        kept="${PREVIOUS}/data/$(basename "${QUARANTINED}")"
+        for suffix in "" -wal -shm -journal; do
+            [[ ! -f "${kept}${suffix}" ]] || mv "${kept}${suffix}" "${PREVIOUS}/data/audit.db${suffix}" || true
+        done
+    fi
+    if start_gateway; then
+        ok "DefenseClaw ${current:-1.x} is back, with its gateway and agent hooks"
+    else
+        warn_not_started
+        warn "DefenseClaw ${current:-1.x} is back, but it registers its agent hooks again only once its gateway runs"
+    fi
+    # Paths in the older release's errors above now hold this install's files.
+    info "The files of DefenseClaw ${back_to} are in ${PREVIOUS}/data again; fix them there (paths above under ${DEFENSECLAW_HOME} named them)"
+    if [[ -n "${START_DRIFT:-}" ]]; then
+        info "To roll back anyway and accept the new agent version, run: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw rollback"
+    else
+        info "Fix the cause above, then run 'defenseclaw rollback' again (log: ${LOG})"
+    fi
+    exit 1
+}
+
 # A 0.x release does not know the agent-side registrations 1.0 writes (hook
 # entries with --event, the OpenCode plugin, the Hermes rendering), so its
 # gateway adds its own next to them and runs every hook twice (GAP-1521).
@@ -1517,6 +1933,18 @@ swap_with_previous() {
 # the connector OTLP tokens teardown revokes: a roll forward that minted new
 # ones left an agent exporter still holding the old token rejected, and doctor
 # warned about an unattributed OTLP credential (GAP-1925).
+# A hook entry this install wrote in a shape the older release does not
+# recognise (a Claude Code hook script path quoted for a home with a space,
+# GAP-1284) outlived that release's uninstall. This install's gateway rewrites
+# those entries in the shape the older release removes; rolling forward runs
+# setup, which writes the current shape again.
+convert_hooks_for_rollback() {
+    local gateway="${BIN_DIR}/defenseclaw-gateway"
+    [[ -x "${gateway}" ]] || return 0
+    "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
+        || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+}
+
 remove_connector_registrations_for_legacy() {
     local state="${DEFENSECLAW_HOME}/active_connector.json" gateway="${BIN_DIR}/defenseclaw-gateway" saved name names
     local hooks="${DEFENSECLAW_HOME}/hooks" tokens token
@@ -1536,6 +1964,9 @@ PY
         [[ -f "${token}" && ! -L "${token}" ]] && cp -p "${token}" "${tokens}/"
     done
     info "Removing the connector registrations of DefenseClaw ${current}; ${back_to} writes its own when its gateway starts"
+    # A rollback that fails from here on starts this install's gateway again,
+    # which writes them back from active_connector.json.
+    LEGACY_TORN_DOWN=1
     for name in ${names}; do
         "${gateway}" connector teardown --connector "${name}" >>"${LOG}" 2>&1 \
             || warn "Could not remove the ${name} registrations of DefenseClaw ${current}; ${back_to} may run its ${name} hooks twice until you run: defenseclaw setup ${name}"
@@ -1579,26 +2010,42 @@ sys.exit(0 if "openclaw" in names else 1)
 PY
 }
 
+# connector_choice ANSWER: the connector a list number or a name selects.
+connector_choice() {
+    local answer index=1 name
+    answer="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    for name in ${CONNECTOR_CHOICES}; do
+        if [[ "${answer}" == "${index}" || "${answer}" == "${name}" ]]; then
+            printf '%s' "${name}"
+            return 0
+        fi
+        index=$((index + 1))
+    done
+    return 1
+}
+
 pick_connector() {
     step "Pick an agent to guard"
-    local index=1 name choice
+    local index=1 name choice tries=0
     for name in ${CONNECTOR_CHOICES}; do
         printf "    ${BOLD}%2d)${NC} %s\n" "${index}" "${name}"
         index=$((index + 1))
     done
-    while true; do
-        printf "  Choice [default 1=codex]: " >&2
+    index=$((index - 1))
+    # An answer that is neither a number on the list nor a name is asked
+    # again, never replaced with another agent (GAP-0333).
+    while :; do
+        printf "  Choice (number or name) [default 1=codex]: " >&2
+        # No terminal to answer on: the default, as before.
         choice=$(read_tty_line) || choice=""
-        choice="${choice:-1}"
-        index=1
-        for name in ${CONNECTOR_CHOICES}; do
-            if [[ "${choice}" == "${index}" || "${choice}" == "${name}" ]]; then
-                CONNECTOR="${name}"
-                break 2
-            fi
-            index=$((index + 1))
-        done
-        warn "Choose a listed number or connector name."
+        CONNECTOR="$(connector_choice "${choice:-1}")" && break
+        tries=$((tries + 1))
+        if [[ ${tries} -ge 3 ]]; then
+            rm -rf "${STAGING}"
+            drop_new_uv
+            usage_error "No agent picked ('${choice}' is not on the list). Run the installer again and pick one, or pass --connector NAME"
+        fi
+        warn "'${choice}' is not on the list: type a number from 1 to ${index} or an agent name such as claudecode"
     done
     ok "Connector: ${CONNECTOR}"
 }
@@ -1614,7 +2061,7 @@ first_install_extras() {
         if [[ -z "${CONNECTOR}" || "${CONNECTOR}" == none ]]; then
             warn "Quickstart needs a connector; run 'defenseclaw init' when ready"
         else
-            local args=(quickstart --non-interactive --yes --connector "${CONNECTOR}")
+            local args=(quickstart --connector "${CONNECTOR}")
             [[ -n "${QUICKSTART_MODE}" ]] && args+=(--mode "${QUICKSTART_MODE}")
             local rc=0
             if [[ "${OPENCLAW_MISSING}" == true ]]; then
@@ -1622,7 +2069,7 @@ first_install_extras() {
                 # installed; the summary names it as the step after OpenClaw.
                 OPENCLAW_NEXT="defenseclaw ${args[*]}"
             else
-                PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" </dev/null || rc=$?
+                PATH="${BIN_DIR}:${PATH}" "${VENV}/bin/defenseclaw" "${args[@]}" || rc=$?
             fi
             if [[ ${rc} -ne 0 ]]; then
                 # The install stays; the summary names the failure and the re-run.

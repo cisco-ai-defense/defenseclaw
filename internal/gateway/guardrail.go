@@ -109,49 +109,76 @@ func guardrailFallbackActionForSeverity(severity string) string {
 	return guardrailFallbackActionForProfile(severity, "default")
 }
 
+// guardrailFallbackActionForProfile maps a severity with a rule-pack
+// posture's default levels and no human confirmation.
 func guardrailFallbackActionForProfile(severity, profile string) string {
-	severity = strings.ToUpper(strings.TrimSpace(severity))
-	switch strings.ToLower(strings.TrimSpace(profile)) {
-	case "strict":
-		switch severity {
-		case "CRITICAL", "HIGH", "MEDIUM":
-			return "block"
-		case "LOW":
-			return "alert"
-		default:
-			return "allow"
-		}
-	case "permissive":
-		switch severity {
-		case "CRITICAL":
-			return "block"
-		case "HIGH":
-			return "alert"
-		default:
-			return "allow"
-		}
-	}
-	switch severity {
-	case "CRITICAL":
-		return "block"
-	case "MEDIUM", "HIGH":
-		return "alert"
-	default:
-		return "allow"
-	}
+	blockThreshold, alertThreshold := guardrailProfileThresholds(strings.ToLower(strings.TrimSpace(profile)))
+	return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
 }
 
-func fallbackGuardrailVerdict(v *ScanVerdict) *ScanVerdict {
-	return fallbackGuardrailVerdictForProfile(v, "default")
-}
-
-func fallbackGuardrailVerdictForProfile(v *ScanVerdict, profile string) *ScanVerdict {
+// fallbackGuardrailVerdictForThresholds applies the resolved thresholds to a
+// verdict when no OPA policy decides. It follows the same order as
+// guardrail.rego, so one config decides the same with or without the module:
+// an advisory Cisco block downgrades to alert, a Cisco verdict at trust level
+// none counts for nothing, and a confirm needs HILT. Observe mode is not
+// applied here: callers report this raw action and apply the mode after it.
+func fallbackGuardrailVerdictForThresholds(v, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string, hilt *policy.GuardrailHILTInput) *ScanVerdict {
 	if v == nil {
-		return allowVerdict("fallback")
+		v = allowVerdict("fallback")
 	}
 	out := *v
-	out.Action = guardrailFallbackActionForProfile(out.Severity, profile)
+	localRank := guardrailSeverityRank(v.Severity)
+	ciscoRank := 0
+	if cisco != nil && thresholds.CiscoTrustLevel != "none" {
+		ciscoRank = guardrailSeverityRank(cisco.Severity)
+	}
+	rank := max(localRank, ciscoRank)
+	switch {
+	case rank <= severityNone:
+		out.Action = guardrailActionAllow
+	case thresholds.CiscoTrustLevel == "advisory" && ciscoRank >= thresholds.Block && localRank < thresholds.Alert:
+		out.Action = guardrailActionAlert
+	default:
+		confirm := mode == "action" && hilt != nil && hilt.Enabled
+		hiltMin := severityHigh
+		if confirm {
+			hiltMin = guardrailSeverityRank(hilt.MinSeverity)
+		}
+		out.Action = guardrailActionForRank(rank, thresholds.Block, thresholds.Alert, confirm, hiltMin)
+	}
 	return &out
+}
+
+// fallbackVerdict is the verdict without a Rego module: merged with the
+// action the thresholds give the local verdict and AI Defense's, the way
+// guardrail.rego weighs them, with the HILT settings of the guardrail
+// profile of ctx (hiltInputFor). Secure Client keeps the 1.0 threshold-only
+// answer on the merged verdict (issue #1092): no Cisco trust level and no
+// HILT confirm.
+func (g *GuardrailInspector) fallbackVerdict(ctx context.Context, local, merged, cisco *ScanVerdict, thresholds policy.ThresholdsInput, mode string) *ScanVerdict {
+	if secureClientGeneration() {
+		return fallbackGuardrailVerdictForThresholds(merged, nil, thresholds, "", nil)
+	}
+	if merged == nil {
+		return allowVerdict("fallback")
+	}
+	if local == nil {
+		local = allowVerdict("fallback")
+	}
+	trusted := merged
+	if thresholds.CiscoTrustLevel == "none" {
+		trusted = local
+	}
+	out := *trusted
+	out.Action = fallbackGuardrailVerdictForThresholds(local, cisco, thresholds, mode, g.hiltInputFor(ctx)).Action
+	return &out
+}
+
+// secureClientGeneration reports a live generation on the Secure Client
+// profile.
+func secureClientGeneration() bool {
+	gen := currentGeneration()
+	return gen != nil && gen.Config != nil && gen.Config.SecureClientIntegration()
 }
 
 func errorVerdict(scanner string) *ScanVerdict {
@@ -205,6 +232,7 @@ type GuardrailInspector struct {
 	// See internal/gateway/inspector.go for the interface contract,
 	// and the picker in sidecar.go for the selection logic.
 	ciscoClient Inspector
+	ciscoMu     sync.RWMutex
 	// managedMode is true when the process is running under
 	// deployment_mode = managed_enterprise. It switches the merge
 	// dispatch (mergeVerdict) to use mergeVerdictsManaged, giving the
@@ -212,10 +240,13 @@ type GuardrailInspector struct {
 	// Toggled by NewGuardrailProxy via SetManagedMode; defaults to
 	// false so existing tests and opensource callers see the exact
 	// pre-change behavior.
-	managedMode       bool
+	managedMode bool
+	// fixedThresholds, when set (SetPosture), replaces per-request
+	// threshold resolution.
+	fixedThresholds atomic.Pointer[policy.ThresholdsInput]
+	// judgeMu guards judge, which a configuration generation replaces.
+	judgeMu           sync.RWMutex
 	judge             *LLMJudge
-	policyDir         string
-	fallbackProfile   atomic.Value // string; default, strict, or permissive
 	detectionStrategy string
 	strategyPrompt    string
 	strategyComplete  string
@@ -236,17 +267,6 @@ type GuardrailInspector struct {
 	// wire config.HILT. New gateway boots set this to true so config.yaml
 	// becomes the single source of truth for prompt-side verdicts.
 	hiltSet bool
-
-	// Rego policy engine — lazily constructed on first finalize() call and
-	// cached for the lifetime of the inspector. Previously policy.New() ran
-	// on every inspection (parsing every .rego file and compiling the
-	// module set from scratch), which dominated guardrail latency under
-	// load. Reload is caller-driven via ReloadPolicies().
-	engineMu        sync.RWMutex
-	engine          *policy.Engine
-	engineLoadErr   error
-	engineInitOnce  sync.Once
-	engineErrLogged sync.Once
 
 	// tracer is set from the sidecar wiring layer once the process-owned v8
 	// runtime is available.
@@ -270,55 +290,58 @@ type GuardrailInspector struct {
 // Managed-mode installs that need to inject the token-authenticated
 // *CiscoDefenseClawInspectClient use SetCiscoInspector after
 // construction instead.
-func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge *LLMJudge, policyDir string) *GuardrailInspector {
+//
+// The inspector evaluates the OPA guardrail policy prepared by the live
+// configuration generation; without one (no policy_dir, or its Rego failed
+// to load) it applies the resolved thresholds directly.
+func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge *LLMJudge) *GuardrailInspector {
 	g := &GuardrailInspector{
 		scannerMode: scannerMode,
 		judge:       judge,
-		policyDir:   policyDir,
 	}
-	g.SetFallbackProfile("default")
 	if cisco != nil {
 		g.ciscoClient = cisco
 	}
 	return g
 }
 
-// SetFallbackProfile preserves the configured posture when OPA is absent or
-// unavailable. The value is atomic because validated config reloads can race
-// in-flight inspections.
-func (g *GuardrailInspector) SetFallbackProfile(profile string) {
+// SetPosture pins the inspector's thresholds to a rule-pack posture's
+// defaults (default, strict or permissive) for an embedder without a
+// configuration generation (the detection benchmark). The gateway never
+// calls it: its inspectors resolve thresholds per request.
+func (g *GuardrailInspector) SetPosture(posture string) {
 	if g == nil {
 		return
 	}
-	switch strings.ToLower(strings.TrimSpace(profile)) {
-	case "strict":
-		g.fallbackProfile.Store("strict")
-	case "permissive":
-		g.fallbackProfile.Store("permissive")
-	default:
-		g.fallbackProfile.Store("default")
-	}
+	block, alert := guardrailProfileThresholds(strings.ToLower(strings.TrimSpace(posture)))
+	g.fixedThresholds.Store(&policy.ThresholdsInput{Block: block, Alert: alert, CiscoTrustLevel: "full"})
 }
 
-func (g *GuardrailInspector) currentFallbackProfile() string {
+func (g *GuardrailInspector) thresholds(ctx context.Context) policy.ThresholdsInput {
+	if fixed := g.fixedThresholds.Load(); fixed != nil {
+		return *fixed
+	}
+	return requestThresholds(ctx)
+}
+
+// SetJudge replaces the LLM judge (nil disables it) for a new
+// configuration generation.
+func (g *GuardrailInspector) SetJudge(judge *LLMJudge) {
 	if g == nil {
-		return "default"
+		return
 	}
-	profile, _ := g.fallbackProfile.Load().(string)
-	if profile == "" {
-		return "default"
-	}
-	return profile
+	g.judgeMu.Lock()
+	g.judge = judge
+	g.judgeMu.Unlock()
 }
 
-// fallbackProfileFor is the posture finalize falls back to for ctx: the one
-// the rule pack of the request's guardrail profile implies
-// (proxyProfileFor), else the proxy's own (GAP-0313).
-func (g *GuardrailInspector) fallbackProfileFor(ctx context.Context) string {
-	if resolved := proxyProfileFor(ctx); resolved != nil {
-		return guardrailProfileForConfigConnector(resolved.derived, profileRequestConnector(ctx))
+func (g *GuardrailInspector) currentJudge() *LLMJudge {
+	if g == nil {
+		return nil
 	}
-	return g.currentFallbackProfile()
+	g.judgeMu.RLock()
+	defer g.judgeMu.RUnlock()
+	return g.judge
 }
 
 // SetCiscoInspector replaces the remote inspector after construction.
@@ -329,7 +352,15 @@ func (g *GuardrailInspector) SetCiscoInspector(i Inspector) {
 	if g == nil {
 		return
 	}
+	g.ciscoMu.Lock()
 	g.ciscoClient = i
+	g.ciscoMu.Unlock()
+}
+
+func (g *GuardrailInspector) currentCiscoInspector() Inspector {
+	g.ciscoMu.RLock()
+	defer g.ciscoMu.RUnlock()
+	return g.ciscoClient
 }
 
 // SetManagedMode toggles the managed-vs-opensource merge dispatch.
@@ -671,35 +702,17 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 	}
 	verdict := g.inspectStrategy(ctx, strategy, direction, content, messages, model, mode)
 	if raw != "" {
-		// Clamp each verdict as a separate Inspect call did before merging.
-		if !g.managedMode {
-			clampPromptDirectionVerdict(verdict, direction)
-		}
-		rawVerdict := g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode)
-		if !g.managedMode {
-			clampPromptDirectionVerdict(rawVerdict, direction)
-		}
-		verdict = mergePromptVerdicts(verdict, rawVerdict)
+		verdict = mergePromptVerdicts(verdict, g.inspectStrategy(ctx, strategy, direction, raw, messages, model, mode))
 	}
 
 	elapsed := time.Since(start)
 	latencyMs := elapsed.Milliseconds()
 
-	// Apply the prompt-surface UX contract before any caller observes the
-	// verdict. Done here (rather than in each call site) so the clamp is
-	// applied uniformly across regex-only / regex+judge / judge-first
-	// strategies and across pre-call, post-call, and mid-stream paths.
-	//
-	// The clamp is a UX contract for LOCAL detection: a prompt-direction
-	// block is demoted to alert so a user's prompt is never hard-blocked
-	// on a local heuristic. It must NOT apply to managed_enterprise: there
-	// the AID cloud verdict is the sole, authoritative decision-maker, so
-	// demoting a non-CRITICAL AID block to alert would leave HIGH/MEDIUM
-	// AID blocks non-enforcing while local enforcement is already off.
-	if !g.managedMode {
-		clampPromptDirectionVerdict(verdict, direction)
-	}
-
+	// A prompt block stands: guardrail.block_at is one threshold on every
+	// surface, so the proxy blocks a prompt at the level the operator set
+	// (GAP-0190). A confirm verdict has no approval surface on a prompt and
+	// is demoted to alert by resolveConfirm; the session-message scan runs
+	// after the prompt was sent and clamps itself.
 	if endSpan != nil {
 		traceFinished = true
 		endSpan(verdict, elapsed)
@@ -760,6 +773,7 @@ func (g *GuardrailInspector) inspectStrategy(ctx context.Context, strategy, dire
 // client side, but traffic is never held hostage to AID availability in
 // managed mode.
 func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, direction string, messages []ChatMessage) *ScanVerdict {
+	ciscoClient := g.currentCiscoInspector()
 	if !managedAIDMessagesHaveInspectableContent(messages) {
 		// Nothing AID can inspect (for example, Inspect rewrites every empty
 		// completion to one assistant message with empty Content). This is a
@@ -769,7 +783,7 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 		g.recordManagedAIDFailOpen(ctx, aidFailOpenNoContent, direction)
 		return allowVerdict("ai-defense")
 	}
-	if g.ciscoClient == nil {
+	if ciscoClient == nil {
 		// Managed mode with no wired inspector = no decision-maker at all.
 		// Fail open, but surface it loudly so operators can alert on a
 		// misconfigured managed install rather than silently running with
@@ -779,7 +793,7 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 	}
 	t0 := time.Now()
 	ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-	v := g.ciscoClient.Inspect(ciscoCtx, messages)
+	v := ciscoClient.Inspect(ciscoCtx, messages)
 	duration := time.Since(t0)
 	elapsed := float64(duration) / float64(time.Millisecond)
 	endCisco(phaseAction(v), phaseSeverity(v), duration)
@@ -970,7 +984,6 @@ func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, co
 		verdict = allowVerdict("ai-defense")
 	} else {
 		verdict = g.inspectRegexOnly(ctx, direction, content, messages, model, mode)
-		clampPromptDirectionVerdict(verdict, direction)
 	}
 	if endSpan != nil {
 		traceFinished = true
@@ -982,6 +995,7 @@ func (g *GuardrailInspector) InspectMidStream(ctx context.Context, direction, co
 // inspectRegexOnly is the original flow: regex patterns produce verdicts,
 // no LLM involvement. Backward-compatible with pre-strategy behavior.
 func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	ciscoClient := g.currentCiscoInspector()
 	var localResult *ScanVerdict
 	var ciscoResult *ScanVerdict
 	var ciscoElapsedMs float64
@@ -1005,13 +1019,13 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern"}
 		}
-		return g.finalize(ctx, direction, model, mode, content, localResult, nil)
+		return g.finalize(ctx, direction, model, mode, content, localResult, localResult, nil)
 	}
 
-	if (sm == "remote" || sm == "both") && g.ciscoClient != nil && len(messages) > 0 {
+	if (sm == "remote" || sm == "both") && ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1020,7 +1034,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 	merged := g.mergeVerdict(localResult, ciscoResult)
 	merged.CiscoElapsedMs = ciscoElapsedMs
 
-	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
+	return g.finalize(ctx, direction, model, mode, content, localResult, merged, ciscoResult)
 }
 
 // inspectRegexJudge uses triage patterns to route ambiguous findings to the
@@ -1028,6 +1042,7 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 // categories are intentionally excluded here: prose is not proof that a
 // command, path access, cognitive-file mutation, or C2 operation will run.
 func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	ciscoClient := g.currentCiscoInspector()
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
 	signals := triagePatterns(direction, content)
@@ -1073,7 +1088,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	runCisco := func() {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1086,24 +1101,26 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 		if ruleVerdict != nil {
 			verdict = mergeVerdicts(verdict, ruleVerdict)
 		}
+		local := verdict
 
-		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+		if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 			runCisco()
 			verdict = g.mergeVerdict(verdict, ciscoResult)
 			verdict.CiscoElapsedMs = ciscoElapsedMs
 		}
-		return g.finalize(ctx, direction, model, mode, content, verdict, ciscoResult)
+		return g.finalize(ctx, direction, model, mode, content, local, verdict, ciscoResult)
 	}
 
 	// If the rule engine found HIGH+ severity, return immediately (covers
 	// sensitive paths, dangerous commands, C2, etc. that triage doesn't have).
 	if ruleVerdict != nil && severityRank[ruleVerdict.Severity] >= severityRank["HIGH"] {
-		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+		local := ruleVerdict
+		if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 			runCisco()
 			ruleVerdict = g.mergeVerdict(ruleVerdict, ciscoResult)
 			ruleVerdict.CiscoElapsedMs = ciscoElapsedMs
 		}
-		return g.finalize(ctx, direction, model, mode, content, ruleVerdict, ciscoResult)
+		return g.finalize(ctx, direction, model, mode, content, local, ruleVerdict, ciscoResult)
 	}
 
 	// NEEDS_REVIEW: send to judge for adjudication with evidence.
@@ -1111,11 +1128,12 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// signals as MEDIUM alerts so they appear in the audit log rather than
 	// being silently dropped.
 	var judgeVerdict *ScanVerdict
+	judge := g.currentJudge()
 	if len(review) > 0 {
-		if g.judge != nil {
+		if judge != nil {
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.adjudicate")
-			judgeVerdict = g.judge.AdjudicateFindings(judgeCtx, direction, content, review)
+			judgeVerdict = judge.AdjudicateFindings(judgeCtx, direction, content, review)
 			endJudge(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(judgeStart))
 		}
 		if judgeVerdict == nil || judgeVerdict.JudgeFailed {
@@ -1126,15 +1144,15 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	}
 
 	// NO_SIGNAL + judge_sweep: run full classification.
-	if len(signals) == 0 && g.judgeSweep && g.judge != nil {
+	if len(signals) == 0 && g.judgeSweep && judge != nil {
 		sweepStart := time.Now()
 		sweepCtx, endSweep := g.startPhaseSpan(ctx, "judge.sweep")
-		judgeVerdict = g.judge.RunJudges(sweepCtx, direction, content, "")
+		judgeVerdict = judge.RunJudges(sweepCtx, direction, content, "")
 		endSweep(phaseAction(judgeVerdict), phaseSeverity(judgeVerdict), time.Since(sweepStart))
 	}
 
 	// Cisco AI Defense (if configured).
-	if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+	if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 		runCisco()
 	}
 
@@ -1149,17 +1167,19 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 			merged = mergeVerdicts(merged, judgeVerdict)
 		}
 	}
+	local := merged
 	if ciscoResult != nil {
 		merged = g.mergeVerdict(merged, ciscoResult)
 		merged.CiscoElapsedMs = ciscoElapsedMs
 	}
 
-	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
+	return g.finalize(ctx, direction, model, mode, content, local, merged, ciscoResult)
 }
 
 // inspectJudgeFirst runs the LLM judge as the primary scanner with regex as
 // a parallel safety net. If the judge fails or times out, falls back to regex.
 func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	ciscoClient := g.currentCiscoInspector()
 	var ciscoResult *ScanVerdict
 	var ciscoElapsedMs float64
 
@@ -1180,7 +1200,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// fall back to an error sentinel so the parent always proceeds
 	// (judge → regex fallback, triage → empty signal set) even under
 	// a pathological policy / scanner bug.
-	if g.judge != nil {
+	if judge := g.currentJudge(); judge != nil {
 		go func() {
 			defer func() {
 				if rec := recover(); rec != nil {
@@ -1191,7 +1211,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 			}()
 			judgeStart := time.Now()
 			judgeCtx, endJudge := g.startPhaseSpan(ctx, "judge.sweep")
-			v := g.judge.RunJudges(judgeCtx, direction, content, "")
+			v := judge.RunJudges(judgeCtx, direction, content, "")
 			endJudge(phaseAction(v), phaseSeverity(v), time.Since(judgeStart))
 			judgeCh <- result{verdict: v}
 		}()
@@ -1240,11 +1260,12 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		if localResult != nil {
 			localResult.ScannerSources = []string{"local-pattern", "judge-fallback"}
 		}
+		local := localResult
 		// Also run Cisco remote on fallback for full parity with regex_only path.
-		if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+		if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 			t0 := time.Now()
 			ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-			ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+			ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
 			ciscoElapsed := time.Since(t0)
 			ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 			endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1253,7 +1274,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 				localResult.CiscoElapsedMs = ciscoElapsedMs
 			}
 		}
-		return g.finalize(ctx, direction, model, mode, content, localResult, ciscoResult)
+		return g.finalize(ctx, direction, model, mode, content, local, localResult, ciscoResult)
 	}
 
 	merged := judgeRes.verdict
@@ -1294,10 +1315,11 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	}
 
 	// Cisco AI Defense (if configured).
-	if (g.scannerMode == "remote" || g.scannerMode == "both") && g.ciscoClient != nil && len(messages) > 0 {
+	local := merged
+	if (g.scannerMode == "remote" || g.scannerMode == "both") && ciscoClient != nil && len(messages) > 0 {
 		t0 := time.Now()
 		ciscoCtx, endCisco := g.startPhaseSpan(ctx, "cisco_ai_defense")
-		ciscoResult = g.ciscoClient.Inspect(ciscoCtx, messages)
+		ciscoResult = ciscoClient.Inspect(ciscoCtx, messages)
 		ciscoElapsed := time.Since(t0)
 		ciscoElapsedMs = float64(ciscoElapsed) / float64(time.Millisecond)
 		endCisco(phaseAction(ciscoResult), phaseSeverity(ciscoResult), ciscoElapsed)
@@ -1305,7 +1327,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		merged.CiscoElapsedMs = ciscoElapsedMs
 	}
 
-	return g.finalize(ctx, direction, model, mode, content, merged, ciscoResult)
+	return g.finalize(ctx, direction, model, mode, content, local, merged, ciscoResult)
 }
 
 // phaseAction safely extracts the action from a potentially-nil verdict
@@ -1332,60 +1354,24 @@ func phaseSeverity(v *ScanVerdict) string {
 	return v.Severity
 }
 
-// policyEngine returns the cached Rego engine, initializing it on first call.
-// Returns nil if construction failed; the error is logged exactly once so
-// OPA misconfiguration surfaces in logs without flooding them on every
-// request. Callers fall back to the merged scanner verdict when nil.
-func (g *GuardrailInspector) policyEngine() *policy.Engine {
-	g.engineInitOnce.Do(func() {
-		eng, err := policy.New(g.policyDir)
-		g.engineMu.Lock()
-		g.engine = eng
-		g.engineLoadErr = err
-		g.engineMu.Unlock()
-	})
-	g.engineMu.RLock()
-	eng, err := g.engine, g.engineLoadErr
-	g.engineMu.RUnlock()
-	if err != nil {
-		g.engineErrLogged.Do(func() {
-			fmt.Fprintf(defaultLogWriter,
-				"  [guardrail] policy engine unavailable, falling back to scanner verdict: %v\n", err)
-		})
-		return nil
+// finalize runs the live generation's OPA guardrail policy when there is
+// one, otherwise it applies the resolved thresholds. Both read
+// input.thresholds for the request's connector and profile. local is the
+// verdict before AI Defense's was merged in: guardrail.rego weighs AI Defense
+// from cisco_result alone (guardrail.cisco_trust_level), so the merged
+// severity must not reach it as local_result too. Secure Client keeps the
+// merged verdict there, as main did (issue #1092).
+func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, local, merged, ciscoResult *ScanVerdict) *ScanVerdict {
+	thresholds := g.thresholds(ctx)
+	var prepared *policy.Prepared
+	if gen := requestGeneration(ctx); gen != nil {
+		prepared = gen.OPA
 	}
-	return eng
-}
-
-// ReloadPolicies rebuilds the policy engine from disk. Call this when the
-// policy directory has changed (e.g. config reload). If the new bundle
-// fails to compile, the previous engine is retained and an error is
-// returned.
-func (g *GuardrailInspector) ReloadPolicies() error {
-	if g.policyDir == "" {
-		return nil
+	if prepared == nil {
+		return g.fallbackVerdict(ctx, local, merged, ciscoResult, thresholds, mode)
 	}
-	eng, err := policy.New(g.policyDir)
-	if err != nil {
-		return err
-	}
-	g.engineMu.Lock()
-	g.engine = eng
-	g.engineLoadErr = nil
-	g.engineMu.Unlock()
-	return nil
-}
-
-// finalize runs OPA policy evaluation if available, otherwise applies the
-// built-in posture-equivalent fallback.
-func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, merged *ScanVerdict, ciscoResult *ScanVerdict) *ScanVerdict {
-	if g.policyDir == "" {
-		return fallbackGuardrailVerdictForProfile(merged, g.fallbackProfileFor(ctx))
-	}
-
-	engine := g.policyEngine()
-	if engine == nil {
-		return fallbackGuardrailVerdictForProfile(merged, g.fallbackProfileFor(ctx))
+	if secureClientGeneration() {
+		local = merged
 	}
 
 	input := policy.GuardrailInput{
@@ -1395,14 +1381,15 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		ScannerMode:   g.scannerMode,
 		ContentLength: len(content),
 		HILT:          g.hiltInputFor(ctx),
+		Thresholds:    &thresholds,
 	}
 
-	if merged != nil && merged.Severity != "NONE" {
+	if local != nil && local.Severity != "NONE" {
 		input.LocalResult = &policy.GuardrailScanResult{
-			Action:   merged.Action,
-			Severity: merged.Severity,
-			Reason:   merged.Reason,
-			Findings: merged.Findings,
+			Action:   local.Action,
+			Severity: local.Severity,
+			Reason:   local.Reason,
+			Findings: local.Findings,
 		}
 	}
 	if ciscoResult != nil && ciscoResult.Severity != "NONE" {
@@ -1416,13 +1403,13 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 
 	opaStart := time.Now()
 	opaCtx, endOPA := g.startPhaseSpan(ctx, "opa")
-	out, err := engine.EvaluateGuardrail(opaCtx, input)
+	out, err := prepared.EvaluateGuardrail(opaCtx, input)
 	opaLatency := time.Since(opaStart)
 	if err != nil || out == nil {
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return fallbackGuardrailVerdictForProfile(merged, g.fallbackProfileFor(ctx))
+		return g.fallbackVerdict(ctx, local, merged, ciscoResult, thresholds, mode)
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 
@@ -1727,7 +1714,7 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // its content rules come from the rule pack of the request's profile
 // (proxyRuleGeneration).
 func scanLocalPatternsFor(ctx context.Context, direction, content string) *ScanVerdict {
-	return scanLocalPatternsWithRules(direction, content, proxyRuleGeneration(ctx))
+	return scanLocalPatternsWithActivation(direction, content, proxyRuleGeneration(ctx), localPatternsOf(pinnedGeneration(ctx)))
 }
 
 // scanProxyContentRules is the content rule scan of a guardrail proxy
@@ -1740,6 +1727,16 @@ func scanProxyContentRules(ctx context.Context, content string) []RuleFinding {
 }
 
 func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePackCategories) *ScanVerdict {
+	return scanLocalPatternsWithActivation(direction, content, rules, nil)
+}
+
+// scanLocalPatternsWithActivation is scanLocalPatternsWithRules with the
+// local patterns of one generation (nil: the process-wide patterns).
+func scanLocalPatternsWithActivation(
+	direction, content string,
+	rules *compiledRulePackCategories,
+	activation *localPatternsActivation,
+) *ScanVerdict {
 	// managed_enterprise: local regex detection is disabled — Cisco AI
 	// Defense is authoritative. Return an allow verdict so any residual
 	// call site (router lane, etc.) produces no local signal.
@@ -1759,6 +1756,11 @@ func scanLocalPatternsWithRules(direction, content string, rules *compiledRulePa
 	secPatterns := secretPatterns
 	exfPatterns := exfilPatterns
 	localPatternsMu.RUnlock()
+	if activation != nil {
+		injPatterns, injRegexes = activation.injectionPatterns, activation.injectionRegexes
+		piiPatterns, piiDRegexes = activation.piiRequestPatterns, activation.piiDataRegexes
+		secPatterns, exfPatterns = activation.secretPatterns, activation.exfilPatterns
+	}
 
 	// normalized defeats whitespace/slash-run evasions (Phase 7 of the
 	// multi-provider-adapters PR). Substring and regex matches use the
@@ -2547,9 +2549,44 @@ func promptSideInstructionText(messages []ChatMessage) string {
 	return strings.Join(parts, "\n")
 }
 
-// promptInspectText is the pre-call inspection source: the latest user
-// turn when present, otherwise prompt-side system/developer text.
+// currentTurnUserText joins the user messages after the last assistant or tool
+// message: the turn the model is about to answer. Most clients send one, but
+// OpenClaw 2026.9 appends a synthetic context message after the prompt, so the
+// last message alone would leave the prompt itself unscanned (GAP-0190).
+func currentTurnUserText(messages []ChatMessage) string {
+	var turn []string
+	for i := len(messages) - 1; i >= 0; i-- {
+		role := messages[i].Role
+		if role == "assistant" || role == "tool" {
+			break
+		}
+		if role == "user" && strings.TrimSpace(messages[i].Content) != "" {
+			turn = append(turn, messages[i].Content)
+		}
+	}
+	for i, j := 0, len(turn)-1; i < j; i, j = i+1, j-1 {
+		turn[i], turn[j] = turn[j], turn[i]
+	}
+	return strings.Join(turn, "\n")
+}
+
+// promptTurnText is the user text the proxy inspects before a call: the user
+// turn in progress. Secure Client keeps the source of main, the latest user
+// message, so AI Defense is sent the text it was sent before (issue #1092).
+func promptTurnText(messages []ChatMessage) string {
+	if ManagedEnterpriseActive() {
+		return lastUserText(messages)
+	}
+	return currentTurnUserText(messages)
+}
+
+// promptInspectText is the pre-call inspection source: the user turn in
+// progress (promptTurnText), else the latest user message, else prompt-side
+// system/developer text.
 func promptInspectText(messages []ChatMessage) string {
+	if text := promptTurnText(messages); strings.TrimSpace(text) != "" {
+		return text
+	}
 	if text := lastUserText(messages); strings.TrimSpace(text) != "" {
 		return text
 	}

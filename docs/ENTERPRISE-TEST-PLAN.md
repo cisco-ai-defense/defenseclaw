@@ -350,7 +350,7 @@ exceptions to rule 1: a direct request is needed to test the gateway boundary.
 Use `curl --unix-socket /run/defenseclaw-hook/hook.sock --config
 <owner-only-request-options> http://localhost/api/v1/<connector>/hook` on
 Linux, the platform hook socket on macOS, or
-`http://127.0.0.1:18970/config/patch` for D2. The owner-only curl options
+`http://127.0.0.1:18970/v1/config/providers/reload` for D2. The owner-only curl options
 file supplies `X-DefenseClaw-Client: <client from the installed hook source>`
 and the scoped bearer; never type or capture the bearer. Save only HTTP
 status, side effect and sanitized audit. These diagnostics supplement the
@@ -516,7 +516,8 @@ upgrades, repairs drift, applies a changed config, or does nothing.
 Use the disposable local account `dcexcluded` for the exclusion filter in
 both test configs. Keep the original administrator config for restoration.
 
-Every standalone config needs `config_version: 8`,
+Every standalone config needs `config_version: 9` (a version 8 file is
+migrated by `ensure`; the upgrade lanes install one on purpose),
 `deployment_mode: managed_enterprise` and `enterprise.profile: standalone`.
 Always set the profile: left unset, the policy commands treat a Windows or
 macOS host as Secure Client. On Linux and macOS, `data_dir` must be exactly
@@ -529,7 +530,7 @@ Minimal config (Linux; the enterprise overview page has the same config per
 OS, and the install rows use it verbatim):
 
 ```yaml
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw
 policy_dir: /etc/defenseclaw/policies
@@ -553,7 +554,7 @@ and `policy_dir`.
 Test config for Linux and macOS (every connector, enrollment filters):
 
 ```yaml
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw            # macOS: /opt/cisco/defenseclaw/runtime
 policy_dir: /etc/defenseclaw/policies     # macOS: /opt/cisco/defenseclaw/etc/policies
@@ -600,7 +601,7 @@ enterprise:
 Test config for Windows:
 
 ```yaml
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 gateway:
   api_bind: 127.0.0.1
@@ -652,8 +653,9 @@ failure drills). The Windows result is for Setup `/ensure CONFIG=<file>`:
 | An inline `cisco_ai_defense.api_key` | Refused | Refused; the Intune packager also refuses a config with an `api_key:` line |
 | `enterprise.trust.mode: authenticode` with the unsigned Setup | Accepted, not used | Exit `1639`; the message names the fix |
 | `enterprise.trust.mode: ""` | Accepted (empty means not set) | Accepted |
-| `guardrail.rule_pack_dir: /nonexistent` | Exit `1`, refused | Exit `1639` |
-| No `config_version` | Refused; the error names the file passed with `--config` and says to add `config_version: 8` (it does not suggest `defenseclaw migrate`, which the enterprise package does not ship) | Refused (`1639`) |
+| `guardrail.rule_pack_dir: /nonexistent` in a `config_version: 8` file (`ensure` migrates it) | Exit `1`, refused | Exit `1639` |
+| `guardrail.rule_pack: x` with `guardrail.custom_packs.x.path: /nonexistent` in a `config_version: 9` file | Exit `1`, refused; record the code | Refused; record the exit code |
+| No `config_version` | Refused; the error names the file passed with `--config` and says to add `config_version: 9` (it does not suggest `defenseclaw migrate`, which the enterprise package does not ship) | Refused (`1639`) |
 | No `guardrail.connectors` | Installs; `status` warns `no_connectors_enabled` when there are eligible users; `security_complete: false` | Installs; `security_complete: false` |
 
 ### Linux install
@@ -1171,6 +1173,7 @@ sudo $G enterprise secret remove --name ai-defense-api-key --json
 # CLI-09, Windows: the key file lives in an admin-only folder
 New-Item -ItemType Directory -Path C:\Admin -Force | Out-Null
 icacls C:\Admin /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+icacls C:\Admin /remove:g "*S-1-5-11" "*S-1-5-32-545" /T /C
 $key = Read-Host -AsSecureString -Prompt 'Disposable test API key'
 [IO.File]::WriteAllText('C:\Admin\ai-defense-api-key.txt', (ConvertFrom-SecureString -SecureString $key -AsPlainText))
 & $Cli enterprise secret set --name ai-defense-api-key --from-file C:\Admin\ai-defense-api-key.txt --json
@@ -1313,7 +1316,7 @@ For B2, during the same admin-controlled stopped-socket window, std1 tries
 protected parent exists first; the attempt must be denied and the file
 absent. Windows has no Unix hook socket (`N/A`). For D2 use the owner-only curl options file
 described in [Rules for every row](#rules-for-every-row) against
-`/config/patch`, then a second user's scoped route. For D4 run C3 and C3b
+`/v1/config/providers/reload`, then a second user's scoped route. For D4 run C3 and C3b
 with only one account's environment changed.
 
 For the remaining A variants, use a separate disposable snapshot for each
@@ -1513,7 +1516,7 @@ rules:
     tags: [test]
 ```
 
-Validate with `<G> rulepack validate --dir <absolute-pack-path>` (add `--json` for machine output). Put `guardrail.mode: action`, `guardrail.rule_pack_dir: <absolute-pack-path>`, and `guardrail.hilt: {enabled: true, min_severity: HIGH}` in the managed config. Apply through `enterprise linux ensure --from-package --config <absolute-config> --json`, `enterprise macos ensure --from-package --config <absolute-config> --json`, or Windows Setup `/ensure JSON=1 CONFIG=<absolute-config>`. On a payload install use `--payload <payload-dir>` in place of `--from-package`. Then run `enterprise policy show` and `enterprise policy verify --json`. A bare `pattern` can be detection-only for generic tool calls, so the block and ask rules also use parsed command facts. `in c.argv` matches one exact argument; quote the marker as its own argument in the prompt.
+Validate with `<G> rulepack validate --dir <absolute-pack-path>` (add `--json` for machine output). Put `guardrail.mode: action`, `guardrail.rule_pack: <name>` with `guardrail.custom_packs.<name>: {path: <absolute-pack-path>, digest: sha256:<digest from rulepack validate>}`, and `guardrail.hilt: {enabled: true, min_severity: HIGH}` in the managed config. Apply through `enterprise linux ensure --from-package --config <absolute-config> --json`, `enterprise macos ensure --from-package --config <absolute-config> --json`, or Windows Setup `/ensure JSON=1 CONFIG=<absolute-config>`. On a payload install use `--payload <payload-dir>` in place of `--from-package`. Then run `enterprise policy show` and `enterprise policy verify --json`. A bare `pattern` can be detection-only for generic tool calls, so the block and ask rules also use parsed command facts. `in c.argv` matches one exact argument; quote the marker as its own argument in the prompt.
 
 ### Common interactive cases
 
@@ -1707,7 +1710,7 @@ All changes in this section are administrator actions on disposable hosts. Use V
 | UPG-L-03 | Linux payload V1 | `sudo "$G" enterprise linux upgrade --payload <root-owned-v2-dir> --json` | V2; a package-owned install refuses this channel with `package_owned_binaries` |
 | UPG-M-01 | macOS pkg V1 | `sudo installer -pkg ./defenseclaw-enterprise-9.9.10-darwin-arm64.pkg -target /` | V2 and healthy launchd jobs; failed apply fails installer |
 | UPG-W-01 | Windows V1, V2 Setup staged | `& $SetupV2 /ensure JSON=1` | Action `ensure`, warning `ensure_upgrade`, event 112, marker V2. Guardian re-renders signed-in users' hooks before the new gateway starts; signed-out users at sign-in. Claude attestation becomes stale; repeat CLI-12 |
-| UPG-02a | Ubuntu package V2, V1 staged | `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<v1>-linux-<arch>.deb`; inspect `last-package-result.json`, then run V1 `ensure --from-package --allow-downgrade` | Package manager may install V1 but lifecycle records `downgrade_refused`; explicit allowance applies V1; verify afterward |
+| UPG-02a | Ubuntu package V2, V1 staged | `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<v1>-linux-<arch>.deb`; then `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade` and repeat, then run V1 `ensure --from-package --allow-downgrade --config config.yaml.v8.bak` | The first install is refused by the apt hook before any file changes and the services keep running; with the marker V1 installs, the marker is used up, and the explicit allowance applies V1; verify afterward |
 | UPG-02b | RHEL package V2, V1 staged | Try `sudo rpm -U ./defenseclaw-enterprise-<v1>-linux-amd64.rpm`; then `sudo dnf downgrade` and V1 `ensure --from-package --allow-downgrade` | First downgrade refused; explicit channel applies V1 and verifies |
 | UPG-02c | macOS pkg V2, V1 staged | Try the V1 pkg; then create the one-use `/opt/cisco/defenseclaw/lifecycle/allow-downgrade` marker as described in the [lifecycle guide](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/lifecycle) and retry | Preinstall first refuses; marker permits one intentional downgrade; verify afterward |
 | UPG-02d | Windows V2, V1 Setup staged | Try `& $SetupV1 /ensure JSON=1`, then explicit `& $SetupV1 /upgrade JSON=1` | Ensure refuses downgrade; explicit upgrade applies the approved V1 rollback; verify afterward |
@@ -1844,15 +1847,15 @@ has found a regression.
   `authenticode|hash_pinned`). Live: macOS, Windows.
 - **REG-1-1-03** **[U] Missing `config_version`.** Run ensure with a config that has no `config_version`.
   Expect: the error names the file you passed with `--config` (not the installed path) and
-  says to add `config_version: 8`; it does not tell you to run `defenseclaw migrate` (not
+  says to add `config_version: 9`; it does not tell you to run `defenseclaw migrate` (not
   shipped in the enterprise package). Live: RHEL, macOS.
-- **REG-1-1-04** **[U] Layout-fixed keys default.** Omit `data_dir` and `guardrail.rule_pack_dir`. Expect:
+- **REG-1-1-04** **[U] Layout-fixed keys default.** Omit `data_dir` and `guardrail.rule_pack`. Expect:
   `data_dir` defaults to the layout's data directory (`/var/lib/defenseclaw`,
   `/opt/cisco/defenseclaw/runtime`) and the rule pack to `<policy_dir>/guardrail/default` if
   that folder exists, else the vendor pack; an explicit wrong `data_dir` is still refused. An
   omitted `policy_dir` is the root-owned vendor policy folder, not a folder inside `data_dir`.
   Live: RHEL, macOS.
-- **REG-1-1-05** **[U] Rule pack created after install.** With `rule_pack_dir` unset, create
+- **REG-1-1-05** **[U] Rule pack created after install.** With `guardrail.rule_pack` unset, create
   `<policy_dir>/guardrail/default` later and run ensure. Expect: ensure applies it and
   restarts the gateway (it does not say `up_to_date` while the gateway keeps the vendor pack).
   Code/docs.
@@ -2147,7 +2150,7 @@ has found a regression.
 - **REG-1-5-05** **[U] Rule pack validation.** Validate a pack with an over-cost CEL expression using `<G>
   rulepack validate --dir <pack>` (listed in help). Expect: the refusal names the per-rule and
   catalog cost limits. The enterprise docs describe this validator, where a custom pack lives,
-  `guardrail.rule_pack_dir`, ensure, and that in-place edits need a gateway restart. Live:
+  `guardrail.rule_pack` and `guardrail.custom_packs`, ensure, and that in-place edits need a gateway restart. Live:
   macOS, RHEL. (The rule is still named by index, record as a UX finding.)
 
 ### Foreign-hook guard (standalone profile)
@@ -2425,7 +2428,7 @@ has found a regression.
 - **REG-1-9-06** **[W] Config the gateway cannot load.** Setup `/ensure` with a config the gateway would
   reject. Expect: exit 1639 before any change, naming the file, the location and the reason
   (the same check as `validate-service-config`). Live.
-- **REG-1-9-07** **[W] No `rule_pack_dir`.** Expect: the gateway starts with the embedded packs. Live.
+- **REG-1-9-07** **[W] No `guardrail.rule_pack`.** Expect: the gateway starts with the embedded packs. Live.
 - **REG-1-9-08** **[W] Newer Setup recovers a pending transaction.** With a failed install pending, run a
   newer Setup `/ensure` as SYSTEM. Expect: it recovers the transaction with its own verified
   gateway and installs; rollback cleanup survives an enumerator republication. Live. The
@@ -2506,6 +2509,64 @@ a marker-bearing plugin without a receipt; the OpenHands decoder and Antigravity
 projection reach every profile. Block and confirm wording, the Windows Codex machine-policy
 command and other Secure Client texts are unchanged (Secure Client items are tracked
 separately, see [Related open issues](#related-open-issues-outside-910-do-not-refile)).
+
+### Single source of truth: managed lockdown (P0)
+
+On a managed standalone host `config.yaml` is the only policy. Run these after
+the lifecycle rows pass. Record each exit code, message and audit row.
+
+- **REG-1-12-01** **[L][M] Policy digest and generation.** After `ensure`, `<G> enterprise <os> status --json`
+  has `policy.effective_digest` (`sha256:` and 64 hex), `policy.config_generation` (1 or more),
+  `policy.applied: true` and `gateway_reported_digest` equal to the digest. `policy-state.json`
+  exists in the lifecycle directory (root-only). A config change raises `config_generation` by one
+  and changes the digest. Two hosts of one OS with the same config report the same digest.
+  `<G> policy digest` prints the same digest and names the components. Live: RHEL, macOS.
+- **REG-1-12-02** **[W] Windows reports the digest through `policy show`.** `enterprise policy show` prints
+  `Effective policy sha256:<12 hex>, config generation N`; the lifecycle result has no `policy`
+  object yet. Record any change in that. Live: Windows.
+- **REG-1-12-03** **[L][M][W] A version 8 administrator config migrates.** `ensure --config` with a
+  `config_version: 8` file leaves `config_version: 9` in place, `config.yaml.v8.bak` byte-equal to the
+  file you pushed, `migration-v9.json` with `conflicts: []`, and `config.generation.json` with actor
+  `lifecycle`. A second `ensure` is a no-op. When the MDM puts the same version 8 file back, `ensure`
+  does not rewrite it on every run. Live: RHEL, macOS, Windows.
+- **REG-1-12-04** **[L][M] In-place edits.** A valid edit of the installed `config.yaml` is applied by
+  the apply trigger and recorded as the next generation. An invalid edit is reverted to
+  `committed-config.yaml`, kept as `rejected-config.yaml`, `status` warns and `verify` fails with
+  `config_rejected` until the file is written again. A hand-edited derived file (a machine-policy
+  entry, a unit) is rewritten by the next `ensure` or `repair`. Live: RHEL, macOS.
+- **REG-1-12-05** **[U] Local writers refuse.** As a standard user and as root, `defenseclaw config set`
+  and `unset`, `skill`, `mcp`, `plugin` and `tool` with `block` and `allow`, and `guardrail block-at`
+  write nothing; `config set` and the asset commands exit `3` with "This device is managed". The
+  gateway answers `403` `managed_device` to `POST /enforce/block` and `POST /enforce/allow` with the
+  gateway token. Each attempt is in the audit log as `outcome=refused reason=managed_device`.
+  Quarantine, restore, runtime disable and enable, and approvals still work. Record any writer that
+  fails with a stack trace instead of the refusal. Live: any host with the `defenseclaw` CLI.
+- **REG-1-12-06** **[U] The environment cannot weaken the host.** With `DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS`,
+  `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` and a `.env` entry set, behavior is unchanged and doctor lists
+  the names (not the values) under `Ignored environment overrides`. `DEFENSECLAW_FAIL_MODE=closed`
+  is honored and `=open` is not. `DEFENSECLAW_DEPLOYMENT_MODE=local` and
+  `DEFENSECLAW_ENTERPRISE_PROFILE=secure_client` do not make `config set` succeed. Live.
+- **REG-1-12-07** **[L][M] Local block and allow rows are ignored.** Put an operator row in the `actions`
+  table of `audit.db` (a version 8 `defenseclaw skill block` on the previous release), then migrate:
+  the result warns `local_enforcement_entries_ignored`, the row is neither imported nor deleted, and
+  the asset is not blocked until it is in `asset_policy`. Live: RHEL.
+- **REG-1-12-08** **[U] Release source.** With `update.source` or `DEFENSECLAW_REPO` set to a mirror, the
+  installer refuses without cosign 2.0 or later; with a mirror that serves a changed `checksums.txt`
+  it refuses on the signature; only the official source runs checksum-only. On a managed host
+  `defenseclaw upgrade` refuses and `DEFENSECLAW_REPO` has no effect. Code.
+- **REG-1-12-09** **[L][M] Stale and rejected policy.** Edit a pinned custom rule pack in place so its
+  digest no longer matches. Expect: `/health` has `policy.last_reload_error`, the previous policy
+  keeps enforcing, `policy.applied` stays true for the old digest until the config is fixed, and
+  the fix clears the error. Live: RHEL.
+- **REG-1-12-10** **[L][M][W] The release gate.** A Release workflow dry run on a branch runs
+  `Enterprise Upgrade (deb)`, `(rpm-el9)`, `(pkg)` and `(Windows)` against the previous release;
+  each passes, or prints the "No previous 1.x release" notice. Read the lane results artifact
+  `enterprise-upgrade-results-<lane>`. CI.
+- **REG-1-12-11** **[M][W] Secure Client invariance.** Under the Secure Client profile the managed gate
+  does not engage, `/health` and `/status` have no `policy` object, the lifecycle result has no
+  `policy`, operator rows in `audit.db` still apply, and the environment policy reads the raw
+  environment. Live when a Secure Client build is available, otherwise `NOT_RUN`.
+
 ---
 
 ## Known residuals and open issues

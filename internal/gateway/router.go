@@ -42,6 +42,8 @@ type EventRouter struct {
 	store  *audit.Store
 	logger *audit.Logger
 	policy *enforce.PolicyEngine
+	// health receives the agent model activity the event stream reports.
+	health *SidecarHealth
 	// The process-owned v8 capabilities are published atomically under one lock.
 	// EventRouter never retains a runtime generation lease or generated trace
 	// handle across WebSocket deliveries.
@@ -50,13 +52,17 @@ type EventRouter struct {
 	observabilityV8Lifecycle     lifecycleV8Runtime
 	observabilityV8Authoritative bool
 	configMu                     sync.RWMutex
-	rulePackMu                   sync.RWMutex
 	notify                       *NotificationQueue
-	judge                        *LLMJudge
-	rp                           *guardrail.RulePack
-	guardrailCfg                 *config.GuardrailConfig
-	hilt                         *HILTApprovalManager
-	judgeSem                     chan struct{} // bounds concurrent active tool-judge executions
+	// judge serves a router outside a gateway; a gateway router uses the
+	// judge of the generation each event reads (policyGeneration).
+	judge *LLMJudge
+	// generationSource is the gateway's published generation. Every event
+	// reads it once and takes its rule pack, rules, local patterns and judge
+	// from that generation (GAP-0455); nil outside a gateway.
+	generationSource func() *Generation
+	guardrailCfg     *config.GuardrailConfig
+	hilt             *HILTApprovalManager
+	judgeSem         chan struct{} // bounds concurrent active tool-judge executions
 
 	autoApprove bool
 	spanMu      sync.Mutex
@@ -97,6 +103,9 @@ type EventRouter struct {
 	// admission policy. Populated at bootstrap via SetDefaultPolicyID.
 	defaultPolicyID string
 }
+
+// SetHealth lets the router report completed model calls to the sidecar health snapshot.
+func (r *EventRouter) SetHealth(h *SidecarHealth) { r.health = h }
 
 // NewEventRouter creates a router that handles gateway events for the sidecar.
 func NewEventRouter(client *Client, store *audit.Store, logger *audit.Logger, autoApprove bool) *EventRouter {
@@ -327,6 +336,12 @@ func (r *EventRouter) logStreamAction(sessionKey, action, target, details string
 // Bifrost, skill-over-Bifrost), extend the payload first, then plumb
 // a provider/qualifier pair through here via toolDestinationApp.
 func (r *EventRouter) logStreamToolAction(sessionKey, action, toolName, toolID, details string) {
+	r.logStreamToolActionSeverity(sessionKey, action, toolName, toolID, details, "INFO")
+}
+
+// logStreamToolActionSeverity is logStreamToolAction for a row that is an
+// alert: the alert views list only rows above INFO.
+func (r *EventRouter) logStreamToolActionSeverity(sessionKey, action, toolName, toolID, details, severity string) {
 	if r == nil || r.logger == nil {
 		return
 	}
@@ -339,23 +354,24 @@ func (r *EventRouter) logStreamToolAction(sessionKey, action, toolName, toolID, 
 		},
 	)
 	ctx := audit.ContextWithEnvelope(context.Background(), env)
-	_ = r.logger.LogActionCtx(ctx, action, toolName, details)
+	_ = r.logger.LogActionCtxSeverity(ctx, action, toolName, details, severity)
 }
 
-// SetRulePack configures the guardrail rule pack for tool result inspection.
-func (r *EventRouter) SetRulePack(rp *guardrail.RulePack) {
-	r.rulePackMu.Lock()
-	r.rp = rp
-	r.rulePackMu.Unlock()
-}
-
-func (r *EventRouter) rulePack() *guardrail.RulePack {
-	if r == nil {
+// policyGeneration is the generation one event is decided with: the
+// gateway's published one, nil for a router outside a gateway.
+func (r *EventRouter) policyGeneration() *Generation {
+	if r == nil || r.generationSource == nil {
 		return nil
 	}
-	r.rulePackMu.RLock()
-	defer r.rulePackMu.RUnlock()
-	return r.rp
+	return r.generationSource()
+}
+
+// rulePack is the active rule pack of the generation events read.
+func (r *EventRouter) rulePack() *guardrail.RulePack {
+	if g := r.policyGeneration(); g != nil {
+		return g.active
+	}
+	return nil
 }
 
 // Route dispatches a single event frame to the correct handler.
@@ -666,6 +682,12 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// operation. The source reports no start instant, so the adapter
 		// records a truthful zero-duration span and retains only its ended
 		// W3C context for a subsequent tool or approval child.
+		// OpenClaw's own assistant frames (provider "openclaw", such as a
+		// delivery mirror) are not provider calls a proxy hop carries.
+		if msg.Role == "assistant" && msg.Model != "" && r.health != nil && !secureClientGeneration() &&
+			!strings.EqualFold(msg.Provider, "openclaw") {
+			r.health.RecordAgentModelActivity(envelope.MessageID, msg.StopReason == "error" || msg.ErrorMessage != "")
+		}
 		if msg.Role == "assistant" && msg.Model != "" && emitModelOperation {
 			promptTokens, completionTokens := int64(0), int64(0)
 			if msg.Usage != nil {
@@ -776,14 +798,16 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	if content == "" {
 		return
 	}
-	if r.judge != nil {
-		r.judge.ObserveSessionPrompt(ContextWithSessionID(context.Background(), sessionKey), content)
+	g := r.policyGeneration()
+	judge := judgeOf(g, r.judge)
+	if judge != nil {
+		judge.ObserveSessionPrompt(ContextWithSessionID(context.Background(), sessionKey), content)
 	}
 	start := time.Now()
 
-	verdict := scanLocalPatterns("prompt", content)
+	verdict := scanLocalPatternsWithActivation("prompt", content, ruleGenerationOf(g, ""), localPatternsOf(g))
 
-	runJudge := r.judge != nil && verdict != nil && verdict.Severity == "HIGH"
+	runJudge := judge != nil && verdict != nil && verdict.Severity == "HIGH"
 	if runJudge {
 		select {
 		case r.judgeSem <- struct{}{}:
@@ -791,7 +815,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 				defer func() { <-r.judgeSem }()
 				jctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				defer cancel()
-				if jv := r.judge.RunJudges(jctx, "prompt", content, ""); jv != nil {
+				if jv := judge.RunJudges(jctx, "prompt", content, ""); jv != nil {
 					verdict = mergeWithJudge(verdict, jv)
 				}
 			}()
@@ -806,7 +830,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		return
 	}
 
-	verdict.Action = guardrailRuntimeActionForGuardrail(r.guardrailConfig(), verdict.Severity, false)
+	verdict.Action = guardrailContentActionForGuardrail(r.guardrailConfig(), r.connectorName(), verdict.Severity)
 	// Mirror the proxy/inspector clamp on this independent prompt-scan
 	// path so the session-message surface obeys the same contract:
 	// prompts get audited as alerts; tool-call gate handles enforcement.
@@ -1324,9 +1348,9 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	//
 	// managed_enterprise: the judge is a local decision-maker — disabled so
 	// AID stays authoritative.
-	if !ManagedEnterpriseActive() && r.judge != nil && len(payload.Args) > 0 {
+	if judge := judgeOf(r.policyGeneration(), r.judge); !ManagedEnterpriseActive() && judge != nil && len(payload.Args) > 0 {
 		judgeCtx := ContextWithSessionID(context.Background(), payload.SessionID)
-		judgeSample, judgeEligible := r.judge.prepareToolJudgeSample(judgeCtx, payload.Tool, string(payload.Args))
+		judgeSample, judgeEligible := judge.prepareToolJudgeSample(judgeCtx, payload.Tool, string(payload.Args))
 		if judgeEligible {
 			go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage, sample string) {
 				r.judgeSem <- struct{}{}
@@ -1334,7 +1358,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				judgeCtx := ContextWithSessionID(context.Background(), sessionID)
 				ctx, cancel := context.WithTimeout(judgeCtx, 60*time.Second)
 				defer cancel()
-				verdict := r.judge.runToolJudgeSample(ctx, tool, string(args), sample)
+				verdict := judge.runToolJudgeSample(ctx, tool, string(args), sample)
 				if verdict.Severity != "NONE" {
 					// Keep stderr redacted, but retain the source reason for the v8
 					// route-specific redaction boundary.
@@ -1419,27 +1443,31 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 //     logged once per call so the operator can see the degraded state —
 //     the deterministic scan still runs.
 func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
-	rp := r.rulePack()
-	if rp == nil || payload.Output == "" {
+	// One generation decides the whole result: the pack's sensitive tools,
+	// its rules and patterns, and the judge (GAP-0455).
+	g := r.policyGeneration()
+	if g == nil || g.active == nil || payload.Output == "" {
 		return
 	}
+	rp := g.active
+	judge := judgeOf(g, r.judge)
 	stool := rp.LookupSensitiveTool(payload.Tool)
 	if stool == nil || !stool.ResultInspection {
 		return
 	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] inspecting sensitive tool result: %s (output_len=%d judge=%t)\n",
-		payload.Tool, len(payload.Output), stool.JudgeResult && r.judge != nil)
+		payload.Tool, len(payload.Output), stool.JudgeResult && judge != nil)
 
 	// Stage 1: deterministic regex scan. Always runs.
-	verdict := scanLocalPatterns("completion", payload.Output)
+	verdict := scanLocalPatternsWithActivation("completion", payload.Output, ruleGenerationOf(g, ""), localPatternsOf(g))
 
 	// Stage 2: LLM judge, if requested and available. Merge into verdict.
 	// managed_enterprise: the judge is a local decision-maker — disabled so
 	// AID stays authoritative. Combined with the inert scanLocalPatterns
 	// above, the verdict stays allow and this lane no-ops (fail open).
 	if stool.JudgeResult && !ManagedEnterpriseActive() {
-		if r.judge == nil {
+		if judge == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] tool %s requests judge_result but judge unavailable; using regex-only verdict\n",
 				payload.Tool)
 		} else {
@@ -1449,7 +1477,7 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 					defer func() { <-r.judgeSem }()
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
-					if jv := r.judge.RunJudges(ctx, "completion", payload.Output, payload.Tool); jv != nil {
+					if jv := judge.RunJudges(ctx, "completion", payload.Output, payload.Tool); jv != nil {
 						verdict = mergeWithJudge(verdict, jv)
 					}
 				}()
@@ -1487,10 +1515,11 @@ func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] tool result alert: tool=%s action=%s severity=%s entities=%d findings=%v\n",
 		payload.Tool, verdict.Action, verdict.Severity, entityCount, scrubbedFindings)
-	r.logStreamToolAction(payload.SessionID, string(audit.ActionToolResultPIIAlert), payload.Tool, payload.ID,
+	r.logStreamToolActionSeverity(payload.SessionID, string(audit.ActionToolResultPIIAlert), payload.Tool, payload.ID,
 		fmt.Sprintf("severity=%s entities=%d findings=%d reason=%s",
 			verdict.Severity, entityCount, len(verdict.Findings),
-			stripLogInjectionRunes(verdict.Reason)))
+			stripLogInjectionRunes(verdict.Reason)),
+		toolResultAlertSeverity(verdict.Severity))
 	if r.notify != nil {
 		// SecurityNotification ultimately surfaces in the TUI
 		// and any webhook alert, both of which are operator-

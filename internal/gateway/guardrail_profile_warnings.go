@@ -69,6 +69,98 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 	return append(warnings, set.groupSIDs.warnings(set.assignments)...)
 }
 
+// healthProfileWarnings is what /health serves to root on the hook socket,
+// and /status to the gateway credential, for status and verify: the
+// assignment warnings profile-explain lists, with the first group pass
+// waited for briefly. Without the wait, a status right after a gateway
+// restart listed no unknown group while profile-explain named it (GAP-0830).
+func (set *guardrailProfileSet) healthProfileWarnings() []string {
+	warnings := set.assignmentWarningsWithWait(true, profileGroupCheckWait)
+	return append(warnings, set.inertHILTWarnings()...)
+}
+
+// inertHILTWarning uses the same resolved threshold as enforcement. Keep
+// blocking precedence and explain why an enabled approval cannot fire.
+func inertHILTWarning(cfg *config.Config, connector string) string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return ""
+	}
+	hilt := cfg.EffectiveHILTForConnector(connector)
+	block := resolveThresholds(cfg, connector).Block
+	if !config.HILTBlockedByThreshold(hilt, block) {
+		return ""
+	}
+	minimum := strings.ToUpper(strings.TrimSpace(hilt.MinSeverity))
+	if minimum == "" {
+		minimum = "HIGH"
+	}
+	return fmt.Sprintf("human approval at %s cannot ask: block_at %s blocks those findings first; lower hilt.min_severity or raise block_at", minimum, block)
+}
+
+func (set *guardrailProfileSet) inertHILTWarnings() []string {
+	if set == nil || set.base == nil || set.base.SecureClientIntegration() {
+		return nil
+	}
+	configs := map[string]*config.Config{"guardrail": set.base}
+	for name, profile := range set.profiles {
+		configs["guardrail.profiles."+name] = profile.Config
+	}
+	return inertHILTWarningsForConfigs(configs)
+}
+
+// ConfigHILTWarnings is the offline validation view of the same warnings
+// used by profile explain and gateway health. It does not change enforcement.
+func ConfigHILTWarnings(cfg *config.Config) []string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return nil
+	}
+	configs := map[string]*config.Config{"guardrail": cfg}
+	profiles, err := cfg.DeriveGuardrailProfiles()
+	if err != nil {
+		return nil // the canonical validator reports the error separately
+	}
+	for name, profile := range profiles {
+		configs["guardrail.profiles."+name] = profile.Config
+	}
+	return inertHILTWarningsForConfigs(configs)
+}
+
+func inertHILTWarningsForConfigs(configs map[string]*config.Config) []string {
+	var scopes []string
+	for scope := range configs {
+		scopes = append(scopes, scope)
+	}
+	slices.Sort(scopes)
+	var warnings []string
+	for _, scope := range scopes {
+		cfg := configs[scope]
+		connectors := map[string]bool{"": true}
+		for name := range cfg.Guardrail.Connectors {
+			connectors[config.NormalizeConnectorName(name)] = true
+		}
+		if profileName := strings.TrimPrefix(scope, "guardrail.profiles."); profileName != scope {
+			for name := range configs["guardrail"].Guardrail.Profiles[profileName].Connectors {
+				connectors[config.NormalizeConnectorName(name)] = true
+			}
+		}
+		var names []string
+		for name := range connectors {
+			names = append(names, name)
+		}
+		slices.Sort(names)
+		for _, name := range names {
+			if note := inertHILTWarning(cfg, name); note != "" {
+				path := scope
+				if name != "" {
+					path += ".connectors." + name
+				}
+				warnings = append(warnings, path+": "+note)
+			}
+		}
+	}
+	return warnings
+}
+
 // unknownConnectorWarnings points out profile selectors and overrides that
 // cannot match any built-in connector. Config is a leaf package, so it cannot
 // consult the runtime registry; plugin names remain valid, with a warning

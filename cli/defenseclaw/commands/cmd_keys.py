@@ -33,6 +33,7 @@ import click
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
+from defenseclaw.config_writer import ACTOR_PREFIX_CLI, current_actor
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.credentials import (
     CredentialSpec,
@@ -95,6 +96,24 @@ def keys_list(app: AppContext, as_json: bool, show_values: bool, missing_only: b
         _render_unregistered(app, statuses)
 
 
+def _emit_gateway_restart_hint(cfg, env_name: str) -> None:
+    """Say a running gateway needs a restart to see a changed ``.env`` value (GAP-0016).
+
+    The gateway reads ``.env`` once, at start, so a rotated judge, LLM or
+    destination key keeps its old value until the gateway restarts.
+    """
+    import os
+
+    from defenseclaw.process_liveness import pid_file_alive
+
+    if pid_file_alive(os.path.join(cfg.data_dir, "gateway.pid")):
+        ux.subhead(
+            f"The running gateway keeps the {env_name} it loaded at start; "
+            "apply the change with: defenseclaw-gateway restart",
+            indent="    ",
+        )
+
+
 def _gateway_token_names(cfg) -> set[str]:
     """Env names that hold DefenseClaw's own gateway auth token."""
     names = {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
@@ -111,6 +130,26 @@ def required_removal_warning(cfg, env_name: str) -> str:
     marks such a key "● REQUIRED <feature>"; ``keys remove`` and the TUI
     confirm repeat that before the key is deleted.
     """
+    import yaml
+
+    from defenseclaw.config import config_path_for_data_dir
+
+    try:
+        with open(config_path_for_data_dir(cfg.data_dir), encoding="utf-8") as stream:
+            source = yaml.safe_load(stream) or {}
+        destinations = ((source.get("observability") or {}).get("destinations") or [])
+        for destination in destinations:
+            if isinstance(destination, dict) and env_name in (
+                destination.get("token_env"), destination.get("bearer_env")
+            ):
+                name = destination.get("name") or "this destination"
+                return (
+                    f"{env_name} is still used by observability destination {name}; removing it will stop "
+                    f"that destination until the key is restored. Remove the destination first with: "
+                    f"defenseclaw setup observability remove {name} --yes."
+                )
+    except (OSError, ValueError, AttributeError, yaml.YAMLError):
+        pass  # Best effort: removal still warns for credentials the registry marks required.
     try:
         statuses = classify(cfg)
     except Exception:  # noqa: BLE001 - a partial config must not block a remove.
@@ -145,6 +184,19 @@ def _render_unregistered(app: AppContext, statuses: list[CredentialStatus]) -> N
     click.echo(f"  {ux.dim('Remove one with: defenseclaw keys remove <ENV_NAME>')}")
 
 
+def _refuse_managed_secret_write(app: AppContext, action: str) -> None:
+    # A per-user dotenv cannot rotate a managed standalone credential.
+    from defenseclaw.enforce.asset_lists import ManagedDeviceError, is_managed_standalone
+
+    if is_managed_standalone(app.cfg):
+        stdin_option = " --from-stdin" if action == "set" else ""
+        raise ManagedDeviceError(
+            "This device uses the managed enterprise secret store. "
+            f"Ask an administrator to run defenseclaw-gateway enterprise secret {action} "
+            f"--name <configured-credential>{stdin_option}."
+        )
+
+
 @keys_cmd.command("set")
 @click.argument("env_name")
 @click.option("--value", "value", default=None, help="Value to store; prompts if omitted.")
@@ -163,6 +215,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     """
     import os
 
+    _refuse_managed_secret_write(app, "set")
     if value_stdin and value is not None:
         raise click.UsageError("--value and --value-stdin are mutually exclusive")
     if value_stdin:
@@ -220,7 +273,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
 
         try:
             app.logger.log_activity(
-                actor="cli:operator",
+                actor=current_actor(ACTOR_PREFIX_CLI),
                 action=ACTION_CONFIG_UPDATE,
                 target_type="config",
                 target_id=f"dotenv:{env_name}",
@@ -245,6 +298,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
     # One path style: keys remove prints os.path.join too (GAP-1297).
     ux.ok(f"Saved {env_name} = {mask(value)} to {dotenv_path}", indent="  ")
     _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
+    _emit_gateway_restart_hint(app.cfg, env_name)
 
 
 @keys_cmd.command("remove")
@@ -259,6 +313,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
     """
     import os
 
+    _refuse_managed_secret_write(app, "remove")
     env_name = env_name.strip()
     if not env_name:
         raise click.UsageError("env_name must be non-empty")
@@ -297,7 +352,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
 
         try:
             app.logger.log_activity(
-                actor="cli:operator",
+                actor=current_actor(ACTOR_PREFIX_CLI),
                 action=ACTION_CONFIG_UPDATE,
                 target_type="config",
                 target_id=f"dotenv:{env_name}",
@@ -311,6 +366,7 @@ def keys_remove(app: AppContext, env_name: str, yes: bool) -> None:
                 err=True,
             )
     ux.ok(f"Removed {env_name} from {dotenv_path}", indent="  ")
+    _emit_gateway_restart_hint(app.cfg, env_name)
     if shell_value and not from_dotenv:
         ux.subhead(f"{env_name} is still exported in this shell; unset it there too.", indent="    ")
 
@@ -363,6 +419,7 @@ def keys_fill_missing(app: AppContext, yes: bool) -> None:
     """Interactively prompt for every REQUIRED-but-unset credential."""
     from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
 
+    _refuse_managed_secret_write(app, "set")
     statuses = [s for s in classify(app.cfg) if s.missing]
     if not statuses:
         ux.ok("No missing required credentials — you're all set.")

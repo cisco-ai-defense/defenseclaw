@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -43,7 +44,6 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_hook_health,
     _check_llm_api_key,
-    _check_openclaw_transport_advisory,
     _check_openhands_hooks,
     _check_proxy_interception,
     _check_scanners,
@@ -63,13 +63,142 @@ from defenseclaw.config import (
 )
 
 
+class DoctorPolicyStateTests(unittest.TestCase):
+    """The Policy row: the generation and digest the gateway applied, FAIL
+    when it is stale against config.yaml or rejected the last change, WARN
+    for a hand edit the writer did not record."""
+
+    def test_policy_row(self):
+        from defenseclaw.commands import cmd_doctor
+
+        applied = "sha256:" + "a" * 64
+        cases = [
+            ({}, applied, "pass"),
+            ({}, "sha256:" + "b" * 64, "fail"),
+            ({"last_reload_error": "rule pack digest mismatch"}, applied, "fail"),
+            ({"config_generation": 2, "config_generation_recorded": False}, applied, "warn"),
+        ]
+        for extra, local, want in cases:
+            policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
+                      "config_generation_recorded": True, **extra}
+            result = _DoctorResult()
+            with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": local}):
+                cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+            self.assertEqual(result.checks[0]["status"], want, (extra, local, result.checks[0]))
+            if want == "fail" and not extra:
+                self.assertIn("defenseclaw-gateway restart", result.checks[0]["detail"])
+
+        old = (
+            "[config_schema_invalid] $.bogus_wp: configuration violates the additionalProperties constraint; "
+            "inspect the canonical v8 schema or generated reference and correct this field"
+        )
+        policy = {"effective_digest": applied, "generation": 3, "last_reload_error": old}
+        result = _DoctorResult()
+        cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+        self.assertNotIn("canonical v8", result.checks[0]["detail"])
+        self.assertNotIn("[config_schema_invalid]", result.checks[0]["detail"])
+        self.assertNotIn("$.bogus_wp", result.checks[0]["detail"])
+        self.assertIn("bogus_wp", result.checks[0]["detail"])
+
+        # A "~/" policy_dir the gateway cannot open: the next step names the absolute path (GAP-1033).
+        policy = {"effective_digest": applied, "generation": 3,
+                  "last_reload_error": "opa: policy: read rego directory: open ~/team-policies: no such file"}
+        result = _DoctorResult()
+        cmd_doctor._check_policy_state(SimpleNamespace(policy_dir="~/team-policies"), result,
+                                       live_health={"policy": policy})
+        self.assertIn(os.path.join(os.path.expanduser("~"), "team-policies"), result.checks[0]["remediation"])
+
+        # A generation applied without its Rego modules is a warning, not a rejected change (GAP-1033).
+        policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
+                  "config_generation_recorded": True, "opa_unavailable": "policy: admission.rego reads data.config",
+                  "last_reload_error": "opa: policy: admission.rego reads data.config"}
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": applied}):
+            cmd_doctor._check_policy_state(SimpleNamespace(policy_dir="/srv/team-policies"), result,
+                                           live_health={"policy": policy})
+        self.assertEqual([c["status"] for c in result.checks], ["warn", "pass"], result.checks)
+
+        # A digest the gateway holds back for a restart-only key is a pending
+        # restart (warn), not a stale gateway (fail) (GAP-0072).
+        policy = {"effective_digest": applied, "generation": 3, "config_generation": 2,
+                  "config_generation_recorded": True, "pending_restart": ["guardrail.connectors"]}
+        result = _DoctorResult()
+        with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": "sha256:" + "b" * 64}):
+            cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+        self.assertEqual(result.checks[0]["status"], "warn")
+        self.assertIn("guardrail.connectors", result.checks[0]["detail"])
+
+        # With the gateway stopped, a hand edit is still found from
+        # config.generation.json next to config.yaml (GAP-0305).
+        from defenseclaw import config_writer
+
+        with tempfile.TemporaryDirectory() as data_dir, patch.dict(os.environ, {"DEFENSECLAW_CONFIG": ""}):
+            config = os.path.join(data_dir, "config.yaml")
+            # Bytes, not text mode: Windows would write CRLF and the recorded
+            # digest of the LF bytes would not match the file.
+            with open(config, "wb") as f:
+                f.write(b"config_version: 9\n")
+            config_writer.record_generation(config, hashlib.sha256(b"config_version: 9\n").hexdigest(), "cli:t", "")
+            for edited, want in ((False, "skip"), (True, "warn")):
+                if edited:
+                    with open(config, "ab") as f:
+                        f.write(b"# hand edit\n")
+                result = _DoctorResult()
+                cmd_doctor._check_policy_state(SimpleNamespace(data_dir=data_dir), result, live_health=None)
+                self.assertEqual(result.checks[0]["status"], want, result.checks[0])
+
+    def test_invalid_config_does_not_claim_gateway_stopped(self):
+        from defenseclaw.commands import cmd_doctor
+
+        result = _DoctorResult()
+        result.checks.append({"check_id": "doctor.config.validation", "status": "fail"})
+        with patch.object(cmd_doctor, "_emit_policy_without_gateway") as emit:
+            cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health=None)
+        self.assertIn("live state was not checked", emit.call_args.args[3])
+        self.assertNotIn("gateway is not running", emit.call_args.args[3])
+
+
+class DoctorRetiredPolicyDataTests(unittest.TestCase):
+    def test_only_data_json_is_retired(self):
+        from defenseclaw.commands import cmd_doctor
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as policy_dir:
+            os.makedirs(os.path.join(policy_dir, "rego"))
+            for name in ("data.json", "data-sandbox.json", "firewall.rego", "audit.rego"):
+                with open(os.path.join(policy_dir, "rego", name), "w", encoding="utf-8") as f:
+                    f.write("{}")
+            result = _DoctorResult()
+            cfg = Config(policy_dir=policy_dir, data_dir="")
+            cfg._source_config_version = 9
+            cmd_doctor._check_policy_evidence_files(cfg, result)
+        detail = result.checks[0]["detail"]
+        self.assertIn("data.json", detail)
+        for leftover in ("data-sandbox.json", "firewall.rego", "audit.rego"):
+            self.assertNotIn(leftover, detail)
+
+    def test_migrated_rules_name_a_renamed_built_in(self):
+        # GAP-1314: doctor names the rules the upgrade rebased, as the upgrade did.
+        from defenseclaw.commands import cmd_doctor
+
+        result = _DoctorResult()
+        cmd_doctor._check_migrated_rules(
+            {"expressed_rules": ["CUSTOM-CMD-RM-RF"], "renamed_rules": ["CMD-RM-RF -> CUSTOM-CMD-RM-RF"]}, result
+        )
+        check = result.checks[0]
+        self.assertEqual(check["status"], "warn")
+        self.assertIn("CUSTOM-CMD-RM-RF (your edited CMD-RM-RF; CMD-RM-RF is the shipped 1.0 rule): enforced as on 0.8.x", check["detail"])
+
+
 class DoctorVirusTotalTests(unittest.TestCase):
     """GAP-1936: the VirusTotal row agrees with the credential row."""
 
     def _cfg(self, use_virustotal: bool, key_env: str = ""):
-        from defenseclaw.config import SkillScannerConfig
+        from defenseclaw.config import SkillScannerAnalyzers, SkillScannerConfig, SkillScannerVirusTotal
 
-        sc = SkillScannerConfig(use_virustotal=use_virustotal, virustotal_api_key_env=key_env)
+        sc = SkillScannerConfig(
+            analyzers=SkillScannerAnalyzers(virustotal=SkillScannerVirusTotal(enabled=use_virustotal, api_key_env=key_env))
+        )
         return SimpleNamespace(scanners=SimpleNamespace(skill_scanner=sc))
 
     def test_disabled_is_skipped(self):
@@ -297,6 +426,41 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("self-test", result.checks[0]["detail"])
         self.assertIn("agent traffic", result.checks[0]["detail"])
 
+    def test_proxy_interception_fails_when_a_model_call_missed_the_proxy(self):
+        # GAP-0190: a passing self-test is not proof that real model calls take the proxy.
+        # GAP-0836: each call needs a hop of its own, so a proxied call does not
+        # vouch for a later call that took no hop.
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        now = datetime.now(timezone.utc)
+
+        def stamp(minutes_ago: int) -> str:
+            return (now - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        for calls, proxied, last_missed, last_proxied, want in (
+            (2, 1, stamp(0), stamp(4), "fail"),
+            (2, 2, None, stamp(0), "pass"),
+            (3, 2, stamp(4), stamp(0), "warn"),
+        ):
+            info = {"verified": True, "last_verified_at": stamp(0), "last_agent_traffic_at": stamp(4),
+                    "agent_model_calls": calls, "agent_model_calls_proxied": proxied,
+                    "last_proxied_model_call_at": last_proxied}
+            if last_missed:
+                info["last_unproxied_model_call_at"] = last_missed
+            result = _DoctorResult()
+            _check_proxy_interception(cfg, result, live_health={"interception": info})
+            self.assertEqual(result.checks[0]["status"], want, result.checks)
+            if want != "pass":
+                self.assertIn("did not go through the guardrail proxy", result.checks[0]["detail"])
+
     def test_proxy_interception_fails_when_self_test_is_stale(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
@@ -366,7 +530,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.to_dict()["exit_code"], 1)
         self.assertIn("has not reported an interceptor self-test", result.checks[0]["detail"])
 
-    def test_disabled_openclaw_is_skipped_by_interception_and_transport_checks(self):
+    def test_disabled_openclaw_is_skipped_by_the_interception_check(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -390,36 +554,6 @@ class DoctorGuardrailTests(unittest.TestCase):
             live_health={"interception": {"verified": False}},
         )
         self.assertEqual(interception.checks, [])
-
-        advisory = _DoctorResult()
-        signal = SimpleNamespace(version="2026.6.8", installed=True)
-        with patch(
-            "defenseclaw.inventory.agent_discovery.discover_agents",
-            return_value=SimpleNamespace(agents={"openclaw": signal}),
-        ):
-            _check_openclaw_transport_advisory(cfg, advisory)
-        self.assertEqual(advisory.checks, [])
-
-    def test_openclaw_transport_advisory_for_2026_6(self):
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, connector="openclaw"),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        result = _DoctorResult()
-        signal = SimpleNamespace(version="2026.6.8", installed=True)
-        with patch(
-            "defenseclaw.inventory.agent_discovery.discover_agents",
-            return_value=SimpleNamespace(agents={"openclaw": signal}),
-        ):
-            _check_openclaw_transport_advisory(cfg, result)
-        self.assertEqual(result.warned, 1, result.checks)
-        self.assertIn("2026.6.8", result.checks[0]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_sidecar_check_surfaces_disabled_summary(self, mock_probe):
@@ -1830,6 +1964,41 @@ class DoctorJsonOutputTests(unittest.TestCase):
         self.assertEqual(result.checks[0]["label"], "LLM reachable")
         self.assertIn("LiteLLM probe failed", result.checks[0]["detail"])
 
+    def test_failed_llm_probe_names_configured_endpoint_without_credentials(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = SimpleNamespace(
+            guardrail=SimpleNamespace(enabled=True),
+            resolve_llm=lambda _scope: SimpleNamespace(
+                model="bedrock/model",
+                base_url="https://user:secret@example.invalid:9443/v1?token=hidden",
+            ),
+        )
+        result = _DoctorResult()
+        with patch("defenseclaw.llm.ping", return_value=(False, "connection refused")):
+            cmd_doctor._check_llm_reachable(cfg, result)
+        detail = result.checks[0]["detail"]
+        self.assertIn("https://example.invalid:9443/v1", detail)
+        self.assertNotIn("secret", detail)
+        self.assertNotIn("hidden", detail)
+
+
+def test_failed_llm_probe_with_malformed_url_still_emits_row():
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = SimpleNamespace(
+        guardrail=SimpleNamespace(enabled=True),
+        resolve_llm=lambda _scope: SimpleNamespace(model="openai/test", base_url="http://[invalid"),
+    )
+    result = _DoctorResult()
+    with patch("defenseclaw.llm.ping", return_value=(False, "connection refused")):
+        cmd_doctor._check_llm_reachable(cfg, result)
+    assert result.checks[0]["label"] == "LLM reachable"
+    assert result.checks[0]["status"] != "pass"
+    assert "connection refused" in result.checks[0]["detail"]
+    assert "http://[invalid" not in result.checks[0]["detail"]
+
+
 
 class VerifyBedrockTests(unittest.TestCase):
     """Regression tests for :func:`_verify_bedrock` (M3).
@@ -2119,6 +2288,23 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         self.assertTrue(any("codex-hook.sh missing" in reason for reason in reasons), reasons)
         self.assertTrue(any("_hardening.sh missing" in reason for reason in reasons), reasons)
 
+    def test_stale_generated_hook_reasons_report_a_baked_fail_mode_config_changed(self):
+        # A writer change to guardrail.hook_fail_mode leaves the script with
+        # the old baked mode; its derived-from header says which.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            cfg.guardrail.mode, cfg.guardrail.hook_fail_mode = "action", "closed"
+            self._write_hook(
+                tmp, "codex-hook.sh",
+                "#!/bin/bash\n# defenseclaw-managed-hook v7\n# defenseclaw-derived: sha256=00 fail_mode=open\n"
+                "defenseclaw_response_failure_reason\n",
+            )
+            reasons = cmd_doctor._stale_generated_hook_reasons(cfg, "codex")
+
+        self.assertTrue(any("bakes hook fail mode open" in reason for reason in reasons), reasons)
+
     def test_codex_hook_check_warns_when_generated_script_is_stale(self):
         from defenseclaw.commands import cmd_doctor
 
@@ -2191,6 +2377,41 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         self.assertNotIn(third_party, rows[0]["detail"])
         self.assertNotIn(own + ",", rows[0]["detail"])
         self.assertEqual([c for c in clean.checks if c["label"] == "Codex hooks of another install"], [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
+    def test_codex_hook_check_warns_when_notify_is_not_defenseclaw(self):
+        # GAP-1248: a renamed notify program left Codex launching a missing
+        # program on every turn while doctor said the hooks were healthy.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, ".defenseclaw")
+            cfg = self._make_cfg(home)
+            self._write_hook(home, "codex-hook.sh", "#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            bridge = os.path.join(home, "notify-bridge.sh")
+            with open(bridge, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/bash\n")
+            own = os.path.join(home, "hooks", "codex-hook.sh")
+            config_toml = os.path.join(tmp, "codex", "config.toml")
+            os.makedirs(os.path.dirname(config_toml))
+            hooks = (
+                "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+                f'type = "command"\ncommand = "{own} --event PreToolUse"\n'
+            )
+
+            def notify_rows(notify: str) -> list[dict]:
+                with open(config_toml, "w", encoding="utf-8") as fh:
+                    fh.write(notify + hooks)
+                result = _DoctorResult()
+                cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
+                return [c for c in result.checks if c["label"] == "Codex notify"]
+
+            renamed = notify_rows(f'notify = ["bash", "{bridge[:-3]}-TAMPERED.sh"]\n')
+            healthy = notify_rows(f'notify = ["bash", "{bridge}"]\n')
+
+        self.assertEqual([c["status"] for c in renamed], ["warn"], renamed)
+        self.assertIn("-TAMPERED.sh", renamed[0]["detail"])
+        self.assertEqual(healthy, [])
 
     def test_unreadable_foreign_codex_hook_script_counts_as_broken(self):
         # GAP-1854: another account's unreadable home raised PermissionError
@@ -2527,14 +2748,14 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # post-repair health counts. The policy-changing repair is visible but
         # explicitly requires selection on the real run.
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 18)
+        self.assertEqual(len(result.repairs), 23)
         self.assertEqual(
             {record["state"] for record in result.repairs},
             {"applicable", "noop", "requires_confirmation"},
         )
         self.assertEqual(result.repair_summary.planned, 8)
         self.assertEqual(result.repair_summary.requires_confirmation, 1)
-        self.assertEqual(result.repair_summary.noop, 9)
+        self.assertEqual(result.repair_summary.noop, 14)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
             "connector residue",
@@ -2624,10 +2845,10 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         self.assertEqual(result.checks, [])
-        self.assertEqual(len(result.repairs), 18)
+        self.assertEqual(len(result.repairs), 23)
         self.assertEqual(result.repair_summary.applied, 8)
         self.assertEqual(result.repair_summary.manual, 1)
-        self.assertEqual(result.repair_summary.noop, 9)
+        self.assertEqual(result.repair_summary.noop, 14)
         self.assertEqual(fix_plugin_reg.call_count, 1)
         self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         fix_residue.assert_not_called()
@@ -3009,7 +3230,7 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
 class GuardrailProxyMultiConnectorTests(unittest.TestCase):
     """D6: whether the proxy port is 'intentionally closed' is decided over the
     FULL active set. A proxy peer (openclaw/zeptoclaw) that binds port 4000
-    forces the real liveliness probe even when the primary is hook-enforced.
+    forces the real /health probe even when the primary is hook-enforced.
     """
 
     def _cfg(self, connectors, mode="observe"):
@@ -3261,6 +3482,62 @@ class TestLegacySandboxDoctor(unittest.TestCase):
         self.assertEqual(sandbox["status"], "warn")
         self.assertIn("legacy-cleanup", sandbox["detail"])
 
+    def test_failing_optional_destination_warns_on_running_telemetry(self):
+        # A jsonl destination the gateway cannot reach yet runs deferred: warn,
+        # do not pass or fail (GAP-1265).
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {
+                "state": "running",
+                "details": {
+                    "optional_destination_state": "degraded",
+                    "optional_destination_failure_summary": "rv13:degraded:file_write_failed",
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(health)),
+            ):
+                _check_sidecar(self._cfg(data_dir, legacy=False), result)
+        telemetry = next(row for row in result.checks if row.get("label", "").strip().endswith("telemetry"))
+        self.assertEqual(telemetry["status"], "warn", telemetry)
+        self.assertIn("rv13:degraded:file_write_failed", telemetry["detail"])
+
+    def test_unverified_project_skill_folder_warns_on_running_watcher(self):
+        # A project skill folder a managed Windows gateway could not verify is
+        # not watched and its skills are refused: warn and name it (GAP-1356).
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {
+                "state": "running",
+                "details": {
+                    "skill_dirs": 1,
+                    "project_skill_roots_unverified": 1,
+                },
+            },
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=False)
+            cfg.gateway.watcher.enabled = True
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(health)),
+            ):
+                _check_sidecar(cfg, result)
+        watcher = next(row for row in result.checks if row.get("label", "").strip().endswith("watcher"))
+        self.assertEqual(watcher["status"], "warn", watcher)
+        self.assertIn("1 project skill folder(s) could not be verified", watcher["detail"])
+
     def test_openshell_sandbox_running_is_not_a_stale_sidecar(self):
         # openshell.enabled makes the gateway run the sandbox subsystem; its
         # "running" must not read as a stale sidecar or drive restarts.
@@ -3383,3 +3660,81 @@ def test_a_stopped_local_observability_stack_is_not_a_failure():
     with patch.object(cmd_doctor.socket, "create_connection", return_value=contextlib.nullcontext()):
         # The stack is up, so its collector failing is a real failure.
         assert not cmd_doctor._local_observability_stack_stopped(local, live, "fail")
+
+
+def test_a_signature_pack_that_fails_its_pin_is_a_doctor_warning(tmp_path):
+    """GAP-0177: the refusal is a WARN naming the pack and both digests, not a gateway.log line."""
+    from defenseclaw.commands import cmd_doctor
+
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps({"version": 1, "signatures": [{
+        "id": "pinned-ai", "name": "Pinned", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}))
+    pinned = "sha256:" + "0" * 64
+    discovery = SimpleNamespace(
+        enabled=True, signature_packs=[str(pack)], signature_pack_digests={str(pack): pinned},
+        allow_workspace_signatures=False, scan_roots=[],
+    )
+    cfg = SimpleNamespace(ai_discovery=discovery, data_dir=str(tmp_path))
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    [check] = result.checks
+    assert check["status"] == "warn" and check["reason_code"] == "signature-pack-refused"
+    assert str(pack.resolve()) in check["detail"] and pinned in check["detail"]
+
+    discovery.signature_pack_digests = {}
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    assert [c["status"] for c in result.checks] == ["pass"]
+
+    # GAP-0220: a configured pack whose file is gone is not "0 loaded" PASS.
+    pack.unlink()
+    result = _DoctorResult()
+    cmd_doctor._check_signature_packs(cfg, result)
+    [check] = result.checks
+    assert check["status"] == "warn" and f"{pack}: file not found" in check["detail"]
+
+
+
+def test_secure_client_config_check_keeps_v8_record(tmp_path):
+    from defenseclaw.commands import cmd_doctor
+
+    config = tmp_path / "config.yaml"
+    config.write_text("config_version: 8\n", encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=os.fspath(tmp_path))
+    result = _DoctorResult()
+    with (
+        patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"),
+        patch("defenseclaw.config_inspect.inspect_v8_config", return_value=SimpleNamespace(valid=True)),
+    ):
+        cmd_doctor._check_config(cfg, result)
+    row = result.checks[-1]
+    assert row["check_id"] == "doctor.config.canonical-v8"
+    assert row["detail"] == f"{config}; canonical schema v8 valid"
+
+    policy_result = _DoctorResult()
+    with patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value="secure_client"):
+        cmd_doctor._check_policy_state(
+            SimpleNamespace(deployment_mode="managed_enterprise"),
+            policy_result,
+            live_health={"policy": {"effective_digest": "sha256:" + "a" * 64}},
+        )
+    assert policy_result.checks == []
+
+
+
+
+def test_policy_digest_probe_unavailable_does_not_pass():
+    from defenseclaw.commands import cmd_doctor
+
+    result = _DoctorResult()
+    with (
+        patch("defenseclaw.commands.cmd_status._enterprise_profile", return_value=""),
+        patch.object(cmd_doctor, "_local_policy_digest", return_value=None),
+    ):
+        cmd_doctor._check_policy_state(
+            SimpleNamespace(), result,
+            live_health={"policy": {"effective_digest": "sha256:" + "a" * 64, "generation": 3}},
+        )
+    row = result.checks[-1]
+    assert row["status"] == "warn"
+    assert "comparison" in row["detail"]

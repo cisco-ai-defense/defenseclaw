@@ -441,7 +441,11 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
 
     @patch(
         "defenseclaw.fail_mode.connector_fail_mode_report",
-        return_value={"effective": "open", "provenance": "process-env"},
+        return_value={
+            "effective": "open",
+            "provenance": "process-env",
+            "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
+        },
     )
     def test_inventory_mode_row_reports_runtime_provenance_without_new_statistic(self, _report) -> None:
         cfg = self._cfg()
@@ -454,7 +458,8 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         self.assertEqual(len(mode_rows), 1)
         self.assertEqual(
             mode_rows[0]["detail"],
-            "action; fail-mode=open; provenance=process-env",
+            "action; fail-mode=open (observe mode keeps hooks fail-open; "
+            "guardrail.hook_fail_mode=closed applies in action mode); provenance=process-env",
         )
         self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 
@@ -747,6 +752,14 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 tmp,
                 mode="action",
                 fail_closed=True,
+            )
+            from defenseclaw.config import GuardrailConfig, PerConnectorGuardrailConfig
+
+            # An upgraded v8 action-mode config may still store open.
+            cfg.guardrail = GuardrailConfig(
+                mode="action",
+                hook_fail_mode="open",
+                connectors={"cursor": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="open")},
             )
             r = _DoctorResult()
             _check_cursor_configured_runtime(
@@ -1630,7 +1643,10 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
             "local_pattern_count": 6,
             "suppression_count": 3,
             "sensitive_tool_count": 5,
+            "stale_rule_count": 0,
+            "alert_only_rule_count": 0,
             "digest": "a" * 64,
+            "files_digest": "b" * 64,
         }
         summary.update(overrides)
         return RulePackValidationResult(
@@ -1677,6 +1693,56 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         self.assertEqual(rp["status"], "pass")
         self.assertIn("11/12 rules enabled", rp["detail"])
         validate.assert_called_once_with(os.getcwd())
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_custom_pack_edited_after_pinning_fails_and_names_the_v9_key(self, validate):
+        validate.return_value = self._valid()  # files_digest is "b" * 64
+        cfg = self._cfg(rule_pack_dir="/packs/mine")
+        cfg.guardrail.effective_rule_pack.return_value = "mine"
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "c" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "fail")
+        self.assertIn('configured rule pack "mine"', rp["detail"])
+        self.assertIn("guardrail.custom_packs.mine.digest", rp["detail"])
+        self.assertNotIn("rule_pack_dir", rp["detail"])
+        # Re-pin in place, keeping per-connector pack choices (GAP-0332).
+        self.assertEqual(
+            rp["remediation"], "defenseclaw config set guardrail.custom_packs.mine.digest sha256:" + "b" * 64
+        )
+
+        cfg.guardrail.custom_packs = {"mine": SimpleNamespace(digest="sha256:" + "b" * 64)}
+        r = _DoctorResult()
+        _check_connector_inventory(cfg, "cursor", r)
+        self.assertEqual(next(c for c in r.checks if c["label"] == "Rule pack")["status"], "pass")
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_pack_whose_action_rules_cannot_block_warns(self, validate):
+        # GAP-0360: a 0.8.x copy of the default pack showed PASS and blocked nothing.
+        validate.return_value = self._valid(stale_rule_count=26, alert_only_rule_count=1)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/acme"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("26 are 0.8.x copies of built-in", rp["detail"])
+        self.assertIn("never block", rp["detail"])
+        self.assertIn("guardrail use-pack", rp["remediation"])
+
+        # GAP-1225: a pack whose only gap is the operator's own pattern rules
+        # (any category) warns too, and says how to make them block again.
+        validate.return_value = self._valid(alert_only_rule_count=2)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/acme"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("2 are custom rules of yours", rp["detail"])
+        self.assertIn("detection-only for tool calls", rp["detail"])
+        self.assertIn("expression", rp["remediation"])
 
     @patch(
         "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
@@ -3504,6 +3570,17 @@ class TestDetectionStrategyRow(unittest.TestCase):
         r = _DoctorResult()
         _check_connector_inventory(cfg, connector, r)
         return next(c for c in r.checks if c["label"] == "Detection")
+
+    def test_failing_runtime_judge_is_not_reported_active(self):
+        cfg = self._cfg(judge_enabled=True, hook_connectors=["codex"])
+        result = _DoctorResult()
+        _check_connector_inventory(
+            cfg, "codex", result,
+            live_health={"guardrail": {"details": {"judge_state": "failing", "judge_recent_calls": 7}}},
+        )
+        row = next(check for check in result.checks if check["label"] == "Detection")
+        self.assertEqual(row["status"], "warn")
+        self.assertIn("judge failing", row["detail"])
 
     def test_strategy_surfaced(self):
         row = self._detection_row(self._cfg(strategy="judge_first"), "codex")

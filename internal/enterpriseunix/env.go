@@ -63,6 +63,7 @@ var commandCandidates = map[string][]string{
 	"systemctl":        {"/usr/bin/systemctl", "/bin/systemctl"},
 	"systemd-sysusers": {"/usr/bin/systemd-sysusers", "/bin/systemd-sysusers"},
 	"getent":           {"/usr/bin/getent", "/bin/getent"},
+	"journalctl":       {"/usr/bin/journalctl", "/bin/journalctl"},
 	"useradd":          {"/usr/sbin/useradd", "/sbin/useradd"},
 	"groupadd":         {"/usr/sbin/groupadd", "/sbin/groupadd"},
 	"userdel":          {"/usr/sbin/userdel", "/sbin/userdel"},
@@ -70,11 +71,14 @@ var commandCandidates = map[string][]string{
 	"dpkg":             {"/usr/bin/dpkg", "/bin/dpkg"},
 	"rpm":              {"/usr/bin/rpm", "/bin/rpm"},
 	"restorecon":       {"/usr/sbin/restorecon", "/sbin/restorecon"},
+	"semodule":         {"/usr/sbin/semodule", "/sbin/semodule"},
 	"launchctl":        {"/bin/launchctl"},
 	"dscl":             {"/usr/bin/dscl"},
 	"pkgutil":          {"/usr/sbin/pkgutil"},
 	"lsof":             {"/usr/sbin/lsof", "/usr/bin/lsof"},
 	"ps":               {"/bin/ps", "/usr/bin/ps"},
+	"ls":               {"/bin/ls"},
+	"chmod":            {"/bin/chmod"},
 }
 
 // ExecRunner is the production Runner.
@@ -160,6 +164,9 @@ const (
 	TrustAdminFile TrustKind = iota
 	// TrustRuntimeDir is a directory the service account may own.
 	TrustRuntimeDir
+	// TrustRulePack is an administrator rule pack: its folders above, and
+	// every folder and file in it (see rulePackTrust).
+	TrustRulePack
 )
 
 // Env binds the lifecycle to one host. Zero values are replaced by
@@ -182,6 +189,9 @@ type Env struct {
 	Lchown func(path string, uid, gid int) error
 	// OwnerOf reports a path's uid and gid without following a symlink.
 	OwnerOf func(path string) (int, int, error)
+	// Fchown changes the owner of an open file: the state folders the service
+	// account can write are re-owned through descriptors (settleStateModes).
+	Fchown func(f *os.File, uid, gid int) error
 	// Trust runs the managed trust checks on a rooted path.
 	Trust func(path string, kind TrustKind) error
 	// HealthGet fetches the gateway /health document over the hook socket
@@ -200,6 +210,9 @@ type Env struct {
 	// connectorName, over the route the standalone plugins use, and returns
 	// the proof (see rotation.go).
 	ListenerProof func(ctx context.Context, connectorName, keyID, nonce string) (string, error)
+	// DiskSpace reports the available bytes, size and device of the
+	// filesystem holding a path (see diskSpace).
+	DiskSpace func(path string) (avail, total, device uint64, err error)
 	// ProcessExecPath returns the executable path the kernel recorded when
 	// process pid started (macOS only; see gatewayProcesses).
 	ProcessExecPath func(pid int) (string, error)
@@ -278,6 +291,9 @@ func (e *Env) fillDefaults() {
 	if e.Lchown == nil {
 		e.Lchown = os.Lchown
 	}
+	if e.Fchown == nil {
+		e.Fchown = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
+	}
 	if e.OwnerOf == nil {
 		e.OwnerOf = func(path string) (int, int, error) {
 			uid, gid, _, err := statOwnerMode(path)
@@ -307,6 +323,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.ProcessExecPath == nil {
 		e.ProcessExecPath = processExecPath
+	}
+	if e.DiskSpace == nil {
+		e.DiskSpace = diskSpace
 	}
 	if e.Services == nil {
 		e.Services = newServiceManager(e)
@@ -357,6 +376,21 @@ func (e *Env) runGatewayCLI(ctx context.Context, args ...string) (CommandResult,
 	return e.Runner.Run(ctx, gateway, args...)
 }
 
+// removeAllTimeout bounds `enterprise hooks remove-all`, which retries a
+// per-user worker that timed out with a longer deadline (GAP-0517); the
+// default two-minute command bound would cut that retry short.
+const removeAllTimeout = 15 * time.Minute
+
+// runGatewayCLILong is runGatewayCLI with a longer bound for the production
+// runner.
+func (e *Env) runGatewayCLILong(ctx context.Context, timeout time.Duration, args ...string) (CommandResult, error) {
+	if runner, ok := e.Runner.(ExecRunner); ok {
+		runner.Timeout = timeout
+		return runner.RunEnv(ctx, e.serviceEnvironment(), filepath.Join(e.P(e.Layout.BinDir), binGateway), args...)
+	}
+	return e.runGatewayCLI(ctx, args...)
+}
+
 // P maps a canonical layout path onto the rooted filesystem.
 func (e *Env) P(path string) string {
 	if e.Root == "" {
@@ -371,6 +405,8 @@ func defaultTrust(path string, kind TrustKind) error {
 		return managed.ValidateTrustedFilePath(path, "managed file")
 	case TrustRuntimeDir:
 		return managed.ValidateTrustedRuntimeDir(path, "managed runtime directory")
+	case TrustRulePack:
+		return rulePackTrust(path)
 	}
 	return fmt.Errorf("unknown trust kind %d", kind)
 }

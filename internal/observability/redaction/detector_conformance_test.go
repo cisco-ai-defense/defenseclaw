@@ -514,8 +514,13 @@ func TestPaymentCardEveryLengthSeparatorAndLuhnExclusion(t *testing.T) {
 		negative := digits[:len(digits)-1] + string('0'+((last-'0'+1)%10))
 		assertDetectorAbsent(t, "pii.payment_card", negative)
 	}
+	assertDetectorExact(t, "pii.payment_card", `note\n4242424242424242`, "4242424242424242")
+	assertDetectorExact(t, "pii.payment_card", "Card: 4111111111111111USD", "4111111111111111")
 	for _, value := range []string{
 		strings.Repeat("1", 16), "4242 4242-4242 4242", "14242424242424242",
+		// GAP-0255: generated ids stay whole.
+		"evaluation_id=da1f4242-4242-4242-42c6-131a379f4f95", "id=42424242-4242-4242-abcd-131a379f4f95",
+		"x4242424242424242",
 	} {
 		assertDetectorAbsent(t, "pii.payment_card", value)
 	}

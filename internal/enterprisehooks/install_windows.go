@@ -562,8 +562,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 // selected executable, and connectors without protected admission, are
 // left unchanged. Callers hold the target user's impersonation token.
 func recordWindowsManagedSetupSelection(target windowsGenericManagedTarget) error {
-	if target.conn == nil || strings.TrimSpace(target.setup.AgentExecutable) == "" ||
-		!connector.ProtectedSetupSelectionConnector(target.conn.Name()) {
+	if !windowsManagedSetupSelectionRequired(target) {
 		return nil
 	}
 	if err := connector.WriteManagedSetupAgentSelection(
@@ -575,6 +574,41 @@ func recordWindowsManagedSetupSelection(target windowsGenericManagedTarget) erro
 		return fmt.Errorf("enterprise hooks: record managed %s executable selection: %w", target.conn.Name(), err)
 	}
 	return nil
+}
+
+// windowsManagedSetupSelectionRequired reports whether the row records a
+// guardian-selected executable (recordWindowsManagedSetupSelection).
+func windowsManagedSetupSelectionRequired(target windowsGenericManagedTarget) bool {
+	return target.conn != nil && strings.TrimSpace(target.setup.AgentExecutable) != "" &&
+		connector.ProtectedSetupSelectionConnector(target.conn.Name())
+}
+
+// ensureWindowsManagedSetupSelectionDataDir creates %USERPROFILE%\.defenseclaw
+// for an account that never ran DefenseClaw, before the full setup route
+// records the executable selection there. The receipt and its lock file live
+// in that folder and the managed lock opens its parent without creating it, so
+// the first enrollment of a new account failed with "open managed lock parent"
+// and Setup /ensure ended 1603 (GAP-1180). Callers hold the target user's
+// impersonation token: the folder is created as that account, owned by it,
+// with the protected LocalSystem/Administrators/account DACL, relative to
+// no-follow handles from the authenticated profile root, so a junction planted
+// in its place is never followed. An existing folder is left to the footprint
+// checks that already ran. It reports whether it created the folder.
+func ensureWindowsManagedSetupSelectionDataDir(target windowsGenericManagedTarget) (bool, error) {
+	if !windowsManagedSetupSelectionRequired(target) {
+		return false, nil
+	}
+	if _, err := os.Lstat(target.dataDir); !errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	creation, err := ensureWindowsTargetOwnedDirectoryTree(target.home, target.dataDir, target.sid)
+	if err != nil {
+		return creation.createdDataDir, fmt.Errorf(
+			"enterprise hooks: create %s for the managed %s executable selection: %w",
+			target.dataDir, target.conn.Name(), err,
+		)
+	}
+	return creation.createdDataDir, nil
 }
 
 // removeWindowsManagedSetupSelectionReceipt deletes the selection receipt
@@ -637,6 +671,20 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			allowMissingConfig := opts.AllowMissingHookConfigRepair || perUserStandalone
 			if err := prepareWindowsGenericFootprint(target, configPaths, footprint, allowMissingConfig); err != nil {
 				return err
+			}
+			// Before the relax step, so a first enrollment's data dir takes
+			// the same path through setup as a later reconcile's.
+			createdDataDir, err := ensureWindowsManagedSetupSelectionDataDir(target)
+			if err != nil {
+				return err
+			}
+			if createdDataDir {
+				defer func() {
+					if setupErr != nil {
+						removeWindowsManagedSetupSelectionReceipt(target.dataDir)
+						_ = os.Remove(target.dataDir)
+					}
+				}()
 			}
 			relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 			// Hardening below only runs when the setup succeeds. A failed setup
@@ -1646,10 +1694,11 @@ func teardownWindowsGenericManagedTarget(
 	if perUser {
 		relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 		defer func() {
-			if len(relaxed) == 0 {
+			restore := windowsRelaxedPathsToRestoreAfterTeardown(target.dataDir, relaxed, teardownErr == nil)
+			if len(restore) == 0 {
 				return
 			}
-			if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, relaxed); restoreErr != nil {
+			if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, restore); restoreErr != nil {
 				teardownErr = errors.Join(teardownErr, fmt.Errorf("enterprise hooks: restore the directories relaxed for teardown: %w", restoreErr))
 			}
 		}()
@@ -1674,6 +1723,27 @@ func teardownWindowsGenericManagedTarget(
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
 	}
 	return nil
+}
+
+// windowsRelaxedPathsToRestoreAfterTeardown returns the paths relaxed for a
+// per-user connector teardown that get the managed DACL back afterwards. A
+// failed teardown leaves the connector managed, so all of them do. After a
+// completed one the guardian no longer manages the agent's own folders, and
+// hardening them again left the read-only OWNER RIGHTS entry behind after an
+// uninstall: a later per-user install could not protect %APPDATA%\devin and
+// its mcp set failed (GAP-1243). Those stay owner-private; only what lies in
+// the DefenseClaw data directory is hardened again.
+func windowsRelaxedPathsToRestoreAfterTeardown(dataDir string, relaxed []string, tornDown bool) []string {
+	if !tornDown {
+		return relaxed
+	}
+	var restore []string
+	for _, path := range relaxed {
+		if sameWindowsEnterprisePath(dataDir, path) || windowsPathWithin(dataDir, path) {
+			restore = append(restore, path)
+		}
+	}
+	return restore
 }
 
 // windowsStandalonePerUserRegistrationLeft reads what of DefenseClaw's
@@ -2289,12 +2359,20 @@ func validateWindowsUserPathProtectionACL(
 	if err != nil {
 		return err
 	}
+	required := len(expected)
+	if directory && windowsGatewayReadablePluginRoot(path) {
+		// The Amp and OpenCode plugin folder may also carry the read grant
+		// of the gateway service (GAP-0958): both of its entries or neither.
+		if optional := windowsGatewayPluginRootAppliedACEs(); len(optional) > 0 && int(dacl.AceCount) == required+len(optional) {
+			expected = append(expected, optional...)
+		}
+	}
 	if int(dacl.AceCount) != len(expected) {
 		return fmt.Errorf(
 			"enterprise hooks: managed Windows DACL on %s has %d ACEs, expected %d",
 			path,
 			dacl.AceCount,
-			len(expected),
+			required,
 		)
 	}
 	seen := make([]bool, len(expected))

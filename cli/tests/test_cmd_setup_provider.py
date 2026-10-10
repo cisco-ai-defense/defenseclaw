@@ -162,6 +162,156 @@ class TestRoundTrip(unittest.TestCase):
                 _read_overlay(path)
 
 
+class TestProviderConfigBacked(unittest.TestCase):
+    @mock.patch("defenseclaw.commands.cmd_setup_provider.OrchestratorClient")
+    def test_offline_list_uses_config_not_stale_overlay(self, client_cls: mock.Mock) -> None:
+        from defenseclaw.config import Config, _merge_llm_providers
+
+        client_cls.return_value.provider_registry.side_effect = requests.ConnectionError()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            _write_overlay(path, _Overlay([{"name": "Stale", "domains": ["old.test"]}], []))
+            cfg = Config()
+            cfg.data_dir = d
+            cfg.llm_providers = _merge_llm_providers(
+                {"custom": [{"name": "Current", "domains": ["current.test"]}]}
+            )
+            app = AppContext()
+            app.cfg = cfg
+            env = {**os.environ, OVERLAY_ENV: path, "DEFENSECLAW_OVERLAY_ROOT": d}
+            result = CliRunner().invoke(provider, ["list", "--json"], obj=app, env=env)
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["source"], "config-fallback")
+            self.assertEqual([item["name"] for item in payload["providers"]], ["Current"])
+            cfg.llm_providers = _merge_llm_providers({})
+            empty = CliRunner().invoke(provider, ["show", "--json"], obj=app, env=env)
+            self.assertEqual(empty.exit_code, 0, empty.output)
+            self.assertEqual(json.loads(empty.output)["providers"], [])
+
+    def test_add_reloads_config_after_provider_lock(self) -> None:
+        import yaml
+        from defenseclaw.config import Config, load
+
+        with tempfile.TemporaryDirectory() as d:
+            config_path = os.path.join(d, "config.yaml")
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write("config_version: 9\n")
+            first = AppContext()
+            second = AppContext()
+            first.cfg = load(data_dir=d)
+            second.cfg = load(data_dir=d)
+            env = {**os.environ, OVERLAY_ENV: os.path.join(d, "custom-providers.json"),
+                   "DEFENSECLAW_OVERLAY_ROOT": d}
+
+            def save(cfg: Config) -> None:
+                payload = {"config_version": 9, "llm_providers": {
+                    "custom": [{"name": item.name, "domains": item.domains}
+                               for item in cfg.llm_providers.custom]}}
+                with open(config_path, "w", encoding="utf-8") as handle:
+                    yaml.safe_dump(payload, handle)
+
+            with mock.patch.object(Config, "save", save):
+                for app, name in ((first, "First"), (second, "Second")):
+                    result = CliRunner().invoke(
+                        provider, ["add", "--name", name, "--domain",
+                                   f"{name.lower()}.test", "--no-reload"], obj=app, env=env,
+                    )
+                    self.assertEqual(result.exit_code, 0, result.output)
+            with open(config_path, encoding="utf-8") as handle:
+                names = [item["name"] for item in yaml.safe_load(handle)["llm_providers"]["custom"]]
+            self.assertEqual(names, ["First", "Second"])
+
+    def test_secure_client_keeps_overlay_persistence(self) -> None:
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            cfg = Config()
+            cfg.data_dir = d
+            cfg.deployment_mode = "managed_enterprise"
+            app = AppContext()
+            app.cfg = cfg
+            env = {**os.environ, OVERLAY_ENV: path, "DEFENSECLAW_OVERLAY_ROOT": d,
+                   "DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}
+            with mock.patch.object(Config, "save") as save:
+                added = CliRunner().invoke(
+                    provider, ["add", "--name", "Legacy", "--domain",
+                               "legacy.test", "--no-reload"], obj=app, env=env,
+                )
+                self.assertEqual(added.exit_code, 0, added.output)
+                removed = CliRunner().invoke(
+                    provider, ["remove", "--name", "Legacy", "--no-reload"], obj=app, env=env,
+                )
+                self.assertEqual(removed.exit_code, 0, removed.output)
+            save.assert_not_called()
+            self.assertEqual(_read_overlay(path).providers, [])
+
+    def test_add_writes_llm_providers_and_a_derived_overlay(self) -> None:
+        """`setup provider add` writes config.yaml llm_providers (through the
+        config writer) and renders custom-providers.json from it; a hand edit of
+        the rendered file is detected, and a legacy operator overlay seeds
+        llm_providers instead of being lost."""
+        from defenseclaw import derived_providers
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"providers": [{"name": "legacy-gw", "domains": ["llm.legacy.test"], "env_keys": ["LEGACY_KEY"]}]}, f)
+            cfg = Config()
+            cfg.data_dir = d
+            app = AppContext()
+            app.cfg = cfg
+            env = {**os.environ, OVERLAY_ENV: path, "DEFENSECLAW_OVERLAY_ROOT": d}
+            with mock.patch.object(Config, "save") as save:
+                res = CliRunner().invoke(
+                    provider,
+                    ["add", "--name", "Acme", "--domain", "llm.acme.test", "--env-key", "ACME_API_KEY", "--no-reload"],
+                    obj=app,
+                    env=env,
+                    catch_exceptions=False,
+                )
+            self.assertEqual(res.exit_code, 0, res.output)
+            save.assert_called_once()
+            self.assertEqual([p.name for p in cfg.llm_providers.custom], ["legacy-gw", "Acme"])
+            self.assertEqual(derived_providers.overlay_state(cfg, path)[0], derived_providers.STATE_FRESH)
+            with open(path, encoding="utf-8") as f:
+                rendered = json.load(f)
+            rendered["providers"].append({"name": "hand-added", "domains": ["x.test"]})
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(rendered, f)
+            self.assertEqual(derived_providers.overlay_state(cfg, path)[0], derived_providers.STATE_EDITED)
+
+
+    def test_add_keeps_a_legacy_overlay_with_request_overrides(self) -> None:
+        """GAP-0500: llm_providers cannot hold request_overrides, so a 0.8.x
+        overlay that sets them stays the live input the gateway merges."""
+        from defenseclaw.config import Config
+
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "custom-providers.json")
+            legacy = {"providers": [{"name": "acme-ro", "domains": ["llm.acme.test"],
+                                     "request_overrides": {"temperature": 0}}]}
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(legacy, f)
+            cfg = Config()
+            cfg.data_dir = d
+            app = AppContext()
+            app.cfg = cfg
+            env = {**os.environ, OVERLAY_ENV: path, "DEFENSECLAW_OVERLAY_ROOT": d}
+            with mock.patch.object(Config, "save"):
+                res = CliRunner().invoke(
+                    provider, ["add", "--name", "Acme", "--domain", "llm.other.test", "--no-reload"],
+                    obj=app, env=env, catch_exceptions=False,
+                )
+            self.assertEqual(res.exit_code, 0, res.output)
+            self.assertEqual([p.name for p in cfg.llm_providers.custom], ["acme-ro", "Acme"])
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), legacy)
+            self.assertIn("live input", res.output)
+
+
 class TestProviderAddCommand(unittest.TestCase):
     def _run(self, *args: str, env: dict[str, str] | None = None) -> object:
         runner = CliRunner()
@@ -326,14 +476,19 @@ class TestProviderAddCommand(unittest.TestCase):
             path = os.path.join(d, "custom-providers.json")
             app = self._app(d)
             env = self._env_for(path)
-            for args in (
-                ["add", "--name", "Acme", "--domain", "one.test"],
-                ["add", "--name", "Acme", "--domain", "two.test"],
-                ["remove", "--name", "Acme"],
-            ):
-                result = CliRunner().invoke(provider, args, obj=app, env=env)
-                self.assertEqual(result.exit_code, 0, result.output)
-                self.assertIn("disk and live state match", result.output)
+            with mock.patch(
+                "defenseclaw.commands.cmd_setup_provider.mark_setup_restart_handled"
+            ) as restart_handled:
+                for args in (
+                    ["add", "--name", "Acme", "--domain", "one.test"],
+                    ["add", "--name", "Acme", "--domain", "two.test"],
+                    ["remove", "--name", "Acme"],
+                ):
+                    result = CliRunner().invoke(provider, args, obj=app, env=env)
+                    self.assertEqual(result.exit_code, 0, result.output)
+                    self.assertIn("disk and live state match", result.output)
+            # GAP-0030: the hot reload is the apply; setup must not restart the gateway too.
+            self.assertEqual(restart_handled.call_count, 3)
             self.assertEqual(client_cls.call_count, 3)
             for call in client_cls.call_args_list:
                 self.assertEqual(call.kwargs["host"], "127.0.0.1")

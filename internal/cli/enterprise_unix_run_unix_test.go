@@ -14,7 +14,9 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -102,7 +104,7 @@ func TestLifecycleOutputPrintsEachProblemOnce(t *testing.T) {
 		t.Skip(err)
 	}
 	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
-		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }}, nil
+		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }, Runner: noHostCommands{}}, nil
 	}
 	t.Cleanup(func() { newUnixLifecycleEnv = previous })
 	platform := "linux"
@@ -110,6 +112,7 @@ func TestLifecycleOutputPrintsEachProblemOnce(t *testing.T) {
 		platform = "macos"
 	}
 	cmd := &cobra.Command{}
+	cmd.SetContext(t.Context()) // cobra gives every executed command a context
 	out.Reset()
 	cmd.SetOut(&out)
 	runErr := runUnixLifecycle(cmd, platform, "verify", &unixLifecycleOptions{})
@@ -179,6 +182,16 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	if err := lifecycleFailure(result, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("not installed: %q, want no repair advice", err)
 	}
+	// A gateway whose config the installed binary refuses is not helped by
+	// repair, which applies the same config again (GAP-0151).
+	refused := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "linux", "1.0.0")
+	refused.Installed = true
+	refused.AddError("verify_failed", "defenseclaw-gateway.service is not active")
+	refused.AddError("config_refused", "the installed gateway refuses the configuration: sidecar: init: bad pin")
+	refused.Finish("linux", 0)
+	if err := lifecycleFailure(refused, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("config_refused: %q, want no repair advice", err)
+	}
 	// GAP-2246: a status that found another run in progress checked nothing.
 	busy := enterprisestatus.New(enterpriseunix.ActionStatus, "standalone", "darwin", "1.0.0")
 	busy.Installed = true
@@ -197,6 +210,15 @@ func TestLifecycleFailureOfAnInstalledVerifyNamesRepair(t *testing.T) {
 	noConnector.Finish("linux", 0)
 	if err := lifecycleFailure(noConnector, false, repair); strings.Contains(err.Error(), "repair") {
 		t.Fatalf("no connector enabled: %q, want no repair advice", err)
+	}
+	// GAP-0918: repair never writes a verify_only file; its problem names
+	// the export instead.
+	verifyOnly := enterprisestatus.New(enterpriseunix.ActionVerify, "standalone", "linux", "1.0.0")
+	verifyOnly.Installed = true
+	verifyOnly.AddError("verify_failed", "DefenseClaw hooks are not in place in vendor machine policy for codex, so codex runs without them; missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only)")
+	verifyOnly.Finish("linux", 0)
+	if err := lifecycleFailure(verifyOnly, false, repair); strings.Contains(err.Error(), "repair") {
+		t.Fatalf("verify_only: %q, want no repair advice", err)
 	}
 }
 
@@ -493,4 +515,57 @@ func TestLifecycleBusyStatusShowsTheInstalledVersion(t *testing.T) {
 			t.Fatalf("%s --help: %q", action, long)
 		}
 	}
+}
+
+// GAP-0334: secret set --from-file read a key file that group or others can
+// write, which Windows and the MDM wrapper refuse.
+func TestSecretSetRefusesAKeyFileOthersCanWrite(t *testing.T) {
+	goos := enterpriseunix.CurrentGOOS()
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		t.Skip(err)
+	}
+	root := t.TempDir()
+	previous := newUnixLifecycleEnv
+	newUnixLifecycleEnv = func(goos string) (*enterpriseunix.Env, error) {
+		return &enterpriseunix.Env{GOOS: goos, Root: root, Layout: layout, Geteuid: func() int { return 0 }}, nil
+	}
+	t.Cleanup(func() { newUnixLifecycleEnv = previous })
+	key := filepath.Join(t.TempDir(), "ai-defense-api-key")
+	if err := os.WriteFile(key, []byte("value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(key, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newEnterpriseSecretCommand("set", "")
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	opts := enterpriseSecretOptions{name: "ai-defense-api-key", fromFile: key}
+	err = runEnterpriseSecret(cmd, "set", &opts)
+	if err == nil || !strings.Contains(err.Error(), "writable by group or other") || commandExitCode(err) != enterprisestatus.UnixExitInvalidArgs {
+		t.Fatalf("a world-writable key file was not refused: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("the refused key file reached the lifecycle: %q", out.String())
+	}
+}
+
+// GAP-0632: a `secret set` whose caller was killed while it waited for the
+// lifecycle lock does not store the credential later.
+func TestSecretSetStandsDownWhenItsCallerIsGone(t *testing.T) {
+	if err := secretCallerGone(4242, 4242); err != nil {
+		t.Fatalf("the caller is still there: %v", err)
+	}
+	if err := secretCallerGone(4242, 1); err == nil || !strings.Contains(err.Error(), "credential was not stored") {
+		t.Fatalf("an orphaned secret set stored the credential: %v", err)
+	}
+}
+
+// noHostCommands keeps a lifecycle test off the host's launchctl and
+// systemctl: every command reports that it is not installed.
+type noHostCommands struct{}
+
+func (noHostCommands) Run(context.Context, string, ...string) (enterpriseunix.CommandResult, error) {
+	return enterpriseunix.CommandResult{ExitCode: -1}, enterpriseunix.ErrCommandNotFound
 }

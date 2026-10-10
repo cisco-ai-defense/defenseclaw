@@ -467,8 +467,34 @@ try {
         [void]$closeJob.Invoke($null, @($emptyJob))
     }
     . $harness -NoRun
+    $liveClaudeGuardView = ${function:Get-ClaudeCodeLauncherGuardExecView}
     . $workflowRunPathHelper
     . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
+    # GAP-1091: both Claude Code registration checks read the exact generated
+    # cmd.exe launcher guard as its exec form and nothing else.
+    $guardLauncher = 'C:\Users\dc user\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe'
+    $guardSentence = @(('DefenseClaw blocked this: its Claude Code hook launcher is missing. ' +
+        'Run the DefenseClaw installer again to repair it.') -split ' ')
+    $guardArgs = @('/d', '/c', 'if', 'exist', $guardLauncher, '(', $guardLauncher, 'hook', '--connector',
+        'claudecode', ')', 'else', '(', 'echo') + $guardSentence + @('1>&2', '&', 'exit', '/b', '2', ')')
+    $guardProcessor = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $editedGuardArgs = @($guardArgs); $editedGuardArgs[-2] = '0'
+    foreach ($guardView in @($liveClaudeGuardView, ${function:Get-ClaudeCodeLauncherGuardExecView})) {
+        $exact = & $guardView ([pscustomobject]@{ type = 'command'; command = $guardProcessor; args = $guardArgs } |
+            ConvertTo-Json -Depth 4 | ConvertFrom-Json)
+        Assert-True ([string]$exact.command -ceq $guardLauncher -and
+            (@($exact.args) -join ' ') -ceq 'hook --connector claudecode') `
+            'Claude Code registration checks read the exact cmd.exe launcher guard as its exec form'
+        foreach ($other in @(
+            [pscustomobject]@{ command = $guardProcessor; args = $editedGuardArgs },
+            [pscustomobject]@{ command = $guardProcessor; args = @('/d', '/c', 'if', 'exist', $guardLauncher, '(', 'C:\Tools\other.exe', 'hook', ')', 'else', '(', 'echo', 'x', ')') },
+            [pscustomobject]@{ command = 'C:\Tools\cmd.exe'; args = $guardArgs },
+            [pscustomobject]@{ command = $guardProcessor; args = @('/d', '/c', 'echo', 'hook', '--connector', 'claudecode') }
+        )) {
+            Assert-True ([object]::ReferenceEquals((& $guardView $other), $other)) `
+                'Claude Code registration checks do not read an edited guard or another cmd.exe handler as DefenseClaw'
+        }
+    }
     $missingOptionalCleanupFields = '{"status":"pending-reboot"}' |
         ConvertFrom-Json -ErrorAction Stop
     foreach ($propertyName in @(
@@ -2774,6 +2800,23 @@ threading.Event().wait()
         [regex]::Matches($nativeHarnessText, 'Test-PathWithin \$root \$approvedStateBase').Count -eq 1 -and
         [regex]::Matches($wizardHarnessText, 'Test-PathWithin \$state \$_').Count -eq 1) `
         'setup cleanup and wizard gates require strict descendants while general state validation can recheck its exact approved root'
+    $wizardObservation = [regex]::Match(
+        $wizardHarnessText,
+        '(?s)function Get-WizardObservation\b.*?(?=\r?\n\$connectorIndices = )'
+    ).Value
+    $observedPathProbe = [regex]::Match(
+        $wizardHarnessText,
+        '(?s)function Test-ObservedPath\b.*?(?=\r?\n\r?\nfunction )'
+    ).Value
+    $deniedProbe = & {
+        function Test-Path { $false; throw [UnauthorizedAccessException]::new('Access to the path is denied.') }
+        . ([scriptblock]::Create($observedPathProbe))
+        Test-ObservedPath 'C:\setup-temp\payload\manifest.json' Leaf
+    }
+    Assert-True ($wizardObservation -match 'Test-ObservedPath' -and
+        $wizardObservation -notmatch 'Test-Path ' -and
+        $deniedProbe -is [bool] -and -not $deniedProbe) `
+        'wizard observer treats a path Setup is deleting (access denied) as absent instead of failing the run'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Go DACL regressions explicitly') 'native Windows workflow has a required Go DACL regression step'
     foreach ($testName in @(
         'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
@@ -3026,9 +3069,9 @@ threading.Event().wait()
         '(?s)function Set-WizardCodexLegacyNonWaitingHook\b.*?(?=\r?\nfunction )'
     ).Value
     Assert-True ($legacyLauncherFixture -match '\$bridge = Get-AwaitedHookBridge \$script' -and
-        $legacyLauncherFixture -match '\$bridge\.Invocation \+ ''; exit \$LASTEXITCODE''' -and
-        $legacyLauncherFixture -notmatch 'argumentLiterals') `
-        'legacy Codex launcher fixture preserves current event and hook-contract bindings'
+        $legacyLauncherFixture -match '"& \$legacyFile hook --connector codex; exit `\$LASTEXITCODE"' -and
+        $legacyLauncherFixture -notmatch '--event|--hook-contract|argumentLiterals|Invocation') `
+        'legacy Codex launcher fixture is the non-waiting call 0.8.x released, with no event or hook contract'
     $legacyWatchdogStop = $legacyLauncherAcceptance.IndexOf("@('watchdog', 'stop')", [StringComparison]::Ordinal)
     $legacyGatewayStop = $legacyLauncherAcceptance.IndexOf("@('stop')", [StringComparison]::Ordinal)
     $legacyFixture = $legacyLauncherAcceptance.IndexOf('Set-WizardCodexLegacyNonWaitingHook', [StringComparison]::Ordinal)

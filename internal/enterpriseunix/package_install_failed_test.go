@@ -3,6 +3,8 @@
 package enterpriseunix
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,31 +68,171 @@ func TestFailedPkgInstallVerifyNextStepsAgree(t *testing.T) {
 	}
 }
 
-// GAP-2410: uninstall (no --purge) after a failed first pkg install found
-// nothing to remove and still said to activate the deployment with `ensure
-// --from-package --config <file>`; it gives the finish step status and
-// verify give: install the pkg again, for its receipt.
-func TestFailedPkgInstallUninstallNoopNextStepsAgree(t *testing.T) {
+// dnf remove after a first rpm install that failed (config_invalid, rolled
+// back) left the rejected config.yaml, the state and log folders, the
+// lifecycle result, an empty drop-in folder and the service account: the
+// package scriptlet runs uninstall, which found no deployment and did
+// nothing (GAP-0421).
+func TestUninstallAfterAFailedPackageInstallRemovesItsLeftovers(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	h.runner.replies = map[string]fakeReply{"rpm -qf --quiet " + filepath.Join(h.env.Layout.BinDir, binGateway): {}}
+	if _, err := h.env.Accounts.Ensure(context.Background(), h.env.Layout.ServiceUser); err != nil {
+		t.Fatal(err)
+	}
+	dropin := "/etc/systemd/system/" + unitGuardian + ".d"
+	for _, dir := range []string{h.env.Layout.DataDir, h.env.Layout.LogDir, h.env.Layout.GuardianAuthDir, dropin} {
+		if err := os.MkdirAll(h.env.P(dir), 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeHostFile(t, h, h.env.Layout.ConfigPath, "config_version: 9\ngateway:\n  api_port: 18971\n")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"gateway.api_port must be 18970"}]}`)
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	for _, path := range []string{h.env.Layout.ConfigDir, h.env.Layout.DataDir, h.env.Layout.LogDir, h.env.Layout.GuardianAuthDir, dropin} {
+		if exists(h.env.P(path)) {
+			t.Errorf("the uninstall after a failed package install left %s", path)
+		}
+	}
+	if _, ok, _ := h.env.Accounts.Lookup(context.Background(), h.env.Layout.ServiceUser); ok {
+		t.Error("the uninstall after a failed package install left the service account")
+	}
+	if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
+		t.Error("the uninstall removed binaries the package owns")
+	}
+}
+
+// GAP-1151: a failed first package install can enroll users before rollback
+// removes config.yaml. Uninstall must still use the retained manifest to
+// remove their hook registrations while the package binary is present.
+func TestFailedFirstPackageUninstallRemovesHooksWithoutConfig(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n  - user: alice\n    uid: 1001\n    user_home: /home/alice\n    connector: codex\n")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"activation_failed","message":"gateway exited"}]}`)
+	if exists(h.env.P(h.env.Layout.ConfigPath)) || exists(h.env.deploymentPath()) {
+		t.Fatal("test requires a retained manifest without config or deployment")
+	}
+	removed := false
+	h.env.Runner = observingRunner{Runner: h.runner, observe: func(_ string, args []string) {
+		if joined := strings.Join(args, " "); strings.Contains(joined, "hooks remove-all") &&
+			!strings.HasSuffix(joined, " --check") {
+			removed = true
+		}
+	}}
+	done := h.run(Options{Action: ActionUninstall})
+	requireOK(t, done)
+	if !removed {
+		t.Fatal("uninstall did not invoke remove-all for the retained manifest")
+	}
+}
+
+// The same on macOS: the Jamf uninstall script answered noop not_installed
+// (with the finish step of GAP-2410) and left bin, the rejected
+// etc/config.yaml and lifecycle (GAP-0567).
+func TestMacOSUninstallAfterAFailedFirstPackageInstallRemovesItsLeftovers(t *testing.T) {
 	h := newTestHost(t, "darwin")
-	dir := h.env.P(h.env.Layout.LifecycleDir)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	bin := h.env.P(h.env.Layout.BinDir)
+	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	last := `{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"rule pack missing"}]}`
-	if err := os.WriteFile(filepath.Join(dir, lastPackageResultFile), []byte(last), 0o600); err != nil {
-		t.Fatal(err)
+	staged := h.payload("1.0.0")
+	for _, name := range []string{binGateway, binHook, binSensorHelper} {
+		if err := h.env.copyFileAtomic(filepath.Join(staged, name), filepath.Join(bin, name), 0o755, rootOwner()); err != nil {
+			t.Fatal(err)
+		}
 	}
-	writeHostFile(t, h, h.env.Layout.DescriptorPath, "{}")
+	writeHostFile(t, h, h.env.Layout.ConfigPath, "config_version: 9\ngateway:\n  api_port: 18971\n")
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"config_invalid","message":"gateway.api_port 18971 must be 18970"}]}`)
 	r := h.run(Options{Action: ActionUninstall})
-	if !r.Noop || r.NoopReason != "not_installed" {
-		t.Fatalf("uninstall noop=%v reason=%q, want a not_installed no-op", r.Noop, r.NoopReason)
+	requireOK(t, r)
+	if r.Noop || exists(h.env.P(h.env.Layout.BinDir)) {
+		t.Fatalf("the uninstall after a failed first pkg install left binaries (noop=%v)", r.Noop)
 	}
-	if failed := messagesOf(r.Warnings, codePackageInstallFailed); !strings.Contains(failed, "install the package again") {
-		t.Fatalf("package_install_failed warning = %q", failed)
+}
+
+// A failed package run the host recovered from out of band (systemd started
+// the gateway again) left its result and the kept gateway output in place:
+// ensure --from-package then found the host healthy and did nothing
+// (GAP-0174).
+func TestHealthyNoopEnsureFromPackageClearsTheFailedPackageResult(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	dir := h.env.P(h.env.Layout.LifecycleDir)
+	leftovers := []string{filepath.Join(dir, lastPackageResultFile), filepath.Join(dir, lastPackageLogFile), h.env.activationFailurePath()}
+	failed := `{"ok":false,"action":"ensure","errors":[{"code":"activation_failed","message":"gateway exited"}]}`
+	for _, path := range leftovers {
+		if err := os.WriteFile(path, []byte(failed), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	leftovers := messagesOf(r.Warnings, codeLeftovers)
-	if leftovers == "" || strings.Contains(leftovers, "--config <file>") || !strings.Contains(leftovers, "as the "+codePackageInstallFailed+" warning says") {
-		t.Fatalf("unmanaged_leftovers warning = %q, want it to defer to the %s advice", leftovers, codePackageInstallFailed)
+	r := h.run(Options{Action: ActionEnsure, FromPackage: true})
+	requireOK(t, r)
+	if !r.Noop {
+		t.Fatalf("ensure --from-package on a healthy host was not a no-op: %+v", r.Changes)
+	}
+	for _, path := range leftovers[1:] {
+		if exists(path) {
+			t.Fatalf("a healthy no-op ensure --from-package left %s", filepath.Base(path))
+		}
+	}
+	// The run records its own result in place of the failure (GAP-1116).
+	var recorded struct {
+		OK bool `json:"ok"`
+	}
+	if raw, err := os.ReadFile(leftovers[0]); err != nil || json.Unmarshal(raw, &recorded) != nil || !recorded.OK {
+		t.Fatalf("last-package-result.json after a healthy no-op ensure --from-package = %q (%v), want the ok result of this run", raw, err)
+	}
+}
+
+// A package upgrade whose activation was rolled back left
+
+// last-package-result.json at ok:false after ensure recovered the host
+// (GAP-0151), and last-activation-failure.log with it (GAP-0162). A later run
+// that commits a deployment removes both; the package's own run leaves the
+// result to its shell, which writes the document after the lifecycle
+// returns.
+func TestRecoveringRunClearsTheFailedPackageResult(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	last := filepath.Join(h.env.P(h.env.Layout.LifecycleDir), lastPackageResultFile)
+	failed := `{"ok":false,"action":"ensure","errors":[{"code":"activation_failed","message":"gateway exited"}]}`
+	if err := os.WriteFile(last, []byte(failed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	activation := h.env.activationFailurePath()
+	if err := os.WriteFile(activation, []byte("gateway exited"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1"), Reason: "package"}))
+	if !exists(last) {
+		t.Fatal("the package's own run removed the result its shell writes")
+	}
+	if exists(activation) {
+		t.Fatal("a committed run left the kept output of the failed activation in place")
+	}
+	if err := os.WriteFile(activation, []byte("gateway exited"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.2")}))
+	if exists(last) || exists(activation) {
+		t.Fatal("a recovering run left the failed package result or the kept activation output in place")
+	}
+}
+
+// GAP-0469: a package reinstall the lifecycle refused (a full disk) printed
+// Complete and left status and verify green on the running deployment.
+func TestStatusWarnsThatTheLastPackageRunDidNotApply(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeHostFile(t, h, filepath.Join(h.env.Layout.LifecycleDir, lastPackageResultFile),
+		`{"ok":false,"action":"ensure","errors":[{"code":"apply_failed","message":"create snapshot: no space left on device"}]}`)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := messagesOf(h.run(Options{Action: action}).Warnings, codePackageInstallFailed)
+		if !strings.Contains(got, "did not apply: apply_failed: create snapshot: no space left on device") || !strings.Contains(got, "--from-package`") {
+			t.Fatalf("%s does not warn about the refused package run: %q", action, got)
+		}
 	}
 }
 

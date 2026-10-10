@@ -36,6 +36,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -70,6 +71,20 @@ func TestSandboxConfigPersister(t *testing.T) {
 	raw, err := os.ReadFile(configFilePathForSnapshot(live))
 	if err != nil || !strings.Contains(string(raw), "registry.example.org") {
 		t.Fatalf("config file = %s, %v", raw, err)
+	}
+
+	// Another writer's entry that the gateway has not reloaded yet survives:
+	// the list comes from the file, not the applied generation.
+	path := configFilePathForSnapshot(live)
+	if _, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: "openshell.egress.unblocked",
+		Value: []string{"registry.example.org", "docs.example.org", "cli.example.org"}}}, configwrite.Options{Actor: "cli:test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.AllowAlways(ctx, "late.example.org"); err != nil {
+		t.Fatal(err)
+	}
+	if got := api.runtimeConfigSnapshot().OpenShell.Egress.Unblocked; !slices.Contains(got, "cli.example.org") || !slices.Contains(got, "late.example.org") {
+		t.Fatalf("unblocked after a concurrent write = %v", got)
 	}
 
 	// An invalid entry is refused and the file restored.

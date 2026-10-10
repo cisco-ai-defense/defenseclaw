@@ -937,7 +937,6 @@ def _interactive_wizard(app: AppContext) -> None:
     raw, source = _load_source(app)
     click.echo("\nDefenseClaw redaction policy")
     click.echo(f"Config: {path}")
-    click.echo("Schema: v8")
     _render_status(_operator_status(app), compact=True)
     draft = _WizardDraft(raw, source, str(path))
 
@@ -1362,6 +1361,10 @@ def _execute_mutations(
     emit_json: bool,
     restart: bool,
 ) -> None:
+    from defenseclaw.enforce.asset_lists import refuse_config_writer_on_managed_device
+
+    # A managed device refuses before the preview, with exit 3 (GAP-0052).
+    refuse_config_writer_on_managed_device(app.cfg, f"setup redaction {action.split()[0]}", "redaction")
     mutation_tuple = tuple(mutations)
     if not mutation_tuple:
         raise click.UsageError("no redaction policy changes were selected")

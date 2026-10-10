@@ -79,6 +79,13 @@ func installDefaultRulePackForDataDir(t testing.TB, dataDir string) string {
 func routerWithDefaultRulePack(t testing.TB) *EventRouter {
 	t.Helper()
 	router := NewEventRouter(nil, nil, nil, false)
-	router.SetRulePack(mustLoadRulePack(t, ""))
+	router.generationSource = staticRulePackGeneration(mustLoadRulePack(t, ""))
 	return router
+}
+
+// staticRulePackGeneration gives a test router a fixed, unpublished
+// generation whose active rule pack is pack.
+func staticRulePackGeneration(pack *guardrail.RulePack) func() *Generation {
+	g := &Generation{active: pack}
+	return func() *Generation { return g }
 }

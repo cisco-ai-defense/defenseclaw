@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -91,11 +92,14 @@ type ContentInspector interface {
 // requests, runs guardrail inspection, and forwards to the upstream LLM
 // provider.
 type GuardrailProxy struct {
-	cfg     *config.GuardrailConfig
-	logger  *audit.Logger
-	health  *SidecarHealth
-	store   *audit.Store
-	dataDir string
+	// generationSource is the gateway's published generation; each request
+	// pins it in withProxyAgent. nil outside a gateway.
+	generationSource func() *Generation
+	cfg              *config.GuardrailConfig
+	logger           *audit.Logger
+	health           *SidecarHealth
+	store            *audit.Store
+	dataDir          string
 
 	observabilityV8Mu                  sync.RWMutex
 	observabilityV8Trace               lifecycleV8Runtime
@@ -285,10 +289,9 @@ func (p *GuardrailProxy) resolveConfirm(ctx context.Context, r *http.Request, ve
 	// here is unusable (operators couldn't reply in the right
 	// format; the message itself re-triggered scanners), so we
 	// demote prompt confirms to alert before any HILT call. We
-	// deliberately scope this guard to confirm — block verdicts on
-	// the prompt direction are already demoted upstream in the
-	// inspector chokepoint, and tests that construct synthetic
-	// block verdicts directly should not be intercepted here.
+	// deliberately scope this guard to confirm: a block verdict on
+	// the prompt direction stands (guardrail.block_at is one threshold
+	// on every surface).
 	if verdict != nil && isPromptDirection(direction) && verdict.Action == guardrailActionConfirm {
 		original := verdict.Action
 		verdict.Action = guardrailActionAlert
@@ -388,7 +391,6 @@ func NewGuardrailProxy(
 	store *audit.Store,
 	dataDir string,
 	gatewayToken string,
-	policyDir string,
 	notify *NotificationQueue,
 	rp *guardrail.RulePack,
 	judgeLLM config.LLMConfig,
@@ -404,12 +406,7 @@ func NewGuardrailProxy(
 	providers, _, _ := providerRegistrySnapshot()
 	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp, providers)
 
-	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
-	connectorName := ""
-	if conn != nil {
-		connectorName = conn.Name()
-	}
-	inspector.SetFallbackProfile(guardrailProfileForConnector(cfg, connectorName))
+	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge)
 	inspector.SetDetectionStrategy(
 		cfg.DetectionStrategy,
 		cfg.DetectionStrategyPrompt,
@@ -499,14 +496,41 @@ func (p *GuardrailProxy) SetManagedInspection(managed bool, replacement Inspecto
 	}
 }
 
+// ReloadCiscoClient rebuilds the open-source AI Defense client of a proxy
+// built for a remote scanner mode from the reloaded cisco_ai_defense.
+func (p *GuardrailProxy) ReloadCiscoClient(aid *config.CiscoAIDefenseConfig, dataDir string) {
+	if p == nil || aid == nil {
+		return
+	}
+	g, ok := p.inspector.(*GuardrailInspector)
+	if !ok || g.managedMode {
+		return
+	}
+	p.rtMu.Lock()
+	defer p.rtMu.Unlock()
+	if mode := p.cfg.ScannerMode; mode != "remote" && mode != "both" {
+		return
+	}
+	if client := NewCiscoInspectClient(aid, filepath.Join(dataDir, ".env")); client != nil {
+		g.SetCiscoInspector(client)
+		return
+	}
+	g.SetCiscoInspector(nil)
+}
+
 // SetSecureClientIntegration preserves the existing judge prompt for Secure Client.
-// The sidecar calls this before serving proxy requests.
+// The sidecar calls this before serving proxy requests. Later generations get
+// a shared judge that buildSharedJudge already marks.
 func (p *GuardrailProxy) SetSecureClientIntegration(enabled bool) {
 	if p == nil {
 		return
 	}
-	if g, ok := p.inspector.(*GuardrailInspector); ok && g.judge != nil {
-		g.judge.secureClient = enabled
+	g, ok := p.inspector.(*GuardrailInspector)
+	if !ok {
+		return
+	}
+	if judge := g.currentJudge(); judge != nil && judge.secureClient != enabled {
+		judge.secureClient = enabled
 	}
 }
 
@@ -535,6 +559,16 @@ type unverifiedProxyCallerKey struct{}
 
 func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 	ctx := r.Context()
+	// One generation decides the request: its rules, local patterns,
+	// profiles and the policy stamp of its records (GAP-0455). An unverified
+	// caller keeps the base guardrail of that same generation.
+	set := liveGuardrailProfiles.Load()
+	if p.generationSource != nil {
+		if g := p.generationSource(); g.published() {
+			ctx = withPinnedGeneration(ctx, g)
+			set = pinnedGeneration(ctx).Profiles
+		}
+	}
 	if _, verified := verifiedSubjectFromContext(ctx); !verified && !p.presentsOwnerCredential(r) {
 		// A provider key admits model traffic but says nothing about who sent it.
 		// Keep the proxy's base guardrail and leave the owner's agent unclaimed.
@@ -548,7 +582,7 @@ func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 			sharedAgentIdentities.observe(facts, "", false)
 		}
 	}
-	return r.WithContext(withGuardrailProfile(ctx, liveGuardrailProfiles.Load(), connectorName))
+	return r.WithContext(withGuardrailProfile(ctx, set, connectorName))
 }
 
 // profileModeFor applies the request's identity-based guardrail profile to
@@ -597,20 +631,35 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 	if newName := strings.TrimSpace(cfg.Connector); newName != "" {
 		p.switchConnectorLocked(strings.ToLower(newName))
 	}
-	p.applyInspectorFallbackProfileLocked()
 	p.rtMu.Unlock()
 }
 
-func (p *GuardrailProxy) applyInspectorFallbackProfileLocked() {
-	setter, ok := p.inspector.(interface{ SetFallbackProfile(string) })
-	if !ok {
+// toolCallAction maps tool calls found in a response with the thresholds of
+// the request's connector and verified profile.
+func (p *GuardrailProxy) toolCallAction(ctx context.Context, findings []RuleFinding) string {
+	connectorName := thresholdConnectorFrom(ctx)
+	if ManagedEnterpriseActive() {
+		// The Secure Client integration keeps the global levels here.
+		connectorName = ""
+	}
+	if cfg := requestPolicyConfig(ctx); cfg != nil {
+		return guardrailActionForConnectorFindings(cfg, connectorName, findings, false)
+	}
+	p.rtMu.RLock()
+	gc := p.cfg
+	p.rtMu.RUnlock()
+	return guardrailActionForGuardrailFindings(gc, connectorName, findings, false)
+}
+
+// SetJudge replaces the inspector's LLM judge with the generation's shared
+// judge (nil disables it).
+func (p *GuardrailProxy) SetJudge(judge *LLMJudge) {
+	if p == nil {
 		return
 	}
-	connectorName := ""
-	if p.connector != nil {
-		connectorName = p.connector.Name()
+	if setter, ok := p.inspector.(interface{ SetJudge(*LLMJudge) }); ok {
+		setter.SetJudge(judge)
 	}
-	setter.SetFallbackProfile(guardrailProfileForConnector(p.cfg, connectorName))
 }
 
 // StartHookConfigGuard launches the connector hook self-heal guard bound to
@@ -683,7 +732,10 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/models", p.handleModels)
 	mux.HandleFunc("/models", p.handleModels)
 	mux.HandleFunc("/health/liveness", p.handleHealth)
-	mux.HandleFunc("/health/liveliness", p.handleHealth) // backward compat
+	if ManagedEnterpriseActive() {
+		// Secure Client keeps the LiteLLM-era alias (issue #1092).
+		mux.HandleFunc("/health/liveliness", p.handleHealth)
+	}
 	mux.HandleFunc("/health/readiness", p.handleHealth)
 	mux.HandleFunc("/health", p.handleHealth)
 	// Layer 3 (observability): egress events reported back from the
@@ -713,7 +765,8 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// (ANTHROPIC_BASE_URL=http://proxy/c/claudecode) hits the same
 	// handlers as fetch-interceptor traffic.
 	stripped := connectorPrefixStripper(mux, p.registry)
-	limited := p.rateLimitMiddleware(stripped)
+	scoped := p.thresholdScopeMiddleware(stripped)
+	limited := p.rateLimitMiddleware(scoped)
 	logged := p.requestLogger(limited)
 	// Middleware ordering matters for v7 correlation: request_id
 	// must be in the context BEFORE CorrelationMiddleware freezes
@@ -814,6 +867,21 @@ func (p *GuardrailProxy) rateLimitMiddleware(next http.Handler) http.Handler {
 // Security: the connector name must pass charset validation AND exist in
 // the registry. Paths containing percent-encoded slashes (%2f/%2F) or
 // dot-dot segments are rejected before any stripping occurs.
+// thresholdScopeMiddleware records the connector this proxy serves (the
+// server-side active connector, never a URL or header value) so guardrail
+// decisions resolve that connector's thresholds.
+func (p *GuardrailProxy) thresholdScopeMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.rtMu.RLock()
+		name := ""
+		if p.connector != nil {
+			name = p.connector.Name()
+		}
+		p.rtMu.RUnlock()
+		next.ServeHTTP(w, r.WithContext(withThresholdConnector(r.Context(), name)))
+	})
+}
+
 func connectorPrefixStripper(next http.Handler, reg *connector.Registry) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
@@ -998,6 +1066,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	r = p.withProxyAgent(r)
+	// A hop the interceptor rewrote is agent traffic here too, so doctor does
+	// not report the OpenClaw Responses calls the proxy handled as a bypass
+	// (GAP-0245). Secure Client keeps the health record of main (issue #1092).
+	if strings.TrimSpace(r.Header.Get("X-DC-Target-URL")) != "" && !ManagedEnterpriseActive() {
+		p.health.RecordAgentProxyTraffic()
+	}
 
 	// Peek the body once so the shape classifier can run even when the
 	// URL is unknown. 10 MiB cap matches the original io.Copy budget.
@@ -1172,6 +1246,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
 
 	userText := lastUserText(partial.Messages)
+	// turnText is the whole user turn of a message list, inspected instead of
+	// userText as on the chat-completions route: OpenClaw 2026.9 appends a
+	// context message after the prompt (GAP-0190, GAP-0243). userText still
+	// drives the heartbeat and session-startup gates.
+	turnText := promptTurnText(partial.Messages)
 	// A coexisting Ollama /api/generate `prompt` is the user generation
 	// input. Do not let top-level `system` replace it (#718). Anthropic
 	// and other system-only native shapes still fall through here when
@@ -1211,6 +1290,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 					}
 				}
 				userText = lastUserText(inputMsgs)
+				turnText = promptTurnText(inputMsgs)
 				if len(partial.Messages) == 0 {
 					partial.Messages = inputMsgs
 				}
@@ -1241,6 +1321,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				geminiMsgs = append(geminiMsgs, ChatMessage{Role: role, Content: t.Text})
 			}
 			userText = lastUserText(geminiMsgs)
+			turnText = promptTurnText(geminiMsgs)
 			if len(partial.Messages) == 0 {
 				partial.Messages = geminiMsgs
 			}
@@ -1283,6 +1364,9 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectRaw := userText
+	if strings.TrimSpace(turnText) != "" {
+		inspectRaw = turnText
+	}
 	if ollamaSystemText != "" {
 		inspectRaw = ollamaSystemText + "\n" + userText
 	}
@@ -1507,7 +1591,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// (defenseclaw.gateway.forwarded_headers) carries the steady-state
 		// signal; this stderr line is opt-in for local triage via
 		// DEFENSECLAW_DEBUG=1. Header names and values are never logged.
-		if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+		if envvars.Getenv("DEFENSECLAW_DEBUG") == "1" {
 			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: forwarded_header_count=%d\n", forwardedHeaderCount)
 		}
 		p.recordProxyForwardedHeadersV8(r.Context(), "passthrough", "ok", int64(forwardedHeaderCount))
@@ -1518,6 +1602,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
 	resp, err := doProviderRequest(upstreamReq, p.emitEgress)
 	if err != nil {
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, partial.Stream, msg)
+			return
+		}
 		if provider == "bedrock" {
 			writeBedrockUpstreamError(w, upstreamErrorMessage("upstream error: ", err))
 		} else {
@@ -2162,9 +2250,15 @@ func extractSSEChunkText(data string, provider string) string {
 	return ""
 }
 
+// handleHealth answers the proxy liveness probe. Outside the Secure Client
+// integration it also names the live generation's effective policy digest.
 func (p *GuardrailProxy) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
+	if policy, ok := CurrentPolicyHealth(); ok {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "healthy", "policy_digest": policy.EffectiveDigest})
+		return
+	}
 	_, _ = w.Write([]byte(`{"status":"healthy"}`))
 }
 
@@ -2199,13 +2293,12 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // providerRegistryMu guards providerDomains / ollamaPorts / providerRegistry.
-// The registry can be rebuilt at runtime via ReloadProviderRegistry() when
-// the operator overlay at ~/.defenseclaw/custom-providers.json changes.
+// The live configuration generation publishes the registry (embedded
+// providers.json, llm_providers from config.yaml and llm.base_url's host;
+// see buildGenerationProviders).
 var providerRegistryMu sync.RWMutex
 
-// providerDomains is built at init (and on reload) from the embedded
-// providers.json merged with the operator overlay. Each entry maps a
-// domain substring to the provider name.
+// providerDomains maps each provider domain to the provider name.
 var providerDomains []providerDomainEntry
 
 type providerDomainEntry struct {
@@ -2218,25 +2311,41 @@ type providerDomainEntry struct {
 // provider traffic so the SSRF allowlist does not reject them.
 var ollamaPorts []int
 
-// providerRegistry holds the merged provider list (built-ins + overlay)
-// as last loaded, for serving GET /v1/config/providers.
+// providerRegistry holds the merged provider list as last published, for
+// serving GET /v1/config/providers.
 var providerRegistry *configs.ProvidersConfig
 
 func init() {
-	if err := ReloadProviderRegistry(); err != nil {
+	cfg, err := configs.LoadProviders()
+	if err != nil {
 		panic("gateway: failed to load embedded providers.json: " + err.Error())
 	}
+	setProviderRegistry(cfg)
 }
 
-// ReloadProviderRegistry re-reads the embedded providers.json and merges
-// the operator overlay at ~/.defenseclaw/custom-providers.json. Safe to
-// call at runtime; concurrent readers of providerDomains / ollamaPorts
-// see a consistent snapshot.
+// ReloadProviderRegistry rebuilds the registry from the live generation's
+// configuration (re-reading any CA files llm_providers references). Before
+// the first generation it loads the embedded providers. Safe to call at
+// runtime; concurrent readers see a consistent snapshot.
 func ReloadProviderRegistry() error {
+	if g := currentGeneration(); g != nil && g.Config != nil {
+		providers, err := buildGenerationProviders(g.Config)
+		if err != nil {
+			return err
+		}
+		applyGenerationProviders(providers)
+		return nil
+	}
 	cfg, err := configs.LoadProviders()
 	if err != nil {
 		return err
 	}
+	setProviderRegistry(cfg)
+	return nil
+}
+
+// setProviderRegistry publishes cfg as the provider registry.
+func setProviderRegistry(cfg *configs.ProvidersConfig) {
 	domains := make([]providerDomainEntry, 0, len(cfg.Providers)*2)
 	for _, p := range cfg.Providers {
 		for _, d := range p.Domains {
@@ -2248,70 +2357,6 @@ func ReloadProviderRegistry() error {
 	ollamaPorts = cfg.OllamaPorts
 	providerRegistry = cfg
 	providerRegistryMu.Unlock()
-	return nil
-}
-
-// SeedCustomProvidersFromLLMBaseURL writes a custom-providers.json overlay
-// that registers the domain from llmBaseURL as a known provider. This allows
-// custom deployments to route traffic through an LLM gateway whose domain is
-// not in the built-in providers list.
-//
-// The file is written to the path returned by configs.CustomProvidersPath().
-// After writing, ReloadProviderRegistry() is called so the domain is
-// immediately recognized by isKnownProviderDomain().
-//
-// No-op when llmBaseURL is empty or cannot be parsed.
-func SeedCustomProvidersFromLLMBaseURL(llmBaseURL string) error {
-	llmBaseURL = strings.TrimSpace(llmBaseURL)
-	if llmBaseURL == "" {
-		return nil
-	}
-	u, err := url.Parse(llmBaseURL)
-	if err != nil {
-		return nil // unparseable URL — skip silently
-	}
-	host := strings.ToLower(u.Hostname())
-	if host == "" || host == "127.0.0.1" || host == "localhost" {
-		return nil // loopback addresses are handled by Ollama / local logic
-	}
-
-	// Check if the domain is already known — avoid writing a redundant overlay.
-	providerRegistryMu.RLock()
-	for _, pd := range providerDomains {
-		if strings.EqualFold(pd.domain, host) {
-			providerRegistryMu.RUnlock()
-			return nil
-		}
-	}
-	providerRegistryMu.RUnlock()
-
-	overlayPath := configs.CustomProvidersPath()
-	if overlayPath == "" {
-		return fmt.Errorf("custom-providers path is empty (no HOME set)")
-	}
-
-	overlay := configs.ProvidersConfig{
-		Providers: []configs.Provider{{
-			Name:    "custom-gateway",
-			Domains: []string{host},
-			EnvKeys: []string{"LLM_GATEWAY"},
-		}},
-	}
-	data, err := json.MarshalIndent(overlay, "", "  ")
-	if err != nil {
-		return err
-	}
-
-	dir := filepath.Dir(overlayPath)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if err := os.WriteFile(overlayPath, data, 0o600); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(os.Stderr, "[sidecar] custom-providers overlay seeded for domain %q\n", host)
-	return ReloadProviderRegistry()
 }
 
 // providerRegistrySnapshot returns the currently-loaded provider list
@@ -3098,7 +3143,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// Record only headers that survive semantic routing's credential
 		// boundary and reach a dispatchable target. The per-request debug
 		// signal follows the same semantics.
-		if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+		if envvars.Getenv("DEFENSECLAW_DEBUG") == "1" {
 			fmt.Fprintf(os.Stderr, "[guardrail] chat: forwarded_header_count=%d\n", forwardedHeaderCount)
 		}
 		p.recordProxyForwardedHeadersV8(
@@ -3246,6 +3291,10 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 			llmCtx, r, req, providerName, promptID, "", "", lifecycleOutcome, "", nil,
 		)
 		fmt.Fprintf(os.Stderr, "[guardrail] upstream error: %v\n", err)
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedChatReply(w, aliasModel, req.Stream, msg)
+			return
+		}
 		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}
@@ -3902,7 +3951,7 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 //
 // Dispatch order:
 //
-//  1. Bedrock is provider-specific (binary eventstream framing, AWS Sigv4
+//  1. Bedrock's native /model/ API is provider-specific (eventstream framing, SigV4
 //     auth) and predates the FormatAdapter registry — it keeps its own
 //     branch so #124's proxy_bedrock_block.go handler stays the single
 //     source of truth for Bedrock wire formats.
@@ -3916,7 +3965,7 @@ func (p *GuardrailProxy) writeBlockedStream(w http.ResponseWriter, model, msg st
 //     formats should go through the registry, not through more branches
 //     here.
 func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, provider, model string, stream bool, msg string) {
-	if provider == "bedrock" {
+	if provider == "bedrock" && !bedrockOpenAICompatibleReply(path) {
 		// Bedrock decides streaming vs non-streaming from the URL path
 		// (/converse-stream vs /converse, /invoke-with-response-stream
 		// vs /invoke) rather than a `stream: true` body field, so the
@@ -3940,6 +3989,16 @@ func (p *GuardrailProxy) writeBlockedPassthrough(w http.ResponseWriter, path, pr
 	} else {
 		p.writeBlockedResponse(w, model, msg)
 	}
+}
+
+// writeBlockedChatReply answers a chat-completions request with msg as the
+// assistant turn, streamed when the client asked for a stream.
+func (p *GuardrailProxy) writeBlockedChatReply(w http.ResponseWriter, model string, stream bool, msg string) {
+	if stream {
+		p.writeBlockedStream(w, model, msg)
+		return
+	}
+	p.writeBlockedResponse(w, model, msg)
 }
 
 // writeBlockedResponseGemini returns a blocked response in Gemini
@@ -4580,7 +4639,6 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	}
 
 	p.connector = newConn
-	p.applyInspectorFallbackProfileLocked()
 	if err := connector.SaveActiveConnector(p.setupOpts.DataDir, newName); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 	}
@@ -5410,9 +5468,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	severity := HighestSeverity(allFindings)
 	confidence := HighestConfidence(allFindings, severity)
 
-	action := guardrailToolCallActionForGuardrailFindings(
-		p.cfg, allFindings, false,
-	)
+	action := p.toolCallAction(ctx, allFindings)
 	if action == guardrailActionConfirm {
 		action = guardrailActionAlert
 	}
@@ -5741,6 +5797,10 @@ func (p *GuardrailProxy) rawForwardChatCompletion(
 	resp, err := doProviderRequest(upReq, p.emitEgress)
 	if err != nil {
 		failModel("upstream_error", err)
+		if msg, ok := privateUpstreamReply(err); ok {
+			p.writeBlockedChatReply(w, req.Model, req.Stream, msg)
+			return
+		}
 		writeOpenAIError(w, http.StatusBadGateway, upstreamErrorMessage("upstream provider error: ", err))
 		return
 	}
@@ -6539,8 +6599,8 @@ func providerRequestOverridesForTarget(targetURL string) map[string]interface{} 
 		return nil
 	}
 
-	cfg, err := configs.LoadProviders()
-	if err != nil || cfg == nil {
+	cfg, _, _ := providerRegistrySnapshot()
+	if cfg == nil {
 		return nil
 	}
 

@@ -38,9 +38,6 @@ type Source = 'scenario' | 'custom' | 'corpus';
 const DOMAIN_OPTIONS: Array<{ value: Domain; label: string; hint?: string }> = [
   { value: 'admission', label: 'admission' },
   { value: 'guardrail', label: 'guardrail' },
-  { value: 'firewall', label: 'firewall' },
-  { value: 'audit', label: 'audit' },
-  { value: 'skill_actions', label: 'skill_actions' },
 ];
 
 const SOURCE_OPTIONS: Array<{ value: Source; label: string }> = [
@@ -459,6 +456,12 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
             }
           />
         </div>
+      )}
+
+      {domain === 'admission' && (
+        <p className="text-[11px] text-fd-muted-foreground">
+          Live Test cannot verify shipped CodeGuard or DefenseClaw plugin content. It evaluates those names without the built-in first-party scan bypass; the gateway checks the installed content.
+        </p>
       )}
 
       {source !== 'corpus' && (

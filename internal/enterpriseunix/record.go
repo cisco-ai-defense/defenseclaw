@@ -51,8 +51,11 @@ type Deployment struct {
 	ProductVersion string `json:"product_version"`
 	Channel        string `json:"channel"`
 	InstalledAt    string `json:"installed_at"`
-	UpdatedAt      string `json:"updated_at"`
-	NoStart        bool   `json:"no_start"`
+	// ActivatedAt records the first successful start after a --no-start staging.
+	// Older records use InstalledAt as the activation time.
+	ActivatedAt string `json:"activated_at,omitempty"`
+	UpdatedAt   string `json:"updated_at"`
+	NoStart     bool   `json:"no_start"`
 
 	ServiceUser           string `json:"service_user"`
 	ServiceUID            int    `json:"service_uid"`
@@ -115,8 +118,10 @@ func (e *Env) loadDeployment() (*Deployment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read deployment record: %w", err)
 	}
+	// Unknown fields are tolerated so a later release can add one and this
+	// binary still reads the record after a rollback.
 	var record Deployment
-	if err := decodeStrict(data, &record); err != nil {
+	if err := json.Unmarshal(data, &record); err != nil {
 		return nil, fmt.Errorf("parse deployment record: %w", err)
 	}
 	if record.SchemaVersion != deploymentSchemaVersion {

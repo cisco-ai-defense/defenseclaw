@@ -16,13 +16,9 @@
 
 """defenseclaw alerts — View and manage security alerts.
 
-P3-#20 collapsed the legacy Textual TUI here in favour of the Go-based
-panel shipped with ``defenseclaw tui`` (internal/tui/alerts.go). This
-module now renders a plain, pipe-friendly table by default and supports
-``--show N`` for scripted deep dives. The ``--tui`` flag is retained as
-a no-op for backward compatibility with muscle memory and older docs;
-it prints a deprecation notice and falls through to the table so
-existing aliases/scripts keep working.
+The interactive Alerts panel lives in ``defenseclaw tui``. This module
+renders a plain, pipe-friendly table by default and supports
+``--show N`` for scripted deep dives.
 """
 
 from __future__ import annotations
@@ -222,14 +218,19 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     A post-tool finding (PostToolUse, ...) cannot block the call that already
     ran, so it is not labelled observe mode on an action-mode connector
     (GAP-1303)."""
-    from defenseclaw.hook_metrics import would_block_hook_label  # noqa: PLC0415
+    from defenseclaw.hook_metrics import (  # noqa: PLC0415
+        POST_TOOL_DECISION,
+        detection_only_hook_label,
+        would_block_hook_label,
+    )
 
     decision = ""
     for raw in hook_details:
         kv = _kv(_strip_details_json(raw))
         action = kv.get("action", "").lower()
         if action == "block":
-            return "blocked"
+            # A block on PostToolUse held the result back; the call had run (GAP-1344).
+            return POST_TOOL_DECISION if detection_only_hook_label(hook_event) == POST_TOOL_DECISION else "blocked"
         # Observe mode records action=allow raw_action=block, with or without
         # would_block=true; both are "would block" (GAP-1213).
         observed_block = action == "allow" and kv.get("raw_action", "").lower() == "block"
@@ -267,9 +268,9 @@ def _rule_pack_dirs() -> list[Path]:
         from defenseclaw import config as config_module  # noqa: PLC0415
 
         cfg = config_module.load()
-        gc = cfg.guardrail
-        if str(getattr(gc, "rule_pack_dir", "") or "").strip():
-            dirs.append(Path(gc.rule_pack_dir).expanduser())
+        configured = cfg.guardrail.effective_rule_pack_dir()
+        if configured:
+            dirs.append(Path(configured))
         policy_dir = str(getattr(cfg, "policy_dir", "") or "").strip()
         if policy_dir:
             seeded = Path(policy_dir).expanduser() / "guardrail"
@@ -551,10 +552,7 @@ def _exit_if_unknown_connector(app: AppContext, needle: str, pool: list) -> None
 
 
 def _render_table(alert_list: list, store, connector: str | None = None, *, secure_client: bool = False) -> None:
-    """Plain Rich table — the single renderer since the Textual TUI
-    was retired in P3-#20. Kept in a helper so the deprecated
-    ``--tui`` flag can fall through here without duplicating the
-    column/width logic."""
+    """Plain Rich table: the single renderer for ``defenseclaw alerts``."""
     from rich import box
     from rich.console import Console
     from rich.markup import escape
@@ -651,12 +649,6 @@ def _render_table(alert_list: list, store, connector: str | None = None, *, secu
         "A name that matches no connector exits 1 and lists the active connectors."
     ),
 )
-@click.option(
-    "--tui/--no-tui",
-    default=False,
-    hidden=True,
-    help="Retired: use 'defenseclaw tui' (Alerts panel). Prints a notice and shows the table.",
-)
 @click.option("--json", "as_json", is_flag=True, help="Print the alerts as a JSON list.")
 @click.pass_context
 def alerts(
@@ -664,7 +656,6 @@ def alerts(
     limit: int,
     show_idx: int | None,
     connector: str | None,
-    tui: bool,
     as_json: bool,
 ) -> None:
     """View and manage security alerts."""
@@ -676,7 +667,7 @@ def alerts(
     if as_json:
         _alerts_json(app, limit, connector)
         return
-    _alerts_default(app, limit, show_idx, tui, connector)
+    _alerts_default(app, limit, show_idx, connector)
 
 
 # Delivery failure codes (internal/observability/delivery) in plain words.
@@ -782,7 +773,6 @@ def _alerts_default(
     app: AppContext,
     limit: int,
     show_idx: int | None,
-    tui: bool,
     connector: str | None = None,
 ) -> None:
     """View security alerts as a table (legacy ``defenseclaw alerts``)."""
@@ -908,12 +898,6 @@ def _alerts_default(
         if e.id:
             click.echo(ux.dim(f"  Acknowledge: defenseclaw alerts acknowledge --id {e.id}"))
         return
-
-    if tui:
-        ux.warn(
-            "`defenseclaw alerts --tui` has been retired. "
-            "Launch `defenseclaw tui` and press 2 for the Alerts panel.",
-        )
 
     from defenseclaw.commands.cmd_status import _enterprise_profile
 
@@ -1129,8 +1113,13 @@ def _set_alert_disposition(
     dry_run: bool = False,
     yes: bool = False,
 ) -> int | None:
-    if app.cfg is None or getattr(app.cfg, "_source_config_version", None) != 8:
-        raise click.ClickException("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+    from defenseclaw.config import is_current_schema
+
+    if app.cfg is None or not is_current_schema(getattr(app.cfg, "_source_config_version", None)):
+        raise click.ClickException(
+            "This configuration was written by an older DefenseClaw"
+            " — run 'defenseclaw migrate' first."
+        )
 
     selector = _alert_selector(
         alert_ids=alert_ids,
@@ -1143,7 +1132,7 @@ def _set_alert_disposition(
     audit_db_identity = _alert_audit_db_identity(app.cfg.audit_db)
     token = app.cfg.gateway.resolved_token()
     if not token:
-        raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the v8 gateway.")
+        raise click.ClickException("Gateway authentication is unavailable; start or reconfigure the gateway.")
     exact_ids = selector.get("ids")
     id_count = len(exact_ids) if isinstance(exact_ids, list) else 0
     client = OrchestratorClient(

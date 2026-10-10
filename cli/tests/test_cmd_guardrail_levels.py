@@ -37,7 +37,7 @@ def app(tmp_path, monkeypatch):
     cfg.guardrail.enabled = True
     cfg.guardrail.mode = "action"
     cfg.guardrail.port = 4321
-    cfg.guardrail.rule_pack_dir = "/packs/default"
+    cfg.guardrail.rule_pack = "default"
     cfg.save = MagicMock()
     ctx = AppContext()
     ctx.cfg = cfg
@@ -60,7 +60,7 @@ def _run(app, command, *args):
 
 def _multi(app) -> None:
     app.cfg.guardrail.connectors = {
-        "codex": PerConnectorGuardrailConfig(rule_pack_dir=STRICT),
+        "codex": PerConnectorGuardrailConfig(rule_pack="strict"),
         "claudecode": PerConnectorGuardrailConfig(),
     }
 
@@ -83,30 +83,24 @@ def test_global_block_at_sets_only_guardrail_block_at(app) -> None:
     }
     gc = app.cfg.guardrail
     assert (gc.block_at, gc.alert_at, gc.connectors) == ("HIGH", "", {})
-    assert (gc.enabled, gc.mode, gc.port, gc.rule_pack_dir) == (True, "action", 4321, "/packs/default")
+    assert (gc.enabled, gc.mode, gc.port, gc.rule_pack) == (True, "action", 4321, "default")
     app.cfg.save.assert_called_once()
     assert app.logger.log_config_change.call_args.args[0] == "guardrail-block-at"  # a config-update mutation
 
 
-def test_global_and_connector_changes_restart_a_running_gateway(app, restarts) -> None:
-    # Hook decisions read the config the gateway started with, so a global
-    # level change needs a restart too.
+def test_level_changes_reach_a_running_gateway_without_a_restart(app, restarts) -> None:
+    # One threshold model: every decision reads the live configuration
+    # generation, so level changes reload hot.
     _multi(app)
     _, payload = _run(app, "alert-at", "LOW", "--json")
-    assert (payload["gateway"], restarts) == ("restarted", [app.cfg.data_dir])
+    assert (payload["gateway"], restarts) == ("live", [])
 
     _, payload = _run(app, "block-at", "CRITICAL", "--connector", "codex", "--json")
-    assert (payload["scope"], payload["source"], payload["gateway"]) == ("codex", "override", "restarted")
+    assert (payload["scope"], payload["source"], payload["gateway"]) == ("codex", "override", "live")
     # Strict pack + codex's own CRITICAL: block 4, alert the global LOW.
     assert (payload["effective_block_at"], payload["effective_alert_at"]) == ("CRITICAL", "LOW+")
     assert app.cfg.guardrail.connectors["codex"].block_at == "CRITICAL"
-    assert restarts == [app.cfg.data_dir] * 2
-
-    _, payload = _run(app, "block-at", "inherit", "--connector", "codex", "--no-restart", "--json")
-    assert (payload["level"], payload["previous"], payload["source"]) == ("inherit", "CRITICAL", "pack")
-    assert (payload["effective_block_at"], payload["gateway"]) == ("MEDIUM+", "restart_needed")
-    assert app.cfg.guardrail.connectors["codex"].block_at == ""
-    assert len(restarts) == 2
+    assert restarts == []
 
 
 def test_alert_above_the_block_level_is_clamped(app) -> None:
@@ -147,7 +141,7 @@ def test_unknown_connector_and_noops_write_nothing(app) -> None:
 
 def test_single_connector_install_writes_its_override(app, restarts) -> None:
     _, payload = _run(app, "block-at", "MEDIUM", "--connector", "codex", "--json")
-    assert (payload["scope"], payload["source"], payload["gateway"]) == ("codex", "override", "restarted")
+    assert (payload["scope"], payload["source"], payload["gateway"]) == ("codex", "override", "live")
     assert app.cfg.guardrail.connectors["codex"].block_at == "MEDIUM"
     assert app.cfg.active_connectors() == ["codex"]
 

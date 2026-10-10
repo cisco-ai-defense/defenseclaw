@@ -19,11 +19,13 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
 import shutil
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
@@ -123,6 +125,19 @@ class AISignature:
     components: tuple[AISignatureComponent, ...] = ()
 
 
+@dataclass(frozen=True)
+class RefusedPack:
+    """A configured pack the gateway does not load: its digest is not the
+    one ``ai_discovery.signature_pack_digests`` pins for it, a managed
+    device has no pin for it (internal/inventory/ai_catalog.go pinRefusal), or
+    its file is gone."""
+
+    path: str
+    reason: str
+    digest: str = ""
+    pinned: str = ""
+
+
 # Builtin ids added in 1.0 that an operator pack installed by an older build
 # may already use; the operator's signature keeps precedence after the upgrade
 # (internal/inventory/ai_catalog.go keeps the same list). Remove once upgrades
@@ -154,14 +169,37 @@ def _secure_client_signatures(builtins: list[AISignature]) -> list[AISignature]:
 
 def load_ai_signatures(
     *,
-    data_dir: str | Path | None = None,
     signature_packs: list[str] | tuple[str, ...] = (),
     allow_workspace_signatures: bool = False,
     scan_roots: list[str] | tuple[str, ...] = (),
     disabled_signature_ids: list[str] | tuple[str, ...] = (),
     secure_client: bool = False,
 ) -> list[AISignature]:
-    """Load the built-in catalog plus configured operator signature packs."""
+    """Load the built-in catalog plus the configured operator signature packs
+    (``ai_discovery.signature_packs``, the only operator source since
+    config_version 9; the managed folder is not globbed)."""
+    return load_ai_signature_catalog(
+        signature_packs=signature_packs,
+        allow_workspace_signatures=allow_workspace_signatures,
+        scan_roots=scan_roots,
+        disabled_signature_ids=disabled_signature_ids,
+        secure_client=secure_client,
+    )[0]
+
+
+def load_ai_signature_catalog(
+    *,
+    signature_packs: list[str] | tuple[str, ...] = (),
+    allow_workspace_signatures: bool = False,
+    scan_roots: list[str] | tuple[str, ...] = (),
+    disabled_signature_ids: list[str] | tuple[str, ...] = (),
+    pack_digests: Mapping[str, str] | None = None,
+    require_digests: bool = False,
+    secure_client: bool = False,
+) -> tuple[list[AISignature], list[RefusedPack]]:
+    """:func:`load_ai_signatures` as the gateway loads it: a pack that fails
+    its pin, or whose file is gone, is left out and returned as refused, the
+    rest of the catalog still loads."""
     builtins = _parse_catalog_text(_catalog_text(), source="builtin")
     if secure_client:
         builtins = _secure_client_signatures(builtins)
@@ -174,16 +212,20 @@ def load_ai_signatures(
         merged.append(sig)
         seen[sig.id] = sig.source
 
-    pack_paths = _signature_pack_paths(
-        data_dir=data_dir,
+    pack_paths, refused = _signature_pack_paths(
         signature_packs=signature_packs,
         allow_workspace_signatures=allow_workspace_signatures,
         scan_roots=scan_roots,
     )
     if len(pack_paths) > MAX_SIGNATURE_PACKS:
         raise SignaturePackError(f"too many signature packs ({len(pack_paths)} > {MAX_SIGNATURE_PACKS})")
+    pins = _pinned_digests(pack_digests)
     for pack_path in pack_paths:
-        for sig in validate_signature_pack(pack_path):
+        pack, raw = _read_pack(pack_path)
+        if (refusal := _pin_refusal(pack, raw, pins, require_digests)) is not None:
+            refused.append(refusal)
+            continue
+        for sig in _parse_catalog_text(raw.decode("utf-8"), source=str(pack)):
             if sig.id in disabled:
                 continue
             if sig.id in seen:
@@ -199,11 +241,76 @@ def load_ai_signatures(
                 continue
             merged.append(sig)
             seen[sig.id] = sig.source
-    return merged
+    return merged, refused
+
+
+def pack_pins(cfg: Any) -> tuple[dict[str, str], bool]:
+    """The pins and whether a pack needs one: ``ai_discovery.signature_pack_digests``,
+    and a managed standalone computer, which loads only pinned packs."""
+    from defenseclaw import config_writer
+    from defenseclaw.config import config_path_for_data_dir
+
+    pins = dict(getattr(cfg.ai_discovery, "signature_pack_digests", None) or {})
+    try:
+        current = Path(config_path_for_data_dir(cfg.data_dir)).read_bytes()
+    except OSError:
+        current = b""
+    return pins, config_writer.standalone_managed(current)
+
+
+def refused_packs(cfg: Any) -> tuple[int, list[RefusedPack]]:
+    """How many packs ``ai_discovery`` configures and which of them are not
+    loaded: a pin mismatch, or a file that is gone. A pack that cannot be read
+    is not counted as refused: the loader reports it."""
+    discovery = cfg.ai_discovery
+    pins, require = pack_pins(cfg)
+    paths, refused = _signature_pack_paths(
+        signature_packs=discovery.signature_packs,
+        allow_workspace_signatures=discovery.allow_workspace_signatures,
+        scan_roots=discovery.scan_roots,
+    )
+    total = len(paths) + len(refused)
+    pinned = _pinned_digests(pins)
+    for path in paths:
+        try:
+            pack, raw = _read_pack(path)
+        except SignaturePackError:
+            continue
+        if (refusal := _pin_refusal(pack, raw, pinned, require)) is not None:
+            refused.append(refusal)
+    return total, refused
+
+
+def _pinned_digests(pins: Mapping[str, str] | None) -> dict[str, str]:
+    """``signature_pack_digests`` keyed by resolved, home-expanded path, as
+    the loader looks them up."""
+    return {
+        str(Path(str(path).strip()).expanduser().resolve()): str(digest).strip().lower()
+        for path, digest in (pins or {}).items()
+    }
+
+
+def _pin_refusal(pack: Path, raw: bytes, pins: Mapping[str, str], required: bool) -> RefusedPack | None:
+    want = pins.get(str(pack.resolve()), "")
+    if not want:
+        if required:
+            return RefusedPack(
+                str(pack), "a managed device loads only packs pinned in ai_discovery.signature_pack_digests"
+            )
+        return None
+    got = "sha256:" + hashlib.sha256(raw).hexdigest()
+    if got == want:
+        return None
+    return RefusedPack(str(pack), f"its digest {got} does not match the pinned {want}", digest=got, pinned=want)
 
 
 def validate_signature_pack(path: str | Path) -> list[AISignature]:
     """Validate and return signatures from a user-supplied pack."""
+    pack, raw = _read_pack(path)
+    return _parse_catalog_text(raw.decode("utf-8"), source=str(pack))
+
+
+def _read_pack(path: str | Path) -> tuple[Path, bytes]:
     pack = Path(path).expanduser()
     try:
         stat = pack.stat()
@@ -214,33 +321,51 @@ def validate_signature_pack(path: str | Path) -> list[AISignature]:
     if stat.st_size > MAX_SIGNATURE_BYTES:
         raise SignaturePackError(f"{pack} exceeds {MAX_SIGNATURE_BYTES} bytes")
     try:
-        text = pack.read_text(encoding="utf-8")
+        return pack, pack.read_bytes()
     except OSError as exc:
         raise SignaturePackError(f"cannot read {pack}: {exc}") from exc
-    return _parse_catalog_text(text, source=str(pack))
+
+
+def signature_pack_dir(data_dir: str | Path) -> Path:
+    return Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME
+
+
+def signature_pack_destination(source: str | Path, data_dir: str | Path) -> Path:
+    src = Path(source).expanduser()
+    pack = _load_pack_payload(src)
+    pack_id = _normalize_id(str(pack.get("id") or src.stem))
+    if not pack_id:
+        raise SignaturePackError("signature pack id or filename must normalize to a non-empty id")
+    return Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME / f"{pack_id}.json"
 
 
 def install_signature_pack(
     source: str | Path,
     *,
     data_dir: str | Path,
+    signature_packs: list[str] | tuple[str, ...] = (),
     replace: bool = False,
+    secure_client: bool = False,
 ) -> Path:
-    """Install *source* into the managed pack directory after validation."""
+    """Install *source* into the managed pack directory after validation.
+
+    The caller adds the returned path to ``ai_discovery.signature_packs``;
+    *signature_packs* are the packs already configured, checked for id
+    conflicts."""
     src = Path(source).expanduser()
-    pack = _load_pack_payload(src)
-    pack_id = _normalize_id(str(pack.get("id") or src.stem))
-    if not pack_id:
-        raise SignaturePackError("signature pack id or filename must normalize to a non-empty id")
+    dest = signature_pack_destination(src, data_dir)
     signatures = validate_signature_pack(src)
 
-    dest_dir = Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME
-    dest = dest_dir / f"{pack_id}.json"
+    dest_dir = dest.parent
+    pack_id = dest.stem
     if dest.exists() and not replace:
         raise SignaturePackError(f"signature pack already installed: {dest}")
 
     dest_resolved = dest.resolve() if dest.exists() else dest.absolute()
-    existing = load_ai_signatures(data_dir=data_dir, signature_packs=())
+    existing = load_ai_signatures(
+        signature_packs=[p for p in signature_packs if Path(p).expanduser() != dest],
+        secure_client=secure_client,
+    )
     existing_ids = {sig.id: sig.source for sig in existing if Path(sig.source) != dest_resolved}
     conflicts = sorted(sig.id for sig in signatures if sig.id in existing_ids)
     if conflicts:
@@ -261,8 +386,17 @@ def install_signature_pack(
     return dest
 
 
-def signature_pack_dir(data_dir: str | Path) -> Path:
-    return Path(data_dir).expanduser() / MANAGED_PACK_DIRNAME
+def restore_signature_pack(dest: Path, content: bytes, mode: int | None) -> None:
+    """Restore the prior pack atomically when its config transaction fails."""
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.stem}.", suffix=".tmp", dir=str(dest.parent))
+    try:
+        with os.fdopen(fd, "wb") as tmp:
+            tmp.write(content)
+        os.chmod(tmp_name, mode if mode is not None else 0o600)
+        os.replace(tmp_name, dest)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
 
 
 def _parse_catalog_text(text: str, *, source: str) -> list[AISignature]:
@@ -423,14 +557,14 @@ def _validate_signature(sig: AISignature) -> None:
 
 def _signature_pack_paths(
     *,
-    data_dir: str | Path | None,
     signature_packs: list[str] | tuple[str, ...],
     allow_workspace_signatures: bool,
     scan_roots: list[str] | tuple[str, ...],
-) -> list[Path]:
+) -> tuple[list[Path], list[RefusedPack]]:
+    """The pack files the configuration names, and the configured entries that
+    match no file (the gateway rejects that change; the CLI says so and reads
+    the rest)."""
     candidates: list[tuple[str, bool]] = []
-    if data_dir:
-        candidates.append((str(signature_pack_dir(data_dir) / "*.json"), False))
     for pack in signature_packs:
         candidates.append((str(pack), True))
     if allow_workspace_signatures:
@@ -439,17 +573,19 @@ def _signature_pack_paths(
                 candidates.append((str(Path(root).expanduser() / WORKSPACE_PACK_PATH), False))
 
     out: list[Path] = []
+    missing: list[RefusedPack] = []
     seen: set[Path] = set()
     for pattern, required in candidates:
         matches = _expand_pack_candidate(pattern)
         if not matches and required:
-            raise SignaturePackError(f"signature pack path matched nothing: {pattern}")
+            gone = any(ch in pattern for ch in "*?[") or Path(pattern).expanduser().is_dir()
+            missing.append(RefusedPack(pattern, "no pack file matches" if gone else "file not found"))
         for path in matches:
             resolved = path.resolve()
             if resolved not in seen:
                 seen.add(resolved)
                 out.append(resolved)
-    return sorted(out)
+    return sorted(out), missing
 
 
 def _expand_pack_candidate(pattern: str) -> list[Path]:

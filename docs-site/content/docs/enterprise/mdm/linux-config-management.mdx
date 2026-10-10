@@ -109,7 +109,7 @@ gpgv --keyring ./defenseclaw-release.gpg defenseclaw-enterprise-1.0.0-linux-amd6
 The example config below is valid for Linux. Replace it with your own:
 
 ```yaml title="config.yaml"
-config_version: 8
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: /var/lib/defenseclaw
 policy_dir: /etc/defenseclaw/policies
@@ -195,6 +195,19 @@ task has `no_log: true` and sends the value on standard input.
         group: root
         mode: "0644"
 
+    # get_url checks the pin; this also covers a package copied from the controller.
+    - name: Read the SHA-256 of the package
+      ansible.builtin.stat:
+        path: "/var/cache/{{ defenseclaw_package }}"
+        checksum_algorithm: sha256
+      register: defenseclaw_package_file
+
+    - name: Refuse a package that does not match its pin
+      ansible.builtin.assert:
+        that: defenseclaw_package_file.stat.checksum == defenseclaw_pins[defenseclaw_package]
+        fail_msg: "/var/cache/{{ defenseclaw_package }} does not match its SHA-256 pin"
+        quiet: true
+
     - name: Install or upgrade the package (Debian, Ubuntu)
       ansible.builtin.apt:
         deb: "/var/cache/{{ defenseclaw_package }}"
@@ -257,6 +270,9 @@ Notes:
 
 - `get_url` skips the download when the file already matches the checksum, and
   `apt` and `dnf` change nothing when that version is installed.
+- The `stat` and `assert` tasks check the file that `apt` or `dnf` installs.
+  They keep the pin when you replace `get_url` with `copy`, which checks no
+  SHA-256.
 - The `dnf` module checks signatures of local packages unless
   `disable_gpg_check` is set. The package has no embedded signature, so the
   task sets it and relies on the SHA-256 check.
@@ -284,7 +300,9 @@ class profile::defenseclaw (
   $provider = $format ? { 'deb' => 'dpkg', default => 'rpm' }
   $pkg = "defenseclaw-enterprise-${version}-linux-${arch}.${format}"
   $gateway = '/opt/defenseclaw/bin/defenseclaw-gateway'
-  $ensure_cmd = "${gateway} enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json"
+  $ensure_once = "${gateway} enterprise linux ensure --from-package --config /etc/mdm/defenseclaw/config.yaml --json"
+  # Retry only lifecycle_busy (75). Discard repeated JSON result documents.
+  $ensure_cmd = "/bin/sh -c 'attempt=0; while :; do ${ensure_once} >/dev/null; rc=\$?; [ \$rc -eq 0 ] && exit 0; [ \$rc -ne 75 ] && exit \$rc; attempt=\$((attempt + 1)); [ \$attempt -ge 5 ] && exit 75; sleep 30; done'"
 
   file { '/etc/mdm':
     ensure => directory,
@@ -338,16 +356,14 @@ class profile::defenseclaw (
     command     => $ensure_cmd,
     refreshonly => true,
     subscribe   => [File['/etc/mdm/defenseclaw/config.yaml'], Package['defenseclaw-enterprise']],
-    tries       => 5,
-    try_sleep   => 30,
+    tries       => 1,
   }
   # Repair drift: run ensure only when verify fails.
   exec { 'defenseclaw-repair':
     command   => $ensure_cmd,
     unless    => "${gateway} enterprise linux verify --json",
     require   => Exec['defenseclaw-ensure'],
-    tries     => 5,
-    try_sleep => 30,
+    tries     => 1,
   }
 
   $key = lookup('defenseclaw::ai_defense_key', Optional[String], 'first', undef)
@@ -377,8 +393,8 @@ Notes:
 - `ensure => latest` with a `source` installs the package, and upgrades it when
   `source` points at a newer file; the `dpkg` and `rpm` providers read the
   version from the file.
-- `exec` retries any failing exit code with `tries` and `try_sleep`, so a busy
-  lock (`75`) is retried.
+- The `ensure` and repair commands retry only exit `75` (busy); an invalid
+  config exits immediately. Puppet receives only a short failure result.
 - The key stays in a root-only file so that Puppet can tell when it changes.
   If you do not want that copy, run `enterprise secret set` from standard
   input in a one-off task instead.
@@ -392,8 +408,9 @@ This recipe uses the `directory`, `file`, `cookbook_file`, `remote_file`,
 [dpkg_package](https://docs.chef.io/client/19/resources/bundled/dpkg_package/),
 [rpm_package](https://docs.chef.io/client/19/resources/bundled/rpm_package/),
 [execute](https://docs.chef.io/client/19/resources/bundled/execute/)). Put
-`config.yaml` in the cookbook's `files` folder and the key in an encrypted
-data bag item `defenseclaw/ai_defense` with a `key` field.
+`config.yaml` in the cookbook's `files` folder. Store the optional key as
+the encrypted node attribute `defenseclaw.ai_defense_key`; leave the
+attribute unset on nodes without AI Defense.
 
 ```ruby title="recipes/default.rb"
 version = '1.0.0'
@@ -460,7 +477,7 @@ execute 'defenseclaw-repair' do
   retry_delay 30
 end
 
-key = data_bag_item('defenseclaw', 'ai_defense')['key'] rescue nil
+key = node['defenseclaw'] && node['defenseclaw']['ai_defense_key']
 if key
   file '/etc/mdm/defenseclaw/ai-defense-api-key' do
     content key
@@ -546,13 +563,21 @@ defenseclaw-package-file:
     - group: root
     - mode: '0644'
 
+# source_hash is not checked for a salt:// source: check the pin here.
+defenseclaw-package-pin:
+  cmd.run:
+    - name: "echo '/var/cache/{{ pkg }} does not match its SHA-256 pin' >&2; exit 1"
+    - unless: "echo '{{ sha256 }}  /var/cache/{{ pkg }}' | sha256sum -c --status"
+    - require:
+      - file: defenseclaw-package-file
+
 defenseclaw-enterprise:
   pkg.installed:
     - sources:
       - defenseclaw-enterprise: /var/cache/{{ pkg }}
     - require:
       - file: defenseclaw-layout-config
-      - file: defenseclaw-package-file
+      - cmd: defenseclaw-package-pin
 
 defenseclaw-ensure:
   cmd.run:
@@ -606,8 +631,13 @@ Notes:
 
 - `pkg.installed` with `sources` reads the version from the file and installs
   it when it differs from the installed version.
-- `file.managed` checks the download against `source_hash`, and
-  `show_changes: False` keeps the key out of the state output.
+- `file.managed` checks `source_hash` only for `http(s)` and `ftp` sources. A
+  `salt://` source, such as a package you keep next to `config.yaml`, is
+  copied without that check. `defenseclaw-package-pin` checks the cached
+  package against the pin whatever the source, and `pkg.installed` requires
+  it, so a package that does not match is never installed. When it matches,
+  the check changes nothing.
+- `show_changes: False` keeps the key out of the state output.
 - `retry` runs a failed state again, so a busy lock (`75`) is retried.
 
 ## Plain apt and dnf
@@ -647,14 +677,34 @@ you ask for a downgrade, so to go back a version see
 ## Payload archive instead of the package
 
 Hosts without dpkg or rpm can use the `.tar.gz` payload. Extract it as root
-into a root-only folder and run `ensure` with `--payload` pointing at the
-folder that holds `defenseclaw-gateway`; see [Linux](/docs/enterprise/linux#install).
+into a root-only folder on a filesystem that allows execution (CIS hosts
+mount `/tmp` and `/var/tmp` `noexec`) and run `ensure` with `--payload`
+pointing at the folder that holds `defenseclaw-gateway`; see [Linux](/docs/enterprise/linux#install).
 On such a host, drop `--from-package` from the converge command, so `ensure`
 keeps the payload channel it was installed from. A host installed from the
 package refuses a payload upgrade with `package_owned_binaries`: keep each host
 on one channel.
 
 ## Check health
+
+After the first install or a reinstall, ask users to restart agent sessions
+that were already open. Those sessions keep running without DefenseClaw until
+restarted. `status` and `ensure` report `agent_sessions_restart_required`
+while they remain open.
+
+Codex keeps a shared background server (its app-server daemon, under
+`~/.codex/packages/app-server-daemon`). One that started before the install
+keeps the requirements it read then: the Codex sessions it serves run without
+DefenseClaw, and a Codex session started after the install refuses it with
+`Cannot use the shared background server: This session requires
+api_key_model_discovery to be disabled`. The warning names that server and the
+Codex sessions of its user. Have the user run `codex app-server daemon restart`,
+or start Codex with `codex --no-daemon`.
+
+A Claude Code session that was open while someone changed or removed
+DefenseClaw's drop-in in `/etc/claude-code/managed-settings.d` keeps the hooks
+it loaded, even after DefenseClaw puts the drop-in back. The warning names
+those sessions too, until they are restarted.
 
 | Check | Command or file |
 | --- | --- |

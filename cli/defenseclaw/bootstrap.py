@@ -55,6 +55,7 @@ from defenseclaw.connector_paths import (
     opencode_writable_plugin_folder,
 )
 from defenseclaw.inventory import agent_discovery
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config, PerConnectorGuardrailConfig
@@ -84,7 +85,6 @@ class BootstrapReport:
     audit_db: str = ""
     is_new_config: bool = False
     dirs_created: list[str] = field(default_factory=list)
-    rego_seeded: str = ""  # destination path, "" if bundle missing
     guardrail_profiles_seeded: list[str] = field(default_factory=list)
     guardrail_profiles_preserved: list[str] = field(default_factory=list)
     splunk_bridge_dest: str = ""  # "" if bundle missing, otherwise dest path
@@ -112,20 +112,12 @@ class StepResult:
         }
 
 
-# ``init --sandbox`` is accepted so existing automation keeps working; the
-# legacy openshell-sandbox (0.0.x) standalone mode it drove was removed.
-SANDBOX_FLAG_DEPRECATION = (
-    "--sandbox is deprecated and ignored: the legacy openshell-sandbox standalone mode was removed. "
-    "To run agents in NVIDIA OpenShell 0.1 sandboxes, run 'defenseclaw sandbox setup'; "
-    "hosts with an old standalone install should run 'defenseclaw sandbox legacy-cleanup' first."
-)
-
-
 @dataclass
 class FirstRunOptions:
     """Structured input for the guided first-run backend."""
 
     connector: str = "codex"
+    rerun_command: str = "defenseclaw init"
     # Complete ordered connector selection for this first-run transaction.
     # ``None`` preserves single-connector callers by using ``connector``.
     connector_settings: list[dict] | None = None
@@ -134,7 +126,6 @@ class FirstRunOptions:
     with_judge: bool = False
     judge_hook_connectors: list[str] | None = None
     skip_install: bool = False
-    sandbox: bool = False
     start_gateway: bool = False
     verify: bool = True
     force: bool = False
@@ -549,7 +540,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
                 report.errors.append(f"mkdir {d}: {exc}")
 
     # --- policy seeding ---
-    _seed_rego(cfg.policy_dir, report)
+    _seed_rego(cfg, report)
     _seed_guardrail_profiles(cfg.policy_dir, report)
     _seed_splunk_bridge(cfg.data_dir, report)
 
@@ -581,6 +572,36 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
             pass
 
     return report
+
+
+def remediate_unwritable_sidecar(report: FirstRunReport, *, command: str) -> bool:
+    """Replace failed sidecar details and stale wait advice with the file remedy."""
+    from defenseclaw.connector_failure import unwritable_config_remedy
+
+    remedy = next(
+        (
+            found
+            for step in report.setup
+            if step.name == "Sidecar" and step.status in {"warn", "fail"}
+            if (found := unwritable_config_remedy(step.detail, connector=report.connector, command=command))
+        ),
+        None,
+    )
+    if remedy is None:
+        return False
+    for step in report.setup + report.readiness:
+        if step.name == "Sidecar":
+            step.status = "fail"
+            step.detail = remedy
+            step.next_command = ""
+    report.next_commands = [remedy] + [
+        item for item in report.next_commands
+        if item != remedy
+        and item not in {"defenseclaw-gateway status", "defenseclaw-gateway start"}
+        and "in a minute" not in item.lower()
+    ]
+    report.status = _rollup_status(report.setup, report.readiness)
+    return True
 
 
 def _restore_first_run_selection_transaction(app, setup_snapshot) -> str:
@@ -654,8 +675,8 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 StepResult(
                     "Config",
                     "fail",
-                    "configuration schema v8 is required",
-                    "defenseclaw upgrade",
+                    "the configuration was written by an older DefenseClaw",
+                    "defenseclaw migrate",
                 )
             )
             return FirstRunReport(
@@ -665,7 +686,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 connector=connector,
                 profile=profile,
                 setup=setup,
-                next_commands=["defenseclaw upgrade"],
+                next_commands=["defenseclaw migrate"],
                 connector_mode_warnings=connector_mode_warnings,
             )
     try:
@@ -810,9 +831,6 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         )
 
 
-    # GAP-1551: hooks bake their fail mode in when the gateway writes them,
-    # so a rerun that only changes it must restart a running gateway.
-    hook_fail_modes_before = _hook_fail_modes(cfg)
     try:
         if protected_selection is not None:
             from defenseclaw.commands.cmd_setup import _revalidate_setup_agent_selections
@@ -914,14 +932,10 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                     "defenseclaw doctor --fix --dry-run",
                 )
             )
-        # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
+        # A genuinely new bootstrap has no canonical graph yet. Re-running
         # first-run against v8 must use the live owner and must not silently drop
         # ordinary v8 setup mutations.
-        logger = (
-            Logger.no_runtime()
-            if new_config or getattr(cfg, "_source_config_version", None) != 8
-            else Logger.from_config(cfg)
-        )
+        logger = Logger.no_runtime() if new_config else Logger.from_config(cfg)
 
         bootstrap = bootstrap_env(cfg, logger)
         if bootstrap.errors:
@@ -951,21 +965,8 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         rollback_first_run_transaction = any(step.status == "fail" for step in setup)
         setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
 
-        if options.sandbox:
-            setup.append(
-                StepResult(
-                    "Sandbox",
-                    "warn",
-                    SANDBOX_FLAG_DEPRECATION,
-                    "defenseclaw sandbox legacy-cleanup --dry-run",
-                )
-            )
-
         if options.start_gateway:
-            gateway_step = _start_gateway_structured(
-                cfg,
-                hook_fail_mode_changed=_hook_fail_modes(cfg) != hook_fail_modes_before,
-            )
+            gateway_step = _start_gateway_structured(cfg)
             setup.append(gateway_step)
             if gateway_step.status == "fail":
                 rollback_first_run_transaction = True
@@ -1065,6 +1066,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                     "fix the failed step, then run defenseclaw init again",
                 )
             )
+    remediate_unwritable_sidecar(report, command=options.rerun_command)
     return report
 
 
@@ -1120,6 +1122,8 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
 
     connector = _normalize_connector(options.connector)
     steps.append(_connector_readiness(cfg, connector))
+    if connector != "none":
+        steps.append(_agent_installation_readiness(cfg, connector))
 
     if options.start_gateway:
         pid_file = os.path.join(cfg.data_dir, "gateway.pid")
@@ -1621,8 +1625,8 @@ def _valid_env_name(value: str) -> bool:
 
 def _scanner_availability(cfg: Config) -> list[StepResult]:
     scanners = [
-        ("Skill scanner", cfg.scanners.skill_scanner.binary, "defenseclaw setup skill-scanner"),
-        ("MCP scanner", cfg.scanners.mcp_scanner.binary, "defenseclaw setup mcp-scanner"),
+        ("Skill scanner", SKILL_SCANNER_BINARY, "defenseclaw setup skill-scanner"),
+        ("MCP scanner", MCP_SCANNER_BINARY, "defenseclaw setup mcp-scanner"),
     ]
     out: list[StepResult] = []
     for label, binary, next_command in scanners:
@@ -1729,7 +1733,7 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
     if connector in ("", "none"):
         return None
     from defenseclaw.commands.cmd_setup import _CONNECTOR_META
-    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
 
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     roster = _running_connectors_from_state_file(cfg.data_dir)
@@ -1748,9 +1752,10 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
         return None
     return StepResult(
         "Connector runtime",
-        "warn",
+        # A hook command the shell cannot run guards nothing (GAP-0382).
+        "fail" if problems[0].startswith("hook command ") else "warn",
         f"{label} is not guarded: {problems[0]}",
-        setup_command(connector),
+        repair_command(connector, problems[0]),
     )
 
 
@@ -1807,7 +1812,7 @@ def gateway_failure_detail(result: subprocess.CompletedProcess, default: str) ->
     return useful[0] if useful else default
 
 
-def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = False) -> StepResult:
+def _start_gateway_structured(cfg: Config) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
 
@@ -1901,8 +1906,6 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
                 f"{gateway_failure_detail(result, 'restart failed')}",
                 "defenseclaw-gateway restart",
             )
-        if hook_fail_mode_changed:
-            return _restart_for_hook_fail_mode(gw)
         return StepResult("Sidecar", "pass", "already running")
     try:
         result = subprocess.run([gw, "start"], capture_output=True, text=True, timeout=_GATEWAY_START_TIMEOUT)
@@ -1929,37 +1932,6 @@ def _start_gateway_structured(cfg: Config, *, hook_fail_mode_changed: bool = Fal
     # A port held by another account names its own fix; lead with it.
     port_fix = re.search(r"with: (defenseclaw setup gateway --api-port \d+)", first)
     return StepResult("Sidecar", "warn", first, port_fix.group(1) if port_fix else "defenseclaw-gateway status")
-
-
-def _hook_fail_modes(cfg: Config) -> dict[str, str]:
-    """Effective hook fail mode per configured hook connector."""
-    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
-
-    gc = cfg.guardrail
-    try:
-        names = cfg.active_connectors() if cfg.has_connector_configured() else []
-    except Exception:
-        return {}
-    return {
-        name: str(gc.effective_hook_fail_mode(name) or "").lower()
-        for name in names
-        if _normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
-    }
-
-
-def _restart_for_hook_fail_mode(gw: str) -> StepResult:
-    """Restart a running gateway so it rewrites the hooks with the new fail mode."""
-    stale = "the hooks keep the old fail mode until the gateway restarts"
-    try:
-        result = subprocess.run([gw, "restart"], capture_output=True, text=True, timeout=_GATEWAY_START_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return StepResult("Sidecar", "warn", f"restart timed out; {stale}", "defenseclaw-gateway restart")
-    except OSError as exc:
-        return StepResult("Sidecar", "warn", f"restart failed ({exc}); {stale}", "defenseclaw-gateway restart")
-    if result.returncode == 0:
-        return StepResult("Sidecar", "pass", "restarted to apply the new hook fail mode")
-    first = gateway_failure_detail(result, "restart failed")
-    return StepResult("Sidecar", "warn", f"restart failed: {first}; {stale}", "defenseclaw-gateway restart")
 
 
 def _pid_file_running(pid_file: str) -> bool:
@@ -2027,6 +1999,28 @@ def _hermes_installed() -> bool:
         return True
     # The upstream installer links ~/.local/bin/hermes, which may not be on PATH yet.
     return os.path.isfile(os.path.expanduser("~/.local/bin/hermes"))
+
+
+def _agent_installation_readiness(cfg: Config, connector: str) -> StepResult:
+    """A hook file DefenseClaw created does not prove the agent is installed."""
+    try:
+        discovery = agent_discovery.discover_agents(
+            use_cache=False, refresh=True, data_dir=cfg.data_dir, persist_cache=False
+        )
+        signal = discovery.agents.get(connector)
+    except Exception as exc:
+        return StepResult(
+            "Agent installation", "warn",
+            f"could not verify {connector} installation: {exc}",
+            "defenseclaw agent discover --refresh",
+        )
+    if signal is not None and signal.installed:
+        return StepResult("Agent installation", "pass", f"{connector} is installed")
+    return StepResult(
+        "Agent installation", "warn",
+        f"{connector} agent is not installed; generated hook files alone do not make it ready",
+        f"install {connector}, then run defenseclaw setup {connector}",
+    )
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
@@ -2326,31 +2320,13 @@ def _next_commands(
 # ---------------------------------------------------------------------------
 
 
-def _seed_rego(policy_dir: str, report: BootstrapReport) -> None:
-    from defenseclaw.paths import bundled_rego_dir
+def _seed_rego(cfg: Config, report: BootstrapReport) -> None:
+    """The shipped Rego modules, as init writes them (rego_policies.seed_rego)."""
+    from defenseclaw.enforce.asset_lists import is_secure_client
+    from defenseclaw.rego_policies import seed_rego
 
-    bundled = bundled_rego_dir()
-    if not bundled or not bundled.is_dir() or not policy_dir:
-        return
-
-    dest = os.path.join(policy_dir, "rego")
-    try:
-        os.makedirs(dest, exist_ok=True)
-    except OSError as exc:
-        report.errors.append(f"mkdir {dest}: {exc}")
-        return
-
-    for src in bundled.iterdir():
-        if src.suffix not in (".rego", ".json") or src.name.startswith("."):
-            continue
-        dst = os.path.join(dest, src.name)
-        if os.path.exists(dst):
-            continue
-        try:
-            shutil.copy2(str(src), dst)
-        except OSError as exc:
-            report.errors.append(f"seed rego {src.name}: {exc}")
-    report.rego_seeded = dest
+    result = seed_rego(cfg.policy_dir, os.path.join(cfg.data_dir, "backups"), refresh_stock=not is_secure_client(cfg))
+    report.errors.extend(f"seed rego {error}" for error in result.errors)
 
 
 def _seed_guardrail_profiles(policy_dir: str, report: BootstrapReport) -> None:

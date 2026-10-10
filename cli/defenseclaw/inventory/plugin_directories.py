@@ -27,6 +27,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from defenseclaw import codex_toml
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
@@ -585,7 +587,7 @@ def _codex_active_plugins(cache_root: str) -> dict[str, bool]:
     except OSError:
         return {}
     try:
-        payload = tomllib.loads(raw.decode("utf-8"))
+        payload = codex_toml.loads(raw)
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
         return {}
     plugins = payload.get("plugins", {})

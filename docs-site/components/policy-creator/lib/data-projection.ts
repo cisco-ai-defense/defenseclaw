@@ -1,11 +1,10 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 //
-// Project a wizard-state Policy into the OPA `data.json` shape that
-// the bundled Rego modules read at evaluation time. This is the
-// browser-side port of cli/defenseclaw/commands/cmd_policy.py
-// :_sync_opa_data — same logic, same field names, same uppercase
-// severity keys, same "enable → allow / disable → block" mapping.
+// Project a wizard-state Policy into the version 8 `data.json` shape (uppercase
+// severity keys, "enable → allow / disable → block"), and into the
+// evaluation input the config_version 9 Rego modules read instead
+// (input.admission, input.thresholds; see withPolicyInput).
 
 import type {
   CorrelationClause,
@@ -46,11 +45,6 @@ export interface OpaData {
     source_path_contains: string[];
   }>;
   severity_ranking: Record<string, number>;
-  audit: {
-    retention_days: number;
-    log_all_actions: boolean;
-    log_scan_results: boolean;
-  };
   guardrail: {
     severity_rank: Record<string, number>;
     block_threshold: number;
@@ -59,12 +53,6 @@ export interface OpaData {
     hilt: { enabled: boolean; min_severity: string };
     patterns: Record<string, string[]>;
     severity_mappings: Record<string, string>;
-  };
-  firewall: {
-    default_action: string;
-    blocked_destinations: string[];
-    allowed_domains: string[];
-    allowed_ports: number[];
   };
   /** Session correlator (Layer 5). Mirrors the YAML schema in
    *  internal/guardrail/defaults/correlation-patterns.yaml so custom
@@ -161,11 +149,6 @@ export function projectPolicyToData(policy: Policy): OpaData {
     scanner_overrides: scannerOverrides,
     first_party_allow_list: policy.first_party_allow_list,
     severity_ranking: { CRITICAL: 5, HIGH: 4, MEDIUM: 3, LOW: 2, INFO: 1 },
-    audit: {
-      retention_days: policy.audit.retention_days,
-      log_all_actions: policy.audit.log_all_actions,
-      log_scan_results: policy.audit.log_scan_results,
-    },
     guardrail: {
       severity_rank: { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 },
       block_threshold: policy.guardrail.block_threshold,
@@ -174,12 +157,6 @@ export function projectPolicyToData(policy: Policy): OpaData {
       hilt: { ...policy.guardrail.hilt },
       patterns: { ...policy.guardrail.patterns },
       severity_mappings: { ...policy.guardrail.severity_mappings },
-    },
-    firewall: {
-      default_action: policy.firewall.default_action,
-      blocked_destinations: [...policy.firewall.blocked_destinations],
-      allowed_domains: [...policy.firewall.allowed_domains],
-      allowed_ports: [...policy.firewall.allowed_ports],
     },
     correlator: projectCorrelator(policy.correlator ?? []),
     cisco_ai_defense: {
@@ -192,4 +169,51 @@ export function projectPolicyToData(policy: Policy): OpaData {
       scan_hook_surface: policy.cisco_ai_defense?.scan_hook_surface ?? true,
     },
   };
+}
+
+/**
+ * The evaluation input of a domain: since config_version 9, admission.rego
+ * reads only input.admission and guardrail.rego only input.thresholds and
+ * input.hilt, which the gateway compiles from config.yaml. They are built
+ * here from the projection the same way (the type's actions over the shared
+ * ones, its first-party entries), unless the test input sets them itself.
+ */
+export function withPolicyInput(domain: string, input: unknown, data: OpaData): unknown {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return input;
+  const base = input as Record<string, unknown>;
+  if (domain === 'admission') {
+    const targetType = String(base.target_type ?? 'skill');
+    // The browser cannot verify shipped asset bytes. The gateway strips these
+    // built-in entries before admission unless CodeGuard matches a pinned
+    // digest; its own plugin is recognized before admission.
+    const firstParty = data.first_party_allow_list
+      .filter((entry) => entry.target_type === targetType)
+      .filter((entry) => !(targetType === 'skill' && entry.target_name === 'codeguard')
+        && !(targetType === 'plugin' && entry.target_name === 'defenseclaw'))
+      .map((entry) => ({ name: entry.target_name, source_path_contains: [...entry.source_path_contains] }));
+    return {
+      ...base,
+      admission: {
+        scan_on_install: data.config.scan_on_install,
+        allow_list_bypass_scan: data.config.allow_list_bypass_scan,
+        actions: { ...data.actions, ...(data.scanner_overrides[targetType] ?? {}) },
+        scanner_overrides: {},
+        ...(typeof base.admission === 'object' && base.admission !== null && !Array.isArray(base.admission)
+          ? base.admission : {}),
+        first_party_allow_list: firstParty,
+      },
+    };
+  }
+  if (domain === 'guardrail') {
+    return {
+      thresholds: {
+        block: data.guardrail.block_threshold,
+        alert: data.guardrail.alert_threshold,
+        cisco_trust_level: data.guardrail.cisco_trust_level,
+      },
+      hilt: { ...data.guardrail.hilt },
+      ...base,
+    };
+  }
+  return input;
 }

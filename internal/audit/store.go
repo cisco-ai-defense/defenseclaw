@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -242,12 +244,33 @@ type Store struct {
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
 
+	// progress receives the one-line notes Init writes while it applies
+	// migrations. nil means os.Stderr, which is gateway.log in the daemon.
+	progress io.Writer
+
 	// findingLifecycleMu serializes the one mutable state projection and its
 	// process-local up/down-counter baselines. SQLite serializes these writers
 	// too, but owning the boundary here also keeps concurrent first scans from
 	// publishing two current-state baselines after a runtime restart/reload.
 	findingLifecycleMu      sync.Mutex
 	findingGaugeInitialized map[string]struct{}
+}
+
+// SetMigrationProgress sends the notes Init writes while it applies
+// migrations ("[audit] applying migration N: ...") to w instead of stderr.
+// The daemon keeps stderr, which is its time-stamped gateway.log; the
+// launcher and one-shot commands pass io.Discard, so an upgrade's installer
+// output does not carry an internal description per migration (GAP-0153).
+// Call it before Init.
+func (s *Store) SetMigrationProgress(w io.Writer) {
+	s.progress = w
+}
+
+func (s *Store) migrationProgress() io.Writer {
+	if s.progress != nil {
+		return s.progress
+	}
+	return os.Stderr
 }
 
 // SQLiteBusyObservabilityV8 is the generated metric capability used by audit,
@@ -1806,80 +1829,12 @@ var migrations = []migration{
 		apply:       migrateFindingLifecycleState,
 	},
 	{
-		description: "guardrails: bind bounded chain enforcement to opaque resource lineage",
-		apply:       migrateToolChainLineageState,
-	},
-	{
-		description: "guardrails: bind transformed artifact chains to opaque derived lineage",
-		apply:       migrateToolChainDerivedLineageState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to nine result slots",
-		apply:       migrateToolChainExpandedCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to ten result slots",
-		apply:       migrateToolChainTenSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to eleven result slots",
-		apply:       migrateToolChainElevenSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to twelve result slots",
-		apply:       migrateToolChainTwelveSlotCatalogState,
-	},
-	{
-		description: "guardrails: expand bounded chain catalog to thirteen result slots",
-		apply:       migrateToolChainThirteenSlotCatalogState,
-	},
-	{
-		description: "guardrails: widen bounded chain masks and add result slots fourteen through seventeen",
-		apply:       migrateToolChainFourteenSlotWideMaskState,
-	},
-	{
-		description: "guardrails: add staged reverse-shell persistence result slot eighteen",
-		apply:       migrateToolChainEighteenSlotWideMaskState,
-	},
-	{
-		description: "guardrails: add result slots nineteen and twenty with bounded exact-value lineage",
-		apply:       migrateToolChainTwentySlotValueLineageState,
-	},
-	{
-		description: "guardrails: reserve append-only bounded chain mask capacity",
-		apply:       migrateToolChainAppendOnlyMaskCapacity,
-	},
-	{
 		description: "guardrails: bind pending SQL value sources to authoritative results",
 		apply:       migrateToolChainSQLValueSourceState,
 	},
 	{
-		description: "guardrails: add result slot twenty-one for bounded SQL value persistence",
-		apply:       migrateToolChainTwentyOneSlotSQLPersistenceState,
-	},
-	{
-		description: "guardrails: add result slot twenty-two for compromised credential authentication",
-		apply:       migrateToolChainTwentyTwoSlotCredentialAuthenticationState,
-	},
-	{
 		description: "guardrails: bind pending credential sources to authoritative results",
 		apply:       migrateToolChainReturnedCredentialSourceState,
-	},
-	{
-		description: "guardrails: add result slot twenty-three for AD CS certificate impersonation",
-		apply:       migrateToolChainTwentyThreeSlotADCSState,
-	},
-	{
-		description: "guardrails: add result slot twenty-four for S4U ticket secretsdump",
-		apply:       migrateToolChainTwentyFourSlotS4UState,
-	},
-	{
-		description: "guardrails: add result slot twenty-five for policy-gated SQLite read-delete",
-		apply:       migrateToolChainTwentyFiveSlotSQLiteReadDeleteState,
-	},
-	{
-		description: "guardrails: add result slot twenty-six for exact file-email lineage",
-		apply:       migrateToolChainTwentySixSlotFileEmailState,
 	},
 }
 
@@ -1967,7 +1922,7 @@ func (s *Store) Init() error {
 	for i := current; i < len(migrations); i++ {
 		m := migrations[i]
 		ver := i + 1
-		fmt.Fprintf(os.Stderr, "[audit] applying migration %d: %s\n", ver, m.description)
+		fmt.Fprintf(s.migrationProgress(), "[audit] applying migration %d: %s\n", ver, m.description)
 		if err := s.applyMigration(ver, m); err != nil {
 			return err
 		}
@@ -2086,6 +2041,30 @@ func (s *Store) DatabasePath() string {
 		return ""
 	}
 	return s.dbPath
+}
+
+// DatabaseFileReplaced reports whether the database path no longer names
+// the file this store opened: it was deleted or replaced while the gateway
+// ran. SQLite keeps writing to the open, unlinked file, so every new audit
+// record is lost until the gateway opens the store again (GAP-0325).
+func (s *Store) DatabaseFileReplaced() bool {
+	if s == nil {
+		return false
+	}
+	s.lifecycleMu.RLock()
+	defer s.lifecycleMu.RUnlock()
+	if s.closed || s.dbPathGuard == nil || s.dbPathGuard.inMemory || s.dbPathGuard.pinned == nil {
+		return false
+	}
+	pinned, err := s.dbPathGuard.pinned.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Lstat(s.dbPathGuard.path)
+	if os.IsNotExist(err) {
+		return true
+	}
+	return err == nil && !os.SameFile(pinned, current)
 }
 
 // acquireReady pins the store against Close for one mandatory v8 transaction.
@@ -3608,6 +3587,10 @@ func connectorEnforcedAlertSQL() string {
 	)`
 }
 
+// alertEligibilitySQL is the one alert-queue predicate. The legacy finding
+// actions are alerts when their severity is real, whether an older gateway
+// wrote them without a bucket or a current one files them under
+// security.finding with a legacy.audit.* event name (GAP-0187).
 func alertEligibilitySQL(legacyActionPlaceholders string) string {
 	findingTagsPath := `$."defenseclaw.finding.tags"`
 	canonicalOutcome := canonicalAlertOutcomeSQL()
@@ -3655,15 +3638,20 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 			AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','ERROR')
 		)
 		OR (
-			event.bucket IS NULL
+			event.action IN (` + legacyActionPlaceholders + `)
+			AND UPPER(COALESCE(event.severity,'')) IN
+				('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
 			AND (
-				(
-					event.action IN (` + legacyActionPlaceholders + `)
-					AND UPPER(COALESCE(event.severity,'')) IN
-						('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+				event.bucket IS NULL
+				OR (
+					event.bucket = 'security.finding'
+					AND event.event_name LIKE 'legacy.audit.%'
 				)
-				OR ` + legacyExplicit + `
 			)
+		)
+		OR (
+			event.bucket IS NULL
+			AND ` + legacyExplicit + `
 		)
 	)`
 }
@@ -4284,6 +4272,18 @@ func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes
 	return nil
 }
 
+// DeleteTargetSnapshot drops the rescan baseline of a target that left its
+// path, so a later copy at that path is a new install, not an unchanged one.
+func (s *Store) DeleteTargetSnapshot(targetType, targetPath string) error {
+	if _, err := s.execDB(context.Background(), "audit",
+		`DELETE FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
+		targetType, targetPath,
+	); err != nil {
+		return fmt.Errorf("audit: delete target snapshot: %w", err)
+	}
+	return nil
+}
+
 // ListNetworkEgressEvents returns recent egress events. Optionally filter by
 // hostname prefix (empty string returns all). Results are newest-first.
 func (s *Store) ListNetworkEgressEvents(limit int, hostname string) ([]NetworkEgressRow, error) {
@@ -4438,7 +4438,7 @@ func currentRunID() string {
 	if v := gatewaylog.ProcessRunID(); v != "" {
 		return v
 	}
-	return strings.TrimSpace(os.Getenv("DEFENSECLAW_RUN_ID"))
+	return strings.TrimSpace(envvars.Getenv("DEFENSECLAW_RUN_ID"))
 }
 
 // processAgentInstanceID holds the per-process agent instance ID that

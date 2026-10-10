@@ -90,11 +90,38 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	}
 	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise`, true }
 	addManagedWindowsSetupAnswer(root)
+	// The installed managed Windows binary answers the documented writer
+	// commands before Cobra can fall through to generic usage.
+	for _, tc := range []struct {
+		parent *cobra.Command
+		name   string
+		args   []string
+		detail string
+	}{
+		{configCmd, "set", []string{"guardrail.mode", "observe"}, "admin config"},
+		{root, "skill", []string{"block", "dc-x"}, "asset_policy.skill"},
+		{root, "plugin", []string{"scan", "--json", `C:\p`}, "defenseclaw scan plugin <path>"},
+	} {
+		child, _, err := tc.parent.Find([]string{tc.name})
+		if err != nil || child == tc.parent {
+			t.Fatalf("managed command %s not registered: %v", tc.name, err)
+		}
+		err = child.RunE(child, tc.args)
+		if commandExitCode(err) != 3 || !strings.Contains(err.Error(), tc.detail) {
+			t.Fatalf("managed %s refusal = %v", tc.name, err)
+		}
+	}
 	root.SetArgs([]string{"setup", "rotate-token", "--yes"})
 	root.SetOut(io.Discard)
 	root.SetErr(io.Discard)
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
 		t.Fatalf("setup rotate-token on a managed Windows computer: %v", err)
+	}
+	// GAP-0779: the MCP scanner named trusted-paths as a remedy, and the
+	// refusal spoke of rotating credentials.
+	root.SetArgs([]string{"setup", "trusted-paths", "add", `C:\Program Files\nodejs`})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "Program Files") || strings.Contains(err.Error(), "Rotating") {
+		t.Fatalf("setup trusted-paths on a managed Windows computer: %v", err)
 	}
 	root.SetArgs([]string{"setup", "kiro"})
 	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||

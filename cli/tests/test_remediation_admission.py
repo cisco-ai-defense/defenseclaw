@@ -47,15 +47,13 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import defenseclaw
 from click.testing import CliRunner
-from defenseclaw.commands.cmd_policy import _opa_runtime_action
+from defenseclaw.commands.cmd_policy import _admission_triple
 from defenseclaw.commands.cmd_skill import skill
-from defenseclaw.config import SkillActionsConfig
 from defenseclaw.enforce.admission import (
     _matches_provenance,
+    compile_admission,
     evaluate_admission,
-    load_admission_policy,
 )
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.inventory import agent_discovery as ad
@@ -67,14 +65,8 @@ from defenseclaw.inventory.claw_inventory import (
     enrich_with_policy,
 )
 from defenseclaw.models import ScanResult
-from defenseclaw.paths import bundled_rego_dir
 
 from tests.helpers import cleanup_app, make_app_context, make_temp_store
-
-
-def _bundled_rego_dir() -> str:
-    return os.fspath(bundled_rego_dir())
-
 
 # ---------------------------------------------------------------------------
 # F-0241 — runtime vocabulary mapping
@@ -82,28 +74,16 @@ def _bundled_rego_dir() -> str:
 
 
 class TestF0241RuntimeVocabulary(unittest.TestCase):
-    def test_block_runtime_stays_block(self):
-        # The bug mapped only "disable" -> "block"; an explicit
-        # ``runtime: block`` override silently became "allow".
-        self.assertEqual(_opa_runtime_action("block"), "block")
-
-    def test_disable_maps_to_block(self):
-        self.assertEqual(_opa_runtime_action("disable"), "block")
-
-    def test_enable_and_allow_map_to_allow(self):
-        self.assertEqual(_opa_runtime_action("enable"), "allow")
-        self.assertEqual(_opa_runtime_action("allow"), "allow")
-
-    def test_case_and_whitespace_insensitive(self):
-        self.assertEqual(_opa_runtime_action("  BLOCK "), "block")
-
-    def test_unknown_defaults_to_allow(self):
-        self.assertEqual(_opa_runtime_action("something-else"), "allow")
-
-
-# ---------------------------------------------------------------------------
-# F-0543 — admission.rego provenance is component-based, not substring
-# ---------------------------------------------------------------------------
+    def test_block_and_disable_runtime_stay_blocking(self):
+        # A policy may spell a runtime block either way; both must activate
+        # as runtime disable, never as an allow.
+        for runtime in ("block", "disable", "  BLOCK "):
+            self.assertEqual(_admission_triple({"runtime": runtime})["runtime"], "disable")
+        for runtime in ("enable", "allow"):
+            self.assertEqual(_admission_triple({"runtime": runtime})["runtime"], "enable")
+        # An unknown spelling is an error, never a silent allow.
+        with self.assertRaises(ValueError):
+            _admission_triple({"runtime": "something-else"})
 
 
 class TestF0543ProvenanceComponentMatch(unittest.TestCase):
@@ -118,26 +98,15 @@ class TestF0543ProvenanceComponentMatch(unittest.TestCase):
             _matches_provenance([".defenseclaw"], "/home/u/.defenseclaw/plugin")
         )
 
-    def test_rego_uses_component_matcher_not_substring(self):
-        rego = os.path.join(_bundled_rego_dir(), "admission.rego")
-        with open(rego, encoding="utf-8") as f:
-            text = f.read()
-        # The substring form was the vulnerability; the active matcher must
-        # now compare whole path components (a contiguous component slice),
-        # not a bare ``contains`` substring test.
-        self.assertIn("_provenance_prefix_matches(input.path, prefix)", text)
-        self.assertIn("array.slice(path_comps", text)
-
 
 # ---------------------------------------------------------------------------
-# F-0541 — bundled data.json first-party plugin provenance is tightened
+# F-0541 — built-in first-party plugin provenance is tightened
 # ---------------------------------------------------------------------------
 
 
 class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
     def setUp(self):
-        self.policy = load_admission_policy(_bundled_rego_dir())
-        _, self.constraints = self.policy.first_party_allow[("plugin", "defenseclaw")]
+        self.constraints = compile_admission(None, "plugin").first_party_allow["defenseclaw"]
 
     def test_broad_extensions_dir_entry_removed(self):
         # `.openclaw/extensions` matched ANY plugin in the extensions dir.
@@ -190,12 +159,8 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
             is_allowed=lambda *a: False,
             is_quarantined=lambda *a: False,
         )
-        bundled_policies = os.path.join(
-            os.path.dirname(defenseclaw.__file__), "_data", "policies"
-        )
         decision = evaluate_admission(
             pe,
-            policy_dir=bundled_policies,
             target_type="plugin",
             name="defenseclaw",
             source_path="/tmp/attacker/.codex-plugin/defenseclaw",
@@ -210,12 +175,8 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
             is_allowed=lambda *a: False,
             is_quarantined=lambda *a: False,
         )
-        bundled_policies = os.path.join(
-            os.path.dirname(defenseclaw.__file__), "_data", "policies"
-        )
         decision = evaluate_admission(
             pe,
-            policy_dir=bundled_policies,
             target_type="plugin",
             name="defenseclaw",
             source_path="/tmp/attacker/extensions/defenseclaw",
@@ -284,9 +245,6 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
             is_allowed=lambda *a: False,
             is_quarantined=lambda *a: False,
         )
-        bundled_policies = os.path.join(
-            os.path.dirname(defenseclaw.__file__), "_data", "policies"
-        )
         with tempfile.TemporaryDirectory(prefix="dclaw-amp-home-") as home:
             with patch.dict(
                 os.environ,
@@ -294,7 +252,6 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
             ):
                 decision = evaluate_admission(
                     pe,
-                    policy_dir=bundled_policies,
                     target_type="plugin",
                     name="defenseclaw",
                     source_path=os.path.join(
@@ -317,32 +274,30 @@ class TestF0541TightenedFirstPartyProvenance(unittest.TestCase):
 
 class TestF0401PathPinFailsClosed(unittest.TestCase):
     def setUp(self):
-        self.store, self.db_path = make_temp_store()
-        self.pe = PolicyEngine(self.store)
-        self.policy_dir = tempfile.mkdtemp(prefix="dclaw-f0401-")
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.pe = PolicyEngine(self.app.store, self.app.cfg)
 
     def tearDown(self):
-        self.store.close()
-        os.unlink(self.db_path)
-        shutil.rmtree(self.policy_dir, ignore_errors=True)
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def _pin(self):
-        self.pe.allow("skill", "trusted", "vetted at a path")
-        self.pe.set_source_path("skill", "trusted", "/opt/trusted/trusted")
+        self.pe.allow("skill", "trusted", "vetted at a path", source_path="/opt/trusted/trusted")
 
-    def test_empty_presented_path_is_rejected(self):
+    def test_empty_presented_path_does_not_skip_scan(self):
+        # An empty presented path cannot prove it is the pinned asset.
         self._pin()
-        d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="skill", name="trusted", source_path="",
-        )
-        self.assertEqual(d.verdict, "rejected")
-        self.assertEqual(d.source, "manual-allow-path-mismatch")
+        d = evaluate_admission(self.pe, target_type="skill", name="trusted", source_path="")
+        self.assertEqual(d.verdict, "scan")
+
+    def test_lookalike_sibling_path_does_not_skip_scan(self):
+        self._pin()
+        d = evaluate_admission(self.pe, target_type="skill", name="trusted", source_path="/opt/trusted/trusted-evil")
+        self.assertEqual(d.verdict, "scan")
 
     def test_matching_path_still_allows(self):
         self._pin()
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
+            self.pe,
             target_type="skill", name="trusted",
             source_path="/opt/trusted/trusted",
         )
@@ -410,7 +365,7 @@ class TestF0423FullPathScanMatch(unittest.TestCase):
             "skills": [{"id": "foo", "source": "user", "path": "/opt/real/foo"}],
             "summary": {"skills": {"count": 1}},
         }
-        enrich_with_policy(inv, self.store, SkillActionsConfig())
+        enrich_with_policy(inv, self.store)
         # The clean scan belongs to a *different* on-disk asset that merely
         # shares the basename — it must not be credited here.
         self.assertEqual(inv["skills"][0]["policy_verdict"], "unscanned")
@@ -426,7 +381,7 @@ class TestF0423FullPathScanMatch(unittest.TestCase):
             "skills": [{"id": "foo", "source": "user", "path": "/tmp/elsewhere/foo"}],
             "summary": {"skills": {"count": 1}},
         }
-        enrich_with_policy(inv, self.store, SkillActionsConfig())
+        enrich_with_policy(inv, self.store)
         self.assertEqual(inv["skills"][0]["policy_verdict"], "clean")
 
 
@@ -454,21 +409,28 @@ class TestF0742UserSourceNotFirstParty(unittest.TestCase):
             ],
             "summary": {"skills": {"count": 1}},
         }
-        enrich_with_policy(inv, self.store, SkillActionsConfig())
+        enrich_with_policy(inv, self.store)
         self.assertNotEqual(inv["skills"][0]["policy_verdict"], "allowed")
 
     def test_bundled_codeguard_still_first_party_allowed(self):
+        # GAP-0419: first-party trust needs the shipped CodeGuard content.
+        from defenseclaw.paths import bundled_codeguard_dir
+
+        home = tempfile.mkdtemp(prefix="dclaw-f0742-")
+        self.addCleanup(shutil.rmtree, home, True)
+        path = os.path.join(home, ".openclaw", "skills", "codeguard")
+        shutil.copytree(bundled_codeguard_dir(), path, ignore=shutil.ignore_patterns("__pycache__"))
         inv = {
             "skills": [
                 {
                     "id": "codeguard",
                     "source": "bundled",
-                    "path": "/home/u/.openclaw/skills/codeguard",
+                    "path": path,
                 }
             ],
             "summary": {"skills": {"count": 1}},
         }
-        enrich_with_policy(inv, self.store, SkillActionsConfig())
+        enrich_with_policy(inv, self.store)
         self.assertEqual(inv["skills"][0]["policy_verdict"], "allowed")
 
 
@@ -547,10 +509,9 @@ class TestF0282SkillScanPathPinnedAllow(_SkillCommandBase):
         mock_scanner.scan.return_value = self._clean_result(skill_dir)
         mock_scanner_cls.return_value = mock_scanner
 
-        pe = PolicyEngine(self.app.store)
-        pe.allow("skill", "demo", "vetted at a specific path")
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         # Pinned to a DIFFERENT path than the one being scanned.
-        pe.set_source_path("skill", "demo", "/opt/trusted/demo")
+        pe.allow("skill", "demo", "vetted at a specific path", source_path="/opt/trusted/demo")
 
         result = self.invoke(["scan", "demo", "--path", skill_dir])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -565,9 +526,8 @@ class TestF0282SkillScanPathPinnedAllow(_SkillCommandBase):
         mock_scanner.scan.return_value = self._clean_result(skill_dir)
         mock_scanner_cls.return_value = mock_scanner
 
-        pe = PolicyEngine(self.app.store)
-        pe.allow("skill", "demo", "vetted")
-        pe.set_source_path("skill", "demo", skill_dir)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
+        pe.allow("skill", "demo", "vetted", source_path=skill_dir)
 
         result = self.invoke(["scan", "demo", "--path", skill_dir])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -583,7 +543,7 @@ class TestF0282SkillScanPathPinnedAllow(_SkillCommandBase):
 class TestF0283InstallRejectsQuarantined(_SkillCommandBase):
     @patch("defenseclaw.commands.cmd_skill._run_clawhub_install")
     def test_quarantined_skill_is_not_installed(self, mock_install):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.quarantine("skill", "qskill", "prior scan findings")
 
         result = self.invoke(["install", "qskill"])

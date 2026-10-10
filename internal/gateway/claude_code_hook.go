@@ -135,10 +135,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	cfg := a.decisionConfig(ctx)
 	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
-		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
+		// The project's skill folders are admitted before the first prompt
+		// can load one (GAP-1063).
+		a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
+		if req.ScanComponents || (cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
 			count := a.scanClaudeCodeComponents(ctx, req)
 			if count > 0 {
 				verdict = &ToolInspectVerdict{
@@ -184,16 +188,21 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
 				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
 			},
-			LegacyText:         string(toolArgs),
-			Connector:          "claudecode",
-			EnforcementCapable: true,
-			record:             toolChainRecorderFromContext(ctx),
+			LegacyText:                    string(toolArgs),
+			Connector:                     "claudecode",
+			EnforcementCapable:            true,
+			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
+			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
+		if decision, matched := a.claudeCodePluginAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "plugin", decision: decision})
 		}
 	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
 		verdict = a.inspectClaudeCodeToolResult(ctx, req, mode)
@@ -203,6 +212,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
+		if decision, matched := a.claudeCodePluginAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "plugin", decision: decision})
+		}
 	case "MessageDisplay":
 		// Anthropic sends the displayed assistant text incrementally in delta.
 		// DefenseClaw registers this event async, so findings are observation
@@ -211,7 +223,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "StopFailure":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
 	case "Stop", "SubagentStop", "SessionEnd":
-		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
+		if !req.StopHookActive && cfg != nil && cfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
 		}
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
@@ -281,7 +293,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// #1092).
 	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
 	if !a.managedAIDOnly() {
-		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", action, reason, policy)
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", req.HookEventName, action, reason,
+			evalCtx.RuleIDs, policy)
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
 	resp.SourceReason = verdict.Reason
@@ -862,8 +875,8 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 		target = filepath.Join(req.CWD, target)
 	}
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var result *scanner.ScanResult
 	if req.sandboxView != nil {
@@ -924,8 +937,8 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 	}
 
 	rulesDir := ""
-	if a.scannerCfg != nil {
-		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		rulesDir = cfg.Scanners.CodeGuard
 	}
 	var results []*scanner.ScanResult
 	if req.sandboxView != nil {
@@ -974,8 +987,8 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHookRequest) []string {
 	if req.sandboxView != nil {
 		var scanPaths []string
-		if a.scannerCfg != nil {
-			scanPaths = a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			scanPaths = cfg.ConnectorHookConfig("claudecode").ScanPaths
 		}
 		return sandboxStopTargets(ctx, req.sandboxView, req.CWD, scanPaths)
 	}
@@ -997,8 +1010,8 @@ func (a *APIServer) claudeCodeStopTargets(ctx context.Context, req claudeCodeHoo
 			out = append(out, p)
 		}
 	}
-	if a.scannerCfg != nil {
-		for _, p := range a.scannerCfg.ConnectorHookConfig("claudecode").ScanPaths {
+	if cfg := a.decisionConfig(ctx); cfg != nil {
+		for _, p := range cfg.ConnectorHookConfig("claudecode").ScanPaths {
 			add(p)
 		}
 	}
@@ -1027,7 +1040,7 @@ func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCode
 		noteSandboxCoverageGap(ctx, sandboxGapComponentScanSkipped)
 		return 0
 	}
-	if !req.ScanComponents && !a.claudeCodeComponentScanDue() {
+	if !req.ScanComponents && !a.claudeCodeComponentScanDue(ctx) {
 		return 0
 	}
 	targets := claudeCodeComponentTargets(req.CWD)
@@ -1045,10 +1058,10 @@ func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCode
 	return count
 }
 
-func (a *APIServer) claudeCodeComponentScanDue() bool {
+func (a *APIServer) claudeCodeComponentScanDue(ctx context.Context) bool {
 	interval := 60 * time.Minute
-	if a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes > 0 {
-		interval = time.Duration(a.scannerCfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes) * time.Minute
+	if cfg := a.decisionConfig(ctx); cfg != nil && cfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes > 0 {
+		interval = time.Duration(cfg.ConnectorHookConfig("claudecode").ComponentScanIntervalMinutes) * time.Minute
 	}
 	a.claudeCodeMu.Lock()
 	defer a.claudeCodeMu.Unlock()
@@ -1177,30 +1190,35 @@ func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, targ
 		result *scanner.ScanResult
 		err    error
 	)
-	scanCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	// The live config: scanner and llm edits reload hot.
+	cfg := a.liveConfig()
+	scanCtx, cancel := context.WithTimeout(ctx, componentScanTimeout(cfg, component))
 	defer cancel()
 	switch component {
 	case "skill":
 		ss := scanner.NewSkillScannerFromLLM(
-			a.scannerCfg.Scanners.SkillScanner,
-			a.scannerCfg.ResolveLLM("scanners.skill"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.SkillScanner,
+			cfg.ResolveLLM("scanners.skill"),
+			cfg.CiscoAIDefense,
 		)
+		ss.SecureClient = cfg.SecureClientIntegration()
 		result, err = ss.Scan(scanCtx, target)
 	case "plugin":
-		ps := scanner.NewPluginScanner(a.scannerCfg.Scanners.PluginScanner)
+		ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+		ps.Connector = "claudecode"
 		result, err = ps.Scan(scanCtx, target)
 	case "mcp":
 		ms := scanner.NewMCPScannerFromLLM(
-			a.scannerCfg.Scanners.MCPScanner,
-			a.scannerCfg.ResolveLLM("scanners.mcp"),
-			a.scannerCfg.CiscoAIDefense,
+			cfg.Scanners.MCPScanner,
+			cfg.ResolveLLM("scanners.mcp"),
+			cfg.CiscoAIDefense,
 		)
+		ms.RulePack = scanner.MCPRulePackFor(cfg, "claudecode")
 		result, err = ms.Scan(scanCtx, target)
 	default:
 		rulesDir := ""
-		if a.scannerCfg != nil {
-			rulesDir = a.scannerCfg.Scanners.CodeGuard
+		if cfg := a.decisionConfig(ctx); cfg != nil {
+			rulesDir = cfg.Scanners.CodeGuard
 		}
 		cg := scanner.NewCodeGuardScanner(rulesDir)
 		result, err = cg.Scan(scanCtx, target)

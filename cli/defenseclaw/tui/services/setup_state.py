@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from defenseclaw import connector_paths
 from defenseclaw.tui.services.cli_choices import REGIONAL_PROVIDERS
 from defenseclaw.tui.services.sandbox_state import HARNESSES, resolve_harness
 
@@ -200,6 +201,9 @@ class ConfigDiffEntry:
     before: str
     after: str
     secret: bool = False
+    # Another writer changed this key on disk while the draft was open; the
+    # save replaces that value (GAP-0342).
+    disk_changed: bool = False
 
 
 def parse_credential_rows(raw: bytes | str) -> tuple[CredentialRow, ...]:
@@ -514,14 +518,7 @@ def build_readiness_checks(
             ReadinessCheck("Custom-provider Overlay", f"instance '{instance_name}' bound", "pass")
         )
 
-    if any(
-        str(_get_path(cfg, key, "") or "").strip()
-        for key in (
-            "scanners.skill_scanner.binary",
-            "scanners.mcp_scanner.binary",
-            "scanners.codeguard",
-        )
-    ):
+    if str(_get_path(cfg, "scanners.codeguard", "") or "").strip():
         checks.append(ReadinessCheck("Scanner Availability", "Scanner config present.", "pass"))
     else:
         checks.append(
@@ -697,9 +694,6 @@ def _collect_errors(sections: Sequence[ConfigSection], *, changed_only: bool) ->
 # Key prefixes whose editor writes go through a dedicated writer in
 # :func:`apply_config_field` that builds the typed dataclass entries itself.
 SPECIAL_WRITER_PREFIXES: tuple[str, ...] = (
-    "skill_actions.",
-    "mcp_actions.",
-    "plugin_actions.",
     "asset_policy.connectors.",
     "guardrail.connectors.",
     "guardrail.judge.hook_connectors.",
@@ -817,17 +811,37 @@ def get_config_value(cfg: object | Mapping[str, Any] | None, key: str, default: 
 
 
 def guardrail_mode_overrides(cfg: object | Mapping[str, Any] | None) -> tuple[str, tuple[tuple[str, str], ...]]:
-    """The global guardrail mode and the connectors whose own mode differs."""
+    """The mode the active connectors run in, and the ones that differ from it.
 
-    mode = str(_get_path(cfg, "guardrail.mode", "") or "").strip() or "observe"
-    overrides: list[tuple[str, str]] = []
+    One active connector (or several agreeing) runs in a single mode, the one
+    the status bar and ``defenseclaw status`` show, even when the global
+    ``guardrail.mode`` says otherwise (GAP-0166). Only a mix of modes is split
+    into a headline (the global mode when some connector runs it, else the
+    most common) plus the connectors that differ.
+    """
+
+    global_mode = str(_get_path(cfg, "guardrail.mode", "") or "").strip() or "observe"
+    own: dict[str, str] = {}
+    disabled: set[str] = set()  # a disabled connector enforces nothing
     connectors = _get_path(cfg, "guardrail.connectors", None)
     if isinstance(connectors, Mapping):
-        for name in sorted(connectors, key=lambda key: str(key).lower()):
-            own = str(_get_path(connectors[name], "mode", "") or "").strip()
-            if own and own != mode:
-                overrides.append((str(name), own))
-    return mode, tuple(overrides)
+        for name, entry in connectors.items():
+            key = connector_paths.normalize(str(name))
+            own[key] = str(_get_path(entry, "mode", "") or "").strip()
+            if _get_path(entry, "enabled", None) is False:
+                disabled.add(key)
+    modes = {
+        name: own.get(connector_paths.normalize(name)) or global_mode
+        for name in sorted(_active_connector_names(cfg), key=str.lower)
+        if connector_paths.normalize(name) not in disabled
+    }
+    counts: dict[str, int] = {}
+    for mode in modes.values():
+        counts[mode] = counts.get(mode, 0) + 1
+    if len(counts) <= 1:
+        return next(iter(counts), global_mode), ()
+    headline = global_mode if global_mode in counts else max(counts, key=counts.__getitem__)
+    return headline, tuple((name, mode) for name, mode in modes.items() if mode != headline)
 
 
 def guardrail_mode_label(cfg: object | Mapping[str, Any] | None) -> str:
@@ -871,8 +885,8 @@ def apply_config_field(cfg: object | dict[str, Any], key: str, value: str) -> No
         return
     if key.startswith("firewall."):
         return
-    if key.startswith(("skill_actions.", "mcp_actions.", "plugin_actions.")):
-        _apply_action_matrix_field(cfg, key, value)
+    if key.startswith("admission.") and ".actions." in key:
+        _apply_admission_action_field(cfg, key, value)
         return
     if _apply_global_registry_required_field(cfg, key, value):
         return
@@ -918,12 +932,12 @@ def _apply_global_registry_required_field(cfg: object | dict[str, Any], key: str
 # B4/E4c/E4d: the config editor exposes every per-connector guardrail override.
 # Top-level ``PerConnectorGuardrailConfig`` fields editable via the 4-part
 # ``guardrail.connectors.<c>.<field>`` key; the nested HILT block is edited via
-# the 5-part ``guardrail.connectors.<c>.hilt.<field>`` key. ``rule_pack_dir`` /
+# the 5-part ``guardrail.connectors.<c>.hilt.<field>`` key. ``rule_pack`` /
 # ``block_message`` are free-text strings; ``mode`` is an enum string;
 # ``hook_fail_mode`` normalizes to open/closed; ``enabled`` is a bool. The
 # per-connector judge state is NOT here — it is membership in the
 # ``guardrail.judge.hook_connectors`` list (see _apply_judge_hook_connector_toggle).
-_PER_CONNECTOR_GUARDRAIL_STR_FIELDS = frozenset({"mode", "rule_pack_dir", "block_message"})
+_PER_CONNECTOR_GUARDRAIL_STR_FIELDS = frozenset({"mode", "rule_pack", "block_message"})
 _PER_CONNECTOR_GUARDRAIL_BOOL_FIELDS = frozenset({"enabled"})
 _PER_CONNECTOR_GUARDRAIL_FAIL_MODE_FIELDS = frozenset({"hook_fail_mode"})
 _PER_CONNECTOR_GUARDRAIL_FIELDS = (
@@ -1396,18 +1410,24 @@ def _apply_connector_hook_field(cfg: object | dict[str, Any], key: str, value: s
     _apply_typed_field(cfg, key, value)
 
 
-def _apply_action_matrix_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+def _apply_admission_action_field(cfg: object | dict[str, Any], key: str, value: str) -> None:
+    """Set ``admission.<type>.actions.<severity>`` to a shorthand; blank
+    removes it, so the default for that severity applies again."""
     parts = key.split(".")
-    if len(parts) != 3:
+    if len(parts) != 4 or parts[1] not in {"defaults", "skill", "mcp", "plugin"}:
         return
-    prefix, severity, column = parts
-    if prefix not in {"skill_actions", "mcp_actions", "plugin_actions"}:
-        return
+    severity = parts[3]
     if severity not in {"critical", "high", "medium", "low", "info"}:
         return
-    if column not in {"file", "runtime", "install"}:
-        return
-    set_config_value(cfg, key, value)
+    actions = get_config_value(cfg, ".".join(parts[:3]), None)
+    if not isinstance(actions, dict):
+        actions = {}
+        set_config_value(cfg, ".".join(parts[:3]), actions)
+    choice = value.strip().lower()
+    if not choice:
+        actions.pop(severity, None)
+    elif choice in {"block", "quarantine", "warn", "allow"}:
+        actions[severity] = choice
 
 
 def _coerce_per_connector_asset_policy_value(field_name: str, value: str) -> Any:
@@ -1508,6 +1528,7 @@ def _apply_per_connector_asset_policy_field(cfg: object | dict[str, Any], key: s
 
 _BOOL_FIELD_KEYS = frozenset(
     {
+        "admission.defaults.allow_list_bypass_scan",
         "notifications.enabled",
         "notifications.block_enforced",
         "notifications.block_would_block",
@@ -1536,8 +1557,9 @@ _BOOL_FIELD_KEYS = frozenset(
         "scanners.skill_scanner.use_behavioral",
         "scanners.skill_scanner.enable_meta",
         "scanners.skill_scanner.use_trigger",
-        "scanners.skill_scanner.use_virustotal",
-        "scanners.skill_scanner.use_aidefense",
+        "scanners.skill_scanner.analyzers.virustotal.enabled",
+        "scanners.skill_scanner.analyzers.aidefense.enabled",
+        "scanners.skill_scanner.analyzers.osv.enabled",
         "scanners.mcp_scanner.scan_prompts",
         "scanners.mcp_scanner.scan_resources",
         "scanners.mcp_scanner.scan_instructions",
@@ -1557,7 +1579,6 @@ _BOOL_FIELD_KEYS = frozenset(
         "gateway.watcher.mcp.take_action",
         "gateway.watchdog.enabled",
         "watch.auto_block",
-        "watch.allow_list_bypass_scan",
         "watch.rescan_enabled",
         "asset_policy.enabled",
         "asset_policy.skill.registry_required",

@@ -121,6 +121,17 @@ class HealthSnapshot:
     # to the config-derived roster.
     connector: ConnectorHealth | None = None
     connectors: tuple[ConnectorHealth, ...] = ()
+    # The effective policy the gateway applied (/status ``policy``): its
+    # applied generation and effective_policy_digest ("" when not reported).
+    policy_generation: int = 0
+    policy_digest: str = ""
+
+    def applied_policy_label(self, digest_chars: int = 12) -> str:
+        """``gen N · <hex>`` for the status strip, "" when not reported."""
+        digest = self.policy_digest.removeprefix("sha256:")
+        if not digest:
+            return ""
+        return f"gen {self.policy_generation} · {digest[:digest_chars]}"
 
 
 # Probe states that mean the sidecar is not running.
@@ -194,15 +205,11 @@ class OverviewConfig:
     # DISABLED rather than hiding them; a *fully removed* connector simply
     # leaves ``active_connectors()`` and never reaches the roster at all.
     connector_disabled: tuple[str, ...] = ()
-    # N3: scanner action overrides from the *active* policy's synced
-    # ``data.json`` (``scanner_overrides`` → scanner_type → severity →
-    # ``{install,file,runtime}`` → action). These live only in the active
-    # policy YAML / ``data.json``; today only ``policy show`` surfaces them, so
-    # ``defenseclaw status`` and the Overview guardrail summary are blind to a
-    # policy that, say, downgrades a scanner surface to ``warn``/``allow``.
-    # Stored flattened as ``(scanner_type, severity, surface, action)`` so the
-    # frozen dataclass stays hashable; empty for the default config → no
-    # Overview change. Populated by the adapter (which reads ``data.json``);
+    # N3: the admission actions config.yaml sets per asset type
+    # (``admission.<type>.actions``) that differ from the built-in policy.
+    # Stored flattened as ``(asset_type, severity, surface, action)`` so the
+    # frozen dataclass stays hashable; empty when config.yaml sets none → no
+    # Overview change. Populated by :func:`admission_action_overrides`;
     # rendered via :func:`format_scanner_overrides_summary` /
     # :meth:`OverviewPanelModel.scanner_overrides_summary`.
     scanner_overrides: tuple[tuple[str, str, str, str], ...] = ()
@@ -1388,13 +1395,11 @@ class OverviewPanelModel:
         return ""
 
     def scanner_overrides_summary(self) -> str:
-        """One-line summary of the active policy's scanner action overrides,
+        """One-line summary of the admission actions config.yaml overrides,
         or ``""`` when there are none (N3).
 
-        Surfaces overrides that today live only in ``policy show`` /
-        ``data.json``. Empty (the default config) renders nothing, so the
-        Overview is unchanged until the adapter populates
-        :attr:`OverviewConfig.scanner_overrides`. See
+        Empty (the default config) renders nothing. See
+        :attr:`OverviewConfig.scanner_overrides` and
         :func:`format_scanner_overrides_summary`.
         """
         if self.cfg is None:
@@ -2167,15 +2172,62 @@ def active_connector_name(health: HealthSnapshot | None, mode: str) -> str:
     return ""
 
 
+def admission_action_overrides(
+    config: object | None,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Effective explicit admission actions that differ from built-in policy.
+
+    Per-type actions win over scanner-derived skill actions, which win over
+    admission.defaults.actions. Only effective differences are shown to the
+    Overview and status views.
+    """
+
+    admission = getattr(config, "admission", None)
+    if admission is None:
+        return ()
+    try:
+        from defenseclaw.enforce.admission import (  # noqa: PLC0415
+            _builtin_admission,
+            _compile_action_map,
+            _derived_scanner_gate,
+        )
+    except Exception:  # noqa: BLE001 - the override summary is purely informational.
+        return ()
+    defaults = _compile_action_map(getattr(getattr(admission, "defaults", None), "actions", None))
+    flat: list[tuple[str, str, str, str]] = []
+    for target_type in ("skill", "mcp", "plugin"):
+        own = _compile_action_map(getattr(getattr(admission, target_type, None), "actions", None))
+        derived = {}
+        if target_type == "skill":
+            scanner = getattr(getattr(config, "scanners", None), "skill_scanner", None)
+            derived = _derived_scanner_gate(
+                getattr(scanner, "fail_on_severity", ""), getattr(scanner, "review_queue_min", "")
+            )
+        builtin = _builtin_admission(target_type).actions
+        for severity in dict.fromkeys((*own, *defaults)):
+            if severity in own:
+                compiled = own[severity]
+            elif severity in derived:
+                continue
+            else:
+                compiled = defaults[severity]
+            if compiled == builtin.get(severity):
+                continue
+            action, allowed = compiled
+            for surface in ("install", "file", "runtime"):
+                flat.append((target_type, severity, surface, str(getattr(action, surface))))
+            if allowed:
+                flat.append((target_type, severity, "verdict", "allow"))
+    return tuple(flat)
+
+
 def format_scanner_overrides_summary(
     overrides: tuple[tuple[str, str, str, str], ...],
 ) -> str:
     """One-line summary of active-policy scanner action overrides (N3).
 
-    ``overrides`` is the flattened ``(scanner_type, severity, surface, action)``
-    view of the active policy's ``scanner_overrides`` (synced into
-    ``data.json``; only ``policy show`` surfaces these today). Returns ``""``
-    when empty, so the Overview / ``defenseclaw status`` render nothing for the
+    ``overrides`` is the flattened ``(asset_type, severity, surface, action)``
+    view of :func:`admission_action_overrides`. Returns ``""`` when empty, so the Overview / ``defenseclaw status`` render nothing for the
     common default config. Groups by scanner then severity, e.g.::
 
         secrets: HIGH file=block, install=warn | pii: MEDIUM runtime=allow

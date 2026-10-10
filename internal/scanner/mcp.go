@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -50,12 +51,26 @@ func mcpScanTargetLooksLikeURL(target string) bool {
 	return false
 }
 
+// mcpScanTargetNotScanned is the refusal of a server on a local or internal
+// address, in the words the audit rows and the block alert carry: what the
+// scanner does not do, that the server was not scanned, and the
+// administrator routes that admit one they trust. Before it read only "MCP
+// scan target IP 127.0.0.1 is loopback/private/link-local/multicast", and
+// nothing said that every local or internal HTTP server is blocked
+// (GAP-0663).
+func mcpScanTargetNotScanned(target, why string) error {
+	return fmt.Errorf("the MCP scanner does not connect to loopback, private, link-local or multicast addresses "+
+		"and %s %s, so the server was not scanned; "+
+		"to admit a server you trust, an administrator adds it to asset_policy.mcp.allowed by name and url "+
+		"(an allowed server is not scanned) or sets admission.mcp.scan_on_install: false", target, why)
+}
+
 // validateMCPScanTargetURL refuses MCP scan URLs that point at
 // loopback / private / link-local / cloud metadata destinations, or
 // that embed inline credentials. The check is opt-out via
 // DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS=1 for local development only.
 func validateMCPScanTargetURL(target string) error {
-	if os.Getenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS") == "1" {
+	if envvars.Getenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS") == "1" {
 		return nil
 	}
 	u, err := url.Parse(target)
@@ -74,7 +89,7 @@ func validateMCPScanTargetURL(target string) error {
 		lowerHost == "ip6-localhost" ||
 		lowerHost == "ip6-loopback" ||
 		strings.HasSuffix(lowerHost, ".localhost") {
-		return fmt.Errorf("MCP scan target %q points at loopback host", host)
+		return mcpScanTargetNotScanned(target, fmt.Sprintf("names the loopback host %s", host))
 	}
 	if lowerHost == "metadata.google.internal" {
 		return fmt.Errorf("MCP scan target %q points at cloud metadata host", host)
@@ -86,7 +101,7 @@ func validateMCPScanTargetURL(target string) error {
 			literal.IsLinkLocalMulticast() ||
 			literal.IsUnspecified() ||
 			literal.IsMulticast() {
-			return fmt.Errorf("MCP scan target IP %s is loopback/private/link-local/multicast", literal)
+			return mcpScanTargetNotScanned(target, fmt.Sprintf("is on %s, %s", literal, mcpScanAddressClass(literal)))
 		}
 		// AWS / Oracle / DO IMDS literals.
 		if literal.String() == "169.254.169.254" || literal.String() == "fd00:ec2::254" {
@@ -110,10 +125,26 @@ func validateMCPScanTargetURL(target string) error {
 			ip.IsMulticast() ||
 			ip.String() == "169.254.169.254" ||
 			ip.String() == "fd00:ec2::254" {
-			return fmt.Errorf("MCP scan target %q resolves to private/loopback IP %s", host, ip)
+			return mcpScanTargetNotScanned(target, fmt.Sprintf("resolves to %s, %s", ip, mcpScanAddressClass(ip)))
 		}
 	}
 	return nil
+}
+
+// mcpScanAddressClass names the class of a refused address.
+func mcpScanAddressClass(ip net.IP) string {
+	switch {
+	case ip.IsLoopback():
+		return "a loopback address"
+	case ip.IsPrivate():
+		return "a private address"
+	case ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast():
+		return "a link-local address"
+	case ip.IsUnspecified():
+		return "the unspecified address"
+	default:
+		return "a multicast address"
+	}
 }
 
 // MCPScanner shells out to the SDK-backed Python CLI
@@ -125,15 +156,30 @@ func validateMCPScanTargetURL(target string) error {
 // the exact contract the plugin scanner already parses, so there is a
 // single SDK code path with no drift-prone second JSON schema.
 //
-// The legacy “InspectLLMConfig“/“CiscoAIDefenseConfig“ fields are kept
-// only to preserve the existing constructor signatures; LLM and Cisco
-// AI Defense credentials are resolved by the Python CLI from its own
-// config, so they are no longer injected into the subprocess env.
+// LLM and Cisco AI Defense credentials are resolved by the Python CLI
+// from its own config, so they are not injected into the subprocess env.
 type MCPScanner struct {
 	Config         config.MCPScannerConfig
 	LLM            config.LLMConfig
-	InspectLLM     config.InspectLLMConfig // Deprecated: populated only for back-compat; do not read.
 	CiscoAIDefense config.CiscoAIDefenseConfig
+	// ServerEntry is the exact watcher registration for a local stdio scan.
+	// It is sent to the Windows runtime on stdin, not on its command line.
+	ServerEntry *config.MCPServerEntry
+	// RulePack is the guardrail rule pack the Windows scanner runtime lays
+	// over the server definition (GAP-0296). The Python CLI resolves its own
+	// from config.yaml, so only the runtime command line carries it.
+	RulePack MCPRulePack
+	// Project and Connector name where a project-scoped local server is
+	// defined (its .mcp.json or the local scope of ~/.claude.json): the
+	// Python CLI resolves a bare server name against the configuration of
+	// its working folder, so the scan runs there for that connector. A name
+	// looked up from the gateway folder was never found (GAP-0623).
+	Project   string
+	Connector string
+
+	// workDirRefused is the server working folder the scan did not use and
+	// why, for the scan failure message.
+	workDirRefused string
 }
 
 // mcpScannerBinary returns the executable to invoke, coercing the
@@ -152,25 +198,11 @@ func mcpScannerBinary(binary string) string {
 	return binary
 }
 
-// NewMCPScanner is the back-compat constructor. Translates the legacy
-// “InspectLLMConfig“ shape into the unified “LLMConfig“ internally
-// so everything downstream only deals with one structure. Prefer
-// “NewMCPScannerFromLLM“ in new code.
-func NewMCPScanner(cfg config.MCPScannerConfig, llm config.InspectLLMConfig, aid config.CiscoAIDefenseConfig) *MCPScanner {
-	cfg.Binary = mcpScannerBinary(cfg.Binary)
-	return &MCPScanner{
-		Config:         cfg,
-		LLM:            inspectToLLM(llm),
-		InspectLLM:     llm,
-		CiscoAIDefense: aid,
-	}
-}
-
 // NewMCPScannerFromLLM constructs a scanner directly from the unified
 // LLM config. Call sites should resolve once via
 // “rootCfg.ResolveLLM("scanners.mcp")“ and pass the result here.
 func NewMCPScannerFromLLM(cfg config.MCPScannerConfig, llm config.LLMConfig, aid config.CiscoAIDefenseConfig) *MCPScanner {
-	cfg.Binary = mcpScannerBinary(cfg.Binary)
+	cfg.Binary = resolveScannerRuntime(mcpScannerBinary(cfg.Binary), "defenseclaw", "defenseclaw.exe")
 	return &MCPScanner{
 		Config:         cfg,
 		LLM:            llm,
@@ -182,6 +214,42 @@ func (s *MCPScanner) Name() string               { return "mcp-scanner" }
 func (s *MCPScanner) Version() string            { return "1.0.0" }
 func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 
+// commandArgs keeps the Windows runtime command line short. The complete
+// settings, rule pack and local server definition travel on stdin.
+func (s *MCPScanner) commandArgs(target string) ([]string, error) {
+	if !usesScannerRuntime(s.Config.Binary) {
+		return s.buildArgs(target), nil
+	}
+	return []string{"mcp-scan", "--input-stdin", target}, nil
+}
+
+func (s *MCPScanner) runtimeInput() ([]byte, error) {
+	settings, err := s.runtimeSettings()
+	if err != nil {
+		return nil, fmt.Errorf("scanner: %s settings for the scanner runtime: %w", s.Name(), err)
+	}
+	input := struct {
+		Settings    json.RawMessage `json:"settings"`
+		RulePack    json.RawMessage `json:"rule_pack,omitempty"`
+		ServerEntry json.RawMessage `json:"server_entry,omitempty"`
+	}{Settings: json.RawMessage(settings)}
+	if s.RulePack.Dir != "" {
+		pack, err := s.RulePack.runtimeArg()
+		if err != nil {
+			return nil, fmt.Errorf("scanner: %s rule pack for the scanner runtime: %w", s.Name(), err)
+		}
+		input.RulePack = json.RawMessage(pack)
+	}
+	if s.ServerEntry != nil && s.ServerEntry.Command != "" && s.ServerEntry.URL == "" {
+		entry, err := s.runtimeServerEntry()
+		if err != nil {
+			return nil, fmt.Errorf("scanner: encode MCP server entry: %w", err)
+		}
+		input.ServerEntry = entry
+	}
+	return json.Marshal(input)
+}
+
 // buildArgs builds the argument vector for “defenseclaw mcp scan“.
 // The “--json/--analyzers/--scan-*“ flags are options on the “scan“
 // subcommand, so they follow “mcp scan“; the target is positional and
@@ -190,8 +258,8 @@ func (s *MCPScanner) SupportedTargets() []string { return []string{"mcp"} }
 func (s *MCPScanner) buildArgs(target string) []string {
 	args := []string{"mcp", "scan", "--json"}
 
-	if s.Config.Analyzers != "" {
-		args = append(args, "--analyzers", s.Config.Analyzers)
+	if analyzers := s.Config.AnalyzersArg(); analyzers != "" {
+		args = append(args, "--analyzers", analyzers)
 	}
 	if s.Config.ScanPrompts {
 		args = append(args, "--scan-prompts")
@@ -203,9 +271,169 @@ func (s *MCPScanner) buildArgs(target string) []string {
 		args = append(args, "--scan-instructions")
 	}
 
+	if s.Project != "" && s.Connector != "" {
+		args = append(args, "--connector", s.Connector)
+	}
 	args = append(args, target)
 	return args
 }
+
+// runtimeServerEntry contains only the local launch fields understood by the
+// Python wrapper. The bytes travel over stdin so entry env values and args
+// do not appear in the runtime process arguments.
+func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
+	entry := s.ServerEntry
+	if entry == nil {
+		return nil, errors.New("missing MCP server entry")
+	}
+	return json.Marshal(struct {
+		Name    string            `json:"name"`
+		Command string            `json:"command"`
+		Args    []string          `json:"args"`
+		Env     map[string]string `json:"env"`
+		CWD     string            `json:"cwd"`
+	}{entry.Name, entry.Command, entry.Args, entry.Env, s.serverWorkDir()})
+}
+
+// serverWorkDir is the folder the Windows scanner runtime starts a local
+// stdio server in, as its agent does (GAP-1317): the entry's cwd, else the
+// project that lists the server. The runtime itself keeps the gateway's
+// folder; only the server's process starts here. A folder is used only when
+// it is absolute, inside the project or the user's home, and no folder on the
+// way down from there is a link or reparse point; otherwise the scan keeps
+// the scanner's folder, as before, and says so.
+//
+// On managed Windows the gateway service account cannot read user profiles,
+// so the enumerator checks the folder as LocalSystem and its spool record
+// carries the result (entry.WorkDir, entry.WorkDirRefused); the gateway then
+// only checks the path's form and that it can open the folder itself.
+func (s *MCPScanner) serverWorkDir() string {
+	s.workDirRefused = ""
+	entry := s.ServerEntry
+	if entry == nil || entry.Command == "" || entry.URL != "" {
+		return ""
+	}
+	refuse := func(dir string, err error) {
+		fmt.Fprintf(os.Stderr, "[scan] MCP server %q: not starting it in %s: %v\n", entry.Name, dir, err)
+		s.workDirRefused = fmt.Sprintf("%s: %v", dir, err)
+	}
+	var roots []string
+	for _, root := range []string{entry.Project, entry.Home} {
+		if root != "" && filepath.IsAbs(root) {
+			roots = append(roots, filepath.Clean(root))
+		}
+	}
+	if entry.WorkDir != "" || entry.WorkDirRefused != "" {
+		if entry.WorkDirRefused != "" {
+			fmt.Fprintf(os.Stderr, "[scan] MCP server %q: not starting it in %s\n", entry.Name, entry.WorkDirRefused)
+			s.workDirRefused = entry.WorkDirRefused
+		}
+		if entry.WorkDir == "" {
+			return ""
+		}
+		if err := verifiedWorkDir(entry.WorkDir, roots); err != nil {
+			refuse(entry.WorkDir, err)
+			return ""
+		}
+		s.workDirRefused = ""
+		return filepath.Clean(entry.WorkDir)
+	}
+	for _, dir := range []string{entry.CWD, entry.Project} {
+		if dir == "" {
+			continue
+		}
+		if err := containedWorkDir(dir, roots); err != nil {
+			refuse(dir, err)
+			continue
+		}
+		s.workDirRefused = ""
+		return filepath.Clean(dir)
+	}
+	return ""
+}
+
+// verifiedWorkDir checks a folder the enumerator verified: its form, that it
+// is still inside the project or the home the gateway resolved, and that the
+// gateway can open it, since the server's process runs as the gateway.
+func verifiedWorkDir(dir string, roots []string) error {
+	if !filepath.IsAbs(dir) || strings.ContainsRune(dir, 0) || strings.HasPrefix(dir, `\\`) || strings.HasPrefix(dir, "//") {
+		return errors.New("the verified folder is not a local absolute path")
+	}
+	dir = filepath.Clean(dir)
+	inside := false
+	for _, root := range roots {
+		if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			inside = true
+			break
+		}
+	}
+	if !inside {
+		return errors.New("the verified folder is outside the project and the user's home folder")
+	}
+	folder, err := workDirOpen(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return errors.New("the DefenseClaw gateway service cannot read this folder")
+		}
+		return err
+	}
+	return folder.Close()
+}
+
+// workDirOpen and workDirLstat are test seams for the gateway's access to a
+// server's folder.
+var (
+	workDirOpen  = os.Open
+	workDirLstat = os.Lstat
+)
+
+// containedWorkDir checks a folder for serverWorkDir.
+func containedWorkDir(dir string, roots []string) error {
+	if !filepath.IsAbs(dir) {
+		return errors.New("the folder is not an absolute path")
+	}
+	dir = filepath.Clean(dir)
+	for _, root := range roots {
+		rel, err := filepath.Rel(root, dir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		path := root
+		var parts []string
+		if rel != "." {
+			parts = strings.Split(rel, string(filepath.Separator))
+		}
+		for i := -1; i < len(parts); i++ {
+			if i >= 0 {
+				path = filepath.Join(path, parts[i])
+			}
+			info, err := workDirLstat(path)
+			if err != nil {
+				return err
+			}
+			if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || fileInfoIsReparsePoint(info) {
+				return fmt.Errorf("%s is a link or reparse point", path)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("%s is not a folder", path)
+			}
+		}
+		return nil
+	}
+	return errors.New("the folder is outside the project and the user's home folder")
+}
+
+// workDirNote leads a failed scan's message when the server could not be
+// started in its own folder, the likely cause of the failure (GAP-1317).
+func (s *MCPScanner) workDirNote() string {
+	if s.workDirRefused == "" {
+		return ""
+	}
+	return "the server was not started in its folder " + s.workDirRefused + "; it ran in the scanner folder instead: "
+}
+
+// runMCPScannerCommand owns the runtime process and its Python descendants.
+var runMCPScannerCommand = processutil.RunTree
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
@@ -239,17 +467,38 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		}
 	}
 
-	args := s.buildArgs(target)
+	if err := scannerRuntimePreflight(s.Config.Binary, "defenseclaw", "defenseclaw.exe"); err != nil {
+		return nil, err
+	}
+	args, argsErr := s.commandArgs(target)
+	if argsErr != nil {
+		return nil, argsErr
+	}
 	cmd := processutil.CommandContext(ctx, s.Config.Binary, args...)
+	if s.Project != "" && !usesScannerRuntime(s.Config.Binary) {
+		cmd.Dir = s.Project
+	}
 	// Inherit the gateway's environment (like the plugin scanner):
 	// the Python CLI resolves LLM / Cisco AI Defense credentials from
 	// its own config, so no scanner-specific env injection is needed.
+	// The embedded runtime has no config of its own and gets the same
+	// allowlisted, config-derived environment the skill scanner does.
+	if usesScannerRuntime(s.Config.Binary) {
+		cmd.Env = s.runtimeEnv()
+	}
 
+	if usesScannerRuntime(s.Config.Binary) {
+		input, err := s.runtimeInput()
+		if err != nil {
+			return nil, err
+		}
+		cmd.Stdin = bytes.NewReader(input)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err := runMCPScannerCommand(cmd)
 	duration := time.Since(start)
 	stderrStr := stderr.String()
 
@@ -267,11 +516,11 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = fmt.Errorf("scanner: %s not found at %q — MCP scanning requires a Python 3.11+ runtime with cisco-ai-mcp-scanner; on 3.11+ repair the managed installation, or run uv sync in a source checkout", s.Name(), s.Config.Binary)
+			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "MCP scanning requires a Python 3.11+ runtime with cisco-ai-mcp-scanner; on 3.11+ repair the managed installation, or run uv sync in a source checkout")
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s%s", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
 			return nil, scanErr
 		}
 	}
@@ -300,7 +549,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	// watcher and REST scan handlers. See finding "Non-zero MCP
 	// scanner exits can be treated as successful scans".
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, stderrStr)
+		scanErr = fmt.Errorf("scanner %s exited %d (%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
 		return result, scanErr
 	}
 

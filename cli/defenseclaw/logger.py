@@ -116,7 +116,7 @@ class _GatewayConfigRecorder:
         except requests.RequestException as exc:
             if _is_definite_preconnect_failure(exc):
                 raise CanonicalObservabilityUnavailableError(
-                    "canonical Observability v8 runtime is unavailable"
+                    "the observability runtime is unavailable"
                 ) from exc
             raise
         finally:
@@ -273,7 +273,7 @@ class Logger:
             }
         )
 
-    def log_config_change(self, operation: str, details: str, *, actor: str = "cli:operator") -> None:
+    def log_config_change(self, operation: str, details: str, *, actor: str | None = None) -> None:
         """Record a CLI setting change as an Activity mutation that names it.
 
         ``log_action("config-update", "config", ...)`` reaches the v8 trail
@@ -284,6 +284,10 @@ class Logger:
         field becomes the diff (``mode: observe -> action``).
         """
 
+        if actor is None:
+            from defenseclaw.config_writer import ACTOR_PREFIX_CLI, current_actor
+
+            actor = current_actor(ACTOR_PREFIX_CLI)
         fields: dict[str, str] = {}
         for token in details.split():
             key, sep, value = token.partition("=")
@@ -449,6 +453,14 @@ def _unconfirmed_audit_reason(exc: BaseException) -> str:
             "the gateway could not record it in time, likely because its audit database is busy "
             "or slow; gateway.log has the cause. Try again in a minute"
         )
+    if status == 400:
+        # GAP-0070: the gateway named the fixed reason (never payload text); a 400 is not a busy gateway.
+        reason = _gateway_rejection_reason(exc)
+        detail = f" ({reason})" if reason else ""
+        return (
+            f"the gateway rejected it as an invalid request{detail}; "
+            "the CLI and the gateway may be different versions, check 'defenseclaw doctor'"
+        )
     if isinstance(status, int) and status >= 500:
         # GAP-2381: a 5xx is not always a busy database; the gateway logs the cause.
         return (
@@ -456,6 +468,14 @@ def _unconfirmed_audit_reason(exc: BaseException) -> str:
             "If it names a busy or locked audit database, try again in a minute"
         )
     return "the gateway did not acknowledge it; gateway.log has the cause. Try again in a minute"
+
+
+def _gateway_rejection_reason(exc: BaseException) -> str:
+    try:
+        reason = exc.response.json().get("reason", "")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError):
+        return ""
+    return reason if isinstance(reason, str) and len(reason) <= 80 else ""
 
 
 # Fields the gateway's canonical scan ingress accepts for one finding

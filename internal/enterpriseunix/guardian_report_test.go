@@ -231,6 +231,10 @@ func TestGuardianReadinessNeedsTheCurrentAttestation(t *testing.T) {
 	if err := os.WriteFile(h.env.committedUserKeyPath(), []byte(key+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The gateway owns the key, beside its hook tokens.
+	account := h.accounts.accounts[h.env.Layout.ServiceUser]
+	h.owners[filepath.Dir(h.env.committedUserKeyPath())] = [2]int{account.UID, account.GID}
+	h.owners[h.env.committedUserKeyPath()] = [2]int{account.UID, account.GID}
 	credential, _ := connector.UserScopedHookAPIToken(key, "codex", "1001")
 	for _, tc := range []struct {
 		name, want string

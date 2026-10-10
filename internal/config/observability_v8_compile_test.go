@@ -503,6 +503,7 @@ func TestCompileObservabilityV8TransportValidation(t *testing.T) {
 		{name: "grpc endpoint path", destination: ObservabilityV8DestinationSource{Name: "otlp", Kind: ObservabilityV8DestinationOTLP, Protocol: "grpc", Endpoint: "https://otel.example.test/v1/traces"}, want: "must not contain a path"},
 		{name: "plaintext without insecure", destination: ObservabilityV8DestinationSource{Name: "otlp", Kind: ObservabilityV8DestinationOTLP, Protocol: "http/protobuf", Endpoint: "http://otel.example.test/v1/traces"}, want: "scheme and tls.insecure disagree"},
 		{name: "tls endpoint with insecure", destination: ObservabilityV8DestinationSource{Name: "otlp", Kind: ObservabilityV8DestinationOTLP, Protocol: "http/protobuf", Endpoint: "https://otel.example.test/v1/traces", TLS: ObservabilityV8TLSSource{Insecure: true}}, want: "scheme and tls.insecure disagree"},
+		{name: "skip verify on plain http", destination: ObservabilityV8DestinationSource{Name: "http", Kind: ObservabilityV8DestinationHTTPJSONL, Endpoint: "http://archive.example.test", TLS: ObservabilityV8TLSSource{InsecureSkipVerify: true}}, want: "valid only with an https endpoint"},
 		{name: "batch relation", destination: ObservabilityV8DestinationSource{Name: "http", Kind: ObservabilityV8DestinationHTTPJSONL, Endpoint: "https://archive.example.test", Batch: ObservabilityV8BatchSource{MaxQueueSize: 10, MaxExportBatchSize: 11}}, want: "must not exceed"},
 		{name: "galileo protocol", destination: ObservabilityV8DestinationSource{Name: "galileo", Kind: ObservabilityV8DestinationOTLP, Preset: "galileo", Protocol: "grpc", Endpoint: "https://api.galileo.ai/otel/traces", Send: &ObservabilityV8SendSource{Signals: traces, Buckets: []observability.Bucket{"*"}}}, want: "requires http/protobuf"},
 		{name: "unregistered event", destination: ObservabilityV8DestinationSource{Name: "console", Kind: ObservabilityV8DestinationConsole, Routes: []ObservabilityV8RouteSource{{Name: "bad", Signals: logs, Selector: &ObservabilityV8SelectorSource{EventNames: []observability.EventName{"made_up.event"}}}}}, want: "unregistered event"},
@@ -977,7 +978,7 @@ func TestCompileObservabilityV8ClassifiesRegisteredCoreAndCanonicalizesEqualAlia
 	}
 	if !reflect.DeepEqual(snapshot.ResourceAttributeEntries.Values(), map[string]string{
 		"organization.unit": "security",
-	}) || !snapshot.ResourceAttributeEntries.CompatibilityAliasesEnabled() {
+	}) {
 		t.Fatalf("custom resource entries = %+v", snapshot.ResourceAttributeEntries)
 	}
 }
@@ -1008,19 +1009,6 @@ func TestCompileObservabilityV8ResourceAttributeEntriesAreSealedAndCopySafe(t *t
 	again := plan.Snapshot()
 	if !reflect.DeepEqual(again.ResourceAttributeEntries.Values(), want) || plan.Digest() != digest {
 		t.Fatal("mutating a resource projection changed the immutable plan")
-	}
-}
-
-func TestCompileObservabilityV8ResourceAttributeEntriesBindCompatibilityAliases(t *testing.T) {
-	disabled := false
-	plan := mustCompileObservabilityV8(t, &ObservabilityV8Source{
-		TracePolicy: ObservabilityV8TracePolicySource{CompatibilityAliases: &disabled},
-		Resource: ObservabilityV8ResourceSource{Attributes: map[string]string{
-			"organization.unit": "security",
-		}},
-	})
-	if plan.Snapshot().ResourceAttributeEntries.CompatibilityAliasesEnabled() {
-		t.Fatal("sealed resource attributes enabled compatibility aliases against trace policy")
 	}
 }
 

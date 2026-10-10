@@ -622,9 +622,12 @@ export class PolicyEnforcer {
         target_type: targetType,
         target_name: name,
         path,
+        // asset_policy rules scoped to a connector match only this one.
+        connector: "openclaw",
         scan_result: {
           max_severity: maxSeverity(scanResult.findings.map((f) => f.severity)),
           total_findings: scanResult.findings.length,
+          scanner_name: scanResult.scanner,
           findings: scanResult.findings.map((f) => ({
             severity: f.severity,
             title: f.title,

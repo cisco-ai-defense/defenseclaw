@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"gopkg.in/yaml.v3"
 )
 
 // The sandbox manager is the SandboxController the REST API drives.
@@ -180,9 +181,7 @@ func (s *Sidecar) newSandboxRuntime(api *APIServer) (*sandboxRuntime, error) {
 	inflight := sandboxauth.NewInFlight(nil)
 	rt := &sandboxRuntime{api: api, egressAddr: egressAddr, health: s.health}
 	mcp := &sandboxMCPInventory{config: s.currentConfig}
-	if api.store != nil {
-		mcp.policy = enforce.NewPolicyEngine(api.store)
-	}
+	mcp.policy = enforce.NewPolicyEngine(api.store).WithConfig(s.currentConfig)
 
 	mgr, err := manager.New(manager.Options{
 		DataDir: dataDir,
@@ -530,14 +529,31 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
 			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
 	}
-	var list []string
-	switch key {
-	case "openshell.egress.unblocked":
-		list = current.OpenShell.Egress.Unblocked
-	case "openshell.egress.block":
-		list = current.OpenShell.Egress.Block
-	default:
+	if key != "openshell.egress.unblocked" && key != "openshell.egress.block" {
 		return fmt.Errorf("sandbox decisions cannot be saved to %s", key)
+	}
+	// The list comes from the file the write replaces, not from the applied
+	// generation, which lags it (debounce, a rejected reload, another
+	// writer): the CAS below then covers the whole read-modify-write.
+	path := configFilePathForSnapshot(current)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	var doc struct {
+		OpenShell struct {
+			Egress struct {
+				Unblocked []string `yaml:"unblocked"`
+				Block     []string `yaml:"block"`
+			} `yaml:"egress"`
+		} `yaml:"openshell"`
+	}
+	if err := yaml.Unmarshal(original, &doc); err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	list := doc.OpenShell.Egress.Unblocked
+	if key == "openshell.egress.block" {
+		list = doc.OpenShell.Egress.Block
 	}
 	for _, have := range list {
 		if strings.EqualFold(strings.TrimSpace(have), host) {
@@ -545,20 +561,23 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		}
 	}
 	next := append(append([]string{}, list...), host)
-	path := configFilePathForSnapshot(current)
-	original, err := captureConfigFileState(path)
+	actor := configwrite.ActorPrefixSandbox + host
+	written, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: key, Value: next}}, configwrite.Options{
+		Actor:        actor,
+		Reason:       "sandbox always decision",
+		ExpectSHA256: configwrite.SHA256Hex(original),
+	})
+	if errors.Is(err, configwrite.ErrManaged) {
+		return &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
+			Detail: "the configuration is administrator-owned; decisions cannot be kept for future sandboxes"}
+	}
 	if err != nil {
-		return err
-	}
-	if err := config.PatchYAMLFile(path, map[string]any{key: next}); err != nil {
-		return err
-	}
-	if _, err := config.LoadRuntimeV8File(path); err != nil {
-		_ = restoreConfigFileState(path, original)
-		return fmt.Errorf("the updated %s is invalid: %w", key, err)
+		return fmt.Errorf("save %s: %w", key, err)
 	}
 	if err := a.configReloader(ctx, "sandbox_always_decision"); err != nil {
-		rollbackErr := restoreConfigFileState(path, original)
+		_, rollbackErr := configwrite.ReplaceDocument(ctx, path, original, configwrite.Options{
+			Actor: actor, Reason: "sandbox always decision rollback", ExpectSHA256: written.SHA256,
+		})
 		if rollbackErr == nil {
 			rollbackErr = a.configReloader(ctx, "sandbox_always_decision_rollback")
 		}

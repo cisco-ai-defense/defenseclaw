@@ -366,3 +366,22 @@ func TestFindingLifecycleStateSurvivesOccurrenceRetention(t *testing.T) {
 		t.Fatalf("protected current state=%+v err=%v", states, err)
 	}
 }
+
+// GAP-0363: the install watcher's admission scans carry an evaluation id, so
+// none of their findings reached 'audit findings'; only CLI scans did.
+func TestFindingLifecycleKeepsInstallAdmissionScans(t *testing.T) {
+	store := newTestLogger(t).store
+	admission := &scanner.ScanResult{
+		Scanner: "skill-scanner", Target: "/home/u/.claude/skills/pptx", TargetType: "skill",
+		Timestamp: time.Date(2026, 10, 7, 20, 0, 0, 0, time.UTC), Duration: time.Millisecond,
+		Findings: []scanner.Finding{{
+			Scanner: "skill-scanner", RuleID: "LLM_SOCIAL_ENGINEERING", Severity: scanner.SeverityInfo,
+			Title: "note", EvidenceSummary: "bytes",
+		}},
+	}
+	emitFindingLifecycleScan(t, store, admission, scanner.AgentIdentity{EvaluationID: "admission-evaluation"})
+	states, err := store.ListFindingStates("skill-scanner", "/home/u/.claude/skills/pptx", false, 10)
+	if err != nil || len(states) != 1 {
+		t.Fatalf("admission scan states=%+v err=%v, want its one finding", states, err)
+	}
+}

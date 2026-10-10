@@ -67,7 +67,7 @@ func (i *sandboxMCPInventory) SandboxMCPServers(ctx context.Context, harness str
 			continue
 		}
 		if i.policy != nil {
-			blocked, err := i.policy.IsBlockedForConnector("mcp", name, harness)
+			blocked, err := mcpServerDenied(i.policy, name, harness)
 			if err != nil {
 				// Fail closed: a server DefenseClaw cannot check stays out.
 				skipped = append(skipped, manager.MCPSkip{Name: name, Reason: "DefenseClaw could not check its block list"})

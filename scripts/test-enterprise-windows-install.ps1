@@ -11,7 +11,7 @@
          services from the Setup's hash-pinned payload and enrolls this
          account for Claude Code and Codex: the Codex requirements and the
          Claude Code managed-settings fragment name the DefenseClaw hook
-      2. /ensure JSON=1 again must be a no-op
+      2. /ensure CONFIG=<the same config> JSON=1 again must be a no-op
       3. the installed CLI's verify and status pass, the services run, the
          HKLM marker and the Add/Remove Programs entry exist, and the MDM
          detect.ps1 (Windows PowerShell 5.1, as Intune runs it) detects it
@@ -21,6 +21,17 @@
       5. /uninstall JSON=1 removes the services, the marker, the Add/Remove
          Programs entry, the installed CLI and every DefenseClaw machine-policy
          file, and detect.ps1 stops detecting
+
+    With -UpgradeFrom it is the enterprise upgrade lane instead of step 1:
+    the previous release's Setup /ensure installs with the same config, then
+    this Setup's /ensure upgrades it. The upgrade must report the applied
+    policy from a newer config generation, keep the secrets and the guardian
+    ledger, and write migration-v9.json plus config.yaml.v8.bak for v8 input.
+    Steps 2-5 then run on the upgraded deployment. The source config, upgraded
+    config and any migration record are kept in -ResultsRoot for
+    scripts/check_enterprise_upgrade_config.py. The rollback drill of the
+    Linux and macOS upgrade lanes is not run here: the Windows Setup
+    transaction has no lifecycle test fault.
 
     Every lifecycle result is saved under -ResultsRoot and checked with
     scripts/check_enterprise_lifecycle_result.py.
@@ -44,13 +55,20 @@
     Where to keep the lifecycle results (default: a new temporary directory).
 .PARAMETER Python
     The Python 3 interpreter that runs the result checker.
+.PARAMETER UpgradeFrom
+    Absolute path of the previous release's standalone Setup, already
+    verified against its signed checksums.txt (the upgrade lane).
+.PARAMETER PreviousVersion
+    The product version of -UpgradeFrom.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$Setup,
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$ResultsRoot = '',
-    [string]$Python = 'python'
+    [string]$Python = 'python',
+    [string]$UpgradeFrom = '',
+    [string]$PreviousVersion = ''
 )
 Set-StrictMode -Version 3.0
 $ErrorActionPreference = 'Stop'
@@ -76,6 +94,10 @@ $claudePolicyFile = Join-Path $claudePolicyDirectory '90-defenseclaw.json'
 $codexPolicyDirectory = Join-Path $env:ProgramData 'OpenAI\Codex'
 $codexPolicyFile = Join-Path $codexPolicyDirectory 'requirements.toml'
 $policyWaitSeconds = 120
+$stateRoot = Join-Path $env:ProgramData 'Cisco\DefenseClaw'
+$installedConfig = Join-Path $stateRoot 'etc\config.yaml'
+$secretsDirectory = Join-Path $stateRoot 'secrets'
+$guardianLedger = Join-Path $stateRoot 'hook-guardian-state\protected_targets.json'
 $script:StepNumber = 0
 $script:SetupRan = $false
 $script:CreatedFixturePaths = [Collections.Generic.List[string]]::new()
@@ -272,6 +294,27 @@ function Invoke-Detect {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (@($output) -join "`n").Trim() }
 }
 
+function Get-FileSha([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'absent' }
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+# One digest over every file name and content under a folder.
+function Get-TreeSha([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) { return 'absent' }
+    $lines = foreach ($file in @(Get-ChildItem -LiteralPath $Path -File -Force -Recurse | Sort-Object FullName)) {
+        '{0} {1}' -f (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash, $file.FullName.Substring($Path.Length)
+    }
+    $bytes = [Text.Encoding]::UTF8.GetBytes((@($lines) -join "`n"))
+    return [BitConverter]::ToString([Security.Cryptography.SHA256]::HashData($bytes)).Replace('-', '')
+}
+
+function Get-ConfigGeneration([string]$Result) {
+    $document = Get-Content -LiteralPath $Result -Raw | ConvertFrom-Json
+    if ($null -eq $document.PSObject.Properties['policy'] -or $null -eq $document.policy) { return 0 }
+    return [int64]$document.policy.config_generation
+}
+
 function Write-Diagnostics {
     Write-Host '-- diagnostics (bounded)'
     foreach ($name in $serviceNames) {
@@ -299,6 +342,13 @@ if (-not [IO.Path]::IsPathRooted($Setup) -or -not (Test-Path -LiteralPath $Setup
     throw "-Setup must be the absolute path of an existing Setup: $Setup"
 }
 $Setup = (Resolve-Path -LiteralPath $Setup).Path
+if ($UpgradeFrom) {
+    if (-not [IO.Path]::IsPathRooted($UpgradeFrom) -or -not (Test-Path -LiteralPath $UpgradeFrom -PathType Leaf)) {
+        throw "-UpgradeFrom must be the absolute path of an existing Setup: $UpgradeFrom"
+    }
+    if (-not $PreviousVersion) { throw '-UpgradeFrom needs -PreviousVersion' }
+    $UpgradeFrom = (Resolve-Path -LiteralPath $UpgradeFrom).Path
+}
 if (-not $ResultsRoot) {
     $ResultsRoot = Join-Path ([IO.Path]::GetTempPath()) ("defenseclaw-install-lane-" + [guid]::NewGuid().ToString('N'))
 }
@@ -315,8 +365,10 @@ $config = Join-Path $stage 'config.yaml'
 # keeps security_complete false until an administrator records the live Claude
 # Code policy proof with Repair -AttestClaudeEffectivePolicy
 # (docs/WINDOWS-ENTERPRISE-CERTIFICATION.md), which a runner cannot give.
+# The lane config sets no LLM judge, so status and verify also warn
+# scanner_judge_missing once the Setup has installed the scanner runtime.
 $installedChecks = @(
-    '--coverage-complete', '--security-incomplete',
+    '--coverage-complete', '--security-incomplete', '--allow-warning', 'scanner_judge_missing',
     '--machine-policy-enforced', 'codex', '--machine-policy-target', 'claudecode'
 )
 
@@ -345,8 +397,14 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not protect $stage" }
     & icacls.exe $stage /setowner '*S-1-5-32-544' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $stage" }
+    $sourceConfigVersion = if ($UpgradeFrom -and $PreviousVersion -match '^v?0\.') { 8 } else { 9 }
+    # A standalone Windows host without a policy_dir keeps the embedded rule
+    # packs only while the config names none: rule_pack: default would select
+    # the default pack of a policy_dir this host does not have, and the Setup
+    # refuses it ("policy_dir is not set").
+    $rulePackLines = if ($sourceConfigVersion -eq 8) { @('  rule_pack_dir: ""') } else { @() }
     $configText = @(
-        'config_version: 8'
+        "config_version: $sourceConfigVersion"
         'deployment_mode: managed_enterprise'
         'enterprise:'
         '  profile: standalone'
@@ -356,7 +414,7 @@ try {
         'guardrail:'
         '  enabled: true'
         '  mode: observe'
-        '  rule_pack_dir: ""'
+        $rulePackLines
         '  connectors:'
         '    claudecode:'
         '      enabled: true'
@@ -370,22 +428,56 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $config" }
     New-AgentFixtures $fixtures $profileHome
 
-    Step 'Setup /ensure with an administrator config (installs the services, enrolls Claude Code and Codex)'
-    $script:SetupRan = $true
-    $run = Invoke-Lifecycle -Name '01-setup-ensure-install' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
-    # Ensure reports the action it chose as the warning ensure_install.
-    Assert-Result $run 'setup-ensure-install' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
-        $installedChecks + @('--allow-warning', 'ensure_install'))
-    Assert-ServicesRunning
-    Assert-PolicyApplied
+    if ($UpgradeFrom) {
+        Step "previous release's Setup /ensure ($PreviousVersion) with the administrator config"
+        $script:SetupRan = $true
+        $run = Invoke-Lifecycle -Name '01-previous-setup-ensure' -FilePath $UpgradeFrom -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        Assert-Result $run 'previous-setup-ensure' (@('--action', 'ensure', '--changed', '--installed', '--version', $PreviousVersion, '--ready') +
+            $installedChecks + @('--allow-warning', 'ensure_install'))
+        Assert-ServicesRunning
+        Assert-PolicyApplied
+        Copy-Item -LiteralPath $config -Destination (Join-Path $ResultsRoot 'config-before.yaml')
+        $run = Invoke-Lifecycle -Name '01-previous-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
+        Assert-Result $run 'previous-status' (@('--action', 'status', '--installed', '--version', $PreviousVersion) + $installedChecks)
+        $previousGeneration = Get-ConfigGeneration $run.Result
+        $previousConfigSha = Get-FileSha $installedConfig
+        $previousSecretsSha = Get-TreeSha $secretsDirectory
+        $previousLedgerSha = Get-FileSha $guardianLedger
+
+        Step "Setup /ensure upgrades to $Version"
+        $run = Invoke-Lifecycle -Name '01-setup-ensure-upgrade' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        Assert-Result $run 'setup-ensure-upgrade' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
+            $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$previousGeneration))
+        Assert-ServicesRunning
+        $record = Join-Path (Split-Path -Parent $installedConfig) 'migration-v9.json'
+        if ($sourceConfigVersion -eq 8) {
+            if (-not (Test-Path -LiteralPath $record -PathType Leaf)) { Fail "the upgrade wrote no $record" }
+            if ((Get-FileSha "$installedConfig.v8.bak") -ne $previousConfigSha) { Fail "$installedConfig.v8.bak is not the previous config" }
+            Copy-Item -LiteralPath $record -Destination (Join-Path $ResultsRoot 'migration-v9.json')
+        }
+        Copy-Item -LiteralPath $installedConfig -Destination (Join-Path $ResultsRoot 'config-upgraded.yaml')
+        if ((Get-TreeSha $secretsDirectory) -ne $previousSecretsSha) { Fail "the upgrade changed the secrets under $secretsDirectory" }
+        if ((Get-FileSha $guardianLedger) -ne $previousLedgerSha) { Fail "the upgrade changed the guardian ledger $guardianLedger" }
+    }
+    else {
+        Step 'Setup /ensure with an administrator config (installs the services, enrolls Claude Code and Codex)'
+        $script:SetupRan = $true
+        $run = Invoke-Lifecycle -Name '01-setup-ensure-install' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
+        # Ensure reports the action it chose as the warning ensure_install.
+        Assert-Result $run 'setup-ensure-install' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
+            $installedChecks + @('--allow-warning', 'ensure_install'))
+        Assert-ServicesRunning
+        Assert-PolicyApplied
+    }
     if (-not (Test-Path -LiteralPath $cli -PathType Leaf)) { Fail "$cli was not installed" }
     if ((Get-MarkerValue 'Profile') -ne 'standalone') { Fail "the HKLM marker does not name the standalone profile" }
     if ((Get-MarkerValue 'ProductVersion') -ne $Version) { Fail "the HKLM marker version is '$(Get-MarkerValue 'ProductVersion')', want '$Version'" }
     if ((Get-MarkerValue 'TrustMode') -ne 'hash_pinned') { Fail "the HKLM marker trust mode is '$(Get-MarkerValue 'TrustMode')', want 'hash_pinned'" }
     if (-not (Test-Path -LiteralPath $arpKey)) { Fail 'the Add/Remove Programs entry is missing' }
 
-    Step 'Setup /ensure again (must be a no-op)'
-    $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', 'JSON=1')
+    # The same command line an MDM re-applies must not count as drift.
+    Step 'Setup /ensure again with the same CONFIG= (must be a no-op)'
+    $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
     Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)
 
     Step 'installed CLI verify'

@@ -237,7 +237,7 @@ A result applies to every OS unless the cell names one.
 
 | Attempt | Result | Enforced by |
 | --- | --- | --- |
-| Delete or edit DefenseClaw's hook registration or plugin in your own agent config (per-user connectors) | Repaired within about a minute; a file change usually triggers repair within seconds | The guardian watches the files and reconciles every minute, writing as the user. Windows: repair runs while the user has an active (connected) session. |
+| Delete or edit DefenseClaw's hook registration or plugin in your own agent config, including the Codex `notify` entry (per-user connectors) | Repaired within about a minute; a file change usually triggers repair within seconds | The guardian watches the files and reconciles every minute, writing as the user. Windows: repair runs while the user has an active (connected) session. |
 | Turn hooks off in user or project settings: Claude Code `disableAllHooks` (also through `--settings`), Codex `[features] hooks = false`, `-c features.hooks=false` or `--disable hooks` | Still inspected | Machine policy. Claude Code runs managed hooks whatever lower settings say. Codex machine requirements pin `features.hooks = true` and managed hooks only. |
 | Point the agent at another config directory with `CLAUDE_CONFIG_DIR`, `HOME`, `CODEX_HOME` or `COPILOT_HOME` | Still inspected | Codex, Claude Code and Copilot load DefenseClaw's hooks from fixed machine paths, not from the user's config directory. |
 | Start a per-user agent (Devin, Antigravity, Hermes, Amp, OpenHands, OmniGent) with another config home, such as `XDG_CONFIG_HOME`, `HOME` or `HERMES_HOME`, with `devin --config <file>`, or with Hermes `--safe-mode` | Not inspected, not logged, not repaired; status and verify still report the user's agent ready | DefenseClaw's registration is only in the default location, and the guardian cannot see how a session was started. See [Residual risks](#residual-risks). |
@@ -254,6 +254,21 @@ modified, is not covered. See [Residual risks](#residual-risks).
 | Add a user or project hook for Codex or Claude Code that rewrites a tool call after DefenseClaw checked it | Denied for both on every OS; the hook never runs. | The vendor's managed-hooks-only lock (`allow_managed_hooks_only` for Codex, `allowManagedHooksOnly` for Claude Code), set in machine policy. |
 | Change DefenseClaw's configuration or policy through the gateway API, or use one agent's hook token for another agent | Denied | The management API needs the gateway's own token, which users cannot read. A hook token works only on its own agent's hook routes, and the hook socket serves only the hook, inspect and Codex notify routes, never the management API. |
 | Delete or edit DefenseClaw's audit database, lifecycle state or logs | Denied | These live in administrator- or service-owned directories. |
+
+### Change policy from the computer
+
+On a managed standalone host the administrator config is the only policy.
+Under the Secure Client profile none of these rows changes behavior.
+
+| Attempt | Result | Enforced by |
+| --- | --- | --- |
+| Run a local writer: `defenseclaw config set` or `unset`, `skill`, `mcp`, `plugin` or `tool` with `block`, `allow` or `unblock`, `guardrail block-at`, `policy activate`, a `setup` command, or the TUI config editor | Denied, also for root. `config set` and the asset commands exit `3` with "This device is managed"; nothing is written and the attempt is audited as `outcome=refused reason=managed_device` | The config writer's managed gate. Go and Python share one writer; on a managed standalone host it refuses every actor except the lifecycle and a migration, before it validates or writes. |
+| Call the gateway's `/enforce/block` or `/enforce/allow` routes | Denied: HTTP `403` `managed_device`, audited with the caller | The gateway's managed refusal, which answers before it decodes the request, also for a caller that holds the gateway token. The routes need that token anyway, and users cannot read it. |
+| Edit `config.yaml`, or a file derived from it (a service definition, a machine-policy entry, a hook script) | Denied for a standard user. An administrator's in-place edit of `config.yaml` is validated and recorded as the next config generation, or reverted; a derived file is rewritten from the config | Administrator-only write on the files. The apply trigger runs `ensure`, which keeps `committed-config.yaml` and `rejected-config.yaml`; `verify` fails on drift; `config.generation.json` names the writer (`lifecycle`, `migration`, or a user). |
+| Set an environment variable, or a `.env` entry, that weakens a check, such as `DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS` or `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` | Ignored: the value reads as unset. Three variables (`DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY`, `DEFENSECLAW_HOOK_MAX_BODY`) are honored only when they make the setting stricter | The registry's `managed` setting (`ignore`, `tighten_only`, `allow`) in `internal/envvars`, applied by the gateway and the CLI. The `.env` loaders skip `ignore` entries, and doctor names the ignored variables, never their values. |
+| Set `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE` to make the host look unmanaged | Still managed | The writer's test reads `deployment_mode` and `enterprise.profile` from `config.yaml` as well as the environment, so the environment can only add managed status. The registry marks both variables `ignore`, the services start with the profile pinned, and a `.env` file cannot set the profile. |
+| Put block or allow entries in the `actions` table of `audit.db` | Ignored | The gateway decides from `asset_policy` in the config on every host except a Secure Client one. A managed `ensure` that migrates a version 8 config counts the entries and warns `local_enforcement_entries_ignored`. |
+| Fetch a release from another source: set `update.source` or `DEFENSECLAW_REPO`, then run `install.sh` or `defenseclaw upgrade` | On a managed host the upgrade and rollback commands refuse and `DEFENSECLAW_REPO` is ignored. Elsewhere only the fetch location changes: a mirror needs cosign and the unchanged signed `checksums.txt` | The release identity is compiled into the installers and the upgrade command. Only the official source falls back to `checksums.txt` alone. |
 
 ### Affect another user
 
@@ -281,6 +296,8 @@ it.
 | Z1 to Z4: the guardian repairs a user's files | A privileged service is tricked into writing outside the user's home, or a registration stays deleted | **Guardian and enumerator.** The guardian writes as the user: under the user's own token on Windows, and through a worker process running as the user on Linux and macOS. It repairs changes within about a minute and records each protected user in the ledger. The enumerator refreshes enrollment every 5 minutes. On Linux and macOS it removes a user only after three consecutive definite "no such user" answers, so a directory outage removes no one. On Windows a revoked user's DefenseClaw registrations are removed as that user, at their next sign-in if they are signed out. |
 | Z3 to Z4: vendor machine policy loads DefenseClaw's hooks | A user turns hooks off or points the agent at another config | **Machine policy.** For Codex, Claude Code, Cursor, Copilot and OpenCode (through DefenseClaw's managed OpenCode plugin), DefenseClaw's hooks sit in the vendor's machine-wide policy, which a standard user cannot edit. DefenseClaw adds only its own entries and removes only those on uninstall. On Windows it rewrites Codex `requirements.toml` as normalized TOML, so comments and key order in that file are not kept. See [Machine policy](/docs/enterprise/machine-policy). |
 | Inside Z4: a user or project hook runs next to DefenseClaw's | A second hook rewrites or approves the tool call after inspection | **Vendor lock and foreign-hook guard.** Codex and Claude Code run with the vendor's managed-hooks-only lock under the default `managed_hooks_only: enforce` (Codex always on Windows). For Cursor, Copilot, Devin, OpenCode and Amp on every OS, Hermes on Linux and macOS, and Codex or Claude Code with `managed_hooks_only: preserve`, the [foreign-hook guard](/docs/enterprise/foreign-hook-guard) removes unapproved entries from the user's config, and `defenseclaw-hook` denies tool calls while an unapproved hook is present in the user's files or the project. A session that started while an unapproved hook was present stays denied until the agent restarts, for at most 7 days, because agents keep the hooks they loaded at session start; the gateway keeps that record per verified uid or SID, and stop and session-end events are still allowed so the agent can end its turn. |
+| Z0 to Z3: a writer changes `config.yaml` | A local tool, an API call or a second writer changes policy, or interleaves with a lifecycle run | **One writer.** Every write takes `config.yaml.lock`, validates before it writes, replaces the file atomically and records a generation (`config.generation.json`, with the actor). On a managed standalone host only the lifecycle and a migration may write. See [Policy changes on a managed host](/docs/enterprise#policy-changes-on-a-managed-host). |
+| Z0 to Z2: the gateway applies the config | The gateway enforces an older policy than the config on disk, because a reload was rejected or has not happened | **Atomic generations and a digest.** The gateway builds each new policy off the request path and swaps it in whole; a change that does not build leaves the previous generation running and shows as `policy.last_reload_error` on `/health`. The lifecycle compares the digest of the config on disk with the digest the gateway reports: `policy.applied` in `status` and `verify`, and the warning `policy_not_applied` after a change. See [Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation). |
 | Z2 to Z5: the gateway calls Cisco AI Defense | The API key leaks | The key is read only from the protected secrets directory, never logged or printed, and an API key written in the config is rejected. The call uses HTTPS, through `enterprise.network` when a proxy is set. Without a key, the local policy engine decides alone. See [AI Defense key](/docs/enterprise/ai-defense-key). |
 
 These rules hold on every OS:
@@ -302,7 +319,7 @@ These rules hold on every OS:
 DefenseClaw inspects the hook events that supported agents send: tool calls,
 and for some agents prompts and session events. It protects only the agents
 listed in the config. On Linux and macOS, listing a machine-policy agent
-publishes its policy even with `enabled: false`, and the config the lifecycle
+publishes its policy while enabled; `enabled: false` removes its policy and hooks. The config the lifecycle
 writes when you supply none lists no agents. On Windows you supply the config. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect).
 
@@ -546,7 +563,7 @@ Windows repairs need a session. The guardian writes a user's files only while th
 
 #### Windows uninstall can leave per-user registrations
 
-Windows uninstall leaves the DefenseClaw per-user registrations of users who are signed out at the time, and of every user when it does not run as LocalSystem. The result lists them (`user_registrations_pending`). They are inert: enrollment is revoked and the hook binary is removed, and none of these agents blocks on a hook command that cannot start.
+Windows uninstall leaves the DefenseClaw per-user registrations of users who are signed out at the time, and of every user when it does not run as LocalSystem. The result lists them (`user_registrations_pending`). They are inert: enrollment is revoked and the hook binary is removed, and no agent blocks on them. Copilot denies a call whose hook command fails, so DefenseClaw's Copilot commands first check that the deployment is still installed (the hook binary or the gateway binary beside it exists) and exit 0 when it is not; with the deployment installed and only the hook binary missing, they still fail, and Copilot denies.
 
 **Where:** Windows, per-user agents.
 
@@ -626,7 +643,32 @@ A running gateway can reload an edited config just before the lifecycle rejects 
 
 **Where:** Linux and macOS.
 
-**What reduces it:** Change the config and upgrade through the lifecycle, and monitor `config_rejected`.
+**What reduces it:** Change the config and upgrade through the lifecycle, and monitor `config_rejected` and `policy.applied` ([Effective policy digest](/docs/enterprise/operations#effective-policy-digest-and-config-generation)).
+
+#### A damaged hook binary until the guardian restores it
+
+A crash or power loss while the package manager unpacks an upgrade can leave `defenseclaw-hook` empty, and agents run an empty file as a script that allows every tool call. A binary that was removed, made non-executable, given to another owner or replaced has the same effect. For the few seconds until the hook guardian notices it, agents run tool calls without DefenseClaw.
+
+**Where:** Linux and macOS; on Windows the guardian restores a missing, empty or different `defenseclaw-hook.exe` the same way.
+
+**What reduces it:** The guardian checks the hook binary every 5 seconds and has the lifecycle put the recorded binary back from the copy it sealed, and `status` and `verify` name the state until then. The package's own install run refuses an empty binary, so MDM detection reinstalls the package. A hook command that fails closed on its own, with no window, is planned for a later release.
+
+#### Application control must allow DefenseClaw files
+
+Agents load DefenseClaw's hook binary and, for OpenCode, the managed plugin `<install root>/share/opencode/defenseclaw.js`. Application control that refuses one of them takes DefenseClaw out of that agent's sessions. OpenCode skips a plugin it cannot read and runs tool calls without DefenseClaw, and `status` and `verify` stay green because they cannot see inside the session.
+
+**Where:** Linux with fapolicyd, and any OS whose application control decides which files an agent may read or run.
+
+**What reduces it:** On Linux, install with the deb or rpm. The package ships the binaries and the OpenCode plugin, so fapolicyd's package-database trust (the `rpmdb` backend on RHEL, `debdb` on Debian and Ubuntu) covers them and you add nothing. After a payload (tarball) install, trust the install tree, and update the entry after every upgrade:
+
+```bash
+fapolicyd-cli --file add /opt/defenseclaw/ --trust-file defenseclaw
+# after each upgrade:
+fapolicyd-cli --file update /opt/defenseclaw/ --trust-file defenseclaw
+fapolicyd-cli --update
+```
+
+Trust your agents' own install folders the same way. To confirm, start an OpenCode session as a user and check that a tool call your policy blocks is blocked.
 
 #### Unsigned builds and application control
 

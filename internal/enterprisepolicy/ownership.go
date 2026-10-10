@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -50,6 +51,10 @@ type ownershipRecord struct {
 	// OwnedKeys names the values DefenseClaw added to a shared policy
 	// store it does not own whole (the VS Code device policies).
 	OwnedKeys []string `json:"owned_keys,omitempty"`
+	// RestoredAt is when DefenseClaw last wrote the file back after
+	// another writer changed or removed it (Linux and macOS). An agent
+	// session open through that change can keep what it loaded then.
+	RestoredAt string `json:"restored_at,omitempty"`
 }
 
 var recordNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
@@ -129,6 +134,26 @@ func deleteRecord(opts Options, connector string) error {
 		return err
 	}
 	return nil
+}
+
+// reservedDropIn reports whether the record names a drop-in whose file
+// name DefenseClaw reserves for itself: 90-defenseclaw.json for the Claude
+// Code hooks and the Copilot policy. Once the record says DefenseClaw
+// published it, the file is DefenseClaw's whatever bytes it holds. A copy
+// someone edited (hook paths pointed at another folder or binary name) is
+// tamper that the next publish repairs, never the administrator's preimage,
+// and removal deletes it. Ownership is never read from the shape of the hook
+// commands inside, which an edit can change: an edited copy recorded as
+// administrator content was restored by uninstall --purge, so every Claude
+// Code call ran a missing hook (GAP-1099). Administrator settings belong in
+// another drop-in, which DefenseClaw never touches.
+func reservedDropIn(connector string) bool {
+	return connector == ConnectorClaudeCode || connector == ConnectorCopilot
+}
+
+// publishedByRecord reports whether record says DefenseClaw published path.
+func publishedByRecord(record *ownershipRecord, path string) bool {
+	return record != nil && record.Path == path && record.PostimageSHA256 != ""
 }
 
 // stripFunc removes DefenseClaw-owned content from one vendor file. It
@@ -225,6 +250,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 	if err != nil {
 		return false, err
 	}
+	outside := false
 	switch {
 	case record == nil || record.Path != path:
 		record = &ownershipRecord{Connector: connector, Path: path}
@@ -232,11 +258,15 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 			return false, err
 		}
 	case !exists || sha256Hex(current) != record.PostimageSHA256:
+		outside = record.PostimageSHA256 != ""
 		if record.PostimageSHA256 != "" && exists && !ownedWasPresent {
 			flapConflict(state, connector, path, record.noteRewrite(opts.now()))
 		}
-		if err := record.capturePreimage(current, exists, strip); err != nil {
-			return false, err
+		// A reserved drop-in keeps the preimage of its first publish.
+		if !reservedDropIn(connector) || !publishedByRecord(record, path) {
+			if err := record.capturePreimage(current, exists, strip); err != nil {
+				return false, err
+			}
 		}
 	}
 	record.CreatedDirs = appendUnique(record.CreatedDirs, alsoCreated...)
@@ -256,12 +286,28 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		if err != nil {
 			return false, err
 		}
+		if outside && opts.goos() != "windows" {
+			record.RestoredAt = opts.now().UTC().Format(time.RFC3339)
+		}
+	}
+	// A directory above the file that users cannot list or pass (an
+	// administrator's chmod 0700) hides the policy from every agent.
+	dirsRestored := false
+	if problem := publishedDirProblem(opts, path); problem != "" {
+		restored, err := restorePublishedDirs(opts, path)
+		if err != nil {
+			return changed, err
+		}
+		if len(restored) > 0 {
+			dirsRestored = true
+			state.detail("restored user access through %s to %s (%s)", strings.Join(restored, ", "), path, problem)
+		}
 	}
 	record.PostimageSHA256 = sha256Hex(rendered)
 	if err := saveRecord(opts, record); err != nil {
-		return changed, err
+		return changed || dirsRestored, err
 	}
-	return changed, nil
+	return changed || dirsRestored, nil
 }
 
 // ownershipRecordNames lists the ownership records connector's machine
@@ -292,6 +338,7 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 	if opts.PolicyFor(connector).Ownership != config.MachinePolicyOwnershipMerge {
 		return
 	}
+	dirsReported := map[string]bool{}
 	for _, name := range ownershipRecordNames(opts, connector) {
 		record, err := loadRecord(opts, name)
 		if err != nil || record == nil {
@@ -305,8 +352,44 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 			state.Drift = true
 			state.conflict("%s has %s; DefenseClaw publishes it with mode 0644, owned by root, so every user's agent can read it; the next lifecycle run that applies changes (ensure, repair or reconcile) restores it", record.Path, problem)
 		}
+		if problem := publishedDirProblem(opts, record.Path); problem != "" && !dirsReported[problem] {
+			dirsReported[problem] = true
+			state.Drift = true
+			state.conflict("users cannot read %s: %s, so their agents run without DefenseClaw's machine policy there; DefenseClaw keeps the directories above the files it publishes accessible, and the hook guardian or the next lifecycle run that applies changes (ensure, repair or reconcile) restores them", record.Path, problem)
+		}
 	}
 	state.finish()
+}
+
+// RestorePublishedPolicyDirs gives the directories above every policy file
+// DefenseClaw publishes (ownership: merge) back the mode 0755 users need to
+// read it. The hook guardian runs it on each pass, so an administrator's
+// chmod 0700 of /etc/claude-code/managed-settings.d does not leave Claude
+// Code without managed settings until the next repair (GAP-0913). It returns
+// the directories it changed.
+func RestorePublishedPolicyDirs(opts Options) ([]string, error) {
+	var restored []string
+	var errs []error
+	for _, name := range append(targetNames(), companionNames()...) {
+		if opts.PolicyFor(name).Ownership != config.MachinePolicyOwnershipMerge {
+			continue
+		}
+		for _, recordName := range ownershipRecordNames(opts, name) {
+			record, err := loadRecord(opts, recordName)
+			if err != nil || record == nil {
+				continue
+			}
+			if _, err := os.Lstat(platformPath(opts, record.Path)); err != nil {
+				continue
+			}
+			dirs, err := restorePublishedDirs(opts, record.Path)
+			restored = appendUnique(restored, dirs...)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", record.Path, err))
+			}
+		}
+	}
+	return restored, errors.Join(errs...)
 }
 
 // restoreOrStrip removes DefenseClaw's content from path. When the file is
@@ -333,7 +416,8 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 	case !exists:
 	case record == nil && wholeFile:
 		state.detail("left %s in place: DefenseClaw has no record of writing it", path)
-	case record != nil && record.Path == path && sha256Hex(current) == record.PostimageSHA256:
+	case record != nil && record.Path == path && sha256Hex(current) == record.PostimageSHA256,
+		reservedDropIn(connector) && publishedByRecord(record, path):
 		var admin []byte
 		if record.PreimageExisted {
 			// Records written before preimages were stripped can hold
@@ -346,7 +430,11 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 			if err := removePolicyFile(opts, path); err != nil {
 				return err
 			}
-			state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
+			if sha256Hex(current) != record.PostimageSHA256 {
+				state.detail("removed %s, DefenseClaw's drop-in (it was changed after DefenseClaw wrote it)", path)
+			} else {
+				state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
+			}
 		} else {
 			if _, err := writePolicyFile(opts, path, admin); err != nil {
 				return err

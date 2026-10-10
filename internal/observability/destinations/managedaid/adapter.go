@@ -72,8 +72,11 @@ type Config struct {
 	ContentHash string
 	Timeout     time.Duration
 	Resource    otlp.LogResourceSnapshot
-	Network     push.NetworkOptions
-	Warnings    push.WarningObserver
+	// DeploymentAliases adds deployment.environment and deployment.mode to
+	// the resource (config.ObservabilityV8ManagedAIDDeploymentAliases).
+	DeploymentAliases bool
+	Network           push.NetworkOptions
+	Warnings          push.WarningObserver
 }
 
 // Adapter is synchronous; the common generation dispatcher owns its bounded
@@ -104,7 +107,7 @@ func New(ctx context.Context, source Config, resolver ProviderResolver) (*Adapte
 	if timeout <= 0 || timeout > defaultTimeout {
 		timeout = defaultTimeout
 	}
-	resourceValues, deviceID, hostname, resourceOK := managedResourceSnapshot(source.Resource.Values)
+	resourceValues, deviceID, hostname, resourceOK := managedResourceSnapshot(source.Resource.Values, source.DeploymentAliases)
 	contentHashOK := validManagedContentHash(source.ContentHash)
 	resource := source.Resource
 	if resourceOK {

@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -28,6 +29,33 @@ type Account struct {
 	UID     int
 	GID     int
 	Created bool
+	// LoginShell is the shell of an account someone can sign in to (a shell
+	// other than nologin or false); "" for a service account.
+	LoginShell string
+	// Home is the account's home directory, named in the refusal.
+	Home string
+}
+
+// noLoginShells are the shells that refuse an interactive sign-in.
+var noLoginShells = map[string]bool{
+	"/usr/sbin/nologin": true, "/sbin/nologin": true, "/usr/bin/nologin": true,
+	"/bin/false": true, "/usr/bin/false": true, "/sbin/false": true,
+}
+
+// loginAccountError refuses an existing account someone can sign in to as
+// the gateway service account: whoever signs in as it could stop the
+// gateway, move its hook socket and read the managed config (GAP-0433).
+func loginAccountError(account Account, ensure, goos string) error {
+	if goos == "darwin" {
+		return fmt.Errorf("the existing account %s (uid %d, home %s) has the login shell %s, so it cannot run the DefenseClaw gateway: "+
+			"give it a no-login shell with `dscl . -create /Users/%s UserShell /usr/bin/false`, then run `%s`",
+			account.Name, account.UID, account.Home, account.LoginShell, account.Name, ensure)
+	}
+	return fmt.Errorf("the existing account %s (uid %d, home %s) has the login shell %s, so it cannot run the DefenseClaw gateway: "+
+		"anyone who signs in as it could stop the gateway or move its hook socket. Remove it with `userdel %s` "+
+		"(DefenseClaw then creates a system account that cannot sign in), or give it a no-login shell with "+
+		"`usermod -s /usr/sbin/nologin %s`, then run `%s`",
+		account.Name, account.UID, account.Home, account.LoginShell, account.Name, account.Name, ensure)
 }
 
 // AccountManager resolves, creates and removes the service account.
@@ -75,11 +103,22 @@ func (a *linuxAccounts) Lookup(ctx context.Context, name string) (Account, bool,
 	if groupName := strings.SplitN(strings.TrimSpace(string(group.Stdout)), ":", 2)[0]; groupName != name {
 		return Account{}, false, fmt.Errorf("service account %s must have primary group %s, found %q", name, name, groupName)
 	}
-	return Account{Name: name, UID: uid, GID: gid}, true, nil
+	account := Account{Name: name, UID: uid, GID: gid, Home: fields[5]}
+	// An empty shell field is /bin/sh.
+	if shell := strings.TrimSpace(fields[6]); shell == "" || !noLoginShells[filepath.Clean(shell)] {
+		account.LoginShell = shell
+		if shell == "" {
+			account.LoginShell = "/bin/sh"
+		}
+	}
+	return account, true, nil
 }
 
 func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error) {
 	if account, ok, err := a.Lookup(ctx, name); err != nil || ok {
+		if err == nil && account.LoginShell != "" {
+			return Account{}, loginAccountError(account, a.env.lifecycleCommand("ensure"), a.env.GOOS)
+		}
 		return account, err
 	}
 	// The account must exist before the transaction renders any file, so
@@ -89,18 +128,36 @@ func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error
 	if err != nil {
 		return Account{}, err
 	}
-	if _, err := a.env.Runner.Run(ctx, "systemd-sysusers", append([]string{"--inline"}, lines...)...); err != nil {
-		if !errors.Is(err, ErrCommandNotFound) {
-			return Account{}, fmt.Errorf("create service account with systemd-sysusers: %w", err)
+	sysusers, err := a.env.Runner.Run(ctx, "systemd-sysusers", append([]string{"--inline"}, lines...)...)
+	if err != nil && !errors.Is(err, ErrCommandNotFound) {
+		return Account{}, fmt.Errorf("create service account with systemd-sysusers: %w", err)
+	}
+	sysusersSkipped := ""
+	if err == nil {
+		account, ok, err := a.Lookup(ctx, name)
+		if err != nil {
+			return Account{}, err
 		}
-		if _, err := a.env.Runner.Run(ctx, "groupadd", "--system", name); err != nil {
-			return Account{}, fmt.Errorf("create service group: %w", err)
+		if ok {
+			account.Created = true
+			return account, nil
 		}
-		if _, err := a.env.Runner.Run(ctx, "useradd", "--system", "--gid", name,
-			"--home-dir", a.env.Layout.DataDir, "--no-create-home",
-			"--shell", "/usr/sbin/nologin", "--comment", "DefenseClaw gateway", name); err != nil {
-			return Account{}, fmt.Errorf("create service account: %w", err)
+		// systemd-sysusers exits 0 without creating anything when it cannot
+		// ask NSS whether the account exists, for example when nsswitch.conf
+		// lists sss while sssd is stopped or masked ("Failed to check if
+		// group defenseclaw already exists: Connection refused"). groupadd
+		// and useradd read /etc/group and /etc/passwd themselves, so they
+		// create it instead (GAP-1214).
+		sysusersSkipped = truncateUTF8(firstLine(string(sysusers.Stderr)), 300)
+		if sysusersSkipped == "" {
+			sysusersSkipped = "it reported nothing"
 		}
+	}
+	if err := a.createWithShadowTools(ctx, name); err != nil {
+		if sysusersSkipped != "" {
+			return Account{}, fmt.Errorf("systemd-sysusers exited without creating the service account %s (%s; this happens when /etc/nsswitch.conf lists sss while sssd is not running), and %w", name, sysusersSkipped, err)
+		}
+		return Account{}, err
 	}
 	account, ok, err := a.Lookup(ctx, name)
 	if err != nil {
@@ -111,6 +168,32 @@ func (a *linuxAccounts) Ensure(ctx context.Context, name string) (Account, error
 	}
 	account.Created = true
 	return account, nil
+}
+
+// createWithShadowTools creates the service group (unless it exists) and
+// the service account with groupadd and useradd.
+func (a *linuxAccounts) createWithShadowTools(ctx context.Context, name string) error {
+	if _, err := a.env.Runner.Run(ctx, "getent", "group", name); err != nil {
+		if _, err := a.env.Runner.Run(ctx, "groupadd", "--system", name); err != nil {
+			return fmt.Errorf("create service group: %w", err)
+		}
+	}
+	if _, err := a.env.Runner.Run(ctx, "useradd", "--system", "--gid", name,
+		"--home-dir", a.env.Layout.DataDir, "--no-create-home",
+		"--shell", "/usr/sbin/nologin", "--comment", "DefenseClaw gateway", name); err != nil {
+		return fmt.Errorf("create service account: %w", err)
+	}
+	return nil
+}
+
+// firstLine is the first non-empty line of a command's output.
+func firstLine(output string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return ""
 }
 
 // sysusersLines returns the entries of the embedded sysusers.d document
@@ -173,6 +256,18 @@ func (a *dsclAccounts) readID(ctx context.Context, record, key string) (int, boo
 	return id, true, nil
 }
 
+func (a *dsclAccounts) readAttribute(ctx context.Context, record, key string) (string, error) {
+	result, err := a.env.Runner.Run(ctx, "dscl", ".", "-read", record, key)
+	if err != nil {
+		return "", fmt.Errorf("read %s %s: %w", record, key, err)
+	}
+	value, ok := strings.CutPrefix(strings.TrimSpace(string(result.Stdout)), key+":")
+	if !ok {
+		return "", fmt.Errorf("dscl %s %s: unexpected output %q", record, key, strings.TrimSpace(string(result.Stdout)))
+	}
+	return strings.TrimSpace(value), nil
+}
+
 func (a *dsclAccounts) Lookup(ctx context.Context, name string) (Account, bool, error) {
 	uid, ok, err := a.readID(ctx, "/Users/"+name, "UniqueID")
 	if err != nil || !ok {
@@ -192,7 +287,22 @@ func (a *dsclAccounts) Lookup(ctx context.Context, name string) (Account, bool, 
 	if !ok || groupGID != gid {
 		return Account{}, false, fmt.Errorf("service account %s must have primary group %s", name, name)
 	}
-	return Account{Name: name, UID: uid, GID: gid}, true, nil
+	shell, err := a.readAttribute(ctx, "/Users/"+name, "UserShell")
+	if err != nil {
+		return Account{}, false, err
+	}
+	home, err := a.readAttribute(ctx, "/Users/"+name, "NFSHomeDirectory")
+	if err != nil {
+		return Account{}, false, err
+	}
+	account := Account{Name: name, UID: uid, GID: gid, Home: home}
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	if !noLoginShells[filepath.Clean(shell)] {
+		account.LoginShell = shell
+	}
+	return account, true, nil
 }
 
 func (a *dsclAccounts) usedIDs(ctx context.Context, path, key string) (map[int]bool, error) {
@@ -225,6 +335,9 @@ func freeServiceID(users, groups map[int]bool) (int, error) {
 
 func (a *dsclAccounts) Ensure(ctx context.Context, name string) (Account, error) {
 	if account, ok, err := a.Lookup(ctx, name); err != nil || ok {
+		if err == nil && account.LoginShell != "" {
+			return Account{}, loginAccountError(account, a.env.lifecycleCommand("ensure"), a.env.GOOS)
+		}
 		return account, err
 	}
 	users, err := a.usedIDs(ctx, "/Users", "UniqueID")

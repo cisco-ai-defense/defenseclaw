@@ -318,37 +318,6 @@ class _BaseSetup(unittest.TestCase):
 # B3 / E4d — per-connector guardrail write-surface
 # ---------------------------------------------------------------------------
 class TestPerConnectorWriteSurface(_BaseSetup):
-    def test_amp_version_admission_precedes_rule_pack_conflict(self):
-        events: list[str] = []
-
-        def admit(*_args, **_kwargs):
-            events.append("version")
-            return True
-
-        with (
-            patch(
-                "defenseclaw.commands.cmd_setup.platform_support.host_os",
-                return_value="windows",
-            ),
-            patch(
-                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
-                side_effect=admit,
-            ) as version_check,
-            patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections") as protected_selection,
-        ):
-            with self.assertRaisesRegex(click.UsageError, "mutually exclusive"):
-                cmd_setup._apply_hook_connector_setup(
-                    self.app,
-                    connector="amp",
-                    restart=False,
-                    rule_pack="strict",
-                    rule_pack_dir=self.tmp_dir,
-                )
-
-        self.assertEqual(events, ["version"])
-        version_check.assert_called_once()
-        protected_selection.assert_not_called()
-
     def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
         receipt = os.path.join(self.tmp_dir, "agent_selection.json")
         prior = b'{"prior":"receipt"}\n'
@@ -574,7 +543,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "guardrail",
                     "--non-interactive",
                     "--no-restart",
-                    "--no-verify",
                     "--connector",
                     "codex",
                     "--mode",
@@ -598,13 +566,13 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         hermes = gc.connectors["hermes"]
         self.assertEqual(codex.mode, "action")
         self.assertEqual(codex.block_message, "codex-only")
-        self.assertTrue(codex.rule_pack_dir.endswith(os.path.join("policies", "guardrail", "strict")))
+        self.assertEqual(codex.rule_pack, "strict")
         self.assertIsNotNone(codex.hilt)
         self.assertTrue(codex.hilt.enabled)
         self.assertEqual(codex.hilt.min_severity, "CRITICAL")
         self.assertEqual(hermes.mode, "")
         self.assertEqual(hermes.block_message, "")
-        self.assertEqual(hermes.rule_pack_dir, "")
+        self.assertEqual(hermes.rule_pack, "")
         self.assertIsNone(hermes.hilt)
 
     def test_setup_guardrail_unscoped_mode_updates_all_active_overrides(self):
@@ -620,7 +588,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "guardrail",
                     "--yes",
                     "--no-restart",
-                    "--no-verify",
                     "--mode",
                     "observe",
                 ],
@@ -644,7 +611,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "guardrail",
                     "--yes",
                     "--no-restart",
-                    "--no-verify",
                     "--block-message",
                     "Global block 2",
                 ],
@@ -665,7 +631,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
         with _stub_side_effects():
             res = _invoke(
-                ["guardrail", "--yes", "--no-restart", "--no-verify"],
+                ["guardrail", "--yes", "--no-restart"],
                 self.app,
             )
         self.assertEqual(res.exit_code, 0, msg=res.output)
@@ -1014,7 +980,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                 side_effect=forbidden,
             ) as generic,
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
         ):
             result = _invoke(
                 [
@@ -1025,7 +990,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -1102,7 +1066,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             "--mode",
                             requested_mode,
                             "--no-restart",
-                            "--no-verify",
                         ],
                         self.app,
                         catch=True,
@@ -1173,7 +1136,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             "--mode",
                             requested_mode,
                             "--no-restart",
-                            "--no-verify",
                         ],
                         self.app,
                         catch=True,
@@ -1232,7 +1194,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -1311,7 +1272,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                                 "--connector",
                                 "opencode",
                                 "--no-restart",
-                                "--no-verify",
                             ],
                             self.app,
                             catch=True,
@@ -1408,7 +1368,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                                     "--connector",
                                     "opencode",
                                     "--no-restart",
-                                    "--no-verify",
                                 ],
                                 self.app,
                                 catch=True,
@@ -1499,7 +1458,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         "--connector",
                         "opencode",
                         "--no-restart",
-                        "--no-verify",
                     ],
                     self.app,
                     catch=True,
@@ -1600,7 +1558,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         "guardrail",
                         "--connector",
                         "opencode",
-                        "--no-verify",
                     ]
                     if failure_phase != "readiness":
                         args.append("--no-restart")
@@ -2057,7 +2014,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                                 "--connector",
                                 "opencode",
                                 "--no-restart",
-                                "--no-verify",
                             ],
                             self.app,
                             catch=True,
@@ -2375,7 +2331,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                                 "--connector",
                                 "opencode",
                                 "--no-restart",
-                                "--no-verify",
                             ],
                             self.app,
                             catch=True,
@@ -2483,7 +2438,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "guardrail",
                     "--connector",
                     "opencode",
-                    "--no-verify",
                 ]
                 if failure_phase != "readiness":
                     args.append("--no-restart")
@@ -2576,7 +2530,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                 side_effect=forbidden,
             ) as generic,
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
         ):
             result = _invoke(
                 [
@@ -2592,7 +2545,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--judge-model",
                     "disposable-model-marker",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -2659,7 +2611,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         "--judge-model",
                         "disposable-model-marker",
                         "--no-restart",
-                        "--no-verify",
                     ]
                     if target_case == "explicit":
                         args[2:2] = ["--connector", "opencode"]
@@ -2751,7 +2702,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             ) as secret_write,
         ):
             result = _invoke(
-                ["guardrail", "--no-restart", "--no-verify"],
+                ["guardrail", "--no-restart"],
                 self.app,
                 catch=True,
             )
@@ -2803,7 +2754,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -2856,7 +2806,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
                 side_effect=forbidden,
             ) as generic,
-            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
         ):
             result = _invoke(
                 [
@@ -2865,7 +2814,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -2921,7 +2869,6 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     "--mode",
                     "action",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
                 catch=True,
@@ -4301,8 +4248,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
                 [
-                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
-                    "--detection-strategy-completion", "regex_judge",
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--detection-strategy-completion", "regex_judge",
                 ],
                 self.app,
             )
@@ -4314,8 +4260,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
                 [
-                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
-                    "--mode", "action",
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--mode", "action",
                     "--detection-strategy", "regex_judge",
                 ],
                 self.app,
@@ -4344,8 +4289,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
             res = _invoke(
                 [
                     "guardrail", "--non-interactive", "--connector", "hermes",
-                    "--mode", "observe", "--no-restart", "--no-verify",
-                ],
+                    "--mode", "observe", "--no-restart", ],
                 self.app,
             )
 
@@ -4364,8 +4308,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
                 [
-                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
-                    "--mode", "action",
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--mode", "action",
                     "--detection-strategy", "regex_judge",
                     "--detection-strategy-completion", "regex_only",
                 ],
@@ -4386,8 +4329,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
                 [
-                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify",
-                    "--mode", "action", "--detection-strategy", "regex_judge",
+                    "guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--mode", "action", "--detection-strategy", "regex_judge",
                 ],
                 self.app,
             )
@@ -4401,7 +4343,7 @@ class TestJ3PerDirectionStrategy(_BaseSetup):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
             res = _invoke(
-                ["guardrail", "--non-interactive", "--connector", "codex", "--no-restart", "--no-verify"],
+                ["guardrail", "--non-interactive", "--connector", "codex", "--no-restart"],
                 self.app,
             )
         self.assertEqual(res.exit_code, 0, msg=res.output)
@@ -4453,3 +4395,12 @@ def test_gateway_lifecycle_progress_names_a_pending_audit_upgrade(tmp_path, caps
     assert out.startswith("\n    Upgrading the audit database (one time; a large history can take a few minutes)...\n")
     assert "    still starting after 0s: upgrading the audit database" in out
     assert out.endswith("  defenseclaw-gateway:")
+
+
+def test_scanner_provider_switch_clears_old_base_url() -> None:
+    from defenseclaw.commands.cmd_setup import _apply_scanner_llm_flags
+
+    llm = SimpleNamespace(provider="openai", model="old", base_url="https://old.example/v1")
+    _apply_scanner_llm_flags(llm, "bedrock", None, None)
+    assert llm.provider == "bedrock"
+    assert llm.base_url == ""

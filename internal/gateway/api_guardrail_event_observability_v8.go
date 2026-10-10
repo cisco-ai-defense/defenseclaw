@@ -162,6 +162,7 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,

@@ -5,6 +5,8 @@ keywords:
   - defenseclaw upgrade
   - defenseclaw rollback
   - defenseclaw migrate
+  - DefenseClaw update.source
+  - DefenseClaw config_version 9 migration
   - DefenseClaw 1.0 upgrade
   - renamed and removed connectors
 ---
@@ -30,7 +32,9 @@ The installer:
 2. Builds the new version next to the running one and checks that it starts,
    and that your configuration can be migrated, before changing anything.
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`,
-   swaps in the new version, and runs `defenseclaw migrate`.
+   swaps in the new version, and runs `defenseclaw migrate`. From 0.x that
+   moves `config.yaml` to `config_version: 9` and keeps the old file (see
+   [Config migration](#config-migration)).
 4. Starts the gateway and waits for it to report healthy.
 
 If any step fails, the installer puts the previous version back, restarts it,
@@ -59,10 +63,57 @@ again. It repairs any install and keeps your data:
 When a newer release exists, interactive CLI commands and the TUI show one
 line: `DefenseClaw X.Y.Z is available (you have A.B.C) — run 'defenseclaw
 upgrade'`. The check runs at most once a day and never in scripts, JSON output,
-or CI. Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or `update_check:
-false` in `config.yaml`; on Windows the `DisableSelfUpdate` enterprise policy
+or CI. Turn it off with `DEFENSECLAW_NO_UPDATE_CHECK=1` or by setting
+`update.check` to `false`; on Windows the `DisableSelfUpdate` enterprise policy
 also turns it off. Nothing is ever installed without you running
 `defenseclaw upgrade`.
+
+```bash
+defenseclaw config set update.check false
+```
+
+## Update settings
+
+The `update` block of `config.yaml` has three keys.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `update.check` | `true` | Show the update notice above. |
+| `update.channel` | `stable` | The release channel. `stable` is the only one. |
+| `update.source` | `https://github.com/cisco-ai-defense/defenseclaw` (built-in) | Where release files are downloaded from; set an `https://` base URL for a mirror. |
+
+### Install from a mirror
+
+Set `update.source` to the mirror's base URL, and `defenseclaw upgrade` reads
+the latest release and downloads the installer, `checksums.txt` and its
+signature bundle from there:
+
+```bash
+defenseclaw config set update.source https://mirror.example.com/defenseclaw
+```
+
+The mirror has to serve the paths GitHub serves: `releases/latest` (a
+redirect to the newest tag) and `releases/download/<tag>/` with the installer,
+the release files, `checksums.txt` and `checksums.txt.bundle`.
+
+`update.source` changes only where the bytes come from. Which signature to
+trust is not a setting: the certificate identity that signed the official
+releases is compiled into DefenseClaw, and neither `update.source` nor the
+deprecated `DEFENSECLAW_REPO` variable can change it. A mirror therefore has to
+serve the official, signed `checksums.txt` and `checksums.txt.bundle`; a copy
+re-signed by anyone else fails verification. For that reason a mirror needs
+`cosign` 2.0 or later on the machine. Without it, `defenseclaw upgrade` stops
+before it runs anything and says `releases from <url> are verified by their
+signature: install cosign 2.0 or later, or clear update.source (and
+DEFENSECLAW_REPO) to use the official releases`. The official source works
+without `cosign` but is then checked against `checksums.txt` only. The upgrade also refuses an
+installer that is stamped with another release than the one you asked for.
+
+`DEFENSECLAW_REPO` is the deprecated alias of `update.source`: a GitHub
+`owner/name` or a mirror URL. When both are set, `update.source` wins. A first
+install has no `config.yaml` yet, so it is the only way to name a mirror there
+(see [Install](/docs/get-started/install#install)). A managed device does not
+self-update; the lifecycle applies updates ([Lifecycle](/docs/enterprise/lifecycle)).
 
 ## Upgrading from 0.x to 1.0
 
@@ -79,9 +130,34 @@ installed. Every path keeps your configuration and data.
 - `defenseclaw upgrade` on 0.8.7 or older, and on Windows, stops with a message
   such as `missing release-provenance.json; refusing before services are
   stopped`. Nothing was changed; use the install command instead.
+- Local audit retention (`observability.local.retention_days`) now defaults to 7 days (90 days in 0.8.x); restore 90 days by setting `observability.local.retention_days: 90` in `config.yaml` or running `defenseclaw config set observability.local.retention_days 90`.
 - The installer imports the 0.x install in place. Installs older than 0.8.5 get
   the schema-v8 observability conversion that `0.8.5` introduced, and an
   installed local observability bundle is refreshed.
+- `config.yaml` becomes the only place your policy lives (`config_version: 9`).
+  Under the derived admission gate, LOW and INFO skill findings now allow.
+  With a judge, the skill scanner defaults to `quiet`; `warn` findings enter
+  the review queue.
+  The installer first checks that your configuration can be migrated; for a
+  version 8 file it also says how many values will move and how many conflicts
+  there are. It then copies the admission actions and thresholds from
+  `policies/rego/data.json`, the `skill_actions`, `mcp_actions` and
+  `plugin_actions` keys, `rule_pack_dir`, the old scanner switches, and your
+  skill, MCP server and plugin block and allow entries from `audit.db` into
+  `config.yaml`. The old `config.yaml` stays as `config.yaml.v8.bak`,
+  `data.json` becomes `data.json.migrated-v9`, and `migration-v9.json` records
+  every value that moved and every conflict that was settled. An unmodified
+  install moves one value. See [Config migration](#config-migration).
+- MCP servers your agents already have keep running. At its first start the
+  gateway records a baseline for each one (one scan; findings raise alerts)
+  instead of admitting it again, so a server the scanner cannot start, such
+  as a command path added with `mcp set --skip-scan`, shows `scan failed` in
+  `defenseclaw mcp list` and is not blocked. A server on a block list stays
+  blocked, and the upgrade summary names it. A server you change or add
+  afterwards goes through install admission. The upgrade summary,
+  `migration-v9.json` and `defenseclaw doctor` name each server the scanner
+  cannot start, with the `mcp set` command that fixes it; see
+  [MCP servers that can no longer be scanned](/docs/reference/migrate-v9#mcp-servers-that-can-no-longer-be-scanned).
 - On Windows, the installer also removes a 0.8.x native Setup installation
   (its program folder, sign-in start entry, Add/Remove Programs entry, and
   `PATH` entry). The old program files are kept in
@@ -97,9 +173,23 @@ installed. Every path keeps your configuration and data.
   once you no longer need the old history. `make all` from a source checkout
   over a 0.x install keeps a copy in
   `~/.defenseclaw/backups/audit-history-<time>.db` and says so.
-- To go back to 0.8.x afterwards, run `defenseclaw rollback`. 0.8.x has no
-  rollback command, so to return to 1.x from there, run the command the
-  rollback prints:
+  0.8.x could leave an audit database that fails SQLite's integrity check
+  ("Rowid N out of order"). 1.0 rebuilds such a database in place before it
+  upgrades it. A 0.x database it cannot rebuild is kept as an archive next to
+  `audit.db` (`audit.db.corrupt-<time>`), and `defenseclaw doctor` lists it
+  without a warning; block/allow lists live in `config.yaml` and are not
+  affected.
+- On a host that several accounts share, `defenseclaw-gateway start` and
+  `restart` in 0.8.4 and older stop every `defenseclaw-gateway` process the
+  account may signal, not only its own (0.8.5 and later stop only the gateway
+  of their own data directory). Do not run those 0.8.4 commands with `sudo` on
+  a shared host. The upgrade itself starts the gateway with the new binary, so
+  upgrading one account leaves the other accounts' gateways running; a
+  rollback to 0.8.4 runs the 0.8.4 start again.
+- To go back to 0.8.x afterwards, run `defenseclaw rollback`, except
+  when you upgraded a Windows 0.8.7-0.8.10 Setup install. That case needs
+  the manual steps in [Rollback](#rollback). 0.8.x has no rollback command,
+  so to return to 1.x from an automatic rollback, run the command it prints:
 
   ```bash
   bash ~/.defenseclaw/previous/installer/install.sh --rollback
@@ -109,8 +199,17 @@ installed. Every path keeps your configuration and data.
 
 ## Rollback
 
-`defenseclaw rollback` swaps the live install with the one the last upgrade
-replaced: binaries, Python environment, and the configuration and data as they
+A Windows 0.8.7-0.8.10 Setup install cannot be restored by
+`defenseclaw rollback`; it refuses without changing the current install.
+To return to that release, run `defenseclaw uninstall`, then download its
+`DefenseClawSetup-x64.exe` and run it in your desktop session. The old
+Setup files and data from before the upgrade are in
+`%USERPROFILE%\.defenseclaw\previous`. See
+[Moving from the 0.8.x Setup package](/docs/get-started/windows/install-lifecycle#moving-from-the-08x-setup-package).
+
+For other installs, `defenseclaw rollback` swaps the live install with the
+one the last upgrade replaced: binaries, Python environment, and the
+configuration and data as they
 were at upgrade time. Anything written since then moves into
 `~/.defenseclaw/previous` and comes back if you roll forward; if you upgrade
 again instead, it is kept in `~/.defenseclaw/backups/rolled-back-<version>-<time>`.
@@ -129,6 +228,31 @@ One previous install is kept, and rolling back needs no network. Reinstalling
 the same version does not replace the rollback copy. Running it again rolls
 forward (its header then reads `Rolling forward to DefenseClaw <version>`).
 
+Rolling back to 0.8.x restores the version 8 `config.yaml` that was saved when
+the upgrade started, together with `data.json` and the operator block and allow
+entries in `audit.db`, because those are part of the saved data. Policy edits
+you made after the upgrade stay in `~/.defenseclaw/previous` and return when
+you roll forward. A 0.8.x release that you install yourself, without
+`defenseclaw rollback`, refuses a version 9 file (`Configuration schema v8 is
+required`); [Going back to 0.8.x](/docs/reference/migrate-v9#going-back-to-08x)
+lists the manual steps.
+
+Agent hook entries live in each agent's own settings, outside
+`~/.defenseclaw`, so the swap does not restore them. Before it restores the
+older install, the rollback has the current gateway rewrite every hook entry
+the older release would not recognise into a form it does, so that release's
+`defenseclaw uninstall` still removes it. On Windows, the Claude Code entries
+that run `defenseclaw-hook.exe` through `cmd.exe` go back to the direct
+launcher form; on macOS and Linux, a Claude Code hook path quoted for a home
+folder with a space goes back to the unquoted path. The settings file from
+before the change is kept in
+`~/.defenseclaw/previous/data/backups/claudecode-settings.before-rollback.json`.
+Rolling forward runs setup, which writes the current form again. If the
+rewrite fails, the rollback still completes and warns that the uninstall may
+leave those entries; remove them from the agent's settings by hand. Every 1.x
+release keeps to this rule: a hook entry it writes is in a form every earlier
+1.x release removes, or its rollback converts the entry first.
+
 The rollback starts the restored gateway when it was running and waits for it.
 A 0.8.x gateway on a large audit database can take a few minutes to start, so
 the rollback waits up to 3 minutes for it. If the gateway does not come up,
@@ -145,6 +269,15 @@ upgrade, the installer says so (`Your previous install is back, but its gateway
 is not running`): agent hooks are not guarded until `defenseclaw-gateway start`
 succeeds.
 
+On a host where several accounts run their own gateways, the macOS and Linux
+installer checks the running gateway's API port before it builds or changes
+anything. When another account's process holds that port, it stops there with
+nothing changed and prints the `defenseclaw setup gateway --api-port <free port>`
+command that moves this account's gateway. Run it, then upgrade again. A gateway
+that was not running before the upgrade stays stopped; when another process
+holds its port, the installer (on every OS) ends with the same command instead
+of `defenseclaw-gateway start`, which would fail.
+
 If an upgrade or rollback is interrupted (the terminal closes or the machine
 loses power), run the same command again. The installer first restores the
 install the interrupted run was replacing, then continues.
@@ -152,7 +285,8 @@ install the interrupted run was replacing, then continues.
 ## Migrations
 
 `defenseclaw migrate` brings configuration and data to the current schema. The
-installer runs it after every swap; running it again is safe.
+installer runs it after every swap; running it again is safe. Add `--check` to
+list the pending steps by name without changing anything.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -160,14 +294,58 @@ installer runs it after every swap; running it again is safe.
 | `1` | A step failed; the installer restores the previous install |
 | `2` | The configuration was written by a newer DefenseClaw than this one |
 
+### Config migration
+
+The step from `config_version: 8` to `9` moves the decisions that 0.8.x kept
+outside `config.yaml` into it: admission and thresholds from
+`policies/rego/data.json`, the `*_actions` keys, `rule_pack_dir`, the scanner
+switches, and the operator block and allow entries from
+`audit.db`. It keeps `config.yaml.v8.bak`, renames the retired `data.json` to
+`data.json.migrated-v9`, and writes `migration-v9.json` with every value it
+moved and every conflict it settled. `config.yaml.v8.bak` is written once: a
+later migration keeps it and saves its own source as
+`config.yaml.v8.bak.<time>` and the earlier record as
+`migration-v9.<time>.json`. The upgrade summary prints one line, and
+`defenseclaw doctor` shows a **Config migration** row until you acknowledge the
+record with `defenseclaw config migrate --ack`. You can preview the result
+first with `defenseclaw config migrate --dry-run`. Until the file is migrated,
+the gateway reads a version 8 file as if it were migrated, in memory only.
+
+[Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) shows the before
+and after files for every key, explains the conflicts, and covers going back to
+0.8.x. On a managed standalone host the lifecycle migrates the administrator
+config for you; see [Lifecycle](/docs/enterprise/lifecycle).
+
+### Shipped policy files
+
+Every upgrade brings the Rego modules in `~/.defenseclaw/policies/rego`
+(`admission.rego` and `guardrail.rego`) to the release you install, so a
+policy fix reaches an upgraded install too. The previous copies are kept in
+`~/.defenseclaw/backups/rego-<time>/`. A module you edited is replaced as well,
+and the upgrade names it: re-apply your change from the backup, or keep your
+own rules in a file of another name, which upgrades never touch. An unmodified
+copy of a module the release no longer ships, such as the 0.8 `sandbox.rego`,
+moves to the same backup. Unedited guardrail rule packs in
+`~/.defenseclaw/policies/guardrail` are updated the same way; an edited rule
+pack is kept, and the upgrade says so.
+
+`defenseclaw init` writes a missing module and updates an unedited one, and
+keeps an edited one. A `policy_dir` outside `~/.defenseclaw` is left as it is,
+because a rollback does not restore it; the upgrade lists the modules there
+that differ from the release. A `policy_dir` written as `~/<folder>` is saved
+as the absolute path, and the policy 0.8.x activated there carries over; see
+[Admission and thresholds from data.json](/docs/reference/migrate-v9#admission-and-thresholds-from-datajson). On a managed host the administrator's lifecycle
+installs the policy.
+
 ## Troubleshooting
 
 | Message | What to do |
 | --- | --- |
-| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one. Run `defenseclaw rollback`, or install the newer release again. |
+| `Your configuration is from a newer DefenseClaw than X` | You are installing an older release over data from a newer one: the newer release moved `config.yaml` past the `config_version` this one reads. Run `defenseclaw rollback`, or install the newer release again. |
 | `A connector needs attention before it is guarded again` | The upgrade finished (installer exit code `3`), but a connector refused to start, usually because the agent itself was updated. Run `defenseclaw doctor`. |
 | `The running gateway did not stop` | Stop it with `defenseclaw-gateway stop` and run the upgrade again. Nothing was changed. |
 | `Another DefenseClaw install is running` | Wait for it to finish. A stale lock from a crashed run is cleared automatically. |
+| `Could not copy <file> (...)` then `Could not save the current install; nothing was changed` (Windows) | The installer could not make the rollback copy of a file in `~/.defenseclaw`, such as the `audit.db` a failed 0.8.x Setup left. The message gives Windows' reason and any DefenseClaw program still running. Stop that program (`Stop-Process -Id <PID>`), or give your account access to the file (`icacls <file>` shows who has it), then run the installer again. Nothing was changed. |
 
 ## Renamed and removed connectors
 
@@ -332,22 +510,6 @@ If `config.yaml` still names `geminicli`, the gateway refuses to start and its
 error points to this section. Step 1 fixes that. If a plugin directory is
 configured and plugin discovery fails, the gateway keeps names it cannot
 resolve and retries their teardown later instead of dropping them.
-
-</Accordion>
-
-<Accordion title="Native Windows installs from pre-release builds" id="native-windows-installs-from-pre-release-builds">
-
-Native Windows Setup builds made after 0.8.10 and before this release could
-select Windsurf or Gemini CLI. This release's Setup and uninstaller still read
-an install state that selected Windsurf: repair and upgrade switch the
-selection to `devin`, and the gateway removes DefenseClaw's Cascade hook
-entries on its next start. To remove such an install, upgrade it first and
-then uninstall, so that cleanup runs.
-
-Native Windows installs made from pre-release main builds that selected Gemini
-CLI must be uninstalled with their original build before installing this
-release; this release's Setup and uninstaller refuse that install state. Then
-clean up Gemini CLI entries with the steps above.
 
 Telemetry schemas no longer accept `geminicli` as a connector value. Rows that
 an older release exported with that value do not validate against the current

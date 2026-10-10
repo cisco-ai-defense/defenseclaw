@@ -18,96 +18,142 @@
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
 from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.config import (
+    AdmissionConfig,
+    AdmissionFirstParty,
     AssetPolicyConfig,
     PerConnectorAssetPolicy,
     PerConnectorAssetTypePolicy,
     SeverityAction,
 )
 from defenseclaw.enforce.admission import (
-    AdmissionPolicyData,
+    CompiledAdmission,
+    compile_admission,
     effective_action_for,
     evaluate_admission,
     evaluate_asset_policy,
-    load_admission_policy,
 )
 from defenseclaw.enforce.policy import PolicyEngine
 
 from tests.helpers import make_temp_store
 
 
+class _FakeConfig:
+    """The config pieces admission reads; save() stands in for the writer."""
+
+    def __init__(self):
+        self.asset_policy = AssetPolicyConfig()
+        self.admission = AdmissionConfig()
+        self.admission.plugin.first_party_allow_list = [
+            AdmissionFirstParty(name="acme-plugin", source_path_contains=[".openclaw/extensions/acme-plugin"]),
+        ]
+        self.deployment_mode = ""
+
+    def save(self):
+        pass
+
+
 class _StoreTestBase(unittest.TestCase):
     def setUp(self):
         self.store, self.db_path = make_temp_store()
-        self.pe = PolicyEngine(self.store)
-        self.policy_dir = tempfile.mkdtemp(prefix="dclaw-policy-")
-        rego_dir = os.path.join(self.policy_dir, "rego")
-        os.makedirs(rego_dir, exist_ok=True)
-        self._write_data_json(rego_dir, {
-            "config": {
-                "allow_list_bypass_scan": True,
-                "scan_on_install": True,
-            },
-            "actions": {
-                "CRITICAL": {"runtime": "block", "file": "quarantine", "install": "block"},
-                "HIGH": {"runtime": "block", "file": "quarantine", "install": "block"},
-                "MEDIUM": {"runtime": "allow", "file": "none", "install": "none"},
-                "LOW": {"runtime": "allow", "file": "none", "install": "none"},
-                "INFO": {"runtime": "allow", "file": "none", "install": "none"},
-            },
-            "first_party_allow_list": [
-                {"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party"},
-            ],
-        })
-
-    def _write_data_json(self, rego_dir, data):
-        with open(os.path.join(rego_dir, "data.json"), "w") as f:
-            json.dump(data, f)
+        self.cfg = _FakeConfig()
+        self.pe = PolicyEngine(self.store, self.cfg)
 
     def tearDown(self):
         self.store.close()
         os.unlink(self.db_path)
-        shutil.rmtree(self.policy_dir, ignore_errors=True)
 
 
 class TestEvaluateAdmissionBlocked(_StoreTestBase):
     def test_blocked_item_returns_blocked(self):
         self.pe.block("skill", "evil", "malware")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="evil")
+        d = evaluate_admission(self.pe, target_type="skill", name="evil")
         self.assertEqual(d.verdict, "blocked")
         self.assertEqual(d.source, "manual-block")
+
+    def test_scoped_pinned_allow_overrides_global_block(self):
+        from defenseclaw.config import AssetPolicyRule
+
+        self.cfg.asset_policy.skill.denied = [AssetPolicyRule(name="trusted")]
+        self.cfg.asset_policy.skill.allowed = [
+            AssetPolicyRule(
+                name="trusted", connector="codex",
+                source_path_contains=["/opt/trusted"],
+            ),
+        ]
+        decision = evaluate_admission(
+            self.pe, target_type="skill", name="trusted", connector="codex",
+            source_path="/opt/trusted",
+        )
+        self.assertEqual(decision.verdict, "allowed")
 
     def test_blocked_after_allow_then_block(self):
         """Block after allow should leave the item blocked (last-write wins)."""
         self.pe.allow("skill", "dual", "good")
         self.pe.block("skill", "dual", "bad")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="dual")
+        d = evaluate_admission(self.pe, target_type="skill", name="dual")
         self.assertEqual(d.verdict, "blocked")
 
 
 class TestEvaluateAdmissionAllowed(_StoreTestBase):
     def test_explicit_allow_skips_scan(self):
         self.pe.allow("skill", "trusted", "vendor")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="trusted")
+        d = evaluate_admission(self.pe, target_type="skill", name="trusted")
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "manual-allow")
 
+    def test_mcp_allow_binds_complete_command_line(self):
+        from defenseclaw.config import AssetPolicyRule
+        from defenseclaw.enforce.asset_lists import list_decision
+
+        self.cfg.asset_policy.mcp.allowed = [
+            AssetPolicyRule(name="reviewed", command="npx", args_prefix=["-y", "reviewed-server"]),
+        ]
+        for command, args, expected in (
+            ("npx", ["-y", "reviewed-server"], "allow"),
+            ("/tmp/npx", ["-y", "reviewed-server"], ""),
+            ("npx", ["-y", "reviewed-server", "--extra"], ""),
+        ):
+            decision, _ = list_decision(
+                self.cfg.asset_policy, "mcp", "reviewed", command=command, args=args,
+            )
+            self.assertEqual(decision, expected)
+
+    def test_path_pinned_allow_does_not_admit_case_sibling(self):
+        from defenseclaw.config import AssetPolicyRule
+        from defenseclaw.enforce.asset_lists import list_decision
+
+        self.cfg.asset_policy.skill.allowed = [
+            AssetPolicyRule(name="Good", source_path_contains=["/home/u/.claude/skills/Good"]),
+        ]
+        decision, _ = list_decision(
+            self.cfg.asset_policy, "skill", "Good",
+            source_path="/home/u/.claude/skills/good",
+        )
+        self.assertEqual(decision, "" if os.name != "nt" else "allow")
+
+    def test_configured_first_party_path_outside_agent_home(self):
+        self.cfg.admission.plugin.first_party_allow_list = [
+            AdmissionFirstParty(
+                name="trusted", source_path_contains=["/opt/company/plugins/trusted"],
+            ),
+        ]
+        decision = evaluate_admission(
+            self.pe, target_type="plugin", name="trusted",
+            source_path="/opt/company/plugins/trusted",
+        )
+        self.assertEqual(decision.verdict, "allowed")
+
     def test_first_party_allow_bypasses_scan(self):
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="plugin", name="defenseclaw")
+        d = evaluate_admission(self.pe, target_type="plugin", name="acme-plugin",
+                               source_path="/home/u/.openclaw/extensions/acme-plugin")
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")
 
@@ -123,15 +169,13 @@ class TestEvaluateAdmissionConnectorScope(_StoreTestBase):
     def test_per_connector_block_only_blocks_that_connector(self):
         self.pe.block_for_connector("mcp", "demo", "codex", "scoped block")
         blocked = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo", connector="codex",
+            self.pe, target_type="mcp", name="demo", connector="codex",
         )
         self.assertEqual(blocked.verdict, "blocked")
         self.assertEqual(blocked.source, "manual-block")
         # A different connector is NOT blocked by the codex-scoped entry.
         other = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo", connector="opencode",
+            self.pe, target_type="mcp", name="demo", connector="opencode",
         )
         self.assertNotEqual(other.verdict, "blocked")
 
@@ -139,23 +183,20 @@ class TestEvaluateAdmissionConnectorScope(_StoreTestBase):
         self.pe.block("mcp", "demo", "global block")
         for connector in ("codex", "opencode", ""):
             d = evaluate_admission(
-                self.pe, policy_dir=self.policy_dir,
-                target_type="mcp", name="demo", connector=connector,
+                self.pe, target_type="mcp", name="demo", connector=connector,
             )
             self.assertEqual(d.verdict, "blocked", connector)
 
     def test_per_connector_allow_only_allows_that_connector(self):
         self.pe.allow_for_connector("mcp", "demo", "codex", "scoped allow")
         allowed = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo", connector="codex",
+            self.pe, target_type="mcp", name="demo", connector="codex",
         )
         self.assertEqual(allowed.verdict, "allowed")
         self.assertEqual(allowed.source, "manual-allow")
         # Another connector falls through to scan (no scoped/global allow).
         other = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo", connector="opencode",
+            self.pe, target_type="mcp", name="demo", connector="opencode",
         )
         self.assertEqual(other.verdict, "scan")
 
@@ -163,14 +204,12 @@ class TestEvaluateAdmissionConnectorScope(_StoreTestBase):
         self.pe.block("mcp", "demo", "global block")
         self.pe.allow_for_connector("mcp", "demo", "codex", "scoped allow")
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo", connector="codex",
+            self.pe, target_type="mcp", name="demo", connector="codex",
         )
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "manual-allow")
         other = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo", connector="opencode",
+            self.pe, target_type="mcp", name="demo", connector="opencode",
         )
         self.assertEqual(other.verdict, "blocked")
 
@@ -178,13 +217,11 @@ class TestEvaluateAdmissionConnectorScope(_StoreTestBase):
         self.pe.allow("mcp", "demo", "global allow")
         self.pe.block_for_connector("mcp", "demo", "codex", "scoped block")
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo", connector="codex",
+            self.pe, target_type="mcp", name="demo", connector="codex",
         )
         self.assertEqual(d.verdict, "blocked")
         other = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo", connector="opencode",
+            self.pe, target_type="mcp", name="demo", connector="opencode",
         )
         self.assertEqual(other.verdict, "allowed")
 
@@ -212,26 +249,25 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
     def test_default_deny_blocks_before_scan(self):
         policy = self._asset_policy(default="deny")
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="skill", name="unknown",
+            self.pe, target_type="skill", name="unknown",
             asset_policy=policy,
         )
         self.assertEqual(d.verdict, "blocked")
         self.assertEqual(d.source, "asset-policy-default-deny")
 
-    def test_allow_overrides_default_deny_without_bypassing_scan(self):
+    def test_operator_allow_overrides_default_deny_and_skips_scan(self):
+        # config_version 9: asset_policy.allowed is the operator allow list.
         policy = self._asset_policy(
             default="deny",
             allowed=[SimpleNamespace(name="trusted", connector="codex")],
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="skill", name="trusted",
+            self.pe, target_type="skill", name="trusted",
             connector="codex",
             asset_policy=policy,
         )
-        self.assertEqual(d.verdict, "scan")
-        self.assertEqual(d.source, "scan-required")
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "manual-allow")
 
     def test_denied_rule_matches_connector_alias(self):
         # A denied rule keyed on the documented alias "open-hands" must still
@@ -242,13 +278,20 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             denied=[SimpleNamespace(name="risky", connector="open-hands")],
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="risky",
+            self.pe, target_type="mcp", name="risky",
             connector="openhands",
             asset_policy=policy,
         )
         self.assertEqual(d.verdict, "blocked")
         self.assertEqual(d.source, "asset-policy-deny")
+
+    def test_denied_rule_matches_the_decomposed_spelling(self):
+        # GAP-0432: names compare after Unicode NFC, as the gateway does.
+        policy = self._asset_policy(denied=[SimpleNamespace(name="epa-caf\u00e9")])
+        d = evaluate_admission(
+            self.pe, target_type="skill", name="epa-cafe\u0301", asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "blocked")
 
     def test_connector_allowed_rule_overrides_global_denied_rule(self):
         policy = self._asset_policy(
@@ -295,8 +338,7 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             registry=[SimpleNamespace(name="github")],
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="rogue",
+            self.pe, target_type="mcp", name="rogue",
             asset_policy=policy,
         )
         self.assertEqual(d.verdict, "blocked")
@@ -378,8 +420,7 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             registry_required=True, registry=[], registry_empty_action="allow",
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="demo",
+            self.pe, target_type="mcp", name="demo",
             asset_policy=policy,
         )
         self.assertEqual(d.verdict, "scan")
@@ -388,25 +429,24 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
     def test_observe_mode_does_not_block_install_flow(self):
         policy = self._asset_policy(mode="observe", default="deny")
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="plugin", name="unknown",
+            self.pe, target_type="plugin", name="unknown",
             asset_policy=policy,
         )
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
-    def test_denied_rule_in_observe_mode_does_not_block_install_flow(self):
+    def test_denied_rule_blocks_in_observe_mode(self):
         policy = self._asset_policy(
             mode="observe",
             denied=[SimpleNamespace(name="untrusted")],
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="skill", name="untrusted",
+            self.pe, target_type="skill", name="untrusted",
             asset_policy=policy,
         )
-        self.assertEqual(d.verdict, "scan")
-        self.assertEqual(d.source, "scan-required")
+        # config_version 9: the explicit lists apply in every mode.
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-deny")
 
     def test_observe_mode_keeps_the_would_block_on_the_decision(self):
         # GAP-2390: observe mode must still report what action mode refuses.
@@ -415,16 +455,14 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             registry=[SimpleNamespace(name="approved")],
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="offreg",
+            self.pe, target_type="mcp", name="offreg",
             asset_policy=policy,
         )
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.observed_source, "asset-policy-registry-required-observe")
         self.assertIn("not in the approved registry", d.observed_reason)
         allowed = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="approved",
+            self.pe, target_type="mcp", name="approved",
             asset_policy=policy,
         )
         self.assertEqual(allowed.observed_reason, "")
@@ -444,8 +482,7 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             registry=[self._mcp_registry_rule()],
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="filesystem",
+            self.pe, target_type="mcp", name="filesystem",
             command="/usr/bin/npx",
             args=["-y", "@modelcontextprotocol/server-filesystem"],
             asset_policy=policy,
@@ -463,8 +500,7 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             registry=[self._mcp_registry_rule()],
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="filesystem",
+            self.pe, target_type="mcp", name="filesystem",
             command="/tmp/evil/npx",
             args=["-y", "@modelcontextprotocol/server-filesystem"],
             asset_policy=policy,
@@ -482,8 +518,7 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
             registry=[self._mcp_registry_rule()],
         )
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="mcp", name="filesystem",
+            self.pe, target_type="mcp", name="filesystem",
             command="/usr/bin/npx",
             args=[
                 "-y",
@@ -497,36 +532,15 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
 
 
 class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
-    def setUp(self):
-        super().setUp()
-        rego_dir = os.path.join(self.policy_dir, "rego")
-        # F-0141/F-0902: markers must pin the asset's own leaf directory
-        # anchored to a DefenseClaw-owned home. A broad parent marker like
-        # ``.openclaw/extensions`` (which any sibling plugin lands under) is no
-        # longer a valid first-party marker, so the only entry here pins the
-        # full home-anchored leaf path.
-        self._write_data_json(rego_dir, {
-            "config": {
-                "allow_list_bypass_scan": True,
-                "scan_on_install": True,
-            },
-            "actions": {},
-            "first_party_allow_list": [
-                {
-                    "target_type": "plugin",
-                    "target_name": "defenseclaw",
-                    "reason": "first-party",
-                    "source_path_contains": [".openclaw/extensions/defenseclaw"],
-                },
-            ],
-        })
+    # F-0141/F-0902: markers must pin the asset's own leaf directory anchored
+    # to a DefenseClaw-owned home; the base fixture pins
+    # ``.openclaw/extensions/acme-plugin``.
 
     def test_matching_path_allows(self):
         # F-1221: the legitimate home-anchored install path still bypasses scan.
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="plugin", name="defenseclaw",
-            source_path="/home/user/.openclaw/extensions/defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
+            source_path="/home/user/.openclaw/extensions/acme-plugin",
         )
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")
@@ -536,8 +550,7 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
         # ``.openclaw/extensions`` parent (the old broad marker) must NOT be
         # blessed — the marker now pins the ``defenseclaw`` leaf.
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="plugin", name="defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
             source_path="/home/user/.openclaw/extensions/evil",
         )
         self.assertEqual(d.verdict, "scan")
@@ -549,9 +562,8 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
         # dir in a user-writable location must NOT inherit the first-party
         # allow even though the component subsequence matches.
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="plugin", name="defenseclaw",
-            source_path="/tmp/attacker/.openclaw/extensions/defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
+            source_path="/tmp/attacker/.openclaw/extensions/acme-plugin",
         )
         # Anchored to a real (if attacker-named) ``.openclaw`` home component —
         # this is still considered first-party-owned by the home marker.
@@ -560,8 +572,7 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
 
     def test_non_matching_path_falls_through(self):
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="plugin", name="defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
             source_path="/home/user/random/plugins/something",
         )
         self.assertEqual(d.verdict, "scan")
@@ -569,8 +580,7 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
 
     def test_temp_dir_falls_through(self):
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="plugin", name="defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
             source_path="/tmp/dclaw-plugin-fetch-abc123/defenseclaw",
         )
         self.assertEqual(d.verdict, "scan")
@@ -578,65 +588,15 @@ class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):
 
     def test_empty_path_falls_through(self):
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="plugin", name="defenseclaw",
+            self.pe, target_type="plugin", name="acme-plugin",
             source_path="",
         )
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
-    def test_workspace_codeguard_broad_parent_no_longer_allows(self):
-        # F-1222: a workspace CodeGuard path matched against the BROAD
-        # ``.openclaw/workspace/skills`` parent marker used to be allowed as
-        # first-party. That blessed any sibling skill dropped in the workspace
-        # skills dir, so the broad marker is gone and the verdict is now a
-        # scan-required decision.
-        rego_dir = os.path.join(self.policy_dir, "rego")
-        self._write_data_json(rego_dir, {
-            "config": {
-                "allow_list_bypass_scan": True,
-                "scan_on_install": True,
-            },
-            "actions": {},
-            "first_party_allow_list": [
-                {
-                    "target_type": "skill",
-                    "target_name": "codeguard",
-                    "reason": "first-party",
-                    "source_path_contains": [".openclaw/workspace/skills", ".openclaw/skills"],
-                },
-            ],
-        })
-        d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="skill", name="codeguard",
-            source_path="/home/user/.openclaw/workspace/skills/codeguard",
-        )
-        # A broad parent marker is NOT a leaf-pin, but it IS anchored to the
-        # ``.openclaw`` home, so the matcher still matches it. The secure
-        # behaviour is enforced by removing such broad markers from the bundled
-        # policy (F-0902); see TestBundledPolicyProvenance for the end-to-end
-        # check that the shipped markers reject siblings.
-        sibling = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="skill", name="codeguard",
-            source_path="/home/user/.openclaw/workspace/skills/evil",
-        )
-        # The broad parent marker would wrongly bless this sibling — proving why
-        # the bundled policy must not ship broad markers.
-        self.assertEqual(sibling.verdict, "allowed")
-        # And the genuine leaf still matches the broad marker too.
-        self.assertEqual(d.verdict, "allowed")
-
 
 class TestBundledPolicyProvenance(unittest.TestCase):
-    """End-to-end checks against the shipped (bundled) default policy markers."""
-
-    def _bundled_policies(self):
-        import defenseclaw
-        return os.path.join(
-            os.path.dirname(defenseclaw.__file__), "_data", "policies"
-        )
+    """End-to-end checks against the built-in first-party markers."""
 
     def _pe(self):
         return SimpleNamespace(
@@ -651,7 +611,6 @@ class TestBundledPolicyProvenance(unittest.TestCase):
         # merely contains ``extensions/defenseclaw`` is NOT first-party-allowed.
         d = evaluate_admission(
             self._pe(),
-            policy_dir=self._bundled_policies(),
             target_type="plugin",
             name="defenseclaw",
             source_path="/tmp/attacker/extensions/defenseclaw",
@@ -659,23 +618,23 @@ class TestBundledPolicyProvenance(unittest.TestCase):
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
-    def test_f0902_legitimate_home_anchored_plugin_allowed(self):
+    def test_builtin_plugin_name_alone_requires_scan(self):
+        # GAP-0419: a plugin folder named defenseclaw is not trusted by name;
+        # the gateway recognizes DefenseClaw's own plugin by its bytes.
         d = evaluate_admission(
             self._pe(),
-            policy_dir=self._bundled_policies(),
             target_type="plugin",
             name="defenseclaw",
             source_path="/home/u/.openclaw/extensions/defenseclaw",
         )
-        self.assertEqual(d.verdict, "allowed")
-        self.assertEqual(d.source, "policy-allow")
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
 
     def test_f0902_spoofed_sibling_skills_path_scans(self):
         # The bundled skill marker must no longer ship bare ``skills/codeguard``
         # / ``workspace/skills/codeguard`` markers.
         d = evaluate_admission(
             self._pe(),
-            policy_dir=self._bundled_policies(),
             target_type="skill",
             name="codeguard",
             source_path="/tmp/attacker/workspace/skills/codeguard",
@@ -683,21 +642,29 @@ class TestBundledPolicyProvenance(unittest.TestCase):
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
-    def test_f0902_legitimate_home_anchored_skill_allowed(self):
-        d = evaluate_admission(
-            self._pe(),
-            policy_dir=self._bundled_policies(),
-            target_type="skill",
-            name="codeguard",
-            source_path="/home/u/.openclaw/workspace/skills/codeguard",
-        )
-        self.assertEqual(d.verdict, "allowed")
-        self.assertEqual(d.source, "policy-allow")
+    def test_codeguard_entry_trusts_only_the_shipped_skill(self):
+        # GAP-0419: any folder named codeguard under a skills folder used to
+        # skip the scan; only an exact copy of the shipped skill does now.
+        import shutil
+        import tempfile
+
+        from defenseclaw.paths import bundled_codeguard_dir
+
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".openclaw", "workspace", "skills", "codeguard")
+            shutil.copytree(bundled_codeguard_dir(), path, ignore=shutil.ignore_patterns("__pycache__"))
+
+            def verdict():
+                return evaluate_admission(self._pe(), target_type="skill", name="codeguard", source_path=path)
+
+            self.assertEqual((verdict().verdict, verdict().source), ("allowed", "policy-allow"))
+            with open(os.path.join(path, "deploy.sh"), "w", encoding="utf-8") as fh:
+                fh.write("echo deploy\n")
+            self.assertEqual((verdict().verdict, verdict().source), ("scan", "scan-required"))
 
     def test_codex_personal_codeguard_path_requires_scan_without_stronger_provenance(self):
         d = evaluate_admission(
             self._pe(),
-            policy_dir=self._bundled_policies(),
             target_type="skill",
             name="codeguard",
             source_path="/home/u/.agents/skills/codeguard",
@@ -708,7 +675,6 @@ class TestBundledPolicyProvenance(unittest.TestCase):
     def test_codex_project_codeguard_spoof_requires_scan(self):
         d = evaluate_admission(
             self._pe(),
-            policy_dir=self._bundled_policies(),
             target_type="skill",
             name="codeguard",
             source_path="/work/repo/.agents/skills/codeguard",
@@ -719,7 +685,6 @@ class TestBundledPolicyProvenance(unittest.TestCase):
     def test_codex_legacy_skill_home_requires_scan(self):
         d = evaluate_admission(
             self._pe(),
-            policy_dir=self._bundled_policies(),
             target_type="skill",
             name="codeguard",
             source_path="/home/u/.codex/skills/codeguard",
@@ -737,25 +702,25 @@ class TestEvaluateAssetPolicyPerConnector(unittest.TestCase):
 
     def test_per_connector_mode_action_blocks_while_inheritor_observes(self):
         # codex overrides mode=action; hermes inherits the global observe.
-        # Same denied rule, different connector → different verdict.
+        # Same default deny, different connector → different verdict.
         policy = AssetPolicyConfig(
             enabled=True,
             mode="observe",
             connectors={"codex": PerConnectorAssetPolicy(mode="action")},
         )
-        policy.mcp.denied = [SimpleNamespace(name="rogue")]
+        policy.mcp.default = "deny"
 
         codex = evaluate_asset_policy(
             policy, target_type="mcp", name="rogue", connector="codex",
         )
         self.assertEqual(codex.verdict, "blocked")
-        self.assertEqual(codex.source, "asset-policy-deny")
+        self.assertEqual(codex.source, "asset-policy-default-deny")
 
         hermes = evaluate_asset_policy(
             policy, target_type="mcp", name="rogue", connector="hermes",
         )
         self.assertEqual(hermes.verdict, "allowed")
-        self.assertEqual(hermes.source, "asset-policy-deny-observe")
+        self.assertEqual(hermes.source, "asset-policy-default-deny-observe")
 
     def test_per_connector_registry_required_overlay(self):
         # codex requires a registry (empty → fail-closed deny); hermes
@@ -855,21 +820,11 @@ class TestEvaluateAssetPolicyPerConnector(unittest.TestCase):
 class TestEvaluateAdmissionFirstPartyNoBypass(_StoreTestBase):
     def setUp(self):
         super().setUp()
-        rego_dir = os.path.join(self.policy_dir, "rego")
-        self._write_data_json(rego_dir, {
-            "config": {
-                "allow_list_bypass_scan": False,
-                "scan_on_install": True,
-            },
-            "actions": {},
-            "first_party_allow_list": [
-                {"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party"},
-            ],
-        })
+        self.cfg.admission.plugin.allow_list_bypass_scan = False
 
     def test_first_party_requires_scan_when_bypass_disabled(self):
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="plugin", name="defenseclaw")
+        d = evaluate_admission(self.pe, target_type="plugin", name="defenseclaw",
+                               source_path="/home/u/.openclaw/extensions/defenseclaw")
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
@@ -877,26 +832,17 @@ class TestEvaluateAdmissionFirstPartyNoBypass(_StoreTestBase):
 class TestEvaluateAdmissionScanDisabled(_StoreTestBase):
     def setUp(self):
         super().setUp()
-        rego_dir = os.path.join(self.policy_dir, "rego")
-        self._write_data_json(rego_dir, {
-            "config": {
-                "allow_list_bypass_scan": True,
-                "scan_on_install": False,
-            },
-            "actions": {},
-        })
+        self.cfg.admission.defaults.scan_on_install = False
 
     def test_scan_disabled_allows_without_scan(self):
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="new-skill")
+        d = evaluate_admission(self.pe, target_type="skill", name="new-skill")
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "scan-disabled")
 
 
 class TestEvaluateAdmissionRequiresScan(_StoreTestBase):
     def test_no_scan_result_returns_scan_required(self):
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="new-skill")
+        d = evaluate_admission(self.pe, target_type="skill", name="new-skill")
         self.assertEqual(d.verdict, "scan")
 
 
@@ -912,16 +858,14 @@ class TestEvaluateAdmissionWithScanResult(_StoreTestBase):
 
     def test_clean_scan(self):
         result = self._make_scan_result([], "INFO")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="safe",
+        d = evaluate_admission(self.pe, target_type="skill", name="safe",
                                scan_result=result)
         self.assertEqual(d.verdict, "clean")
         self.assertEqual(d.source, "scan-clean")
 
     def test_high_severity_rejected(self):
         result = self._make_scan_result([{"severity": "HIGH"}], "HIGH")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="risky",
+        d = evaluate_admission(self.pe, target_type="skill", name="risky",
                                scan_result=result)
         self.assertEqual(d.verdict, "rejected")
         self.assertEqual(d.source, "scan-rejected")
@@ -930,40 +874,36 @@ class TestEvaluateAdmissionWithScanResult(_StoreTestBase):
 
     def test_medium_severity_warning(self):
         result = self._make_scan_result([{"severity": "MEDIUM"}], "MEDIUM")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="iffy",
+        d = evaluate_admission(self.pe, target_type="skill", name="iffy",
                                scan_result=result)
         self.assertEqual(d.verdict, "warning")
         self.assertEqual(d.source, "scan-warning")
 
     def test_install_block_alone_rejects(self):
-        rego_dir = os.path.join(self.policy_dir, "rego")
-        self._write_data_json(rego_dir, {
-            "config": {"allow_list_bypass_scan": True, "scan_on_install": True},
-            "actions": {
-                "HIGH": {"runtime": "allow", "file": "none", "install": "block"},
-            },
-        })
+        self.cfg.admission.defaults.actions["high"] = {"install": "block", "file": "none", "runtime": "enable"}
         result = self._make_scan_result([{"severity": "HIGH"}], "HIGH")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="partial",
-                               scan_result=result)
+        d = evaluate_admission(self.pe, target_type="skill", name="partial", scan_result=result)
         self.assertEqual(d.verdict, "rejected")
+
+    def test_allow_shorthand_allows_findings(self):
+        self.cfg.admission.skill.actions["medium"] = "allow"
+        result = self._make_scan_result([{"severity": "MEDIUM"}], "MEDIUM")
+        d = evaluate_admission(self.pe, target_type="skill", name="ok", scan_result=result)
+        self.assertEqual(d.verdict, "allowed")
+        self.assertEqual(d.source, "scan-allowed")
 
 
 class TestEvaluateAdmissionDictScanResult(_StoreTestBase):
     def test_dict_scan_result_clean(self):
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="skill", name="safe",
+            self.pe, target_type="skill", name="safe",
             scan_result={"total_findings": 0, "max_severity": "INFO"},
         )
         self.assertEqual(d.verdict, "clean")
 
     def test_dict_scan_result_with_findings(self):
         d = evaluate_admission(
-            self.pe, policy_dir=self.policy_dir,
-            target_type="skill", name="risky",
+            self.pe, target_type="skill", name="risky",
             scan_result={"total_findings": 2, "max_severity": "HIGH"},
         )
         self.assertEqual(d.verdict, "rejected")
@@ -972,95 +912,126 @@ class TestEvaluateAdmissionDictScanResult(_StoreTestBase):
 class TestEvaluateAdmissionQuarantine(_StoreTestBase):
     def test_quarantined_item_rejected_when_flag_set(self):
         self.pe.quarantine("skill", "qskill", "scan findings")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="qskill",
+        d = evaluate_admission(self.pe, target_type="skill", name="qskill",
                                include_quarantine=True)
         self.assertEqual(d.verdict, "rejected")
         self.assertEqual(d.source, "quarantine")
 
     def test_quarantined_item_not_checked_without_flag(self):
         self.pe.quarantine("skill", "qskill", "scan findings")
-        d = evaluate_admission(self.pe, policy_dir=self.policy_dir,
-                               target_type="skill", name="qskill")
+        d = evaluate_admission(self.pe, target_type="skill", name="qskill")
         self.assertEqual(d.verdict, "scan")
 
 
 class TestEffectiveActionFor(unittest.TestCase):
-    def test_global_action(self):
-        policy = AdmissionPolicyData(
-            actions={"HIGH": SeverityAction(file="quarantine", runtime="disable", install="block")},
+    def test_scanner_override_then_severity_then_fail_closed(self):
+        quarantine = SeverityAction(file="quarantine", runtime="disable", install="block")
+        warn = SeverityAction()
+        policy = CompiledAdmission(
+            actions={"MEDIUM": (warn, False)},
+            scanner_overrides={"virustotal": {"MEDIUM": (quarantine, False)}},
         )
-        action = effective_action_for(policy, target_type="skill", severity="HIGH")
-        self.assertEqual(action.install, "block")
+        self.assertEqual(effective_action_for(policy, severity="medium", scanner="virustotal")[0], quarantine)
+        self.assertEqual(effective_action_for(policy, severity="MEDIUM", scanner="skill-scanner")[0], warn)
+        self.assertEqual(effective_action_for(policy, severity="BOGUS")[0].install, "block")
 
-    def test_scanner_override_takes_precedence(self):
-        policy = AdmissionPolicyData(
-            actions={"MEDIUM": SeverityAction(runtime="enable", install="none")},
-            scanner_overrides={
-                "mcp": {"MEDIUM": SeverityAction(runtime="disable", install="block")},
-            },
+
+class TestCompileAdmission(unittest.TestCase):
+    def test_builtin_defaults(self):
+        mcp = compile_admission(None, "mcp")
+        self.assertTrue(mcp.scan_on_install and mcp.allow_list_bypass_scan)
+        self.assertEqual(mcp.actions["HIGH"][0].install, "block")
+        self.assertEqual(mcp.actions["MEDIUM"][0].install, "block")
+        self.assertIn("codeguard", compile_admission(None, "skill").first_party_allow)
+        self.assertIn("defenseclaw", compile_admission(None, "plugin").first_party_allow)
+
+    def test_layers_type_then_scanner_gate_then_defaults(self):
+        # Unset gate keys apply their shown defaults (HIGH, review MEDIUM), as Go.
+        gate = SimpleNamespace(fail_on_severity="", review_queue_min="")
+        cfg = SimpleNamespace(admission=AdmissionConfig(), scanners=SimpleNamespace(skill_scanner=gate))
+        cfg.admission.defaults.actions["low"] = "block"
+        cfg.admission.skill.actions["critical"] = "block"
+        # An explicit empty first-party list allows nothing first party (Go firstParty).
+        cfg.admission.plugin.first_party_allow_list = []
+        self.assertEqual(compile_admission(cfg, "plugin").first_party_allow, {})
+        self.assertIn("codeguard", compile_admission(cfg, "skill").first_party_allow)
+        # Entries that share a name all apply, as in Go and Rego.
+        cfg.admission.skill.first_party_allow_list = [
+            AdmissionFirstParty(name="codeguard", source_path_contains=[".claude/skills/codeguard"]),
+            AdmissionFirstParty(name="codeguard", source_path_contains=[".cursor/skills/codeguard"]),
+        ]
+        self.assertEqual(
+            compile_admission(cfg, "skill").first_party_allow,
+            {"codeguard": [".claude/skills/codeguard", ".cursor/skills/codeguard"]},
         )
-        action = effective_action_for(policy, target_type="mcp", severity="MEDIUM")
-        self.assertEqual(action.install, "block")
+        cfg.admission.skill.first_party_allow_list = None
+        skill = compile_admission(cfg, "skill")
+        self.assertEqual(skill.source, "config:admission.skill.actions")
+        self.assertEqual(skill.actions["CRITICAL"][0].file, "none")
+        self.assertEqual(skill.actions["HIGH"][0].file, "quarantine")
+        self.assertEqual(skill.actions["MEDIUM"][0].install, "none")
+        self.assertTrue(skill.actions["LOW"][1])
+        self.assertEqual(compile_admission(cfg, "plugin").actions["LOW"][0].install, "block")
 
-        skill_action = effective_action_for(policy, target_type="skill", severity="MEDIUM")
-        self.assertEqual(skill_action.install, "none")
+    def test_secure_client_unconstrained_legacy_first_party_entry(self):
+        import json
+        import tempfile
+        from unittest.mock import patch
 
-    def test_unknown_severity_returns_default(self):
-        policy = AdmissionPolicyData()
-        action = effective_action_for(policy, target_type="skill", severity="UNKNOWN")
-        self.assertEqual(action.install, "none")
+        with tempfile.TemporaryDirectory() as policy_dir:
+            os.makedirs(os.path.join(policy_dir, "rego"))
+            with open(os.path.join(policy_dir, "rego", "data.json"), "w", encoding="utf-8") as handle:
+                json.dump({"first_party_allow_list": [
+                    {"target_type": "plugin", "target_name": "trusted", "source_path_contains": []},
+                ]}, handle)
+            cfg = SimpleNamespace(
+                deployment_mode="managed_enterprise", policy_dir=policy_dir,
+                admission=AdmissionConfig(),
+            )
+            pe = PolicyEngine(None, cfg)
+            with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}):
+                decision = evaluate_admission(
+                    pe, target_type="plugin", name="trusted", source_path="/opt/trusted",
+                )
+        self.assertEqual(decision.verdict, "allowed")
 
-    def test_fallback_actions_used(self):
-        from defenseclaw.config import SkillActionsConfig
-        policy = AdmissionPolicyData()
-        fallback = SkillActionsConfig(
-            high=SeverityAction(install="block", runtime="disable", file="quarantine"),
+    def test_secure_client_keeps_the_1_0_data_json_admission(self):
+        # As Go secureClientAdmission: data.json decides and no scanner gate
+        # is derived, so a LOW skill finding stays a warning.
+        import json
+        import tempfile
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as policy_dir:
+            os.makedirs(os.path.join(policy_dir, "rego"))
+            with open(os.path.join(policy_dir, "rego", "data.json"), "w", encoding="utf-8") as handle:
+                json.dump({"actions": {
+                    "HIGH": {"install": "block", "file": "quarantine", "runtime": "block"},
+                    "MEDIUM": {"install": "block", "file": "none", "runtime": "block"},
+                    "LOW": {"install": "none", "file": "none", "runtime": "allow"},
+                }}, handle)
+            cfg = SimpleNamespace(deployment_mode="managed_enterprise", policy_dir=policy_dir, admission=AdmissionConfig())
+            with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}):
+                skill = compile_admission(cfg, "skill")
+        self.assertEqual(skill.source, "data.json")
+        self.assertEqual((skill.actions["MEDIUM"][0].install, skill.actions["MEDIUM"][0].runtime), ("block", "disable"))
+        self.assertEqual(skill.actions["LOW"][0].install, "none")
+        self.assertFalse(skill.actions["LOW"][1])
+
+
+class TestPolicyViews(_StoreTestBase):
+    def test_case_variant_journal_row_merges_with_operator_allow(self):
+        from defenseclaw.config import AssetPolicyRule
+        from defenseclaw.enforce.asset_lists import install_counts, merge_operator_entries
+
+        self.store.set_action_field("skill", "MySkill", "install", "block", "scan")
+        self.cfg.asset_policy.skill.allowed = [AssetPolicyRule(name="myskill")]
+        entries = merge_operator_entries(
+            self.store.list_actions_by_type("skill"), self.cfg, "skill",
         )
-        action = effective_action_for(policy, target_type="skill", severity="HIGH",
-                                      fallback_actions=fallback)
-        self.assertEqual(action.install, "block")
-
-
-class TestLoadAdmissionPolicy(unittest.TestCase):
-    def test_missing_dir_returns_defaults(self):
-        policy = load_admission_policy("/nonexistent")
-        self.assertTrue(policy.allow_list_bypass_scan)
-        self.assertTrue(policy.scan_on_install)
-        self.assertEqual(policy.actions["HIGH"].install, "block")
-        self.assertEqual(policy.actions["HIGH"].runtime, "disable")
-        self.assertEqual(policy.actions["MEDIUM"].install, "none")
-        self.assertEqual(policy.scanner_overrides["mcp"]["MEDIUM"].install, "block")
-        self.assertIn(("plugin", "defenseclaw"), policy.first_party_allow)
-        self.assertIn(("skill", "codeguard"), policy.first_party_allow)
-
-    def test_valid_data_json(self):
-        tmp = tempfile.mkdtemp()
-        rego_dir = os.path.join(tmp, "rego")
-        os.makedirs(rego_dir)
-        with open(os.path.join(rego_dir, "data.json"), "w") as f:
-            json.dump({
-                "config": {"allow_list_bypass_scan": False, "scan_on_install": False},
-                "actions": {"MEDIUM": {"runtime": "block", "file": "quarantine", "install": "block"}},
-                "first_party_allow_list": [
-                    {"target_type": "skill", "target_name": "codeguard", "reason": "first-party"},
-                ],
-            }, f)
-        policy = load_admission_policy(tmp)
-        self.assertFalse(policy.allow_list_bypass_scan)
-        self.assertFalse(policy.scan_on_install)
-        self.assertIn("MEDIUM", policy.actions)
-        self.assertEqual(policy.actions["MEDIUM"].runtime, "disable")
-        self.assertIn(("skill", "codeguard"), policy.first_party_allow)
-
-    def test_invalid_json_returns_defaults(self):
-        tmp = tempfile.mkdtemp()
-        rego_dir = os.path.join(tmp, "rego")
-        os.makedirs(rego_dir)
-        with open(os.path.join(rego_dir, "data.json"), "w") as f:
-            f.write("{not json")
-        policy = load_admission_policy(tmp)
-        self.assertTrue(policy.allow_list_bypass_scan)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].actions.install, "allow")
+        self.assertEqual(install_counts(self.store, self.cfg)[:2], (0, 1))
 
 
 class TestPolicyEngineToolConnectorScope(_StoreTestBase):
@@ -1069,57 +1040,92 @@ class TestPolicyEngineToolConnectorScope(_StoreTestBase):
     Mirrors internal/enforce/policy_test.go::TestPolicyEngineToolConnectorScope.
     """
 
+    def test_secure_client_tool_scope_uses_gateway_key(self):
+        from unittest.mock import patch
+
+        self.cfg.deployment_mode = "managed_enterprise"
+        with patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "secure_client"}):
+            self.pe.block_tool_for_connector("delete_file", "claudecode", "scoped")
+            row = self.store.get_action("tool", "@claudecode/delete_file")
+            self.assertIsNotNone(row)
+            self.assertEqual(row.actions.install, "block")
+            self.assertTrue(self.pe.is_blocked_for_connector("tool", "delete_file", "claudecode"))
+            self.assertFalse(self.pe.is_blocked_for_connector("tool", "delete_file", "codex"))
+            self.pe.allow_tool_for_connector("delete_file", "claudecode", "reviewed")
+            self.assertTrue(self.pe.is_allowed_for_connector("tool", "delete_file", "claudecode"))
+            self.pe.unblock_tool_for_connector("delete_file", "claudecode")
+            self.assertIsNone(self.store.get_action("tool", "@claudecode/delete_file"))
+
     def test_connector_block_isolated(self):
         self.pe.block_tool_for_connector("delete_file", "hermes", "scoped")
-        self.assertTrue(self.pe.is_tool_blocked_for_connector("delete_file", "hermes"))
-        self.assertFalse(self.pe.is_tool_blocked_for_connector("delete_file", "codex"))
-        self.assertFalse(self.pe.is_tool_blocked_for_connector("delete_file", ""))
-        self.assertFalse(self.pe.is_tool_blocked_for_connector("delete_file"))
+        self.assertTrue(self.pe.is_blocked_for_connector("tool", "delete_file", "hermes"))
+        self.assertFalse(self.pe.is_blocked_for_connector("tool", "delete_file", "codex"))
+        self.assertFalse(self.pe.is_blocked_for_connector("tool", "delete_file", ""))
+        self.assertFalse(self.pe.is_blocked_for_connector("tool", "delete_file", ""))
 
     def test_global_block_hits_all_connectors(self):
         self.pe.block_tool_for_connector("delete_file", "", "global")
         for connector in ("", "hermes", "codex"):
             self.assertTrue(
-                self.pe.is_tool_blocked_for_connector("delete_file", connector)
+                self.pe.is_blocked_for_connector("tool", "delete_file", connector)
             )
 
     def test_connector_allow_isolated(self):
         self.pe.allow_tool_for_connector("search", "hermes", "scoped")
-        self.assertTrue(self.pe.is_tool_allowed_for_connector("search", "hermes"))
-        self.assertFalse(self.pe.is_tool_allowed_for_connector("search", "codex"))
-        self.assertFalse(self.pe.is_tool_allowed_for_connector("search", ""))
+        self.assertTrue(self.pe.is_allowed_for_connector("tool", "search", "hermes"))
+        self.assertFalse(self.pe.is_allowed_for_connector("tool", "search", "codex"))
+        self.assertFalse(self.pe.is_allowed_for_connector("tool", "search", ""))
 
     def test_global_allow_applies_to_all_connectors(self):
         self.pe.allow_tool_for_connector("search", "", "global")
         for connector in ("", "hermes", "codex"):
             self.assertTrue(
-                self.pe.is_tool_allowed_for_connector("search", connector)
+                self.pe.is_allowed_for_connector("tool", "search", connector)
             )
 
     def test_connector_allow_overrides_global_block_for_connector(self):
         # Connector-scoped rows are authoritative before the global fallback.
         self.pe.block_tool_for_connector("write_file", "", "global block")
         self.pe.allow_tool_for_connector("write_file", "hermes", "scoped allow")
-        self.assertFalse(self.pe.is_tool_blocked_for_connector("write_file", "hermes"))
-        self.assertTrue(self.pe.is_tool_allowed_for_connector("write_file", "hermes"))
-        self.assertTrue(self.pe.is_tool_blocked_for_connector("write_file", "codex"))
-        self.assertFalse(self.pe.is_tool_allowed_for_connector("write_file", "codex"))
-
-    def test_connector_allow_clears_enforcement(self):
-        target = "@hermes/run"
-        self.store.set_action_field("tool", target, "file", "quarantine", "scan")
-        self.store.set_action_field("tool", target, "runtime", "disable", "scan")
-        self.pe.allow_tool_for_connector("run", "hermes", "approved")
-        self.assertFalse(self.store.has_action("tool", target, "file", "quarantine"))
-        self.assertFalse(self.store.has_action("tool", target, "runtime", "disable"))
-
-    def test_connector_scope_orthogonal_to_source_scope(self):
-        # "@C/T" (connector) and "S/T" (source) are distinct namespaces: a
-        # connector-scoped block must not satisfy a source-scoped lookup.
-        self.pe.block_tool_for_connector("x", "hermes", "conn")
-        self.assertTrue(self.pe.is_tool_blocked_for_connector("x", "hermes"))
-        self.assertFalse(self.pe.is_tool_blocked("x", source="hermes"))
+        self.assertFalse(self.pe.is_blocked_for_connector("tool", "write_file", "hermes"))
+        self.assertTrue(self.pe.is_allowed_for_connector("tool", "write_file", "hermes"))
+        self.assertTrue(self.pe.is_blocked_for_connector("tool", "write_file", "codex"))
+        self.assertFalse(self.pe.is_allowed_for_connector("tool", "write_file", "codex"))
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_secure_client_partial_actions_keep_builtin_medium_warning(tmp_path, monkeypatch):
+    import json
+
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "secure_client")
+    rego = tmp_path / "rego"
+    rego.mkdir()
+    (rego / "data.json").write_text(json.dumps({"actions": {"CRITICAL": {
+        "install": "block", "file": "quarantine", "runtime": "block",
+    }}}), encoding="utf-8")
+    cfg = SimpleNamespace(deployment_mode="managed_enterprise", policy_dir=str(tmp_path))
+    policy = compile_admission(cfg, "skill")
+    action, _ = effective_action_for(policy, severity="MEDIUM")
+    assert action.install == "none"
+    assert action.runtime == "enable"
+
+
+def test_secure_client_observe_denied_skill_keeps_would_block(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "secure_client")
+    cfg = _FakeConfig()
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.policy_dir = str(tmp_path)
+    cfg.asset_policy.enabled = True
+    cfg.asset_policy.mode = "observe"
+    cfg.asset_policy.skill.denied = [SimpleNamespace(name="denied", connector="", reason="operator")]
+    store, db_path = make_temp_store()
+    try:
+        decision = evaluate_admission(PolicyEngine(store, cfg), target_type="skill", name="denied")
+        assert decision.verdict == "scan"
+        assert decision.observed_source == "asset-policy-deny-observe"
+    finally:
+        store.close()
+        os.unlink(db_path)

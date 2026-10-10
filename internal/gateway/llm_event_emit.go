@@ -750,6 +750,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 	meta.ToolID = firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
 	meta.ToolName = req.ToolName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
+	meta = a.applyCursorToolEventOutcome(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
 	meta = a.applyCopilotSubagentLineage(meta, req.Payload)
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
@@ -1176,6 +1177,30 @@ func applyHookEventMeta(meta llmEventMeta, event string, payload map[string]inte
 	return meta
 }
 
+// Cursor declares the terminal hook event kind as the outcome authority.
+// A successful postToolUse can carry a reason mentioning an earlier failed
+// operation; the generic status-word heuristic must not override that event.
+func (a *APIServer) applyCursorToolEventOutcome(meta llmEventMeta, event string, payload map[string]interface{}) llmEventMeta {
+	if meta.Source != "cursor" || meta.LifecycleEvent != "tool_end" {
+		return meta
+	}
+	lifecycle := a.hookProfileForConnector(meta.Source).ToolCallLifecycle
+	if lifecycle.OutcomeAuthority != connector.ToolOutcomeEventKind {
+		return meta
+	}
+	switch lifecycle.ClassifyTerminalOutcome(meta.Source, event, payload) {
+	case connector.ToolLifecycleOutcomeSuccess:
+		meta.LifecycleOutcome = "completed"
+	case connector.ToolLifecycleOutcomeFailure:
+		meta.LifecycleOutcome = "failed"
+	case connector.ToolLifecycleOutcomeDenied:
+		meta.LifecycleOutcome = "denied"
+	case connector.ToolLifecycleOutcomeCancelled:
+		meta.LifecycleOutcome = "cancelled"
+	}
+	return meta
+}
+
 // finalizeHookEventCorrelation derives identities only after execution and
 // trace correlation are authoritative. Session starts may rotate an execution,
 // and generic events need their per-delivery trace identity to avoid collapsing
@@ -1341,6 +1366,11 @@ func hookLifecycleDedupeKey(meta llmEventMeta, payload map[string]interface{}) s
 			),
 			stableHookToolIdentity(payload),
 		)
+		// Cursor can reuse a call ID for different tools in one turn.
+		// Their terminal records must keep separate canonical outcomes.
+		if meta.Source == "cursor" && identity != "" {
+			identity = stableLLMEventID("tool-lifecycle", meta.ToolName, identity)
+		}
 	case "session_start", "session_end", "subagent_start", "subagent_stop", "compact_start", "compact_end":
 		identity = firstNonEmpty(meta.LifecycleID, meta.SessionID)
 	}

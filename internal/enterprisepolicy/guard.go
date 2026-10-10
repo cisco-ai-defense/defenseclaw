@@ -22,9 +22,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pelletier/go-toml/v2"
-
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
 
@@ -614,6 +613,8 @@ func ownedCommand(command, hookBinary string) bool {
 	if strings.EqualFold(command, hookBinary) {
 		return true
 	}
+	// Copilot commands start with the removed-deployment guard.
+	command = strings.TrimPrefix(command, connector.CopilotRemovedDeploymentGuardPOSIX(hookBinary))
 	rest, ok := strings.CutPrefix(command, shellQuote(hookBinary)+" hook --connector ")
 	if !ok {
 		return false
@@ -875,7 +876,7 @@ func (s *guardScan) scanJSONHooks(source hookSource, data []byte) []Finding {
 func (s *guardScan) scanCodexTOML(source hookSource, data []byte) []Finding {
 	req := s.req
 	cfg := map[string]any{}
-	if err := toml.Unmarshal(data, &cfg); err != nil {
+	if err := connector.ParseCodexTOML(data, &cfg); err != nil {
 		return []Finding{s.unreadable(source, err)}
 	}
 	hooks, _ := cfg["hooks"].(map[string]any)

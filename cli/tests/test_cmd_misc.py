@@ -84,7 +84,7 @@ class TestStatusCommand(unittest.TestCase):
         mock_client.is_running.return_value = False
         mock_client_cls.return_value = mock_client
 
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("skill", "bad", "test")
         pe.allow("skill", "good", "test")
 
@@ -176,13 +176,9 @@ class TestAlertsCommand(unittest.TestCase):
         else:
             os.environ["COLUMNS"] = self._orig_columns
 
-    # ------------------------------------------------------------------
-    # Helpers: existing tests updated to pass --no-tui (TUI is default)
-    # ------------------------------------------------------------------
-
     def test_alerts_empty(self):
         from defenseclaw.commands.cmd_alerts import alerts
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No alerts", result.output)
 
@@ -194,7 +190,7 @@ class TestAlertsCommand(unittest.TestCase):
         self.app.store.log_event(Event(action="scan-finding", target="/skills/worse",
                                        severity="CRITICAL", details="major vulnerability"))
 
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Security Alerts", result.output)
         self.assertIn("HIGH", result.output)
@@ -207,7 +203,7 @@ class TestAlertsCommand(unittest.TestCase):
             self.app.store.log_event(Event(action="scan-finding", target=f"/skills/s{i}",
                                            severity="MEDIUM", details=f"issue {i}"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "-n", "2"], obj=self.app,
+        result = self.runner.invoke(alerts, ["-n", "2"], obj=self.app,
                                     catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Security Alerts", result.output)
@@ -215,7 +211,7 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_no_store(self):
         from defenseclaw.commands.cmd_alerts import alerts
         self.app.store = None
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No audit store", result.output)
 
@@ -230,7 +226,7 @@ class TestAlertsCommand(unittest.TestCase):
                                        severity="HIGH",
                                        details="scanner=skill-scanner findings=2 max_severity=HIGH"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+        result = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
                                     catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Alert #1", result.output)
@@ -245,7 +241,7 @@ class TestAlertsCommand(unittest.TestCase):
         event = Event(id="a1", action="telemetry-destination", severity="HIGH",
                       details="galileo/traces failed: request_timeout")
         with patch.object(self.app.store, "list_alerts", return_value=[event]):
-            result = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+            result = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
                                         catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("galileo/traces failed: request_timeout", result.output)
@@ -265,9 +261,9 @@ class TestAlertsCommand(unittest.TestCase):
                   details="galileo/traces failed: http_authentication"),
         ]
         with patch.object(self.app.store, "list_alerts", return_value=events):
-            circuit = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+            circuit = self.runner.invoke(alerts, ["--show", "1"], obj=self.app,
                                          catch_exceptions=False)
-            delivery = self.runner.invoke(alerts, ["--no-tui", "--show", "2"], obj=self.app,
+            delivery = self.runner.invoke(alerts, ["--show", "2"], obj=self.app,
                                           catch_exceptions=False)
         self.assertEqual(circuit.exit_code, 0, circuit.output)
         self.assertIn("galileo degraded: otlp export paused after 1 failure (authentication", circuit.output)
@@ -284,7 +280,7 @@ class TestAlertsCommand(unittest.TestCase):
         self.app.store.log_event(Event(action="scan-finding", target="/skills/x",
                                        severity="LOW", details="scanner=skill-scanner findings=0"))
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--show", "99"], obj=self.app,
+        result = self.runner.invoke(alerts, ["--show", "99"], obj=self.app,
                                     catch_exceptions=True)
         self.assertNotEqual(result.exit_code, 0)
 
@@ -304,7 +300,7 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex"],
+        result = self.runner.invoke(alerts, ["--connector", "codex"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         # The scope is reflected in the title and only codex rows survive.
@@ -317,7 +313,7 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
         self._seed_two_connectors()
 
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "CODEX"],
+        result = self.runner.invoke(alerts, ["--connector", "CODEX"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=codex", result.output)
@@ -329,7 +325,7 @@ class TestAlertsCommand(unittest.TestCase):
 
         # A known connector without alerts; an unknown name exits 1 (GAP-2130,
         # covered in test_alerts_connector_ux_b2.py).
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "cursor"],
+        result = self.runner.invoke(alerts, ["--connector", "cursor"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No alerts from connector 'cursor'", result.output)
@@ -339,7 +335,7 @@ class TestAlertsCommand(unittest.TestCase):
         self._seed_two_connectors()
 
         # --show 1 should resolve against the filtered list, i.e. the codex row.
-        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex", "--show", "1"],
+        result = self.runner.invoke(alerts, ["--connector", "codex", "--show", "1"],
                                     obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Alert #1", result.output)
@@ -350,7 +346,7 @@ class TestAlertsCommand(unittest.TestCase):
         self._seed_two_connectors()
 
         # Without --connector, both connectors' rows render (no-op parity).
-        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("connector=codex", result.output)
         self.assertIn("claudec", result.output)
@@ -956,6 +952,18 @@ class TestSetupCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Configure skill-scanner", result.output)
 
+    def test_setup_skill_scanner_without_a_judge_recommends_one(self):
+        """No llm: block -> static rules with the quiet policy, and the wizard
+        recommends a judge (never a rules-only setup)."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup, ["skill-scanner", "--non-interactive", "--no-verify"], obj=self.app, catch_exceptions=False
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.scanners.skill_scanner.policy, "quiet")
+        self.assertIn("defenseclaw setup llm", result.output)
+
     def test_setup_non_interactive_flags(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -1014,7 +1022,6 @@ class TestSetupGuardrailUnifiedLLMSharing(unittest.TestCase):
                     "guardrail",
                     "--non-interactive",
                     "--no-restart",
-                    "--no-verify",
                     "--mode", "observe",
                     "--scanner-mode", "local",
                     "--judge-model", "bedrock/claude-3-5-haiku-20241022",
@@ -1099,7 +1106,6 @@ class TestSetupGuardrailJudgeFlagsObserveMode(unittest.TestCase):
                     "guardrail",
                     "--non-interactive",
                     "--no-restart",
-                    "--no-verify",
                     "--connector", "claudecode",
                     "--mode", mode,
                     "--judge-model", "us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -1218,7 +1224,7 @@ class TestSetupSkillScannerCommonConfig(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(self.app.cfg.scanners.skill_scanner.use_aidefense)
+        self.assertTrue(self.app.cfg.scanners.skill_scanner.analyzers.aidefense.enabled)
 
 
 class TestSetupMCPScannerCommonConfig(unittest.TestCase):
@@ -1266,8 +1272,36 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
         self.assertIn("llm.model", result.output)
         self.assertNotIn("inspect_llm.provider", result.output)
 
+    def test_auto_inside_analyzers_keeps_yara(self):
+        """M29: "auto,llm" (what the old wizard saved) runs YARA and the LLM."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["mcp-scanner", "--non-interactive", "--no-verify", "--analyzers", "auto,llm"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.scanners.mcp_scanner.analyzers, "yara,llm")
+
+    def test_openai_compatible_accepts_base_url(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["mcp-scanner", "--non-interactive", "--no-verify",
+             "--llm-provider", "openai-compatible", "--llm-model", "test-model",
+             "--llm-base-url", "https://llm.example/v1"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.llm.provider, "openai")
+        self.assertEqual(self.app.cfg.llm.base_url, "https://llm.example/v1")
+
     def test_mcp_scanner_no_old_llm_flags(self):
-        """The old --endpoint-url, --llm-base-url, --llm-timeout, --llm-max-retries flags are gone."""
+        """The retired endpoint and timeout options remain absent."""
         from defenseclaw.commands.cmd_setup import setup
 
         result = self.runner.invoke(
@@ -1276,7 +1310,6 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("--endpoint-url", result.output)
-        self.assertNotIn("--llm-base-url", result.output)
         self.assertNotIn("--llm-timeout", result.output)
         self.assertNotIn("--llm-max-retries", result.output)
 
@@ -1370,22 +1403,23 @@ class TestSetupSplunkCommand(unittest.TestCase):
                 )
             )
         if local:
-            destinations.append(
-                _build_v8_preset_destination(
-                    PRESETS["splunk-hec"],
-                    {
-                        "host": "127.0.0.1",
-                        "port": "8088",
-                        "index": "defenseclaw_local",
-                        "source": "defenseclaw",
-                        "sourcetype": "defenseclaw:json",
-                    },
-                    name="splunk-hec-local",
-                    enabled=True,
-                    signals=None,
-                    target=None,
-                )
+            local_destination = _build_v8_preset_destination(
+                PRESETS["splunk-hec"],
+                {
+                    "host": "127.0.0.1",
+                    "port": "8088",
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                },
+                name="splunk-hec-local",
+                enabled=True,
+                signals=None,
+                target=None,
             )
+            # As the local Splunk setup writes it (GAP-0208).
+            local_destination["network_safety"] = {"allow_private_networks": True}
+            destinations.append(local_destination)
         self._write_v8_destinations(destinations)
 
     def tearDown(self):
@@ -1875,7 +1909,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertNotEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertNotIn("Local Splunk configured (Free mode from day 1)", result.output)
 
     @patch(
@@ -2032,7 +2065,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Local Splunk enablement cancelled.", result.output)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         mock_preflight.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(False, "docker_not_installed"))
@@ -2051,7 +2083,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             input=user_input, catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertNotIn("Local Splunk configured", result.output)
         mock_preflight.assert_called_once()
 
@@ -2095,7 +2126,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.otel.enabled)
         self.assertIn("O11y (OTLP): disabled", result.output)
 
     def test_setup_splunk_disable_logs(self):
@@ -2109,7 +2139,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertIn("HEC): disabled", result.output)
 
     def test_setup_splunk_disable_both(self):
@@ -2123,8 +2152,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertFalse(self.app.cfg.otel.enabled)
-        self.assertFalse(self.app.cfg.splunk.enabled)
 
     @patch("defenseclaw.commands.cmd_setup.apply_dashboards")
     def test_setup_splunk_interactive_o11y(self, mock_apply_dashboards):

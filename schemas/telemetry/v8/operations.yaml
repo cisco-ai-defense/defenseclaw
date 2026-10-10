@@ -4597,10 +4597,13 @@ groups:
       - workdir
       reserved_keys:
       - defenseclaw.claw.home_dir
+      - defenseclaw.device.id
       - defenseclaw.gateway.host
       - defenseclaw.gateway.port
       - defenseclaw.preset
       - defenseclaw.preset_name
+      - deployment.environment
+      - deployment.mode
       - discovery.source
       - telemetry.sdk.language
       - telemetry.sdk.name
@@ -4608,13 +4611,6 @@ groups:
       forbidden_value_classes:
       - filesystem_path
       - credential_material
-    compatibility_aliases:
-    - alias: deployment.environment
-      canonical: deployment.environment.name
-    - alias: deployment.mode
-      canonical: defenseclaw.deployment.mode
-    - alias: defenseclaw.device.id
-      canonical: defenseclaw.device.public_key_fingerprint
     legacy_bindings:
     - source: schemas/otel/resource.schema.json
       disposition: preserved
@@ -4656,6 +4652,7 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - correlation.security
+  - correlation.policy.effective
   attributes:
   - ref: defenseclaw.asset.id
     requirement_level: recommended
@@ -10319,6 +10316,7 @@ groups:
   introduced_in: telemetry-registry-v2
   extends:
   - body.compliance.activity
+  - correlation.policy.effective
   - correlation.sandbox
   attributes: []
   body_fields: []

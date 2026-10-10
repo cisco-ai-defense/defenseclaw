@@ -324,7 +324,7 @@ class TestPluginInstall(PluginCommandTestBase):
     def test_install_of_a_blocked_plugin_points_at_unblock(self, mock_scan):
         # GAP-2112: allow also skips the scan gate; unblock only clears the block.
         mock_scan.return_value = self._clean_result()
-        PolicyEngine(self.app.store).block("plugin", "held-plugin", "test")
+        PolicyEngine(self.app.store, self.app.cfg).block("plugin", "held-plugin", "test")
         result = self._invoke_install(["install", self._create_plugin_dir("held-plugin")])
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("'defenseclaw plugin unblock held-plugin --connector", result.output)
@@ -1105,7 +1105,7 @@ class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
         os.makedirs(os.path.join(codex_dir, "dc-plugin-scope"))
         self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
         self.app.cfg.plugin_dirs = lambda connector=None: [codex_dir]  # type: ignore[method-assign]
-        PolicyEngine(self.app.store).disable_for_connector(
+        PolicyEngine(self.app.store, self.app.cfg).disable_for_connector(
             "plugin",
             "dc-plugin-scope",
             "codex",
@@ -1380,7 +1380,7 @@ class TestPluginBlock(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[plugin] Blocked 'blocked-one' (every connector).", result.output)
         self.assertIn("blocked-one", result.output)
-        self.assertTrue(PolicyEngine(self.app.store).is_blocked("plugin", "blocked-one"))
+        self.assertTrue(PolicyEngine(self.app.store, self.app.cfg).is_blocked("plugin", "blocked-one"))
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-block"]
         self.assertEqual(len(events), 1)
 
@@ -1401,7 +1401,7 @@ class TestPluginBlock(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[plugin] Unblocked 'loaded-two' (every connector).", result.output)
         self.assertNotIn("(openclaw).", result.output)
-        self.assertFalse(PolicyEngine(self.app.store).is_blocked("plugin", "loaded-two"))
+        self.assertFalse(PolicyEngine(self.app.store, self.app.cfg).is_blocked("plugin", "loaded-two"))
 
     def test_block_custom_reason_in_audit_log(self):
         self.invoke(["block", "r1", "--reason", "CVE-1234"])
@@ -1410,11 +1410,21 @@ class TestPluginBlock(PluginCommandTestBase):
 
 
 class TestPluginAllow(PluginCommandTestBase):
+    def test_allow_quarantined_copy_requires_restore(self):
+        self._install_plugin("held-copy")
+        self.assertEqual(self.invoke(["quarantine", "held-copy", "--connector", "openclaw"]).exit_code, 0)
+
+        result = self.invoke(["allow", "held-copy", "--connector", "openclaw"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("restore it before allowing", result.output)
+        self.assertFalse(self.app.cfg.asset_policy.plugin.allowed)
+        self.assertEqual(self.invoke(["restore", "held-copy"]).exit_code, 0)
+
     def test_allow_happy_path(self):
         result = self.invoke(["allow", "allowed-one"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[plugin] Allowed 'allowed-one' (every connector).", result.output)
-        self.assertTrue(PolicyEngine(self.app.store).is_allowed("plugin", "allowed-one"))
+        self.assertTrue(PolicyEngine(self.app.store, self.app.cfg).is_allowed("plugin", "allowed-one"))
         events = [e for e in self.app.store.list_events(10) if e.action == "plugin-allow"]
         self.assertEqual(len(events), 1)
 
@@ -1431,7 +1441,7 @@ class TestPluginAllow(PluginCommandTestBase):
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_allow_reenables_runtime_disable_before_clearing_db(self, mock_cls):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable("plugin", "safe-plugin", "runtime blocked")
 
         mock_cls.return_value.enable_plugin.return_value = {"status": "enabled"}
@@ -1444,7 +1454,7 @@ class TestPluginAllow(PluginCommandTestBase):
 
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_allow_preserves_runtime_disable_when_gateway_enable_fails(self, mock_cls):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable("plugin", "safe-plugin", "runtime blocked")
 
         mock_cls.return_value.enable_plugin.side_effect = Exception("timeout")
@@ -1460,7 +1470,7 @@ class TestPluginAllow(PluginCommandTestBase):
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_allow_scoped_name_clears_resolved_runtime_disable(self, mock_cls, mock_list):
         mock_list.return_value = [{"id": "xai", "name": "@openclaw/xai-plugin"}]
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable("plugin", "xai", "runtime blocked")
 
         mock_cls.return_value.enable_plugin.return_value = {"status": "enabled"}
@@ -1641,7 +1651,7 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
         hermes_dir = os.path.join(self.tmp_dir, "hermes-plugins")
         os.makedirs(os.path.join(hermes_dir, "any-plugin"))
         self.app.cfg.plugin_dirs = lambda connector=None: [hermes_dir]  # type: ignore[method-assign]
-        PolicyEngine(self.app.store).disable("plugin", "any-plugin", "manual")
+        PolicyEngine(self.app.store, self.app.cfg).disable("plugin", "any-plugin", "manual")
         result = self.invoke(["enable", "any-plugin"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("runtime disable cleared (connector=hermes)", result.output)
@@ -1675,7 +1685,7 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
         os.makedirs(os.path.join(hermes_dir, "dc-plugin-scope"))
         mapping = {"codex": [codex_dir], "hermes": [hermes_dir]}
         self.app.cfg.plugin_dirs = lambda connector=None: mapping.get(connector or "codex", [])  # type: ignore[method-assign]
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.disable_for_connector("plugin", "dc-plugin-scope", "codex", "manual")
         pe.disable_for_connector("plugin", "dc-plugin-scope", "hermes", "manual")
 
@@ -1705,7 +1715,7 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
         os.makedirs(hermes_dir)
         mapping = {"codex": [codex_dir], "hermes": [hermes_dir]}
         self.app.cfg.plugin_dirs = lambda connector=None: mapping.get(connector or "codex", [])  # type: ignore[method-assign]
-        PolicyEngine(self.app.store).disable("plugin", "missing-plugin", "legacy global")
+        PolicyEngine(self.app.store, self.app.cfg).disable("plugin", "missing-plugin", "legacy global")
 
         result = self.invoke(["enable", "missing-plugin"])
 
@@ -1744,7 +1754,7 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
     @patch("defenseclaw.gateway.OrchestratorClient")
     def test_enable_connector_clears_scoped_disable_without_gateway(self, mock_cls):
         self.app.cfg.active_connectors = lambda: ["openclaw", "codex", "claudecode"]  # type: ignore[method-assign]
-        PolicyEngine(self.app.store).disable_for_connector(
+        PolicyEngine(self.app.store, self.app.cfg).disable_for_connector(
             "plugin", "any-plugin", "codex", "manual",
         )
         result = self.invoke(["enable", "any-plugin", "--connector", "codex"])
@@ -1764,7 +1774,7 @@ class TestPluginRuntimeToggleConnectorGuard(PluginCommandTestBase):
         os.makedirs(os.path.join(hermes_dir, "dc-plugin-scope"))
         mapping = {"codex": [codex_dir], "hermes": [hermes_dir]}
         self.app.cfg.plugin_dirs = lambda connector=None: mapping.get(connector or "codex", [])  # type: ignore[method-assign]
-        PolicyEngine(self.app.store).disable("plugin", "dc-plugin-scope", "manual global")
+        PolicyEngine(self.app.store, self.app.cfg).disable("plugin", "dc-plugin-scope", "manual global")
 
         result = self.invoke(["enable", "dc-plugin-scope", "--connector", "codex"])
 
@@ -1808,7 +1818,7 @@ class TestPluginQuarantineRestore(PluginCommandTestBase):
         qpath = os.path.join(self.app.cfg.quarantine_dir, "plugins", "openclaw", "qplug")
         self.assertTrue(os.path.isdir(qpath))
         self.assertTrue(
-            PolicyEngine(self.app.store).is_quarantined_for_connector(
+            PolicyEngine(self.app.store, self.app.cfg).is_quarantined_for_connector(
                 "plugin", "qplug", "openclaw",
             )
         )
@@ -2002,7 +2012,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         hermes_path = self._seed_connector_plugin("hermes", "shared")
         _seed_scan(self.app.store, self._clean_scan_result(codex_path))
         _seed_scan(self.app.store, self._clean_scan_result(hermes_path))
-        PolicyEngine(self.app.store).block_for_connector(
+        PolicyEngine(self.app.store, self.app.cfg).block_for_connector(
             "plugin", "shared", "hermes", "manual",
         )
 
@@ -2030,7 +2040,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
 
     def test_scoped_info_labels_connector_for_not_installed_action_card(self):
         self._seed_connector_plugin("codex", "removed")
-        PolicyEngine(self.app.store).disable_for_connector(
+        PolicyEngine(self.app.store, self.app.cfg).disable_for_connector(
             "plugin", "removed", "codex", "manual",
         )
         remove_result = self.invoke(["remove", "removed", "--connector", "codex"])
@@ -2044,7 +2054,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertIn("Actions:     disabled", result.output)
 
     def test_info_global_action_does_not_create_phantom_card(self):
-        PolicyEngine(self.app.store).block("plugin", "ghost", "manual")
+        PolicyEngine(self.app.store, self.app.cfg).block("plugin", "ghost", "manual")
 
         result = self.invoke(["info", "ghost"])
 
@@ -2120,7 +2130,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
     def test_bare_unblock_clears_all_scoped_enforcement_fields(self):
         self._seed_connector_plugin("codex", "shared")
         self._seed_connector_plugin("hermes", "shared")
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block_for_connector("plugin", "shared", "codex", "manual block")
         pe.disable_for_connector("plugin", "shared", "codex", "manual disable")
         pe.allow_for_connector("plugin", "shared", "hermes", "manual allow")
@@ -2693,7 +2703,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_blocked_plugin(self, mock_fetch):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("plugin", "blocked-pkg", "testing")
         src = self._create_plugin_dir("downloaded-blocked-source")
         with open(os.path.join(src, "plugin.json"), "w") as f:
@@ -2708,7 +2718,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_allowed_plugin_skips_scan(self, mock_fetch, mock_scan):
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.allow("plugin", "trusted-pkg", "testing")
 
         src = self._create_plugin_dir("trusted-pkg")
@@ -2755,20 +2765,15 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         result = self._invoke_install(["install", "--action", "danger-pkg"])
 
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("added to block list", result.output)
+        self.assertIn("install blocked by this scan", result.output)
         self.assertIn("quarantined", result.output)
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "danger-pkg")))
 
     @patch("defenseclaw.gateway.OrchestratorClient.disable_plugin")
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
-    def test_install_action_strict_config_quarantines_critical(self, mock_fetch, mock_scan, mock_disable):
-        """With strict plugin_actions config, --action on CRITICAL quarantines and blocks."""
-        from defenseclaw.config import PluginActionsConfig, SeverityAction
-        self.app.cfg.plugin_actions = PluginActionsConfig(
-            critical=SeverityAction(file="quarantine", runtime="disable", install="block"),
-            high=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
+    def test_install_action_critical_records_the_install_block(self, mock_fetch, mock_scan, mock_disable):
+        """--action on CRITICAL quarantines (admission default) and records the scan block."""
         mock_scan.return_value = self._critical_scan_result()
         src = self._create_plugin_dir("strict-danger-pkg")
         mock_fetch.return_value = src
@@ -2778,11 +2783,10 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
         self.assertEqual(result.exit_code, 1)
         self.assertIn("quarantined", result.output)
-        self.assertIn("block list", result.output)
-        pe = PolicyEngine(self.app.store)
-        self.assertTrue(
-            pe.is_blocked_for_connector("plugin", "strict-danger-pkg", "openclaw")
-        )
+        self.assertIn("install blocked by this scan", result.output)
+        # A scan verdict's install block is enforcement journal, not policy.
+        journal = self.app.store.get_action("plugin", "strict-danger-pkg", "openclaw")
+        self.assertEqual(journal.actions.install if journal else None, "block")
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
@@ -2933,7 +2937,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         mock_fetch.return_value = src
 
         # Block the DERIVED name (basename of the fetched source dir).
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("plugin", "evil-url-plugin", "testing url admission bypass")
 
         result = self._invoke_install(["install", "https://evil.example.com/pkg.tgz"])

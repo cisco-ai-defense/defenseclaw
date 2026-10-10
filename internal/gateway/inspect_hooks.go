@@ -25,8 +25,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/google/uuid"
 )
 
 // inspectMode returns the authenticated connector's guardrail mode for the
@@ -164,11 +166,10 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
 			return
 		}
+		// A prompt block stands: guardrail.block_at is one threshold on every
+		// surface. A prompt is never confirmable, so there is no confirm to
+		// demote.
 		verdict = a.buildVerdict(r.Context(), ruleFindings, "prompt", false)
-		// Apply the prompt-surface UX contract before mode handling so
-		// "action" mode operators see alert (instead of block) and "observe"
-		// mode operators see the same audit reason explaining the demotion.
-		clampPromptDirectionToolVerdict(verdict, "prompt")
 	}
 	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), profileRequestConnector(r.Context())))
 
@@ -399,6 +400,9 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	}
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/tool-response", auditAction, req.Tool, auditDetails))
+	if !managedAIDOnly {
+		a.alertSensitiveToolResult(r, req.Tool, outputStr, verdict)
+	}
 
 	reveal := wantsReveal(r)
 	if managedAIDOnly {
@@ -407,28 +411,154 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
-// buildVerdict converts rule findings into a ToolInspectVerdict.
-func buildVerdict(ruleFindings []RuleFinding, direction string) *ToolInspectVerdict {
-	return buildVerdictWithConfig(ruleFindings, direction, nil, false)
+// alertSensitiveToolResult raises tool-result-pii-alert for a tool result on
+// the generic inspect endpoint; see sensitiveToolResultAlert.
+func (a *APIServer) alertSensitiveToolResult(r *http.Request, tool, output string, verdict *ToolInspectVerdict) {
+	if verdict == nil || a.logger == nil {
+		return
+	}
+	details, ok := a.sensitiveToolResultAlert(r.Context(), profileRequestConnector(r.Context()), tool, verdict.Severity, verdict.Findings, output)
+	if !ok {
+		return
+	}
+	event := a.inspectAuditEvent(
+		r, "/api/v1/inspect/tool-response", string(audit.ActionToolResultPIIAlert), tool, details)
+	a.raiseToolResultAlert(r.Context(), event, verdict.Severity)
 }
 
+// alertSensitiveHookToolResult is the same alert for the connector hook
+// endpoints (Claude Code, Codex and every other agent hook), which finalize
+// their tool results through finalizeAgentHook instead of the inspect route.
+func (a *APIServer) alertSensitiveHookToolResult(ctx context.Context, connectorName string, req agentHookRequest, resp agentHookResponse) {
+	if a.logger == nil || a.managedAIDOnly() || req.ToolName == "" || !isResultLikeEvent(req.HookEventName) {
+		return
+	}
+	result := stringifyHookValue(firstValue(req.Payload, "tool_response", "toolResponse", "tool_result", "toolResult", "result", "error"))
+	details, ok := a.sensitiveToolResultAlert(ctx, connectorName, req.ToolName, resp.Severity, resp.Findings, result)
+	if !ok {
+		return
+	}
+	structured := map[string]any{"route": "hook:" + req.HookEventName, "connector": connectorName}
+	auditCallerIdentity(ctx).addTo(structured)
+	a.raiseToolResultAlert(ctx, audit.Event{
+		Action:     string(audit.ActionToolResultPIIAlert),
+		Target:     req.ToolName,
+		Details:    details,
+		Connector:  connectorName,
+		Structured: structured,
+	}, resp.Severity)
+}
+
+// raiseToolResultAlert files a tool-result-pii-alert with the severity of the
+// result's findings and sends it to the configured webhooks. The row used to
+// carry INFO, which the alert views leave out, so the alert was an audit row
+// no operator saw (GAP-0187). The details only count the findings.
+func (a *APIServer) raiseToolResultAlert(ctx context.Context, event audit.Event, findingSeverity string) {
+	event.Severity = toolResultAlertSeverity(findingSeverity)
+	// The logger stamps the row id on its own copy of the event, so give the
+	// event its id first: the webhook payload then carries the id of the audit
+	// row, and the delivery can be matched to the alert (GAP-0218).
+	if event.ID == "" {
+		event.ID = uuid.New().String()
+	}
+	_ = a.logger.LogEventCtx(ctx, event)
+	if a.webhookSource == nil {
+		return
+	}
+	if webhooks := a.webhookSource(); webhooks != nil {
+		event.Timestamp = time.Now().UTC()
+		event.Actor = "defenseclaw-hook"
+		event.Structured = nil
+		webhooks.Dispatch(event)
+	}
+}
+
+// toolResultAlertSeverity maps a findings severity to the outer severity of
+// the alert row: one the alert views list (never INFO or NONE).
+func toolResultAlertSeverity(severity string) string {
+	switch s := strings.ToUpper(strings.TrimSpace(severity)); s {
+	case "CRITICAL", "HIGH", "MEDIUM", "LOW":
+		return s
+	default:
+		return "MEDIUM"
+	}
+}
+
+// sensitiveToolResultAlert checks the same composed rule pack and entity rules
+// that scanned this request. Findings from a judge or another category do not
+// prove a sensitive value; only matched entity values count.
+func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
+	g := a.generation()
+	if g == nil {
+		return "", false
+	}
+	pack := g.RulePacks["conn:"+connectorName]
+	if pack == nil {
+		pack = g.RulePacks["global"]
+	}
+	if g.Profiles != nil {
+		resolved := resolvedGuardrailProfileFrom(ctx)
+		if resolved == nil || resolved.set != g.Profiles {
+			resolved = resolveGuardrailProfileFor(ctx, g.Profiles)
+		}
+		if resolved != nil && resolved.derived != nil {
+			key := effectiveRulePackKey(resolved.derived, connectorName)
+			if key != effectiveRulePackKey(g.Profiles.base, connectorName) {
+				if selected := g.Profiles.packs[key]; selected != nil {
+					pack = selected
+				} else if retry := g.Profiles.missing[key]; retry != nil {
+					if selected := retry.rulePack(time.Now()); selected != nil {
+						pack = selected
+					}
+				}
+			}
+		}
+	}
+	entry := pack.LookupSensitiveTool(tool)
+	if entry == nil || !entry.ResultInspection {
+		return "", false
+	}
+	minEntities := entry.MinEntitiesAlert
+	if minEntities <= 0 {
+		minEntities = 1
+	}
+	entities := countRuleEntitiesFor(ctx, connectorName, output)
+	if entities == 0 && output != "" {
+		// A judge can identify PII that has no deterministic pattern. Only
+		// its PII findings may stand in for matched values.
+		for _, finding := range findings {
+			if strings.HasPrefix(finding, "JUDGE-PII-") {
+				entities++
+			}
+		}
+	}
+	if entities < minEntities {
+		return "", false
+	}
+	return fmt.Sprintf("tool=%s severity=%s entities=%d", tool, severity, entities), true
+}
+
+// buildVerdict converts rule findings into a ToolInspectVerdict.
+func buildVerdict(ruleFindings []RuleFinding, direction string) *ToolInspectVerdict {
+	return buildVerdictWithConfig(ruleFindings, direction, nil, "", false)
+}
+
+// buildVerdict maps the findings with the levels of the connector the hook
+// request authenticated as (one threshold model). Under the Secure Client
+// integration content keeps the global posture levels, as before.
 func (a *APIServer) buildVerdict(ctx context.Context, ruleFindings []RuleFinding, direction string, confirmable bool) *ToolInspectVerdict {
 	cfg := (*config.Config)(nil)
 	if a != nil {
 		cfg = a.decisionConfig(ctx)
 	}
-	connector := ""
-	if cfg != nil && !cfg.SecureClientIntegration() {
-		connector = profileRequestConnector(ctx)
+	connector := profileRequestConnector(ctx)
+	if cfg != nil && cfg.SecureClientIntegration() {
+		connector = ""
 	}
-	return buildVerdictWithConfigForConnector(ruleFindings, direction, cfg, connector, confirmable)
+	return buildVerdictWithConfig(ruleFindings, direction, cfg, connector, confirmable)
 }
 
-func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *config.Config, confirmable bool) *ToolInspectVerdict {
-	return buildVerdictWithConfigForConnector(ruleFindings, direction, cfg, "", confirmable)
-}
-
-func buildVerdictWithConfigForConnector(ruleFindings []RuleFinding, direction string, cfg *config.Config, connector string, confirmable bool) *ToolInspectVerdict {
+func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *config.Config, connector string, confirmable bool) *ToolInspectVerdict {
 	if len(ruleFindings) == 0 {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
@@ -436,9 +566,7 @@ func buildVerdictWithConfigForConnector(ruleFindings []RuleFinding, direction st
 	severity := HighestSeverity(ruleFindings)
 	confidence := HighestConfidence(ruleFindings, severity)
 
-	action := guardrailRuntimeActionForFindings(
-		cfg, connector, ruleFindings, confirmable,
-	)
+	action := guardrailContentActionForFindings(cfg, connector, ruleFindings, confirmable)
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 	for i, f := range ruleFindings {

@@ -206,12 +206,34 @@ func TestColdStartDefersMultiConnectorRulePacksToIsolatedSetup(t *testing.T) {
 		"claudecode": {RulePackDir: invalidRulePackDir(t)},
 	}
 
-	rp, _, err := loadInitialSidecarRulePack(cfg)
+	_, rp, _, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		t.Fatalf("multi-connector cold-start global preflight: %v", err)
 	}
 	if rp == nil {
 		t.Fatal("multi-connector cold-start returned no validated global pack")
+	}
+}
+
+func TestColdStartKeepsValidConnectorPackWhenAnotherIsInvalid(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.RulePackDir = ""
+	validDir := installDefaultRulePackForDataDir(t, t.TempDir())
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {RulePackDir: validDir},
+		"codex":      {RulePackDir: invalidRulePackDir(t)},
+	}
+
+	candidate, err := generationRulePacks(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.connectors["claudecode"] == nil {
+		t.Fatal("valid connector pack was dropped by an invalid peer")
+	}
+	if candidate.connectors["codex"] != nil {
+		t.Fatal("invalid connector pack was published")
 	}
 }
 
@@ -243,34 +265,6 @@ func TestRulePackCandidatePreflightChecksOnlyEnabledConnectorOverrides(t *testin
 		!strings.Contains(err.Error(), "connector codex rule pack") {
 		t.Fatalf("enabled invalid connector preflight error = %v", err)
 	}
-}
-
-func TestRulePackNeedsReloadTracksEffectiveActiveSingleConnector(t *testing.T) {
-	singleConnectorConfig := func(connector, rulePackDir string) *config.Config {
-		cfg := config.DefaultConfig()
-		cfg.Guardrail.Enabled = true
-		cfg.Guardrail.RulePackDir = "/global"
-		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-			connector: {RulePackDir: rulePackDir},
-		}
-		return cfg
-	}
-
-	t.Run("scoped pack A to B", func(t *testing.T) {
-		oldCfg := singleConnectorConfig("codex", "/scoped/a")
-		newCfg := singleConnectorConfig("codex", "/scoped/b")
-		if !rulePackNeedsReload(oldCfg, newCfg) {
-			t.Fatal("single-connector scoped rule-pack change did not require reload")
-		}
-	})
-
-	t.Run("active connector A to B", func(t *testing.T) {
-		oldCfg := singleConnectorConfig("codex", "/scoped/a")
-		newCfg := singleConnectorConfig("claudecode", "/scoped/b")
-		if !rulePackNeedsReload(oldCfg, newCfg) {
-			t.Fatal("active single-connector rule-pack change did not require reload")
-		}
-	})
 }
 
 func TestSingleConnectorScopedRulePackReloadPublishesActiveCandidate(t *testing.T) {
@@ -322,8 +316,8 @@ rules:
 	if err := ApplyRulePackOverrides(oldPack); err != nil {
 		t.Fatalf("apply old scoped rule pack: %v", err)
 	}
-	fixture.sidecar.router = routerWithDefaultRulePack(t)
-	fixture.sidecar.router.SetRulePack(oldPack)
+	fixture.sidecar.router = NewEventRouter(nil, nil, nil, false)
+	fixture.sidecar.router.generationSource = fixture.sidecar.Generation
 	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, oldRaw)
 	if err != nil || !bound {
 		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
@@ -372,6 +366,25 @@ rules:
 	}
 	if !foundRouterRule {
 		t.Fatal("router rule pack does not contain SCOPED-B")
+	}
+}
+
+func TestRouterToolResultUsesPublishedGenerationPolicy(t *testing.T) {
+	pack := &guardrail.RulePack{SensitiveTools: &guardrail.SensitiveToolsConfig{
+		Tools: []guardrail.SensitiveTool{{Name: "listed_tool", ResultInspection: true, MinEntitiesAlert: 1}},
+	}}
+	patterns, err := prepareLocalPatternsOverride(&guardrail.LocalPatterns{Secrets: []string{"dccert-block-marker"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := &Generation{Config: config.DefaultConfig(), N: 2, Digest: "sha256:new",
+		active: pack, activePatterns: patterns}
+	router := NewEventRouter(nil, nil, nil, false)
+	router.generationSource = func() *Generation { return generation }
+	router.notify = NewNotificationQueue()
+	router.inspectToolResult(ToolResultPayload{Tool: "listed_tool", Output: "dccert-block-marker"})
+	if got := router.notify.ActiveNotifications(); len(got) != 1 || got[0].SkillName != "listed_tool" {
+		t.Fatalf("tool result was not inspected with published pack and patterns: %+v", got)
 	}
 }
 

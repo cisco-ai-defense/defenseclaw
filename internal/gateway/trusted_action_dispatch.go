@@ -58,8 +58,17 @@ type trustedActionRequest struct {
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
 	DowngradeReadOnlyDataArgs bool
-	record                    func(actionfacts.Facts, []RuleFinding)
-	recordTelemetry           func(trustedActionTelemetry)
+	// A sandbox action may execute in a filesystem the gateway cannot see.
+	SkipLocalFilesystemResolution bool
+	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
+	// Its gateway cannot inspect the caller's home when ProtectHome is active.
+	ProtectedHomeHook bool
+	// ResolvedWriteTargets comes from the hook running as the real user.
+	// A present empty map means the client inspected the action and found no
+	// static write target; nil denotes missing or invalid client evidence.
+	ResolvedWriteTargets map[string]string
+	record               func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry      func(trustedActionTelemetry)
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -90,6 +99,9 @@ func dispatchTrustedAction(
 ) (findings []RuleFinding) {
 	if ManagedEnterpriseActive() {
 		return nil
+	}
+	if _, ok := managedHookPeerFromContext(parent); ok {
+		request.ProtectedHomeHook = true
 	}
 	var (
 		facts     actionfacts.Facts
@@ -1111,7 +1123,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return curlDownloadExecPrerequisite(facts) ||
 				powerShellDownloadExecPrerequisite(facts)
 		},
-		detectionOnly: true,
+		alertOnly: true,
 	},
 	"secrets.cloud_secret_manager_read": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {

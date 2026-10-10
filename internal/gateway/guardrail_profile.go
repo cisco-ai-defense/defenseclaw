@@ -11,6 +11,7 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"sort"
@@ -154,9 +155,11 @@ type guardrailProfileSet struct {
 	defaultProfile string
 	// groupCheck is the last look at whether the assignments' groups exist.
 	groupCheck profileGroupCheck
-	// rules holds the compiled rule pack of every rule_pack_dir a derived
-	// profile can resolve to, keyed by the cleaned directory.
+	// rules holds the compiled rule pack of every scope a derived profile
+	// can resolve to, keyed by effectiveRulePackKey (directory plus rules).
 	rules map[string]*compiledRulePackCategories
+	// packs are the composed packs behind rules, by the same key.
+	packs map[string]*guardrail.RulePack
 	// missing holds the rule packs that did not load when the set was built
 	// at start, keyed like rules; requests retry them (GAP-0333).
 	missing map[string]*profileRulePackRetry
@@ -187,6 +190,7 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 		assignments:    append([]config.ProfileAssignment(nil), cfg.Guardrail.ProfileAssignments...),
 		defaultProfile: strings.TrimSpace(cfg.Guardrail.DefaultProfile),
 		rules:          make(map[string]*compiledRulePackCategories),
+		packs:          make(map[string]*guardrail.RulePack),
 		matches:        newProfileMatchCache(),
 	}
 	if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && profileGroupSIDLookup != nil {
@@ -201,16 +205,24 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 	}
 	sort.Strings(names)
 	tuned := profileConnectorNames(cfg)
+	// Scopes that resolve to the same loaded pack share its compiled rules:
+	// compiling it once per scope key cost a share of every start (GAP-0276).
+	compiledPacks := make(map[*guardrail.RulePack]*compiledRulePackCategories)
 	for _, name := range names {
-		for _, dir := range profileRulePackDirs(derived[name].Config, tuned) {
-			key := profileRulePackKey(dir)
+		for _, scope := range profileRulePackScopes(derived[name].Config, tuned) {
+			key := scope.key()
 			if _, done := set.rules[key]; done {
 				continue
 			}
-			rp, loadErr := loadValidatedRulePack(cache, dir, "guardrail profile "+name)
+			rp, loadErr := loadScopedRulePack(cache, derived[name].Config, scope, "guardrail profile "+name)
 			var compiled *compiledRulePackCategories
 			if loadErr == nil {
-				compiled, loadErr = compileRulePackCategories(rp)
+				if compiled = compiledPacks[rp]; compiled == nil {
+					compiled, loadErr = compileRulePackCategories(rp)
+					if loadErr == nil {
+						compiledPacks[rp] = compiled
+					}
+				}
 			}
 			if loadErr != nil {
 				if strictRules {
@@ -222,10 +234,12 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 				if set.missing == nil {
 					set.missing = make(map[string]*profileRulePackRetry)
 				}
-				set.missing[key] = &profileRulePackRetry{profile: name, dir: dir, lastErr: loadErr.Error(), nextTry: time.Now().Add(profileRulePackRetryInterval)}
+				set.missing[key] = &profileRulePackRetry{profile: name, cfg: derived[name].Config, scope: scope,
+					lastErr: loadErr.Error(), nextTry: time.Now().Add(profileRulePackRetryInterval)}
 				continue
 			}
 			set.rules[key] = compiled
+			set.packs[key] = rp
 		}
 	}
 	return set, nil
@@ -246,8 +260,11 @@ func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, 
 const profileRulePackRetryInterval = 30 * time.Second
 
 type profileRulePackRetry struct {
-	profile, dir string
-	loaded       atomic.Pointer[compiledRulePackCategories]
+	profile string
+	cfg     *config.Config
+	scope   rulePackScope
+	loaded  atomic.Pointer[compiledRulePackCategories]
+	pack    atomic.Pointer[guardrail.RulePack]
 
 	mu      sync.Mutex
 	lastErr string
@@ -268,7 +285,7 @@ func (r *profileRulePackRetry) rules(now time.Time) *compiledRulePackCategories 
 		return loaded
 	}
 	r.nextTry = now.Add(profileRulePackRetryInterval)
-	rp, err := loadValidatedRulePack(guardrail.NewRulePackCache(), r.dir, "guardrail profile "+r.profile)
+	rp, err := loadScopedRulePack(guardrail.NewRulePackCache(), r.cfg, r.scope, "guardrail profile "+r.profile)
 	var compiled *compiledRulePackCategories
 	if err == nil {
 		compiled, err = compileRulePackCategories(rp)
@@ -277,9 +294,18 @@ func (r *profileRulePackRetry) rules(now time.Time) *compiledRulePackCategories 
 		r.lastErr = err.Error()
 		return nil
 	}
+	r.pack.Store(rp)
 	r.loaded.Store(compiled)
-	fmt.Fprintf(os.Stderr, "[guardrail] profile %s: rule pack %q loaded; it did not load when the gateway started\n", r.profile, r.dir)
+	fmt.Fprintf(os.Stderr, "[guardrail] profile %s: rule pack %s loaded; it did not load when the gateway started\n", r.profile, r.scope.key())
 	return compiled
+}
+
+// rulePack returns the composed pack behind the rules the retry published.
+func (r *profileRulePackRetry) rulePack(now time.Time) *guardrail.RulePack {
+	if r.rules(now) == nil {
+		return nil
+	}
+	return r.pack.Load()
 }
 
 // pendingRulePackNote is the explain warning for a profile whose rule pack
@@ -288,7 +314,7 @@ func (set *guardrailProfileSet) pendingRulePackNote(profile string, cfg *config.
 	if set == nil || cfg == nil || len(set.missing) == 0 {
 		return ""
 	}
-	retry := set.missing[profileRulePackKey(cfg.EffectiveRulePackDirForConnector(connectorName))]
+	retry := set.missing[effectiveRulePackKey(cfg, connectorName)]
 	if retry == nil || retry.rules(time.Now()) != nil {
 		return ""
 	}
@@ -299,42 +325,45 @@ func (set *guardrailProfileSet) pendingRulePackNote(profile string, cfg *config.
 		"the gateway retries the pack every %s and uses it once it loads", firstNonEmpty(profile, "default"), reason, profileRulePackRetryInterval)
 }
 
-// profileRulePackDirs lists every rule-pack directory a derived configuration
-// can resolve for some connector, including the connectors some profile
-// tunes (tuned, from profileConnectorNames: computed once for all profiles,
-// as walking every profile for each derived configuration was quadratic).
-func profileRulePackDirs(cfg *config.Config, tuned []string) []string {
+// profileRulePackScopes lists every rule-pack scope a derived configuration
+// can resolve for some connector, one per composed-pack key, including the
+// connectors some profile tunes (tuned, from profileConnectorNames: computed
+// once for all profiles, as walking every profile for each derived
+// configuration was quadratic).
+func profileRulePackScopes(cfg *config.Config, tuned []string) []rulePackScope {
 	if cfg == nil {
 		return nil
 	}
 	seen := map[string]struct{}{}
-	var dirs []string
-	add := func(dir string) {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
+	var scopes []rulePackScope
+	add := func(scope rulePackScope) {
+		if scope.dir == "" && scope.ref.Name == "" && len(scope.layers) == 0 {
 			return
 		}
-		if _, ok := seen[profileRulePackKey(dir)]; ok {
+		if _, ok := seen[scope.key()]; ok {
 			return
 		}
-		seen[profileRulePackKey(dir)] = struct{}{}
-		dirs = append(dirs, dir)
+		seen[scope.key()] = struct{}{}
+		scopes = append(scopes, scope)
 	}
-	add(cfg.Guardrail.RulePackDir)
+	add(globalRulePackScope(cfg))
 	for name := range cfg.Guardrail.Connectors {
-		add(cfg.EffectiveRulePackDirForConnector(name))
+		add(connectorRulePackScope(cfg, name))
 	}
 	for _, name := range tuned {
-		add(cfg.EffectiveRulePackDirForConnector(name))
+		add(connectorRulePackScope(cfg, name))
 	}
 	if cfg.ApplicationProtection.Enabled {
-		add(cfg.ApplicationProtection.Guardrail.RulePackDir)
-		for _, pc := range cfg.ApplicationProtection.Connectors {
-			add(pc.Guardrail.RulePackDir)
+		// Disabled application protection selects no rule pack (GAP-0975).
+		if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
+			add(overlay)
+		}
+		for name := range cfg.ApplicationProtection.Connectors {
+			add(connectorRulePackScope(cfg, name))
 		}
 	}
-	sort.Strings(dirs)
-	return dirs
+	sort.Slice(scopes, func(i, j int) bool { return scopes[i].key() < scopes[j].key() })
+	return scopes
 }
 
 // profileConnectorNames returns every connector some profile tunes, so the
@@ -386,8 +415,8 @@ func (a *APIServer) guardrailProfileSet() *guardrailProfileSet {
 }
 
 // initGuardrailProfiles derives the profiles of the start-time config.
-func (a *APIServer) initGuardrailProfiles(cfg *config.Config, cache *guardrail.RulePackCache) {
-	set, err := newGuardrailProfileSet(cfg, cache, false)
+func (a *APIServer) initGuardrailProfiles(cfg *config.Config) {
+	set, err := newGuardrailProfileSet(cfg, nil, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail profiles unavailable: %v\n", err)
 		return
@@ -412,8 +441,26 @@ type profileRouteConnectorKey struct{}
 // after authentication, and stores it on ctx. routeConnector is the
 // connector the server-side route serves (never a payload value). It is a
 // no-op when no profiles are configured.
+// It also pins the API server's published generation on ctx, so the rules,
+// judge, profiles and policy stamp of the request come from one generation
+// (GAP-0455).
 func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConnector string) context.Context {
-	return withGuardrailProfile(ctx, a.guardrailProfileSet(), routeConnector)
+	if g := a.generation(); g.published() {
+		ctx = withPinnedGeneration(ctx, g)
+	}
+	return withGuardrailProfile(ctx, a.requestProfileSet(ctx), routeConnector)
+}
+
+// requestProfileSet is the profile set decisions for ctx read: the set of
+// the generation pinned on ctx, else this API server's live set. A reload
+// publishes the next generation before the live set changes, so reading the
+// live set could pair one generation's rules with another's mode and
+// thresholds (GAP-1295).
+func (a *APIServer) requestProfileSet(ctx context.Context) *guardrailProfileSet {
+	if g := pinnedGeneration(ctx); g.published() {
+		return g.Profiles
+	}
+	return a.guardrailProfileSet()
 }
 
 // withGuardrailProfile is withGuardrailProfileDecision for set. The LLM
@@ -451,10 +498,7 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.guardrailProfileSet() != nil {
-			r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), ""))
-		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
 	})
 }
 
@@ -475,7 +519,7 @@ func (a *APIServer) resolveProfile(ctx context.Context) profileDecision {
 }
 
 func (a *APIServer) resolvedProfile(ctx context.Context) *resolvedGuardrailProfile {
-	set := a.guardrailProfileSet()
+	set := a.requestProfileSet(ctx)
 	if set == nil {
 		return nil
 	}
@@ -1107,16 +1151,31 @@ func anyEqualFold(have []string, want string) bool {
 }
 
 // decisionConfig returns the configuration a decision for ctx reads: the
-// derived configuration of the request's profile, or the live base snapshot.
+// derived configuration of the requests profile, or the live generations
+// configuration (a.scannerCfg for an API server without a generation).
 func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 	if a == nil {
 		return nil
 	}
-	// Secure Client keeps the pre-profile startup policy path.
+	// Secure Client keeps the pre-profile startup policy path (issue #1092).
 	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
 		return a.scannerCfg
 	}
-	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot())
+	return a.decisionConfigFrom(ctx, a.liveBaseConfig(ctx))
+}
+
+// liveBaseConfig is the configuration decisions start from before a profile
+// applies: the request's pinned generation, else the live one, else the
+// start-time configuration.
+func (a *APIServer) liveBaseConfig(ctx context.Context) *config.Config {
+	g := pinnedGeneration(ctx)
+	if g == nil {
+		g = a.generation()
+	}
+	if g != nil && g.Config != nil {
+		return g.Config
+	}
+	return a.scannerCfg
 }
 
 // decisionConfigFrom is decisionConfig for a caller that already holds a
@@ -1138,7 +1197,7 @@ func (a *APIServer) decisionConfigFrom(ctx context.Context, base *config.Config)
 // its thresholds and its rule pack come from the same profile (GAP-0311).
 func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
 	resolved := resolvedGuardrailProfileFrom(ctx)
-	if set := liveGuardrailProfiles.Load(); set != nil && (resolved == nil || resolved.set != set) {
+	if set := pinnedProfileSet(ctx); set != nil && (resolved == nil || resolved.set != set) {
 		resolved = resolveGuardrailProfileFor(ctx, set)
 	}
 	if resolved != nil && resolved.derived != nil {
@@ -1146,7 +1205,7 @@ func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *c
 			return generation
 		}
 	}
-	return snapshotRulePackGeneration(connectorName)
+	return pinnedRuleGeneration(ctx, connectorName)
 }
 
 // scanAllRulesFor is ScanAllRules with the request's profile rule pack.
@@ -1176,14 +1235,14 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	if r == nil || r.set == nil || r.derived == nil || r.set.base == nil {
 		return nil
 	}
-	dir := profileRulePackKey(r.derived.EffectiveRulePackDirForConnector(connectorName))
-	if dir == "" || dir == profileRulePackKey(r.set.base.EffectiveRulePackDirForConnector(connectorName)) {
+	key := effectiveRulePackKey(r.derived, connectorName)
+	if key == "" || key == effectiveRulePackKey(r.set.base, connectorName) {
 		return nil
 	}
-	if rules := r.set.rules[dir]; rules != nil {
+	if rules := r.set.rules[key]; rules != nil {
 		return rules
 	}
-	if retry := r.set.missing[dir]; retry != nil {
+	if retry := r.set.missing[key]; retry != nil {
 		return retry.rules(time.Now())
 	}
 	return nil
@@ -1197,7 +1256,7 @@ func proxyProfileFor(ctx context.Context) *resolvedGuardrailProfile {
 	if ctx != nil && ctx.Value(unverifiedProxyCallerKey{}) == true {
 		return nil
 	}
-	set := liveGuardrailProfiles.Load()
+	set := pinnedProfileSet(ctx)
 	if set == nil {
 		return nil
 	}
@@ -1235,7 +1294,7 @@ func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
 			return generation
 		}
 	}
-	return snapshotRulePackGeneration(connectorName)
+	return pinnedRuleGeneration(ctx, connectorName)
 }
 
 // proxyGuardrailProfileTelemetryFor describes only a profile actually used
@@ -1259,7 +1318,7 @@ type guardrailProfileTelemetry struct {
 // emitted under ctx. All are absent when no profiles are configured, so
 // records stay unchanged for every deployment without them.
 func guardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry {
-	set := liveGuardrailProfiles.Load()
+	set := pinnedProfileSet(ctx)
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if set == nil {
 		if resolved == nil || resolved.set != nil {
@@ -1340,6 +1399,22 @@ func diffGuardrailProfileDigests(oldSet, newSet *guardrailProfileSet) []guardrai
 	return changes
 }
 
+// refreshDirectoryFactsOnProfileChange has the next request of every
+// account refresh its cached directory facts when a reload changes the
+// guardrail profiles or their assignments, so a pushed group assignment
+// applies at the next decision (GAP-1036).
+func refreshDirectoryFactsOnProfileChange(oldCfg, newCfg *config.Config) {
+	if oldCfg == nil || newCfg == nil {
+		return
+	}
+	before, after := oldCfg.Guardrail, newCfg.Guardrail
+	if reflect.DeepEqual(before.Profiles, after.Profiles) && reflect.DeepEqual(before.ProfileAssignments, after.ProfileAssignments) &&
+		before.DefaultProfile == after.DefaultProfile {
+		return
+	}
+	peerDirectoryCache().invalidate()
+}
+
 // auditGuardrailProfileChanges records one config.change.applied per profile
 // whose digest changed, targeted at guardrail.profiles.<name>.
 func auditGuardrailProfileChanges(logger *audit.Logger, changes []guardrailProfileDigestChange) {
@@ -1398,6 +1473,10 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		return
 	}
 	base := a.runtimeConfigSnapshot()
+	// Explain the base that decisions use: the published generation.
+	if g := a.generation(); g != nil && g.Config != nil && (base == nil || !base.SecureClientIntegration()) {
+		base = g.Config
+	}
 	if base != nil && base.SecureClientIntegration() {
 		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "guardrail profiles are not supported with the Secure Client integration"})
 		return
@@ -1465,6 +1544,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["profile"] = ""
 		out["match"] = ""
 		out["effective"] = profileEffectiveView(base, connectorName)
+		if note := inertHILTWarning(base, connectorName); note != "" {
+			out["warnings"] = []string{note}
+		}
 		a.writeJSON(w, http.StatusOK, out)
 		return
 	}
@@ -1503,6 +1585,9 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if note := set.pendingRulePackNote(decision.Name, effective, connectorName); note != "" {
 		warnings = append(warnings, note)
 	}
+	if note := inertHILTWarning(effective, connectorName); note != "" {
+		warnings = append(warnings, note)
+	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
@@ -1519,11 +1604,15 @@ func profileEffectiveView(cfg *config.Config, connectorName string) map[string]a
 		return map[string]any{}
 	}
 	hilt := cfg.EffectiveHILTForConnector(connectorName)
-	return map[string]any{
+	view := map[string]any{
 		"mode":          hookModeForConfig(cfg, connectorName),
 		"block_at":      cfg.Guardrail.EffectiveBlockAt(connectorName),
 		"alert_at":      cfg.Guardrail.EffectiveAlertAt(connectorName),
 		"rule_pack_dir": cfg.EffectiveRulePackDirForConnector(connectorName),
 		"hilt":          map[string]any{"enabled": hilt.Enabled, "min_severity": hilt.MinSeverity},
 	}
+	if !cfg.SecureClientIntegration() {
+		view["resolved_block_at"] = resolveThresholds(cfg, connectorName).Block
+	}
+	return view
 }

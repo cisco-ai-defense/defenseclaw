@@ -29,9 +29,11 @@ Windows (PowerShell):
 irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
 ```
 
-On a first install the installer asks which agent to guard (the default is
-`codex`). When it finishes, run `defenseclaw init` to configure DefenseClaw (see the
-[quickstart](/docs/get-started/quickstart)). To pick an agent during the install, pass options: on
+On a first install the installer asks which agent to guard (a number or a name;
+the default is `codex`). When it finishes, run the command it prints,
+`defenseclaw init --connector <agent>`, to set up that agent (see the
+[quickstart](/docs/get-started/quickstart)); plain `defenseclaw init` sets up
+every agent it finds. To set the agent up during the install, pass options: on
 macOS/Linux, end the command above with `bash -s -- --connector codex --quickstart`
 instead of `bash`; on Windows, run
 
@@ -62,6 +64,17 @@ which runs the latest release's installer for you.
 | `-NoPersistPath` | Windows only: do not change the user `PATH` in the registry |
 | `-CosignPath FILE` | Windows only: the `cosign` to check the release signature with |
 
+To install from a mirror instead of GitHub, set `DEFENSECLAW_REPO` to the
+mirror's base URL for that command, for example
+`curl -LsSf <install.sh URL> | DEFENSECLAW_REPO=https://mirror.example.com/defenseclaw bash`.
+A first install has no `config.yaml` yet, so the variable is the only way to
+name a mirror; once DefenseClaw is set up, `update.source` in `config.yaml`
+does the same for `defenseclaw upgrade`
+([Upgrade](/docs/get-started/upgrade#install-from-a-mirror)). The mirror only
+changes where the files come from. The installer still checks the release
+signature against the official release identity, so a mirror's downloads are
+refused unless `cosign` 2.0 or later is installed.
+
 The installers exit with one of these codes (`install.ps1` when run as a file;
 `irm | iex` reports a failure as an error instead):
 
@@ -69,6 +82,7 @@ The installers exit with one of these codes (`install.ps1` when run as a file;
 | --- | --- |
 | `0` | DefenseClaw is installed. |
 | `1` | DefenseClaw was not installed. An upgrade puts the previous install back. |
+| `2` | Nothing was changed: an option or value the installer does not know, such as a misspelled flag or a connector name that is not on the list. Options that take a value also accept the `--name=value` form. |
 | `3` | DefenseClaw is installed, but a connector needs attention before it is guarded again. Run `defenseclaw doctor`. |
 | `4` | DefenseClaw is installed, but the first-run quickstart failed. The installer prints what failed and the `defenseclaw quickstart ...` command to run again once it is fixed. |
 
@@ -176,6 +190,7 @@ and Python 3.10-3.13 from python.org.
       <File name="… (the CLI's Python environment)" />
     </Folder>
     <File name="config.yaml" />
+    <File name="config.generation.json" />
     <File name="audit.db" />
     <File name="device.key" />
     <Folder name="hooks" defaultOpen>
@@ -204,8 +219,13 @@ and Python 3.10-3.13 from python.org.
   </Folder>
 </Files>
 
-`config.yaml`, `audit.db` and `device.key` are created by `defenseclaw init` or
-`quickstart`, and the hook scripts by setting up an agent. The installer keeps
+`config.yaml`, `config.generation.json` (the record of the last config write),
+`audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`,
+and the hook scripts by setting up an agent. Only `config.yaml` is policy: the
+hook scripts are derived from it. An upgrade from 0.x also leaves
+`config.yaml.v8.bak` and `migration-v9.json` next to it; see
+[Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9). The full tree
+is in [Configuration](/docs/reference/configuration#on-disk-layout). The installer keeps
 `installer/` (the installer that performed the current install, used by
 `defenseclaw rollback`), `previous/` (the install the last upgrade replaced)
 and `logs/`. When the installer installs `uv` for you, `uv` and `uvx` are in
@@ -276,6 +296,7 @@ Doctor verifies:
 | Audit database and device key | The audit database is intact, has the tables it needs and has room to grow; the device key and its provenance record are intact. |
 | Components and connectors | The CLI and gateway versions match, and each agent you set up runs a version DefenseClaw supports. |
 | Gateway | The running gateway is the one DefenseClaw started, answers its health check, and accepts the local API token. |
+| Policy and config migration | The **Policy** row: the gateway applies the policy that `config.yaml` and the assets it names compute to, and `config.yaml` was not edited outside the writer. The **Config migration** row appears after an upgrade from 0.x until you read the migration record. |
 | Guardrail, scanners and credentials | Enabled services are reachable, the scanner programs run, and configured keys are present. Doctor never prints a secret. |
 | Observability | Each configured destination is reachable and delivering. The local SQLite history keeps working when a destination fails. |
 
@@ -331,14 +352,30 @@ Linux, `--binaries` removes `defenseclaw`, `defenseclaw-gateway`,
 `skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`,
 `mcp-scanner-api` and `litellm`) from `~/.local/bin`, and the `uv` and `uvx`
 an installer added there while they are unchanged; with `--all`, what that uv
-downloaded goes too. The 0.8.x installer kept no record of
-the uv, the uv cache (`~/.cache/uv`) or the `~/.sigstore` folder it added, so
-the upgrade from 0.8.x records them only when the evidence shows that
-installer put them there: uv's install receipt names `~/.local/bin` and the
-uv version there, and was written at most ten minutes before the 0.8.x
-install, and `~/.sigstore` holds only the public Sigstore cache, unused since,
-with no `cosign` on your `PATH`. A `uv`, uv cache or `~/.sigstore` of your
-own stays.
+downloaded goes too. The 0.8.x installer kept no record of the uv, the uv
+cache (`~/.cache/uv`) or the `~/.sigstore` folder it added, and it used a uv
+you already had, so the upgrade from 0.8.x records them only when all of this
+shows that installer put them there:
+
+- uv's install receipt (`~/.config/uv/uv-receipt.json`) names `~/.local/bin`,
+  only `uv` and `uvx`, and the uv version that `~/.local/bin/uv` reports and
+  that made the 0.8.x Python environment, and was written at most ten minutes
+  before that environment.
+- `uv` and `uvx` are your own regular files, not links.
+- Nothing in `~/.cache/uv` is older than the receipt, every package in it was
+  downloaded after the 0.8.x Python environment was made and is one that
+  environment holds (DefenseClaw among them), and uv has no tools installed.
+- For `~/.sigstore`: it holds only the public Sigstore cache, unused since,
+  and no `cosign` is on your `PATH`.
+
+`uninstall --all --binaries` then removes the recorded `uv` and `uvx` while
+they are unchanged, `~/.cache/uv` when nothing in it changed since the
+upgrade, and `~/.config/uv` when it holds only that receipt. uv's Python
+folder (`~/.local/share/uv/python`) always stays, since other tools can use
+it. When the evidence is missing, or you updated or replaced `uv` since, the
+uninstall plan and its result name what stays (`uv`, `uvx`, `~/.cache/uv`,
+`~/.config/uv`) as not recorded as installed by DefenseClaw: remove them
+yourself if DefenseClaw added them.
 
 Uninstall also removes DefenseClaw's OpenShell sandboxes and images. When
 Docker or OpenShell is gone or broken, add `--skip-sandbox-teardown` to leave

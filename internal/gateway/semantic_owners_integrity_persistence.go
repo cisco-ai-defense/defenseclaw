@@ -695,7 +695,9 @@ func integrityCommandMutatesPath(
 			actionfacts.OperationMove,
 			actionfacts.OperationConfigChange,
 		) || (strings.EqualFold(command.Program, "curl") ||
-			strings.EqualFold(command.Program, "curl.exe")) &&
+			strings.EqualFold(command.Program, "curl.exe") ||
+			strings.EqualFold(command.Program, "wget") ||
+			strings.EqualFold(command.Program, "wget.exe")) &&
 			hasAnyOperation(command, actionfacts.OperationFetch, actionfacts.OperationUpload)
 	case actionfacts.PathAccessAppend:
 		return hasAnyOperation(
@@ -1460,10 +1462,14 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	commandText := strings.ToLower(input.Command)
+	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(request, facts)
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
-		!strings.Contains(commandText, "base64") {
-		return appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts)
+		!strings.Contains(commandText, "base64") && !symlinkWrite {
+		return appendTrustedCMDPrivateKeyReadFinding(
+			appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
+			generation, request, input,
+		)
 	}
 	for _, finding := range findings {
 		if finding.RuleID == "persistence.ssh_authorized_keys_command" &&
@@ -1473,19 +1479,28 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	}
 	enforcementFacts := facts.EnforcementProjection()
 	if request.EnforcementCapable &&
-		(enforcementFacts.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
+		(enforcementFacts.EnforcementEligible() &&
+			(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
+				sshAuthorizedKeysStructuredPrerequisite(enforcementFacts)) ||
 			homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
 			trustedStaticStatementAuthorizedKeysWrite(input) ||
+			trustedStaticRedirectAuthorizedKeysWrite(input, facts) ||
+			trustedHereStringAuthorizedKeysWrite(input) ||
+			trustedDDOutputAuthorizedKeysWrite(input) ||
 			trustedSedInPlaceAuthorizedKeysWrite(input) ||
 			trustedAssignedAuthorizedKeysWrite(input) ||
 			trustedAuthorizedKeysGlobWrite(input) ||
 			trustedAuthorizedKeysSymlinkWrite(input) ||
+			symlinkWrite ||
 			trustedFindExecAuthorizedKeysWrite(input) ||
 			trustedHomeDirectoryAuthorizedKeysWrite(input) ||
 			trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
 			trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
 			trustedInlineAuthorizedKeysWrite(facts) ||
 			trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
+			trustedCMDAuthorizedKeysWrite(input) ||
+			trustedNamedOutFileAuthorizedKeysWrite(input) ||
+			trustedGitBashAuthorizedKeysWrite(input) ||
 			trustedNestedAuthorizedKeysWrite(input, facts)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1504,7 +1519,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			}))
 		}
 	}
-	return appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts)
+	return appendTrustedCMDPrivateKeyReadFinding(
+		appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
+		generation, request, input,
+	)
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(
@@ -1549,7 +1567,6 @@ func sshAuthorizedKeysPrerequisite(
 	for _, candidate := range facts.Paths {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if !ok ||
-			sshAuthorizedKeysCurlOutput(command, candidate) ||
 			!matchesAuthorizedKeys(facts, candidate) ||
 			!integrityCommandMutatesPath(command, candidate) {
 			continue
@@ -1583,9 +1600,6 @@ func sshAuthorizedKeysSafeNegative(
 	if !facts.Authoritative() {
 		return false
 	}
-	if sshAuthorizedKeysOnlyCurlOutput(facts) {
-		return true
-	}
 	for _, candidate := range facts.Paths {
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if !ok ||
@@ -1611,37 +1625,6 @@ func sshAuthorizedKeysSafeNegative(
 	)(facts)
 }
 
-func sshAuthorizedKeysCurlOutput(
-	command actionfacts.CommandFact,
-	candidate actionfacts.PathFact,
-) bool {
-	return (strings.EqualFold(command.Program, "curl") ||
-		strings.EqualFold(command.Program, "curl.exe")) &&
-		candidate.Access == actionfacts.PathAccessWrite &&
-		hasOperation(command, actionfacts.OperationFetch)
-}
-
-func sshAuthorizedKeysOnlyCurlOutput(facts actionfacts.Facts) bool {
-	seen := false
-	for _, candidate := range facts.Paths {
-		if candidate.Access != actionfacts.PathAccessWrite &&
-			candidate.Access != actionfacts.PathAccessAppend &&
-			candidate.Access != actionfacts.PathAccessDelete {
-			continue
-		}
-		command, ok := integrityCommandByID(facts, candidate.CommandID)
-		if !ok || !integrityCommandMutatesPath(command, candidate) {
-			continue
-		}
-		if !sshAuthorizedKeysCurlOutput(command, candidate) ||
-			!matchesAuthorizedKeys(facts, candidate) {
-			return false
-		}
-		seen = true
-	}
-	return seen
-}
-
 func integrityExplicitCommandMutator(
 	command actionfacts.CommandFact,
 	candidate actionfacts.PathFact,
@@ -1654,7 +1637,7 @@ func integrityExplicitCommandMutator(
 		return false
 	}
 	switch strings.ToLower(command.Program) {
-	case "tee", "truncate", "rm", "unlink", "cp", "mv", "install", "sed", "curl", "copy",
+	case "tee", "truncate", "rm", "unlink", "cp", "mv", "install", "sed", "curl", "wget", "copy",
 		"move", "set-content", "sc", "add-content", "ac", "out-file",
 		"remove-item", "ri", "copy-item", "cpi", "move-item", "mi":
 		return true

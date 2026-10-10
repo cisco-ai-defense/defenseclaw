@@ -9,12 +9,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -57,7 +59,7 @@ func NewAssetQuarantinePlan(
 	if err != nil {
 		return AssetQuarantinePlan{}, err
 	}
-	if !safePathSegment(targetName) {
+	if !safeQuarantineAssetName(targetName, sourcePath) {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: invalid quarantine target name")
 	}
 	connector = strings.TrimSpace(connector)
@@ -81,7 +83,7 @@ func NewAssetQuarantinePlan(
 	if err := validateExistingAncestors(filepath.Dir(sourcePath)); err != nil {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: quarantine source ancestry: %w", err)
 	}
-	if filepath.Base(sourcePath) != targetName {
+	if exactAssetBase(sourcePath) != targetName {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: quarantine source identity mismatch")
 	}
 	quarantineRootInput := strings.TrimSpace(quarantineRoot)
@@ -102,6 +104,9 @@ func NewAssetQuarantinePlan(
 	}
 	parts = append(parts, targetName)
 	destination := filepath.Join(parts...)
+	if extendedTrailingNamePath(sourcePath) && strings.HasSuffix(targetName, " ") {
+		destination = filepath.Join(parts[:len(parts)-1]...) + string(filepath.Separator) + targetName
+	}
 	if !pathWithin(destination, quarantineRoot, false) {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: quarantine destination escaped storage")
 	}
@@ -119,6 +124,33 @@ func NewAssetQuarantinePlan(
 		QuarantineRoot: quarantineRoot, QuarantinePath: destination,
 		ContentHash: contentHash, OwnershipJSON: ownership,
 	}, nil
+}
+
+// perSourceQuarantineDir holds the quarantine copies whose default slot
+// (<type>/<connector>/<name>) already holds a different asset of the same
+// name, for example one skill name in the profiles of two users on a managed
+// Windows computer, where the watcher shares one quarantine (GAP-0413).
+const perSourceQuarantineDir = "per-source"
+
+// PerSourceQuarantinePath is the quarantine destination of plan keyed by its
+// source path and content, for a source whose default slot holds a different
+// asset. The last element stays the asset name, so a restore finds it the
+// same way, and the same source and content always get the same slot.
+func (plan AssetQuarantinePlan) PerSourceQuarantinePath() string {
+	typeDir, _ := quarantineTypeDir(plan.TargetType)
+	key := cleanQuarantineSourcePath(plan.SourcePath)
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	sum := sha256.Sum256([]byte(key + "\x00" + plan.ContentHash))
+	parts := []string{plan.QuarantineRoot, perSourceQuarantineDir, typeDir}
+	if plan.Connector != "" {
+		parts = append(parts, plan.Connector)
+	}
+	if extendedTrailingNamePath(plan.SourcePath) && strings.HasSuffix(plan.TargetName, " ") {
+		return filepath.Join(append(parts, hex.EncodeToString(sum[:8]))...) + string(filepath.Separator) + plan.TargetName
+	}
+	return filepath.Join(append(parts, hex.EncodeToString(sum[:8]), plan.TargetName)...)
 }
 
 // ExecuteAssetQuarantine performs copy, hash verification, atomic publication,
@@ -149,7 +181,7 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 		if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
 			return fmt.Errorf("enforce: source changed during quarantine recovery: %w", err)
 		}
-		return removeAssetPath(plan.SourcePath, plan.SourceRoot)
+		return removeQuarantinedSource(plan, recordID)
 	}
 	if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
 		return fmt.Errorf("enforce: source changed before quarantine: %w", err)
@@ -191,10 +223,34 @@ func ExecuteAssetQuarantine(plan AssetQuarantinePlan, recordID string) error {
 	if err := requireAssetHash(plan.SourcePath, plan.ContentHash); err != nil {
 		return fmt.Errorf("enforce: source changed during quarantine: %w", err)
 	}
-	if err := removeAssetPath(plan.SourcePath, plan.SourceRoot); err != nil {
+	if err := removeQuarantinedSource(plan, recordID); err != nil {
 		return fmt.Errorf("enforce: remove quarantined source: %w", err)
 	}
 	return nil
+}
+
+// RemoveStaleQuarantineStages removes the stages an earlier attempt at the
+// destination of plan left: their journal id is another one, and recordID
+// owns the destination now. A copy that failed for lack of space left its
+// stage beside the destination when its own clean-up failed too (GAP-0826).
+func RemoveStaleQuarantineStages(plan AssetQuarantinePlan, recordID string) {
+	if validateQuarantinePlan(plan) != nil || !safePathSegment(recordID) {
+		return
+	}
+	stage := plan.QuarantinePath + ".pending-" + recordID
+	parent := filepath.Dir(plan.QuarantinePath)
+	prefix := filepath.Base(plan.QuarantinePath) + ".pending-"
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		path := filepath.Join(parent, entry.Name())
+		if !strings.HasPrefix(entry.Name(), prefix) || path == stage || !safePathSegment(entry.Name()) {
+			continue
+		}
+		_ = removeAssetPathIfExists(path, plan.QuarantineRoot)
+	}
 }
 
 // ExecuteAssetRestore copies and verifies quarantine content into a staging
@@ -281,14 +337,21 @@ func ExecuteAssetRestore(plan AssetRestorePlan) error {
 // and bytes all contribute to the digest.
 func AssetContentHash(path string) (string, error) {
 	pathInput := strings.TrimSpace(path)
+	if extendedTrailingNamePath(path) {
+		pathInput = path
+	}
 	if pathInput == "" {
 		return "", fmt.Errorf("enforce: invalid asset path")
 	}
-	path, err := filepath.Abs(pathInput)
-	if err != nil {
-		return "", fmt.Errorf("enforce: invalid asset path")
+	path = pathInput
+	if !extendedTrailingNamePath(path) {
+		var err error
+		path, err = filepath.Abs(pathInput)
+		if err != nil {
+			return "", fmt.Errorf("enforce: invalid asset path")
+		}
+		path = filepath.Clean(path)
 	}
-	path = filepath.Clean(path)
 	info, err := safeAssetInfo(path)
 	if err != nil {
 		return "", err
@@ -324,7 +387,7 @@ func validateQuarantinePlan(plan AssetQuarantinePlan) error {
 	if _, err := quarantineTypeDir(plan.TargetType); err != nil {
 		return err
 	}
-	if !safePathSegment(plan.TargetName) || !safePathSegment(plan.Connector) && plan.Connector != "" {
+	if !safeQuarantineAssetName(plan.TargetName, plan.SourcePath) || !safePathSegment(plan.Connector) && plan.Connector != "" {
 		return fmt.Errorf("enforce: invalid quarantine identity")
 	}
 	if !filepath.IsAbs(plan.SourcePath) || !filepath.IsAbs(plan.SourceRoot) ||
@@ -335,8 +398,8 @@ func validateQuarantinePlan(plan AssetQuarantinePlan) error {
 		!pathWithin(plan.QuarantinePath, plan.QuarantineRoot, false) {
 		return fmt.Errorf("enforce: quarantine plan escaped an allowed root")
 	}
-	if filepath.Base(plan.SourcePath) != plan.TargetName ||
-		filepath.Base(plan.QuarantinePath) != plan.TargetName {
+	if exactAssetBase(plan.SourcePath) != plan.TargetName ||
+		exactAssetBase(plan.QuarantinePath) != plan.TargetName {
 		return fmt.Errorf("enforce: quarantine plan identity mismatch")
 	}
 	if err := validateSHA256Hex(plan.ContentHash); err != nil {
@@ -349,7 +412,7 @@ func normalizeRestorePlan(plan AssetRestorePlan) (AssetRestorePlan, string, erro
 	if _, err := quarantineTypeDir(plan.TargetType); err != nil {
 		return AssetRestorePlan{}, "", err
 	}
-	if !safePathSegment(plan.TargetName) || !safePathSegment(plan.RecordID) {
+	if !safeQuarantineAssetName(plan.TargetName, plan.QuarantinePath) || !safePathSegment(plan.RecordID) {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid restore identity")
 	}
 	var err error
@@ -362,15 +425,22 @@ func normalizeRestorePlan(plan AssetRestorePlan) (AssetRestorePlan, string, erro
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine root")
 	}
 	quarantinePathInput := strings.TrimSpace(plan.QuarantinePath)
+	if extendedTrailingNamePath(plan.QuarantinePath) {
+		quarantinePathInput = plan.QuarantinePath
+	}
 	if quarantinePathInput == "" || !filepath.IsAbs(quarantinePathInput) {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: quarantine path must be absolute")
 	}
-	plan.QuarantinePath, err = filepath.Abs(quarantinePathInput)
-	if err != nil {
-		return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine path")
+	if extendedTrailingNamePath(quarantinePathInput) {
+		plan.QuarantinePath = quarantinePathInput
+	} else {
+		plan.QuarantinePath, err = filepath.Abs(quarantinePathInput)
+		if err != nil {
+			return AssetRestorePlan{}, "", fmt.Errorf("enforce: invalid quarantine path")
+		}
 	}
 	if !pathWithin(plan.QuarantinePath, plan.QuarantineRoot, false) ||
-		filepath.Base(plan.QuarantinePath) != plan.TargetName {
+		exactAssetBase(plan.QuarantinePath) != plan.TargetName {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: restore quarantine path escaped storage")
 	}
 	if err := validateExistingAncestors(filepath.Dir(plan.QuarantinePath)); err != nil {
@@ -381,7 +451,7 @@ func normalizeRestorePlan(plan AssetRestorePlan) (AssetRestorePlan, string, erro
 	if err != nil {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: restore destination: %w", err)
 	}
-	if filepath.Base(plan.RestorePath) != plan.TargetName {
+	if exactAssetBase(plan.RestorePath) != plan.TargetName {
 		return AssetRestorePlan{}, "", fmt.Errorf("enforce: restore destination identity mismatch")
 	}
 	if err := validateExistingAncestors(filepath.Dir(plan.RestorePath)); err != nil {
@@ -411,12 +481,73 @@ func safePathSegment(value string) bool {
 		!strings.ContainsAny(value, "/\\\x00")
 }
 
+// Win32's filepath.Clean drops a final dot or space even on an extended
+// path. Preserve the watcher's exact spelling through the checked move.
+func extendedTrailingNamePath(path string) bool {
+	return runtime.GOOS == "windows" && strings.HasPrefix(path, `\\?\`) &&
+		(strings.HasSuffix(path, ".") || strings.HasSuffix(path, " "))
+}
+
+func exactAssetBase(path string) string {
+	if extendedTrailingNamePath(path) && strings.HasSuffix(path, " ") {
+		return path[strings.LastIndexAny(path, `/\`)+1:]
+	}
+	return filepath.Base(path)
+}
+
+func safeQuarantineAssetName(name, path string) bool {
+	if safePathSegment(name) {
+		return true
+	}
+	return extendedTrailingNamePath(path) && strings.HasSuffix(name, " ") &&
+		strings.TrimSpace(name) != "" && !strings.ContainsAny(name, "/\\\x00")
+}
+
+// containmentPath is path without the extended-length prefix the standalone
+// Windows watcher puts on a skill or plugin whose name ends with a dot or a
+// space. The hook guardian checks such a request against enrolled roots in the
+// ordinary form, and filepath.Rel saw two volumes (\\?\C: and C:), so it
+// refused the source as outside the watched folders (GAP-1007). Only the
+// containment checks compare this form; the exact extended path is what is
+// opened, hashed and removed.
+func containmentPath(path string) string {
+	if runtime.GOOS != "windows" || !strings.HasPrefix(path, `\\?\`) {
+		return path
+	}
+	rest := path[len(`\\?\`):]
+	if len(rest) >= 4 && strings.EqualFold(rest[:4], `UNC\`) {
+		return `\\` + rest[4:]
+	}
+	if len(rest) >= 3 && rest[1:3] == `:\` {
+		return rest
+	}
+	return path
+}
+
+func cleanQuarantineSourcePath(path string) string {
+	if extendedTrailingNamePath(path) {
+		return path
+	}
+	return filepath.Clean(path)
+}
+
 func pathWithinRoots(path string, roots []string, allowEqual bool) (string, string, error) {
 	pathInput := strings.TrimSpace(path)
+	if extendedTrailingNamePath(path) {
+		pathInput = path
+	}
 	if pathInput == "" || !filepath.IsAbs(pathInput) {
 		return "", "", fmt.Errorf("path is not absolute")
 	}
-	path = filepath.Clean(pathInput)
+	path = cleanQuarantineSourcePath(pathInput)
+	// The exact extended path is kept unclean so its final dot or space
+	// survives; refuse one that a lexical clean would change, so its "." and
+	// ".." elements can not differ from what the containment check saw.
+	if extendedTrailingNamePath(path) {
+		if form := containmentPath(path); filepath.Clean(form) != form {
+			return "", "", fmt.Errorf("extended path is not canonical")
+		}
+	}
 	for _, root := range roots {
 		rootInput := strings.TrimSpace(root)
 		if rootInput == "" {
@@ -434,8 +565,8 @@ func pathWithinRoots(path string, roots []string, allowEqual bool) (string, stri
 }
 
 func pathWithin(path, root string, allowEqual bool) bool {
-	path = filepath.Clean(path)
-	root = filepath.Clean(root)
+	path = filepath.Clean(containmentPath(path))
+	root = filepath.Clean(containmentPath(root))
 	relative, err := filepath.Rel(root, path)
 	if err != nil || filepath.IsAbs(relative) {
 		return false
@@ -444,6 +575,56 @@ func pathWithin(path, root string, allowEqual bool) bool {
 		return allowEqual
 	}
 	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+// IsLinkedAsset reports whether path itself is a symlink or a Windows
+// reparse point (a junction), without following it.
+func IsLinkedAsset(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && fileInfoIsLinkOrReparse(info)
+}
+
+// RemoveLinkedAsset removes path, a symlink or Windows junction directly in
+// one of sourceRoots, and returns what it pointed to. A link cannot be moved
+// into quarantine storage like a folder, so the watcher takes it out of the
+// skills or plugins folder instead (GAP-0394): os.Remove deletes the link
+// entry only and never opens, follows or changes the folder it points to.
+// Anything that is not a link is refused.
+func RemoveLinkedAsset(sourceRoots []string, targetType, path string) (string, error) {
+	source, root, err := pathWithinRoots(path, sourceRoots, false)
+	if err != nil {
+		return "", fmt.Errorf("enforce: linked asset: %w", err)
+	}
+	if filepath.Dir(source) != root {
+		return "", fmt.Errorf("enforce: linked asset %s is not directly in a watched folder", source)
+	}
+	if strings.TrimSpace(targetType) == "skill" && IsBundledSkillPath(source) {
+		return "", ErrBundledSkill
+	}
+	if err := validateExistingAncestors(root); err != nil {
+		return "", fmt.Errorf("enforce: linked asset ancestry: %w", err)
+	}
+	info, err := os.Lstat(source)
+	if err != nil {
+		return "", fmt.Errorf("enforce: inspect linked asset %s: %w", source, err)
+	}
+	if !fileInfoIsLinkOrReparse(info) {
+		return "", fmt.Errorf("enforce: %s is not a link", source)
+	}
+	target, _ := os.Readlink(source)
+	if err := os.Remove(source); err != nil {
+		// A managed Windows gateway may read but not delete in a user's
+		// folder: the hook guardian removes the link as that user (GAP-1188).
+		if remove := linkedAssetRemover.Load(); remove != nil && errors.Is(err, fs.ErrPermission) {
+			delegated := (*remove)(targetType, source)
+			if delegated == nil {
+				return target, nil
+			}
+			return target, fmt.Errorf("enforce: remove link %s: %w; hook guardian: %w", source, err, delegated)
+		}
+		return target, fmt.Errorf("enforce: remove link %s: %w", source, err)
+	}
+	return target, nil
 }
 
 func safeAssetInfo(path string) (fs.FileInfo, error) {
@@ -618,6 +799,9 @@ func ensureContainedDirectory(path, root string) error {
 }
 
 func validateExistingAncestors(path string) error {
+	if existingPathIsLinkFree(path) {
+		return nil
+	}
 	current := filepath.Clean(path)
 	for {
 		info, err := os.Lstat(current)
@@ -647,7 +831,7 @@ func validateContainedAncestors(path, root string) error {
 		if fileInfoIsLinkOrReparse(info) {
 			return fmt.Errorf("enforce: linked contained path %s", current)
 		}
-		if current == root {
+		if filepath.Clean(containmentPath(current)) == filepath.Clean(containmentPath(root)) {
 			return nil
 		}
 		parent := filepath.Dir(current)

@@ -27,7 +27,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -436,20 +439,11 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 	if len(hosts) == 0 {
 		return errors.New("name at least one host")
 	}
-	key := "openshell.egress." + list
-	var current []string
-	if a.Cfg != nil {
-		switch list {
-		case "allow":
-			current = a.Cfg.OpenShell.Egress.Allow
-		case "block":
-			current = a.Cfg.OpenShell.Egress.Block
-		default:
-			return fmt.Errorf("unknown egress list %q", list)
-		}
+	if list != "allow" && list != "block" {
+		return fmt.Errorf("unknown egress list %q", list)
 	}
-	next := append([]string(nil), current...)
-	var added []string
+	key := "openshell.egress." + list
+	wanted := make([]string, 0, len(hosts))
 	for _, h := range hosts {
 		h = config.NormalizeOpenShellEgressPattern(h)
 		if err := config.ValidateOpenShellEgressPattern(h); err != nil {
@@ -463,23 +457,15 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 				return err
 			}
 		}
-		dup := false
-		for _, have := range next {
-			if strings.EqualFold(have, h) {
-				dup = true
-			}
-		}
-		if !dup {
-			next = append(next, h)
-			added = append(added, h)
-		}
+		wanted = append(wanted, h)
+	}
+	added, err := a.addEgressHosts(list, wanted)
+	if err != nil {
+		return err
 	}
 	if len(added) == 0 {
 		a.ok("already in " + key)
 		return nil
-	}
-	if err := a.patchConfig(map[string]any{key: next}); err != nil {
-		return err
 	}
 	a.ok("added " + strings.Join(added, ", ") + " to " + key)
 	if list == "allow" {
@@ -487,6 +473,63 @@ func (a *App) PolicyEdit(ctx context.Context, list string, hosts []string) error
 	}
 	a.note("the daemon applies it to running sandboxes within a few seconds")
 	return nil
+}
+
+// egressEditAttempts bounds how often addEgressHosts redoes an edit that
+// another writer overtook.
+const egressEditAttempts = 5
+
+// addEgressHosts appends the hosts it does not already have to
+// openshell.egress.<list> and returns the ones it added. The list is read
+// from the config.yaml the write replaces, not from a.Cfg, which was loaded
+// when the command started, and the write is checked against those bytes:
+// the daemon saves its "always" decisions to the same lists while this runs,
+// so a write from a stale list would drop them. A change made in between
+// fails the write with configwrite.ErrConflict and the edit is redone on the
+// new file.
+func (a *App) addEgressHosts(list string, hosts []string) ([]string, error) {
+	a.defaults()
+	for range egressEditAttempts {
+		raw, err := os.ReadFile(a.ConfigPath)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read %s: %w", a.ConfigPath, err)
+		}
+		var doc struct {
+			OpenShell struct {
+				Egress struct {
+					Allow []string `yaml:"allow"`
+					Block []string `yaml:"block"`
+				} `yaml:"egress"`
+			} `yaml:"openshell"`
+		}
+		if err := yaml.Unmarshal(raw, &doc); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", a.ConfigPath, err)
+		}
+		current := doc.OpenShell.Egress.Allow
+		if list == "block" {
+			current = doc.OpenShell.Egress.Block
+		}
+		next := slices.Clone(current)
+		var added []string
+		for _, h := range hosts {
+			if !slices.ContainsFunc(next, func(have string) bool { return strings.EqualFold(strings.TrimSpace(have), h) }) {
+				next = append(next, h)
+				added = append(added, h)
+			}
+		}
+		if len(added) == 0 {
+			return nil, nil
+		}
+		err = a.patchConfigIf(map[string]any{"openshell.egress." + list: next}, configwrite.SHA256Hex(raw))
+		if errors.Is(err, configwrite.ErrConflict) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return added, nil
+	}
+	return nil, fmt.Errorf("%s keeps changing; run the command again", a.ConfigPath)
 }
 
 // adminAllows refuses an allow entry the organization's policy would make
@@ -517,32 +560,46 @@ func (a *App) adminAllows(entry string) error {
 	return nil
 }
 
-// patchConfig writes keys to config.yaml, keeping the file valid.
+// managedConfigRefusal is the refusal of a local config edit on a managed
+// device: the organization's sentence, and exit 3 like every other local writer
+// (GAP-0052).
+func managedConfigRefusal() error {
+	return &ExitError{Code: 3, Err: errors.New(sandboxapi.AdminMessage + ": the configuration is administrator-owned")}
+}
+
+// patchConfig writes keys to config.yaml through the single config writer,
+// which validates the change before anything is written.
 func (a *App) patchConfig(updates map[string]any) error {
+	return a.patchConfigIf(updates, "")
+}
+
+// patchConfigIf is patchConfig for a read-modify-write: a non-empty
+// expectSHA256 (of the bytes the new values were computed from) makes the
+// write fail with configwrite.ErrConflict when config.yaml has changed since.
+func (a *App) patchConfigIf(updates map[string]any, expectSHA256 string) error {
 	a.defaults()
 	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
-		return errors.New(sandboxapi.AdminMessage + ": the configuration is administrator-owned")
+		return managedConfigRefusal()
 	}
-	path := a.ConfigPath
-	before, err := os.ReadFile(path)
-	existed := err == nil
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read %s: %w", path, err)
+	keys := make([]string, 0, len(updates))
+	for key := range updates {
+		keys = append(keys, key)
 	}
-	mode := os.FileMode(0o600)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
+	sort.Strings(keys)
+	changes := make([]configwrite.Change, 0, len(keys))
+	for _, key := range keys {
+		changes = append(changes, configwrite.Change{Path: key, Value: updates[key]})
 	}
-	if err := config.PatchYAMLFile(path, updates); err != nil {
-		return err
+	_, err := configwrite.Apply(context.Background(), a.ConfigPath, changes, configwrite.Options{
+		Actor:        configwrite.CurrentActor(configwrite.ActorPrefixCLI),
+		Reason:       "defenseclaw-gateway sandbox",
+		ExpectSHA256: expectSHA256,
+	})
+	if errors.Is(err, configwrite.ErrManaged) {
+		return managedConfigRefusal()
 	}
-	if _, err := config.LoadRuntimeV8File(path); err != nil {
-		if existed {
-			_ = config.WriteFileAtomic(path, before, mode)
-		} else {
-			_ = os.Remove(path)
-		}
-		return fmt.Errorf("the change would make %s invalid (it was not written): %w", path, err)
+	if err != nil {
+		return fmt.Errorf("%s was not changed: %w", a.ConfigPath, err)
 	}
 	return nil
 }

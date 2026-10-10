@@ -24,6 +24,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -338,9 +339,17 @@ func (s claudeCodeUserSourceSet) highToLow() []*claudeCodeSettingsSource {
 
 func inspectClaudeCodeUserSources(opts SetupOpts) (claudeCodeUserSourceSet, error) {
 	var result claudeCodeUserSourceSet
-	user, err := readOptionalClaudeCodeSettings("user settings", claudeCodeSettingsPath())
+	userPath := claudeCodeSettingsPath()
+	readPath, err := claudeCodeUserSettingsReadPath(userPath)
+	if err != nil {
+		return result, fmt.Errorf("inspect Claude Code user settings %s: %w", userPath, err)
+	}
+	user, err := readOptionalClaudeCodeSettings("user settings", readPath)
 	if err != nil {
 		return result, err
+	}
+	if user != nil {
+		user.path = userPath
 	}
 	result.user = user
 
@@ -605,6 +614,36 @@ func jsonValuesEqual(left, right interface{}) bool {
 	leftJSON, leftErr := json.Marshal(left)
 	rightJSON, rightErr := json.Marshal(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
+// claudeCodeUserSettingsReadPath is the file to read for the per-user
+// ~/.claude/settings.json. A dotfiles layout makes it a symlink; Setup
+// writes through the link, so the inspection follows it too when it ends at
+// a regular file in the user's home that the user owns. Refusing every link
+// left the gateway unable to start while the hooks were already installed,
+// so every Claude Code prompt was blocked (GAP-1062). Windows keeps
+// refusing links.
+func claudeCodeUserSettingsReadPath(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 || runtime.GOOS == "windows" {
+		return path, nil
+	}
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("settings source is a link that cannot be followed: %w", err)
+	}
+	home := filepath.Clean(userHomeDir())
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
+	if rel, err := filepath.Rel(home, target); err != nil || rel == "." || rel == ".." ||
+		strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("settings source is a link to %s, outside your home folder; link it to a file in your home folder or replace the link with the file", target)
+	}
+	if err := validatePluginOwner(target); err != nil {
+		return "", fmt.Errorf("settings source is a link to a file another account owns: %w", err)
+	}
+	return target, nil
 }
 
 func readOptionalClaudeCodeSettings(name, path string) (*claudeCodeSettingsSource, error) {

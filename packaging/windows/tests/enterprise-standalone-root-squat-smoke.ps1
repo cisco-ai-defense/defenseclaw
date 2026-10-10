@@ -216,6 +216,33 @@ try {
             }
             Reset-TestRoots
 
+            # GAP-0915: an empty folder an earlier removal left under Program
+            # Files carries the default inherit-only CREATOR OWNER entry; it
+            # grants nothing, so the existing-root check takes the folder
+            # over. Without the switch (Secure Client) it is still refused.
+            $leftover = [IO.Path]::Combine($Root, 'pf-leftover')
+            [void][IO.Directory]::CreateDirectory($leftover)
+            $leftoverSecurity = [Security.AccessControl.DirectorySecurity]::new()
+            $leftoverSecurity.SetSecurityDescriptorSddlForm(
+                'O:BAG:BAD:(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)',
+                [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access
+            )
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $leftover -AclObject $leftoverSecurity
+            $writers = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+            try {
+                Assert-DefenseClawPathAcl -Path $leftover -AllowedWriterSIDs $writers -AllowUsersRead -AllowInheritance -IgnoreCreatorTemplates
+            }
+            catch {
+                $failures.Add("the CREATOR OWNER template blocked a default-ACL folder: $($_.Exception.Message)")
+            }
+            try {
+                Assert-DefenseClawPathAcl -Path $leftover -AllowedWriterSIDs $writers -AllowUsersRead -AllowInheritance
+                $failures.Add('the strict check accepted the CREATOR OWNER template')
+            }
+            catch {
+            }
+            Reset-TestRoots
+
             # A junction is renamed as a link; its target is never followed.
             $target = [IO.Path]::Combine($Root, 'junction-target')
             New-TestDirectory $target 'BA'
@@ -223,10 +250,18 @@ try {
             New-TestDirectory $vendor 'BA'
             [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $lock -Target $target)
             Assert-TestPaths 'junction lock directory' (Get-TestSquatPaths) @('Cisco\DefenseClaw-Lifecycle')
+            $script:DefenseClawSquattedRootNotes = @()
             Move-DefenseClawStandaloneSquattedRoots -Squatted @(Get-DefenseClawStandaloneSquattedRoots)
             if ([IO.Directory]::Exists($lock) -or
                 -not [IO.File]::Exists([IO.Path]::Combine($target, 'keep.txt'))) {
-                $failures.Add('junction was not renamed as a link, or its target changed')
+                $failures.Add('junction was not removed as a link, or its target changed')
+            }
+            # GAP-0904: the link is removed, not left renamed in ProgramData,
+            # and the result says what it was and where it pointed.
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $vendor -Force -Filter 'DefenseClaw-Lifecycle.untrusted-*').Count -ne 0 -or
+                @($script:DefenseClawSquattedRootNotes).Count -ne 1 -or
+                [string]$script:DefenseClawSquattedRootNotes[0] -notlike "removed the link $lock that *pointed at*junction-target*") {
+                $failures.Add("planted junction left behind or not reported: $(@($script:DefenseClawSquattedRootNotes) -join ' | ')")
             }
             Reset-TestRoots
 
@@ -274,16 +309,6 @@ try {
             if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before) {
                 $failures.Add('preparing a root changed the DACL of an existing vendor directory')
             }
-            # GAP-0577: install, upgrade and repair then give an existing
-            # administrator-owned vendor directory the same entry, once.
-            Grant-DefenseClawStandaloneVendorDirectoryUsersRead
-            Grant-DefenseClawStandaloneVendorDirectoryUsersRead
-            $usersRules = @(Get-TestUsersRules $vendor)
-            if ($usersRules.Count -ne 1 -or $usersRules[0].IsInherited -or
-                $usersRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
-                [int]$usersRules[0].FileSystemRights -ne 0x1200a9) {
-                $failures.Add("an existing vendor directory did not get one this-folder-only Users read entry: $($usersRules.Count)")
-            }
             Reset-TestRoots
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
             try {
@@ -292,15 +317,32 @@ try {
             finally {
                 Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
             }
-            Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
-            try {
-                Grant-DefenseClawStandaloneVendorDirectoryUsersRead
-            }
-            finally {
-                Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
-            }
             if (@(Get-TestUsersRules $vendor).Count -ne 0) {
                 $failures.Add('the Secure Client profile gave its vendor directory a Users entry')
+            }
+            Reset-TestRoots
+
+            # GAP-0578: an existing vendor directory standard users cannot
+            # read (another Cisco product's SYSTEM and Administrators DACL)
+            # gets one this-folder Users entry from install and repair, which
+            # verify requires; uninstall gives back exactly that entry.
+            [void][IO.Directory]::CreateDirectory($vendor)
+            Microsoft.PowerShell.Security\Set-Acl -LiteralPath $vendor -AclObject $vendorSecurity
+            $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+            if (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor) {
+                $failures.Add('a SYSTEM and Administrators only vendor directory reads as checkable by users')
+            }
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            Grant-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            $usersRules = @(Get-TestUsersRules $vendor)
+            if ($usersRules.Count -ne 1 -or [int]$usersRules[0].FileSystemRights -ne 0x1200a0 -or
+                $usersRules[0].InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None -or
+                -not (Test-DefenseClawStandaloneVendorUsersRead -Path $vendor)) {
+                $failures.Add('install did not give an existing vendor directory exactly one this-folder Users read entry')
+            }
+            Revoke-DefenseClawStandaloneVendorUsersRead -Path $vendor
+            if ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl -cne $before) {
+                $failures.Add('uninstall did not give the vendor directory its DACL back')
             }
             Reset-TestRoots
 

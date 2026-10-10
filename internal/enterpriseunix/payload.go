@@ -32,10 +32,13 @@ type payload struct {
 
 var versionPattern = regexp.MustCompile(`^(dev|[0-9]+\.[0-9]+\.[0-9]+([.+-][0-9A-Za-z.+-]+)?)$`)
 
+// emptySHA256 is the SHA-256 of zero bytes.
+const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
 // loadPayload validates dir (an absolute, administrator-staged directory)
 // and reads the gateway's version from it. Every binary must be a regular,
-// executable, non-symlink file that is not writable by group or other and
-// is owned by root or the account running the lifecycle.
+// non-empty, executable, non-symlink file that is not writable by group or
+// other and is owned by root or the account running the lifecycle.
 func (e *Env) loadPayload(ctx context.Context, dir string) (*payload, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("payload directory %q must be absolute", dir)
@@ -59,6 +62,12 @@ func (e *Env) loadPayload(ctx context.Context, dir string) (*payload, error) {
 		digest, err := sha256File(path)
 		if err != nil {
 			return nil, err
+		}
+		if digest == emptySHA256 {
+			// A crash during the package unpack can leave a binary empty,
+			// and agents run an empty hook as a script that allows every
+			// tool call (GAP-0680).
+			return nil, fmt.Errorf("payload %s is empty (0 bytes)", path)
 		}
 		p.Digests[name] = digest
 	}

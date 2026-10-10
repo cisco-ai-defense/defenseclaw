@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import click
+import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_config
 from defenseclaw.config_inspect import ConfigInspectError, ConfigV8WireResult
@@ -128,7 +130,7 @@ def test_v8_source_view_uses_masked_source_not_go_effective(tmp_path: Path) -> N
     inspect.assert_not_called()
 
 
-def test_v8_effective_view_is_go_owned_and_reveal_is_rejected(tmp_path: Path) -> None:
+def test_v8_effective_view_is_go_owned(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text("config_version: 8\nobservability: {}\n", encoding="utf-8")
     effective = {
@@ -143,12 +145,59 @@ def test_v8_effective_view_is_go_owned_and_reveal_is_rejected(tmp_path: Path) ->
             cmd_config.config_cmd,
             ["show", "--effective", "--section", "observability", "--format", "json"],
         )
-        reveal = CliRunner().invoke(cmd_config.config_cmd, ["show", "--effective", "--reveal"])
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.output) == {"observability": effective}
-    assert reveal.exit_code == 2
-    assert "--reveal works only for pre-v8 configurations" in reveal.output
+
+
+def test_get_follows_writer_paths_and_unset_refuses_a_typo(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
+
+    def run(*args: str):
+        with (
+            patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+            patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+        ):
+            return CliRunner().invoke(cmd_config.config_cmd, list(args))
+
+    assert run("set", "asset_policy.skill.denied[0]", "--json", '{"name": "evil", "reason": "x"}').exit_code == 0
+    # A string enum whose value YAML 1.1 reads as a boolean (GAP-0157).
+    assert run("set", "ai_discovery.ide_inventory", "off").exit_code == 0
+    off = run("get", "ai_discovery.ide_inventory")
+    assert off.exit_code == 0 and off.output.strip() == "off"
+    got = run("get", "asset_policy.skill.denied[0].name")
+    assert got.exit_code == 0 and got.output.strip() == "evil"
+
+    # An admission key config.yaml leaves out prints the policy the gateway enforces, not null.
+    scan = run("get", "admission.skill.scan_on_install")
+    assert scan.exit_code == 0 and "true" in scan.output and "null" not in scan.output
+    assert run("get", "admission", "--effective").exit_code == 0
+    # A section config.yaml leaves out resolves its defaults, not empty values (GAP-0085).
+    update = run("get", "update", "--effective")
+    assert update.exit_code == 0 and "channel: stable" in update.output and "check: true" in update.output
+    assert "null" not in update.output and "''" not in update.output
+
+    # An admission key at its built-in value is a key whose default applies; the shared
+    # defaults layer has no value of its own and says where the policy in force is; update
+    # shows the defaults the notice and channel run with.
+    again = run("unset", "admission.skill.actions.high")
+    assert again.exit_code == 0 and "default already applies" in again.output
+    shared = run("get", "admission.defaults.actions")
+    assert shared.exit_code == 1 and "config get admission.skill" in shared.output
+    shown = json.loads(run("show", "--section", "admission", "--format", "json").output)["admission"]
+    assert "defaults" not in shown and shown["skill"]["actions"]["critical"] == "quarantine"
+    assert run("get", "update.check").output.splitlines()[-1] == "true"
+    assert run("get", "update.channel").output.splitlines()[-1] == "stable"
+
+    typo = run("unset", "guardrail.blockat")
+    assert typo.exit_code == 1 and "not a configuration key" in typo.output
+    default = run("unset", "guardrail.block_at")
+    assert default.exit_code == 0 and "default already applies" in default.output
+    # GAP-0308: a key under a connector config.yaml does not list is a key whose default applies.
+    absent = run("unset", "guardrail.connectors.codex.block_at")
+    assert absent.exit_code == 0 and "default already applies" in absent.output, absent.output
+    assert run("unset", "guardrail.connectors.codex.blok_at").exit_code == 1
 
 
 def test_v8_provenance_view_exposes_only_canonical_go_annotations(tmp_path: Path) -> None:
@@ -233,7 +282,9 @@ def test_reference_json_schema_uses_embedded_go_schema() -> None:
             ["reference", "observability", "--format", "json-schema"],
         )
     assert result.exit_code == 0
-    assert result.output == schema
+    # The CLI re-indents the schema and describes block_message limits
+    # (GAP-0395); the content is the embedded Go schema.
+    assert json.loads(result.output) == json.loads(schema)
 
 
 def test_config_path_projects_v8_paths_without_legacy_load(tmp_path: Path) -> None:
@@ -334,3 +385,74 @@ def test_generic_redaction_profile_refusal_names_unknown_and_defined(tmp_path: P
     detail = cmd_config._v8_failure_detail(str(config_path), refusal)
     assert "strickt" in detail and "defined:" in detail
     assert "observability.defaults.redaction_profile" in detail
+
+
+def test_unset_validates_every_key_before_writing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 9\nupdate:\n  check: false\n")
+
+    def run(*args: str):
+        with (
+            patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+            patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+        ):
+            return CliRunner().invoke(cmd_config.config_cmd, list(args))
+
+    before = path.read_bytes()
+    typo = run("unset", "update.check", "update.chek")
+    assert typo.exit_code != 0
+    assert "update.chek is not a configuration key" in typo.output
+    assert path.read_bytes() == before
+
+    extra = run("unset", "update.check", "admission.skill.actions.high.extra")
+    assert extra.exit_code != 0
+    assert path.read_bytes() == before
+
+    mixed = run("unset", "update.check", "update.channel")
+    assert mixed.exit_code == 0, mixed.output
+    assert "Unset update.check (" in mixed.output
+    assert "Unset update.check, update.channel" not in mixed.output
+
+
+def test_unset_of_a_whole_connector_says_it_is_no_longer_guarded(tmp_path: Path, monkeypatch) -> None:
+    # GAP-1021: a typo for guardrail.connectors.codex.mode dropped Codex silently.
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\n"
+        "guardrail:\n"
+        "  enabled: true\n"
+        "  connectors:\n"
+        "    claudecode: {mode: action}\n"
+        "    codex: {mode: action}\n"
+    )
+    with (
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+    ):
+        result = CliRunner().invoke(cmd_config.config_cmd, ["unset", "guardrail.connectors.codex"])
+    assert result.exit_code == 0, result.output
+    assert "Codex left the guardrail roster" in result.output
+    assert "defenseclaw setup codex --mode action" in result.output
+    assert "guardrail disable --connector codex" in result.output
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the managed standalone layouts are Linux and macOS only")
+def test_config_path_uses_managed_vendor_policy_default(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "config.yaml"
+    data_dir = tmp_path / "data"
+    vendor_dir = tmp_path / "vendor-policies"
+    config_path.write_text(
+        "config_version: 9\n"
+        "deployment_mode: managed_enterprise\n"
+        "enterprise: {profile: standalone}\n"
+        f"data_dir: {data_dir}\n"
+        "observability: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(cmd_config.config_module._STANDALONE_VENDOR_POLICY_DIRS, str(config_path), str(vendor_dir))
+    with patch.object(cmd_config.config_module, "config_path", return_value=config_path):
+        result = CliRunner().invoke(cmd_config.config_cmd, ["path"])
+    assert result.exit_code == 0, result.output
+    assert "policy dir" in result.output and str(vendor_dir) in result.output
+    assert str(data_dir / "policies") not in result.output

@@ -45,6 +45,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
         {
             "0678175caa680c77ffd723c5ffd7d581e5d6747c884e71b61aa3bfedba92e1b6",
             "20a9adcda34d02c061e6f1c0073546fcc540f97ee604b55401ba0f9946ef4a70",
+            "3b60ff13444113a2d41cf9f4002794685267b61ec82ccf309fa6d6419fb3bdfd",
             "3eec0102c3fd29f3cb9205b0cb3750cbc2b88de821ed5d943081e5605d5fefad",
             "55f5a0278318615f350752ff4f00d1ccd995cd52a46a9a7f0a32c5f783f7bb35",
             "5b9ca53ad605b53d1d1618b51e52c658140d42190e6f903abaaca604ae145c93",
@@ -59,15 +60,18 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "b5966ccf711d96c4d4797cc722fa6a23794c3516a2bbb204adce313ed86ca045",
             "c152251f48fe5e3c217202b60d1ca8dfd46d245900c758dce45ebdde31f707b8",
             "d20d889c468919185d2c175d6131bdd8824fb572d00ee3d285095f7507534019",
+            "e58d2d497dd75d9ee38dd6a5fc7b30aef00ae7d4966a5b5d6cc33c6005acdbe8",
             "eb35cfd63246ee6343faf4114ea9a6b62155f8faf6825f05a2bb9180444bb61d",
             "ef527c66677705936f1ee319b24a76f3401286a1362265251ae2a69dc4f6dd22",
         }
     ),
     "permissive": frozenset(
         {
+            "06295d7fc02c0168fb93403a27f42b41127756d251a3d04c2c167db5dfca3f49",
             "09e49a34880ace6a9b29d613a8af16bd7f96063e7a6361897a77df475abd7859",
             "25a73df95116e71d06b8043f82df3e79e4bf943cb2e2e72529448e5ef91c009b",
             "29ce292e52f2fac289d6567ec7994b1f17af98e3fd1c4a5e2084f8c8a97b5371",
+            "3ecdef60681cc5922962c48882de64b97f56605e22c6952bd49bb156ea445328",
             "45b3e39a75a57d6220b62c35bfa57ea3fcbd55ad0f8bdc97c20ac7523fc5a61a",
             "69256416b4fcdcce3c9981d153242cc8a68fc659ed216767bc44e89052e2499c",
             "6dd147550abcb729f5bc59f4f7be5ff04ff4d40b57a45a7848a8139b8c35ffe9",
@@ -98,6 +102,7 @@ STOCK_PROFILE_DIGESTS: dict[str, frozenset[str]] = {
             "9e8416be13a3a62f9e5a486570b6fce4673b86e2d834aa4d8891732bbaecea9c",
             "9f54aa385dffab92b7c08180ea2e37142d4fcf6ce3a53a29d9c0fc63374e0ff9",
             "a30346773809eb3571e1e44508e343cfc72ac70ed605b9837d0dcd663f2375e0",
+            "c31e5e90da9c3a6521c328adb9ac7883555d1acd7ad287cc43e5fa56237bfa35",
             "c78061e9d90d91005913add8b0c046b05ecf921648494e7b035b6a4bf37956c1",
             "c7b0103f24c84a775050494b6fff77bebe5f6404ec8a62097f8a6f97dc81b3ac",
             "db6ca1ece31914feab3234c49b469094e2c5997f09b37578eb981b17a30d9a10",

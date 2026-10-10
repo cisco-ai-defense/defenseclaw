@@ -25,7 +25,10 @@ def _summary(**overrides: int | str) -> dict[str, int | str]:
         "local_pattern_count": 6,
         "suppression_count": 3,
         "sensitive_tool_count": 5,
+        "stale_rule_count": 0,
+        "alert_only_rule_count": 0,
         "digest": "a" * 64,
+        "files_digest": "b" * 64,
     }
     result.update(overrides)
     return result
@@ -481,6 +484,23 @@ def test_offline_validation_preflight_matches_only_exact_command_sequence(
     ctx = SimpleNamespace(invoked_subcommand=invoked_subcommand)
     with patch("sys.argv", argv):
         assert main._is_offline_rulepack_validation(ctx) is expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["defenseclaw", "guardrail", "use-pack", "./pack"], True),
+        (["defenseclaw", "guardrail", "--json", "use-pack", "./pack"], False),
+        (["defenseclaw", "guardrail", "mode", "use-pack"], False),
+    ],
+    ids=("exact", "intervening-flag", "different-guardrail-subcommand"),
+)
+def test_use_pack_skips_the_pre_command_validation_so_it_can_repin(argv: list[str], expected: bool) -> None:
+    from defenseclaw import main
+
+    ctx = SimpleNamespace(invoked_subcommand="guardrail")
+    with patch("sys.argv", argv):
+        assert main._is_pack_repin(ctx) is expected
 
 
 def test_validate_pack_accepts_discovered_bare_name(tmp_path) -> None:

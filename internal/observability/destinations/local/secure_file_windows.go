@@ -13,13 +13,15 @@
 package local
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
-func secureOpenAppend(path string) (*os.File, os.FileInfo, int64, error) {
+func secureOpenAppend(path string, _ bool) (*os.File, os.FileInfo, int64, error) {
 	if err := prepareSecureParent(path); err != nil {
 		return nil, nil, 0, err
 	}
@@ -39,7 +41,7 @@ func secureOpenAppend(path string) (*os.File, os.FileInfo, int64, error) {
 	return file, info, info.Size(), nil
 }
 
-func secureOpenRead(path string) (*os.File, os.FileInfo, error) {
+func secureOpenRead(path string, _ bool) (*os.File, os.FileInfo, error) {
 	if err := prepareSecureParent(path); err != nil {
 		return nil, nil, err
 	}
@@ -136,7 +138,7 @@ func validateSecureFileInfo(info os.FileInfo) error {
 	return nil
 }
 
-func validateSecureOpenFile(file *os.File) error {
+func validateSecureOpenFile(file *os.File, _ bool) error {
 	if file == nil {
 		return unsafeFailure()
 	}
@@ -248,4 +250,120 @@ func windowsAllowedACEPrincipal(sid *windows.SID) bool {
 		return true
 	}
 	return windowsAllowedOwner(sid)
+}
+
+// jsonlFileProblem is JSONLPathProblem for an existing regular file. The
+// access list of the file is checked by the gateway at open: an entry for
+// the gateway account is right when the gateway checks and foreign when an
+// administrator does, so the start line names it instead.
+func jsonlFileProblem(os.FileInfo) string { return "" }
+
+// jsonlFolderProblem is JSONLPathProblem for an existing folder: an allow
+// entry with write access for an account other than SYSTEM, Administrators,
+// the current account or allowedWriters.
+func jsonlFolderProblem(folder string, _ os.FileInfo, allowedWriters []string) string {
+	name, err := windows.UTF16PtrFromString(folder)
+	if err != nil {
+		return ""
+	}
+	handle, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(handle)
+	var details windows.ByHandleFileInformation
+	if windows.GetFileInformationByHandle(handle, &details) == nil &&
+		details.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return "is in " + folder + ", a link (reparse point)"
+	}
+	descriptor, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return ""
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return ""
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil ||
+			ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || !windowsWriteLikeAccess(ace.Mask) {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if windowsAllowedACEPrincipal(sid) || jsonlAllowedWriter(sid, allowedWriters) {
+			continue
+		}
+		return fmt.Sprintf("is in %s, a folder %s can write", folder, windowsAccountName(sid))
+	}
+	return ""
+}
+
+// jsonlMissingFolderProblem is JSONLPathProblem for a missing folder that
+// the gateway creates depth levels below ancestor with MkdirAll. The folder
+// gets only the container-inherit entries of ancestor, without the
+// no-propagate ones below its first new subfolder, and the gateway refuses
+// it at open, like jsonlFolderProblem, when one of them lets an account
+// other than SYSTEM, Administrators, the creator (CREATOR OWNER) or
+// allowedWriters write it.
+func jsonlMissingFolderProblem(folder, ancestor string, depth int, allowedWriters []string) string {
+	descriptor, err := windows.GetNamedSecurityInfo(ancestor, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return ""
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return ""
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil ||
+			ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.CONTAINER_INHERIT_ACE == 0 ||
+			(depth > 1 && ace.Header.AceFlags&windows.NO_PROPAGATE_INHERIT_ACE != 0) ||
+			!windowsWriteLikeAccess(ace.Mask) {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.IsWellKnown(windows.WinCreatorOwnerSid) || windowsAllowedACEPrincipal(sid) || jsonlAllowedWriter(sid, allowedWriters) {
+			continue
+		}
+		return fmt.Sprintf("is in %s, a missing folder that would inherit from %s write access for %s",
+			folder, ancestor, windowsAccountName(sid))
+	}
+	return ""
+}
+
+// jsonlAllowedWriter reports whether sid is one of allowed, given as SIDs
+// or account names.
+func jsonlAllowedWriter(sid *windows.SID, allowed []string) bool {
+	for _, value := range allowed {
+		switch {
+		case value == "":
+		case strings.HasPrefix(strings.ToUpper(value), "S-1-"):
+			if strings.EqualFold(sid.String(), value) {
+				return true
+			}
+		default:
+			if account, _, _, err := windows.LookupSID("", value); err == nil && account.Equals(sid) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func windowsAccountName(sid *windows.SID) string {
+	account, domain, _, err := sid.LookupAccount("")
+	switch {
+	case err != nil || account == "":
+		return sid.String()
+	case domain == "":
+		return account
+	default:
+		return domain + `\` + account
+	}
 }

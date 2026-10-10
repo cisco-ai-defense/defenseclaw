@@ -808,7 +808,7 @@ func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	cfg.Claw.ConfigFile = ocPath
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
-	snap, err := w.snapshotMCPServer("remote-mcp")
+	snap, err := w.snapshotMCPServer(InstallEvent{Type: InstallMCP, Name: "remote-mcp", Path: "remote-mcp"})
 	if err != nil {
 		t.Fatalf("snapshotMCPServer: %v", err)
 	}

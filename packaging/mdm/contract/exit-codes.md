@@ -77,6 +77,7 @@ evaluated". Run the `status` action to inspect the host.
 | `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | all | Setup's code or `1603` / the lifecycle's code or `1` | The lifecycle did not start or printed no result. |
 | `mdm_secret_failed` | all | `1603` / `1`, `2` or `75` | Storing the credential failed. On Windows the deployment applied. On Linux and macOS the wrapper stores it before the config, so the config was not applied, and the exit code is the one `secret set` returned. |
 | `mdm_staging_untrusted`, `mdm_package_incomplete` | all | `1603` / `1` | The private staging folder or the Intune content is not as expected. |
+| `mdm_staging_noexec` | unix | — / `1` | Linux: the payload's gateway cannot run from the staging folder (a `noexec` mount, named in the message). Use `--staging-dir` or a deb/rpm source. |
 | `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | Windows | `1603` / — | Host refusals of the PowerShell 7 wrapper. The lifecycle applies the same checks itself. |
 
 Every other code (for example `config_invalid`, `lifecycle_busy`,

@@ -304,7 +304,13 @@ func writeIdentitySpoolFile(dir, name string, record IdentitySpoolRecord, setOwn
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".identity-*")
+	return writeSpoolBytes(dir, name, ".identity-*", data, setOwnership)
+}
+
+// writeSpoolBytes replaces dir/name with data atomically, with its final
+// mode and ownership set before the rename.
+func writeSpoolBytes(dir, name, pattern string, data []byte, setOwnership func(string) error) error {
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}

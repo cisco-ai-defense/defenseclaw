@@ -31,6 +31,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from defenseclaw.fail_mode import _UPSTREAM_FAIL_OPEN_CONNECTORS
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupWizard
 from defenseclaw.tui.services.setup_state import (
     ConfigSection,
@@ -317,6 +318,39 @@ def _destinations(observability: Any) -> list[Any] | None:
     ]
 
 
+def _fail_mode_text(cfg: Any) -> str:
+    """What the active connectors' hooks do when the guardrail can't answer.
+
+    The effective value per connector (observe mode and agents that fail open
+    upstream stay open, as in ``defenseclaw status``), not the raw global
+    ``guardrail.hook_fail_mode`` (GAP-0152). A mixed set reads "fail closed,
+    1 open".
+    """
+
+    global_mode = _text(cfg, "guardrail.hook_fail_mode") or "closed"
+    resolver = getattr(getattr(cfg, "guardrail", None), "effective_hook_fail_mode", None)
+    modes: list[str] = []
+    enabled = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)
+    for name in active_connector_names(cfg):
+        if callable(enabled) and not enabled(name):
+            continue
+        if name.lower() in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+            modes.append("open")
+        elif callable(resolver):
+            try:
+                modes.append(str(resolver(name) or global_mode).strip().lower())
+            except Exception:  # noqa: BLE001 - a config quirk must not break the Status column.
+                modes.append(global_mode)
+        else:
+            modes.append(global_mode)
+    if not modes:
+        return f"fail {global_mode}"
+    lead = "open" if modes.count("open") > modes.count("closed") else "closed"
+    other = "closed" if lead == "open" else "open"
+    rest = modes.count(other)
+    return f"fail {lead}, {rest} {other}" if rest else f"fail {lead}"
+
+
 def _connector_status(cfg: Any, owned: bool) -> TaskStatus:
     names = active_connector_names(cfg)
     if not names:
@@ -427,7 +461,7 @@ def _splunk_status(cfg: Any, observability: Any) -> TaskStatus:
             if getattr(d, "kind", "") == "splunk_hec" or str(getattr(d, "preset", "")).startswith("splunk")
         ]
         return TaskStatus("ok", _plural(len(splunk), "destination")) if splunk else TaskStatus("off")
-    return TaskStatus("ok", "HEC on") if _flag(cfg, "splunk.enabled") else TaskStatus("off")
+    return TaskStatus("off")
 
 
 def _has_preset(observability: Any, preset: str) -> bool:
@@ -479,24 +513,17 @@ def task_status(
     if wizard == SetupWizard.GUARDRAIL_ACTIONS:
         if not guardrail_on:
             return TaskStatus("off", "guardrail off")
-        return TaskStatus("ok", f"fail {_text(cfg, 'guardrail.hook_fail_mode') or 'closed'}")
+        return TaskStatus("ok", _fail_mode_text(cfg))
     if wizard in {SetupWizard.SKILL_SCANNER, SetupWizard.MCP_SCANNER}:
-        scanner = "skill_scanner" if wizard == SetupWizard.SKILL_SCANNER else "mcp_scanner"
         if problems:
             return TaskStatus("attention", "not configured")
-        if not _text(cfg, f"scanners.{scanner}.binary"):
-            return TaskStatus("off")
         if wizard == SetupWizard.SKILL_SCANNER:
-            # An empty policy is what "--policy none" saves; only an unset one
-            # is the permissive default, as the strictness form reads it
-            # (GAP-2562).
-            raw = _value(cfg, "scanners.skill_scanner.policy", "permissive")
-            policy = "permissive" if raw is None else (str(raw).strip() or "none")
+            # An unset or empty policy is the recommended quiet preset.
+            raw = _value(cfg, "scanners.skill_scanner.policy", "quiet")
+            policy = str(raw or "").strip() or "quiet"
             return TaskStatus("ok", f"{policy} · LLM" if _flag(cfg, "scanners.skill_scanner.use_llm") else policy)
         return TaskStatus("ok", _short(f"{_text(cfg, 'scanners.mcp_scanner.analyzers') or 'auto'} analyzers"))
     if wizard == SetupWizard.REDACTION:
-        if _flag(cfg, "privacy.disable_redaction"):
-            return TaskStatus("attention", "turned off")
         return _redaction_status(cfg, observability)
     if wizard == SetupWizard.TRUSTED_PATHS:
         added = len(_items(cfg, "ai_discovery.trusted_binary_prefixes"))
@@ -592,9 +619,9 @@ SECTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "Guardrail",
             "Scanners",
             "Asset Policy",
-            "Skill Actions",
-            "MCP Actions",
-            "Plugin Actions",
+            "Skill Admission",
+            "MCP Admission",
+            "Plugin Admission",
             "Cisco AI Defense",
             "Firewall",
             "Trusted Paths",

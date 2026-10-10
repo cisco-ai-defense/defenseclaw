@@ -307,12 +307,12 @@ You don't pick the Bifrost key directly. You pick a model — the gateway maps `
   <Card
     title="Skill Scanner"
     href="/docs/scanning/skill-scanner"
-    description="SKILL_SCANNER_LLM_API_KEY is auto-populated from DEFENSECLAW_LLM_KEY via inject_llm_env. LLM analysis works with any LiteLLM-supported provider (OpenAI, Anthropic, Bedrock, Gemini, Vertex, Azure, Groq, Mistral, vLLM, Ollama, …)."
+    description="The skill scanner's LLM judge inherits the top-level llm: block (judge_source: inherit), so the unified key reaches it with no scanner-specific variable. Works with any LiteLLM-supported provider, including a local vLLM server."
   />
   <Card
     title="MCP Scanner"
     href="/docs/scanning/mcp-scanner"
-    description="Same inject_llm_env path. The MCP behavioural analysis pipeline reuses the unified key."
+    description="The MCP scanner's LLM analyzer inherits the same llm: block (judge_source: inherit)."
   />
   <Card
     title="Set up the guardrail (judge)"
@@ -365,10 +365,31 @@ defenseclaw setup guardrail \
 ## Custom providers for internal or self-hosted endpoints
 
 Internal LLM gateways (a corporate vLLM cluster, an isolated Bedrock
-mirror, a lab vending machine) plug in via the
-`~/.defenseclaw/custom-providers.json` overlay. Each entry exposes
-its own `base_url`, env keys, allowed request types, and per-instance
-TLS posture.
+mirror, a lab vending machine) plug in as `llm_providers.custom`
+entries in `config.yaml` (see the
+[configuration reference](/docs/reference/configuration#custom-llm-providers-llm_providerscustom)).
+Each entry exposes its own `base_url`, env keys, allowed request types,
+and per-instance TLS posture.
+
+Manage the entries with `defenseclaw setup provider add`, `list`, `show` and
+`remove`. `add` and `remove` write `llm_providers` in `config.yaml` through the
+config writer; `list` and `show` print the registry the running gateway reports
+and fall back, with a label, to the file on disk when the gateway is
+unreachable. A file marked `_derived_from` is derived from
+`llm_providers` on config writes and is not read back as input: do not edit
+it. If that derived file drifts, `defenseclaw doctor` fails the
+**Custom-provider overlay** row and `defenseclaw doctor --fix` rewrites it.
+
+During the v9 migration, DefenseClaw imports an ordinary hand-written
+`custom-providers.json` from 0.8.x into `llm_providers`, then retires the old
+overlay. If any provider uses `request_overrides`, which `llm_providers`
+cannot represent, migration reports it and leaves the legacy file as a
+**live input**. The gateway continues to merge that overlay with
+`llm_providers` after config changes. `defenseclaw setup provider add` and
+`remove` copy its providers into `llm_providers` (without the overrides) and
+leave the file in place. Preserve and review the file until those request
+overrides are no longer needed; changing `llm_providers` alone does not remove
+them. See [v9 migration](/docs/reference/migrate-v9#custom-providers).
 
 ```bash
 defenseclaw setup provider add \
@@ -410,9 +431,9 @@ matching the request URL's host against each entry's `domains` list. If
 you set `--base-url` but never declare a `--domain` covering the same
 host, `defenseclaw doctor` emits a `base_url host … not covered by
 domains` warning and the gateway falls back to default TLS / routing
-because it cannot match the inbound URL to the overlay. Always pass
+because it cannot match the inbound URL to the entry. Always pass
 `--domain <host>` alongside `--base-url <scheme>://<host>:<port>` (or
-add the host to `domains` in the JSON overlay directly).
+add the host to the entry's `domains` in `llm_providers.custom`).
 </Callout>
 
 Then bind a resolved role to the instance:
@@ -438,17 +459,17 @@ defenseclaw setup guardrail \
 ```
 
 `defenseclaw doctor` validates that every `instance_name` in your
-config resolves to an overlay entry, warns when an overlay TLS block
-declares both `ca_cert_pem` and `insecure_skip_verify`, and warns when
-an entry's `base_url` host is not covered by its `domains` list (which
-would otherwise silently bypass the overlay at request time).
+config resolves to an `llm_providers.custom` entry, warns when an entry
+sets both a CA file and `insecure_skip_verify`, and warns when an entry's
+`base_url` host is not covered by its `domains` list (which would
+otherwise silently bypass the entry at request time).
 
 ### Bedrock, Vertex AI, Azure on a custom instance
 
 A custom instance can carry the full regional posture (region, auth
 mode, deployment aliases) so a *single* `setup llm --instance-name X`
 call is all that's needed downstream. Same flags as the role-level
-regional flags below — they just attach to the overlay entry instead.
+regional flags below — they just attach to the `llm_providers.custom` entry instead.
 
 ```bash
 defenseclaw setup provider add \
@@ -482,12 +503,12 @@ The same shape works for Vertex AI (`--vertex-project-id`,
 (`--azure-endpoint`, `--azure-api-version`, `--azure-auth-mode`,
 `--azure-deployment-alias model=deployment`).
 
-#### Role wins, overlay fills blanks
+#### Role wins, the provider entry fills blanks
 
-When the resolved role *and* the overlay both declare a sub-block,
-the role's fields win and the overlay only supplies values the role
-omitted. The example below pins region on the role but inherits
-auth mode and the deployment alias table from the overlay:
+When the resolved role *and* its `llm_providers.custom` entry both
+declare a sub-block, the role's fields win and the entry only supplies
+values the role omitted. The example below pins region on the role but
+inherits auth mode and the deployment alias table from the entry:
 
 ```yaml
 # ~/.defenseclaw/config.yaml
@@ -495,34 +516,25 @@ llm:
   provider: custom
   instance_name: acme-bedrock-prod
   bedrock:
-    region: us-west-2          # overrides overlay's us-east-2
-```
+    region: us-west-2          # overrides the entry's us-east-2
 
-```json
-# ~/.defenseclaw/custom-providers.json
-{
-  "providers": [
-    {
-      "name": "acme-bedrock-prod",
-      "base_provider_type": "bedrock",
-      "bedrock": {
-        "region": "us-east-2",                  // shadowed by role above
-        "auth_mode": "iam_credentials",         // inherited
-        "access_key_env": "ACME_AWS_AKID",      // inherited
-        "secret_key_env": "ACME_AWS_SECRET",    // inherited
-        "deployment_aliases": {                 // inherited
-          "fast": "anthropic.claude-3-haiku-20240307-v1:0",
-          "heavy": "anthropic.claude-3-opus-20240229-v1:0"
-        }
-      }
-    }
-  ]
-}
+llm_providers:
+  custom:
+    - name: acme-bedrock-prod
+      base_provider_type: bedrock
+      bedrock:
+        region: us-east-2                    # shadowed by the role above
+        auth_mode: iam_credentials           # inherited
+        access_key_env: ACME_AWS_AKID        # inherited
+        secret_key_env: ACME_AWS_SECRET      # inherited
+        deployment_aliases:                  # inherited
+          fast: anthropic.claude-3-haiku-20240307-v1:0
+          heavy: anthropic.claude-3-opus-20240229-v1:0
 ```
 
 Effective dispatch posture: region `us-west-2`, IAM-credentials auth
-from `ACME_AWS_*`, alias table from the overlay. `defenseclaw doctor`
-flags overlay fields that the role silently shadows so the dead config
+from `ACME_AWS_*`, alias table from the entry. `defenseclaw doctor`
+flags entry fields that the role silently shadows so the dead config
 can be pruned.
 
 ## Regional providers (Bedrock, Vertex AI, Azure OpenAI)
@@ -616,6 +628,6 @@ defenseclaw setup llm \
 - [`cli/defenseclaw/commands/cmd_keys.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_keys.py) — the four subcommands.
 - [`cli/defenseclaw/credentials.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/credentials.py) — the `CREDENTIALS` registry and the resolve / classify functions.
 - [`cli/defenseclaw/commands/_llm_picker.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/_llm_picker.py) — shared interactive pickers and the inherit preflight.
-- [`internal/configs/embed.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/configs/embed.go) — the Go-side `Provider` overlay schema (custom providers).
+- [`internal/configs/embed.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/configs/embed.go) — the Go-side `Provider` schema that `llm_providers.custom` entries map to.
 - [Reference → Keys](/docs/reference/keys) — the full credential table with feature gating and override paths.
-- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — the two scanners that consume the unified key via `inject_llm_env`.
+- [Skill scanner](/docs/scanning/skill-scanner) and [MCP scanner](/docs/scanning/mcp-scanner) — the two scanners whose LLM judge inherits the unified `llm:` block.

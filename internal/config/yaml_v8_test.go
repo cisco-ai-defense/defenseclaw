@@ -76,7 +76,7 @@ func TestParseV8YAMLVersionContract(t *testing.T) {
 		{"missing", "observability: {}\n", V8YAMLErrorVersionRequired},
 		{"zero", "config_version: 0\n", V8YAMLErrorVersionUpgrade},
 		{"past", "config_version: 7\n", V8YAMLErrorVersionUpgrade},
-		{"future", "config_version: 9\n", V8YAMLErrorVersionUnsupported},
+		{"future", "config_version: 10\n", V8YAMLErrorVersionUnsupported},
 		{"negative", "config_version: -1\n", V8YAMLErrorVersionInvalid},
 		{"quoted", "config_version: '8'\n", V8YAMLErrorVersionInvalid},
 		{"float", "config_version: 8.0\n", V8YAMLErrorVersionInvalid},
@@ -94,9 +94,9 @@ func TestParseV8YAMLVersionContract(t *testing.T) {
 	if !strings.Contains(past.Error(), "run `defenseclaw migrate`") {
 		t.Fatalf("older config error = %q, want migrate guidance", past.Error())
 	}
-	future := requireV8YAMLError(t, []byte("config_version: 9\n"), V8YAMLErrorVersionUnsupported)
-	if !strings.Contains(future.Error(), "written by a newer DefenseClaw (config_version 9)") ||
-		!strings.Contains(future.Error(), "restore ~/.defenseclaw/previous") {
+	future := requireV8YAMLError(t, []byte("config_version: 10\n"), V8YAMLErrorVersionUnsupported)
+	if !strings.Contains(future.Error(), "written by a newer DefenseClaw (config_version 10)") ||
+		!strings.Contains(future.Error(), "config.yaml.v8.bak next to the config file on a managed host, ~/.defenseclaw/previous") {
 		t.Fatalf("newer config error = %q, want newer-release guidance", future.Error())
 	}
 }
@@ -233,7 +233,11 @@ func TestParseV8YAMLNodeLimitCountsKeysAndScalars(t *testing.T) {
 	requireV8YAMLError(t, []byte(sequenceV8YAML(allowedItems+1)), V8YAMLErrorNodeLimit)
 }
 
-func TestParseV8YAMLTargetedLegacyDiagnostics(t *testing.T) {
+// A Secure Client source stays on config_version 8, so a legacy v7 key keeps
+// the targeted error of main (issue #1092).
+func TestParseV8YAMLSecureClientLegacyDiagnostics(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
 	for _, test := range []struct {
 		name, body, path, target string
 	}{
@@ -247,12 +251,13 @@ func TestParseV8YAMLTargetedLegacyDiagnostics(t *testing.T) {
 		{"connector sinks", "observability:\n  connectors:\n    codex:\n      audit_sinks: []\n", "$.observability.connectors.codex.audit_sinks", "connector selectors"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := requireV8YAMLError(t, []byte("config_version: 8\n"+test.body), V8YAMLErrorLegacyKeyForbidden)
+			source := "config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n" + test.body
+			err := requireV8YAMLError(t, []byte(source), V8YAMLErrorLegacyKeyForbidden)
 			if err.Path != test.path {
 				t.Fatalf("Path = %q, want %q", err.Path, test.path)
 			}
-			if !strings.Contains(err.Action, "defenseclaw upgrade") || !strings.Contains(err.Action, test.target) {
-				t.Fatalf("Action = %q, want upgrade guidance with %q", err.Action, test.target)
+			if !strings.Contains(err.Action, test.target) {
+				t.Fatalf("Action = %q, want the replacement %q", err.Action, test.target)
 			}
 		})
 	}
@@ -360,5 +365,29 @@ func TestParseV8YAMLSharesTheParseOfOneSource(t *testing.T) {
 	}
 	if _, err := ParseV8YAML("config.yaml", []byte("config_version: 8\ndata_dir: [\n")); err == nil {
 		t.Fatal("malformed bytes were accepted from the cache")
+	}
+}
+
+// TestSecureClientV9SourceRejected keeps the Secure Client parser, schema
+// preflight and runtime loader on the v8 contract while other profiles can
+// use v9.
+func TestSecureClientV9SourceRejected(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\nadmission: {skill: {actions: {high: block}}}\n")
+	err := requireV8YAMLError(t, raw, V8YAMLErrorVersionUnsupported)
+	if err.Path != "$.config_version" {
+		t.Fatalf("error path = %q, want $.config_version", err.Path)
+	}
+	var schemaErr *V8YAMLError
+	if err := ValidateV8SchemaBytes("config.yaml", raw); !errors.As(err, &schemaErr) ||
+		schemaErr.Code != V8YAMLErrorVersionUnsupported {
+		t.Fatalf("schema preflight error = %v, want unsupported version", err)
+	}
+	if err := checkRuntimeConfigVersion(9, true); err == nil {
+		t.Fatal("runtime version check accepted Secure Client v9")
+	}
+	if _, err := LoadRuntimeV8FromBytes("config.yaml", raw); err == nil {
+		t.Fatal("runtime loader accepted Secure Client v9 source")
 	}
 }

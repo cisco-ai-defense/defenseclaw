@@ -77,6 +77,18 @@ class JudgeBedrockSetupTests(unittest.TestCase):
         self.assertNotIn("has no value", res.output)
         save.assert_called_once()
 
+    def test_switching_provider_clears_old_endpoint(self) -> None:
+        self.app.cfg.llm.provider = "openai"
+        self.app.cfg.llm.base_url = "http://127.0.0.1:18999/v1"
+        cmd_setup._configure_llm_non_interactive(
+            self.app.cfg,
+            str(self.tmp_dir),
+            provider="bedrock",
+            model=HAIKU,
+            region="us-east-1",
+        )
+        self.assertEqual(self.app.cfg.llm.base_url, "")
+
     def test_setup_llm_show_prints_effective_defaults_when_unset(self) -> None:
         """GAP-2613: unset timeout/max_retries show the 30 s / 2 defaults, not 0."""
         self.app.cfg.llm = _instance_role_llm()
@@ -265,3 +277,17 @@ class JudgeBedrockSetupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JudgeNotRunningTest(unittest.TestCase):
+    # GAP-0383: the gateway says the enabled judge could not start; doctor
+    # fails a row instead of counting the earlier judge calls as working.
+    def test_unavailable_judge_fails_and_skips_the_calls_row(self):
+        reason = "no API key for its LLM: DEFENSECLAW_LLM_KEY is not set (environment or ~/.defenseclaw/.env)"
+        health = {"guardrail": {"details": {"judge_state": "unavailable", "judge_unavailable_reason": reason}}}
+        r = _DoctorResult()
+        self.assertTrue(cmd_doctor._check_judge_running(health, r))
+        row = r.checks[-1]
+        self.assertEqual(row["status"], "fail")
+        self.assertIn(reason, row["detail"])
+        self.assertFalse(cmd_doctor._check_judge_running({"guardrail": {"details": {"judge_state": "ok"}}}, r))

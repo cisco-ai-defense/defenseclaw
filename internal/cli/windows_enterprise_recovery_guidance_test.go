@@ -77,6 +77,16 @@ func TestWindowsEnterpriseEnumeratorFailureTextUnwrapsTheCause(t *testing.T) {
 	if _, _, ok := windowsEnterpriseEnumeratorFailureText("the gateway did not start"); ok {
 		t.Fatal("an unrelated message was rewritten")
 	}
+	// The v9 keys get the code too; a policy_dir the service cannot read
+	// does not (GAP-0314).
+	for label, want := range map[string]string{
+		"guardrail.rule_pack": "rule_pack_unreadable", "guardrail.custom_packs.acme.path": "rule_pack_unreadable", "policy_dir": "",
+	} {
+		v9 := strings.Replace(message, "guardrail.rule_pack_dir", label, 1)
+		if _, code, ok := windowsEnterpriseEnumeratorFailureText(v9); !ok || code != want {
+			t.Fatalf("%s: ok=%t code=%q, want %q", label, ok, code, want)
+		}
+	}
 }
 
 // GAP-1419: a refused managed runtime bundle names the file and the reason
@@ -113,5 +123,59 @@ func TestWindowsEnterpriseInstallerBuildMismatchText(t *testing.T) {
 	}
 	if _, ok := windowsEnterpriseInstallerBuildMismatchText("gateway did not become ready", "uninstall", false); ok {
 		t.Fatal("an unrelated error was rewritten")
+	}
+}
+
+// GAP-0920, GAP-1041: a LocalSystem run whose recovery failed is not told to
+// run the same LocalSystem Setup command again, nor to correct a path and an
+// account the error may not name; it gets the FORCE=1 last resort.
+func TestWindowsEnterpriseStandaloneNextStepAfterALocalSystemRecovery(t *testing.T) {
+	original := windowsEnterpriseRunningAsLocalSystem
+	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
+	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
+	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil)
+	if strings.Contains(got, "Next step: run DefenseClaw Setup") || !strings.Contains(got, "running it again unchanged fails the same way") ||
+		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) || strings.Contains(got, "(the path and the account)") ||
+		!strings.Contains(got, "/uninstall FORCE=1 JSON=1") {
+		t.Fatalf("next step = %q", got)
+	}
+	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
+	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
+		t.Fatalf("an administrator run lost the LocalSystem step: %q", got)
+	}
+}
+
+// GAP-0741: a committed install whose lifecycle journal could not be retired
+// because of a per-user .defenseclaw folder says it is installed, names the
+// folder and its fix, and says that /ensure again converges.
+func TestWindowsEnterpriseCommittedJournalNextStep(t *testing.T) {
+	original := `Install committed, but its protected managed-hook lifecycle journal could not be retired: retire copilot managed runtime generations for SID S-1-5-21-1-2-3-1018: enterprise hooks: managed runtime generation directory is untrusted: C:\Users\dcw-std2\.defenseclaw\hooks: access denied`
+	step := windowsEnterpriseCommittedJournalNextStep(original, true)
+	for _, want := range []string{"installed and running", `C:\Users\dcw-std2\.defenseclaw was left by a per-user`, "uninstall --all --binaries --yes", "run Setup /ensure again"} {
+		if !strings.Contains(step, want) {
+			t.Fatalf("next step %q, want %q", step, want)
+		}
+	}
+	if got := windowsEnterpriseCommittedJournalNextStep(original, false); got != "" {
+		t.Fatalf("not installed: %q", got)
+	}
+}
+
+// GAP-0770: a lifecycle that a Group Policy AllSigned execution policy kept
+// from starting names the policy and the signature cause, with the fix,
+// instead of "exited with code 1".
+func TestWindowsEnterpriseExecutionPolicyRefusal(t *testing.T) {
+	stderr := []byte("\x1b[31;1mSecurityError: File C:\\ProgramData\\DefenseClaw-Setup-1\\install-enterprise.ps1 cannot be loaded. The file C:\\ProgramData\\DefenseClaw-Setup-1\\install-enterprise.ps1 is not digitally signed. You cannot run this script on the current system.\x1b[0m\r\n")
+	got := windowsEnterpriseExecutionPolicyRefusal(stderr)
+	for _, want := range []string{"powershell_execution_policy: ", "is not digitally signed", "AllSigned", "Trusted Publishers", "nothing was changed"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("refusal %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Fatalf("refusal keeps color sequences: %q", got)
+	}
+	if got := windowsEnterpriseExecutionPolicyRefusal([]byte("powershell7_required: install PowerShell 7\n")); got != "" {
+		t.Fatalf("other stderr = %q", got)
 	}
 }

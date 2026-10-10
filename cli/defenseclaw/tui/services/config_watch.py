@@ -17,14 +17,17 @@
 """Lightweight, cross-platform config generation detection for the TUI.
 
 The watcher deliberately does not parse YAML.  A one-second background poll
-compares a stable file signature and asks the app shell to reload only when a
-new generation is present.  The content digest is the fallback for filesystems
-whose timestamp granularity can hide rapid, same-size in-place writes.
+compares a stable file signature plus the writer's ``config.generation.json``
+counter and asks the app shell to reload only when a new generation is
+present.  The content digest also catches hand edits (which bump no counter)
+and filesystems whose timestamp granularity can hide rapid, same-size
+in-place writes.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,6 +48,9 @@ class ConfigGeneration:
     changed_ns: int
     size: int
     digest: str
+    # ``generation`` from config.generation.json next to config.yaml (the
+    # config writer's counter); 0 when the file is missing or unreadable.
+    config_generation: int = 0
 
     @property
     def identity(self) -> tuple[int, int]:
@@ -101,7 +107,17 @@ def probe_config_generation(path: str | Path) -> ConfigGeneration | None:
     )
     if before_key != after_key or total != after.st_size:
         return None
-    return ConfigGeneration(*after_key, digest.hexdigest())
+    return ConfigGeneration(*after_key, digest.hexdigest(), _writer_generation(config_path))
+
+
+def _writer_generation(config_path: Path) -> int:
+    """The config writer's generation counter, 0 when it can't be read."""
+    try:
+        with (config_path.parent / "config.generation.json").open(encoding="utf-8") as stream:
+            value = json.load(stream).get("generation", 0)
+    except (OSError, ValueError, AttributeError):
+        return 0
+    return value if isinstance(value, int) and value >= 0 else 0
 
 
 class ConfigChangeWatcher:

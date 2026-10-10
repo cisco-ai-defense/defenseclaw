@@ -28,6 +28,11 @@
 [CmdletBinding()]
 param()
 
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
+    Write-Output 'DefenseClaw Intune install requires PowerShell FullLanguage. Allow or sign the DefenseClaw kit scripts in WDAC/AppLocker, then retry.'
+    exit 1603
+}
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 

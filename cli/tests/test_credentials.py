@@ -40,12 +40,11 @@ from defenseclaw.config import (
     LLMConfig,
     MCPScannerConfig,
     OpenShellConfig,
-    OTelConfig,
-    OTelDestinationConfig,
     PerConnectorGuardrailConfig,
     ScannersConfig,
+    SkillScannerAnalyzers,
     SkillScannerConfig,
-    SplunkConfig,
+    SkillScannerVirusTotal,
 )
 
 
@@ -201,7 +200,9 @@ class RequirementPredicateTests(unittest.TestCase):
         on = _make_cfg(
             "/tmp/dc-test",
             scanners=ScannersConfig(
-                skill_scanner=SkillScannerConfig(use_virustotal=True),
+                skill_scanner=SkillScannerConfig(
+                    analyzers=SkillScannerAnalyzers(virustotal=SkillScannerVirusTotal(enabled=True))
+                ),
             ),
         )
         self.assertEqual(C._virustotal_key(on), C.Requirement.REQUIRED)
@@ -237,12 +238,6 @@ class RequirementPredicateTests(unittest.TestCase):
             ),
         )
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.NOT_USED)
-
-    def test_splunk_required_when_enabled(self):
-        off = _make_cfg("/tmp/dc-test")
-        self.assertEqual(C._splunk_token(off), C.Requirement.NOT_USED)
-        on = _make_cfg("/tmp/dc-test", splunk=SplunkConfig(enabled=True))
-        self.assertEqual(C._splunk_token(on), C.Requirement.REQUIRED)
 
     def test_splunk_required_for_enabled_v8_hec_reference(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -296,43 +291,6 @@ class RequirementPredicateTests(unittest.TestCase):
             )
             with patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}, clear=False):
                 self.assertEqual(C._splunk_token(cfg), C.Requirement.REQUIRED)
-
-    def test_galileo_key_required_only_for_enabled_destination(self):
-        off = _make_cfg("/tmp/dc-test")
-        self.assertEqual(C._galileo_key(off), C.Requirement.NOT_USED)
-
-        disabled = _make_cfg(
-            "/tmp/dc-test",
-            otel=OTelConfig(
-                enabled=True,
-                destinations=[OTelDestinationConfig(name="galileo", preset="galileo", enabled=False)],
-            ),
-        )
-        self.assertEqual(C._galileo_key(disabled), C.Requirement.NOT_USED)
-
-        enabled = _make_cfg(
-            "/tmp/dc-test",
-            otel=OTelConfig(
-                enabled=True,
-                destinations=[OTelDestinationConfig(name="galileo", preset="galileo", enabled=True)],
-            ),
-        )
-        self.assertEqual(C._galileo_key(enabled), C.Requirement.REQUIRED)
-
-        custom_name = _make_cfg(
-            "/tmp/dc-test",
-            otel=OTelConfig(
-                enabled=True,
-                destinations=[
-                    OTelDestinationConfig(
-                        name="galileo-security",
-                        preset="galileo",
-                        enabled=True,
-                    )
-                ],
-            ),
-        )
-        self.assertEqual(C._galileo_key(custom_name), C.Requirement.REQUIRED)
 
     def test_galileo_key_uses_enabled_v8_header_reference(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -489,7 +447,8 @@ class RequirementPredicateTests(unittest.TestCase):
         cfg = _make_cfg(
             "/tmp/dc-test",
             scanners=ScannersConfig(
-                skill_scanner=SkillScannerConfig(use_llm=True),
+                # use_llm is on by default; the judge needs a key once a model resolves.
+                skill_scanner=SkillScannerConfig(use_llm=True, llm=LLMConfig(model="anthropic/claude-sonnet-5-5")),
             ),
         )
         self.assertEqual(C._defenseclaw_llm_key(cfg), C.Requirement.REQUIRED)
@@ -563,47 +522,6 @@ class BoundEndpointTests(unittest.TestCase):
         spec = C.lookup("VIRUSTOTAL_API_KEY")
         self.assertIsNotNone(spec)
         self.assertEqual(spec.resolve_bound_endpoint(cfg), "")
-
-    def test_galileo_returns_destination_endpoint(self):
-        cfg = _make_cfg(
-            "/tmp/dc-test",
-            otel=OTelConfig(
-                enabled=True,
-                destinations=[
-                    OTelDestinationConfig(
-                        name="galileo",
-                        preset="galileo",
-                        endpoint="https://api.example.test/otel/traces",
-                    )
-                ],
-            ),
-        )
-        spec = C.lookup("GALILEO_API_KEY")
-        self.assertIsNotNone(spec)
-        self.assertEqual(
-            spec.resolve_bound_endpoint(cfg),
-            "https://api.example.test/otel/traces",
-        )
-
-        cfg.otel.destinations.insert(
-            0,
-            OTelDestinationConfig(
-                name="galileo-stale",
-                preset="galileo",
-                enabled=False,
-                endpoint="https://stale.example.test/otel/traces",
-            ),
-        )
-        self.assertEqual(
-            spec.resolve_bound_endpoint(cfg),
-            "https://api.example.test/otel/traces",
-        )
-
-        cfg.otel.destinations[1].name = "galileo-security"
-        self.assertEqual(
-            spec.resolve_bound_endpoint(cfg),
-            "https://api.example.test/otel/traces",
-        )
 
     def test_resolve_bound_endpoint_swallows_resolver_errors(self):
         """If a future resolver raises (e.g. config refactor changes

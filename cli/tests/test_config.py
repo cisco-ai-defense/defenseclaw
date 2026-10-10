@@ -51,9 +51,7 @@ from defenseclaw.config import (
     PerConnectorAssetPolicy,
     PerConnectorAssetTypePolicy,
     PerConnectorGuardrailConfig,
-    PluginActionsConfig,
     SeverityAction,
-    SkillActionsConfig,
     SkillScannerConfig,
     WatchConfig,
     WebhookConfig,
@@ -67,9 +65,6 @@ from defenseclaw.config import (
     _merge_inspect_llm,
     _merge_mcp_scanner,
     _merge_openshell,
-    _merge_plugin_actions,
-    _merge_severity_action,
-    _merge_skill_actions,
     _merge_webhooks,
     config_path,
     default_config,
@@ -100,55 +95,6 @@ class TestHelpers(unittest.TestCase):
 
     def test_dedup_empty(self):
         self.assertEqual(_dedup([]), [])
-
-    def test_malformed_otel_destination_numbers_fall_back_to_defaults(self):
-        cfg = config_mod._merge_otel(
-            {
-                "destinations": [
-                    {
-                        "name": "malformed",
-                        "enabled": True,
-                        "metrics": {"enabled": True, "export_interval_s": "abc"},
-                        "batch": {
-                            "max_export_batch_size": "many",
-                            "scheduled_delay_ms": {},
-                            "max_queue_size": None,
-                        },
-                    }
-                ]
-            }
-        )
-        destination = cfg.destinations[0]
-        self.assertEqual(destination.metrics.export_interval_s, 60)
-        self.assertEqual(destination.batch.max_export_batch_size, 512)
-        self.assertEqual(destination.batch.scheduled_delay_ms, 5000)
-        self.assertEqual(destination.batch.max_queue_size, 2048)
-
-    def test_quoted_false_does_not_enable_otel_destination_or_signals(self):
-        cfg = config_mod._merge_otel(
-            {
-                "enabled": "false",
-                "logs": {"emit_individual_findings": "false"},
-                "destinations": [
-                    {
-                        "name": "quoted",
-                        "enabled": "false",
-                        "tls": {"insecure": "false"},
-                        "traces": {"enabled": "false"},
-                        "logs": {"enabled": "false"},
-                        "metrics": {"enabled": "false"},
-                    }
-                ],
-            }
-        )
-        self.assertFalse(cfg.enabled)
-        self.assertFalse(cfg.logs.emit_individual_findings)
-        destination = cfg.destinations[0]
-        self.assertFalse(destination.enabled)
-        self.assertFalse(destination.tls.insecure)
-        self.assertFalse(destination.traces.enabled)
-        self.assertFalse(destination.logs.enabled)
-        self.assertFalse(destination.metrics.enabled)
 
     def test_validate_deployment_mode_empty_allowed(self):
         self.assertEqual(config_mod._validate_deployment_mode(""), "")
@@ -322,17 +268,20 @@ class TestPaths(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX group-read mode has no Windows DACL equivalent")
     def test_secure_write_preserves_group_read_without_write(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
-        path.write_text("config_version: 6\n")
+        path.write_text("config_version: 9\nobservability: {}\n")
         os.chmod(path, 0o640)
-        config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
+        config_mod.write_config_yaml_secure(
+            str(path), {"config_version": 9, "observability": {}, "gateway": {"api_port": 18971}}
+        )
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
 
     @unittest.skipIf(os.name == "nt", "fallback covers POSIX platforms without fchmod")
     def test_secure_write_uses_path_chmod_without_fchmod(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
+        document = {"config_version": 9, "observability": {}}
         with patch.object(config_mod.os, "fchmod", None):
-            config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
-        self.assertEqual(config_mod.yaml.safe_load(path.read_text()), {"config_version": 6})
+            config_mod.write_config_yaml_secure(str(path), document)
+        self.assertEqual(config_mod.yaml.safe_load(path.read_text()), document)
 
     def test_load_dotenv_ignores_unreadable_file(self):
         with patch("builtins.open", side_effect=PermissionError("denied")):
@@ -366,41 +315,6 @@ class TestSeverityAction(unittest.TestCase):
         self.assertEqual(sa.file, "none")
         self.assertEqual(sa.runtime, "enable")
         self.assertEqual(sa.install, "none")
-
-
-class TestSkillActionsConfig(unittest.TestCase):
-    def test_for_severity_known(self):
-        cfg = SkillActionsConfig()
-        self.assertEqual(cfg.for_severity("CRITICAL").install, "none")
-        self.assertEqual(cfg.for_severity("HIGH").runtime, "enable")
-        self.assertEqual(cfg.for_severity("MEDIUM").runtime, "enable")
-        self.assertEqual(cfg.for_severity("LOW").file, "none")
-
-    def test_for_severity_unknown_falls_to_info(self):
-        cfg = SkillActionsConfig()
-        action = cfg.for_severity("UNKNOWN")
-        self.assertEqual(action.runtime, "enable")
-        self.assertEqual(action.install, "none")
-
-    def test_for_severity_case_insensitive(self):
-        cfg = SkillActionsConfig()
-        self.assertEqual(cfg.for_severity("critical").install, "none")
-
-    def test_should_disable(self):
-        cfg = SkillActionsConfig()
-        self.assertFalse(cfg.should_disable("CRITICAL"))
-        self.assertFalse(cfg.should_disable("HIGH"))
-        self.assertFalse(cfg.should_disable("MEDIUM"))
-
-    def test_should_quarantine(self):
-        cfg = SkillActionsConfig()
-        self.assertFalse(cfg.should_quarantine("CRITICAL"))
-        self.assertFalse(cfg.should_quarantine("LOW"))
-
-    def test_should_install_block(self):
-        cfg = SkillActionsConfig()
-        self.assertFalse(cfg.should_install_block("HIGH"))
-        self.assertFalse(cfg.should_install_block("INFO"))
 
 
 class TestAIDiscoveryConfig(unittest.TestCase):
@@ -603,51 +517,14 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
 
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = config_mod.load()
+            # Any write validates the whole candidate, so the unknown key
+            # blocks it (an unchanged save writes nothing).
+            cfg.gateway.port = 19998
             with self.assertRaises(V8ConfigError):
                 cfg.save()
 
 
 class TestMergeFunctions(unittest.TestCase):
-    def test_merge_severity_action_none(self):
-        sa = _merge_severity_action(None)
-        self.assertEqual(sa.file, "none")
-
-    def test_merge_severity_action_partial(self):
-        sa = _merge_severity_action({"file": "quarantine"})
-        self.assertEqual(sa.file, "quarantine")
-        self.assertEqual(sa.runtime, "enable")
-
-    def test_merge_skill_actions_none(self):
-        sa = _merge_skill_actions(None)
-        self.assertEqual(sa.critical.install, "none")
-
-    def test_merge_skill_actions_override(self):
-        sa = _merge_skill_actions({"critical": {"file": "quarantine", "runtime": "disable", "install": "block"}})
-        self.assertEqual(sa.critical.install, "block")
-        self.assertEqual(sa.high.install, "none")
-
-    def test_merge_plugin_actions_none(self):
-        pa = _merge_plugin_actions(None)
-        self.assertEqual(pa.critical.file, "none")
-        self.assertEqual(pa.critical.runtime, "enable")
-        self.assertEqual(pa.critical.install, "none")
-        self.assertEqual(pa.medium.file, "none")
-        self.assertEqual(pa.medium.runtime, "enable")
-
-    def test_merge_plugin_actions_override(self):
-        pa = _merge_plugin_actions({"high": {"file": "quarantine", "runtime": "disable", "install": "block"}})
-        self.assertEqual(pa.high.install, "block")
-        self.assertEqual(pa.high.file, "quarantine")
-        self.assertEqual(pa.critical.install, "none")
-
-    def test_plugin_actions_for_severity(self):
-        pa = PluginActionsConfig()
-        self.assertEqual(pa.for_severity("CRITICAL").install, "none")
-        self.assertFalse(pa.should_disable("HIGH"))
-        self.assertFalse(pa.should_quarantine("CRITICAL"))
-        self.assertFalse(pa.should_install_block("LOW"))
-        self.assertEqual(pa.for_severity("BOGUS").runtime, "enable")
-
     def test_merge_gateway_watcher_none(self):
         gw = _merge_gateway_watcher(None)
         self.assertTrue(gw.enabled)
@@ -699,8 +576,6 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertTrue(cfg.data_dir.endswith(".defenseclaw"))
         self.assertTrue(cfg.audit_db.endswith("audit.db"))
         self.assertEqual(cfg.claw.mode, "openclaw")
-        self.assertEqual(cfg.scanners.skill_scanner.binary, "skill-scanner")
-        self.assertEqual(cfg.scanners.mcp_scanner.binary, "mcp-scanner")
         self.assertEqual(cfg.gateway.port, 18789)
         self.assertEqual(cfg.gateway.api_bind, "")
         self.assertEqual(cfg.gateway.api_port, 18970)
@@ -714,14 +589,15 @@ class TestDefaultConfig(unittest.TestCase):
     def test_default_skill_scanner_config(self):
         cfg = default_config()
         sc = cfg.scanners.skill_scanner
-        self.assertFalse(sc.use_llm)
+        # The recommended default: the quiet policy with the LLM judge.
+        self.assertTrue(sc.use_llm)
+        self.assertEqual(sc.policy, "quiet")
         self.assertFalse(sc.use_behavioral)
         self.assertFalse(sc.enable_meta)
         self.assertFalse(sc.use_trigger)
-        self.assertFalse(sc.use_virustotal)
-        self.assertFalse(sc.use_aidefense)
+        self.assertFalse(sc.analyzers.virustotal.enabled)
+        self.assertFalse(sc.analyzers.aidefense.enabled)
         self.assertEqual(sc.llm_consensus_runs, 0)
-        self.assertEqual(sc.policy, "permissive")
         self.assertTrue(sc.lenient)
 
     def test_default_mcp_scanner_config(self):
@@ -957,7 +833,6 @@ class TestConfigLoadSave(unittest.TestCase):
                 watch=WatchConfig(
                     debounce_ms=750,
                     auto_block=False,
-                    allow_list_bypass_scan=False,
                     rescan_enabled=False,
                     rescan_interval_min=15,
                 ),
@@ -1003,7 +878,8 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(raw["asset_policy"]["mode"], "action")
             self.assertTrue(raw["asset_policy"]["mcp"]["registry_required"])
             self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["name"], "github")
-            self.assertFalse(raw["asset_policy"]["skill"]["runtime_detection"]["enabled"])
+            # GAP-0060: only what differs from the defaults is written.
+            self.assertEqual(raw["asset_policy"]["skill"], {"default": "deny"})
 
             with patch("defenseclaw.config.default_data_path") as mock_dp:
                 mock_dp.return_value = Path(tmpdir)
@@ -1173,7 +1049,7 @@ class TestConfigLoadSave(unittest.TestCase):
             loaded.ai_discovery.enabled = False
             loaded.save()
             with open(config_file) as f:
-                self.assertEqual(yaml.safe_load(f)["ai_discovery"]["ide_inventory"], "off")
+                self.assertEqual(config_mod.parse_config_yaml(f.read())["ai_discovery"]["ide_inventory"], "off")
 
     def test_global_only_asset_policy_omits_connectors_key(self):
         # An enabled-but-global-only config must NOT emit `connectors:` so it
@@ -1577,7 +1453,7 @@ class TestMergeMCPScannerClean(unittest.TestCase):
             "llm_provider": "openai",
             "api_key": "stale-key",
         })
-        self.assertEqual(cfg.binary, "mcp-scanner")
+        self.assertFalse(hasattr(cfg, "binary"))
         self.assertEqual(cfg.analyzers, "yara")
         self.assertFalse(hasattr(cfg, "llm_provider"))
         self.assertFalse(hasattr(cfg, "api_key"))
@@ -1597,13 +1473,27 @@ class TestSkillScannerConfigClean(unittest.TestCase):
         cfg = SkillScannerConfig(
             use_llm=True, use_behavioral=True,
             llm_consensus_runs=3, policy="strict",
-            virustotal_api_key="vt-key",
         )
         self.assertTrue(cfg.use_llm)
         self.assertTrue(cfg.use_behavioral)
         self.assertEqual(cfg.llm_consensus_runs, 3)
         self.assertEqual(cfg.policy, "strict")
-        self.assertEqual(cfg.virustotal_api_key, "vt-key")
+
+    def test_a_v8_source_folds_its_retired_scanner_keys_into_analyzers(self):
+        # GAP-0157: the models carry no v8-only fields; a version 8 source (a
+        # Secure Client document is never migrated) is read through analyzers.
+        from defenseclaw.config import _merge_skill_scanner_analyzers
+
+        folded = _merge_skill_scanner_analyzers(
+            {"use_virustotal": True, "use_aidefense": True, "virustotal_api_key_env": "VT_KEY"}
+        )
+        self.assertTrue(folded.virustotal.enabled and folded.aidefense.enabled)
+        self.assertEqual(folded.virustotal.api_key_env, "VT_KEY")
+        written = _merge_skill_scanner_analyzers(
+            {"use_virustotal": True, "analyzers": {"virustotal": {"enabled": False}}}
+        )
+        self.assertFalse(written.virustotal.enabled)
+        self.assertFalse(hasattr(SkillScannerConfig(), "use_virustotal"))
 
 
 class TestConfigTopLevelSections(unittest.TestCase):
@@ -1868,14 +1758,14 @@ class TestGuardrailHostField(unittest.TestCase):
         )
         self.assertEqual(gc.allow_private_upstreams, ["10.50.2.100", "172.16.0.5"])
 
-    def test_merge_guardrail_hilt_defaults_and_alias(self):
+    def test_merge_guardrail_hilt_defaults_and_values(self):
         default_gc = _merge_guardrail({}, "/tmp")
         self.assertFalse(default_gc.hilt.enabled)
         self.assertEqual(default_gc.hilt.min_severity, "HIGH")
 
-        aliased = _merge_guardrail({"hitl": {"enabled": True, "min_severity": "medium"}}, "/tmp")
-        self.assertTrue(aliased.hilt.enabled)
-        self.assertEqual(aliased.hilt.min_severity, "MEDIUM")
+        configured = _merge_guardrail({"hilt": {"enabled": True, "min_severity": "medium"}}, "/tmp")
+        self.assertTrue(configured.hilt.enabled)
+        self.assertEqual(configured.hilt.min_severity, "MEDIUM")
 
 
 class TestOpenShellModeField(unittest.TestCase):
@@ -2135,5 +2025,41 @@ class TestWebhookConfig(unittest.TestCase):
                 self.assertEqual(cfg.webhooks[0].min_severity, "LOW")
 
 
+class TestPolicyDirDefault(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "the managed standalone layout is a POSIX layout")
+    def test_managed_standalone_layout_defaults_to_the_vendor_policy_folder(self):
+        # Go resolves an omitted policy_dir there to the root-owned vendor
+        # folder the gateway loads; Python reads the same tree.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "config.yaml")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_CONFIG": path}),
+                patch.dict(config_mod._STANDALONE_VENDOR_POLICY_DIRS, {path: "/opt/vendor/share/policies"}),
+            ):
+                self.assertEqual(load(data_dir=tmpdir).policy_dir, "/opt/vendor/share/policies")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(sys.platform == "win32" or os.geteuid() == 0, "POSIX permissions as a regular account")
+class UnreadableConfigTest(unittest.TestCase):
+    # GAP-0398: a root-owned (unreadable) config.yaml is not a missing one.
+    def test_load_refuses_instead_of_using_defaults(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg_file = os.path.join(data_dir, "config.yaml")
+            Path(cfg_file).write_text("config_version: 9\n")
+            os.chmod(cfg_file, 0)
+            try:
+                with patch.object(config_mod, "config_path_for_data_dir", return_value=Path(cfg_file)):
+                    with self.assertRaises(config_mod.ConfigVersionError):
+                        config_mod.load(data_dir=data_dir)
+                with patch.object(config_mod.os, "geteuid", return_value=os.getuid() + 1):
+                    message = config_mod._unreadable_config_message(cfg_file, PermissionError(13, "Permission denied"))
+                self.assertIn("sudo chown", message)
+                self.assertIn(cfg_file, message)
+            finally:
+                os.chmod(cfg_file, 0o600)

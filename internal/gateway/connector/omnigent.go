@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"gopkg.in/yaml.v3"
 )
@@ -820,7 +821,7 @@ func validateOmnigentInterpreter(opts SetupOpts, path string) error {
 		"/usr/local/Cellar", "/opt/local/bin", "/opt/local/sbin",
 	}
 	prefixes := append([]string(nil), defaultPrefixes...)
-	prefixes = append(prefixes, filepath.SplitList(os.Getenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES"))...)
+	prefixes = append(prefixes, filepath.SplitList(envvars.Getenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES"))...)
 	trusted := false
 	for index, prefix := range prefixes {
 		prefix = strings.TrimSpace(prefix)

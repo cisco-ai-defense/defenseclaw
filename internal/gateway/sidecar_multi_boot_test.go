@@ -1924,6 +1924,25 @@ func TestSetupConnectorsIsolated_RefusedUnchangedSetupKeepsExistingHooks(t *test
 	}
 }
 
+// GAP-1241: a single-connector start whose Setup refused before changing
+// anything keeps the registration it had instead of re-applying it, which
+// needs the posture a 0.8.x lock never recorded.
+func TestRestoreSingleConnectorSetupPointKeepsRegistrationAfterUnchangedRefusal(t *testing.T) {
+	refused := &bootStubConnector{stubConnector: stubConnector{name: "hermes"}}
+	transaction := multiConnectorSetupTransaction{applied: []multiConnectorSetupRollbackPoint{{
+		conn:             refused,
+		previouslyActive: true,
+		previousLock:     connector.HookContractLockEntry{Connector: "hermes", DefenseClawVersion: "0.8.10"},
+	}}}
+	cause := fmt.Errorf("connector hermes setup failed: %w", connector.ErrSetupRefusedUnchanged)
+	if err := restoreSingleConnectorSetupPoint(context.Background(), transaction, cause); err != cause {
+		t.Fatalf("restore error = %v, want the refusal alone", err)
+	}
+	if refused.setupCalls != 0 || refused.teardownCalls != 0 {
+		t.Fatalf("refused connector setup=%d teardown=%d, want 0/0", refused.setupCalls, refused.teardownCalls)
+	}
+}
+
 // TestSetupConnectorsIsolated_AllFailReturnsEmpty confirms that when every
 // connector fails the result is empty (the caller turns this into a loud boot
 // failure rather than idling on a gateway that protects nothing).
@@ -2380,6 +2399,61 @@ func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *tes
 	}
 	if got := snap.Guardrail.Details["lifecycle_manager"]; got != "enterprise_hook_guardian" {
 		t.Fatalf("lifecycle_manager = %v, want enterprise_hook_guardian", got)
+	}
+}
+
+// GAP-0905: after a hot guardrail.mode change the Guardrail status block
+// reports the mode in force, as the Connector Mode section does, instead of
+// the mode the guardrail started with.
+func TestRunGuardrailManagedEnterpriseStatusFollowsHotModeChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed enterprise hook lifecycle is rejected on native Windows")
+	}
+	prevInterval := guardrailHealthRefreshInterval
+	guardrailHealthRefreshInterval = 10 * time.Millisecond
+	t.Cleanup(func() { guardrailHealthRefreshInterval = prevInterval })
+	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
+	prevCodex := connector.CodexConfigPathOverride
+	connector.CodexConfigPathOverride = codexConfig
+	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
+	cfg := &config.Config{
+		DataDir:        t.TempDir(),
+		DeploymentMode: string(config.DeploymentModeManagedEnterprise),
+		Gateway:        config.GatewayConfig{APIPort: 18970},
+		Guardrail: config.GuardrailConfig{
+			Enabled: true, Connector: "codex", Mode: "observe", HookSelfHeal: true,
+		},
+	}
+	s := &Sidecar{cfg: cfg, health: NewSidecarHealth(), router: routerWithDefaultRulePack(t)}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.runGuardrail(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("runGuardrail: %v", err)
+		}
+	})
+	waitForMode := func(want string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			details := s.health.Snapshot().Guardrail.Details
+			if details["mode"] == want && details["policy_mode"] == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("guardrail status mode = %v policy_mode = %v, want %s", details["mode"], details["policy_mode"], want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	waitForMode("observe")
+	for _, mode := range []string{"action", "observe"} {
+		next := *cfg
+		next.Guardrail.Mode = mode
+		s.cfgCurrent.Store(&next)
+		waitForMode(mode)
 	}
 }
 

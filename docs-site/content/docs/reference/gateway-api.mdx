@@ -88,11 +88,6 @@ X-DefenseClaw-Token:   <token>
 X-DC-Auth:             Bearer <token>
 ```
 
-`PATCH /v1/guardrail/config` performs a second, endpoint-local check and accepts
-only `Authorization: Bearer` or `X-DefenseClaw-Token`; `X-DC-Auth` alone is
-rejected there. The endpoint also rejects every patch in
-`managed_enterprise` deployment mode.
-
 Loopback connector hook routes can instead use the matching connector's narrow
 hook token. The Codex token also authorizes `/api/v1/codex/notify`. A
 connector-scoped token on a generic `/api/v1/inspect/*` route is accepted only
@@ -161,7 +156,7 @@ X-DefenseClaw-Client: cli
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/health` | exempt | The full health document: uptime, every subsystem's state and details, provenance and ACP posture. Used by readiness probes, `defenseclaw doctor`, `defenseclaw status`, the TUI, the watchdog and in-agent plugins. |
-| `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, and `connector_modes` (one entry per active connector). Used by `defenseclaw status` and the TUI. |
+| `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, `connector_modes` (one entry per active connector), and the guardrail profile warnings `profile_assignment_warnings` (plus `profile_warnings` on the standalone profile). Used by `defenseclaw status`, the TUI, and Windows `enterprise windows status` and `verify`. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
 
 `/health` is unauthenticated by design. Any local process that can reach
@@ -179,8 +174,15 @@ that authenticate right now are derived (the current key, plus a staged or
 retiring one during a key rotation). They let the lifecycle check a key
 rotation; they are not the key IDs the listener proof takes, which are the
 SHA-256 of one user's hook credential. It carries no tokens, key material or request
-content. On Linux and macOS managed installs the hook socket also answers
-`GET /health` with the same document without peer authorization; every
+content. The guardrail profile warnings name configured groups and
+`DOMAIN\user` selectors, so `/health` gives only their number:
+`profile_assignment_warning_count`, and on the standalone profile
+`profile_warning_count`, each present only when it is not zero. `/status`
+lists the warnings themselves. On Linux and macOS managed installs the hook
+socket also answers `GET /health` with the same document without peer
+authorization; there root alone also gets `profile_assignment_warnings`,
+`profile_warnings` and the uids of the accounts whose directory lookups fail,
+which is how `enterprise linux|macos status` and `verify` read them. Every
 other path there keeps peer authorization. This is accepted so that every
 health consumer works without a credential; see residual R33 in the
 enterprise threat model.
@@ -273,6 +275,32 @@ left, the `sandbox` subsystem is absent from `/health`.
   cannot disagree with what is actually in the data path.
   `defenseclaw-gateway status` renders its per-connector **"Connector Mode"**
   section directly from this array.
+
+#### The policy object
+
+`/health` and `/status` carry a `policy` object that identifies the policy the
+gateway is enforcing. It is omitted on a Secure Client device.
+
+```json title="GET /health (policy object)"
+{
+  "effective_digest": "sha256:ad4166a5811d1b19edf47054d9b81c0ae317e19f05a0ec5cfa16621755f13813",
+  "generation": 9,
+  "config_generation": 19,
+  "config_generation_recorded": true,
+  "built_at": "2026-10-06T18:20:23Z",
+  "component_count": 6
+}
+```
+
+`effective_digest` and `generation` identify the policy generation in force;
+`config_generation` is the writer's counter from `config.generation.json`;
+`component_count` is the number of inputs the digest covers (config, the Rego
+modules, the providers, every rule pack in use and each guardrail profile).
+Their digests are not on `/health`, so the object stays small with thousands
+of profiles; `defenseclaw-gateway policy digest` lists each one.
+When a change fails to build, the previous generation keeps running and the
+object gains `last_reload_error` with the reason; `defenseclaw doctor` reports
+that as a failed Policy row. The next change that builds clears it.
 
 ### Connector hooks
 
@@ -381,6 +409,10 @@ These routes return `503` when no upstream client object is present and `502`
 when an attempted upstream RPC fails, including a disconnected client. They do
 not perform the CLI's filesystem quarantine/restore workflow.
 
+The gateway registers these routes and the three inventory routes below only
+when `openclaw` is an active connector, and never on a standalone enterprise
+deployment; elsewhere they return `404`.
+
 ### Inventory
 
 | Method | Path | Purpose |
@@ -394,17 +426,14 @@ not perform the CLI's filesystem quarantine/restore workflow.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET`, `HEAD` | `/v1/config/providers` | Return the merged built-in and operator provider registry plus overlay status. |
-| `POST` | `/v1/config/providers/reload` | Reload the built-in registry and `custom-providers.json` overlay. |
+| `POST` | `/v1/config/providers/reload` | Rebuild the provider registry from the built-in providers and `config.yaml` `llm_providers`. |
 
 ### Policy
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/policy/evaluate` | Debug the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, scan_result?}}`. DefenseClaw injects its current allow/block lists and returns `{ok: true, data: <AdmissionOutput>}`; arbitrary OPA domains/input are rejected. |
-| `POST` | `/policy/evaluate/firewall` | Evaluate the firewall sub-policy in isolation. |
-| `POST` | `/policy/evaluate/audit` | Evaluate the audit sub-policy. |
-| `POST` | `/policy/evaluate/skill-actions` | Evaluate the `skill_actions` sub-policy by severity. |
-| `POST` | `/policy/reload` | Atomically reload `.rego` modules plus optional `data.json` from configured `policy_dir` (or its `rego` child), invalidate the judge cache, and return `{"status":"reloaded","policy_dir":"..."}`. |
+| `POST` | `/policy/evaluate` | Dry-run the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, connector?, scan_result?}}`, where `target_type` is `skill`, `mcp` or `plugin` and `scan_result` is `{scanner_name, max_severity, total_findings, exit_code?, scan_error?}`. DefenseClaw adds the `admission:` block for the type and the `asset_policy` block and allow rules from the live generation, and returns `{ok: true, data: <AdmissionOutput>}` with `verdict`, `reason`, `file_action`, `install_action` and `runtime_action`. Rules scoped to a connector match only when the request names it in `input.connector` (the OpenClaw plugin sends `openclaw`). Arbitrary OPA domains and input are rejected. See [Admission and the block/allow list](/docs/policies/admission). |
+| `POST` | `/policy/reload` | Rebuild the policy generation now and return `{"status":"reloaded","policy_dir":"...","generation":N,"digest":"sha256:..."}` (the generation and digest that are enforcing now); it also clears the judge cache. The gateway already watches `config.yaml`, the policy assets it names and the rule packs, and applies a valid change on its own, so this only forces a rebuild (for example from a script). A change that fails to build leaves the running generation in place; see [the `policy` object](#the-policy-object). |
 
 ### Guardrail control plane
 
@@ -413,20 +442,49 @@ not perform the CLI's filesystem quarantine/restore workflow.
 | `POST` | `/v1/guardrail/event` | Emit canonical telemetry for an already-decided guardrail event. Requires `evaluation_id`, `direction` (`prompt` or `completion`), `action` (`allow`, `alert`, or `block`), and severity (`NONE` through `CRITICAL`); latency/token values must be finite and nonnegative. Returns `{"status":"ok"}`. No production caller is wired in this repository. |
 | `POST` | `/v1/guardrail/evaluate` | Combine caller-supplied, precomputed `local_result` / `cisco_result` values with required `evaluation_id`, `direction`, and `mode`, plus optional model/scanner/content/timing metadata. It does not scan arbitrary content and returns a `GuardrailOutput` with `action`, `severity`, `reason`, and `scanner_sources`. |
 | `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
-| `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into the active DefenseClaw config file, validate the full YAML file, and apply it through the central reloader. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. Managed-enterprise deployments reject this API mutation. |
 
-Changing `connector` uses restart semantics so listener and hook state are rebuilt; it is not accepted as an in-place connector swap.
+### Block and allow lists
 
-### Enforcement logging
-
-These endpoints manage the durable enforcement allow/block lists.
+These endpoints read and change the block and allow lists, which are the
+`asset_policy.<type>.denied` and `allowed` rules (and `asset_policy.tool`) in
+`config.yaml`. See [Admission and the block/allow list](/docs/policies/admission).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST`, `DELETE` | `/enforce/block` | Add a block, or remove it with `DELETE`. |
-| `POST` | `/enforce/allow` | Add an allow and re-enable a disabled skill/plugin when required. |
-| `GET` | `/enforce/blocked` | List blocked entries. |
-| `GET` | `/enforce/allowed` | List allowed entries. |
+| `POST`, `DELETE` | `/enforce/block` | Add a denied rule, or remove the rule with `DELETE`. |
+| `POST` | `/enforce/allow` | Add an allowed rule, and re-enable a disabled skill or plugin when required. |
+| `GET` | `/enforce/blocked` | List the denied rules. |
+| `GET` | `/enforce/allowed` | List the allowed rules. |
+
+The write routes take `{"target_type", "target_name", "reason", "connector", "source_path"}`.
+`target_type` is `skill`, `mcp`, `plugin` or `tool` and `target_name` is
+required; any other `target_type` gets `400`. `connector` scopes the rule to one
+connector, and `source_path` (allow only) pins an allow to one install path. Each
+write goes through the same config writer as `defenseclaw config set`, with the
+actor `api:<identity>`, and the gateway applies it without a restart. A write
+returns the new config writer generation in `generation`:
+
+```json
+{"effective_policy_digest":"sha256:8e6d614e5be0460109785e8e0d532aa980ab41dd87babf936d2675c4726f0c4b","generation":17,"status":"blocked"}
+```
+
+`generation` is the writer counter from `config.generation.json`, not
+`/health.policy.generation`. The latter counts policy rebuilds in the current
+gateway process and can reset on restart. To confirm enforcement, compare
+`effective_policy_digest` with `/health.policy.effective_digest`; if the
+reload fails, the response has `applied: false` and `reload_error` instead of
+the digest.
+
+`status` is `blocked`, `unblocked` or `allowed`. The `GET` routes return a list
+of `{id, target_type, target_name, reason, updated_at, connector?}`.
+
+On a managed standalone device the write routes answer `403` with
+`{"error":"managed_device","detail":"policy changes are made in the management plane"}`
+and audit the attempt; put the rule in the admin config instead. The `GET`
+routes still work. On a Secure Client device these routes keep reading and
+writing the audit database's `actions` table, as they did before version 9.
+A write that cannot take the config lock answers `503`, and one that loses a
+race with another writer answers `409`.
 
 ### Audit
 
@@ -447,12 +505,6 @@ defenseclaw tui                                             # Live dashboard
 ```
 
 Audit export includes the legacy `details` text and, when present, first-class `structured` JSON from `audit_events.structured_json`. Connector hook rows use `schema: "defenseclaw.hook.v1"`; older parsers can still read the mirrored `details_json=` token inside `details`.
-
-### Config
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/config/patch` | Bridge `{path, value}` to the connected upstream agent gateway's WebSocket `config.patch` RPC. It does not write DefenseClaw's `config.yaml`; an absent client returns `503`, while an RPC/disconnection failure returns `502`. |
 
 ### Runtime control and internal observability bridges
 

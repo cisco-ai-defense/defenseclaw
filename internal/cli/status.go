@@ -61,6 +61,9 @@ The sidecar must be running for this command to work.`,
 	// On a standalone managed host an administrator's status reads the
 	// managed deployment without extra environment variables.
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		if err := managedStandardUserGatewayRefusal(); err != nil {
+			return err
+		}
 		applyManagedStandaloneAdminEnv(cmd.ErrOrStderr())
 		gatewayStatusConfigProblem = nil
 		err := loadGatewayCommandConfigFor(cmd)
@@ -303,9 +306,10 @@ func gatewayStatusConfigLoadError(err error) error {
 	}
 	if problem, ok := configSchemaProblem(err); ok {
 		return fmt.Errorf("failed to load config: %s. %s Fix the file (check it with: defenseclaw config validate)",
-			problem, state)
+			strings.TrimRight(problem, ". "), state)
 	}
-	return fmt.Errorf("%w. %s Fix the file (check it with: defenseclaw config validate)", err, state)
+	return fmt.Errorf("%s. %s Fix the file (check it with: defenseclaw config validate)",
+		strings.TrimRight(err.Error(), ". "), state)
 }
 
 func printGatewayStatusBanner() {
@@ -509,6 +513,13 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 	}
 	newest := moved[len(moved)-1]
 	fmt.Println()
+	if newest.PreCutover {
+		// Not lost history: 1.0 does not carry 0.x history over (GAP-1222).
+		OK(fmt.Sprintf("The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in %s (since %s); %s",
+			newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+		Subhead("Delete the archive and its -wal/-shm files when you no longer need it.")
+		return
+	}
 	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; %s",
 		newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
 	recoverHint := "Recover older audit records with: sqlite3 " + newest.Path + " .recover"

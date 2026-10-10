@@ -18,6 +18,7 @@ package connector
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -201,6 +202,77 @@ func TestPatchCodexConfigReplacesTrustedMatrixAfterDataDirChange(t *testing.T) {
 		map[string]interface{}{"keep": "verbatim"},
 	) {
 		t.Fatalf("unrelated operator state changed: %#v", state["operator-unrelated"])
+	}
+}
+
+// GAP-0907: after the hook script path in config.toml is edited, the
+// self-heal Setup replaces the edited handlers in place instead of adding a
+// second hook set next to them.
+func TestPatchCodexConfigReplacesEditedHookPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("user-scoped Codex trust state is not installed on Windows")
+	}
+	root := t.TempDir()
+	configPath := filepath.Join(root, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = previous })
+	opts := SetupOpts{
+		DataDir:       filepath.Join(root, ".defenseclaw"),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-notify-token",
+		OTLPPathToken: strings.Repeat("a", 48),
+	}
+	hookScript := filepath.Join(opts.DataDir, "hooks", "codex-hook.sh")
+	connector := NewCodexConnector()
+	if err := connector.patchCodexConfig(opts, hookScript); err != nil {
+		t.Fatalf("Codex config patch: %v", err)
+	}
+	installed, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.ReplaceAll(string(installed), "/.defenseclaw/hooks/", "/.defenseclaw/xhooks/")
+	if edited == string(installed) {
+		t.Fatal("fixture did not edit the hook path")
+	}
+	if err := os.WriteFile(configPath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := connector.patchCodexConfig(opts, hookScript); err != nil {
+		t.Fatalf("repair Codex config patch: %v", err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "/xhooks/") {
+		t.Fatalf("repair kept the edited hook entries:\n%s", raw)
+	}
+	document := map[string]interface{}{}
+	if err := toml.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse repaired Codex config: %v", err)
+	}
+	hooks, _ := document["hooks"].(map[string]interface{})
+	if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
+		t.Fatalf("repaired matrix is not trusted: %v", err)
+	}
+	groups, err := codexHookGroupsForOptions(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := codexHookContractForSetup(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range groups {
+		command := codexHookCommandForPlatform(runtime.GOOS, group.eventType, contract.ContractID, hookScript)
+		if got := codexTestCommandCount(hooks[group.eventType], command); got != 1 {
+			t.Errorf("%s handler count = %d, want 1", group.eventType, got)
+		}
 	}
 }
 
@@ -541,4 +613,41 @@ func codexTestCommandCount(rawGroups interface{}, command string) int {
 		}
 	}
 	return count
+}
+
+// GAP-0382: a home path with a space must still give a hook command the
+// shell can run, and setup must still claim the unquoted form older
+// releases wrote so it replaces it.
+func TestHookCommandForHomeWithSpaceRunsAndStaysOwned(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell hook commands")
+	}
+	hooksDir := filepath.Join(t.TempDir(), "dc ip8", ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(hooksDir, "codex-hook.sh")
+	ran := filepath.Join(hooksDir, "ran")
+	body := "#!/bin/sh\n" + hookMarker + "1\necho \"$@\" > \"" + ran + "\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	command := codexHookCommandForPlatform("linux", "PreToolUse", "codex-hooks-v4", script)
+	if out, err := exec.Command("/bin/sh", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("sh -c %q: %v: %s", command, err, out)
+	}
+	if got, err := os.ReadFile(ran); err != nil || !strings.Contains(string(got), "--event PreToolUse") {
+		t.Fatalf("hook did not run with its arguments: %q %v", got, err)
+	}
+	legacy := script + " --event PreToolUse --hook-contract codex-hooks-v4"
+	for _, registered := range []string{command, legacy} {
+		identity, event, ok := parseCodexManagedCommandIdentityForPlatform("linux", registered)
+		if !ok || identity.script != script || event != "PreToolUse" {
+			t.Fatalf("%q not claimed: %+v %q %v", registered, identity, event, ok)
+		}
+	}
+	plain := "/home/u/.defenseclaw/hooks/codex-hook.sh"
+	if got := posixHookCommandWord(plain); got != plain {
+		t.Fatalf("a shell-safe path changed: %q", got)
+	}
 }

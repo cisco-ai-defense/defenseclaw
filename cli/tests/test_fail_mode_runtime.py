@@ -347,6 +347,19 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
     assert report["provenance"] == "process-env"
     assert report["configured"] == "closed"
     assert report["drift"] == ["process-env-open"]
+    assert report["note"] == ""
+
+    # GAP-0129: closed in config.yaml with open hooks is intended in observe mode, and the report says so.
+    observe = ConnectorFailModeState(
+        connector="claudecode",
+        desired="open",
+        configured="closed",
+        runtime="open",
+        sources=(("config", "closed"), ("hook-script", "open"), ("claude-env", "open")),
+        drift=(),
+    ).to_report()
+    assert observe["effective"] == "open" and observe["drift"] == []
+    assert observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
 
 
 def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(
@@ -656,11 +669,16 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
         *(Path(cfg.data_dir) / "hooks" / name for name in _SHARED_HOOK_SCRIPTS),
     ]
     original_runtime = {path: path.read_bytes() for path in tracked_paths}
+    config_yaml = dcconfig.config_path_for_data_dir(cfg.data_dir)
+    config_yaml.write_text("config_version: 9\n", encoding="utf-8")
+    concurrent = b"config_version: 9\nasset_policy: {}\n"
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
 
     def fail_after_partial_write(_cfg: object, _connector: str) -> None:
+        # Another writer commits config.yaml while the refresh runs.
+        config_yaml.write_bytes(concurrent)
         (home / ".claude" / "settings.json").write_text('{"partial":true}', encoding="utf-8")
         for path in tracked_paths:
             path.write_text("partial reconciliation", encoding="utf-8")
@@ -683,6 +701,10 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     assert (home / ".claude" / "settings.json").read_bytes() == original_settings
     assert {path: path.read_bytes() for path in tracked_paths} == original_runtime
     assert "restored" in result.output
+    # The rollback is a second save through the single writer, never a raw
+    # copy of the snapshot over the other writer's commit (GAP-0303).
+    assert cfg.save.call_count == 2
+    assert config_yaml.read_bytes() == concurrent
 
 
 def test_truthful_noop_requires_current_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

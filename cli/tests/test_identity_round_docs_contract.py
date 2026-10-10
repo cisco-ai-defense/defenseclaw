@@ -11,12 +11,9 @@ def page(name: str) -> str:
 def test_quickstart_explains_installer_choice_and_init() -> None:
     text = page("get-started/quickstart.mdx")
     assert "<include>../../snippets/install-commands.mdx</include>" in text
-    assert "defenseclaw init" in text
     assert "defenseclaw setup <connector>" in text
-    assert "none" in text
-    assert re.search(r"install.{0,90}(?:pick|choose).{0,50}agent|install.{0,90}agent.{0,50}guard", text, re.I)
-    assert re.search(r"choice.{0,30}sav|remember.{0,30}choice", text, re.I)
-    assert re.search(r"init.{0,50}(?:sets? up|configur\w*).{0,50}(?:agent|connector)", text, re.I)
+    assert re.search(r"install.{0,90}(?:asks|pick|choose).{0,50}agent|install.{0,90}agent.{0,50}guard", text, re.I)
+    assert re.search(r"defenseclaw init --connector [a-z]+", text)
 
 
 def test_copilot_workspace_scope_and_guardrail_route() -> None:
@@ -74,11 +71,10 @@ def test_identity_redaction_warns_about_qualified_account_name() -> None:
 def test_quickstart_contract_accepts_equivalent_wording(monkeypatch) -> None:
     equivalent = """
     <include>../../snippets/install-commands.mdx</include>
-    During installation, choose one agent to guard or choose none. The installer
-    remembers your choice for init, which configures the selected connector.
-    Add others later using defenseclaw setup <connector>.
+    During installation, choose the agent to guard. The installer then prints
+    the next command. Add others later using defenseclaw setup <connector>.
     ```bash
-    defenseclaw init
+    defenseclaw init --connector codex
     ```
     """
     monkeypatch.setitem(test_quickstart_explains_installer_choice_and_init.__globals__,

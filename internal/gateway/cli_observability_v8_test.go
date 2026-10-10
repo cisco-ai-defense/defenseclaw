@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	collectormetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
@@ -112,6 +114,15 @@ func TestCLIObservabilityV8SkillFindingScannerContract(t *testing.T) {
 	}
 	if len(capture.traces) != 1 {
 		t.Fatalf("asset scan traces=%d, want one", len(capture.traces))
+	}
+
+	// A sub-analyzer of the scan's own scanner is accepted (GAP-0070).
+	const subAnalyzer = `{"kind":"scan","run_id":"mcp-yara-run","scan":{"scanner":"mcp-scanner","target":"http://127.0.0.1:1/mcp","timestamp":"2026-07-24T16:00:00Z","findings":[{"id":"mcp-YARA-0","severity":"HIGH","title":"x","description":"","location":"","remediation":"","scanner":"mcp-scanner/YARA","tags":[]}],"duration_ms":5}}`
+	request = httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(subAnalyzer))
+	response = httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("sub-analyzer finding status=%d response=%q", response.Code, response.Body.String())
 	}
 
 	request = httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader(leakedAnalyzer))
@@ -551,6 +562,34 @@ func TestCLIObservabilityV8RecordsContextRequiredSetupActions(t *testing.T) {
 	}
 }
 
+// GAP-0019/GAP-0167: a refused config write on a managed device is audited as
+// the generic "action" row, which keeps the key and the refusal details. The
+// "config-update" action would be recorded as an applied config change.
+func TestCLIObservabilityV8KeepsTheDetailsOfARefusedConfigWrite(t *testing.T) {
+	fixture, api, _ := newCLIObservabilityV8Fixture(t)
+	body := `{"kind":"action","run_id":"gap-0167","action":{"name":"action","target":"guardrail.mode","details":"outcome=refused reason=managed_device command=config set"}}`
+	request := httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, bytes.NewBufferString(body))
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d response=%q", response.Code, response.Body.String())
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var target, details string
+	if err := database.QueryRow(`SELECT COALESCE(target,''), COALESCE(details,'')
+		FROM audit_events WHERE run_id = 'gap-0167' AND action = 'action'`,
+	).Scan(&target, &details); err != nil {
+		t.Fatal(err)
+	}
+	if target != "guardrail.mode" || !strings.Contains(details, "outcome=refused reason=managed_device") {
+		t.Fatalf("refusal row target=%q details=%q", target, details)
+	}
+}
+
 // GAP-2644: model spans the CLI submits (plugin and skill scans) carry the
 // calling user and the CLI run id, like the gateway's own model and judge
 // spans, so per-user attribution in Tempo and Galileo includes them.
@@ -585,5 +624,18 @@ func TestCLIObservabilityV8ModelSpanCarriesUserAndRunID(t *testing.T) {
 	}
 	if got := gatewayProtoAttribute(attrs, "defenseclaw.run.id"); got != "python-scan-run" {
 		t.Errorf("defenseclaw.run.id=%q", got)
+	}
+}
+
+func TestCLIObservabilityV8SecureClientInvalidRequestResponse(t *testing.T) {
+	_, api, _ := newCLIObservabilityV8Fixture(t)
+	api.scannerCfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileSecureClient}}
+	response := httptest.NewRecorder()
+	api.handleCLIObservabilityV8(response, httptest.NewRequest(http.MethodPost, cliObservabilityV8Path, strings.NewReader("{")))
+	if response.Code != http.StatusBadRequest ||
+		response.Header().Get("Content-Type") != "text/plain; charset=utf-8" ||
+		response.Body.String() != "{\"error\":\"invalid canonical observability request\"}\n" {
+		t.Fatalf("Secure Client invalid request wire response: status=%d headers=%v body=%q", response.Code, response.Header(), response.Body.String())
 	}
 }

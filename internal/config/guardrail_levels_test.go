@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -234,21 +235,21 @@ func TestGuardrailLevelsRejectedBySchema(t *testing.T) {
 	}
 }
 
-// TestGuardrailLevelsValidatedOnLoad pins that Load() runs the new checks on
-// a path the v8 schema doesn't cover (a v7 file), so a bad level can't reach
-// the gateway through it either.
+// TestGuardrailLevelsValidatedOnLoad pins that LoadFromFile runs the level
+// checks on a path the schema compiler does not cover (the Windows lifecycle
+// readers), so a bad level cannot reach the gateway through it either.
 func TestGuardrailLevelsValidatedOnLoad(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(home, ".defenseclaw"))
 	path := filepath.Join(home, DefaultConfigName)
-	raw := []byte("config_version: 7\ndata_dir: " + home + "\nguardrail:\n  block_at: severe\n")
+	raw := []byte("config_version: 9\ndata_dir: " + home + "\nguardrail:\n  block_at: severe\n")
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := LoadFromBytes(path, raw)
+	_, err := LoadFromFile(path)
 	if err == nil || !strings.Contains(err.Error(), "guardrail.block_at: must be one of CRITICAL, HIGH, MEDIUM, LOW") {
-		t.Fatalf("LoadFromBytes = %v, want the guardrail.block_at error", err)
+		t.Fatalf("LoadFromFile = %v, want the guardrail.block_at error", err)
 	}
 }
 
@@ -282,5 +283,32 @@ func TestGuardrailLevelsYAMLRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(string(empty), "block_at") || strings.Contains(string(empty), "alert_at") {
 		t.Fatalf("empty levels were written:\n%s", empty)
+	}
+}
+
+// GAP-0548: a custom_packs path written with .. loaded the same pack under
+// another effective policy digest; the loader keeps the clean path.
+func TestCustomPackPathIsCleanedOnLoad(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows paths are kept as written")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("DEFENSECLAW_HOME", filepath.Join(home, ".defenseclaw"))
+	raw := []byte(`config_version: 9
+data_dir: ` + filepath.Join(home, "state") + `
+guardrail:
+  enabled: true
+  rule_pack: acme
+  custom_packs:
+    acme: {path: /etc/defenseclaw/policies/guardrail/../guardrail/acme/, digest: "sha256:` + strings.Repeat("a", 64) + `"}
+observability: {}
+`)
+	cfg, err := LoadRuntimeV8CandidateFromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Guardrail.CustomPacks["acme"].Path; got != "/etc/defenseclaw/policies/guardrail/acme" {
+		t.Fatalf("custom_packs.acme.path = %q", got)
 	}
 }

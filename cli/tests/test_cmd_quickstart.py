@@ -20,11 +20,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import click
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner, Result
-from defenseclaw.bootstrap import StepResult
-from defenseclaw.commands.cmd_quickstart import quickstart_cmd
+from defenseclaw.bootstrap import FirstRunReport, StepResult
+from defenseclaw.commands import cmd_setup
+from defenseclaw.commands.cmd_quickstart import _require_operational_success, quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery
@@ -32,6 +36,63 @@ from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 from tests.helpers import record_test_setup_agent_selections
 from tests.permissions import set_known_windows_directory_acl
+
+
+def test_unwritable_claude_settings_has_actionable_quickstart_failure() -> None:
+    report = FirstRunReport(
+        status="needs_attention", config_file="", data_dir="", connector="claudecode", profile="observe",
+        setup=[StepResult(
+            "Sidecar", "warn",
+            "Error: start daemon readiness: gateway guardrail failed during startup: "
+            "connector claudecode setup failed: claudecode settings hooks: "
+            "move compared config to tombstone: operation not permitted; "
+            "connector setup rollback incomplete: connector claudecode teardown: claudecode teardown error",
+        )],
+        readiness=[StepResult("Sidecar", "warn", "not answering yet", "check it in a minute")],
+        next_commands=["defenseclaw-gateway status", "check it in a minute with defenseclaw-gateway status"],
+    )
+    _require_operational_success(report, gateway_requested=True)
+    for step in (report.setup[0], report.readiness[0]):
+        assert step.status == "fail"
+        assert ".claude" in step.detail and "cannot be written" in step.detail
+        assert "tombstone" not in step.detail and not step.next_command
+    next_section = "\n".join(report.next_commands)
+    assert "in a minute" not in next_section
+    assert "settings.json" in next_section and "writable" in next_section
+
+
+@pytest.mark.parametrize(
+    "mode, step, typed",
+    [("observe", "settings hooks", False), ("action", "otel env", False), ("observe", "settings hooks", True)],
+)
+def test_unwritable_claude_settings_setup_restart_names_file_and_rerun(
+    mode: str, step: str, typed: bool
+) -> None:
+    # The two gateway errors are from GAP-1064's live observe/action captures.
+    error = (
+        "Error: restart daemon readiness: gateway guardrail failed during startup: "
+        f"connector claudecode setup failed: claudecode {step}: "
+        "move compared config to tombstone: operation not permitted "
+        "(check /home/dcl-rv2f5c/.defenseclaw/gateway.log for errors)"
+    )
+    if typed:
+        error = error.replace(
+            "move compared config to tombstone: operation not permitted",
+            'connector config file "/home/custom/.claude/settings.json" cannot be written: operation not permitted',
+        )
+    root = click.Context(click.Group("defenseclaw"), info_name="defenseclaw")
+    setup = click.Context(click.Group("setup"), parent=root, info_name="setup")
+    command = click.Context(click.Command("claudecode"), parent=setup, info_name="claudecode")
+    command.params = {"mode": mode, "yes": True}
+    with command:
+        remedy = cmd_setup._setup_config_write_remedy(error)
+    assert remedy is not None
+    assert "Claude Code settings file" in remedy and "settings.json cannot be written" in remedy
+    if typed:
+        assert "/home/custom/.claude/settings.json" in remedy
+    assert "Make it writable or ask your administrator" in remedy
+    assert f"rerun defenseclaw setup claudecode --mode {mode} --yes" in remedy
+    assert "tombstone" not in remedy and "readiness" not in remedy
 
 
 class QuickstartProfileDefaultsTests(unittest.TestCase):
@@ -163,6 +224,32 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
 
         with patch.object(cmd_quickstart, "_configured_quickstart_connectors", return_value=["claudecode"]):
             self.assertIsNone(cmd_quickstart._refuse_roster_narrowing(cfg_mod, "claudecode"))
+
+    def test_explicit_quickstart_refreshes_discovery_before_bootstrap(self):
+        from unittest.mock import Mock
+
+        order = []
+        report = Mock()
+        report.status = "ready"
+        report.setup = []
+        report.readiness = []
+        report.to_dict.return_value = {"status": "ready"}
+        def discover(**kwargs):
+            order.append("discover")
+            self.assertFalse(kwargs["use_cache"])
+            self.assertTrue(kwargs["refresh"])
+        def bootstrap(*args):
+            order.append("bootstrap")
+            return report
+        with (
+            patch("defenseclaw.inventory.agent_discovery.discover_agents", side_effect=discover),
+            patch("defenseclaw.bootstrap.run_first_run", side_effect=bootstrap),
+            patch("defenseclaw.commands.cmd_quickstart._refuse_roster_narrowing"),
+            patch("defenseclaw.platform_support.connector_platform_support", return_value=Mock(available=True)),
+        ):
+            result = self._invoke(["--connector", "codex", "--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(order, ["discover", "bootstrap"])
 
     def test_openclaw_defaults_to_observe_profile(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
@@ -314,6 +401,34 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertEqual(summary["profile"], "action")
         setup = {step["name"]: step for step in summary["setup"]}
         self.assertIn("hermes, mode=action", setup["Guardrail"]["detail"])
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["connectors"]["hermes"]["mode"], "action")
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    def test_repeat_quickstart_without_mode_keeps_action(self, _gate):
+        # GAP-0979: a re-run without --mode switched action/closed back to observe/open.
+        atomic_write_private_bytes(
+            os.path.join(self.tmp_dir, "config.yaml"),
+            b"config_version: 8\n"
+            b"observability: {}\n"
+            b"claw:\n"
+            b"  mode: hermes\n"
+            b"guardrail:\n"
+            b"  enabled: true\n"
+            b"  connector: hermes\n"
+            b"  mode: observe\n"
+            b"  scanner_mode: local\n"
+            b"  connectors:\n"
+            b"    hermes:\n"
+            b"      mode: action\n",
+        )
+
+        result = self._invoke(["--connector", "hermes", "--skip-gateway", "--json-summary"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["profile"], "action")
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
@@ -566,6 +681,10 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
                 return_value=StepResult("Connector", "pass", "Codex config found"),
             ),
             patch("defenseclaw.bootstrap.shutil.which", return_value="available"),
+            patch(
+                "defenseclaw.bootstrap._agent_installation_readiness",
+                return_value=StepResult("Agent installation", "pass", "Codex is installed"),
+            ),
         ):
             result = self._invoke([
                 "--connector",

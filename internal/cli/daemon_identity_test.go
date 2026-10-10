@@ -124,9 +124,7 @@ func TestRotationStopReadinessAuthenticatesPIDDataDirAndListener(t *testing.T) {
 	cfg.Gateway.Watcher.Enabled = false
 
 	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
-	if cfg.ConfigVersion == config.ObservabilityV8ConfigVersion {
-		snap.Telemetry.State = gateway.StateRunning
-	}
+	snap.Telemetry.State = gateway.StateRunning
 	status := gatewayStatusEnvelope{Health: snap}
 	status.Runtime.PID = 42
 	status.Runtime.DataDir = cfg.DataDir

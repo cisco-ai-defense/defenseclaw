@@ -110,3 +110,26 @@ func TestResultMarshalJSONKeepsAmpersandLiteral(t *testing.T) {
 		t.Fatalf("round trip: %v %+v", err, back.Errors)
 	}
 }
+
+func TestPolicyStateLineNamesGenerationDigestAndWhetherTheGatewayAppliedIt(t *testing.T) {
+	digest := "sha256:0123456789abcdef0123456789abcdef"
+	cases := []struct {
+		name  string
+		state PolicyState
+		want  string
+	}{
+		{"applied", PolicyState{EffectiveDigest: digest, ConfigGeneration: 4, Applied: true},
+			"policy: config generation 4, effective digest sha256:0123456789ab; applied by the gateway"},
+		{"gateway silent", PolicyState{EffectiveDigest: digest, ConfigGeneration: 4},
+			"policy: config generation 4, effective digest sha256:0123456789ab; the gateway did not report a policy, so it is not confirmed as applied"},
+		{"older digest", PolicyState{EffectiveDigest: digest, ConfigGeneration: 5, GatewayReportedDigest: "sha256:ffffffffffffffff"},
+			"policy: config generation 5, effective digest sha256:0123456789ab; the gateway reports sha256:ffffffffffff and applies this one on its next reload"},
+		{"rejected", PolicyState{EffectiveDigest: digest, ConfigGeneration: 5, LastReloadError: "digest mismatch"},
+			"policy: config generation 5, effective digest sha256:0123456789ab; the gateway rejected its last reload (digest mismatch) and keeps enforcing the policy it last built"},
+	}
+	for _, tc := range cases {
+		if got := tc.state.Line(); got != tc.want {
+			t.Errorf("%s: Line() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

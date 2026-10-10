@@ -38,10 +38,6 @@ from defenseclaw import connector_paths
 from defenseclaw.config import (
     ClawConfig,
     Config,
-    MCPActionsConfig,
-    PluginActionsConfig,
-    SeverityAction,
-    SkillActionsConfig,
 )
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
@@ -1420,9 +1416,9 @@ class _StoreWithPolicyMixin:
     """Provides a temp Store with init() for policy tests."""
 
     def setUp(self) -> None:
-        from tests.helpers import make_temp_store
+        from tests.helpers import make_temp_config, make_temp_store
         self.store, self.db_path = make_temp_store()
-        self.skill_actions = SkillActionsConfig()
+        self.cfg = make_temp_config()
 
     def tearDown(self) -> None:
         self.store.close()
@@ -1430,10 +1426,11 @@ class _StoreWithPolicyMixin:
             os.unlink(self.db_path)
         except OSError:
             pass
+        shutil.rmtree(self.cfg.data_dir, ignore_errors=True)
 
     def _pe(self):
         from defenseclaw.enforce import PolicyEngine
-        return PolicyEngine(self.store)
+        return PolicyEngine(self.store, self.cfg)
 
 
 class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
@@ -1447,7 +1444,7 @@ class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
             reason="known malware",
         )
         verdict, detail = _admission_verdict(
-            pe, "skill", "bad-skill", None, entry, self.skill_actions,
+            pe, "skill", "bad-skill", None, entry,
         )
         self.assertEqual(verdict, "blocked")
         self.assertEqual(detail, "known malware")
@@ -1456,7 +1453,7 @@ class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         pe.block("plugin", "evil-plugin", "blocked")
         verdict, detail = _admission_verdict(
-            pe, "plugin", "evil-plugin", None, None, self.skill_actions,
+            pe, "plugin", "evil-plugin", None, None,
         )
         self.assertEqual(verdict, "blocked")
         self.assertEqual(detail, "block list")
@@ -1470,7 +1467,7 @@ class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
             reason="policy override",
         )
         verdict, _ = _admission_verdict(
-            pe, "skill", "dual-status", scan, entry, self.skill_actions,
+            pe, "skill", "dual-status", scan, entry,
         )
         self.assertEqual(verdict, "blocked")
 
@@ -1486,7 +1483,7 @@ class TestAdmissionVerdictAllowed(_StoreWithPolicyMixin, unittest.TestCase):
             reason="security team approved",
         )
         verdict, detail = _admission_verdict(
-            pe, "skill", "trusted", None, entry, self.skill_actions,
+            pe, "skill", "trusted", None, entry,
         )
         self.assertEqual(verdict, "allowed")
         self.assertEqual(detail, "security team approved")
@@ -1495,7 +1492,7 @@ class TestAdmissionVerdictAllowed(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         pe.allow("mcp", "local-server", "ok")
         verdict, detail = _admission_verdict(
-            pe, "mcp", "local-server", None, None, self.skill_actions,
+            pe, "mcp", "local-server", None, None,
         )
         self.assertEqual(verdict, "allowed")
         self.assertEqual(detail, "allow list")
@@ -1512,7 +1509,7 @@ class TestAdmissionVerdictQuarantined(_StoreWithPolicyMixin, unittest.TestCase):
             reason="under review",
         )
         verdict, detail = _admission_verdict(
-            pe, "skill", "suspect", None, entry, self.skill_actions,
+            pe, "skill", "suspect", None, entry,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("quarantined", detail)
@@ -1522,7 +1519,7 @@ class TestAdmissionVerdictQuarantined(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         self.store.set_action_field("plugin", "risky", "file", "quarantine", "auto")
         verdict, detail = _admission_verdict(
-            pe, "plugin", "risky", None, None, self.skill_actions,
+            pe, "plugin", "risky", None, None,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("quarantined", detail)
@@ -1534,7 +1531,7 @@ class TestAdmissionVerdictUnscanned(_StoreWithPolicyMixin, unittest.TestCase):
     def test_unscanned(self):
         pe = self._pe()
         verdict, detail = _admission_verdict(
-            pe, "skill", "new-skill", None, None, self.skill_actions,
+            pe, "skill", "new-skill", None, None,
         )
         self.assertEqual(verdict, "unscanned")
         self.assertEqual(detail, "no scan result")
@@ -1547,7 +1544,7 @@ class TestAdmissionVerdictClean(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 0, "max_severity": "INFO", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "skill", "safe-skill", scan, None, self.skill_actions,
+            pe, "skill", "safe-skill", scan, None,
         )
         self.assertEqual(verdict, "clean")
         self.assertEqual(detail, "scan clean")
@@ -1560,7 +1557,7 @@ class TestAdmissionVerdictRejected(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 1, "max_severity": "CRITICAL", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "skill", "dangerous", scan, None, self.skill_actions,
+            pe, "skill", "dangerous", scan, None,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("1 finding, max", detail)
@@ -1570,34 +1567,10 @@ class TestAdmissionVerdictRejected(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 5, "max_severity": "HIGH", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "plugin", "risky-plugin", scan, None, self.skill_actions,
+            pe, "plugin", "risky-plugin", scan, None,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("5 findings", detail)
-        self.assertIn("HIGH", detail)
-
-    def test_strict_actions_reject_critical(self):
-        pe = self._pe()
-        strict = SkillActionsConfig(
-            critical=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
-        scan = {"finding_count": 1, "max_severity": "CRITICAL", "target": "/x"}
-        verdict, detail = _admission_verdict(
-            pe, "skill", "dangerous", scan, None, strict,
-        )
-        self.assertEqual(verdict, "rejected")
-        self.assertIn("CRITICAL", detail)
-
-    def test_strict_actions_reject_high(self):
-        pe = self._pe()
-        strict = SkillActionsConfig(
-            high=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
-        scan = {"finding_count": 5, "max_severity": "HIGH", "target": "/x"}
-        verdict, detail = _admission_verdict(
-            pe, "plugin", "risky-plugin", scan, None, strict,
-        )
-        self.assertEqual(verdict, "rejected")
         self.assertIn("HIGH", detail)
 
 
@@ -1608,7 +1581,7 @@ class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 2, "max_severity": "MEDIUM", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "skill", "so-so", scan, None, self.skill_actions,
+            pe, "skill", "so-so", scan, None,
         )
         self.assertEqual(verdict, "warning")
         self.assertIn("2 findings", detail)
@@ -1618,22 +1591,10 @@ class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
         pe = self._pe()
         scan = {"finding_count": 1, "max_severity": "LOW", "target": "/x"}
         verdict, detail = _admission_verdict(
-            pe, "mcp", "minor-issues", scan, None, self.skill_actions,
+            pe, "mcp", "minor-issues", scan, None,
         )
         self.assertEqual(verdict, "rejected")
         self.assertIn("LOW", detail)
-
-    def test_custom_actions_do_not_override_loaded_policy_defaults(self):
-        """When centralized policy data is in effect, config fallback actions do not take precedence."""
-        pe = self._pe()
-        strict = SkillActionsConfig(
-            medium=SeverityAction(file="quarantine", runtime="disable", install="block"),
-        )
-        scan = {"finding_count": 3, "max_severity": "MEDIUM", "target": "/x"}
-        verdict, _ = _admission_verdict(
-            pe, "skill", "strict-check", scan, None, strict,
-        )
-        self.assertEqual(verdict, "warning")
 
 
 # ---------------------------------------------------------------------------
@@ -1648,18 +1609,16 @@ class TestBuildActionsMap(_StoreWithPolicyMixin, unittest.TestCase):
         self.assertEqual(result, {})
 
     def test_with_entries(self):
-        pe = self._pe()
-        pe.block("skill", "a", "reason-a")
-        pe.allow("skill", "b", "reason-b")
+        self.store.set_action_field("skill", "a", "install", "block", "reason-a")
+        self.store.set_action_field("skill", "b", "file", "quarantine", "reason-b")
         result = _build_actions_map_for_type(self.store, "skill")
         self.assertIn("a", result)
         self.assertIn("b", result)
         self.assertEqual(result["a"].reason, "reason-a")
 
     def test_different_target_types(self):
-        pe = self._pe()
-        pe.block("skill", "s1", "x")
-        pe.block("plugin", "p1", "y")
+        self.store.set_action_field("skill", "s1", "install", "block", "x")
+        self.store.set_action_field("plugin", "p1", "install", "block", "y")
         skill_map = _build_actions_map_for_type(self.store, "skill")
         plugin_map = _build_actions_map_for_type(self.store, "plugin")
         self.assertIn("s1", skill_map)
@@ -1948,7 +1907,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_skills_enriched(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {s["id"]: s for s in inv["skills"]}
         self.assertEqual(by_id["github"]["policy_verdict"], "allowed")
@@ -1980,7 +1939,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             ],
             "summary": {"skills": {"count": 2}},
         }
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {s["id"]: s for s in inv["skills"]}
         self.assertEqual(by_id["codeguard"]["policy_verdict"], "clean")
@@ -1997,7 +1956,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         inv = self._make_inventory()
         for s in inv["skills"]:
             s["enabled"] = True
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {s["id"]: s for s in inv["skills"]}
         self.assertIs(by_id["discord"]["enabled"], False)
@@ -2006,7 +1965,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_scan_data_attached_to_items(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {s["id"]: s for s in inv["skills"]}
         self.assertEqual(by_id["weather"]["scan_findings"], 0)
@@ -2019,7 +1978,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_scan_data_on_plugins(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {p["id"]: p for p in inv["plugins"]}
         self.assertEqual(by_id["web-search"]["scan_findings"], 1)
@@ -2029,7 +1988,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_plugins_enriched(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         by_id = {p["id"]: p for p in inv["plugins"]}
         self.assertEqual(by_id["defenseclaw"]["policy_verdict"], "blocked")
@@ -2039,7 +1998,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_mcp_enriched(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         self.assertEqual(inv["mcp"][0]["policy_verdict"], "allowed")
 
@@ -2103,10 +2062,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
                 "summary": {"skills": {"count": 1}, "plugins": {"count": 1}, "mcp": {"count": 0}},
             }
 
-            enrich_with_policy(
-                inv, self.store, self.skill_actions,
-                policy_dir=cfg.policy_dir, cfg=cfg,
-            )
+            enrich_with_policy(inv, self.store, cfg=cfg)
 
             # F-0742: the codeguard row is ``source: user`` (operator-supplied
             # provenance). It must NOT be blessed by the first-party allow
@@ -2116,25 +2072,20 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             # unscanned (its only scan target, /tmp/downloads/codeguard,
             # does not match the resolved on-disk path — F-0423).
             self.assertEqual(inv["skills"][0]["policy_verdict"], "unscanned")
-            # The defenseclaw plugin has no untrusted source marker, so the
-            # first-party allow still applies on its resolved provenance.
-            self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
+            # GAP-0419: a plugin folder named defenseclaw is not trusted by
+            # its name and location alone (the gateway recognizes DefenseClaw's
+            # own plugin by its bytes), so this empty one stays unscanned.
+            self.assertEqual(inv["plugins"][0]["policy_verdict"], "unscanned")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_inventory_uses_per_target_fallback_actions_when_policy_missing(self):
+    def test_inventory_uses_the_admission_defaults_when_policy_missing(self):
         import uuid
         from datetime import datetime, timezone
 
         tmp = tempfile.mkdtemp(prefix="dc-inventory-fallback-")
         cfg = Config(
             policy_dir=os.path.join(tmp, "missing-policy"),
-            plugin_actions=PluginActionsConfig(
-                high=SeverityAction(file="quarantine", runtime="disable", install="block"),
-            ),
-            mcp_actions=MCPActionsConfig(
-                high=SeverityAction(file="none", runtime="enable", install="block"),
-            ),
         )
 
         now = datetime.now(timezone.utc)
@@ -2154,10 +2105,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             "summary": {"skills": {"count": 0}, "plugins": {"count": 1}, "mcp": {"count": 1}},
         }
 
-        enrich_with_policy(
-            inv, self.store, self.skill_actions,
-            policy_dir=cfg.policy_dir, cfg=cfg,
-        )
+        enrich_with_policy(inv, self.store, cfg=cfg)
 
         self.assertEqual(inv["plugins"][0]["policy_verdict"], "rejected")
         self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
@@ -2183,8 +2131,8 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             )
             os.makedirs(os.path.join(cfg.claw.home_dir, "extensions", "xai-plugin"), exist_ok=True)
 
-            pe = self._pe()
-            pe.allow("plugin", "xai-plugin", "reviewed")
+            from defenseclaw.config import AssetPolicyRule
+            cfg.asset_policy.plugin.allowed.append(AssetPolicyRule(name="xai-plugin", reason="reviewed"))
 
             now = datetime.now(timezone.utc)
             self.store.insert_scan_result(
@@ -2200,10 +2148,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
                 "summary": {"skills": {"count": 0}, "plugins": {"count": 1}, "mcp": {"count": 0}},
             }
 
-            enrich_with_policy(
-                inv, self.store, self.skill_actions,
-                policy_dir=cfg.policy_dir, cfg=cfg,
-            )
+            enrich_with_policy(inv, self.store, cfg=cfg)
 
             self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
             self.assertEqual(inv["plugins"][0]["scan_findings"], 1)
@@ -2228,7 +2173,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             "summary": {"skills": {"count": 0}, "plugins": {"count": 0}, "mcp": {"count": 1}},
         }
 
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         self.assertEqual(inv["mcp"][0]["policy_verdict"], "clean")
         self.assertEqual(inv["mcp"][0]["scan_findings"], 0)
@@ -2242,9 +2187,6 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
         try:
             cfg = Config(
                 policy_dir=os.path.join(tmp, "missing-policy"),
-                mcp_actions=MCPActionsConfig(
-                    high=SeverityAction(file="none", runtime="enable", install="block"),
-                ),
             )
 
             now = datetime.now(timezone.utc)
@@ -2260,10 +2202,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
                 "summary": {"skills": {"count": 0}, "plugins": {"count": 0}, "mcp": {"count": 1}},
             }
 
-            enrich_with_policy(
-                inv, self.store, self.skill_actions,
-                policy_dir=cfg.policy_dir, cfg=cfg,
-            )
+            enrich_with_policy(inv, self.store, cfg=cfg)
 
             self.assertEqual(inv["mcp"][0]["policy_verdict"], "rejected")
             self.assertEqual(inv["mcp"][0]["scan_findings"], 2)
@@ -2274,7 +2213,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_summary_policy_counts(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         ps = inv["summary"]["policy_skills"]
         self.assertEqual(ps["blocked"], 1)
@@ -2295,7 +2234,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
     def test_summary_scan_counts(self):
         self._seed_store()
         inv = self._make_inventory()
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         ss = inv["summary"]["scan_skills"]
         self.assertEqual(ss["scanned"], 2)
@@ -2313,12 +2252,12 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
 
     def test_no_store_is_noop(self):
         inv = self._make_inventory()
-        enrich_with_policy(inv, None, self.skill_actions)
+        enrich_with_policy(inv, None, cfg=self.cfg)
         self.assertNotIn("policy_verdict", inv["skills"][0])
 
     def test_empty_skills_list(self):
         inv = {"skills": [], "plugins": [], "mcp": [], "summary": {}}
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
         self.assertNotIn("policy_skills", inv["summary"])
 
     def test_items_without_id_are_skipped(self):
@@ -2328,7 +2267,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             "mcp": [],
             "summary": {"skills": {"count": 1}},
         }
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
         self.assertNotIn("policy_verdict", inv["skills"][0])
 
 
@@ -2358,7 +2297,7 @@ class TestCLIIntegrationWithPolicy(unittest.TestCase):
         from datetime import datetime, timezone
 
         from defenseclaw.enforce import PolicyEngine
-        pe = PolicyEngine(self.app.store)
+        pe = PolicyEngine(self.app.store, self.app.cfg)
         now = datetime.now(timezone.utc)
 
         pe.block("skill", "weather", "missing weather-cli binary")
@@ -4445,11 +4384,11 @@ class TestEnrichConnectorScopedBlock(_StoreWithPolicyMixin, unittest.TestCase):
             "summary": {"skills": {"count": 1}},
         }
 
-        enrich_with_policy(inv, self.store, self.skill_actions)
+        enrich_with_policy(inv, self.store, cfg=self.cfg)
 
         self.assertEqual(inv["skills"][0]["policy_verdict"], "blocked")
         self.assertEqual(inv["summary"]["policy_skills"]["blocked"], 1)
 
         other = {"connector": "codex", "skills": [{"id": "fsa4-review"}], "summary": {"skills": {"count": 1}}}
-        enrich_with_policy(other, self.store, self.skill_actions)
+        enrich_with_policy(other, self.store, cfg=self.cfg)
         self.assertNotEqual(other["skills"][0]["policy_verdict"], "blocked")

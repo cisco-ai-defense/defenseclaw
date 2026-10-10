@@ -8,7 +8,11 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""``guardrail list-packs --json`` and ``guardrail use-pack``."""
+"""``guardrail list-packs --json`` and ``guardrail use-pack``.
+
+use-pack writes ``guardrail[.connectors.C].rule_pack`` through the config
+writer; the writer is recorded here, not run.
+"""
 
 from __future__ import annotations
 
@@ -17,17 +21,24 @@ from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
-from defenseclaw import rulepack_validation
+from defenseclaw import config_writer, policy_catalog, rulepack_validation
 from defenseclaw.commands import cmd_guardrail
-from defenseclaw.config import PerConnectorGuardrailConfig, default_config
+from defenseclaw.config import (
+    CustomRulePack,
+    GuardrailProfile,
+    GuardrailRulesConfig,
+    PerConnectorGuardrailConfig,
+    default_config,
+)
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
+from tests.helpers import select_pack
 
 
 def _valid(path, **_kwargs):
     return rulepack_validation.RulePackValidationResult(
-        wire_version=1, kind="validation_result", valid=True, summary={"rule_count": 1}
+        wire_version=1, kind="validation_result", valid=True, summary={"rule_count": 1, "digest": "c" * 64, "files_digest": "a" * 64}
     )
 
 
@@ -63,12 +74,18 @@ def env(tmp_path, monkeypatch):
     cfg.guardrail.enabled = True
     cfg.guardrail.mode = "action"
     cfg.guardrail.port = 4321
-    cfg.guardrail.rule_pack_dir = str(guardrail_root / "default")
-    cfg.save = MagicMock()
+    cfg.guardrail.rule_pack = "default"
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
-    return app, guardrail_root, custom
+    writes: list[list[config_writer.Change]] = []
+
+    def _apply(changes, actor, reason, expect_sha256=None, **_kwargs):
+        writes.append(list(changes))
+        return config_writer.WriteResult(generation=7, sha256="0" * 64)
+
+    monkeypatch.setattr(config_writer, "apply", _apply)
+    return app, guardrail_root, custom, writes
 
 
 def _run(app, args):
@@ -76,13 +93,13 @@ def _run(app, args):
 
 
 def _multi(app, overrides: dict[str, str]):
-    app.cfg.guardrail.connectors = {
-        name: PerConnectorGuardrailConfig(rule_pack_dir=path) for name, path in overrides.items()
-    }
+    app.cfg.guardrail.connectors = {name: PerConnectorGuardrailConfig() for name in overrides}
+    for name, path in overrides.items():
+        select_pack(app.cfg, app.cfg.guardrail.connectors[name], path)
 
 
 def test_global_switch_clears_overrides_and_reports_them(env):
-    app, root, custom = env
+    app, root, custom, writes = env
     _multi(app, {"codex": str(custom), "claudecode": ""})
     result = _run(app, ["use-pack", "strict", "--json"])
     assert result.exit_code == 0, result.output
@@ -94,45 +111,71 @@ def test_global_switch_clears_overrides_and_reports_them(env):
     assert payload["path"] == str(root / "strict")
     assert payload["cleared_overrides"] == ["codex"]
     assert payload["validation"]["valid"] is True
-    gc = app.cfg.guardrail
-    assert gc.rule_pack_dir == str(root / "strict")
-    assert all(block.rule_pack_dir == "" for block in gc.connectors.values())
-    assert (gc.enabled, gc.mode, gc.port) == (True, "action", 4321)
-    app.cfg.save.assert_called_once()
-
-
-def test_connector_scope_creates_only_that_block_on_single_install(env):
-    app, root, custom = env
-    result = _run(app, ["use-pack", str(custom), "--connector", "codex"])
-    assert result.exit_code == 0, result.output
-    gc = app.cfg.guardrail
-    assert set(gc.connectors) == {"codex"}
-    assert gc.connectors["codex"].rule_pack_dir == str(custom)
-    assert gc.rule_pack_dir == str(root / "default")
-    assert app.cfg.active_connectors() == ["codex"]
+    assert len(writes) == 1
+    assert not any(c.path.startswith("guardrail.connectors.claudecode") for c in writes[0])
 
 
 def test_connector_scope_leaves_peers_alone(env):
-    app, root, custom = env
+    app, root, custom, writes = env
     _multi(app, {"codex": "", "claudecode": str(root / "permissive")})
     result = _run(app, ["use-pack", "team", "--connector", "codex", "--json"])
     # "team" isn't under <policy_dir>/guardrail, so it is not a known name.
     assert result.exit_code == 1
     assert json.loads(result.output)["ok"] is False
-    app.cfg.save.assert_not_called()
+    assert writes == []
 
     result = _run(app, ["use-pack", str(custom), "--connector", "codex", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert (payload["scope"], payload["connector"], payload["cleared_overrides"]) == ("connector", "codex", [])
-    gc = app.cfg.guardrail
-    assert gc.connectors["claudecode"].rule_pack_dir == str(root / "permissive")
-    assert gc.rule_pack_dir == str(root / "default")
+    paths = [c.path for c in writes[-1]]
+    assert paths == [
+        "guardrail.custom_packs.team",
+        "guardrail.connectors.codex.rule_pack",
+    ]
+
+
+def test_connector_custom_path_cannot_replace_global_pack(env, tmp_path):
+    app, _root, custom, writes = env
+    app.cfg.guardrail.rule_pack = "team"
+    app.cfg.guardrail.custom_packs = {
+        "team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)
+    }
+    other = tmp_path / "another" / "team"
+    (other / "rules").mkdir(parents=True)
+
+    result = _run(app, ["use-pack", str(other), "--connector", "codex", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.output)["ok"] is False
+    assert app.cfg.guardrail.custom_packs["team"].path == str(custom)
+    assert writes == []
+
+
+def test_registered_custom_pack_key_is_selected_by_name(env):
+    """GAP-0049: a guardrail.custom_packs key selects like config set guardrail.rule_pack does,
+    keeping its pinned digest; a pack edited since it was pinned is refused."""
+    app, _root, custom, writes = env
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)}
+    result = _run(app, ["use-pack", "team", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["pack"] == "team"
+    assert writes[-1] == [config_writer.Change("guardrail.rule_pack", "team")]
+
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    refused = _run(app, ["use-pack", "team"])
+    assert refused.exit_code == 1
+    assert "config set guardrail.custom_packs.team.digest sha256:" + "a" * 64 in refused.output
+    assert len(writes) == 1
+
+    # GAP-0159: an unknown name lists the registered custom_packs names it could have been.
+    unknown = _run(app, ["use-pack", "nosuch"])
+    assert unknown.exit_code == 1 and "guardrail.custom_packs name (team)" in unknown.output
 
 
 def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):
     """GAP-1576: an unrelated ./vsg2 folder does not shadow the installed vsg2 pack."""
-    app, root, _custom = env
+    app, root, _custom, writes = env
     (root / "vsg2" / "rules").mkdir(parents=True)
     workdir = tmp_path / "work"
     (workdir / "vsg2").mkdir(parents=True)
@@ -140,75 +183,112 @@ def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeyp
     result = _run(app, ["use-pack", "vsg2", "--json"])
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["path"] == str(root / "vsg2")
-    assert app.cfg.guardrail.rule_pack_dir == str(root / "vsg2")
+    assert writes[-1][0].value["path"] == str(root / "vsg2")
+    assert config_writer.Change("guardrail.rule_pack", "vsg2") in writes[-1]
 
 
 def test_unknown_connector_refused(env):
-    app, _root, _custom = env
+    app, _root, _custom, writes = env
     result = _run(app, ["use-pack", "strict", "--connector", "claudecode"])
     assert result.exit_code == 1
-    assert app.cfg.guardrail.connectors == {}
-    app.cfg.save.assert_not_called()
+    assert writes == []
 
 
 def test_invalid_pack_writes_nothing(env, monkeypatch):
-    app, root, _custom = env
+    app, _root, _custom, writes = env
     monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _invalid)
     result = _run(app, ["use-pack", "strict", "--json"])
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert payload["ok"] is False
     assert payload["validation"]["error"]["code"] == "bad_rule"
-    assert app.cfg.guardrail.rule_pack_dir == str(root / "default")
-    app.cfg.save.assert_not_called()
+    assert writes == []
 
 
 def test_validator_unavailable_preset_proceeds_custom_refuses(env, monkeypatch):
-    app, root, custom = env
+    """A custom pack is pinned by its validated digest, so without the
+    validator it is refused even with --no-validate."""
+    app, _root, custom, writes = env
     monkeypatch.setattr(rulepack_validation, "validate_rule_pack", _unavailable)
 
     preset = _run(app, ["use-pack", "permissive"])
     assert preset.exit_code == 0, preset.output
-    assert app.cfg.guardrail.rule_pack_dir == str(root / "permissive")
+    assert writes[-1][0] == config_writer.Change("guardrail.rule_pack", "permissive")
 
-    app.cfg.save.reset_mock()
-    refused = _run(app, ["use-pack", str(custom), "--json"])
-    assert refused.exit_code == 2
-    assert json.loads(refused.output)["ok"] is False
-    assert app.cfg.guardrail.rule_pack_dir == str(root / "permissive")
-    app.cfg.save.assert_not_called()
-
-    forced = _run(app, ["use-pack", str(custom), "--no-validate", "--json"])
-    assert forced.exit_code == 0, forced.output
-    payload = json.loads(forced.output)
-    assert payload["validation"] is None
-    assert payload["pack"] == "team"
-    assert app.cfg.guardrail.rule_pack_dir == str(custom)
+    for extra in ([], ["--no-validate"]):
+        refused = _run(app, ["use-pack", str(custom), *extra, "--json"])
+        assert refused.exit_code == 2
+        assert json.loads(refused.output)["ok"] is False
+    assert len(writes) == 1
 
 
 def test_clear_connector_override(env):
-    app, root, custom = env
+    app, root, custom, writes = env
     _multi(app, {"codex": str(custom), "claudecode": ""})
     result = _run(app, ["use-pack", "--clear", "--connector", "codex", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["connector"] == "codex"
     assert payload["path"] == str(root / "default")
-    gc = app.cfg.guardrail
-    assert set(gc.connectors) == {"codex", "claudecode"}
-    assert gc.connectors["codex"].rule_pack_dir == ""
+    assert writes == [[config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True)]]
+
+
+def test_clear_connector_pack_drops_stale_rule_overrides(env, monkeypatch):
+    app, _root, _custom, writes = env
+    monkeypatch.setattr(policy_catalog, "pack_rule_defaults", lambda _path: {"SEC-AWS-KEY": True})
+    monkeypatch.setattr(policy_catalog, "rule_defaults_with_protections", lambda _path, _packs: {"SEC-AWS-KEY": True})
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(
+            rule_pack="strict", rules=GuardrailRulesConfig(disable=["SEC-ENV-DUMP-REQUEST"])
+        )
+    }
+    result = _run(app, ["use-pack", "--clear", "--connector", "codex", "--json"])
+    assert result.exit_code == 0, result.output
+    assert writes[-1] == [
+        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
+        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True),
+    ]
+    assert json.loads(result.output)["dropped_rule_references"] == [
+        "guardrail.connectors.codex.rules.disable: SEC-ENV-DUMP-REQUEST"
+    ]
+
+
+def test_global_pack_switch_keeps_profile_connector_rule_from_profile_protection(env, monkeypatch):
+    app, _root, _custom, writes = env
+    rule_id = "impact.sql_schema_destroy"
+    protection = "database-destruction-protection"
+    monkeypatch.setattr(policy_catalog, "pack_rule_defaults", lambda _path: {"other.rule": True})
+    monkeypatch.setattr(
+        policy_catalog,
+        "rule_defaults_with_protections",
+        lambda _path, packs: {"other.rule": True, **({rule_id: True} if protection in packs else {})},
+    )
+    app.cfg.guardrail.profiles = {
+        "engineering": GuardrailProfile(
+            rules=GuardrailRulesConfig(protections=[protection]),
+            connectors={
+                "codex": PerConnectorGuardrailConfig(
+                    rules=GuardrailRulesConfig(severity_overrides={rule_id: "LOW"})
+                )
+            },
+        )
+    }
+    result = _run(app, ["use-pack", "permissive", "--json"])
+    assert result.exit_code == 0, result.output
+    assert not any(c.path.endswith("severity_overrides") for c in writes[-1])
+    assert json.loads(result.output)["dropped_rule_references"] == []
 
 
 def test_usage_errors(env):
-    app, _root, _custom = env
+    app, _root, _custom, writes = env
     assert _run(app, ["use-pack"]).exit_code == 2
     assert _run(app, ["use-pack", "--clear"]).exit_code == 2
     assert _run(app, ["use-pack", "strict", "--clear", "--connector", "codex"]).exit_code == 2
-    app.cfg.save.assert_not_called()
+    assert writes == []
 
 
 def test_list_packs_json(env):
-    app, root, custom = env
+    app, root, custom, _writes = env
     _multi(app, {"codex": str(custom), "claudecode": ""})
     (root / "team2" / "rules").mkdir(parents=True)
     result = _run(app, ["list-packs", "--json"])
@@ -235,7 +315,7 @@ def test_list_packs_json(env):
 
 
 def test_validate_pack_unknown_bare_name_lists_available_packs(env, monkeypatch):
-    app, root, _custom = env
+    app, root, _custom, _writes = env
     monkeypatch.setattr("defenseclaw.config.load", lambda: app.cfg)
     (root / "team2" / "rules").mkdir(parents=True)
     result = _run(app, ["validate-pack", "nosuchpack"])

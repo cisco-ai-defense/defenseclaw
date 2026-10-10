@@ -24,8 +24,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -33,11 +31,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -54,7 +53,8 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 		t.Fatalf("initial load: %v", err)
 	}
 	applied := false
-	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff, source configReloadSource) error {
+	health := NewSidecarHealth()
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, health, "", func(_ context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff, source configReloadSource) error {
 		applied = true
 		if source.compiledV8 == nil || source.compiledV8.Plan == nil {
 			t.Fatal("apply did not receive a compiled v8 source")
@@ -77,6 +77,11 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	}
 	if got := mgr.Current().Guardrail.Mode; got != "action" {
 		t.Fatalf("current mode = %q, want action", got)
+	}
+	// Nothing needs a restart: restart_required is [] as on main, not null
+	// (GAP-0109).
+	if raw, _ := json.Marshal(health.Snapshot().Config.Details["restart_required"]); string(raw) != "[]" {
+		t.Fatalf("restart_required = %s, want []", raw)
 	}
 }
 
@@ -198,11 +203,47 @@ func TestConfigManagerV8ReloadCompilesAndPassesExactStableSnapshot(t *testing.T)
 	if err := mgr.Reload(context.Background(), "test"); err != nil {
 		t.Fatal(err)
 	}
-	if !applied || mgr.gen.Load() != 1 || mgr.Current().ConfigVersion != 8 {
+	// The config_version 8 file reloads as its in-memory v9 migration.
+	if !applied || mgr.gen.Load() != 1 || mgr.Current().ConfigVersion != config.ConfigVersionV9 {
 		t.Fatalf("applied/gen/version = %t/%d/%d", applied, mgr.gen.Load(), mgr.Current().ConfigVersion)
 	}
 	if got, want := version.Current().ContentHash, configContentHashForTest(nextRaw); got != want {
 		t.Fatalf("successful reload content hash = %q, want %q", got, want)
+	}
+}
+
+// A destination key written to .env after the gateway started resolves when
+// the config that references it reloads (GAP-0017).
+func TestConfigManagerReloadReadsDotEnvKeysAddedSinceStart(t *testing.T) {
+	const keyName = "P0_RELOAD_DEST_KEY"
+	t.Setenv(keyName, "")
+	os.Unsetenv(keyName)
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	initialRaw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.RegisterDotEnvLoader(func(string) { os.Setenv(keyName, "from-dotenv") })
+	t.Cleanup(func() { config.RegisterDotEnvLoader(nil) })
+	mgr := newConfigManagerWithSnapshot(
+		path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			return nil
+		},
+	)
+	withDestination := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability:\n  destinations:\n" +
+		"    - name: remote\n      kind: otlp\n      endpoint: https://otel.example.test\n" +
+		"      headers:\n        Authorization: {env: " + keyName + "}\n")
+	if err := os.WriteFile(path, withDestination, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "test"); err != nil {
+		t.Fatalf("reload with a key that is only in .env: %v", err)
 	}
 }
 
@@ -743,14 +784,20 @@ func TestDiffConfigsMarksOpenShellChanged(t *testing.T) {
 	}
 }
 
-func TestDiffConfigsMarksApplicationProtectionChanged(t *testing.T) {
+func TestDiffConfigsApplicationProtectionAndAIDefenseAreHot(t *testing.T) {
 	oldCfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
 	newCfg := &config.Config{ApplicationProtection: config.DefaultApplicationProtectionConfig()}
 	newCfg.ApplicationProtection.Enabled = !oldCfg.ApplicationProtection.Enabled
 
+	newCfg.CiscoAIDefense.Endpoint = "https://aid.example.test"
+
 	diff := diffConfigs(oldCfg, newCfg)
 	if !slices.Contains(diff.Changed, "application_protection") {
 		t.Fatalf("changed = %v, missing application_protection", diff.Changed)
+	}
+	// Both reload hot on an open-source host (spec section 4).
+	if len(diff.RestartRequired) != 0 {
+		t.Fatalf("restart required = %v, want none", diff.RestartRequired)
 	}
 }
 
@@ -903,6 +950,74 @@ func TestDiffConfigsV8ResourceIdentityRequiresRestart(t *testing.T) {
 	}
 }
 
+// TestHoldRestartRequiredAppliesTheRest: a hook_self_heal, environment or
+// gateway.api_port edit needs a restart, so it keeps its running value while
+// an admission edit in the same (or a later) reload still applies hot
+// (GAP-0275; a shared team config naming another account's api_port,
+// GAP-0352). hook_fail_mode is hot: the hook guard reads it from the live
+// config (GAP-0045).
+func TestHoldRestartRequiredAppliesTheRest(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Gateway.APIPort = oldCfg.Gateway.APIPort + 70
+	newCfg.Environment = oldCfg.Environment + "-next"
+	newCfg.Guardrail.HookSelfHeal = !oldCfg.Guardrail.HookSelfHeal
+	newCfg.Guardrail.HookFailMode = "closed"
+	newCfg.Guardrail.BlockAt = "HIGH"
+	newCfg.Admission.Skill.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionBlock}
+
+	diff := diffConfigs(oldCfg, newCfg)
+	held := holdRestartRequired(oldCfg, newCfg, diff.RestartRequired)
+	if !slices.Contains(diff.RestartRequired, "guardrail") || !slices.Contains(diff.RestartRequired, "gateway") || held == nil {
+		t.Fatalf("restart_required = %v, held = %v", diff.RestartRequired, held != nil)
+	}
+	heldDiff := diffConfigs(oldCfg, held)
+	if len(heldDiff.RestartRequired) != 0 || !slices.Contains(heldDiff.Changed, "admission") ||
+		held.Guardrail.HookSelfHeal != oldCfg.Guardrail.HookSelfHeal || held.Environment != oldCfg.Environment ||
+		held.Gateway.APIPort != oldCfg.Gateway.APIPort ||
+		held.Guardrail.HookFailMode != "closed" || held.Guardrail.BlockAt != "HIGH" {
+		t.Fatalf("held diff = %+v hook_self_heal=%v hook_fail_mode=%q block_at=%q",
+			heldDiff, held.Guardrail.HookSelfHeal, held.Guardrail.HookFailMode, held.Guardrail.BlockAt)
+	}
+}
+
+// TestDiffConfigsSecureClientV8ActionsRequireRestart: under Secure Client an
+// edit of a v8 action key is restart-required, as on main (GAP-0279).
+func TestDiffConfigsSecureClientV8ActionsRequireRestart(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	oldCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	oldCfg.Enterprise.Profile = managed.ProfileSecureClient
+	oldCfg.SecureClientV8Actions = map[string][5]config.SeverityAction{"skill_actions": {}}
+	newCfg := cloneConfig(oldCfg)
+	newCfg.SecureClientV8Actions["skill_actions"] = [5]config.SeverityAction{1: {Install: config.InstallNone}}
+	if diff := diffConfigs(oldCfg, newCfg); !slices.Equal(diff.RestartRequired, []string{"skill_actions"}) {
+		t.Fatalf("diff = %+v", diff)
+	}
+	if diff := diffConfigs(oldCfg, cloneConfig(oldCfg)); len(diff.Changed) != 0 {
+		t.Fatalf("unchanged diff = %+v", diff)
+	}
+}
+
+// TestDiffConfigsDirectoryKeys: a policy_dir or quarantine_dir edit applies
+// hot (the generation rebuilds, the watcher restarts) and a plugin_dir edit is
+// restart-required and held, instead of all three passing as no change
+// (GAP-0277).
+func TestDiffConfigsDirectoryKeys(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.PolicyDir = filepath.Join(t.TempDir(), "team-policies")
+	newCfg.QuarantineDir = filepath.Join(t.TempDir(), "quarantine")
+	newCfg.PluginDir = filepath.Join(t.TempDir(), "plugins")
+
+	diff := diffConfigs(oldCfg, newCfg)
+	held := holdRestartRequired(oldCfg, newCfg, diff.RestartRequired)
+	if !slices.Contains(diff.Changed, "policy_dir") || !slices.Contains(diff.Changed, "quarantine_dir") ||
+		strings.Join(diff.RestartRequired, ",") != "plugin_dir" || held == nil || held.PluginDir != oldCfg.PluginDir ||
+		!watcherNeedsRestart(oldCfg, newCfg) {
+		t.Fatalf("diff = %+v held = %v", diff, held != nil)
+	}
+}
+
 func TestDiffConfigsAllowsHotGuardrailPolicyFields(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)
@@ -936,80 +1051,6 @@ func TestDiffConfigsRequiresRestartForJudgeBodyRetentionTransitions(t *testing.T
 				t.Fatalf("restart_required = %v, broad guardrail reason obscures exact boundary", diff.RestartRequired)
 			}
 		})
-	}
-}
-
-func TestGuardrailAPIPatchCommitsDiskManagerSidecarAndProxyTogether(t *testing.T) {
-	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
-	path := fixture.configPath
-	raw := "config_version: 8\n" +
-		"data_dir: " + fixture.dataDir + "\n" +
-		"gateway:\n  token: transactional-token\n" +
-		"guardrail:\n  enabled: true\n  mode: observe\n  scanner_mode: local\n" +
-		"observability: {}\n"
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatalf("write initial config: %v", err)
-	}
-	oldCfg, err := config.LoadRuntimeV8File(path)
-	if err != nil {
-		t.Fatalf("load initial config: %v", err)
-	}
-
-	proxy := &GuardrailProxy{
-		cfg:          &oldCfg.Guardrail,
-		mode:         oldCfg.Guardrail.Mode,
-		blockMessage: oldCfg.Guardrail.BlockMessage,
-		inspector:    NewGuardrailInspector("local", nil, nil, ""),
-	}
-	sidecar := fixture.sidecar
-	sidecar.publishConfig(oldCfg)
-	sidecar.setGuardrailProxy(proxy)
-	bound, err := sidecar.BootstrapObservabilityRuntime(t.Context(), path, []byte(raw))
-	if err != nil || !bound {
-		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
-	}
-	mgr := newConfigManagerWithSnapshot(
-		path, oldCfg, nil, nil, sidecar.observabilityV8ActivePlanDigest(), sidecar.applyConfigReloadSnapshot,
-	)
-	api := &APIServer{scannerCfg: cloneConfig(oldCfg)}
-	api.SetConfigRuntime(mgr.Reload, sidecar.currentConfig)
-
-	body, _ := json.Marshal(map[string]any{"mode": "action"})
-	req := httptest.NewRequest(http.MethodPatch, "/v1/guardrail/config", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer transactional-token")
-	w := httptest.NewRecorder()
-	api.handleGuardrailConfig(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("PATCH status = %d, want 200; body: %s", w.Code, w.Body.String())
-	}
-	for label, got := range map[string]string{
-		"manager": mgr.Current().Guardrail.Mode,
-		"sidecar": sidecar.currentConfig().Guardrail.Mode,
-	} {
-		if got != "action" {
-			t.Fatalf("%s mode = %q, want action", label, got)
-		}
-	}
-	proxy.rtMu.RLock()
-	proxyMode := proxy.mode
-	proxy.rtMu.RUnlock()
-	if proxyMode != "action" {
-		t.Fatalf("proxy mode = %q, want action", proxyMode)
-	}
-	persisted, err := config.LoadRuntimeV8File(path)
-	if err != nil {
-		t.Fatalf("reload persisted config: %v", err)
-	}
-	if persisted.Guardrail.Mode != "action" {
-		t.Fatalf("persisted mode = %q, want action", persisted.Guardrail.Mode)
-	}
-	var response map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if response["live"] != true || response["mode"] != "action" {
-		t.Fatalf("response = %#v, want live action", response)
 	}
 }
 
@@ -1055,17 +1096,31 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	}
 }
 
+// llm and scanner edits reload hot: the judge is rebuilt, the install
+// watcher restarts in-process and API scans read the live config.
 func TestReloadPredicatesRestartLLMConsumers(t *testing.T) {
 	oldCfg := &config.Config{}
 	newCfg := &config.Config{}
 	oldCfg.LLM.Model = "openai/gpt-4o-mini"
 	newCfg.LLM.Model = "openai/gpt-4.1-mini"
+	newCfg.Scanners.SkillScanner.FailOnSeverity = "MEDIUM"
 
-	if !guardrailNeedsRestart(oldCfg, newCfg) {
-		t.Fatal("guardrailNeedsRestart returned false for llm change")
+	if diff := diffConfigs(oldCfg, newCfg); len(diff.RestartRequired) != 0 {
+		t.Fatalf("llm and scanners diff = %+v, want a hot reload", diff)
 	}
 	if !watcherNeedsRestart(oldCfg, newCfg) {
 		t.Fatal("watcherNeedsRestart returned false for llm change")
+	}
+
+	// An operator block/allow (asset_policy) or an admission edit applies to
+	// the next decision without a restart, which would cancel an install
+	// scan in flight and fail it closed (GAP-0315).
+	listEdit := &config.Config{}
+	listEdit.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: "foo"}}
+	scanOff := false
+	listEdit.Admission.Skill.ScanOnInstall = &scanOff
+	if watcherNeedsRestart(&config.Config{}, listEdit) {
+		t.Fatal("watcherNeedsRestart returned true for an asset_policy or admission edit")
 	}
 }
 
@@ -1077,6 +1132,88 @@ func TestGuardrailRestartPredicateIncludesSingularConnector(t *testing.T) {
 
 	if !guardrailNeedsRestart(oldCfg, newCfg) {
 		t.Fatal("guardrailNeedsRestart returned false for singular connector change")
+	}
+}
+
+// The connector set applies in-process off Secure Client: disabling a
+// connector re-runs the connector setup (and the install watcher) without a
+// gateway restart, enabled: true is the unset default, and Secure Client
+// keeps the restart (GAP-0072, GAP-0032).
+func TestConnectorSetChangeIsHotOffSecureClient(t *testing.T) {
+	yes, no := true, false
+	withCodex := func(enabled *bool, profile string) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Enabled: enabled}, "claudecode": {}}
+		if profile != "" {
+			cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+			cfg.Enterprise.Profile = profile
+		}
+		return cfg
+	}
+	if connectorSetChanged(withCodex(nil, ""), withCodex(&yes, "")) {
+		t.Fatal("enabled: true (the default) changed the connector set")
+	}
+	oldCfg, newCfg := withCodex(&yes, ""), withCodex(&no, "")
+	if diff := diffConfigs(oldCfg, newCfg); len(diff.RestartRequired) != 0 || !connectorSetChanged(oldCfg, newCfg) {
+		t.Fatalf("disable codex: diff = %+v, connector set changed = %v; want a hot connector-set change", diff, connectorSetChanged(oldCfg, newCfg))
+	}
+	sc := managed.ProfileSecureClient
+	if diff := diffConfigs(withCodex(&yes, sc), withCodex(&no, sc)); !slices.Contains(diff.RestartRequired, "guardrail.connectors") {
+		t.Fatalf("Secure Client disable codex: restart_required = %v, want guardrail.connectors", diff.RestartRequired)
+	}
+}
+
+// The CLI no longer restarts the gateway for a hook fail mode change
+// (GAP-0184): with hook self-heal off, no hook guard rewrites the hooks, so the
+// reload re-runs the connector setup; with it on the guards do.
+func TestHookFailModeChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	oldCfg.Guardrail.Enabled = true
+	oldCfg.Guardrail.Connector = "codex"
+	oldCfg.Guardrail.Mode = "action"
+	oldCfg.Guardrail.HookSelfHeal = false
+	oldCfg.Guardrail.HookFailMode = "open"
+	newCfg := cloneConfig(oldCfg)
+	newCfg.Guardrail.HookFailMode = "closed"
+	if !hookFailModeNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("hook fail mode change with self-heal off did not re-run the connector setup")
+	}
+	oldCfg.Guardrail.HookSelfHeal, newCfg.Guardrail.HookSelfHeal = true, true
+	if hookFailModeNeedsSetup(oldCfg, newCfg) {
+		t.Fatal("hook fail mode change with self-heal on re-ran the setup; the hook guards apply it")
+	}
+}
+
+// A custom rule-pack folder that is deleted and created again is watched
+// again (and reported as added, so the 30 s tick reloads the generation from
+// it) instead of staying in the watched set with a dead watch (GAP-0266).
+func TestAssetWatchesReaddARecreatedFolder(t *testing.T) {
+	fsw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fsw.Close()
+	pack := filepath.Join(t.TempDir(), "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	watches := &assetWatches{fsw: fsw, watched: map[string]struct{}{}}
+	want := map[string]struct{}{pack: {}}
+	if !watches.sync(want) {
+		t.Fatal("first sync did not watch the pack folder")
+	}
+	if err := os.RemoveAll(pack); err != nil {
+		t.Fatal(err)
+	}
+	watches.removed(pack)
+	if watches.sync(want) {
+		t.Fatal("sync watched a folder that is gone")
+	}
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !watches.sync(want) {
+		t.Fatal("the recreated pack folder was not watched again")
 	}
 }
 
@@ -1117,7 +1254,6 @@ func TestAIDiscoveryRestartPredicateIncludesLiveManagedModeTransitions(t *testin
 func TestEventRouterConfigurationAccessorsAreConcurrentSafe(t *testing.T) {
 	router := &EventRouter{}
 	guardrailCfg := &config.GuardrailConfig{Connector: "codex"}
-	rulePacks := []*guardrail.RulePack{{}, {SensitiveTools: &guardrail.SensitiveToolsConfig{}}}
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Add(2)
@@ -1127,8 +1263,6 @@ func TestEventRouterConfigurationAccessorsAreConcurrentSafe(t *testing.T) {
 				router.SetGuardrailConfig(guardrailCfg)
 				router.SetDefaultAgentName("codex")
 				router.SetDefaultPolicyID("action")
-				router.SetRulePack(rulePacks[0])
-				router.SetRulePack(rulePacks[1])
 			}
 		}()
 		go func() {
@@ -1288,10 +1422,10 @@ func TestKiroConnectorModeIsHooksOnly(t *testing.T) {
 	}
 }
 
-func TestDiffConfigsRegistrySourcesHotReloadAssetPolicyNeedsRestart(t *testing.T) {
+func TestDiffConfigsRegistrySourcesAndAssetPolicyHotReload(t *testing.T) {
 	// GAP-2422: the gateway never reads registry sources, so adding one must
-	// not make every later reload fail; asset_policy still needs a restart
-	// (the CLI restarts a running gateway for it).
+	// not make every later reload fail. asset_policy (the operator block and
+	// allow lists since config_version 9) is read live, so it reloads hot.
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)
 	newCfg.Registries.Sources = append(newCfg.Registries.Sources, config.RegistrySource{ID: "corp", Kind: "file"})
@@ -1301,7 +1435,279 @@ func TestDiffConfigsRegistrySourcesHotReloadAssetPolicyNeedsRestart(t *testing.T
 	}
 	newCfg.AssetPolicy.Enabled = !oldCfg.AssetPolicy.Enabled
 	diff = diffConfigs(oldCfg, newCfg)
-	if !slices.Contains(diff.RestartRequired, "asset_policy") {
-		t.Fatalf("restart_required=%v, missing asset_policy", diff.RestartRequired)
+	if !slices.Contains(diff.Changed, "asset_policy") || len(diff.RestartRequired) != 0 {
+		t.Fatalf("changed=%v restart_required=%v, asset_policy must hot reload", diff.Changed, diff.RestartRequired)
 	}
+}
+
+// TestConfigManagerAssetReloadAppliesWithoutConfigDiff pins the asset path
+// of the one watcher: a referenced asset changing (or /policy/reload)
+// rebuilds the generation even though config.yaml is unchanged, and an
+// unchanged rebuild swaps nothing.
+func TestConfigManagerAssetReloadAppliesWithoutConfigDiff(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+	var diffs []ConfigDiff
+	unchanged := false
+	var rejected error
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+		diffs = append(diffs, diff)
+		if rejected != nil {
+			return rejected
+		}
+		if unchanged {
+			return errGenerationUnchanged
+		}
+		return nil
+	})
+	if err := mgr.Reload(context.Background(), "settle"); err != nil {
+		t.Fatalf("settle reload: %v", err)
+	}
+	diffs = nil
+	if err := mgr.Reload(context.Background(), "test"); err != nil || len(diffs) != 0 {
+		t.Fatalf("plain reload of an unchanged file = %v, applied %v", err, diffs)
+	}
+	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil {
+		t.Fatalf("asset reload: %v", err)
+	}
+	if len(diffs) != 1 || !slices.Equal(diffs[0].Changed, []string{configDiffAssets}) || len(diffs[0].RestartRequired) != 0 {
+		t.Fatalf("asset reload diffs = %+v, want one hot %q diff", diffs, configDiffAssets)
+	}
+	gen := mgr.gen.Load()
+	unchanged = true
+	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil || mgr.gen.Load() != gen {
+		t.Fatalf("unchanged asset rebuild = %v, generation %d -> %d", err, gen, mgr.gen.Load())
+	}
+	// A pack that fails its digest check rejects the rebuild and leaves a
+	// last_reload_error; restoring the pack rebuilds the same generation,
+	// which must clear that error (GAP-0027), and a plain reload after the
+	// repair does too (GAP-0131).
+	t.Cleanup(func() { liveReloadError.Store("") })
+	rejected = errors.New("custom pack digest mismatch")
+	if err := mgr.ReloadAssets(context.Background(), "test"); err == nil {
+		t.Fatal("rejected asset rebuild succeeded")
+	}
+	if !hasRejection() {
+		t.Fatal("rejected asset rebuild left no last_reload_error")
+	}
+	rejected = nil
+	if err := mgr.ReloadAssets(context.Background(), "test"); err != nil || hasRejection() {
+		t.Fatalf("restored asset rebuild = %v, last_reload_error still set: %v", err, hasRejection())
+	}
+	rejected = errors.New("custom pack digest mismatch")
+	if err := mgr.ReloadAssets(context.Background(), "test"); err == nil {
+		t.Fatal("rejected asset rebuild succeeded")
+	}
+	rejected = nil
+	if err := mgr.Reload(context.Background(), "test"); err != nil || mgr.rejected || hasRejection() {
+		t.Fatalf("reload after the repair = %v, rejection still standing (manager %v)", err, mgr.rejected)
+	}
+}
+
+// hasRejection reports a standing policy.last_reload_error.
+func hasRejection() bool {
+	msg, _ := liveReloadError.Load().(string)
+	return msg != ""
+}
+
+// A config_version 8 file whose in-memory migration fails is refused, not
+// run as raw v8 without its data.json admission and audit.db block/allow
+// policy (the reload keeps the previous generation).
+func TestLoadRuntimeConfigCandidateRefusesAFailedV8Migration(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	dataJSON := filepath.Join(dir, "policies", "rego", "data.json")
+	if err := os.MkdirAll(filepath.Dir(dataJSON), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataJSON, []byte(`{"actions": {},}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(dir, "config.yaml")
+	raw := []byte("config_version: 8\ndata_dir: " + dir + "\nobservability: {}\n")
+	if cfg, err := loadRuntimeConfigCandidate(source, raw); err == nil || cfg != nil {
+		t.Fatalf("loadRuntimeConfigCandidate = %v, %v; want the failed migration refused", cfg, err)
+	}
+}
+
+// A Secure Client gateway reads .env only at start (GAP-0137, issue #1092).
+func TestConfigManagerSecureClientReloadReadsNoDotEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	raw := []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\ndata_dir: " + dir + "\nobservability: {}\n")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Loading a Secure Client profile turns on strict hook contract
+	// resolution for the whole process (Windows and macOS); later tests in
+	// the same go test process expect it off.
+	t.Cleanup(func() { connector.SetStrictHookContractResolution(false) })
+	loads := 0
+	config.RegisterDotEnvLoader(func(string) { loads++ })
+	t.Cleanup(func() { config.RegisterDotEnvLoader(nil) })
+	initial := &config.Config{DeploymentMode: "managed_enterprise", DataDir: dir}
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			return nil
+		})
+	_ = mgr.Reload(context.Background(), "test")
+	if loads != 0 {
+		t.Fatalf("a Secure Client reload loaded .env %d time(s)", loads)
+	}
+}
+
+// Secure Client keeps its reload classification (GAP-0141, GAP-0147, issue
+// #1092): hook_fail_mode reloads hot; the levels, llm, watch, ai_discovery
+// and admission (where the v8 action keys now land) need a restart; and the
+// watcher follows no policy assets.
+func TestDiffConfigsSecureClientKeepsItsReloadClassification(t *testing.T) {
+	base := &config.Config{DeploymentMode: "managed_enterprise"}
+	edit := func(change func(*config.Config)) ConfigDiff {
+		next := cloneConfig(base)
+		change(next)
+		return diffConfigs(base, next)
+	}
+	if diff := edit(func(c *config.Config) { c.Guardrail.HookFailMode = "open" }); len(diff.RestartRequired) != 0 {
+		t.Fatalf("hook_fail_mode needs a restart: %v", diff.RestartRequired)
+	}
+	for want, change := range map[string]func(*config.Config){
+		"guardrail":    func(c *config.Config) { c.Guardrail.BlockAt = "HIGH" },
+		"llm":          func(c *config.Config) { c.LLM.Model = "openai/gpt-4o" },
+		"watch":        func(c *config.Config) { c.Watch.DebounceMs = 900 },
+		"ai_discovery": func(c *config.Config) { c.AIDiscovery.Enabled = true },
+		"admission": func(c *config.Config) {
+			c.Admission.Skill.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionBlock}
+		},
+	} {
+		if diff := edit(change); !slices.Contains(diff.RestartRequired, want) {
+			t.Fatalf("%s edit restart set = %v, want %s", want, diff.RestartRequired, want)
+		}
+	}
+	sidecar := &Sidecar{cfg: base, configMgr: &ConfigManager{}}
+	sidecar.watchGenerationAssets()
+	if sidecar.configMgr.assetDirs != nil || sidecar.configMgr.assetFiles != nil {
+		t.Fatal("the Secure Client watcher follows policy assets")
+	}
+}
+
+// An asset edited after bootstrap but before startup watches are attached
+// must be rebuilt before the gateway reports readiness.
+func TestConfigManagerStartupRebuildsAssetBeforeReady(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	pack := filepath.Join(dir, "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	asset := filepath.Join(pack, "rule.rego")
+	if err := os.WriteFile(asset, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeConfigForManagerTest(t, path, dir, "observe")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := make(chan string, 2)
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			contents, err := os.ReadFile(asset)
+			if err == nil {
+				applied <- string(contents)
+			}
+			return err
+		})
+	mgr.setStartupSource(path, raw)
+	mgr.assetDirs = func() []string { return []string{pack} }
+	mgr.afterWatchAdded = func() {
+		if err := os.WriteFile(asset, []byte("new"), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ready := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup did not report readiness")
+	}
+	select {
+	case got := <-applied:
+		if got != "new" {
+			t.Fatalf("startup applied asset %q, want new", got)
+		}
+	default:
+		t.Fatal("startup reported readiness without rebuilding the edited asset")
+	}
+	cancel()
+	<-done
+}
+
+// The config directory already has an fsnotify watch, but it must also be
+// classified as an asset directory when policy files live beside config.yaml.
+func TestConfigManagerWatchesAssetsBesideConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := make(chan struct{}, 3)
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "",
+		func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+			applied <- struct{}{}
+			return nil
+		})
+	mgr.setStartupSource(path, raw)
+	mgr.assetDirs = func() []string { return []string{dir} }
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	ready := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup did not report readiness")
+	}
+	// Discard the startup rebuild; the new file must cause another apply.
+	select {
+	case <-applied:
+	default:
+		t.Fatal("startup did not build referenced assets")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "new.rego"), []byte("package new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-applied:
+	case <-time.After(3 * time.Second):
+		t.Fatal("asset beside config.yaml did not trigger reload")
+	}
+	cancel()
+	<-done
 }

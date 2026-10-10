@@ -275,6 +275,10 @@ type hermesForeignHookBlock struct {
 // parentheses, as the other standalone block messages read.
 func hermesForeignHookBlockMessage(reason string) string {
 	reason = strings.TrimSpace(reason)
+	if strings.HasPrefix(reason, "DefenseClaw blocked ") {
+		// Already the sentence (hookexec.ManagedTransportFailureText).
+		return reason
+	}
 	if rest, ok := strings.CutPrefix(reason, hookexec.ForeignHookBlockedReasonPrefix); ok {
 		return "DefenseClaw blocked this tool call: " + strings.TrimSpace(rest) + " (" + strings.TrimSuffix(hookexec.ForeignHookBlockedReasonPrefix, ":") + ")"
 	}
@@ -324,6 +328,11 @@ func runForeignHookCheck(connectorName string, stdin io.Reader, stdout io.Writer
 	if decision.Deny {
 		_ = hookForeignGuardRecord(accountHome, name, facts.event, decision, time.Now())
 		result = foreignHookCheckResult{Deny: true, Reason: decision.Reason}
+		// The plugin shows the reason as is: a stopped gateway or a held
+		// port gets the sentence the native hooks print, not its code.
+		if text, ok := hookexec.ManagedTransportFailureText(facts.event, decision.Reason); ok {
+			result.Reason = text
+		}
 		return 0
 	}
 	for _, finding := range decision.Findings {
@@ -435,6 +444,11 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 			// says so in the words, and with the reason code, every other
 			// managed hook uses (GAP-0578, GAP-0639).
 			reason = hookexec.ManagedGatewayNotRunningReason
+		} else if hookexec.ManagedGatewayPortHeld(err) {
+			// The gateway service runs but another process answers on its
+			// port: say so, not that the session record is unavailable
+			// (GAP-1029).
+			reason = hookexec.ManagedGatewayPortHeldReason
 		}
 		decision = enterprisepolicy.GuardDecision{
 			Deny:     true,

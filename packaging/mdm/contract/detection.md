@@ -39,7 +39,7 @@ checks the installed config's SHA-256.
 | --- | --- |
 | Package database | `dpkg-query -W -f='${Status} ${Version}' defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise`. This works only for the deb/rpm channel. |
 | Script | `linux/detect.sh [--min-version X.Y.Z] [--require-healthy] [--format exit\|value\|jamf]`. It asks the installed gateway (`/opt/defenseclaw/bin/defenseclaw-gateway`, which must be root-owned) for `enterprise linux status --json`, so it also covers the payload channel. Run it as root; otherwise it reports `not-installed`. |
-| Health | `detect.sh --require-healthy`, or `defenseclaw-enterprise.sh --action verify` exits 0. |
+| Health | `detect.sh --require-healthy`, or `defenseclaw-enterprise.sh --action verify` exits 0. `--require-healthy` also reports `unhealthy` while dpkg lists the package half-configured or half-installed, or rpm lists two versions of it (an interrupted install or upgrade). |
 | Last package result | `/var/lib/defenseclaw-enterprise/last-package-result.json`: the result of the package's own `ensure --from-package`. |
 | Wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` (root, 0600). |
 

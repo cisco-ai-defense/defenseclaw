@@ -17,7 +17,7 @@ the finding metadata, while the active policy profile maps that finding to
 
 <Callout type="info" title="CEL complements OPA/Rego">
 CEL performs semantic matching inside a trusted tool-call boundary. OPA/Rego
-continues to own admission, firewall, audit, and policy-domain
+continues to own admission and guardrail policy-domain
 decisions. CEL does not scan prompts or ordinary tool-result text and does not
 expose a separate policy endpoint.
 </Callout>
@@ -118,8 +118,10 @@ rule to command, path, network, and data-flow cases.
 ## Validate and activate
 
 Compile the candidate with the same Go loader used by the gateway, then switch
-to it. `use-pack` validates the pack again and restarts a running gateway so it
-loads the pack; rule-pack files are not watched for changes.
+to it. `use-pack` validates the pack again, pins its digest in `config.yaml`, and
+the running gateway loads the pack on its next reload without a restart. The
+gateway watches pack directories, so a later in-place edit is rejected until you
+pin the new digest ([Rules and custom packs](/docs/policies/rules#change-a-pinned-pack)).
 
 ```bash
 defenseclaw guardrail validate-pack \

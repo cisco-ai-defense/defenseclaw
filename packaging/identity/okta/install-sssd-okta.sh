@@ -23,6 +23,8 @@
 #
 # Exit codes: 0 done or unchanged dry-run, 1 a step failed, 2 bad arguments,
 # 3 the host cannot be configured, 4 dry-run would change the host.
+# Without a bind password, dry-run cannot compare or plan SSSD config changes;
+# pass --bind-password-file or OKTA_BIND_PASSWORD for a complete plan.
 
 set -euo pipefail
 
@@ -42,6 +44,7 @@ RENDER_ONLY=""
 PASSWORD=""
 WORK=""
 CHANGED=0
+PW_UNKNOWN=0
 
 usage() {
   cat <<USAGE
@@ -77,7 +80,8 @@ Options:
   --skip-bind-test          Do not test the bind user with ldapsearch
   --render-only FILE        Write the rendered config to FILE (mode 0600),
                             check it, and change nothing else. Works on any Linux.
-  --dry-run                 Show what would change, change nothing
+  --dry-run                 Show what would change, change nothing. Without a
+                            bind password, SSSD config changes are unknown.
   --force                   Replace an sssd.conf this script did not write or
                             one with other SSSD domains; also let authselect
                             replace a modified profile
@@ -569,7 +573,7 @@ sssd_config_stale() {
 
 restart_sssd() {
   if ((DRY_RUN)); then
-    if ((${CONF_CHANGED:-0})) || sssd_config_stale; then
+    if ((PW_UNKNOWN == 0)) && { ((${CONF_CHANGED:-0})) || sssd_config_stale; }; then
       log "  would restart sssd and wait for the $DOMAIN domain to be Online"
       CHANGED=1
     fi
@@ -618,7 +622,7 @@ main() {
   local pw=$PASSWORD
   if [[ -z $pw ]]; then
     if ((DRY_RUN)); then
-      pw="<bind password>"
+      PW_UNKNOWN=1
     else
       fail 2 "no bind password: use --bind-password-file, OKTA_BIND_PASSWORD or a terminal prompt"
     fi
@@ -634,13 +638,19 @@ main() {
   fi
 
   check_host
-  log "Rendering and checking the config"
-  render "$WORK/sssd.conf" "$pw"
-  config_check "$WORK/sssd.conf"
-  bind_test
+  if ((PW_UNKNOWN)); then
+    log "  cannot judge SSSD config without the bind password; pass --bind-password-file or OKTA_BIND_PASSWORD for a complete dry run"
+  else
+    log "Rendering and checking the config"
+    render "$WORK/sssd.conf" "$pw"
+    config_check "$WORK/sssd.conf"
+    bind_test
+  fi
   authselect_profile_check
   log "SSSD config ($CONF)"
-  install_conf "$WORK/sssd.conf"
+  if ((PW_UNKNOWN == 0)); then
+    install_conf "$WORK/sssd.conf"
+  fi
   log "PAM and home directories"
   pam_step
   log "sshd"

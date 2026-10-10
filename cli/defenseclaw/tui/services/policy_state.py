@@ -21,7 +21,7 @@ Seven views, in navigation order (keys ``1``-``7``):
 3. **Chains**: the bounded tool-call chains, grouped by domain (read-only).
 4. **Rule families**: the rule files of the scope's effective pack.
 5. **Policies**: the named security policies (``policy activate``); ``b`` /
-   ``a`` change the highlighted policy's levels for LLM traffic.
+   ``a`` change the highlighted policy's block and alert levels.
 6. **Rule packs**: the guardrail rule pack per scope (``guardrail use-pack``).
 7. **Sandbox packs**: the sandbox policy packs, read-only.
 
@@ -29,10 +29,12 @@ A tool call's block and alert levels come from ``guardrail.block_at`` /
 ``alert_at`` (the connector's own value, else the global one), else from the
 name of the scope's rule-pack folder (``internal/gateway/decision.go``:
 ``strict`` blocks MEDIUM+, ``permissive`` and everything else CRITICAL); the
-alert level never sits above the block level. The posture rows show them and
-``b`` / ``a`` there run ``guardrail block-at`` / ``alert-at``. The named
-policy's thresholds apply to LLM traffic through the guardrail proxy only;
-the Policies view shows and changes those (``policy edit guardrail``).
+alert level never sits above the block level. The same levels apply to
+prompts, completions and the proxy's LLM traffic (one threshold model). The
+posture rows show them and ``b`` / ``a`` there run ``guardrail block-at`` /
+``alert-at``. On the Policies view ``b`` / ``a`` on the active policy set the
+global levels (``policy edit guardrail``); on another policy they only save
+it until it is activated.
 
 No I/O happens here. The app reads :mod:`defenseclaw.policy_catalog` in a
 thread and feeds the results in; the model answers what to render and which
@@ -94,7 +96,7 @@ SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW")
 LEVEL_FOR_RANK = {4: "CRITICAL", 3: "HIGH+", 2: "MEDIUM+", 1: "LOW+"}
 
-# The levels the policy's block-at and alert-at pickers offer (LLM traffic).
+# The levels the policy's block-at and alert-at pickers offer.
 BLOCK_LEVELS = ("CRITICAL", "HIGH+", "MEDIUM+")
 ALERT_LEVELS = ("HIGH+", "MEDIUM+", "LOW+")
 # The tool-call level pickers (``guardrail block-at`` / ``alert-at``), plus
@@ -128,9 +130,6 @@ CHAIN_DOMAINS: tuple[tuple[str, str], ...] = (
     ("network", "Network"),
     ("security-controls", "Security controls"),
 )
-
-# The composed pack folder ``guardrail protection enable`` writes per scope.
-PROTECTED_PACK_PREFIX = "protected-"
 
 
 def threshold_rank(label: str) -> int | None:
@@ -341,9 +340,10 @@ def mode_intent(mode: str, connector: str = "") -> PolicyCommandIntent:
 def threshold_intent(kind: str, level: str, policy: str = "") -> PolicyCommandIntent:
     """``policy edit guardrail --block-threshold N [-p NAME]`` (or ``--alert-threshold``).
 
-    The named policy's level for LLM traffic through the guardrail proxy:
-    ``policy`` names it ("" = the active one); a built-in one is copied to the
-    policy folder first. ``level`` is a threshold label (``HIGH+``).
+    ``policy`` "" sets the live global level (``guardrail.block_at`` /
+    ``alert_at``, every guardrail surface); a name saves that inactive policy
+    (a built-in one is copied to the policy folder first) until it is
+    activated. ``level`` is a threshold label (``HIGH+``).
     """
     rank = level_rank(level)
     if rank is None:
@@ -356,7 +356,7 @@ def threshold_intent(kind: str, level: str, policy: str = "") -> PolicyCommandIn
     return PolicyCommandIntent(
         label=f"policy edit guardrail {flag} {rank}" + (f" -p {policy}" if policy else ""),
         args=args,
-        hint=f"Make the {policy or 'active'} policy {what} LLM traffic at {level}.",
+        hint=f"Make the {policy or 'active'} policy {what} at {level}.",
     )
 
 
@@ -384,7 +384,7 @@ def level_intent(kind: str, level: str, connector: str = "") -> PolicyCommandInt
     return PolicyCommandIntent(
         label=f"guardrail {args[1]} {name}{scope}",
         args=args,
-        hint=f"Set the tool-call {what} level{scope} to {name}.",
+        hint=f"Set the {what} level for prompts, completions and tool calls{scope} to {name}.",
     )
 
 
@@ -534,8 +534,8 @@ def picker_level(stored: str) -> str:
 def policy_weakenings(old: object | None, new: object | None) -> tuple[str, ...]:
     """Ways ``new`` protects less than ``old`` (empty when it does not).
 
-    A threshold that catches fewer severities, a firewall that goes from deny
-    to allow by default, or human approval switched off.
+    A threshold that catches fewer severities, or human approval switched off.
+    A preset's firewall default is not compared: the gateway does not enforce it.
     """
     if old is None or new is None:
         return ()
@@ -548,8 +548,6 @@ def policy_weakenings(old: object | None, new: object | None) -> tuple[str, ...]
         before, after = str(_attr(old, field)), str(_attr(new, field))
         if threshold_weakens(before, after):
             reasons.append(f"{label} {after} instead of {before}")
-    if _attr(old, "firewall_default") == "deny" and _attr(new, "firewall_default") == "allow":
-        reasons.append("the firewall allows by default instead of denying")
     if _attr(old, "hilt", None) is True and _attr(new, "hilt", None) is False:
         reasons.append("human approval is turned off")
     return tuple(reasons)
@@ -561,12 +559,10 @@ def policy_comparison(old: object | None, new: object) -> tuple[tuple[str, str, 
     def values(policy: object | None) -> dict[str, str]:
         if policy is None:
             return {}
-        firewall = str(_attr(policy, "firewall_default")) or "unchanged"
         return {
             "Block at": str(_attr(policy, "block_at")) or "-",
             "Alert at": str(_attr(policy, "alert_at")) or "-",
             "Install block at": str(_attr(policy, "install_block_at")) or "-",
-            "Firewall default": firewall,
             "Human approval": _hilt_label(_attr(policy, "hilt", None)),
         }
 
@@ -820,8 +816,8 @@ POLICY_KEYMAP: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("j/k or Up/Down", "Move in the view", POLICY_VIEWS),
     ("m", "Posture: switch the highlighted scope between observe and action", ("posture",)),
-    ("b / a", "Posture: the scope's tool-call block at / alert at level", ("posture",)),
-    ("b / a", "Policies: the policy's block / alert level for LLM traffic (guardrail proxy)", ("policies",)),
+    ("b / a", "Posture: the scope's block at / alert at level (tool calls, prompts, LLM traffic)", ("posture",)),
+    ("b / a", "Policies: the policy's block / alert level (the active one: every surface)", ("policies",)),
     ("h", "Posture: human approval for the highlighted scope", ("posture",)),
     ("p", "Posture: switch the highlighted scope's rule pack", ("posture",)),
     ("Space / Enter", "Opt-in packs: turn the pack on or off for the scope", ("optin",)),
@@ -906,8 +902,7 @@ class PoliciesPanelModel:
         # ``guardrail hilt --connector`` needs the per-connector map; a
         # single-connector install changes the global block instead.
         self.multi_connector = isinstance(connectors, Mapping) and bool(connectors)
-        # policy_dir, else <data_dir>/policies: the folder the CLI composes
-        # protection packs under (policy_catalog.protected_pack_dir).
+        # policy_dir, else <data_dir>/policies.
         self.policy_dir = policy_root(config)
 
     def apply_policies(self, policies: list[Any] | tuple[Any, ...]) -> None:
@@ -1453,13 +1448,14 @@ class PoliciesPanelModel:
         if view == "packs" and self.pack_error:
             return f"Could not read rule packs: {self.pack_error}"
         if view == "posture":
-            active = self.active_policy()
-            if active is None:
-                return "Tool-call levels are set per scope below · no policy is active for LLM traffic"
-            text = (
-                f"LLM traffic ({active.name} policy): blocks {active.block_at or '?'}, alerts {active.alert_at or '?'}"
-            )
-            wide = f"{text} · tool calls: per scope below"
+            # One threshold model: LLM traffic, prompts and tool calls all take
+            # their scope's levels (the rows below), not the preset's.
+            row = self.scope_row("")
+            if row is None:
+                return "Levels are set per scope below"
+            block, alert = self.scope_levels(row)
+            text = f"Global: blocks {block or '?'}, alerts {alert or '?'}"
+            wide = f"{text} · LLM traffic and tool calls use their scope's levels below"
             return wide if not width or len(wide) <= width else text
         if view in {"optin", "families"}:
             scope = self.scope_name() or "-"
@@ -1710,7 +1706,6 @@ class PoliciesPanelModel:
                         policy.block_at or "-",
                         policy.alert_at or "-",
                         policy.install_block_at or "-",
-                        policy.firewall_default or "-",
                         fit(policy.description or "-", 40),
                     )
                 )
@@ -1729,23 +1724,22 @@ class PoliciesPanelModel:
                 rows.append(
                     (active, fit(policy.name, max(8, width - 30)), policy.block_at or "-", policy.alert_at or "-")
                 )
-        # Block / alert here are the policy's levels for LLM traffic through the
-        # guardrail proxy; the Posture view shows the tool-call levels.
+        # Block / alert are the policy's levels; the active policy's are the
+        # global levels every guardrail surface uses (one threshold model).
         if width >= 100:
             columns: tuple[str, ...] = (
                 "",
                 "Policy",
                 "Kind",
-                "LLM block",
-                "LLM alert",
+                "Block",
+                "Alert",
                 "Install block",
-                "Firewall",
                 "Description",
             )
         elif width >= 62:
-            columns = ("", "Policy", "Kind", "LLM block", "LLM alert", "Install block")
+            columns = ("", "Policy", "Kind", "Block", "Alert", "Install block")
         else:
-            columns = ("", "Policy", "LLM block", "LLM alert")
+            columns = ("", "Policy", "Block", "Alert")
         return columns, tuple(rows)
 
     def aside(self) -> tuple[str, tuple[str, ...]]:
@@ -1796,16 +1790,14 @@ class PoliciesPanelModel:
             "",
             self._pack_line(row),
         ]
+        from defenseclaw.policy_catalog import inert_hilt_warning
+
+        if note := inert_hilt_warning(hilt, block):
+            lines.insert(1, "Warning: " + note)
         protection = self.scope_protection(row)
         if protection:
             titles = [str(_attr(self.protection_pack(name), "title")) or name for name in protection]
             lines.append("Opt-in: " + ", ".join(titles))
-        active = self.active_policy()
-        if active is not None:
-            lines.append(
-                f"LLM traffic through the guardrail proxy: the {active.name} policy blocks "
-                f"{active.block_at or '?'}, alerts at {active.alert_at or '?'}."
-            )
         return f"Posture · {scope}", tuple(lines)
 
     def _pack_line(self, row: object) -> str:
@@ -1908,9 +1900,8 @@ class PoliciesPanelModel:
         kind = "built-in" if policy.builtin else "custom"
         effects = " · ".join(policy_side_effects(policy))
         lines = [
-            f"LLM traffic (guardrail proxy): block {policy.block_at} · alert {policy.alert_at}",
-            f"installs blocked at {policy.install_block_at} · firewall {policy.firewall_default or 'unchanged'} · "
-            f"approval {_hilt_label(policy.hilt)}",
+            f"guardrail: block {policy.block_at} · alert {policy.alert_at}",
+            f"installs blocked at {policy.install_block_at} · approval {_hilt_label(policy.hilt)}",
             policy.description or "-",
             policy.path + (f"  (activating it: {effects})" if effects else ""),
         ]
@@ -1967,7 +1958,6 @@ __all__ = [
     "POLICY_VIEWS",
     "PROFILE_LEVELS",
     "PROTECTED_CONTEXT",
-    "PROTECTED_PACK_PREFIX",
     "TOOL_ALERT_LEVELS",
     "TOOL_BLOCK_LEVELS",
     "VIEW_KEYS",

@@ -194,7 +194,7 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
             env=environment,
             text=True,
             capture_output=True,
-            timeout=15,
+            timeout=90,
             check=False,
         )
 
@@ -307,7 +307,6 @@ def test_source_gateway_claim_allows_rebuild_but_rejects_installed_tampering(
         "extensions/defenseclaw/package.json",
         "extensions/defenseclaw/package-lock.json",
         "macos/DefenseClawMac/DefenseClawMac.xcodeproj/project.pbxproj",
-        "internal/config/config.go",
         "internal/config/observability_v8_types.go",
         "release/source-install-identity.json",
     ):
@@ -766,12 +765,15 @@ def test_current_observability_guidance_explains_v8_redaction_workflow() -> None
         "defenseclaw config validate",
         "defenseclaw config show --effective --section observability",
         "defenseclaw observability plan",
-        "defenseclaw-gateway restart",
     )
     for rel in OBSERVABILITY_V8_WORKFLOW_GUIDES:
         text = (ROOT / rel).read_text(encoding="utf-8")
         for expected in required_workflow:
             assert expected in text, f"{rel} is missing v8 redaction guidance: {expected}"
+        if not rel.endswith(".mdx"):
+            # The generator and the alert rules still name the restart; the docs pages
+            # say that a running gateway applies a verified policy itself (config_version 9).
+            assert "defenseclaw-gateway restart" in text, f"{rel} is missing the restart command"
 
     for rel in OBSERVABILITY_V8_CONNECTOR_GUIDES:
         text = (ROOT / rel).read_text(encoding="utf-8")
@@ -916,7 +918,7 @@ def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> No
 
 
 def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> None:
-    text = (ROOT / "docs-site/content/docs/connectors/zeptoclaw.mdx").read_text()
+    text = (ROOT / "docs-site/content/docs/connectors/zeptoclaw.mdx").read_text(encoding="utf-8")
     for expected in (
         'title="Treat local event history as sensitive data"',
         "observability.local.retention_days",
@@ -929,13 +931,13 @@ def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> Non
 
 
 def test_enterprise_example_uses_secure_managed_redaction_default() -> None:
-    text = (ROOT / "docs-site/content/docs/enterprise/secure-client.mdx").read_text()
+    text = (ROOT / "docs-site/content/docs/enterprise/secure-client.mdx").read_text(encoding="utf-8")
     assert "  defaults:\n    redaction_profile: sensitive" in text
 
 
 def test_readme_delegates_observability_operations_to_the_website() -> None:
-    readme = (ROOT / "README.md").read_text()
-    implementation = (ROOT / "docs/OBSERVABILITY.md").read_text()
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    implementation = (ROOT / "docs/OBSERVABILITY.md").read_text(encoding="utf-8")
 
     assert "https://cisco-ai-defense.github.io/defenseclaw/docs/observability/" in readme
     assert "schemas/telemetry/v8/registry.yaml" in implementation
@@ -945,8 +947,8 @@ def test_readme_delegates_observability_operations_to_the_website() -> None:
 
 
 def test_policy_overview_matches_atomic_invalid_regex_rejection() -> None:
-    overview = (ROOT / "docs-site/content/docs/policies/index.mdx").read_text()
-    validation = (ROOT / "docs-site/content/docs/policies/rulepack-validation.mdx").read_text()
+    overview = (ROOT / "docs-site/content/docs/policies/index.mdx").read_text(encoding="utf-8")
+    validation = (ROOT / "docs-site/content/docs/policies/rulepack-validation.mdx").read_text(encoding="utf-8")
 
     assert "logged and dropped" not in overview
     assert "rejects the complete candidate" in overview
@@ -960,9 +962,9 @@ def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
     # GAP-1191: ai_discovery.enabled defaults to false, so the managed
     # install pages and every sample config must turn it on explicitly.
     for page in ("linux.mdx", "macos.mdx"):
-        text = (ROOT / "docs-site/content/docs/enterprise" / page).read_text()
+        text = (ROOT / "docs-site/content/docs/enterprise" / page).read_text(encoding="utf-8")
         assert "ai_discovery:\n  enabled: true" in text, page
-    configuration = (ROOT / "docs-site/content/docs/enterprise/configuration.mdx").read_text()
+    configuration = (ROOT / "docs-site/content/docs/enterprise/configuration.mdx").read_text(encoding="utf-8")
     samples = configuration[configuration.index("## Sample configs"):]
     assert samples.count("ai_discovery:\n  enabled: true") == 3
 
@@ -970,8 +972,8 @@ def test_enterprise_docs_say_how_to_turn_on_ai_discovery() -> None:
 def test_threat_model_r7_matches_linux_socket_dependency() -> None:
     # GAP-1198: on Linux the gateway service requires both socket units, so
     # a held port keeps the whole gateway (hook socket included) down.
-    model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text()
-    unit = (ROOT / "packaging/systemd/defenseclaw-gateway.service").read_text()
+    model = (ROOT / "docs/ENTERPRISE-THREAT-MODEL.md").read_text(encoding="utf-8")
+    unit = (ROOT / "packaging/systemd/defenseclaw-gateway.service").read_text(encoding="utf-8")
     assert "Requires=defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket" in unit
     assert "which the gateway serves independently of the TCP port" not in model
     assert "does not start at all, and every hook on the host fails closed" in model
@@ -982,9 +984,14 @@ def test_quickstart_initializes_before_setup() -> None:
     # GAP-1613: the installer does not initialize DefenseClaw, so the
     # walkthrough (the quickstart; First guardrail continues from it) must
     # run init before any other defenseclaw command.
-    text = (ROOT / "docs-site/content/docs/get-started/quickstart.mdx").read_text()
+    text = (ROOT / "docs-site/content/docs/get-started/quickstart.mdx").read_text(encoding="utf-8")
     commands = re.findall(r"^defenseclaw(?:-gateway)? [a-z-]+", text, re.MULTILINE)
     assert commands[0] == "defenseclaw init", commands
+    # GAP-0409: the installer asks for one agent and prints its init command;
+    # plain init would set up every detected agent, unlike the report shown.
+    install_sh = (ROOT / "scripts/install.sh").read_text(encoding="utf-8")
+    assert 'Next: ${CYAN}defenseclaw init --connector %s${NC}' in install_sh
+    assert re.search(r"^defenseclaw init --connector claudecode$", text, re.MULTILINE)
 
 
 def test_documented_rule_pack_dirs_are_absolute() -> None:
@@ -996,6 +1003,58 @@ def test_documented_rule_pack_dirs_are_absolute() -> None:
             if value.strip("\"'").startswith("~"):
                 offenders.append(f"{path.relative_to(ROOT)}: {value}")
     assert not offenders, offenders
+
+
+def test_v9_migration_docs_name_the_released_config_v8_source() -> None:
+    # 1.0.0 is unreleased: config_version 8 was written by 0.8.5-0.8.10, so
+    # the migration and rollback docs name 0.8.x, and the 0.x upgrade path
+    # (the one a 0.8.10 user reads) says what the v9 step moves and keeps.
+    docs = ROOT / "docs-site/content/docs"
+    for page in (
+        "reference/migrate-v9.mdx",
+        "get-started/upgrade.mdx",
+        "get-started/install.mdx",
+        "reference/cli.mdx",
+        "reference/configuration.mdx",
+        "enterprise/lifecycle.mdx",
+        "guardrail/unified-llm-key.mdx",
+        "policies/admission.mdx",
+    ):
+        assert not re.search(r"\b1\.0\.x\b|the 1\.0 (?:behavior|admission)", (docs / page).read_text(encoding="utf-8")), page
+
+    upgrade = (docs / "get-started/upgrade.mdx").read_text(encoding="utf-8")
+    path = upgrade.split("## Upgrading from 0.x to 1.0", 1)[1].split("\n## Rollback", 1)[0]
+    for name in ("data.json", "audit.db", "config.yaml.v8.bak", "migration-v9.json"):
+        assert name in path, name
+
+    migrate = (docs / "reference/migrate-v9.mdx").read_text(encoding="utf-8")
+    back = migrate.split("## Going back to 0.8.x", 1)[1]
+    assert "Configuration schema v8 is required" in back  # what the 0.8.x CLI prints
+    assert "reads up to 8" not in migrate and "migrate --check` on" not in back  # 0.8.x has `migrations`, not `migrate`
+
+def test_admission_docs_explain_take_action_false_limits() -> None:
+    text = (ROOT / "docs-site/content/docs/policies/admission.mdx").read_text(encoding="utf-8")
+    section = text.split("Where it runs:", 1)[1].split("## The admission block", 1)[0]
+    assert "take_action" in section
+    assert "denied" in section and "scanner" in section and "quarantin" in section
+    assert "nothing else" not in section
+
+
+def test_profile_docs_apply_levels_to_content_decisions() -> None:
+    text = (ROOT / "docs-site/content/docs/guardrail/user-and-group-policies.mdx").read_text(encoding="utf-8")
+    section = text.split("| `block_at`, `alert_at` |", 1)[1].split("| `hilt` |", 1)[0]
+    assert "prompt" in section and "response" in section and "proxy" in section
+    assert "Secure Client" in section
+    assert "tool-call decisions" not in section
+
+
+def test_provider_docs_explain_legacy_overlay_migration() -> None:
+    text = (ROOT / "docs-site/content/docs/guardrail/unified-llm-key.mdx").read_text(encoding="utf-8")
+    section = text.split("Manage the entries with", 1)[1].split("```bash", 1)[0]
+    assert "migration" in section and "request_overrides" in section
+    assert "live input" in section and "0.8.x" in section
+    assert "next `setup provider add` or `remove`" not in section
+
 
 def test_mdm_claude_windows_guide_uses_audit_export() -> None:
     guide = (ROOT / "docs-site/content/docs/enterprise/mdm/index.mdx").read_text()

@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
@@ -585,4 +586,101 @@ func TestEgressMechanismWithoutDNSCaptureSaysReverseDNS(t *testing.T) {
 		return
 	}
 	t.Fatal("plane B missing from planeHealth")
+}
+
+// recycledPIDAcquirer replays one process table per poll.
+type recycledPIDAcquirer struct {
+	acquire.Acquirer
+	tables [][]procprobe.Process
+}
+
+func (a *recycledPIDAcquirer) Processes(context.Context) ([]procprobe.Process, int, error) {
+	table := a.tables[0]
+	if len(a.tables) > 1 {
+		a.tables = a.tables[1:]
+	}
+	return table, 0, nil
+}
+
+func (a *recycledPIDAcquirer) Connections(context.Context) ([]netprobe.Connection, int, error) {
+	return nil, 0, nil
+}
+
+// GAP-1372: process A (alice, pid N) exits and process B (bob) takes pid N
+// with a later start. Each keeps its own finding and owner: A's agent
+// session is not merged with B's, keeps alice after A exited, and B's
+// process episode does not continue A's.
+func TestRecycledPIDIsNeverMergedWithTheProcessThatHeldIt(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+
+	t.Run("agent sessions", func(t *testing.T) {
+		source := newFake(fullCoverage(),
+			plane.Event{Kind: plane.KindExec, PID: 7708, PPID: 1, Name: "claude", Cmdline: "claude", At: base},
+			plane.Event{Kind: plane.KindExec, PID: 7709, PPID: 7708, Name: "sudo", Cmdline: "sudo -i",
+				At: base.Add(time.Second)},
+			plane.Event{Kind: plane.KindExit, PID: 7709, At: base.Add(2 * time.Minute)},
+			plane.Event{Kind: plane.KindExit, PID: 7708, At: base.Add(2 * time.Minute)},
+			plane.Event{Kind: plane.KindExec, PID: 7708, PPID: 1, Name: "claude", Cmdline: "claude",
+				At: base.Add(4 * time.Minute)},
+			plane.Event{Kind: plane.KindExec, PID: 7710, PPID: 7708, Name: "sudo", Cmdline: "sudo -i",
+				At: base.Add(4*time.Minute + time.Second)},
+		)
+		host := newHost(source)
+		drainInto(t, host, source, 2)
+		service := &Service{hostPlane: host, owners: newOwnerBook(ownerTestLookups(), time.Hour)}
+		service.owners.observe([]procprobe.Process{{PID: 7708, Name: "claude.exe", User: `DCLAB\alice`,
+			UserSID: aliceSID, StartedAt: base.Add(40 * time.Millisecond)}}, base.Add(30*time.Second))
+		service.owners.observe([]procprobe.Process{{PID: 7708, Name: "claude.exe", User: bobSID,
+			UserSID: bobSID, StartedAt: base.Add(4*time.Minute + 40*time.Millisecond)}}, base.Add(5*time.Minute))
+
+		findings := service.hostPlaneFindings(base.Add(6*time.Minute), 1, correlate.New(correlate.Snapshot{}),
+			service.owners.resolver())
+		if len(findings) != 2 || findings[0].FindingID == findings[1].FindingID {
+			t.Fatalf("findings = %+v, want one per process instance", findings)
+		}
+		owners := map[string]bool{}
+		for _, finding := range findings {
+			owners[finding.UserSID] = true
+		}
+		if !owners[aliceSID] || !owners[bobSID] {
+			t.Fatalf("findings = %+v, want A's session under alice and B's under bob", findings)
+		}
+	})
+
+	t.Run("process episodes", func(t *testing.T) {
+		service, err := New(Options{
+			Config:    config.AIRuntimeConfig{Enabled: true, Planes: []string{"a"}, MinRiskToReport: 1},
+			Providers: testCatalog(),
+			Platform:  allPlanesAvailable(),
+			Resolver:  StaticResolver{Names: map[string]string{}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := procprobe.Process{PID: 42, Name: "python.exe", User: "alice", RSSBytes: 2 << 30, StartedAt: base}
+		b := procprobe.Process{PID: 42, Name: "python.exe", User: "bob", RSSBytes: 2 << 30,
+			StartedAt: base.Add(time.Hour)}
+		a1, a2, b1, b2 := a, a, b, b
+		a1.CPUTime, a2.CPUTime = time.Hour, 2*time.Hour
+		// B has burned more CPU than A ever did, so a pid-keyed episode
+		// would score B's first sample as a delta of A's.
+		b1.CPUTime, b2.CPUTime = 3*time.Hour, 4*time.Hour
+		service.options.Acquirer = &recycledPIDAcquirer{Acquirer: service.options.Acquirer,
+			tables: [][]procprobe.Process{{a1}, {a2}, {b1}, {b2}}}
+		service.Poll(context.Background())
+		first := service.Poll(context.Background())
+		if len(first.Findings) != 1 || first.Findings[0].User != "alice" {
+			t.Fatalf("A's findings = %+v", first.Findings)
+		}
+		if reused := service.Poll(context.Background()); len(reused.Findings) != 0 {
+			t.Fatalf("B's first sample continued A's episode: %+v", reused.Findings)
+		}
+		second := service.Poll(context.Background())
+		if len(second.Findings) != 1 || second.Findings[0].User != "bob" ||
+			second.Findings[0].FindingID == first.Findings[0].FindingID {
+			t.Fatalf("B's findings = %+v, want its own finding apart from A's %s", second.Findings,
+				first.Findings[0].FindingID)
+		}
+	})
 }

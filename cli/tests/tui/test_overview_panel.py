@@ -1144,8 +1144,8 @@ def test_multi_connector_rows_noop_for_single_connector() -> None:
 
 
 def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
-    # N3 state-layer surface: scanner overrides live only in the active policy
-    # YAML / data.json today. The default config has none, so the summary is ""
+    # N3 state-layer surface: scanner overrides come from config.yaml.
+    # The default config has none, so the summary is ""
     # and the Overview renders nothing until the adapter populates the field.
     assert format_scanner_overrides_summary(()) == ""
     assert OverviewPanelModel(None, version="test").scanner_overrides_summary() == ""
@@ -1166,6 +1166,18 @@ def test_scanner_overrides_summary_formats_and_stays_empty_by_default() -> None:
     # Malformed entries degrade gracefully instead of raising.
     assert format_scanner_overrides_summary((("", "high", "file", "block"),)) == ""
     assert format_scanner_overrides_summary((("secrets", "low", "file"),)) == ""  # wrong arity
+
+
+def test_status_and_overview_show_the_same_admission_overrides() -> None:
+    # `defenseclaw status` read the deleted data.json and always printed
+    # nothing; it now lists the admission.<type>.actions the Overview shows.
+    from defenseclaw.commands.cmd_status import _scanner_overrides_summary
+    from defenseclaw.config import default_config
+
+    cfg = default_config()
+    assert _scanner_overrides_summary(cfg) == ""
+    cfg.admission.mcp.actions["medium"] = "warn"
+    assert _scanner_overrides_summary(cfg) == "mcp: MEDIUM install=none, file=none, runtime=enable"
 
 
 def test_guardrail_detail_names_the_rule_pack_not_a_placeholder_strategy() -> None:
@@ -1460,3 +1472,22 @@ def test_telemetry_detail_names_full_disk_and_marks_local_sqlite_failing(monkeyp
 
     model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="running", details=details)))
     assert model.telemetry_detail() == "1 destination: local-sqlite (healthy)"
+
+
+def test_secure_client_status_keeps_legacy_scanner_override(tmp_path, monkeypatch) -> None:
+    import json
+
+    from defenseclaw.commands.cmd_status import _scanner_overrides_summary
+    from defenseclaw.config import default_config
+
+    policy_dir = tmp_path / "policies"
+    (policy_dir / "rego").mkdir(parents=True)
+    (policy_dir / "rego" / "data.json").write_text(json.dumps({
+        "scanner_overrides": {"mcp": {"MEDIUM": {"install": "block"}}}
+    }))
+    cfg = default_config()
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.policy_dir = str(policy_dir)
+    monkeypatch.setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "secure_client")
+
+    assert _scanner_overrides_summary(cfg) == "mcp: MEDIUM install=block"

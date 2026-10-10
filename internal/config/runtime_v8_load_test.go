@@ -5,16 +5,60 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"gopkg.in/yaml.v3"
 )
+
+func TestConcurrentRuntimeLoadsKeepEachSource(t *testing.T) {
+	sources := []struct {
+		raw  []byte
+		mode string
+		port int
+	}{
+		{[]byte("config_version: 9\nguardrail: {mode: action}\ngateway: {port: 18765}\nobservability: {}\n"), "action", 18765},
+		{[]byte("config_version: 9\nguardrail: {mode: observe}\ngateway: {port: 19876}\nobservability: {}\n"), "observe", 19876},
+	}
+	start := make(chan struct{})
+	errs := make(chan error, len(sources))
+	var workers sync.WaitGroup
+	for _, source := range sources {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			for range 20 {
+				cfg, err := LoadRuntimeV8CandidateFromBytes("config.yaml", source.raw)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if cfg.Guardrail.Mode != source.mode || cfg.Gateway.Port != source.port {
+					errs <- fmt.Errorf("loaded mode=%q port=%d, want mode=%q port=%d",
+						cfg.Guardrail.Mode, cfg.Gateway.Port, source.mode, source.port)
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
 
 func TestRuntimeV8LoadersPreserveEmptyConnectorPolicyEntries(t *testing.T) {
 	raw := []byte(`config_version: 8
@@ -37,10 +81,14 @@ observability: {}
 		"inspection-candidate": func() (*Config, error) {
 			return LoadRuntimeV8InspectionCandidateFromBytes("config.yaml", raw)
 		},
-		// LoadFromFile and LoadFromBytes, which the Windows guardian,
-		// enumerator and Setup use, dropped these entries (GAP-0221).
+		// LoadFromFile, which the Windows guardian, enumerator and Setup
+		// use, dropped these entries on main (GAP-0221).
 		"file": func() (*Config, error) {
-			return LoadFromBytes("config.yaml", raw)
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				return nil, err
+			}
+			return LoadFromFile(path)
 		},
 	}
 	for name, load := range loaders {
@@ -58,7 +106,7 @@ observability: {}
 	// A Secure Client config keeps the file loader of main, which drops them.
 	if runtime.GOOS != "linux" {
 		secureClient := append([]byte("deployment_mode: managed_enterprise\nenterprise:\n  profile: secure_client\n"), raw...)
-		cfg, err := loadConfigSourceChecked("config.yaml", false, secureClient, true, false, false, false, false)
+		cfg, err := loadFileSource(filepath.Join(t.TempDir(), "config.yaml"), secureClient, false, false, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -68,8 +116,7 @@ observability: {}
 	}
 }
 
-func TestLoadRuntimeV8FromBytesDoesNotRetainLegacyObservability(t *testing.T) {
-	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
+func TestLoadRuntimeV8FromBytesRetainsConnectorWebhookOverride(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw-v8
 observability:
@@ -81,21 +128,9 @@ observability:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OTel.Enabled || len(cfg.OTel.Destinations) != 0 {
-		t.Fatalf("target runtime retained legacy OTel config: %+v", cfg.OTel)
-	}
-	if cfg.AuditSinks != nil {
-		t.Fatalf("target runtime retained global legacy audit sinks: %+v", cfg.AuditSinks)
-	}
-	if cfg.AIDiscovery.EmitOTel {
-		t.Fatal("target runtime retained ai_discovery.emit_otel")
-	}
 	connector, ok := cfg.Observability.Connectors["codex"]
 	if !ok || connector.Webhooks == nil {
 		t.Fatalf("v8 connector webhook override was not retained: %+v", cfg.Observability.Connectors)
-	}
-	if connector.AuditSinks != nil {
-		t.Fatalf("target runtime retained connector legacy audit sinks: %+v", connector.AuditSinks)
 	}
 }
 
@@ -307,11 +342,11 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 		{version: MaxSupportedConfigVersion},
 		{
 			version: MaxSupportedConfigVersion + 1,
-			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); "+
-				"upgrade DefenseClaw or restore ~/.defenseclaw/previous", MaxSupportedConfigVersion+1),
+			want: fmt.Sprintf("config was written by a newer DefenseClaw (config_version %d); %s",
+				MaxSupportedConfigVersion+1, newerConfigAction),
 		},
 	} {
-		err := checkRuntimeConfigVersion(test.version)
+		err := checkRuntimeConfigVersion(test.version, false)
 		if test.want == "" {
 			if err != nil {
 				t.Fatalf("config_version %d rejected: %v", test.version, err)
@@ -324,14 +359,13 @@ func TestRuntimeConfigVersionGate(t *testing.T) {
 	}
 
 	// The inspection decoder runs without the YAML entrypoint, so it reaches
-	// the runtime gate directly. The gate must report the declared version, not
-	// the v7 stamp the compatibility decoder applies to older sources.
-	_, err := loadConfigSource("config.yaml", false, []byte("config_version: 5\n"), true, false, true, false)
+	// the runtime gate directly. The gate must report the declared version.
+	_, err := loadConfigSource("config.yaml", []byte("config_version: 5\n"), false, false)
 	if err == nil || !strings.Contains(err.Error(), "config_version 5 is older than 8") {
-		t.Fatalf("pre-v8 inspection error = %v, want declared-version migrate guidance", err)
+		t.Fatalf("older-version inspection error = %v, want declared-version migrate guidance", err)
 	}
-	_, err = loadConfigSource("config.yaml", false, []byte("config_version: 9\n"), true, false, true, false)
-	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 9)") {
+	_, err = loadConfigSource("config.yaml", []byte("config_version: 10\n"), false, false)
+	if err == nil || !strings.Contains(err.Error(), "written by a newer DefenseClaw (config_version 10)") {
 		t.Fatalf("newer inspection error = %v, want newer-release guidance", err)
 	}
 }
@@ -369,6 +403,224 @@ func TestRuntimeV8LoadersRetainManagedPathTrust(t *testing.T) {
 	}
 }
 
+func TestRuntimeV8LoadsConfigVersion9Keys(t *testing.T) {
+	raw := []byte(`config_version: 8
+data_dir: /tmp/defenseclaw-v8
+admission:
+  defaults:
+    scan_on_install: false
+    actions: {critical: quarantine, low: {install: none, file: none, runtime: disable}}
+  skill:
+    scanner_overrides: {skill-scanner: {high: block}}
+    first_party_allow_list: [{name: codeguard, source_path_contains: [.claude/skills/codeguard]}]
+guardrail:
+  rule_pack: strict
+  rules:
+    disable: [ENT-DATA-EMPLOYEE-ID, exec.remote_ip_download_execute_same_artifact]
+    severity_overrides: {SEC-AWS-SECRET: HIGH, impact.cloud_s3_data_delete: HIGH}
+  profiles:
+    contractors:
+      rules: {severity_overrides: {SEC-OPENAI-V2: LOW}}
+asset_policy:
+  tool:
+    denied: [{name: shell, connector: codex}]
+llm_providers:
+  custom: [{name: gw, domains: [llm.example.internal], extra_headers: {X-Route: A}}]
+update: {check: false}
+scanners:
+  mcp_scanner: {analyzers: "yara,llm"}
+ai_discovery:
+  signature_packs: [/home/u/.defenseclaw/signature-packs/p.json]
+  signature_pack_digests: {/home/u/.defenseclaw/signature-packs/p.json: "sha256:0000000000000000000000000000000000000000000000000000000000000001"}
+observability: {}
+`)
+	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission := cfg.Admission
+	if got := admission.Defaults.Actions.Critical.Expand(); got != (SeverityAction{Install: InstallBlock, File: FileActionQuarantine, Runtime: RuntimeDisable}) {
+		t.Errorf("critical = %+v, want the quarantine triple", got)
+	}
+	if got := admission.Defaults.Actions.Low.Expand(); got.Runtime != RuntimeDisable || got.Install != InstallNone {
+		t.Errorf("low triple = %+v", got)
+	}
+	if admission.Defaults.ScanOnInstall == nil || *admission.Defaults.ScanOnInstall {
+		t.Errorf("scan_on_install = %v, want false", admission.Defaults.ScanOnInstall)
+	}
+	if got := admission.Skill.ScannerOverrides["skill-scanner"].High; got == nil || got.Shorthand != AdmissionActionBlock {
+		t.Errorf("skill-scanner high = %+v, want block", got)
+	}
+	// The gateway clones a config through JSON; both action forms survive.
+	var cloned AdmissionConfig
+	if encoded, err := json.Marshal(admission); err != nil || json.Unmarshal(encoded, &cloned) != nil ||
+		!reflect.DeepEqual(cloned, admission) {
+		t.Errorf("admission JSON round trip = %+v (%v)", cloned, err)
+	}
+	if got := cfg.Guardrail.Rules.SeverityOverrides["SEC-AWS-SECRET"]; got != "HIGH" || cfg.Guardrail.RulePack != "strict" {
+		t.Errorf("rules = %+v rule_pack = %q; rule IDs must keep their case", cfg.Guardrail.Rules, cfg.Guardrail.RulePack)
+	}
+	// The newer semantic packs spell their IDs in lower case with dots.
+	if rules := cfg.Guardrail.Rules; len(rules.Disable) != 2 || rules.SeverityOverrides["impact.cloud_s3_data_delete"] != "HIGH" {
+		t.Errorf("lower-case dotted rule IDs = %+v", rules)
+	}
+	if rules := cfg.Guardrail.Profiles["contractors"].Rules; rules == nil || rules.SeverityOverrides["SEC-OPENAI-V2"] != "LOW" {
+		t.Errorf("profile rules = %+v", rules)
+	}
+	if denied := cfg.AssetPolicy.Tool.Denied; len(denied) != 1 || denied[0] != (AssetPolicyToolRule{Name: "shell", Connector: "codex"}) {
+		t.Errorf("asset_policy.tool.denied = %+v", denied)
+	}
+	if custom := cfg.LLMProviders.Custom; len(custom) != 1 || custom[0].ExtraHeaders["X-Route"] != "A" {
+		t.Errorf("llm_providers.custom = %+v", custom)
+	}
+	if cfg.Update.CheckEnabled() {
+		t.Error("update.check false must disable the update notice")
+	}
+	// A pack's pin is keyed by its file path, whose dots Viper would split (GAP-0066).
+	pins := cfg.AIDiscovery.SignaturePackDigests
+	if pins["/home/u/.defenseclaw/signature-packs/p.json"] != "sha256:0000000000000000000000000000000000000000000000000000000000000001" {
+		t.Errorf("signature_pack_digests = %v, want the pin keyed by the full path", pins)
+	}
+	if got := cfg.Scanners.MCPScanner.Analyzers; !reflect.DeepEqual(got, []string{"yara", "llm"}) {
+		t.Errorf("v8 analyzers CSV = %v, want [yara llm]", got)
+	}
+}
+
+func TestConfigVersion9RejectsReplacedV8Keys(t *testing.T) {
+	for path, body := range map[string]string{
+		"$.otel": "otel:\n  endpoint: https://example.invalid\n",
+		"$.guardrail.profiles.p.connectors.codex.rule_pack_dir":           "guardrail:\n  profiles:\n    p:\n      connectors:\n        codex: {rule_pack_dir: /x}\n",
+		"$.scanners.skill_scanner.use_virustotal":                         "scanners:\n  skill_scanner: {use_virustotal: true}\n",
+		"$.observability.trace_policy.compatibility_aliases":              "observability:\n  trace_policy: {compatibility_aliases: true}\n",
+		"$.observability.resource.attributes[\"deployment.environment\"]": "observability:\n  resource:\n    attributes: {deployment.environment: prod}\n",
+	} {
+		for _, version := range []int{8, 9} {
+			var document yaml.Node
+			if err := yaml.Unmarshal([]byte(fmt.Sprintf("config_version: %d\n%s", version, body)), &document); err != nil {
+				t.Fatal(err)
+			}
+			err := rejectV9RemovedKeys("config.yaml", document.Content[0])
+			var yamlErr *V8YAMLError
+			switch {
+			case version == 8 && err != nil:
+				t.Errorf("v8 %s is migration input, got %v", path, err)
+			case version == 9 && (!errors.As(err, &yamlErr) || yamlErr.Path != path || yamlErr.Code != V8YAMLErrorLegacyKeyForbidden):
+				t.Errorf("v9 %s: got %v", path, err)
+			}
+		}
+	}
+}
+
+// GAP-0295/GAP-0301: scanners.mcp_scanner.api, .timeouts and
+// scanners.skill_scanner.timeouts.llm_s were read by no scan and are gone. A
+// file a pre-release build wrote with them still loads, with them ignored.
+func TestRuntimeV8IgnoresTheRemovedScannerKeys(t *testing.T) {
+	raw := []byte("config_version: 8\nscanners:\n  skill_scanner:\n    timeouts: {scan_s: 600, llm_s: 60}\n" +
+		"  mcp_scanner:\n    api: {endpoint: https://aid.example.test}\n    timeouts: {stdio_s: 5, remote_s: 5, llm_s: 5}\nobservability: {}\n")
+	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatalf("a config holding the removed scanner keys must load: %v", err)
+	}
+	if got := cfg.Scanners.SkillScanner.ScanTimeoutSeconds(); got != 600 {
+		t.Errorf("scan_s = %d, want 600 kept", got)
+	}
+}
+
+// A config_version 8 document that skips the in-memory migration (a Secure
+// Client one) still enables VirusTotal and AI Defense through its v8 keys; the
+// model carries them only as analyzers (GAP-0157).
+func TestRuntimeV8FoldsTheRetiredScannerKeysIntoAnalyzers(t *testing.T) {
+	const keyEnv = "GAP0157_TEST_VT_KEY"
+	t.Setenv(keyEnv, "")
+	raw := []byte("config_version: 8\nscanners:\n  skill_scanner:\n    use_virustotal: true\n    use_aidefense: true\n" +
+		"    virustotal_api_key_env: " + keyEnv + "\n    virustotal_api_key: inline-test-value\nobservability: {}\n")
+	cfg, err := LoadRuntimeV8FromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc := cfg.Scanners.SkillScanner
+	if !sc.Analyzers.VirusTotal.Enabled || !sc.Analyzers.AIDefense.Enabled || sc.VirusTotalKeyEnvName() != keyEnv {
+		t.Errorf("analyzers = %+v, want virustotal and aidefense on with key env %s", sc.Analyzers, keyEnv)
+	}
+	if got := sc.ResolvedVirusTotalKey(); got != "inline-test-value" {
+		t.Errorf("inline v8 key = %q, want it kept for the document", got)
+	}
+	written := append(raw[:len(raw)-len("observability: {}\n")], []byte("    analyzers: {virustotal: {enabled: false}}\nobservability: {}\n")...)
+	cfg, err = LoadRuntimeV8FromBytes("config.yaml", written)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Scanners.SkillScanner.Analyzers.VirusTotal.Enabled {
+		t.Error("an analyzers key that is written must win over use_virustotal")
+	}
+}
+
+// A destination key that `defenseclaw keys set` stored in the data dir's .env
+// resolves for the candidate validator, as it does for `config validate` and
+// the gateway. The 8 -> 9 migration check used to refuse the config of a user
+// who had set the key it asked for (GAP-0173).
+func TestValidateCandidateResolvesDestinationSecretsFromTheDataDirDotEnv(t *testing.T) {
+	const name = "GAP0173_TEST_GALILEO_API_KEY"
+	dir := t.TempDir()
+	raw := []byte("config_version: 9\ndata_dir: " + dir + "\nobservability:\n  destinations:\n" +
+		"  - name: galileo\n    kind: otlp\n    preset: galileo\n    enabled: true\n    protocol: http/protobuf\n" +
+		"    endpoint: https://api.galileo.ai/otel/traces\n    headers:\n      Galileo-API-Key:\n        env: " + name + "\n" +
+		"      project: defenseclaw\n      logstream: production\n" +
+		"    send:\n      signals:\n      - traces\n      buckets:\n      - agent.lifecycle\n")
+	t.Setenv(name, "")
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
+	}
+	previous := dotEnvLoader
+	t.Cleanup(func() { dotEnvLoader = previous })
+	RegisterDotEnvLoader(func(path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		if key, value, ok := strings.Cut(strings.TrimSpace(string(data)), "="); ok && os.Getenv(key) == "" {
+			_ = os.Setenv(key, value)
+		}
+	})
+
+	configFile := filepath.Join(dir, "config.yaml")
+	if err := ValidateCandidate(configFile, raw); err == nil || !strings.Contains(err.Error(), name) {
+		t.Fatalf("without the key: %v, want an unset-variable error naming %s", err, name)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte(name+"=probe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCandidate(configFile, raw); err != nil {
+		t.Fatalf("with the key in .env: %v", err)
+	}
+}
+
+// TestRuntimeV8RejectsInvalidAdmission: no enforcement path admits a tool
+// definition, so admission.tool is not a setting that validates and does
+// nothing (tool block/allow is asset_policy.tool); and an action mapping that
+// leaves out install, file or runtime would compile them to none/none/allow
+// and permit a severity the built-in action blocks (GAP-1290).
+func TestRuntimeV8RejectsInvalidAdmission(t *testing.T) {
+	for name, admission := range map[string]string{
+		"admission.tool":       "  tool:\n    actions: {medium: block}\n",
+		"empty action mapping": "  skill:\n    actions: {high: {}}\n",
+		"action without file":  "  skill:\n    actions: {high: {install: block, runtime: disable}}\n",
+	} {
+		raw := []byte("config_version: 9\nadmission:\n" + admission + "observability: {}\n")
+		if err := ValidateCandidate(filepath.Join(t.TempDir(), "config.yaml"), raw); err == nil {
+			t.Errorf("%s loaded; want a validation error", name)
+		}
+	}
+	// The gateway clones a config through JSON, which writes every key.
+	var action AdmissionAction
+	if err := json.Unmarshal([]byte(`{"install":"block","runtime":"disable"}`), &action); err == nil {
+		t.Error("JSON action without file decoded; want an error")
+	}
+	if err := json.Unmarshal([]byte(`{"install":"","file":"","runtime":""}`), &action); err != nil {
+		t.Errorf("JSON clone of an empty triple: %v", err)
+	}
+}
+
 func TestRuntimeV8LoadersPreserveEmptyProfiles(t *testing.T) {
 	raw := []byte(`config_version: 8
 data_dir: /tmp/defenseclaw-v8
@@ -383,9 +635,13 @@ guardrail:
       match: {groups: [admins]}
 observability: {}
 `)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	for name, load := range map[string]func() (*Config, error){
 		"runtime": func() (*Config, error) { return LoadRuntimeV8FromBytes("config.yaml", raw) },
-		"file":    func() (*Config, error) { return LoadFromBytes("config.yaml", raw) },
+		"file":    func() (*Config, error) { return LoadFromFile(path) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := load()
@@ -430,5 +686,50 @@ func TestProfileAssignmentSchemaLimitFitsYAMLNodeBudget(t *testing.T) {
 	doc := "config_version: 8\nguardrail:\n  profiles:\n    baseline: {}\n  profile_assignments:\n" + strings.Repeat("    - profile: baseline\n      match: {agents: [agt-0000000000000000]}\n", n)
 	if err := ValidateV8SchemaBytes("config.yaml", []byte(doc)); err != nil {
 		t.Fatalf("%d schema-permitted assignments rejected: %v", n, err)
+	}
+}
+
+func TestSecureClientV8RejectsLLMProviders(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	raw := []byte("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\nllm_providers:\n  custom: [{name: marker, domains: [example.internal]}]\n")
+	err := requireV8YAMLError(t, raw, V8YAMLErrorLegacyKeyForbidden)
+	if err.Path != "$.llm_providers" {
+		t.Fatalf("error path = %q, want $.llm_providers", err.Path)
+	}
+	if _, err := LoadRuntimeV8FromBytes("config.yaml", raw); err == nil {
+		t.Fatal("runtime loader accepted Secure Client v8 llm_providers")
+	}
+}
+
+// Secure Client keeps the origin/main v8 values for omitted skill scanner
+// settings, while an explicit v8 setting remains authoritative.
+func TestSecureClientSkillScannerOmittedDefaults(t *testing.T) {
+	for _, source := range []struct {
+		name, yaml, policy string
+		useLLM             bool
+	}{
+		{"omitted", "scanners: {}", "permissive", false},
+		{"explicit", "scanners: {skill_scanner: {use_llm: true, policy: strict}}", "strict", true},
+	} {
+		t.Run(source.name, func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			viper.SetConfigType("yaml")
+			setDefaults(t.TempDir())
+			if err := viper.ReadConfig(strings.NewReader(source.yaml)); err != nil {
+				t.Fatal(err)
+			}
+			var cfg Config
+			if err := viper.Unmarshal(&cfg); err != nil {
+				t.Fatal(err)
+			}
+			cfg.DeploymentMode = "managed_enterprise"
+			cfg.Enterprise.Profile = "secure_client"
+			applySecureClientScannerDefaults(&cfg)
+			if got := cfg.Scanners.SkillScanner; got.UseLLM != source.useLLM || got.Policy != source.policy {
+				t.Fatalf("scanner defaults = use_llm:%t policy:%q, want %t %q", got.UseLLM, got.Policy, source.useLLM, source.policy)
+			}
+		})
 	}
 }

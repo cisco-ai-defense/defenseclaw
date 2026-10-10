@@ -17,7 +17,7 @@
 package scanner
 
 import (
-	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -25,130 +25,121 @@ import (
 )
 
 func TestNewSkillScanner_DefaultBinary(t *testing.T) {
-	ss := NewSkillScanner(config.SkillScannerConfig{}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{})
+	ss := NewSkillScannerFromLLM(config.SkillScannerConfig{}, config.LLMConfig{}, config.CiscoAIDefenseConfig{})
 	if ss.Config.Binary != "skill-scanner" {
 		t.Errorf("expected default binary 'skill-scanner', got %q", ss.Config.Binary)
 	}
 }
 
-func TestNewSkillScanner_CustomBinary(t *testing.T) {
-	ss := NewSkillScanner(
-		config.SkillScannerConfig{Binary: "custom-scanner"},
-		config.InspectLLMConfig{},
-		config.CiscoAIDefenseConfig{},
-	)
-	if ss.Config.Binary != "custom-scanner" {
-		t.Errorf("expected 'custom-scanner', got %q", ss.Config.Binary)
+// The scanner environment comes from config only: a shell value of a
+// scanner variable never wins over config, and other scanner variables
+// from the gateway's environment are dropped.
+func TestSecureClientSkillScannerKeepsInheritedJudge(t *testing.T) {
+	t.Setenv("SKILL_SCANNER_LLM_MODEL", "openai/inherited-model")
+	t.Setenv("SKILL_SCANNER_LLM_API_KEY", "inherited-key")
+	ss := NewSkillScannerFromLLM(config.SkillScannerConfig{UseLLM: true},
+		config.LLMConfig{}, config.CiscoAIDefenseConfig{})
+	ss.SecureClient = true
+	if !slices.Contains(ss.buildArgs("/skill", "quiet"), "--use-llm") {
+		t.Fatal("Secure Client scan lost the inherited LLM judge")
+	}
+	env := strings.Join(ss.scanEnv(), "\n")
+	if !strings.Contains(env, "SKILL_SCANNER_LLM_MODEL=openai/inherited-model") ||
+		!strings.Contains(env, "SKILL_SCANNER_LLM_API_KEY=inherited-key") {
+		t.Fatal("Secure Client scan lost inherited scanner settings")
 	}
 }
 
-func TestNewSkillScanner_StoresCommonConfigs(t *testing.T) {
-	llm := config.InspectLLMConfig{Provider: "anthropic", Model: "claude-sonnet-4-20250514", APIKey: "sk-test"}
-	aid := config.CiscoAIDefenseConfig{Endpoint: "https://custom.endpoint", APIKey: "aid-key"}
+func TestSkillScanner_ScanEnv_ConfigOnly(t *testing.T) {
+	t.Setenv("SKILL_SCANNER_LLM_MODEL", "other")
+	t.Setenv("ENABLE_LLM_ANALYZER", "1")
+	t.Setenv("AI_DEFENSE_API_KEY", "shell-key")
 
-	ss := NewSkillScanner(config.SkillScannerConfig{}, llm, aid)
-
-	if ss.InspectLLM.Provider != "anthropic" {
-		t.Errorf("InspectLLM.Provider = %q, want 'anthropic'", ss.InspectLLM.Provider)
-	}
-	if ss.InspectLLM.Model != "claude-sonnet-4-20250514" {
-		t.Errorf("InspectLLM.Model = %q, want 'claude-sonnet-4-20250514'", ss.InspectLLM.Model)
-	}
-	if ss.CiscoAIDefense.Endpoint != "https://custom.endpoint" {
-		t.Errorf("CiscoAIDefense.Endpoint = %q", ss.CiscoAIDefense.Endpoint)
-	}
-}
-
-func TestSkillScanner_ScanEnv_InjectsLLMKey(t *testing.T) {
-	t.Setenv("SKILL_SCANNER_LLM_API_KEY", "")
-	os.Unsetenv("SKILL_SCANNER_LLM_API_KEY")
-
-	llm := config.InspectLLMConfig{APIKey: "test-llm-key", Model: "gpt-4o"}
-	ss := NewSkillScanner(config.SkillScannerConfig{}, llm, config.CiscoAIDefenseConfig{})
-
-	env := ss.scanEnv()
-
-	found := map[string]string{}
-	for _, e := range env {
-		parts := strings.SplitN(e, "=", 2)
-		if len(parts) == 2 {
-			found[parts[0]] = parts[1]
-		}
-	}
-
-	if found["SKILL_SCANNER_LLM_API_KEY"] != "test-llm-key" {
-		t.Errorf("expected SKILL_SCANNER_LLM_API_KEY='test-llm-key', got %q", found["SKILL_SCANNER_LLM_API_KEY"])
-	}
-	if found["SKILL_SCANNER_LLM_MODEL"] != "gpt-4o" {
-		t.Errorf("expected SKILL_SCANNER_LLM_MODEL='gpt-4o', got %q", found["SKILL_SCANNER_LLM_MODEL"])
-	}
-}
-
-func TestSkillScanner_BuildArgsSkipsUnsupportedLLMProvider(t *testing.T) {
 	ss := NewSkillScannerFromLLM(
-		config.SkillScannerConfig{UseLLM: true, UseBehavioral: true},
-		config.LLMConfig{Provider: "bedrock", Model: "us.anthropic.claude-haiku"},
+		config.SkillScannerConfig{UseLLM: true},
+		config.LLMConfig{APIKey: "test-llm-key", Model: "gpt-4o"},
 		config.CiscoAIDefenseConfig{},
 	)
 
-	args := strings.Join(ss.buildArgs("/tmp/skill"), " ")
-	if strings.Contains(args, "--use-llm") {
-		t.Fatalf("unsupported provider must not enable skill-scanner LLM analyzer: %s", args)
+	found := map[string][]string{}
+	for _, e := range ss.scanEnv() {
+		if name, value, ok := strings.Cut(e, "="); ok {
+			found[name] = append(found[name], value)
+		}
 	}
-	if strings.Contains(args, "--llm-provider") {
-		t.Fatalf("unsupported provider must not pass --llm-provider: %s", args)
+	if got := found["SKILL_SCANNER_LLM_MODEL"]; len(got) != 1 || got[0] != "gpt-4o" {
+		t.Errorf("SKILL_SCANNER_LLM_MODEL = %q, want only the config model", got)
 	}
-	if !strings.Contains(args, "--use-behavioral") {
-		t.Fatalf("static/behavioral scan flags should remain active: %s", args)
+	if got := found["SKILL_SCANNER_LLM_API_KEY"]; len(got) != 1 || got[0] != "test-llm-key" {
+		t.Errorf("SKILL_SCANNER_LLM_API_KEY = %q", got)
+	}
+	for _, name := range []string{"ENABLE_LLM_ANALYZER", "AI_DEFENSE_API_KEY"} {
+		if _, ok := found[name]; ok {
+			t.Errorf("%s leaked from the gateway environment", name)
+		}
+	}
+	if len(found["PATH"]) == 0 {
+		t.Error("PATH must pass through")
 	}
 }
 
-func TestSkillScanner_ScanEnv_InjectsCiscoKey(t *testing.T) {
-	os.Unsetenv("AI_DEFENSE_API_KEY")
-
-	aid := config.CiscoAIDefenseConfig{APIKey: "cisco-key-direct", APIKeyEnv: ""}
-	ss := NewSkillScanner(config.SkillScannerConfig{}, config.InspectLLMConfig{}, aid)
-
-	env := ss.scanEnv()
-
-	for _, e := range env {
-		if strings.HasPrefix(e, "AI_DEFENSE_API_KEY=") {
-			val := strings.TrimPrefix(e, "AI_DEFENSE_API_KEY=")
-			if val != "cisco-key-direct" {
-				t.Errorf("expected 'cisco-key-direct', got %q", val)
-			}
-			return
+// Every provider gets the judge: anthropic/openai by flag, openai-compatible
+// servers (vLLM) by base URL and served model name, and the rest (Bedrock,
+// Vertex, Azure, ...) by their LiteLLM model prefix.
+func TestSkillScanner_BuildArgsJudgeForEveryProvider(t *testing.T) {
+	cases := []struct {
+		llm          config.LLMConfig
+		wantProvider string
+		wantEnv      string
+	}{
+		{config.LLMConfig{Provider: "bedrock", Model: "us.anthropic.claude-haiku"}, "", "SKILL_SCANNER_LLM_MODEL=bedrock/us.anthropic.claude-haiku"},
+		{config.LLMConfig{Provider: "vllm", Model: "gemma-4", BaseURL: "http://127.0.0.1:8000/v1"}, "openai-compatible", "SKILL_SCANNER_LLM_BASE_URL=http://127.0.0.1:8000/v1"},
+		{config.LLMConfig{Provider: "anthropic", Model: "claude-sonnet-5-5", APIKey: "k"}, "anthropic", "SKILL_SCANNER_LLM_MODEL=anthropic/claude-sonnet-5-5"},
+	}
+	for _, tc := range cases {
+		ss := NewSkillScannerFromLLM(config.SkillScannerConfig{UseLLM: true}, tc.llm, config.CiscoAIDefenseConfig{})
+		args := strings.Join(ss.buildArgs("/tmp/skill", "quiet"), " ")
+		if !strings.Contains(args, "--use-llm") || !strings.Contains(args, "--policy quiet") {
+			t.Fatalf("%s: judge or policy missing: %s", tc.llm.Provider, args)
+		}
+		if strings.Contains(args, "--fail-on-severity") {
+			t.Fatalf("%s: the gate must never be passed to the scanner: %s", tc.llm.Provider, args)
+		}
+		if got := strings.Contains(args, "--llm-provider"); got != (tc.wantProvider != "") ||
+			(tc.wantProvider != "" && !strings.Contains(args, "--llm-provider "+tc.wantProvider)) {
+			t.Fatalf("%s: --llm-provider wrong: %s", tc.llm.Provider, args)
+		}
+		if env := strings.Join(ss.scanEnv(), "\n"); !strings.Contains(env, tc.wantEnv) {
+			t.Fatalf("%s: env missing %s", tc.llm.Provider, tc.wantEnv)
 		}
 	}
-	t.Error("AI_DEFENSE_API_KEY not found in scanEnv()")
+}
+
+// enable_meta without a usable judge must not pass --enable-meta: the pinned
+// skill-scanner exits 2 without an LLM key, and the watcher fails closed.
+func TestSkillScanner_BuildArgsMetaNeedsTheJudge(t *testing.T) {
+	cfg := config.SkillScannerConfig{UseLLM: true, EnableMeta: true}
+	if args := NewSkillScannerFromLLM(cfg, config.LLMConfig{}, config.CiscoAIDefenseConfig{}).buildArgs("/tmp/skill", "quiet"); slices.Contains(args, "--enable-meta") {
+		t.Fatalf("--enable-meta without a judge: %v", args)
+	}
+	judge := config.LLMConfig{Provider: "anthropic", Model: "claude-sonnet-5-5", APIKey: "k"}
+	if args := NewSkillScannerFromLLM(cfg, judge, config.CiscoAIDefenseConfig{}).buildArgs("/tmp/skill", "quiet"); !slices.Contains(args, "--enable-meta") {
+		t.Fatalf("--enable-meta missing with a judge: %v", args)
+	}
 }
 
 func TestNewMCPScanner_DefaultBinary(t *testing.T) {
-	// The MCP scanner now routes through the SDK-backed Python CLI
+	// The MCP scanner routes through the SDK-backed Python CLI
 	// (defenseclaw mcp scan), so the empty default and the legacy
 	// "mcp-scanner" value both coerce to "defenseclaw".
-	ms := NewMCPScanner(config.MCPScannerConfig{}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{})
+	ms := NewMCPScannerFromLLM(config.MCPScannerConfig{}, config.LLMConfig{}, config.CiscoAIDefenseConfig{})
 	if ms.Config.Binary != "defenseclaw" {
 		t.Errorf("expected default binary 'defenseclaw', got %q", ms.Config.Binary)
 	}
 
-	legacy := NewMCPScanner(config.MCPScannerConfig{Binary: "mcp-scanner"}, config.InspectLLMConfig{}, config.CiscoAIDefenseConfig{})
+	legacy := NewMCPScannerFromLLM(config.MCPScannerConfig{Binary: "mcp-scanner"}, config.LLMConfig{}, config.CiscoAIDefenseConfig{})
 	if legacy.Config.Binary != "defenseclaw" {
 		t.Errorf("legacy 'mcp-scanner' must coerce to 'defenseclaw', got %q", legacy.Config.Binary)
-	}
-}
-
-func TestNewMCPScanner_StoresCommonConfigs(t *testing.T) {
-	llm := config.InspectLLMConfig{Provider: "openai", Model: "gpt-4o", APIKey: "sk-openai"}
-	aid := config.CiscoAIDefenseConfig{Endpoint: "https://eu.api.example.com", APIKey: "eu-key"}
-
-	ms := NewMCPScanner(config.MCPScannerConfig{}, llm, aid)
-
-	if ms.InspectLLM.Provider != "openai" {
-		t.Errorf("InspectLLM.Provider = %q, want 'openai'", ms.InspectLLM.Provider)
-	}
-	if ms.CiscoAIDefense.Endpoint != "https://eu.api.example.com" {
-		t.Errorf("CiscoAIDefense.Endpoint = %q", ms.CiscoAIDefense.Endpoint)
 	}
 }
 

@@ -20,14 +20,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
-	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 func stringSliceContains(values []string, needle string) bool {
@@ -176,7 +174,7 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 	path := filepath.Join(configDir, "managed.yaml")
 	t.Setenv(managed.ConfigPathEnv, path)
 	t.Setenv("DEFENSECLAW_HOME", dataDir)
-	if err := os.WriteFile(path, []byte("config_version: 6\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("config_version: 9\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
@@ -189,26 +187,48 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 	}
 }
 
-func TestLoadLegacySplunkPointsToReleaseUpgrade(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	configPath := filepath.Join(DefaultDataPath(), DefaultConfigName)
-	if err := os.WriteFile(configPath, []byte("config_version: 3\nsplunk:\n  enabled: true\n"), 0o600); err != nil {
+// TestLoadFromFileRefusesAnOlderConfigWithOneInstruction pins the single
+// runtime answer for a released 0.8.x (config_version 7) file: one error that
+// names the repair, whatever released keys the file carries. Nothing is
+// half-loaded.
+func TestLoadFromFileRefusesAnOlderConfigWithOneInstruction(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigName)
+	raw := "config_version: 7\nsplunk:\n  enabled: true\notel:\n  enabled: true\n  endpoint: localhost:4317\n" +
+		"audit_sinks:\n  - name: siem\n    kind: http_jsonl\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	cfg, err := LoadFromFile(path)
+	if cfg != nil || err == nil {
+		t.Fatalf("LoadFromFile = (%v, %v), want a refusal", cfg, err)
+	}
+	for _, want := range []string{"config_version 7 is older than 8", "defenseclaw migrate"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("LoadFromFile error = %q, want it to contain %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "splunk") || strings.Contains(err.Error(), "audit_sinks") {
+		t.Fatalf("LoadFromFile error = %q, want one version error, not a per-key legacy error", err)
+	}
+}
 
-	_, err := Load()
-	if err == nil {
-		t.Fatal("Load() error=nil, want legacy Splunk migration guidance")
-	}
-	message := err.Error()
-	if !strings.Contains(message, "defenseclaw upgrade --yes") || !strings.Contains(message, "config v8") {
-		t.Fatalf("Load() error=%q, want release-upgrade config-v8 guidance", message)
-	}
-	if !strings.Contains(message, "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/") {
-		t.Fatalf("Load() error=%q, want canonical configuration documentation URL", message)
-	}
-	if strings.Contains(message, "migrate-splunk") || strings.Contains(message, "--apply") {
-		t.Fatalf("Load() error=%q still advertises the removed migration command", message)
+// TestValidateCandidateRefusesReleasedObservabilityKeysInCurrentFile pins that
+// the canonical validator, which the config writers, the v9 migration and the
+// gateway start run, names a released 0.8.x observability key left in a current
+// file instead of ignoring it: the exporter or sink it described would
+// otherwise silently stop. The schema alone enforces this; there is no
+// per-key legacy check.
+func TestValidateCandidateRefusesReleasedObservabilityKeysInCurrentFile(t *testing.T) {
+	for _, body := range []string{
+		"otel:\n  enabled: true\n",
+		"audit_sinks:\n  - name: siem\n    kind: http_jsonl\n",
+		"splunk:\n  enabled: true\n",
+	} {
+		raw := []byte("config_version: 9\nobservability: {}\n" + body)
+		if err := ValidateCandidate(filepath.Join(t.TempDir(), DefaultConfigName), raw); err == nil {
+			t.Fatalf("ValidateCandidate accepted %q; want a schema refusal", body)
+		}
 	}
 }
 
@@ -220,16 +240,21 @@ func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) 
 		}
 	}
 	path := filepath.Join(dir, DefaultConfigName)
-	data := []byte("config_version: 6\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	_, err := LoadFromFile(path)
-	if err == nil {
-		t.Fatal("LoadFromFile succeeded for untrusted managed_enterprise config path")
-	}
-	if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
-		t.Fatalf("LoadFromFile error = %v, want managed trust check failure", err)
+	// The path is refused before the content is checked: version 9 is newer
+	// than Secure Client reads (the Windows default for managed_enterprise)
+	// and 99 is newer than any build reads.
+	for _, version := range []string{"9", "99"} {
+		data := []byte("config_version: " + version + "\ndeployment_mode: managed_enterprise\ndata_dir: " + dir + "\n")
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		_, err := LoadFromFile(path)
+		if err == nil {
+			t.Fatal("LoadFromFile succeeded for untrusted managed_enterprise config path")
+		}
+		if !strings.Contains(err.Error(), "managed_enterprise config trust check failed") {
+			t.Fatalf("config_version %s: LoadFromFile error = %v, want managed trust check failure", version, err)
+		}
 	}
 }
 
@@ -241,7 +266,7 @@ func TestLoadFromFile_ManagedEnterpriseEnvPinRejectsUntrustedUnmanagedFile(t *te
 		}
 	}
 	path := filepath.Join(dir, DefaultConfigName)
-	if err := os.WriteFile(path, []byte("config_version: 6\ndeployment_mode: unmanaged_byod\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("config_version: 9\ndeployment_mode: unmanaged_byod\n"), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	t.Setenv(managed.DeploymentModeEnv, string(DeploymentModeManagedEnterprise))
@@ -318,9 +343,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Watch.DebounceMs != 500 {
 		t.Errorf("expected debounce 500ms, got %d", cfg.Watch.DebounceMs)
 	}
-	if !cfg.Watch.AllowListBypassScan {
-		t.Error("expected allow-list bypass scan enabled by default")
-	}
 	if !cfg.Watch.RescanEnabled {
 		t.Error("expected rescan enabled by default")
 	}
@@ -338,7 +360,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestLoadFromFileEnablesOnlineModelProvenanceOnlyWhenConfigured(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, DefaultConfigName)
-	raw := "config_version: 6\ndata_dir: " + dir + "\nai_discovery:\n  enabled: true\n  lookup_model_provenance_online: true\n"
+	raw := "config_version: 9\ndata_dir: " + dir + "\nai_discovery:\n  enabled: true\n  lookup_model_provenance_online: true\n"
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -406,115 +428,6 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	}
 	if !cfg.Guardrail.Judge.PII {
 		t.Error("expected judge.pii true by default")
-	}
-}
-
-func TestDefaultSkillActions(t *testing.T) {
-	sa := DefaultSkillActions()
-
-	tests := []struct {
-		severity string
-		file     FileAction
-		runtime  RuntimeAction
-		install  InstallAction
-	}{
-		{"CRITICAL", FileActionNone, RuntimeEnable, InstallNone},
-		{"HIGH", FileActionNone, RuntimeEnable, InstallNone},
-		{"MEDIUM", FileActionNone, RuntimeEnable, InstallNone},
-		{"LOW", FileActionNone, RuntimeEnable, InstallNone},
-		{"INFO", FileActionNone, RuntimeEnable, InstallNone},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.severity, func(t *testing.T) {
-			action := sa.ForSeverity(tt.severity)
-			if action.File != tt.file {
-				t.Errorf("File: got %q, want %q", action.File, tt.file)
-			}
-			if action.Runtime != tt.runtime {
-				t.Errorf("Runtime: got %q, want %q", action.Runtime, tt.runtime)
-			}
-			if action.Install != tt.install {
-				t.Errorf("Install: got %q, want %q", action.Install, tt.install)
-			}
-		})
-	}
-}
-
-func TestForSeverity_CaseInsensitive(t *testing.T) {
-	sa := DefaultSkillActions()
-	got := sa.ForSeverity("critical")
-	if got.Install != InstallNone {
-		t.Errorf("expected none for lowercase critical, got %q", got.Install)
-	}
-}
-
-func TestForSeverity_Unknown(t *testing.T) {
-	sa := DefaultSkillActions()
-	got := sa.ForSeverity("BOGUS")
-	if got.Runtime != RuntimeEnable {
-		t.Errorf("expected enable for unknown severity, got %q", got.Runtime)
-	}
-}
-
-func TestShouldDisable(t *testing.T) {
-	sa := DefaultSkillActions()
-	if sa.ShouldDisable("CRITICAL") {
-		t.Error("expected ShouldDisable(CRITICAL)=false with permissive defaults")
-	}
-	if sa.ShouldDisable("LOW") {
-		t.Error("expected ShouldDisable(LOW)=false")
-	}
-}
-
-func TestShouldQuarantine(t *testing.T) {
-	sa := DefaultSkillActions()
-	if sa.ShouldQuarantine("HIGH") {
-		t.Error("expected ShouldQuarantine(HIGH)=false with permissive defaults")
-	}
-	if sa.ShouldQuarantine("MEDIUM") {
-		t.Error("expected ShouldQuarantine(MEDIUM)=false")
-	}
-}
-
-func TestShouldInstallBlock(t *testing.T) {
-	sa := DefaultSkillActions()
-	if sa.ShouldInstallBlock("CRITICAL") {
-		t.Error("expected ShouldInstallBlock(CRITICAL)=false with permissive defaults")
-	}
-	if sa.ShouldInstallBlock("INFO") {
-		t.Error("expected ShouldInstallBlock(INFO)=false")
-	}
-}
-
-func TestValidate_ValidConfig(t *testing.T) {
-	sa := DefaultSkillActions()
-	if err := sa.Validate(); err != nil {
-		t.Errorf("Validate() returned unexpected error: %v", err)
-	}
-}
-
-func TestValidate_InvalidRuntime(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.Critical.Runtime = "invalid"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid runtime")
-	}
-}
-
-func TestValidate_InvalidFile(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.High.File = "delete"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid file action")
-	}
-}
-
-func TestValidate_InvalidInstall(t *testing.T) {
-	sa := DefaultSkillActions()
-	sa.Medium.Install = "reject"
-	if err := sa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid install action")
 	}
 }
 
@@ -720,7 +633,7 @@ func TestValidateGatewayConfigReloadMode(t *testing.T) {
 func TestLoadFromFileNormalizesGatewayConfigReloadMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, DefaultConfigName)
-	raw := "config_version: 6\ndata_dir: " + dir + "\ngateway:\n  config_reload:\n    mode: ' Restart '\n"
+	raw := "config_version: 9\ndata_dir: " + dir + "\ngateway:\n  config_reload:\n    mode: ' Restart '\n"
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -1028,89 +941,6 @@ func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
 	}
 }
 
-func TestDefaultPluginActions(t *testing.T) {
-	pa := DefaultPluginActions()
-
-	tests := []struct {
-		severity string
-		file     FileAction
-		runtime  RuntimeAction
-		install  InstallAction
-	}{
-		{"CRITICAL", FileActionNone, RuntimeEnable, InstallNone},
-		{"HIGH", FileActionNone, RuntimeEnable, InstallNone},
-		{"MEDIUM", FileActionNone, RuntimeEnable, InstallNone},
-		{"LOW", FileActionNone, RuntimeEnable, InstallNone},
-		{"INFO", FileActionNone, RuntimeEnable, InstallNone},
-	}
-
-	for _, tt := range tests {
-		got := pa.ForSeverity(tt.severity)
-		if got.File != tt.file {
-			t.Errorf("PluginActions[%s].File = %q, want %q", tt.severity, got.File, tt.file)
-		}
-		if got.Runtime != tt.runtime {
-			t.Errorf("PluginActions[%s].Runtime = %q, want %q", tt.severity, got.Runtime, tt.runtime)
-		}
-		if got.Install != tt.install {
-			t.Errorf("PluginActions[%s].Install = %q, want %q", tt.severity, got.Install, tt.install)
-		}
-	}
-}
-
-func TestPluginActionsShouldDisable(t *testing.T) {
-	pa := DefaultPluginActions()
-	if pa.ShouldDisable("CRITICAL") {
-		t.Error("expected ShouldDisable(CRITICAL)=false with permissive defaults")
-	}
-	if pa.ShouldDisable("LOW") {
-		t.Error("expected ShouldDisable(LOW)=false")
-	}
-}
-
-func TestPluginActionsShouldQuarantine(t *testing.T) {
-	pa := DefaultPluginActions()
-	if pa.ShouldQuarantine("HIGH") {
-		t.Error("expected ShouldQuarantine(HIGH)=false with permissive defaults")
-	}
-	if pa.ShouldQuarantine("MEDIUM") {
-		t.Error("expected ShouldQuarantine(MEDIUM)=false")
-	}
-}
-
-func TestPluginActionsShouldInstallBlock(t *testing.T) {
-	pa := DefaultPluginActions()
-	if pa.ShouldInstallBlock("CRITICAL") {
-		t.Error("expected ShouldInstallBlock(CRITICAL)=false with permissive defaults")
-	}
-	if pa.ShouldInstallBlock("LOW") {
-		t.Error("expected ShouldInstallBlock(LOW)=false")
-	}
-}
-
-func TestPluginActionsValidate(t *testing.T) {
-	pa := DefaultPluginActions()
-	if err := pa.Validate(); err != nil {
-		t.Errorf("Validate() returned unexpected error: %v", err)
-	}
-}
-
-func TestPluginActionsValidateInvalid(t *testing.T) {
-	pa := DefaultPluginActions()
-	pa.Critical.Runtime = "invalid"
-	if err := pa.Validate(); err == nil {
-		t.Error("expected Validate() to return error for invalid runtime")
-	}
-}
-
-func TestDefaultConfigPluginActions(t *testing.T) {
-	cfg := DefaultConfig()
-	if cfg.PluginActions.Critical.Install != InstallNone {
-		t.Errorf("DefaultConfig().PluginActions.Critical.Install = %q, want %q",
-			cfg.PluginActions.Critical.Install, InstallNone)
-	}
-}
-
 func TestConfig_PluginDirs(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "test-oc-home")
 	cfg := &Config{
@@ -1123,376 +953,6 @@ func TestConfig_PluginDirs(t *testing.T) {
 	want := filepath.Join(home, "extensions")
 	if dirs[0] != want {
 		t.Errorf("PluginDirs()[0] = %q, want %q", dirs[0], want)
-	}
-}
-
-func TestDefaultConfig_OTelProcessPolicy(t *testing.T) {
-	cfg := DefaultConfig()
-
-	if cfg.OTel.Enabled {
-		t.Error("otel should be disabled by default")
-	}
-
-	if len(cfg.OTel.Destinations) != 0 {
-		t.Errorf("default destinations=%v want none", cfg.OTel.Destinations)
-	}
-}
-
-func TestLoadOTelResourceAttributesPreservesDottedKeys(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("DEFENSECLAW_HOME", tmpDir)
-
-	configFile := filepath.Join(tmpDir, DefaultConfigName)
-	data := []byte(`otel:
-  enabled: false
-  resource:
-    attributes:
-      defenseclaw.preset: splunk-o11y
-      defenseclaw.preset_name: Splunk Observability Cloud
-      service.name: pr117
-`)
-	if err := os.WriteFile(configFile, data, 0o600); err != nil {
-		t.Fatalf("WriteFile(%s) error: %v", configFile, err)
-	}
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-
-	want := map[string]string{
-		"defenseclaw.preset":      "splunk-o11y",
-		"defenseclaw.preset_name": "Splunk Observability Cloud",
-		"service.name":            "pr117",
-	}
-	if len(cfg.OTel.Resource.Attributes) != len(want) {
-		t.Fatalf("OTel.Resource.Attributes len = %d, want %d (%v)", len(cfg.OTel.Resource.Attributes), len(want), cfg.OTel.Resource.Attributes)
-	}
-	for key, wantValue := range want {
-		if got := cfg.OTel.Resource.Attributes[key]; got != wantValue {
-			t.Errorf("OTel.Resource.Attributes[%q] = %q, want %q", key, got, wantValue)
-		}
-	}
-}
-
-func TestLoadOTelNamedDestinations(t *testing.T) {
-	tmpDir := t.TempDir()
-	t.Setenv("DEFENSECLAW_HOME", tmpDir)
-	data := []byte(`otel:
-  enabled: true
-  destinations:
-    - name: local-observability
-      preset: local-otlp
-      enabled: true
-      protocol: grpc
-      endpoint: 127.0.0.1:4317
-      traces: {enabled: true}
-      metrics: {enabled: true, export_interval_s: 15}
-      logs: {enabled: true}
-    - name: galileo
-      preset: galileo
-      enabled: true
-      protocol: http
-      endpoint: https://api.galileo.ai
-      headers:
-        Galileo-API-Key: ${GALILEO_API_KEY}
-        project: defenseclaw
-        logstream: default
-      span_filter:
-        operations:
-          - name: chat
-            require_attributes:
-              - gen_ai.operation.name
-              - gen_ai.request.model
-      traces:
-        enabled: true
-        url_path: /otel/traces
-      metrics: {enabled: false}
-      logs: {enabled: false}
-`)
-	configFile := filepath.Join(tmpDir, DefaultConfigName)
-	if err := os.WriteFile(configFile, data, 0o600); err != nil {
-		t.Fatalf("WriteFile(%s) error: %v", configFile, err)
-	}
-
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if len(cfg.OTel.Destinations) != 2 {
-		t.Fatalf("len(OTel.Destinations)=%d want 2", len(cfg.OTel.Destinations))
-	}
-	local := cfg.OTel.Destinations[0]
-	if local.Name != "local-observability" || !local.Metrics.Enabled || local.Metrics.ExportIntervalS != 15 {
-		t.Errorf("local destination decoded incorrectly: %#v", local)
-	}
-	galileo := cfg.OTel.Destinations[1]
-	if galileo.Name != "galileo" || galileo.Preset != "galileo" {
-		t.Errorf("galileo identity decoded incorrectly: %#v", galileo)
-	}
-	if got := galileo.Headers["galileo-api-key"]; got != "${GALILEO_API_KEY}" {
-		t.Errorf("galileo-api-key=%q want env reference; headers=%v", got, galileo.Headers)
-	}
-	if galileo.Traces.URLPath != "/otel/traces" || galileo.Metrics.Enabled || galileo.Logs.Enabled {
-		t.Errorf("galileo signals decoded incorrectly: %#v", galileo)
-	}
-	if !reflect.DeepEqual(galileo.SpanFilter.Operations, []OTelSpanFilterOperationConfig{{
-		Name: "chat", RequireAttributes: []string{"gen_ai.operation.name", "gen_ai.request.model"},
-	}}) {
-		t.Errorf("galileo span filter decoded incorrectly: %#v", galileo.SpanFilter)
-	}
-}
-
-func TestOTelConfigValidateNamedDestinations(t *testing.T) {
-	valid := OTelConfig{Destinations: []OTelDestinationConfig{
-		{Name: "local", Enabled: true, Protocol: "http", Endpoint: "http://127.0.0.1:4318", Traces: OTelTracesConfig{Enabled: true}},
-		{Name: "filtered", Enabled: true, Protocol: "http", Endpoint: "https://collector.example.test", Traces: OTelTracesConfig{Enabled: true}},
-	}}
-	if err := valid.ValidateNamedDestinations(); err != nil {
-		t.Fatalf("valid destinations rejected: %v", err)
-	}
-	duplicate := OTelConfig{Destinations: append([]OTelDestinationConfig(nil), valid.Destinations...)}
-	duplicate.Destinations[1].Name = "local"
-	if err := duplicate.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "duplicate") {
-		t.Fatalf("duplicate validation error=%v, want duplicate diagnostic", err)
-	}
-	noSignals := OTelConfig{Destinations: []OTelDestinationConfig{{Name: "empty", Enabled: true}}}
-	if err := noSignals.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "no enabled signals") {
-		t.Fatalf("no-signal validation error=%v, want actionable diagnostic", err)
-	}
-	noEndpoint := OTelConfig{Destinations: []OTelDestinationConfig{{
-		Name: "missing-endpoint", Enabled: true, Traces: OTelTracesConfig{Enabled: true},
-	}}}
-	if err := noEndpoint.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "no endpoint") {
-		t.Fatalf("no-endpoint validation error=%v, want actionable diagnostic", err)
-	}
-	missingLogEndpoint := OTelConfig{Destinations: []OTelDestinationConfig{{
-		Name: "partial", Enabled: true, Protocol: "http",
-		Traces: OTelTracesConfig{Enabled: true, Endpoint: "https://collector.example.test/v1/traces"},
-		Logs:   OTelLogsConfig{Enabled: true},
-	}}}
-	if err := missingLogEndpoint.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "enables logs but has no endpoint") {
-		t.Fatalf("partial endpoint validation error=%v, want signal-specific diagnostic", err)
-	}
-	filteredWithoutTraces := OTelConfig{Destinations: []OTelDestinationConfig{{
-		Name: "filtered", SpanFilter: OTelSpanFilterConfig{RequireOperation: "chat"},
-	}}}
-	if err := filteredWithoutTraces.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "traces are disabled") {
-		t.Fatalf("filter validation error=%v, want traces-disabled diagnostic", err)
-	}
-	badFilterAttrs := OTelConfig{Destinations: []OTelDestinationConfig{{
-		Name: "filtered", Endpoint: "https://collector.example.test",
-		Traces:     OTelTracesConfig{Enabled: true},
-		SpanFilter: OTelSpanFilterConfig{RequireAttributes: []string{"gen_ai.request.model", " gen_ai.request.model "}},
-	}}}
-	if err := badFilterAttrs.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "repeats") {
-		t.Fatalf("filter duplicate validation error=%v, want duplicate diagnostic", err)
-	}
-	emptyFilterAttr := OTelConfig{Destinations: []OTelDestinationConfig{{
-		Name: "filtered", Endpoint: "https://collector.example.test",
-		Traces:     OTelTracesConfig{Enabled: true},
-		SpanFilter: OTelSpanFilterConfig{RequireAttributes: []string{" "}},
-	}}}
-	if err := emptyFilterAttr.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "empty required attribute") {
-		t.Fatalf("empty filter validation error=%v, want empty-attribute diagnostic", err)
-	}
-	badOperations := OTelConfig{Destinations: []OTelDestinationConfig{{
-		Name: "filtered", Endpoint: "https://collector.example.test",
-		Traces: OTelTracesConfig{Enabled: true},
-		SpanFilter: OTelSpanFilterConfig{Operations: []OTelSpanFilterOperationConfig{
-			{Name: "chat", RequireAttributes: []string{"gen_ai.operation.name"}},
-			{Name: "chat", RequireAttributes: []string{"gen_ai.operation.name"}},
-		}},
-	}}}
-	if err := badOperations.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "repeats operation") {
-		t.Fatalf("operation validation error=%v, want duplicate-operation diagnostic", err)
-	}
-	mixedFilterShapes := OTelConfig{Destinations: []OTelDestinationConfig{{
-		Name: "filtered", Endpoint: "https://collector.example.test",
-		Traces: OTelTracesConfig{Enabled: true},
-		SpanFilter: OTelSpanFilterConfig{
-			RequireOperation: "chat",
-			Operations:       []OTelSpanFilterOperationConfig{{Name: "chat"}},
-		},
-	}}}
-	if err := mixedFilterShapes.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "cannot mix") {
-		t.Fatalf("mixed filter validation error=%v, want shape diagnostic", err)
-	}
-	empty := OTelConfig{Enabled: true}
-	if err := empty.ValidateNamedDestinations(); err == nil || !strings.Contains(err.Error(), "at least one named destination") {
-		t.Fatalf("empty destination validation error=%v, want named-destination diagnostic", err)
-	}
-}
-
-func TestOTelDestinationWaivedForManagedAIDLogSink(t *testing.T) {
-	// managed_enterprise + cisco_ai_defense.endpoint auto-provisions the Cisco
-	// AI Defense log sink, which is a valid consumer of otel.enabled even with
-	// zero user destinations — so the "needs a destination" rule is waived.
-	managedWithSink := &Config{
-		DeploymentMode: "managed_enterprise",
-		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://aid.example.test"},
-		OTel:           OTelConfig{Enabled: true},
-	}
-	if !managedWithSink.HasManagedAIDLogSink() {
-		t.Fatalf("HasManagedAIDLogSink() = false, want true for managed_enterprise + endpoint")
-	}
-	if err := managedWithSink.OTel.validateNamedDestinations(managedWithSink.HasManagedAIDLogSink()); err != nil {
-		t.Fatalf("managed AID sink should waive the destination requirement, got: %v", err)
-	}
-
-	// Without the managed sink (no endpoint), the waiver does not apply.
-	noEndpoint := &Config{
-		DeploymentMode: "managed_enterprise",
-		OTel:           OTelConfig{Enabled: true},
-	}
-	if noEndpoint.HasManagedAIDLogSink() {
-		t.Fatalf("HasManagedAIDLogSink() = true with no endpoint, want false")
-	}
-	if err := noEndpoint.OTel.validateNamedDestinations(noEndpoint.HasManagedAIDLogSink()); err == nil ||
-		!strings.Contains(err.Error(), "at least one named destination") {
-		t.Fatalf("without the managed sink the destination rule must still apply, got: %v", err)
-	}
-
-	// Not managed_enterprise: waiver does not apply even with an endpoint set.
-	unmanaged := &Config{
-		DeploymentMode: "unmanaged_byod",
-		CiscoAIDefense: CiscoAIDefenseConfig{Endpoint: "https://aid.example.test"},
-		OTel:           OTelConfig{Enabled: true},
-	}
-	if unmanaged.HasManagedAIDLogSink() {
-		t.Fatalf("HasManagedAIDLogSink() = true outside managed_enterprise, want false")
-	}
-	// Close the loop: without the waiver, otel.enabled + zero destinations must
-	// still fail even though an endpoint is configured.
-	if err := unmanaged.OTel.validateNamedDestinations(unmanaged.HasManagedAIDLogSink()); err == nil ||
-		!strings.Contains(err.Error(), "at least one named destination") {
-		t.Fatalf("unmanaged + endpoint should still require a destination, got: %v", err)
-	}
-}
-
-func TestLoadMigratesFlatSignalsWithNamedDestinations(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	data := []byte(`otel:
-  enabled: true
-  protocol: grpc
-  endpoint: https://legacy.example.test
-  traces:
-    enabled: true
-  destinations:
-    - name: named
-      enabled: true
-      protocol: http
-      endpoint: https://collector.example.test
-      traces: {enabled: true}
-`)
-	if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error=%v, want flat OTel migration", err)
-	}
-	if cfg.ConfigVersion != CurrentConfigVersion {
-		t.Fatalf("ConfigVersion=%d want %d", cfg.ConfigVersion, CurrentConfigVersion)
-	}
-	if got := len(cfg.OTel.Destinations); got != 2 {
-		t.Fatalf("destinations=%d want 2", got)
-	}
-	migrated := cfg.OTel.Destinations[0]
-	if migrated.Name != "generic-otlp" || migrated.Endpoint != "https://legacy.example.test" {
-		t.Fatalf("migrated destination=%+v", migrated)
-	}
-	if !migrated.Traces.Enabled || migrated.Logs.Enabled || migrated.Metrics.Enabled {
-		t.Fatalf("migrated signals=%+v %+v %+v, want traces-only", migrated.Traces, migrated.Logs, migrated.Metrics)
-	}
-	if cfg.OTel.Destinations[1].Name != "named" {
-		t.Fatalf("second destination=%+v, want named destination preserved", cfg.OTel.Destinations[1])
-	}
-}
-
-func TestLoadMigratesEnvironmentBackedLegacyOTelExporter(t *testing.T) {
-	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-	t.Setenv("DEFENSECLAW_OTEL_ENDPOINT", "http://127.0.0.1:4318")
-	t.Setenv("DEFENSECLAW_OTEL_PROTOCOL", "http/protobuf")
-	t.Setenv("DEFENSECLAW_OTEL_TLS_INSECURE", "true")
-	data := []byte(`config_version: 6
-otel:
-  enabled: true
-`)
-	if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load() error=%v, want env-backed flat OTel migration", err)
-	}
-	if got := len(cfg.OTel.Destinations); got != 1 {
-		t.Fatalf("destinations=%d want 1", got)
-	}
-	migrated := cfg.OTel.Destinations[0]
-	if migrated.Endpoint != "http://127.0.0.1:4318" || migrated.Protocol != "http/protobuf" {
-		t.Fatalf("migrated destination=%+v", migrated)
-	}
-	if !migrated.TLS.Insecure {
-		t.Fatalf("migrated TLS=%+v, want legacy insecure policy preserved", migrated.TLS)
-	}
-	if !migrated.Traces.Enabled || !migrated.Logs.Enabled || !migrated.Metrics.Enabled {
-		t.Fatalf("migrated signals=%+v %+v %+v, want all enabled", migrated.Traces, migrated.Logs, migrated.Metrics)
-	}
-}
-
-func TestLoadMigratesEnvironmentBackedLegacyOTelSignalExporters(t *testing.T) {
-	tests := []struct {
-		name     string
-		signal   string
-		endpoint string
-		protocol string
-	}{
-		{name: "traces", signal: "TRACES", endpoint: "http://127.0.0.1:4318/v1/traces", protocol: "http/protobuf"},
-		{name: "logs", signal: "LOGS", endpoint: "http://127.0.0.1:4318/v1/logs", protocol: "http/protobuf"},
-		{name: "metrics", signal: "METRICS", endpoint: "http://127.0.0.1:4318/v1/metrics", protocol: "http/protobuf"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("DEFENSECLAW_HOME", t.TempDir())
-			t.Setenv("DEFENSECLAW_OTEL_"+tt.signal+"_ENDPOINT", tt.endpoint)
-			t.Setenv("DEFENSECLAW_OTEL_"+tt.signal+"_PROTOCOL", tt.protocol)
-			data := []byte("config_version: 6\notel:\n  enabled: true\n")
-			if err := os.WriteFile(filepath.Join(DefaultDataPath(), DefaultConfigName), data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			cfg, err := Load()
-			if err != nil {
-				t.Fatalf("Load() error=%v", err)
-			}
-			if got := len(cfg.OTel.Destinations); got != 1 {
-				t.Fatalf("destinations=%d want 1", got)
-			}
-			destination := cfg.OTel.Destinations[0]
-			switch tt.signal {
-			case "TRACES":
-				if !destination.Traces.Enabled || destination.Traces.Endpoint != tt.endpoint || destination.Traces.Protocol != tt.protocol || destination.Logs.Enabled || destination.Metrics.Enabled {
-					t.Fatalf("migrated destination=%+v, want traces-only", destination)
-				}
-			case "LOGS":
-				if !destination.Logs.Enabled || destination.Logs.Endpoint != tt.endpoint || destination.Logs.Protocol != tt.protocol || destination.Traces.Enabled || destination.Metrics.Enabled {
-					t.Fatalf("migrated destination=%+v, want logs-only", destination)
-				}
-			case "METRICS":
-				if !destination.Metrics.Enabled || destination.Metrics.Endpoint != tt.endpoint || destination.Metrics.Protocol != tt.protocol || destination.Traces.Enabled || destination.Logs.Enabled {
-					t.Fatalf("migrated destination=%+v, want metrics-only", destination)
-				}
-			}
-		})
-	}
-}
-
-func TestConfig_ClawHomeDir(t *testing.T) {
-	cfg := &Config{
-		Claw: ClawConfig{HomeDir: "/tmp/my-claw"},
-	}
-	if cfg.ClawHomeDir() != "/tmp/my-claw" {
-		t.Errorf("ClawHomeDir() = %q, want /tmp/my-claw", cfg.ClawHomeDir())
 	}
 }
 
@@ -1582,14 +1042,13 @@ func TestSkillScannerConfigNoLLMFields(t *testing.T) {
 	if sc.Binary != "skill-scanner" {
 		t.Errorf("expected 'skill-scanner', got %q", sc.Binary)
 	}
-	if sc.Policy != "permissive" {
-		t.Errorf("expected default policy 'permissive', got %q", sc.Policy)
+	if sc.Policy != "quiet" || !sc.UseLLM {
+		t.Errorf("expected the recommended default (policy quiet, judge on), got policy %q use_llm %v", sc.Policy, sc.UseLLM)
 	}
 	if !sc.Lenient {
 		t.Error("expected default lenient=true")
 	}
 	_ = sc.UseLLM
-	_ = sc.VirusTotalKey
 }
 
 func TestMCPScannerConfigNoLLMFields(t *testing.T) {
@@ -1598,8 +1057,8 @@ func TestMCPScannerConfigNoLLMFields(t *testing.T) {
 	if mc.Binary != "mcp-scanner" {
 		t.Errorf("expected 'mcp-scanner', got %q", mc.Binary)
 	}
-	if mc.Analyzers != "auto" {
-		t.Errorf("expected default analyzers 'auto', got %q", mc.Analyzers)
+	if mc.AnalyzersArg() != "" {
+		t.Errorf("expected the auto analyzer set (no --analyzers), got %q", mc.Analyzers)
 	}
 	if mc.ScanPrompts {
 		t.Error("expected default scan_prompts=false")
@@ -1679,65 +1138,6 @@ func TestGuardrailConfig_EffectiveHost(t *testing.T) {
 				t.Errorf("EffectiveHost() = %q, want %q", got, tt.want)
 			}
 		})
-	}
-}
-
-func TestConfig_Save(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := DefaultConfig()
-	cfg.DataDir = tmpDir
-
-	if err := cfg.Save(); err != nil {
-		t.Fatalf("Save() returned error: %v", err)
-	}
-
-	configFile := filepath.Join(tmpDir, DefaultConfigName)
-	if _, err := os.Stat(configFile); os.IsNotExist(err) {
-		t.Error("config file was not created")
-	}
-}
-
-// TestConfig_Save_BumpsProvenance pins the v7 contract that every
-// successful Save() updates the process-wide content_hash AND
-// increments the monotonic generation counter. Dashboards rely on
-// generation to detect churn without diffing hashes, and a regression
-// here (e.g. a caller that marshals through a different path and
-// forgets the bump) would cause "config changed" alerts to miss real
-// writes until the next sidecar restart re-seeds from disk.
-func TestConfig_Save_BumpsProvenance(t *testing.T) {
-	tmpDir := t.TempDir()
-	cfg := DefaultConfig()
-	cfg.DataDir = tmpDir
-
-	before := version.Current()
-
-	if err := cfg.Save(); err != nil {
-		t.Fatalf("Save() returned error: %v", err)
-	}
-	afterFirst := version.Current()
-	if afterFirst.Generation <= before.Generation {
-		t.Errorf("generation did not bump on first Save: before=%d after=%d", before.Generation, afterFirst.Generation)
-	}
-	if afterFirst.ContentHash == "" {
-		t.Errorf("content_hash empty after Save — expected hash of marshaled config")
-	}
-
-	// Mutate the config and save again; both hash and generation
-	// must advance. Pinning this guards the "ContentHash stable
-	// across identical saves, fresh per mutation" invariant.
-	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw connector.
-	// Keep it aligned with schemas/otel/resource.schema.json so this test
-	// doesn't bake a stale legacy mode string.
-	cfg.Claw.Mode = "zeptoclaw"
-	if err := cfg.Save(); err != nil {
-		t.Fatalf("Save() (2) returned error: %v", err)
-	}
-	afterSecond := version.Current()
-	if afterSecond.Generation <= afterFirst.Generation {
-		t.Errorf("generation did not bump on second Save: first=%d second=%d", afterFirst.Generation, afterSecond.Generation)
-	}
-	if afterSecond.ContentHash == afterFirst.ContentHash {
-		t.Errorf("content_hash unchanged after config mutation — hashing is not observing the new bytes")
 	}
 }
 
@@ -1926,6 +1326,24 @@ func TestRecognizedLLMProvidersLockstep(t *testing.T) {
 	for _, p := range mustHave {
 		if _, ok := recognizedLLMProviders[p]; !ok {
 			t.Errorf("recognizedLLMProviders missing %q — keep this set in lockstep with cli/defenseclaw/config.py:_RECOGNIZED_LLM_PROVIDERS", p)
+		}
+	}
+}
+
+// GAP-0156: the judge posts to <host>/v1/chat/completions and LiteLLM to
+// <base>/chat/completions, so an OpenAI-style bare host gets /v1 for LiteLLM.
+func TestLLMRequestBaseURL(t *testing.T) {
+	for _, tc := range []struct{ provider, base, want string }{
+		{"openai", "http://127.0.0.1:28555", "http://127.0.0.1:28555/v1"},
+		{"openai-compatible", "https://llm.example/", "https://llm.example/v1"},
+		{"openai", "https://llm.example/v1", "https://llm.example/v1"},
+		{"openai", "https://llm.example/api", "https://llm.example/api"},
+		{"anthropic", "https://llm.example", "https://llm.example"},
+		{"openai", "", ""},
+	} {
+		got := LLMConfig{Provider: tc.provider, BaseURL: tc.base}.RequestBaseURL()
+		if got != tc.want {
+			t.Errorf("%s %q: RequestBaseURL = %q, want %q", tc.provider, tc.base, got, tc.want)
 		}
 	}
 }

@@ -374,9 +374,9 @@ def test_redaction_key_transaction_is_metadata_only_and_restored_before_start() 
         "function New-DefenseClawTransaction",
         "function Set-DefenseClawTransactionManagedHooksTeardownPrepared",
     )
-    capture_at = transaction.index(
-        "Get-DefenseClawRedactionKeySecuritySnapshot",
-    )
+    # The read-only precheck before the stops (GAP-0920) refuses a bad key
+    # early; the snapshot the transaction records is taken after them.
+    capture_at = transaction.index("$redactionKeySecurity =")
     last_initial_stop_at = transaction.index(
         "Stop-DefenseClawService -Name $brokerServiceName",
     )

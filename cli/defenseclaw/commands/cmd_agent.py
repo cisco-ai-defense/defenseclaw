@@ -480,7 +480,7 @@ def ide_plugins(
     if str(payload.get("scope") or "") == "off":
         click.echo(
             "The IDE plugin inventory is turned off (ai_discovery.ide_inventory: off). "
-            "Set it to all in the config file that 'defenseclaw config path' shows."
+            "Turn it on with: defenseclaw config set ai_discovery.ide_inventory all"
         )
         return
     plugins = payload.get("plugins") or []
@@ -1615,6 +1615,15 @@ def discovery_status(
         ),
     }
 
+    pack_total, refused_packs = ai_signatures.refused_packs(cfg)
+    packs = {
+        "configured": pack_total,
+        "not_loaded": [
+            {"path": pack.path, "reason": pack.reason, "digest": pack.digest, "pinned": pack.pinned}
+            for pack in refused_packs
+        ],
+    }
+
     live: dict[str, Any] = {
         "reachable": False,
         "enabled": None,
@@ -1668,6 +1677,7 @@ def discovery_status(
         click.echo(json.dumps(
             {
                 "on_disk": on_disk,
+                "signature_packs": packs,
                 "live": live,
                 "drift": drift,
                 "comparison": {
@@ -1693,6 +1703,15 @@ def discovery_status(
         "enabled" if on_disk["lookup_model_provenance_online"] else "disabled",
         indent="  ",
     )
+    if pack_total:
+        ux.kv(
+            "Signature packs",
+            f"{pack_total - len(refused_packs)} of {pack_total} loaded"
+            + (f", {len(refused_packs)} not loaded" if refused_packs else ""),
+            indent="  ",
+        )
+        for pack in refused_packs:
+            ux.warn(f"Not loaded: {pack.path}: {pack.reason}", indent="  ")
 
     click.echo()
     ux.section("Live (sidecar)")
@@ -3660,13 +3679,22 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
 
     secure_client = _enterprise_profile(cfg) == "secure_client"
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    pins, require_pins = ai_signatures.pack_pins(cfg)
+    configured = list(cfg.ai_discovery.signature_packs)
+    if secure_client:
+        # Secure Client v8 still discovers every pack in this directory. An
+        # empty or absent directory is not an error there, so list the files
+        # that exist instead of a pattern that must match.
+        pack_dir = ai_signatures.signature_pack_dir(cfg.data_dir)
+        configured[:0] = [str(path) for path in sorted(pack_dir.glob("*.json")) if path.is_file()]
     try:
-        sigs = ai_signatures.load_ai_signatures(
-            data_dir=cfg.data_dir,
-            signature_packs=cfg.ai_discovery.signature_packs,
+        sigs, refused = ai_signatures.load_ai_signature_catalog(
+            signature_packs=configured,
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
             disabled_signature_ids=disabled,
+            pack_digests=pins,
+            require_digests=require_pins,
             secure_client=secure_client,
         )
     except ai_signatures.SignaturePackError as exc:
@@ -3679,8 +3707,12 @@ def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> N
                 for field in ai_signatures.IDE_INVENTORY_FIELDS:
                     sig.pop(field, None)
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
-        return
-    click.echo(_render_signatures_table(sigs).rstrip())
+    else:
+        click.echo(_render_signatures_table(sigs).rstrip())
+    # A pack that fails its pin is not loaded: its signatures are not listed.
+    # Say so where the list is read (stderr keeps --json parseable).
+    for pack in refused:
+        click.echo(f"Not loaded: {pack.path}: {pack.reason}", err=as_json)
 
 
 @signatures.command("validate")
@@ -3704,13 +3736,67 @@ def signatures_validate(pack_path: Path, as_json: bool) -> None:
 @click.option("--replace", is_flag=True, help="Replace an installed pack with the same pack id.")
 @pass_ctx
 def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
-    """Install a validated pack into the managed signature-pack directory."""
-    cfg = _load_config_best_effort(app)
+    """Install a validated pack and configure it for standalone discovery."""
+    from defenseclaw import config_writer
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.config import load as load_config
+
+    cfg = _require_loaded_config(app)
+    secure_client = _enterprise_profile(cfg) == "secure_client"
+    if secure_client:
+        # Match the v8 command: install into the directory without a config
+        # write. The Secure Client gateway discovers that directory itself.
+        try:
+            legacy_packs = sorted(ai_signatures.signature_pack_dir(cfg.data_dir).glob("*.json"))
+            dest = ai_signatures.install_signature_pack(
+                pack_path, data_dir=cfg.data_dir, signature_packs=[str(path) for path in legacy_packs],
+                replace=replace,
+                secure_client=True,
+            )
+        except ai_signatures.SignaturePackError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Installed signature pack: {dest}")
+        return
+
+    config_path = config_path_for_data_dir(cfg.data_dir)
     try:
-        dest = ai_signatures.install_signature_pack(pack_path, data_dir=cfg.data_dir, replace=replace)
+        # A managed refusal must happen before an existing pack is replaced.
+        config_writer.refuse_when_managed(config_path)
+        with config_writer.hold_lock(config_path):
+            config_writer.refuse_when_managed(config_path)
+            # The command may have loaded config before another install committed.
+            # Read it again under the writer lock before checking and editing packs.
+            current_cfg = load_config(data_dir=cfg.data_dir) if Path(config_path).is_file() else cfg
+            configured = list(current_cfg.ai_discovery.signature_packs or [])
+            dest = ai_signatures.signature_pack_destination(pack_path, current_cfg.data_dir)
+            previous = dest.read_bytes() if dest.exists() else None
+            previous_mode = dest.stat().st_mode & 0o777 if previous is not None else None
+            dest = ai_signatures.install_signature_pack(
+                pack_path, data_dir=current_cfg.data_dir, signature_packs=configured, replace=replace
+            )
+            original_pins = dict(current_cfg.ai_discovery.signature_pack_digests or {})
+            try:
+                if str(dest) not in configured:
+                    current_cfg.ai_discovery.signature_packs = [*configured, str(dest)]
+                pins = dict(original_pins)
+                if str(dest) in pins:
+                    pins[str(dest)] = "sha256:" + hashlib.sha256(dest.read_bytes()).hexdigest()
+                    current_cfg.ai_discovery.signature_pack_digests = pins
+                if str(dest) not in configured or str(dest) in pins:
+                    current_cfg.save()
+                app.cfg = current_cfg
+            except Exception:
+                if previous is None:
+                    dest.unlink()
+                else:
+                    ai_signatures.restore_signature_pack(dest, previous, previous_mode)
+                current_cfg.ai_discovery.signature_packs = configured
+                current_cfg.ai_discovery.signature_pack_digests = original_pins
+                raise
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(f"Installed signature pack: {dest}")
+    click.echo(f"Installed signature pack: {dest} (added to ai_discovery.signature_packs)")
 
 
 @signatures.command("disable")
@@ -3811,9 +3897,11 @@ def _require_loaded_config(app: AppContext):
     """
     cfg = getattr(app, "cfg", None)
     if cfg is not None:
-        if getattr(cfg, "_source_config_version", None) != 8:
+        from defenseclaw.config import is_current_schema
+
+        if not is_current_schema(getattr(cfg, "_source_config_version", None)):
             raise click.ClickException(
-                "Configuration schema v8 is required — run 'defenseclaw migrate' first."
+                "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
             )
         return cfg
     from defenseclaw import config as cfg_mod

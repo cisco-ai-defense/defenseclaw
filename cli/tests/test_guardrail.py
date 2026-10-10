@@ -1264,10 +1264,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
         self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
         self.assertNotIn("privacy", raw)
-        self.assertEqual(
-            Path(raw["guardrail"]["rule_pack_dir"]).parts[-3:],
-            ("policies", "guardrail", "strict"),
-        )
+        # A fresh config is config_version 9: the preset is named, not a directory.
+        self.assertEqual(raw["guardrail"]["rule_pack"], "strict")
+        self.assertNotIn("rule_pack_dir", raw["guardrail"])
 
     def test_yes_alias_updates_rule_pack(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1281,7 +1280,6 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "strict",
                 "--yes",
                 "--no-restart",
-                "--no-verify",
             ],
             obj=self.app,
         )
@@ -1291,10 +1289,9 @@ class TestSetupGuardrailCommand(unittest.TestCase):
 
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
-        self.assertEqual(
-            Path(raw["guardrail"]["rule_pack_dir"]).parts[-3:],
-            ("policies", "guardrail", "strict"),
-        )
+        # A fresh config is config_version 9: the preset is named, not a directory.
+        self.assertEqual(raw["guardrail"]["rule_pack"], "strict")
+        self.assertNotIn("rule_pack_dir", raw["guardrail"])
 
     def test_unscoped_rule_pack_updates_global_for_all_connectors(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1306,8 +1303,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "codex": PerConnectorGuardrailConfig(),
             "claudecode": PerConnectorGuardrailConfig(),
         }
-        gc.connectors["codex"].rule_pack_dir = "/tmp/old-codex-pack"
-        gc.connectors["claudecode"].rule_pack_dir = "/tmp/old-claude-pack"
+        gc.connectors["codex"].rule_pack = "permissive"
+        gc.connectors["claudecode"].rule_pack = "default"
         self.app.cfg.claw.home_dir = self.tmp_dir
 
         result = self.runner.invoke(
@@ -1318,22 +1315,15 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "strict",
                 "--yes",
                 "--no-restart",
-                "--no-verify",
             ],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(
-            Path(gc.rule_pack_dir).parts[-3:],
-            ("policies", "guardrail", "strict"),
-        )
+        self.assertEqual(gc.rule_pack, "strict")
         for connector in ("codex", "claudecode"):
-            self.assertEqual(gc.connectors[connector].rule_pack_dir, "")
-            self.assertEqual(
-                Path(gc.effective_rule_pack_dir(connector)).parts[-3:],
-                ("policies", "guardrail", "strict"),
-            )
+            self.assertEqual(gc.connectors[connector].rule_pack, "")
+            self.assertEqual(gc.effective_rule_pack(connector), "strict")
 
     def test_scoped_rule_pack_updates_only_requested_connector(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1357,41 +1347,14 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 "strict",
                 "--yes",
                 "--no-restart",
-                "--no-verify",
             ],
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
 
-        self.assertEqual(gc.rule_pack_dir, "")
-        self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
-        self.assertEqual(
-            Path(gc.connectors["claudecode"].rule_pack_dir).parts[-3:],
-            ("policies", "guardrail", "strict"),
-        )
-
-    def test_rule_pack_dir_missing_is_rejected_before_save(self):
-        from defenseclaw.commands.cmd_setup import setup
-
-        self.app.cfg.claw.home_dir = self.tmp_dir
-        missing = os.path.join(self.tmp_dir, "missing-pack")
-        result = self.runner.invoke(
-            setup,
-            [
-                "guardrail",
-                "--rule-pack-dir",
-                missing,
-                "--yes",
-                "--no-restart",
-                "--no-verify",
-            ],
-            obj=self.app,
-        )
-
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("--rule-pack-dir", result.output)
-        self.assertIn("does not exist", result.output)
-        self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
+        self.assertEqual(gc.rule_pack, "")
+        self.assertEqual(gc.connectors["codex"].rule_pack, "")
+        self.assertEqual(gc.connectors["claudecode"].rule_pack, "strict")
 
     def test_block_message_written_to_config_yaml(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -3953,6 +3916,7 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
                 commands = _load_profile_rules(profile, "commands.yaml")
                 paths = _load_profile_rules(profile, "sensitive-paths.yaml")
 
+                # Owner decision for 1.0 (GAP-0893): curl piped to a shell stays off outside strict.
                 self.assertEqual(commands["CMD-PIPE-CURL"]["expression"], "false")
                 self.assertEqual(commands["CMD-PIPE-CURL"]["pattern"], "a^")
                 self.assertEqual(commands["CMD-PIPE-CURL"]["severity"], "HIGH")
@@ -3965,3 +3929,16 @@ class BalancedPermissiveNoisePosture(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_guardrail_write_timeout_has_friendly_recovery():
+    from defenseclaw.commands.cmd_guardrail import _guardrail_write_error
+    from defenseclaw.config_inspect import ConfigInspectTimeoutError
+    from defenseclaw.config_writer import ConfigWriteError
+
+    refused = ConfigWriteError("configuration check timed out")
+    refused.__cause__ = ConfigInspectTimeoutError("configuration check timed out")
+    message = _guardrail_write_error(refused)
+    assert message.count("\n") == 2
+    assert "Nothing was changed; re-run the command." in message
+    assert "Traceback" not in message

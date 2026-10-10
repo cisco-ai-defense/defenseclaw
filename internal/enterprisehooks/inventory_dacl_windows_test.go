@@ -304,6 +304,68 @@ func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T)
 	}
 }
 
+// GAP-1237: the standalone gateway gets read on Devin's user MCP config
+// alone; its folder, which the guardian protects, and the hook file beside it
+// get nothing, the revoke takes the grant back, and a hard link to another
+// file is refused. The Secure Client profile grants nothing there.
+func TestInventoryDACLGrantsDevinMCPConfigFileOnly(t *testing.T) {
+	sid, err := windows.StringToSid(windowsServiceSIDString(productionGatewayServiceName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := t.TempDir(), t.TempDir()
+	devin := filepath.Join(home, "AppData", "Roaming", "devin")
+	if err := os.MkdirAll(devin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hooks, mcp, other := filepath.Join(devin, "config.json"), filepath.Join(devin, "mcp_config.json"), filepath.Join(outside, "other.json")
+	for _, path := range []string{hooks, mcp, other} {
+		if err := os.WriteFile(path, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hasACE := func(path string) bool {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		return err == nil && dacl != nil && daclHasACEFor(dacl, []*windows.SID{sid})
+	}
+	for _, g := range inventoryDACLAgentGrants(home, nil, false) {
+		if strings.HasPrefix(strings.ToLower(g.dir), `appdata\roaming\devin`) {
+			t.Fatalf("Secure Client profile grants %s", g.dir)
+		}
+	}
+	var grant *inventoryDACLGrant
+	for _, g := range inventoryDACLAgentGrants(home, nil, true) {
+		if g.dir == `AppData\Roaming\devin\mcp_config.json` {
+			grant = &g
+		}
+	}
+	if grant == nil {
+		t.Fatal("standalone profile has no Devin MCP config grant")
+	}
+	if result, err := grant.ensure(mcp, sid); err != nil || result != inventoryDACLGranted {
+		t.Fatalf("Devin MCP config grant = %v, %v; want granted", result, err)
+	}
+	if !hasACE(mcp) || hasACE(devin) || hasACE(hooks) {
+		t.Fatal("the grant did not stay on mcp_config.json alone")
+	}
+	if err := RevokeGatewayInventoryReadForManifest(Manifest{Targets: []ManifestTarget{{UserHome: home, Connector: "devin"}}}); err != nil || hasACE(mcp) {
+		t.Fatalf("revoke left the Devin MCP config grant: %v", err)
+	}
+	if err := os.Remove(mcp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(other, mcp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := grant.ensure(mcp, sid); !errors.Is(err, errInventoryDACLLink) || hasACE(other) {
+		t.Fatalf("grant through a hard link = %v; want refused, no ACE on the other file", err)
+	}
+}
+
 func TestInventoryDACLRejectsDirectoryReplacedAfterCheck(t *testing.T) {
 	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
 	if err != nil {
@@ -366,5 +428,217 @@ func TestInventoryListOnlyDirsCoverGuardianProtectedAgents(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("list-only grants miss %v", want)
+	}
+}
+
+// GAP-0913: the enumerator grants the gateway service read access to every
+// skill and plugin folder the managed watcher watches for an enrolled user,
+// except a folder on a managed hook path, which the guardian keeps at its
+// exact DACL. Copilot, OpenCode and Amp skills were never granted, so the
+// watcher could not read them and a skill there was never scanned.
+func TestInventoryDACLComponentGrantsCoverWatchedFolders(t *testing.T) {
+	ownHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := `C:\Users\dc-gap0913`
+	names := []string{"copilot", "opencode", "amp", "hermes"}
+	granted := map[string]bool{}
+	for _, g := range inventoryDACLComponentGrants(home, ownHome, inventoryDACLEnrolledHome{connectors: names}) {
+		granted[strings.ToLower(g.dir)] = true
+	}
+	for _, want := range []string{`.copilot\skills`, `.config\opencode\skills`, `.config\amp\skills`} {
+		if !granted[want] {
+			t.Errorf("watched folder %s is not granted; granted %v", want, granted)
+		}
+	}
+	for _, hookDir := range []string{`.copilot`, `.config`} {
+		if granted[hookDir] {
+			t.Errorf("folder %s on a managed hook path is granted", hookDir)
+		}
+	}
+	// The Amp and OpenCode plugin folders are on their hook path and get
+	// the read grant the guardian admits there (GAP-0958).
+	for _, pluginRoot := range []string{`.config\amp\plugins`, `.config\opencode\plugins`} {
+		if !granted[pluginRoot] {
+			t.Errorf("plugin folder %s is not granted", pluginRoot)
+		}
+	}
+	// The uninstall revokes every folder the enumerator grants.
+	revoked := map[string]bool{}
+	for _, rel := range inventoryDACLComponentDirs(home) {
+		revoked[strings.ToLower(rel)] = true
+	}
+	for dir := range granted {
+		if !revoked[dir] {
+			t.Errorf("granted folder %s is not revoked at uninstall", dir)
+		}
+	}
+	reg := connector.NewDefaultRegistry()
+	var managed []string
+	for _, name := range names {
+		conn, _ := reg.Get(name)
+		managed = append(managed, inventoryDACLManagedHookPaths(conn, home)...)
+	}
+	for _, name := range names {
+		conn, _ := reg.Get(name)
+		skills, plugins := connector.ComponentDirsForHome(conn, ownHome, home)
+		for _, dir := range append(skills, plugins...) {
+			rel, _ := filepath.Rel(home, dir)
+			if !granted[strings.ToLower(rel)] && !inventoryDACLOnManagedPath(dir, managed) {
+				t.Errorf("%s watches %s, which is neither granted nor on a managed hook path", name, rel)
+			}
+		}
+	}
+}
+
+// GAP-0958: the Amp and OpenCode plugin folder is their managed hook path,
+// at the guardian's exact protected DACL, and the folder where a user adds a
+// plugin. The enumerator adds the gateway service's read grant there; the
+// guardian's exact check admits it on that folder only, and only read
+// rights. DefenseClaw's own plugin keeps its protected DACL, a plugin the
+// user had added inherits the grant, and the uninstall revoke restores the
+// exact DACL.
+func TestGatewayPluginRootReadGrantKeepsTheGuardianDACL(t *testing.T) {
+	if ok, err := windowsTestEffectiveAdministratorsEnabled(); err != nil || !ok {
+		t.Skip("granting needs WRITE_DAC through the Administrators entry of the guardian DACL")
+	}
+	target := currentWindowsTestSID(t)
+	gateway, err := windowsGatewayPluginRootReadSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(t.TempDir(), "home")
+	rel := `.config\amp\plugins`
+	root := filepath.Join(home, rel)
+	sibling := filepath.Join(home, `.config\amp\skills`)
+	userPlugin := filepath.Join(root, "user-plugin")
+	for _, dir := range []string{root, sibling, userPlugin} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	managedPlugin := filepath.Join(root, "defenseclaw.ts")
+	if err := os.WriteFile(managedPlugin, []byte("// plugin\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pluginACL, err := windowsManagedPluginProtectionACL(target, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(managedPlugin, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, pluginACL, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{root, sibling} {
+		if err := setWindowsUserPathProtection(dir, target, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dacl := func(path string) *windows.ACL {
+		t.Helper()
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		acl, _, err := sd.DACL()
+		if err != nil || acl == nil {
+			t.Fatalf("DACL of %s: %v", path, err)
+		}
+		return acl
+	}
+	ownHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var grant *inventoryDACLGrant
+	for _, g := range inventoryDACLComponentGrants(home, ownHome, inventoryDACLEnrolledHome{sid: target.String(), connectors: []string{"amp"}}) {
+		if strings.EqualFold(g.dir, rel) {
+			grant = &g
+		}
+	}
+	if grant == nil {
+		t.Fatalf("the enumerator does not grant %s", rel)
+	}
+	for pass, want := range []inventoryDACLResult{inventoryDACLGranted, inventoryDACLAlreadyPresent} {
+		got, err := grant.ensure(root, gateway)
+		if err != nil || got != want {
+			t.Fatalf("pass %d = %v, %v; want %v", pass, got, err, want)
+		}
+	}
+	if err := validateWindowsUserPathElement(root, target, true, true, true); err != nil {
+		t.Fatalf("guardian exact check refuses the granted plugin folder: %v", err)
+	}
+	const writeLike = windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.DELETE | windows.WRITE_DAC | windows.WRITE_OWNER |
+		windows.FILE_WRITE_DATA | windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES | 0x40 // FILE_DELETE_CHILD
+	acl := dacl(root)
+	for i := uint32(0); i < uint32(acl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, i, &ace); err != nil {
+			t.Fatal(err)
+		}
+		if (*windows.SID)(unsafe.Pointer(&ace.SidStart)).Equals(gateway) && ace.Mask&writeLike != 0 {
+			t.Fatalf("gateway entry has write-like rights 0x%x", uint32(ace.Mask))
+		}
+	}
+	if !daclContainsInventoryReadACE(dacl(userPlugin), gateway) {
+		t.Fatal("the plugin the user added does not inherit the gateway read grant")
+	}
+	if daclHasACEFor(dacl(managedPlugin), []*windows.SID{gateway}) {
+		t.Fatal("the managed plugin inherited the gateway grant")
+	}
+	if err := verifyWindowsPrivatePluginFile(managedPlugin, target, true); err != nil {
+		t.Fatalf("managed plugin DACL changed: %v", err)
+	}
+	// The guardian DACL plus any other gateway entry, or the read grant on
+	// any other guardian folder, is still drift.
+	withGatewayEntry := func(path string, mask windows.ACCESS_MASK) {
+		t.Helper()
+		canonical, err := windowsUserPathCanonicalACEs(target, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		canonical = append(canonical, windowsUserPathCanonicalACE{sid: gateway, mask: mask, inheritance: windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT})
+		entries := make([]windows.EXPLICIT_ACCESS, 0, len(canonical))
+		for _, item := range canonical {
+			entries = append(entries, windows.EXPLICIT_ACCESS{AccessPermissions: item.mask, AccessMode: windows.GRANT_ACCESS,
+				Inheritance: item.inheritance, Trustee: windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID,
+					TrusteeType: windows.TRUSTEE_IS_USER, TrusteeValue: windows.TrusteeValueFromSID(item.sid)}})
+		}
+		acl, err := windows.ACLFromEntries(entries, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withGatewayEntry(sibling, inventoryReadACE.mask)
+	if err := validateWindowsUserPathElement(sibling, target, true, true, true); err == nil {
+		t.Fatal("guardian exact check admits the gateway grant outside the plugin folder")
+	}
+	withGatewayEntry(root, inventoryReadACE.mask|windows.GENERIC_WRITE)
+	if err := validateWindowsUserPathElement(root, target, true, true, true); err == nil {
+		t.Fatal("guardian exact check admits a writable gateway entry on the plugin folder")
+	}
+	if got, err := ensureGatewayPluginRootReadACEPinned(home, rel, gateway, target); err != nil || got != inventoryDACLSkippedMissing {
+		t.Fatalf("grant over a drifted plugin folder = %v, %v; want it left to the guardian", got, err)
+	}
+	if err := setWindowsUserPathProtection(root, target, true); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ensureGatewayPluginRootReadACEPinned(home, rel, gateway, target); err != nil || got != inventoryDACLGranted {
+		t.Fatalf("grant after the guardian reset = %v, %v", got, err)
+	}
+	// The uninstall revoke leaves the exact guardian DACL.
+	if err := revokeInventoryACEs(home, rel, []*windows.SID{gateway}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWindowsUserPathElement(root, target, true, true, true); err != nil {
+		t.Fatalf("revoked plugin folder is not at the guardian DACL: %v", err)
+	}
+	if daclHasACEFor(dacl(root), []*windows.SID{gateway}) {
+		t.Fatal("revoke left a gateway entry on the plugin folder")
 	}
 }

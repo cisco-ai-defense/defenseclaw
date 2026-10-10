@@ -59,7 +59,7 @@ Before starting, pick the closest sibling and list its footprint: `git grep -l -
 - [ ] Watcher doesn't create other agents' roots. Verify: a "does not create foreign roots" case.
 - [ ] `claw.go`: `ReadMCPServersForConnector`, `ConnectorHomeDir`, `SkillDirsForConnector`, `PluginDirsForConnector` explicit arms. Verify: `claw_test.go` "never reads OpenClaw" case.
 - [ ] `hasNativeMCPReader` and `readMCPServersUnderHomeForOS` (per OS). Verify: `TestReadMCPServersUnderHomeUsesCanonicalUserConfigs`.
-- [ ] `connector_paths.py`: `KNOWN_CONNECTORS`, `HOOK_ONLY_CONNECTORS` and every dispatcher. Verify: `test_<id>_resolves_its_own_surfaces_not_openclaw`.
+- [ ] `connector_paths.py`: `KNOWN_CONNECTORS` and every dispatcher. Verify: `test_<id>_resolves_its_own_surfaces_not_openclaw`.
 - [ ] `mcp_source_locations` lists every file `mcp_servers` opens. Verify: `test_every_file_opened_was_declared` (add the name).
 - [ ] `set_mcp_server` / `unset_mcp_server`, or `MCPWriteUnsupportedError`. Verify: `test_connector_mcp_writers.py`.
 - [ ] AIBOM limitations notes and `_collect_mcp_config_files`. Verify: `test_claw_inventory.py`.

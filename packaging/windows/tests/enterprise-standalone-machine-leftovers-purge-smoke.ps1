@@ -13,12 +13,18 @@
 # PowerShell exits); one it cannot remove is reported. GAP-2057: stale
 # DefenseClaw-Installer-<32 hex> staging folders in ProgramData and
 # DefenseClaw-Bootstrap-<32 hex> folders in Windows\Temp go the same way,
-# except the bootstrap folder this run's TEMP points into. GAP-0262: the
+# except the bootstrap folder this run's TEMP points into. GAP-0525: stale
+# DefenseClaw-Enterprise-Setup-<32 hex> staging folders go too, except young
+# or busy ones, which are reported. GAP-0262: the
 # hooks' runtime selector state and lock go, so the Claude Code folders they
 # kept go too. GAP-0575, GAP-0562: without a deployment record, the hook
 # machine state that names this scope's hook executable and the public
-# policy summary go. Runs in a disposable scratch directory; no service or
-# machine root is touched.
+# policy summary go. GAP-0938: a standalone uninstall drops the Codex ACL
+# preimage of a requirements.toml the managed-hook teardown already removed.
+# GAP-1145: a purge removes, and re-permissions, a tree that holds names
+# Win32 path normalization changes (a skill quarantined as 'tdot.').
+# Runs in a disposable scratch directory; no service or machine root is
+# touched.
 
 [CmdletBinding()]
 param()
@@ -72,6 +78,51 @@ $failures = & $module {
         }
         if (@(Remove-DefenseClawEmptyClaudeManagedSettingsFolders -ProgramFiles (Microsoft.PowerShell.Management\Join-Path $Scratch 'absent')).Count -ne 0) {
             $failures.Add('an absent ClaudeCode folder was reported')
+        }
+
+        # GAP-1145 (standalone runs PowerShell 7)
+        if ($PSVersionTable.PSVersion.Major -ge 7) {
+            $exactTree = Microsoft.PowerShell.Management\Join-Path $Scratch 'exact-names'
+            foreach ($name in @('tdot.', 'tsp ')) {
+                $leaf = [IO.Path]::Combine($exactTree, 'quarantine', $name)
+                [void][IO.Directory]::CreateDirectory('\\?\' + $leaf)
+                [IO.File]::WriteAllText('\\?\' + [IO.Path]::Combine($leaf, 'SKILL.md'), 'x')
+            }
+            $dotted = [IO.Path]::Combine($exactTree, 'quarantine', 'tdot.')
+            if ((Get-DefenseClawExactItemPath -Path $dotted) -cne ('\\?\' + $dotted) -or
+                (Get-DefenseClawExactItemPath -Path $exactTree) -cne $exactTree) {
+                $failures.Add('the exact path of a trailing-dot name is not its extended-length form')
+            }
+            foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $exactTree -Recurse -Force)) {
+                $kind = if ($item.PSIsContainer) { 'AdminDirectory' } else { 'AdminFile' }
+                try {
+                    Set-DefenseClawPathAcl `
+                        -Path (Get-DefenseClawExactItemPath -Path $item.FullName) `
+                        -Kind $kind `
+                        -GatewayServiceSID $script:AdministratorsSID
+                }
+                catch {
+                    $failures.Add("preserved-state ACL rewrite failed on $($item.FullName): $($_.Exception.Message)")
+                }
+            }
+            $originalSafeRoot = ${function:script:Assert-DefenseClawSafeRoot}
+            try {
+                ${function:script:Assert-DefenseClawSafeRoot} = {
+                    param([string]$Path, [string]$Label, [string]$RequiredBase)
+                    return [IO.Path]::GetFullPath($Path)
+                }
+                Remove-DefenseClawManagedTree -Path $exactTree -RequiredBase $Scratch -Label 'exact-name tree'
+            }
+            catch {
+                $failures.Add("a tree with exact names was not removed: $($_.Exception.Message)")
+            }
+            finally {
+                ${function:script:Assert-DefenseClawSafeRoot} = $originalSafeRoot
+            }
+            if ([IO.Directory]::Exists('\\?\' + $exactTree)) {
+                $failures.Add('a tree with exact names survived its removal')
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath ('\\?\' + $exactTree) -Recurse -Force
+            }
         }
 
         # GAP-1734. The ACL check and the guarded tree removal need a real
@@ -136,6 +187,106 @@ $failures = & $module {
             $failures.Add("removed this run's bootstrap folder: $ownBootstrap")
         }
 
+        # GAP-0525: the staging folder an interrupted Setup left goes once it
+        # is 30 minutes old; a younger one, and one a running Setup holds as
+        # its working directory, stay and are reported.
+        $setupStale = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('3' * 32))
+        $setupYoung = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('4' * 32))
+        $setupBusy = [IO.Path]::Combine($programData, 'DefenseClaw-Enterprise-Setup-' + ('5' * 32))
+        foreach ($path in @($setupStale, $setupYoung, $setupBusy)) {
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($path, 'scratch'))
+        }
+        foreach ($path in @($setupStale, $setupBusy)) {
+            [IO.Directory]::SetCreationTimeUtc($path, [DateTime]::UtcNow.AddHours(-2))
+        }
+        $savedDirectory = [Environment]::CurrentDirectory
+        [Environment]::CurrentDirectory = $setupBusy
+        try {
+            $left = @(Remove-DefenseClawStaleRunDirectories -ProgramData $programData -WindowsTemp $windowsTemp)
+        }
+        finally {
+            [Environment]::CurrentDirectory = $savedDirectory
+        }
+        $setupLeft = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $programData -Directory -Filter 'DefenseClaw-Enterprise-Setup-*' |
+                Microsoft.PowerShell.Core\ForEach-Object { $_.FullName } | Microsoft.PowerShell.Utility\Sort-Object)
+        if (($setupLeft -join ';') -cne (@($setupYoung, $setupBusy) -join ';')) {
+            $failures.Add("Setup staging folders left: $($setupLeft -join '; ')")
+        }
+        foreach ($expected in @("${setupYoung}: created less than 30 minutes ago", "${setupBusy}: in use by a running Setup")) {
+            if (@($left | Microsoft.PowerShell.Core\Where-Object { ([string]$_).StartsWith($expected) }).Count -ne 1) {
+                $failures.Add("Setup staging report lacks '$expected': $($left -join '; ')")
+            }
+        }
+
+        # GAP-0526: once a CLI uninstall's finalizer removed the install
+        # root, the empty C:\Program Files\Cisco it sat in goes; a Cisco
+        # folder that holds anything else stays.
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        $savedProgramFiles = $script:ProgramFiles
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $script:ProgramFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'PF'
+            $vendor = [IO.Path]::Combine($script:ProgramFiles, 'Cisco')
+            [void][IO.Directory]::CreateDirectory($vendor)
+            Remove-DefenseClawEmptyStandaloneInstallParent -Layout @{ InstallRoot = [IO.Path]::Combine($vendor, 'DefenseClaw') }
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $vendor) {
+                $failures.Add('an empty Program Files\Cisco was kept after the install root went')
+            }
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendor, 'Other'))
+            Remove-DefenseClawEmptyStandaloneInstallParent -Layout @{ InstallRoot = [IO.Path]::Combine($vendor, 'DefenseClaw') }
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($vendor, 'Other')))) {
+                $failures.Add('a Program Files\Cisco holding another folder was removed')
+            }
+        }
+        finally {
+            $script:ProgramFiles = $savedProgramFiles
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
+        }
+
+        # GAP-0533: an uninstall that finds no recorded state still removes
+        # DefenseClaw's machine-wide hook files: the drop-ins that name this
+        # scope's hook, and the hook runtime folder with its connector
+        # folders (the ACL check and the tree removal are still replaced, as
+        # above).
+        $savedProgramFiles = $script:ProgramFiles
+        $savedProgramData = $script:ProgramData
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $script:ProgramFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'PF533'
+            $script:ProgramData = Microsoft.PowerShell.Management\Join-Path $Scratch 'PD533'
+            $hook533 = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe'
+            $named533 = '{"hook_executable":"' + $hook533.Replace('\', '\\') + '"}'
+            $claudeDropIns = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d')
+            [void][IO.Directory]::CreateDirectory($claudeDropIns)
+            foreach ($leaf in @('90-defenseclaw.json', '.defenseclaw-managed-hooks.state', '.defenseclaw-managed-runtime-selector.state')) {
+                [IO.File]::WriteAllText([IO.Path]::Combine($claudeDropIns, $leaf), $named533)
+            }
+            [IO.File]::WriteAllText([IO.Path]::Combine($claudeDropIns, '00-defenseclaw-version-floor.json'), '{}')
+            $hookRuntime = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw-HookRuntime')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($hookRuntime, 'opencode'))
+            [IO.File]::WriteAllText([IO.Path]::Combine($hookRuntime, 'machine-policy.json'), '{}')
+            $layout533 = @{
+                StateRoot = [IO.Path]::Combine($script:ProgramData, 'Cisco', 'DefenseClaw')
+                HookPath = $hook533
+                CodexMachinePolicyDirectory = ''
+            }
+            $left = @(
+                @(Remove-DefenseClawUnattributedStandaloneHookRuntime -Layout $layout533) +
+                @(Remove-DefenseClawStandaloneOrphanedHookMachineState -Layout $layout533)
+            )
+            if ($left.Count -ne 0 -or
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode'))) -or
+                (Microsoft.PowerShell.Management\Test-Path -LiteralPath $hookRuntime)) {
+                $failures.Add("a state-absent uninstall left DefenseClaw's machine-wide hook files: $($left -join '; ')")
+            }
+        }
+        finally {
+            $script:ProgramFiles = $savedProgramFiles
+            $script:ProgramData = $savedProgramData
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
+        }
+
         # GAP-0262 (the ACL check is still replaced, as above).
         $selector = Microsoft.PowerShell.Management\Join-Path $Scratch 'selector'
         $selectorDropIns = [IO.Path]::Combine($selector, 'ClaudeCode', 'managed-settings.d')
@@ -196,6 +347,61 @@ $failures = & $module {
             $left = @(Remove-DefenseClawStandaloneHookRuntimeLeftovers -Directory $hookRuntime)
             if ($left.Count -ne 0 -or [IO.Directory]::Exists($hookRuntime)) {
                 $failures.Add("the HookRuntime folder and its machine-policy.json stayed: $($left -join '; ')")
+            }
+        }
+        finally {
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
+        }
+
+        # GAP-0938: a fresh ensure adopted the requirements.toml a purge
+        # without the state root left, so its ACL preimage records a file
+        # that existed before the deployment. The managed-hook teardown then
+        # deletes that file and its ownership record, and the removal after
+        # it finds nothing. A standalone uninstall drops the preimage of the
+        # missing file; Secure Client keeps the refusal.
+        $codexState = Microsoft.PowerShell.Management\Join-Path $Scratch 'codex-acl'
+        [void][IO.Directory]::CreateDirectory($codexState)
+        $codexLayout = @{
+            CodexMachinePolicyPath = [IO.Path]::Combine($codexState, 'requirements.toml')
+            CodexRequirementsOwnershipPath = [IO.Path]::Combine($codexState, 'codex-requirements-ownership.json')
+            CodexManagedHooksStatePath = [IO.Path]::Combine($codexState, '.defenseclaw-managed-hooks.state')
+            CodexRequirementsAclBackupPath = [IO.Path]::Combine($codexState, 'codex-requirements-acl-backup.json')
+        }
+        $absentRemoval = [pscustomobject]@{
+            disposition = 'ownership_absent'
+            safe_to_remove_binary = $true
+            managed_state_existed = $false
+            managed_state_removed = $false
+            managed_state_removed_or_absent = $true
+            surviving_owned_path_references = 0
+        }
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        try {
+            foreach ($case in @(@('Standalone', $false), @('SecureClient', $true))) {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile $case[0]
+                [IO.File]::WriteAllText($codexLayout.CodexRequirementsAclBackupPath, (([ordered]@{
+                                schema_version = 1
+                                path = $codexLayout.CodexMachinePolicyPath
+                                existed = $true
+                                sha256 = ('a' * 64)
+                                security_descriptor = 'O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+                            }) | Microsoft.PowerShell.Utility\ConvertTo-Json))
+                $refused = $false
+                try {
+                    Complete-DefenseClawCodexRequirementsRemoval `
+                        -Layout $codexLayout `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -Report $absentRemoval
+                }
+                catch {
+                    $refused = ([string]$_.Exception.Message).StartsWith('verified-absent Codex removal retains an ACL preimage')
+                    if (-not $refused) {
+                        $failures.Add("$($case[0]): unexpected Codex removal error: $($_.Exception.Message)")
+                    }
+                }
+                if ($refused -ne $case[1] -or [IO.File]::Exists($codexLayout.CodexRequirementsAclBackupPath) -ne $case[1]) {
+                    $failures.Add("$($case[0]): the preimage of a missing requirements.toml was refused=$refused, kept=$([IO.File]::Exists($codexLayout.CodexRequirementsAclBackupPath))")
+                }
             }
         }
         finally {

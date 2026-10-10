@@ -58,12 +58,16 @@ func copilotHandler(opts Options, event string, timeout int) *object {
 		// Copilot evaluates the powershell field itself. The awaited
 		// statements keep the GUI-subsystem hook synchronous and return its
 		// exit code, also when the hook exits at once.
+		// The guard keeps a registration Copilot still holds after
+		// uninstall inert (connector.CopilotRemovedDeploymentGuardPowerShell).
 		handler.set("powershell", strings.Join(append([]string{
 			"$ErrorActionPreference='Stop'",
 			"$env:NoDefaultCurrentDirectoryInExePath='1'",
+			connector.CopilotRemovedDeploymentGuardPowerShell(opts.HookBinary),
 		}, connector.WindowsAwaitedHookStatements(opts.HookBinary, args)...), "; "))
 	} else {
-		handler.set("bash", shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event "+shellQuote(event))
+		handler.set("bash", connector.CopilotRemovedDeploymentGuardPOSIX(opts.HookBinary)+
+			shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event "+shellQuote(event))
 	}
 	handler.set("timeoutSec", json.Number(fmt.Sprint(timeout)))
 	return handler
@@ -94,7 +98,24 @@ func copilotHandlerIsOwned(opts Options, raw any) bool {
 		return strings.Contains(command, connector.PowerShellQuoteLiteral(opts.HookBinary)) &&
 			strings.Contains(command, "'--enterprise-managed'") && strings.Contains(command, "'copilot'")
 	}
+	// A drop-in a 1.0 pre-release wrote has no removed-deployment guard;
+	// ensure rewrites it.
+	command = strings.TrimPrefix(command, connector.CopilotRemovedDeploymentGuardPOSIX(opts.HookBinary))
 	return strings.HasPrefix(command, shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event ")
+}
+
+// copilotHandlerIsIntact reports a DefenseClaw handler whose command is the
+// one DefenseClaw renders for event, byte for byte. Copilot runs the field
+// through a shell, so the prefix match that identifies DefenseClaw's
+// handler also accepted trailing shell text (a redirection and an || true
+// fallback) that discards the hook's deny while verify reported coverage
+// (GAP-1348).
+func copilotHandlerIsIntact(opts Options, event string, raw any) bool {
+	field := "bash"
+	if opts.goos() == "windows" {
+		field = "powershell"
+	}
+	return stringField(raw, "type") == "command" && stringField(raw, field) == stringField(copilotHandler(opts, event, 0), field)
 }
 
 func inspectCopilot(opts Options, state *State) error {
@@ -160,6 +181,9 @@ func inspectCopilot(opts Options, state *State) error {
 				if copilotHandlerIsOwned(opts, handler) {
 					state.OwnedEntries++
 					ownedPerEvent[event]++
+					if !copilotHandlerIsIntact(opts, event, handler) {
+						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s is not the command DefenseClaw publishes, so it may not enforce; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event)
+					}
 				} else {
 					state.ForeignEntries++
 				}
@@ -168,7 +192,7 @@ func inspectCopilot(opts Options, state *State) error {
 	}
 	for _, group := range groups {
 		if ownedPerEvent[group.Event] != 1 {
-			state.conflict("Copilot event %s has %d DefenseClaw policy hooks, want exactly one", group.Event, ownedPerEvent[group.Event])
+			state.entryConflict("Copilot event %s has %d DefenseClaw policy hooks, want exactly one", group.Event, ownedPerEvent[group.Event])
 		}
 	}
 	state.detail("Copilot has no managed-only lock: user (~/.copilot), repository (.github/hooks) and Claude-format hooks still run and can return modifiedArgs; the foreign-hook guard applies")
