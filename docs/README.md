@@ -16,6 +16,7 @@ procedures, package-local notes, generated schema references, and test fixtures.
 | --- | --- | --- |
 | System boundaries | [`ARCHITECTURE.md`](ARCHITECTURE.md) | `cli/`, `cmd/`, `internal/`, `extensions/defenseclaw/` |
 | Guardrail | [`GUARDRAIL.md`](GUARDRAIL.md), [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md) | `internal/gateway/`, `internal/guardrail/`, `policies/` |
+| Hook compatibility fallback | [`development/unverified-hook-contract-fallback.md`](development/unverified-hook-contract-fallback.md) | `internal/gateway/connector/`, `internal/enterprisehooks/` |
 | Observability v8 | [`OBSERVABILITY.md`](OBSERVABILITY.md) | `schemas/telemetry/v8/`, `schemas/config/v8/`, `internal/observability/` |
 | Gateway | [`reference/GATEWAY_SPEC.md`](reference/GATEWAY_SPEC.md) | `internal/gateway/` |
 | Private upstream security | [`reference/PRIVATE_UPSTREAMS.md`](reference/PRIVATE_UPSTREAMS.md) | `internal/netguard/`, `internal/gateway/provider.go` |

@@ -219,6 +219,40 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 	}
 }
 
+func TestBestEffortHookContractUsesDefaultUnionWithoutClaimingCompatibility(t *testing.T) {
+	resolution := ResolveHookContract("codex", "codex nightly")
+	if resolution.Status != HookCompatibilityUnknown {
+		t.Fatalf("Status=%q want %q", resolution.Status, HookCompatibilityUnknown)
+	}
+	fallback := BestEffortHookContract(resolution)
+	if fallback.ContractID != "codex-hooks-v4" || !fallback.DefaultForUnversioned {
+		t.Fatalf("fallback=%+v, want reviewed Codex default", fallback)
+	}
+
+	events := make(map[string]struct{}, len(fallback.Events))
+	for _, event := range fallback.Events {
+		events[event] = struct{}{}
+	}
+	for _, contract := range KnownHookContracts("codex") {
+		for _, event := range contract.Events {
+			if _, ok := events[event]; !ok {
+				t.Fatalf("best-effort contract omitted %s from %s", event, contract.ContractID)
+			}
+		}
+	}
+
+	profile := NewCodexConnector().HookProfile(SetupOpts{
+		AgentVersion:   "codex nightly",
+		HookContractID: fallback.ContractID,
+	})
+	if profile.CompatibilityStatus != HookCompatibilityUnknown {
+		t.Fatalf("fallback profile compatibility=%q, want unknown", profile.CompatibilityStatus)
+	}
+	if profile.ContractID != fallback.ContractID {
+		t.Fatalf("fallback profile contract=%q want %q", profile.ContractID, fallback.ContractID)
+	}
+}
+
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
 	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {

@@ -173,16 +173,17 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 	if setupOpts.HookContractID == "" {
 		resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
-		setupOpts.HookContractID = resolution.Contract.ContractID
+		setupOpts.HookContractID = connector.BestEffortHookContract(resolution).ContractID
 	}
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
-		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
-		if err := validateActivationSurfaces(home, paths, uid, false, nil); err != nil {
+		setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
+		if err != nil {
 			return err
 		}
-		if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
+		if err := validateActivationSurfaces(home, paths, uid, false, nil); err != nil {
 			return err
 		}
 		footprint := connector.AgentPaths{}
@@ -231,7 +232,8 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
 			}
-			if connector.HookContractLockDrifted(lock, current) {
+			if connector.HookContractLockDrifted(lock, current) ||
+				canonicalHookFailMode(lock.HookFailMode) != canonicalHookFailMode(current.HookFailMode) {
 				return fmt.Errorf("enterprise hooks: connector %s hook contract lock drift detected", conn.Name())
 			}
 			result = InstallResult{
@@ -334,11 +336,30 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 	if setupOpts.HookContractID == "" {
 		resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
-		setupOpts.HookContractID = resolution.Contract.ContractID
+		setupOpts.HookContractID = connector.BestEffortHookContract(resolution).ContractID
 	}
 
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
+		requestedHookFailMode := canonicalHookFailMode(setupOpts.HookFailMode)
+		setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
+		if err != nil {
+			return err
+		}
+		if requestedHookFailMode == "closed" && canonicalHookFailMode(setupOpts.HookFailMode) == "open" {
+			resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
+			reason := resolution.Reason
+			if resolution.Status == connector.HookCompatibilityKnown {
+				reason = "selected contract differs from the installed hook-contract lock"
+			}
+			fmt.Fprintf(
+				os.Stderr,
+				"[enterprise-hooks] WARNING: %s hook contract is not verified (%s); installing %s with fail-open delivery until compatibility is verified\n",
+				conn.Name(),
+				reason,
+				setupOpts.HookContractID,
+			)
+		}
 		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
 		pluginArtifacts := connector.ManagedPluginArtifacts(conn, setupOpts)
 		// Endpoint-product bootstrap: on a fresh target where the
@@ -374,9 +395,6 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			opts.AllowMissingHookConfigRepair,
 			pluginArtifacts,
 		); err != nil {
-			return err
-		}
-		if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
 			return err
 		}
 		footprint := connector.AgentPaths{}
@@ -944,13 +962,24 @@ func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {
 	return append(files, scopedToken), nil
 }
 
-func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {
-	if !strings.EqualFold(strings.TrimSpace(mode), "action") || os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
-		return nil
-	}
+func prepareHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) (connector.SetupOpts, error) {
 	resolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
+	if strings.TrimSpace(opts.HookContractID) == "" {
+		opts.HookContractID = connector.BestEffortHookContract(resolution).ContractID
+	}
+	if os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
+		return opts, nil
+	}
 	if connector.HookContractNeedsActionOverride(resolution) {
-		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, resolution.Reason)
+		opts.HookFailMode = "open"
+	}
+	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
+		previous := connector.LoadHookContractLockEntry(opts.DataDir, conn.Name())
+		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+		if hookContractsIncompatible(previous, current) {
+			opts.HookFailMode = "open"
+		}
+		return opts, nil
 	}
 	// Native Windows managed runtimes are administrator-published regular
 	// files. Unix guardians intentionally install hardened per-user symlinks,
@@ -962,7 +991,7 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 		strictManagedRuntime,
 	)
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
+		return connector.SetupOpts{}, fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
 	}
 	if previous.Connector != "" {
 		current, err := connector.NewHookContractLockEntryForMode(
@@ -972,13 +1001,41 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 			strictManagedRuntime,
 		)
 		if err != nil {
-			return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
+			return connector.SetupOpts{}, fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
 		}
-		if connector.HookContractLockDrifted(previous, current) {
-			return fmt.Errorf("enterprise hooks: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+		if hookContractsIncompatible(previous, current) {
+			opts.HookFailMode = "open"
 		}
 	}
-	return nil
+	return opts, nil
+}
+
+// validateHookContract is retained as a read-only compatibility wrapper for
+// focused validation tests and callers that only need an error result. Install
+// and Verify use prepareHookContract directly so its effective fail mode and
+// fallback contract reach the generated hooks.
+func validateHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) error {
+	_, err := prepareHookContract(mode, conn, opts)
+	return err
+}
+
+func hookContractsIncompatible(previous, current connector.HookContractLockEntry) bool {
+	if strings.TrimSpace(previous.Connector) == "" {
+		return false
+	}
+	if current.CompatibilityStatus != connector.HookCompatibilityKnown {
+		return true
+	}
+	previousID := strings.TrimSpace(previous.ContractID)
+	currentID := strings.TrimSpace(current.ContractID)
+	return previousID == "" || currentID == "" || previousID != currentID
+}
+
+func canonicalHookFailMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), "open") {
+		return "open"
+	}
+	return "closed"
 }
 
 func pathInside(root, path string) bool {

@@ -41,8 +41,10 @@ bounded wall-clock duration. It never executes an app-bundled Codex binary as
 root. A missing, failed, or malformed bundle probe does not stop discovery:
 the enumerator continues through the remaining bundle executables and
 lower-priority sources, including package metadata and the bounded `PATH`
-fallback. Codex remains unversioned and is rejected later only when every
-applicable source fails to yield a supported version.
+fallback. When every applicable source fails to yield a supported version, the
+target remains unversioned and the guardian installs the reviewed best-effort
+contract with fail-open delivery until later discovery resolves a known
+compatible contract.
 
 Reconciliation repeats discovery on every render, so an in-place agent upgrade
 updates `agent_version` without reinstalling DefenseClaw.
