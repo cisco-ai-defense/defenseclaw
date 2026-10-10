@@ -729,6 +729,15 @@ static const char *extract_host(const char *dest, size_t *host_len) {
         p = at + 1;
     }
 
+    /* Handle IPv6 bracket notation: [::1], [fc00::1], etc. */
+    if (*p == '[') {
+        p++;
+        const char *host_start = p;
+        while (*p && *p != ']') p++;
+        *host_len = (size_t)(p - host_start);
+        return host_start;
+    }
+
     /* Hostname extends to ':', '/', '?', or end of string */
     const char *host_start = p;
     while (*p && *p != ':' && *p != '/' && *p != '?') {
@@ -791,6 +800,11 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
 
     /* Check for IPv6 loopback */
     if (strcmp(host, "::1") == 0) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Check for IPv4-mapped IPv6 loopback (::ffff:127.x.x.x) */
+    if (strncasecmp(host, "::ffff:127.", 11) == 0) {
         return DCLAW_ACTION_BLOCK;
     }
 

@@ -630,7 +630,11 @@ def main() -> int:
         return 1
 
     try:
+        _MAX_LINE = 1024 * 1024  # 1 MB per message
         for raw_line in sys.stdin:
+            if len(raw_line) > _MAX_LINE:
+                log(f"WARNING: dropping oversized message ({len(raw_line)} bytes)")
+                continue
             line = raw_line.strip()
             if not line:
                 continue

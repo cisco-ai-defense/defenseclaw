@@ -994,13 +994,8 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 
 	newTokenHex := hex.EncodeToString(newToken)
 
-	// BLK-1 fix: Update the atomic pointer instead of os.Setenv so the
-	// authMiddleware immediately sees the new token without re-registering.
-	// M-4 note: The atomic pointer swap is instant — the next request uses
-	// the new token. In-flight requests that already passed authMiddleware
-	// continue normally (they are past the middleware). This is correct HTTP
-	// semantics: once auth is verified, the request proceeds to completion.
 	a.currentToken.Store(&newTokenHex)
+	os.Setenv("DCLAW_FLEET_API_TOKEN", newTokenHex)
 	a.lastTokenRotation = time.Now()
 
 	a.emitAudit("fleet.token.rotated", "DCLAW_FLEET_API_TOKEN",

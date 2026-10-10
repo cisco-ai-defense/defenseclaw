@@ -1,6 +1,7 @@
 package mqtt
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -753,24 +754,34 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 			}
 			if hasKey {
 				isKeyed = true
-				if len(msg.Payload) < 64 {
-					b.logger.Printf("[mqtt-bridge] verdict request from keyed device %d too short for HMAC (%d bytes)", parts.DeviceID, len(msg.Payload))
-					b.incErrors()
-					return
-				}
-				payloadBody = msg.Payload[:len(msg.Payload)-32]
-				payloadHMAC := msg.Payload[len(msg.Payload)-32:]
-				mac := hmac.New(sha256.New, vrDeviceKey)
-				mac.Write([]byte(msg.Topic))
-				mac.Write(payloadBody)
-				expected := mac.Sum(nil)
-				if !hmac.Equal(expected, payloadHMAC) {
-					b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — HMAC verification failed for device %d", parts.DeviceID)
-					b.incErrors()
-					return
-				}
 			} else {
 				b.logger.Printf("[mqtt-bridge] WARNING: processing verdict request from unkeyed device %d", parts.DeviceID)
+			}
+		} else {
+			// Legacy envDeviceKeyProvider: no DeviceKeyChecker interface.
+			// Verify HMAC if the key is non-zero (provisioned).
+			var zeroKey [32]byte
+			if len(vrDeviceKey) > 0 && !bytes.Equal(vrDeviceKey, zeroKey[:]) {
+				isKeyed = true
+			}
+		}
+
+		if isKeyed {
+			if len(msg.Payload) < 64 {
+				b.logger.Printf("[mqtt-bridge] verdict request from keyed device %d too short for HMAC (%d bytes)", parts.DeviceID, len(msg.Payload))
+				b.incErrors()
+				return
+			}
+			payloadBody = msg.Payload[:len(msg.Payload)-32]
+			payloadHMAC := msg.Payload[len(msg.Payload)-32:]
+			mac := hmac.New(sha256.New, vrDeviceKey)
+			mac.Write([]byte(msg.Topic))
+			mac.Write(payloadBody)
+			expected := mac.Sum(nil)
+			if !hmac.Equal(expected, payloadHMAC) {
+				b.logger.Printf("[mqtt-bridge] WARNING: verdict request rejected — HMAC verification failed for device %d", parts.DeviceID)
+				b.incErrors()
+				return
 			}
 		}
 	}

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
@@ -255,17 +256,27 @@ def _setup_docker_inner(
     ux.echo("  Generating MQTT password file (staging)...")
     current_uid = os.getuid()
     current_gid = os.getgid()
-    passwd_result = subprocess.run(
-        [
-            "docker", "run", "--rm",
-            "--user", f"{current_uid}:{current_gid}",
-            "-v", f"{staging_dir}:/mosquitto/config",
-            _MOSQUITTO_IMAGE,
-            "mosquitto_passwd", "-b", "-c",
-            "/mosquitto/config/passwd", mqtt_user, mqtt_pass,
-        ],
-        capture_output=True, text=True,
-    )
+    # Write password to a temp file inside the staging mount to avoid
+    # exposing it in the process table via CLI arguments.
+    pass_file = staging_dir / ".mqtt_pass"
+    try:
+        pass_file.write_text(mqtt_pass)
+        os.chmod(pass_file, 0o600)
+        passwd_result = subprocess.run(
+            [
+                "docker", "run", "--rm",
+                "--user", f"{current_uid}:{current_gid}",
+                "-v", f"{staging_dir}:/mosquitto/config",
+                _MOSQUITTO_IMAGE,
+                "sh", "-c",
+                "mosquitto_passwd -b -c /mosquitto/config/passwd "
+                + shlex.quote(mqtt_user)
+                + " \"$(cat /mosquitto/config/.mqtt_pass)\"",
+            ],
+            capture_output=True, text=True,
+        )
+    finally:
+        pass_file.unlink(missing_ok=True)
     if passwd_result.returncode != 0:
         ux.err(f"Failed to generate MQTT password file: {passwd_result.stderr.strip()}")
         return False

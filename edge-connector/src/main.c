@@ -218,15 +218,18 @@ int main(void) {
                 continue;
             }
             if (n <= 0) {
-                /* Client disconnected or error */
+                /* Client disconnected or error. Swap-remove and do NOT
+                 * re-check slot i: the swapped-in client's fds[] entry is
+                 * stale (built before poll). It will be polled next cycle. */
                 hal_ipc_socket_close(client_fds[i]);
-                client_fds[i] = client_fds[num_clients - 1];
-                client_buf_len[i] = client_buf_len[num_clients - 1];
-                memcpy(client_buf[i], client_buf[num_clients - 1], client_buf_len[i]);
-                client_fds[num_clients - 1] = -1;
-                client_buf_len[num_clients - 1] = 0;
                 num_clients--;
-                i--; /* re-check swapped slot */
+                if (i < num_clients) {
+                    client_fds[i] = client_fds[num_clients];
+                    client_buf_len[i] = client_buf_len[num_clients];
+                    memcpy(client_buf[i], client_buf[num_clients], client_buf_len[i]);
+                }
+                client_fds[num_clients] = -1;
+                client_buf_len[num_clients] = 0;
                 continue;
             }
             client_buf_len[i] += (size_t)n;

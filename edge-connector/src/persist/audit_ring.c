@@ -464,6 +464,8 @@ int dclaw_audit_ring_init(void) {
     return 0;
 }
 
+/* NOT thread-safe: must be called from the single-threaded main event loop.
+ * Concurrent calls would corrupt the HMAC chain and ring_head. */
 int dclaw_audit_write(dclaw_action_t action, dclaw_reason_t reason,
                       uint16_t target_hash, uint16_t session_id) {
     /* P2-18 fix: If the audit key was refused (production build without

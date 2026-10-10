@@ -1041,6 +1041,7 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
 
     size_t raw_topic_len = strlen(topic);
     if (raw_topic_len > 65535) return -1;
+    if (len > MQTT_RECV_BUF_SIZE) return -1;
     uint16_t topic_len = (uint16_t)raw_topic_len;
     uint32_t remaining = 2 + topic_len + (uint32_t)len;
     uint16_t packet_id = 0;
