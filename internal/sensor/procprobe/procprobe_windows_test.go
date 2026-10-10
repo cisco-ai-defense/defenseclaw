@@ -12,7 +12,18 @@
 
 package procprobe
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
+
+func TestWMIProcessOwnerForCurrentProcess(t *testing.T) {
+	pid := uint32(os.Getpid())
+	owner, ok := lookupWMIProcessOwners(map[uint32]int{pid: 0})[pid]
+	if !ok || owner.name == "" || owner.sid == "" {
+		t.Fatalf("Win32_Process.GetOwnerSid returned no owner for pid %d: %+v", pid, owner)
+	}
+}
 
 // TestUsableCmdlineBytesRejectsLengthsThatCannotBeIndexed pins the guard on a
 // value read out of another process's PEB.

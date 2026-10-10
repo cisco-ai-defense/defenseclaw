@@ -147,6 +147,7 @@ type enterpriseRuntimeFinding struct {
 	PID       int    `json:"pid"`
 	Process   string `json:"process"`
 	User      string `json:"user,omitempty"`
+	UserSID   string `json:"user_sid,omitempty"`
 	AgentName string `json:"agent_name,omitempty"`
 	Score     int    `json:"score"`
 	Severity  string `json:"severity"`
@@ -489,30 +490,15 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		report.RuntimeError = err.Error()
 	} else if view != nil {
 		if user != "" {
-			// Runtime findings carry names rather than UIDs or SIDs. A bare
-			// name cannot identify one account when local and domain accounts
-			// share it. Only a bare --user may select bare runtime findings;
-			// qualified and SID selections keep qualified names (GAP-1250).
+			// The owner SID identifies local and domain names without relying
+			// on the spelling returned by the process token or WTS.
 			// Secure Client keeps the exact --user match of main (issue #1092).
 			secureClient := cfg != nil && cfg.SecureClientIntegration()
-			selectedNames := make(map[string]struct{}, len(report.Accounts)*2)
-			if !secureClient {
-				for _, account := range report.Accounts {
-					if useridentity.QualifiedAccountName(account.User) {
-						selectedNames[strings.ToLower(account.User)] = struct{}{}
-					}
-					if useridentity.QualifiedAccountName(user) {
-						selectedNames[strings.ToLower(user)] = struct{}{}
-					}
-					if strings.EqualFold(user, useridentity.BareAccountName(account.User)) {
-						selectedNames[strings.ToLower(user)] = struct{}{}
-					}
-				}
-			}
+			accountFilter := useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
 			findings := view.Findings[:0]
 			for _, finding := range view.Findings {
-				_, selected := selectedNames[strings.ToLower(finding.User)]
-				if (secureClient && strings.EqualFold(finding.User, user)) || (!secureClient && selected) {
+				if (secureClient && strings.EqualFold(finding.User, user)) ||
+					(!secureClient && accountFilter.Matches(finding.UserSID, finding.User)) {
 					findings = append(findings, finding)
 				}
 			}
