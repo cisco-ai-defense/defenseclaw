@@ -1480,6 +1480,10 @@ reset_audit_journal_mode() {
 
 start_gateway() {
     local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
+    # Each start explains only itself: the explanation of a failed new
+    # gateway skipped the wait for the restored one, which was then
+    # reported as not running while it came up (GAP-1241).
+    START_EXPLAINED=""
     info "Starting the gateway"
     # A 0.8.x start gives up after 60 seconds and stops the gateway it
     # launched, so one restored on a large audit database is stopped before it
