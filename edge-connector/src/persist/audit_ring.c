@@ -234,8 +234,9 @@ static void compute_hmac(const dclaw_audit_entry_t *entry, const uint8_t *prev_h
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
 
-    /* Truncate to 16 bytes (BLK-1: matches struct hmac[16]) */
     memcpy(out_hmac, hmac_full, 16);
+    dclaw_secure_zero(hmac_full, sizeof(hmac_full));
+    dclaw_secure_zero(entry_data, sizeof(entry_data));
 }
 
 #else /* Built-in HMAC-SHA256 — no external library required */

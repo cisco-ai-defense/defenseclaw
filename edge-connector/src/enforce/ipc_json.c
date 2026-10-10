@@ -174,8 +174,9 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                         scan++;
                     }
                     if (*scan != '"') return -1;
-                    uint16_t clen = (uint16_t)(scan - content_start);
-                    if (clen > DCLAW_CONTENT_MAX - 1) clen = DCLAW_CONTENT_MAX - 1;
+                    size_t raw_clen = (size_t)(scan - content_start);
+                    if (raw_clen > DCLAW_CONTENT_MAX - 1) raw_clen = DCLAW_CONTENT_MAX - 1;
+                    uint16_t clen = (uint16_t)raw_clen;
                     memcpy(out->content_buf, content_start, clen);
                     out->content_buf[clen] = '\0';
 

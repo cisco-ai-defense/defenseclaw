@@ -63,7 +63,7 @@ static size_t cbor_encode_uint_safe(uint8_t *buf, size_t remaining, uint8_t majo
 static size_t cbor_encode_bytes_safe(uint8_t *buf, size_t remaining,
                                      const uint8_t *data, size_t len) {
     size_t hdr_size = cbor_uint_size(len);
-    if (hdr_size + len > remaining) return 0;
+    if (len > remaining || hdr_size > remaining - len) return 0;
     size_t hdr = cbor_encode_uint_safe(buf, remaining, 2, len);
     memcpy(buf + hdr, data, len);
     return hdr + len;
@@ -72,7 +72,7 @@ static size_t cbor_encode_bytes_safe(uint8_t *buf, size_t remaining,
 static size_t cbor_encode_text_safe(uint8_t *buf, size_t remaining, const char *str) {
     size_t len = strlen(str);
     size_t hdr_size = cbor_uint_size(len);
-    if (hdr_size + len > remaining) return 0;
+    if (len > remaining || hdr_size > remaining - len) return 0;
     size_t hdr = cbor_encode_uint_safe(buf, remaining, 3, len);
     memcpy(buf + hdr, str, len);
     return hdr + len;

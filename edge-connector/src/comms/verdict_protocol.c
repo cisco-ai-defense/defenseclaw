@@ -103,8 +103,8 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
 
-    /* BLK-1: Truncate to 16 bytes (was 4) */
     memcpy(out_16bytes, hmac_full, 16);
+    dclaw_secure_zero(hmac_full, sizeof(hmac_full));
 }
 
 #else /* Built-in HMAC-SHA256 — no external library required */

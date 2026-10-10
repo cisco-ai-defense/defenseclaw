@@ -685,7 +685,17 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	if dev.Status == manager.StatusLockdown {
 		b.logger.Printf("[mqtt-bridge] verdict request from lockdown device %d — returning BLOCK",
 			parts.DeviceID)
-		b.sendLockdownBlockResponse(parts, msg.Payload)
+		// Strip trailing 32-byte HMAC for keyed devices so the CBOR
+		// decoder in sendLockdownBlockResponse sees clean CBOR only.
+		lockdownPayload := msg.Payload
+		if b.keyProvider != nil {
+			dk := b.keyProvider.KeyForDevice(fullID)
+			var zk [32]byte
+			if dk != nil && !bytes.Equal(dk, zk[:]) && len(msg.Payload) >= 64 {
+				lockdownPayload = msg.Payload[:len(msg.Payload)-32]
+			}
+		}
+		b.sendLockdownBlockResponse(parts, lockdownPayload)
 		b.incErrors()
 		return
 	}
@@ -841,9 +851,11 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 
 	// Use a background context with timeout for the publish since the message
 	// handler context may not be the bridge's long-lived context.
-	pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer pubCancel()
-	if err := b.client.Publish(pubCtx, respTopic, 1, payload); err != nil {
+	// QoS 0 for verdict responses: the readLoop calls handlers
+	// synchronously, so QoS 1 would deadlock waiting for PUBACK
+	// from the same goroutine. Verdict responses are idempotent
+	// and the C agent retries on timeout, so fire-and-forget is safe.
+	if err := b.client.Publish(context.Background(), respTopic, 0, payload); err != nil {
 		b.logger.Printf("[mqtt-bridge] publish verdict response to %s: %v", respTopic, err)
 		b.incErrors()
 		return
@@ -903,9 +915,7 @@ func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte)
 		parts.TenantID, parts.FleetID, parts.DeviceID)
 	payload := EncodeVerdictResponse(resp)
 
-	pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer pubCancel()
-	if err := b.client.Publish(pubCtx, respTopic, 1, payload); err != nil {
+	if err := b.client.Publish(context.Background(), respTopic, 0, payload); err != nil {
 		b.logger.Printf("[mqtt-bridge] publish lockdown BLOCK to %s: %v", respTopic, err)
 	}
 
