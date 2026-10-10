@@ -1421,10 +1421,13 @@ func skillProbeFromFields(toolName string, toolInput, payload map[string]interfa
 // skillProbeFromFields does not read (an ordinary tool's "name" argument is
 // not a skill). Measured shapes: Amp skill {"name": <skill>} and Hermes
 // skill_view {"name": "<category>:<skill>"} (live audit, GAP-1234); OpenCode
-// skill {"name": <skill>} (its tool/skill.ts).
+// skill {"name": <skill>} (its tool/skill.ts); Kiro CLI v3 disclose_context
+// {"name": <skill>} (live capture, kiro-cli 2.26.1 --v3: it loads the skill
+// with no file read, so the folder fallback saw nothing, GAP-1249).
 var nativeSkillLoaderTools = map[string]string{
 	"amp":      "skill",
 	"hermes":   "skill_view",
+	"kiro":     "disclose_context",
 	"opencode": "skill",
 }
 
