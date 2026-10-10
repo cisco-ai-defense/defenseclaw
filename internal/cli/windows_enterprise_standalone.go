@@ -400,7 +400,7 @@ func runWindowsEnterpriseStandaloneAction(
 		// /health too (GAP-1029).
 		if result.Readiness.Gateway {
 			if body, err := windowsStandaloneGatewayHealth(); err == nil {
-				appendStandaloneGatewayWarnings(result, body)
+				appendStandaloneGatewayWarnings(result, body, windowsStandaloneGatewayStatus())
 			}
 		}
 		if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
@@ -533,6 +533,36 @@ func windowsStandaloneGatewayHealth() ([]byte, error) {
 		return nil, fmt.Errorf("gateway health returned %s", resp.Status)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// windowsStandaloneGatewayStatus reads the gateway's /status with the
+// gateway token in its data directory, which only an administrator can
+// read: the profile warnings name configured groups and accounts, so
+// /health gives only their number (GAP-1268). nil when it cannot.
+func windowsStandaloneGatewayStatus() []byte {
+	base, token, _, err := managedScanGatewayEndpoint()
+	if err != nil || token == "" {
+		return nil
+	}
+	req, err := http.NewRequest(http.MethodGet, base+"/status", nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil
+	}
+	return body
 }
 
 // addWindowsEnterpriseNothingInstalledError fails an install or upgrade

@@ -1924,6 +1924,25 @@ func TestSetupConnectorsIsolated_RefusedUnchangedSetupKeepsExistingHooks(t *test
 	}
 }
 
+// GAP-1241: a single-connector start whose Setup refused before changing
+// anything keeps the registration it had instead of re-applying it, which
+// needs the posture a 0.8.x lock never recorded.
+func TestRestoreSingleConnectorSetupPointKeepsRegistrationAfterUnchangedRefusal(t *testing.T) {
+	refused := &bootStubConnector{stubConnector: stubConnector{name: "hermes"}}
+	transaction := multiConnectorSetupTransaction{applied: []multiConnectorSetupRollbackPoint{{
+		conn:             refused,
+		previouslyActive: true,
+		previousLock:     connector.HookContractLockEntry{Connector: "hermes", DefenseClawVersion: "0.8.10"},
+	}}}
+	cause := fmt.Errorf("connector hermes setup failed: %w", connector.ErrSetupRefusedUnchanged)
+	if err := restoreSingleConnectorSetupPoint(context.Background(), transaction, cause); err != cause {
+		t.Fatalf("restore error = %v, want the refusal alone", err)
+	}
+	if refused.setupCalls != 0 || refused.teardownCalls != 0 {
+		t.Fatalf("refused connector setup=%d teardown=%d, want 0/0", refused.setupCalls, refused.teardownCalls)
+	}
+}
+
 // TestSetupConnectorsIsolated_AllFailReturnsEmpty confirms that when every
 // connector fails the result is empty (the caller turns this into a loud boot
 // failure rather than idling on a gateway that protects nothing).

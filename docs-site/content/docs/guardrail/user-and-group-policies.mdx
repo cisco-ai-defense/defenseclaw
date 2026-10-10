@@ -185,7 +185,10 @@ assignment or the default. The gateway looks the groups of your assignments up
 in the operating system, and a group it definitely does not find is a warning in
 `guardrail profile explain`, `guardrail profile list`, `guardrail status` and
 `doctor` (on standalone enterprise, `enterprise <os> status` and `verify`,
-code `profile_assignment_unmatched`), and a line in the gateway log at start,
+code `profile_assignment_unmatched`; the gateway lists these warnings only
+with its credential, because they name groups and accounts, so on Windows
+status run from a prompt that is not elevated says how many there are
+instead), and a line in the gateway log at start,
 at every reload and when a later check (at most once a minute, while the
 gateway is asked for its health or a profile) first finds it, for example after
 an SSSD naming switch

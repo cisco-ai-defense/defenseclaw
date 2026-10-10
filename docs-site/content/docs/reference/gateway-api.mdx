@@ -156,7 +156,7 @@ X-DefenseClaw-Client: cli
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/health` | exempt | The full health document: uptime, every subsystem's state and details, provenance and ACP posture. Used by readiness probes, `defenseclaw doctor`, `defenseclaw status`, the TUI, the watchdog and in-agent plugins. |
-| `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, and `connector_modes` (one entry per active connector). Used by `defenseclaw status` and the TUI. |
+| `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, `connector_modes` (one entry per active connector), and the guardrail profile warnings `profile_assignment_warnings` (plus `profile_warnings` on the standalone profile). Used by `defenseclaw status`, the TUI, and Windows `enterprise windows status` and `verify`. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
 
 `/health` is unauthenticated by design. Any local process that can reach
@@ -174,8 +174,15 @@ that authenticate right now are derived (the current key, plus a staged or
 retiring one during a key rotation). They let the lifecycle check a key
 rotation; they are not the key IDs the listener proof takes, which are the
 SHA-256 of one user's hook credential. It carries no tokens, key material or request
-content. On Linux and macOS managed installs the hook socket also answers
-`GET /health` with the same document without peer authorization; every
+content. The guardrail profile warnings name configured groups and
+`DOMAIN\user` selectors, so `/health` gives only their number:
+`profile_assignment_warning_count`, and on the standalone profile
+`profile_warning_count`, each present only when it is not zero. `/status`
+lists the warnings themselves. On Linux and macOS managed installs the hook
+socket also answers `GET /health` with the same document without peer
+authorization; there root alone also gets `profile_assignment_warnings`,
+`profile_warnings` and the uids of the accounts whose directory lookups fail,
+which is how `enterprise linux|macos status` and `verify` read them. Every
 other path there keeps peer authorization. This is accepted so that every
 health consumer works without a credential; see residual R33 in the
 enterprise threat model.

@@ -1047,7 +1047,12 @@ const codeJudgeFailing = enterprisestatus.CodeJudgeFailing
 func (l *lifecycle) readGatewayPosture(body []byte) {
 	var health struct {
 		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
-		Telemetry                 struct {
+		// The number of the warnings /health lists only to root on the
+		// hook socket, because they name configured groups and accounts
+		// (GAP-1268).
+		ProfileAssignmentWarningCount int `json:"profile_assignment_warning_count"`
+		ProfileWarningCount           int `json:"profile_warning_count"`
+		Telemetry                     struct {
 			Details struct {
 				OptionalState  string `json:"optional_destination_state"`
 				FailureSummary string `json:"optional_destination_failure_summary"`
@@ -1084,6 +1089,14 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	}
 	for _, warning := range health.ProfileAssignmentWarnings {
 		l.result.AddWarning(codeProfileAssignments, warning)
+	}
+	if withheld := max(health.ProfileAssignmentWarningCount, health.ProfileWarningCount); withheld > 0 &&
+		len(health.ProfileAssignmentWarnings)+len(health.ProfileWarnings) == 0 {
+		// Fail closed: a /health read other than root on the hook socket
+		// (the TCP fallback) carries only their number.
+		l.result.AddWarning(codeProfileAssignments, fmt.Sprintf("%d guardrail profile assignment warning(s) are not listed: the gateway "+
+			"lists them only to root on its hook socket, because they name the configured groups and accounts; `%s` shows them",
+			withheld, l.env.lifecycleCommand("profile-explain --user <account>")))
 	}
 	if health.Telemetry.Details.OptionalState == "degraded" {
 		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+

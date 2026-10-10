@@ -1196,6 +1196,14 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := validateHermesWindowsSetupAdmission(ctx, opts); err != nil {
 			return executableAdmissionRefused(err)
 		}
+		// An allowlist Setup cannot repair is refused before anything is
+		// written: rolling back after the refusal tore down the hooks an
+		// earlier DefenseClaw registered and left Hermes unguarded (GAP-1241).
+		allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+		command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
+		if err := checkHermesAllowlistRepairable(allowlistPath, command); err != nil {
+			return setupRefusedUnchanged{err: fmt.Errorf("%s hook config: %w", c.name, err)}
+		}
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
@@ -3828,6 +3836,47 @@ func hermesHookEventSet() map[string]struct{} {
 	return events
 }
 
+// hermesConsentKeys are the keys of the approval Hermes records itself when
+// a shell hook is accepted (at its prompt or through hooks_auto_accept).
+var hermesConsentKeys = map[string]struct{}{
+	"event":                    {},
+	"command":                  {},
+	"approved_at":              {},
+	"script_mtime_at_approval": {},
+}
+
+// hermesConsentForCommand reports whether an allowlist entry without
+// DefenseClaw's ownership marker is the consent Hermes recorded for command:
+// Hermes' own keys only, and exactly that command. DefenseClaw 0.8.x
+// registered its hook with hooks_auto_accept and never wrote the allowlist,
+// so every approval an upgraded profile holds has this shape. Setup adopts it
+// and Teardown removes it with the hook; refusing it stopped every 0.8.x
+// upgrade with Hermes enrolled (GAP-1241). Any other unmarked entry naming a
+// DefenseClaw command is still refused as ambiguous.
+func hermesConsentForCommand(entry map[string]interface{}, command string) bool {
+	if entryCommand, _ := entry["command"].(string); entryCommand != command {
+		return false
+	}
+	for key := range entry {
+		if _, ok := hermesConsentKeys[key]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// checkHermesAllowlistRepairable makes Setup's allowlist decisions without
+// writing anything, so Setup refuses an allowlist it cannot repair before it
+// changes a file (GAP-1241).
+func checkHermesAllowlistRepairable(path, command string) error {
+	document, err := readHermesAllowlist(path)
+	if err != nil {
+		return err
+	}
+	_, _, err = planHermesAllowlistApprovals(path, document["approvals"].([]interface{}), command)
+	return err
+}
+
 func patchHermesAllowlist(path, command, executablePath string) error {
 	if strings.TrimSpace(command) == "" {
 		return fmt.Errorf("Hermes hook command is empty")
@@ -3836,41 +3885,9 @@ func patchHermesAllowlist(path, command, executablePath string) error {
 	if err != nil {
 		return err
 	}
-	approvals := document["approvals"].([]interface{})
-	events := hermesHookEventSet()
-	recognizedCommands := hermesRecognizedHookCommands(command)
-	managedCurrent := map[string]bool{}
-	kept := make([]interface{}, 0, len(approvals)+len(events))
-	for _, raw := range approvals {
-		entry, ok := raw.(map[string]interface{})
-		if !ok {
-			kept = append(kept, raw)
-			continue
-		}
-		event, _ := entry["event"].(string)
-		entryCommand, _ := entry["command"].(string)
-		_, requiredEvent := events[event]
-		owned, _ := entry[hermesAllowlistOwnerField].(bool)
-		_, recognized := recognizedCommands[entryCommand]
-		if owned {
-			if !recognized {
-				return fmt.Errorf("Hermes allowlist entry %q has a tampered DefenseClaw command; refusing non-exact repair", event)
-			}
-			if !requiredEvent || managedCurrent[event] {
-				// Remove exact DefenseClaw-owned stale events and duplicates.
-				continue
-			}
-			if entryCommand == command {
-				managedCurrent[event] = true
-				kept = append(kept, raw)
-			}
-			// A finite recognized historical command is replaced below.
-			continue
-		}
-		if requiredEvent && recognized {
-			return fmt.Errorf("Hermes allowlist entry %q lost its DefenseClaw ownership marker; refusing ambiguous repair", event)
-		}
-		kept = append(kept, raw)
+	kept, managedCurrent, err := planHermesAllowlistApprovals(path, document["approvals"].([]interface{}), command)
+	if err != nil {
+		return err
 	}
 	approvedAt := time.Now().UTC().Format(time.RFC3339Nano)
 	var scriptMTime interface{}
@@ -3899,6 +3916,51 @@ func patchHermesAllowlist(path, command, executablePath string) error {
 		return nil
 	}
 	return atomicWriteFile(path, data, 0o600)
+}
+
+// planHermesAllowlistApprovals returns the approvals Setup keeps and the
+// required events whose current DefenseClaw approval is already present.
+func planHermesAllowlistApprovals(path string, approvals []interface{}, command string) ([]interface{}, map[string]bool, error) {
+	events := hermesHookEventSet()
+	recognizedCommands := hermesRecognizedHookCommands(command)
+	managedCurrent := map[string]bool{}
+	kept := make([]interface{}, 0, len(approvals)+len(events))
+	for _, raw := range approvals {
+		entry, ok := raw.(map[string]interface{})
+		if !ok {
+			kept = append(kept, raw)
+			continue
+		}
+		event, _ := entry["event"].(string)
+		entryCommand, _ := entry["command"].(string)
+		_, requiredEvent := events[event]
+		owned, _ := entry[hermesAllowlistOwnerField].(bool)
+		_, recognized := recognizedCommands[entryCommand]
+		if owned {
+			if !recognized {
+				return nil, nil, fmt.Errorf("Hermes allowlist entry %q has a tampered DefenseClaw command; refusing non-exact repair", event)
+			}
+			if !requiredEvent || managedCurrent[event] {
+				// Remove exact DefenseClaw-owned stale events and duplicates.
+				continue
+			}
+			if entryCommand == command {
+				managedCurrent[event] = true
+				kept = append(kept, raw)
+			}
+			// A finite recognized historical command is replaced below.
+			continue
+		}
+		if requiredEvent && recognized {
+			if hermesConsentForCommand(entry, command) {
+				// Adopted: a marked approval replaces it below.
+				continue
+			}
+			return nil, nil, fmt.Errorf("Hermes allowlist entry %q lost its DefenseClaw ownership marker; refusing ambiguous repair (remove the entries for DefenseClaw's hook from %s, then run 'defenseclaw setup hermes')", event, path)
+		}
+		kept = append(kept, raw)
+	}
+	return kept, managedCurrent, nil
 }
 
 func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
@@ -3978,7 +4040,16 @@ func teardownHermesAllowlist(opts SetupOpts, configPath, command string) error {
 			}
 			continue
 		}
-		if backup != nil && requiredEvent && entryCommand == command && !pristinePairs[pair] {
+		if owned && pristinePairs[pair] {
+			// Setup adopted the consent Hermes had recorded in the copy it
+			// captured; it goes back as Hermes wrote it (GAP-1241).
+			delete(entry, hermesAllowlistOwnerField)
+		} else if backup != nil && requiredEvent && entryCommand == command && !pristinePairs[pair] {
+			if hermesConsentForCommand(entry, command) {
+				// Consent Hermes recorded for DefenseClaw's hook after Setup
+				// goes with the hook.
+				continue
+			}
 			return fmt.Errorf("Hermes allowlist entry %s lost its DefenseClaw ownership marker; refusing ambiguous cleanup", event)
 		}
 		kept = append(kept, raw)
