@@ -1661,7 +1661,7 @@ func windowsEnterpriseConfigConnectors(path string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return enterprisehooks.EffectiveWindowsHookConnectors(cfg), nil
+	return enterprisehooks.EffectiveWindowsStandaloneHookConnectors(cfg), nil
 }
 
 // loadWindowsEnterpriseStandaloneConfig loads path (the installed config

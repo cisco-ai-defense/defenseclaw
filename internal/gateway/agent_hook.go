@@ -839,6 +839,7 @@ func (a *APIServer) hookDecisionMeta(
 	meta.ToolID = req.ToolInvocationID
 	meta.ToolName = req.ToolName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
+	meta = a.applyCursorToolEventOutcome(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
 	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
