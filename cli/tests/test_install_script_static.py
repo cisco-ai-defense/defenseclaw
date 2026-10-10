@@ -656,6 +656,8 @@ def test_a_restored_0_8_gateway_is_launched_and_waited_for(tmp_path: Path) -> No
         + funcs
         + f"gateway_pid() {{ kill -0 \"$(cat '{pid_file}')\" 2>/dev/null && cat '{pid_file}'; }}\n"
         + f'DEFENSECLAW_HOME="{tmp_path}" BIN_DIR="{bin_dir}"\n'
+        # GAP-1241: the failed new gateway's start has already explained itself.
+        + "START_EXPLAINED=1\n"
         + f'rc=0; start_gateway || rc=$?; echo "rc=$rc"; kill "$(cat \'{pid_file}\')"\n',
         encoding="utf-8",
     )
