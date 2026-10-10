@@ -67,6 +67,18 @@ def test_hermes_prompt_finding_in_action_mode_is_not_observe_mode() -> None:
         )
 
 
+def test_copilot_prompt_finding_is_never_observe_mode() -> None:
+    """GAP-1244: Copilot has no prompt veto, so action mode must not say observe mode."""
+    row = "connector=copilot action=allow raw_action=block mode=action would_block=true"
+    label = "detected in the prompt (cannot block)"
+    for target in ("copilot:userPromptSubmitted", "copilot:userPromptTransformed"):
+        assert cmd_alerts._hook_decision([row], target) == label  # noqa: SLF001
+        assert alerts_panel._hook_decision_from_rows([row], target) == label  # noqa: SLF001
+    # A Copilot tool call can still block, so its observe label is unchanged.
+    observed = [row.replace("mode=action", "mode=observe")]
+    assert cmd_alerts._hook_decision(observed, "copilot:preToolUse") == "would block (observe mode)"  # noqa: SLF001
+
+
 def test_message_display_finding_cannot_block_in_cli_and_tui() -> None:
     """GAP-1531: MessageDisplay runs async; its finding is never "observe mode"."""
     observed = ["connector=claudecode action=allow raw_action=block mode=action would_block=true"]

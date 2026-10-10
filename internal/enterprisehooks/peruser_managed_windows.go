@@ -566,15 +566,13 @@ func revokeWindowsPerUserManagedRegistration(
 
 // windowsEnumeratorHookConnector reports whether the Windows enumerator
 // emits rows for name: the machine-policy connectors always, the per-user
-// connectors only in a standalone process.
-func windowsEnumeratorHookConnector(name string) bool {
+// connectors only for a standalone config.
+func windowsEnumeratorHookConnector(name string, standalone bool) bool {
 	if _, ok := windowsHookConnectors[name]; ok {
 		return true
 	}
-	if _, perUser := windowsStandalonePerUserConnector(name); perUser {
-		return windowsEnterpriseStandaloneProcess()
-	}
-	return false
+	_, perUser := windowsStandalonePerUserConnector(name)
+	return perUser && standalone
 }
 
 // WindowsPerUserManagedEnrollmentTarget is one secretless enrollment row.

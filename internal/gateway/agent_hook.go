@@ -839,6 +839,7 @@ func (a *APIServer) hookDecisionMeta(
 	meta.ToolID = req.ToolInvocationID
 	meta.ToolName = req.ToolName
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
+	meta = a.applyCursorToolEventOutcome(meta, req.HookEventName, req.Payload)
 	meta = a.reconcileHookParent(meta)
 	meta = a.mergeHookSessionLifecycle(meta)
 	if snapshot, ok := a.hookPhaseSnapshot(meta); ok {
@@ -2187,7 +2188,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
-		if runtime.GOOS == "windows" && req.ConnectorName == "kiro" && !isSandboxHookRequest(ctx) {
+		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) {
 			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
 				actionInput.DialectHint = agentHookWindowsShellDialect(actionInput)
 			}
@@ -2286,7 +2287,44 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	return resp
 }
 
-// agentHookWindowsShellDialect reads only server-projected shell arguments.
+// selectWindowsShellDialect selects a complete grammar for a native Windows
+// shell call. Codex names its shell tool Bash everywhere, but on Windows it
+// runs the command in PowerShell, so a command such as
+// `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
+// and ran with no finding (GAP-0912), and so was the POSIX-looking
+// `echo k >> $HOME\.ssh\authorized_keys` (GAP-1134). A complete PowerShell
+// reading therefore decides. The PowerShell model leaves an unqualified
+// native program such as curl incomplete, because Windows PowerShell aliases
+// it; such a command keeps its inferred grammar, as before GAP-1134, so its
+// POSIX reading can still enforce instead of every finding turning into
+// detection-only. An exact cmd /d /c wrapper may instead use CMD grammar:
+// /d disables ambient AutoRun commands before the quoted body.
+func selectWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
+	tool = strings.ToLower(strings.TrimSpace(tool))
+	switch tool {
+	case "bash", "exec_command", "shell_command", "shell", "powershell", "execute_command", "run_command", "terminal",
+		"exec", "execute", "run_shell", "run_shell_command", "runshellcommand", "shell_exec", "run_terminal_cmd", "async_shell_command":
+	default:
+		return ""
+	}
+	if command == "" {
+		return ""
+	}
+	input.DialectHint = actionfacts.DialectPowerShell
+	if actionfacts.Analyze(input).Authoritative() ||
+		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
+		return actionfacts.DialectPowerShell
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(command)), "cmd /d /c ") {
+		input.DialectHint = actionfacts.DialectCMD
+		if actionfacts.Analyze(input).Authoritative() {
+			return actionfacts.DialectCMD
+		}
+	}
+	return ""
+}
+
+// agentHookWindowsShellDialect reads only the server-projected shell arguments.
 // A payload-supplied dialect field cannot choose the parser grammar.
 func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 	var args struct {

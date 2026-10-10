@@ -167,10 +167,33 @@ func windowsValidatePipelineAuthority(
 	if dialect == windowsPowerShell &&
 		(windowsDirectWebExpressionPipeline(commands, edges) ||
 			windowsDirectProcessStopPipeline(commands, edges) ||
-			windowsDirectACLPipeline(commands, edges)) {
+			windowsDirectACLPipeline(commands, edges) ||
+			windowsDirectTeePipeline(commands, edges)) {
 		return
 	}
 	out.markPartial(IssueUnsupportedConstruct)
+}
+
+// An exact Write-Output | Tee-Object pipeline has one modeled source and a
+// modeled file sink. Other pipelines keep their partial status.
+func windowsDirectTeePipeline(commands []windowsParsedCommand, edges []windowsPipelineEdge) bool {
+	if len(commands) != 2 || len(edges) != 1 || edges[0].from != 0 || edges[0].to != 1 ||
+		len(commands[0].words) < 2 || len(commands[1].words) < 2 ||
+		len(commands[0].redirects) != 0 || len(commands[1].redirects) != 0 ||
+		commands[0].callOperator || commands[1].callOperator {
+		return false
+	}
+	for _, command := range commands {
+		for _, word := range command.words {
+			if word.expands || word.wildcard {
+				return false
+			}
+		}
+	}
+	source := commandProgramForDialect(commands[0].words[0].value, DialectPowerShell)
+	sink := commandProgramForDialect(commands[1].words[0].value, DialectPowerShell)
+	return (source == "echo" || source == "write-output") &&
+		(sink == "tee" || sink == "tee-object")
 }
 
 func windowsDirectACLPipeline(
@@ -1725,11 +1748,23 @@ func windowsClassifyPowerShell(
 		}
 	case "get-acl":
 		classifyStructuredGetACL(builder.out, command)
-	case "set-content", "out-file":
+	case "set-content", "out-file", "tee", "tee-object":
 		access := PathAccessWrite
-		if name == "out-file" {
+		if name != "set-content" {
+			appendSeen := false
 			for _, arg := range args {
-				if strings.EqualFold(arg.value, "-append") || strings.EqualFold(arg.value, "-append:$true") {
+				if arg.quote != QuoteNone {
+					continue
+				}
+				lower := strings.ToLower(arg.value)
+				if lower != "-append" && lower != "-append:$true" && lower != "-append:$false" {
+					continue
+				}
+				if appendSeen {
+					builder.out.markPartial(IssueUnknownOperandGrammar)
+				}
+				appendSeen = true
+				if lower != "-append:$false" {
 					access = PathAccessAppend
 				}
 			}
@@ -1739,10 +1774,10 @@ func windowsClassifyPowerShell(
 		} else {
 			windowsAddOperation(command, OperationWrite)
 		}
-		windowsAddPowerShellPrimaryPath(command.ID, access, args, true, builder)
+		windowsAddPowerShellPrimaryPath(name, command.ID, access, args, true, builder)
 	case "add-content":
 		windowsAddOperation(command, OperationAppend)
-		windowsAddPowerShellPrimaryPath(command.ID, PathAccessAppend, args, true, builder)
+		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessAppend, args, true, builder)
 	case "remove-item", "ri", "rm", "del", "erase", "rmdir", "rd":
 		windowsAddOperation(command, OperationDelete)
 		windowsAddPowerShellPaths(
@@ -1781,12 +1816,12 @@ func windowsClassifyPowerShell(
 		// aligned with structured argv until that wrapper binding is owned.
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 	case "test-path", "get-item", "gi":
-		windowsAddPowerShellPrimaryPath(command.ID, PathAccessMetadata, args, false, builder)
+		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessMetadata, args, false, builder)
 	case "get-itemproperty", "gp":
 		classifyStructuredPowerShellRegistryProperty(builder.out, command, name)
 	case "set-item":
 		windowsAddOperation(command, OperationConfigChange)
-		windowsAddPowerShellPrimaryPath(command.ID, PathAccessWrite, args, true, builder)
+		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessWrite, args, true, builder)
 	case "set-itemproperty", "sp", "new-itemproperty",
 		"remove-itemproperty", "rp":
 		classifyStructuredPowerShellRegistryProperty(builder.out, command, name)
@@ -1850,7 +1885,7 @@ func windowsClassifyPowerShell(
 		"gemini", "gemini.exe", "opencode", "opencode.exe":
 		classifyAgentRuntime(builder.out, command, command.Program)
 	case "start-process":
-		windowsAddPowerShellPrimaryPath(command.ID, PathAccessExecute, args, true, builder)
+		windowsAddPowerShellPrimaryPath(name, command.ID, PathAccessExecute, args, true, builder)
 		if windowsStartProcessHasActionArguments(args) {
 			// Start-Process reparses ArgumentList inside the child process.
 			// Until that nested argv is parsed narrowly, retain the executable
@@ -4098,6 +4133,7 @@ func windowsPowerShellNewItemPathFlavor(
 // operand is the path and whose remaining positionals are values or arguments.
 // This avoids turning Set-Content's value into a second write target.
 func windowsAddPowerShellPrimaryPath(
+	program string,
 	commandID int64,
 	access PathAccess,
 	args []windowsWord,
@@ -4112,13 +4148,18 @@ func windowsAddPowerShellPrimaryPath(
 		"-exclude": true, "-erroraction": true, "-warningaction": true,
 		"-name": true, "-type": true, "-itemtype": true, "-argumentlist": true,
 		"-workingdirectory": true, "-verb": true, "-credential": true,
-		"-width": true, "-wi": true, "-inputobject": true,
+		"-width": true, "-wi": true,
 	}
 	switchParams := map[string]bool{
 		"-force": true, "-recurse": true, "-raw": true, "-quiet": true,
 		"-confirm": true, "-whatif": true, "-nonewwindow": true,
 		"-wait": true, "-passthru": true, "-usenewenvironment": true,
-		"-append": true, "-append:$true": true, "-append:$false": true,
+	}
+	if program == "out-file" || program == "tee" || program == "tee-object" {
+		valueParams["-inputobject"] = true
+		switchParams["-append"] = true
+		switchParams["-append:$true"] = true
+		switchParams["-append:$false"] = true
 	}
 	var positionals []windowsWord
 	found := false
