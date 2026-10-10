@@ -28,8 +28,24 @@ static const char *parse_string(const char *p, char *out, size_t max_len) {
         if (*p == '\\') {
             p++;
             if (*p == '\0') return NULL;
+            switch (*p) {
+            case '"': case '\\': case '/':
+                out[i++] = *p++;
+                break;
+            case 'n': out[i++] = '\n'; p++; break;
+            case 't': out[i++] = '\t'; p++; break;
+            case 'r': out[i++] = '\r'; p++; break;
+            case 'b': out[i++] = '\b'; p++; break;
+            case 'f': out[i++] = '\f'; p++; break;
+            case 'u': out[i++] = '?'; p++; break; /* placeholder for \uXXXX */
+            default:
+                return NULL; /* reject invalid escape sequences */
+            }
+        } else {
+            if ((unsigned char)*p < 0x20)
+                return NULL; /* reject unescaped control characters */
+            out[i++] = *p++;
         }
-        out[i++] = *p++;
     }
     out[i] = '\0';
     if (*p != '"') return NULL;
@@ -148,12 +164,12 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                     /* Copy content into owned buffer to avoid dangling pointer */
                     if (*p != '"') return -1;
                     const char *content_start = p + 1;
-                    /* Find closing quote, skipping escaped characters */
                     const char *scan = content_start;
                     while (*scan != '"' && *scan != '\0') {
                         if (*scan == '\\') {
-                            scan++;
-                            if (*scan == '\0') return -1; /* unterminated escape */
+                            if (*(scan + 1) == '\0') return -1;
+                            scan += 2;
+                            continue;
                         }
                         scan++;
                     }

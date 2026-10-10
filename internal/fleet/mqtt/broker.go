@@ -522,5 +522,11 @@ func EncodeVerdictRequestCBOR(vr *VerdictRequest) []byte {
 	buf = append(buf, encodeCBORUint(0, uint64(vr.ContentScope))...)
 	buf = append(buf, encodeCBORText(vr.Content)...)
 	buf = append(buf, encodeCBORUint(0, uint64(vr.Findings))...)
+	// B-1 fix: Encode boot_nonce if non-zero (backward compatible — older
+	// decoders that don't know about field 12 simply stop at findings).
+	var zeroNonce [16]byte
+	if vr.BootNonce != zeroNonce {
+		buf = append(buf, encodeCBORBytes(vr.BootNonce[:])...)
+	}
 	return buf
 }

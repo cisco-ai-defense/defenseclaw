@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -210,13 +209,17 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, fmt.Errorf("unknown profile %q: must be minimal, standard, or edge", profile)
 	}
 
-	// CRT-3 fix: Validate compilerPath to prevent path traversal attacks.
+	// Validate compilerPath: must be an absolute path to a regular file.
 	absPath, err := filepath.Abs(s.compilerPath)
 	if err != nil {
 		return nil, fmt.Errorf("invalid compiler path: %w", err)
 	}
-	if strings.Contains(absPath, "..") {
-		return nil, fmt.Errorf("compiler path must not contain '..'")
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil, fmt.Errorf("compiler not found: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("compiler path is not a regular file: %s", absPath)
 	}
 
 	// Create temp directory for compiler I/O

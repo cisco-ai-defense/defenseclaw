@@ -290,44 +290,42 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
 	shard := fullID % 256
-	fm.deviceLocks[shard].Lock()
 
+	// Lock ordering: mu (global map lock) before shard lock.
+	// Auto-register needs mu.Lock, so acquire mu first when device is unknown.
 	fm.mu.RLock()
 	dev, exists := fm.devices[fullID]
 	fm.mu.RUnlock()
 
 	if !exists {
 		if !fm.AutoRegister {
-			fm.deviceLocks[shard].Unlock()
 			return
 		}
-		// Release shard lock before acquiring mu.Lock to maintain
-		// consistent lock ordering (mu before shard) and prevent
-		// deadlock with ListDevices/GetFleetHealth.
-		fm.deviceLocks[shard].Unlock()
 
-		dev = &Device{
-			DeviceID:      fullID,
-			TenantID:      tenantID,
-			FleetID:       fleetID,
-			HWProfile:     "auto-discovered",
-			FWVersion:     fmt.Sprintf("%d", hb.FWVersion),
-			PolicyVersion: hb.PolicyVersion,
-			Capabilities:  hb.Capabilities,
-			Status:        StatusOnline,
-			RegisteredAt:  time.Now(),
-			LastHeartbeat: time.Now(),
-		}
 		fm.mu.Lock()
+		// Double-check under write lock — another goroutine may have registered
+		// between the RUnlock and Lock above.
 		if existing, ok := fm.devices[fullID]; ok {
 			dev = existing
 		} else {
+			dev = &Device{
+				DeviceID:      fullID,
+				TenantID:      tenantID,
+				FleetID:       fleetID,
+				HWProfile:     "auto-discovered",
+				FWVersion:     fmt.Sprintf("%d", hb.FWVersion),
+				PolicyVersion: hb.PolicyVersion,
+				Capabilities:  hb.Capabilities,
+				Status:        StatusOnline,
+				RegisteredAt:  time.Now(),
+				LastHeartbeat: time.Now(),
+			}
 			fm.devices[fullID] = dev
 		}
 		fm.mu.Unlock()
 
-		// Re-acquire shard lock for the remainder of heartbeat processing.
 		fm.deviceLocks[shard].Lock()
+		defer fm.deviceLocks[shard].Unlock()
 
 		if fm.store != nil {
 			if err := fm.store.SaveDevice(dev); err != nil {
@@ -348,8 +346,10 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			Severity:  "info",
 			Timestamp: time.Now(),
 		})
+	} else {
+		fm.deviceLocks[shard].Lock()
+		defer fm.deviceLocks[shard].Unlock()
 	}
-	defer fm.deviceLocks[shard].Unlock()
 
 	// NEW-3 fix: Replay detection — reject heartbeats where the monotonic
 	// uptime has not advanced.

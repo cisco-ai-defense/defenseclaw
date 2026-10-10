@@ -822,7 +822,7 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
                     "PyNaCl is required for signing in production mode "
                     "(DCLAW_PRODUCTION is set). Install with: pip install pynacl"
                 )
-            if os.environ.get("DCLAW_DEV_MODE", "").upper() == "OFF":
+            if os.environ.get("DCLAW_DEV_MODE", "").strip().lower() in ("off", "0", "false", "no"):
                 raise RuntimeError(
                     "PyNaCl is required for signing when DCLAW_DEV_MODE=OFF. "
                     "Install with: pip install pynacl"
@@ -834,7 +834,7 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
             "Signing key is required in production mode (DCLAW_PRODUCTION is set). "
             "Provide --signing-key with a valid Ed25519 key."
         )
-    if os.environ.get("DCLAW_DEV_MODE", "").upper() == "OFF":
+    if os.environ.get("DCLAW_DEV_MODE", "").strip().lower() in ("off", "0", "false", "no"):
         raise RuntimeError(
             "Signing key is required when DCLAW_DEV_MODE=OFF. "
             "Provide --signing-key with a valid Ed25519 key."

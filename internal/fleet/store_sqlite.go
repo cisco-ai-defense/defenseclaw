@@ -317,6 +317,21 @@ func (s *SQLiteStore) LoadDecommissioned() ([]uint64, error) {
 	return ids, rows.Err()
 }
 
+// IsDecommissioned checks if a device ID has a decommission tombstone in the
+// persistent store. H-12 fix: enables the bridge cleanup goroutine to verify
+// persistent state before evicting in-memory tombstones.
+func (s *SQLiteStore) IsDecommissioned(fullDeviceID uint64) (bool, error) {
+	var exists int
+	err := s.db.QueryRow("SELECT 1 FROM decommissioned_devices WHERE device_id = ?", fullDeviceID).Scan(&exists)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check decommissioned %d: %w", fullDeviceID, err)
+	}
+	return true, nil
+}
+
 // DeleteDecommissioned removes a device from the tombstone table on re-registration (M-12).
 func (s *SQLiteStore) DeleteDecommissioned(deviceID uint64) error {
 	_, err := s.db.Exec("DELETE FROM decommissioned_devices WHERE device_id = ?", deviceID)

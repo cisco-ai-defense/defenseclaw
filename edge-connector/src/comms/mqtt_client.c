@@ -192,6 +192,7 @@ static int32_t mqtt_decode_remaining_length(const uint8_t *buf, size_t available
         if (!(byte & 0x80)) break;
     } while (i < 4);
     *bytes_consumed = i;
+    if (value > MQTT_RECV_BUF_SIZE) return -1;
     return (int32_t)value;
 }
 
@@ -895,7 +896,8 @@ int dclaw_mqtt_connect(void) {
         return -1;
     }
 
-    /* M-11 fix: Scrub MQTT credentials from process environment */
+    /* Best-effort scrub: clears getenv() pointer only; /proc/PID/environ
+     * (snapshot at exec) is NOT affected. Use file-based provisioning. */
     {
         char *ev = getenv("DCLAW_MQTT_PASS");
         if (ev && ev[0]) {

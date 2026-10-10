@@ -7,6 +7,7 @@
  */
 
 #include "sha256.h"
+#include "platform.h"
 #include <string.h>
 
 /* SHA-256 constants: first 32 bits of the fractional parts of the
@@ -168,8 +169,7 @@ void dclaw_sha256_final(dclaw_sha256_ctx *ctx, uint8_t *hash) {
         store_be32(hash + i * 4, ctx->state[i]);
     }
 
-    /* Zero sensitive state */
-    memset(ctx, 0, sizeof(*ctx));
+    dclaw_secure_zero(ctx, sizeof(*ctx));
 }
 
 void dclaw_sha256(const uint8_t *data, size_t len, uint8_t *hash) {

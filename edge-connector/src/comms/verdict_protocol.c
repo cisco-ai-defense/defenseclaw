@@ -249,8 +249,9 @@ static const uint8_t *get_device_key(size_t *out_key_len) {
             if (hex_decode(env_key, s_device_key, 32) == 0) {
                 s_device_key_len = 32;
                 loaded = true;
-                /* C-2 fix: Scrub the env var from /proc/PID/environ to limit
-                 * the window for local key disclosure. */
+                /* Best-effort scrub: overwrites the getenv() pointer in the C
+                 * runtime, but /proc/PID/environ (a snapshot at exec) is NOT
+                 * cleared. Use file-based key provisioning in production. */
                 {
                     char *ev = getenv("DCLAW_DEVICE_KEY");
                     if (ev) {

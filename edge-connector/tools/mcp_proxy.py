@@ -504,7 +504,7 @@ class MCPProxy:
 
 async def _run_stdio(proxy: MCPProxy) -> None:
     """Serve MCP over stdin/stdout (the standard MCP stdio transport)."""
-    reader = asyncio.StreamReader()
+    reader = asyncio.StreamReader(limit=4 * 1024 * 1024)
     protocol = asyncio.StreamReaderProtocol(reader)
     await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin.buffer)
 
@@ -517,10 +517,27 @@ async def _run_stdio(proxy: MCPProxy) -> None:
 
     logger.info("MCP proxy ready (stdio transport)")
 
+    MAX_LINE_SIZE = 4 * 1024 * 1024  # 4 MB per message
     while True:
-        line = await reader.readline()
+        try:
+            line = await reader.readuntil(b"\n")
+        except asyncio.IncompleteReadError as e:
+            if e.partial:
+                line = e.partial
+            else:
+                break
+        except asyncio.LimitOverrunError:
+            logger.warning("Dropping oversized stdio message (>%d bytes)", MAX_LINE_SIZE)
+            while True:
+                chunk = await reader.read(65536)
+                if not chunk or chunk.endswith(b"\n"):
+                    break
+            continue
         if not line:
             break
+        if len(line) > MAX_LINE_SIZE:
+            logger.warning("Dropping oversized stdio message (%d bytes)", len(line))
+            continue
 
         try:
             msg = json.loads(line)

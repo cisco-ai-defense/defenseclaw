@@ -160,8 +160,7 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     {
         uint8_t pct = 0;
         if (s->eval_count > 0) {
-            /* M-5 fix: Cap at 100% to prevent overflow on counter wrap */
-            uint32_t raw = 100U * s->eval_cache_hit_count / s->eval_count;
+            uint32_t raw = (uint32_t)((uint64_t)100 * s->eval_cache_hit_count / s->eval_count);
             pct = (uint8_t)(raw > 100 ? 100 : raw);
         }
         buf[pos++] = pct;
@@ -344,8 +343,8 @@ int dclaw_cbor_decode_verdict_response_enriched(const uint8_t *buf, size_t len,
             if (major == 2 || major == 3) {
                 uint64_t str_len;
                 size_t hdr = cbor_decode_uint(buf + pos, len - pos, &str_len);
-                if (hdr > 0 && pos + hdr + str_len <= len) {
-                    size_t copy_len = str_len < (evidence_size - 1) ? str_len : (evidence_size - 1);
+                if (hdr > 0 && str_len <= (uint64_t)(len - pos - hdr) && pos + hdr + (size_t)str_len <= len) {
+                    size_t copy_len = (size_t)str_len < (evidence_size - 1) ? (size_t)str_len : (evidence_size - 1);
                     memcpy(evidence, buf + pos + hdr, copy_len);
                     evidence[copy_len] = '\0';
                 }

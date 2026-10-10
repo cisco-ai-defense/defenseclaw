@@ -1024,19 +1024,21 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// H-4 fix: Check device existence BEFORE inserting into the rate-limit map.
+	// Previously, non-existent device IDs would create entries in
+	// deviceKeyRotations, causing unbounded map growth from scanning attacks.
+	_, ok := a.manager.GetDevice(deviceID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
+		return
+	}
+
 	a.rotationMu.Lock()
 	if lastRot, exists := a.deviceKeyRotations[deviceID]; exists && time.Since(lastRot) < time.Minute {
 		a.rotationMu.Unlock()
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
 			"error": "device key rotation rate limited — try again in 1 minute",
 		})
-		return
-	}
-
-	_, ok := a.manager.GetDevice(deviceID)
-	if !ok {
-		a.rotationMu.Unlock()
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
 		return
 	}
 

@@ -127,10 +127,12 @@ def _build_remote(target: str, user: str, remote_dir: str, profile: str) -> bool
     """Run cmake && make && sudo make install on the remote device."""
     ux.echo()
     ux.section("Building on remote device")
+    safe_dir = shlex.quote(remote_dir)
+    safe_profile = shlex.quote(profile)
     build_script = (
-        f"cd {remote_dir} && "
+        f"cd {safe_dir} && "
         f"mkdir -p build && cd build && "
-        f"cmake .. -DDCLAW_PROFILE={profile} -DDCLAW_DEV_MODE=OFF && "
+        f"cmake .. -DDCLAW_PROFILE={safe_profile} -DDCLAW_DEV_MODE=OFF && "
         f"make -j$(nproc) && "
         f"sudo make install"
     )
