@@ -194,6 +194,12 @@ type MigrationRecord struct {
 	RenamedRules       []string `json:"renamed_rules,omitempty"`
 	ExpressedRules     []string `json:"expressed_rules,omitempty"`
 	WholeArgumentRules []string `json:"whole_argument_rules,omitempty"`
+	// RulePackRebaseFailures names each 0.8.x custom pack whose 1.0 copy
+	// could not be made, and why. It is pinned as it is, so its rules that
+	// blocked a tool call with a pattern alone only record the match. The
+	// upgrade, doctor and an audit alert at each gateway start name it until
+	// the record is acknowledged (GAP-1358).
+	RulePackRebaseFailures []string `json:"rule_pack_rebase_failures,omitempty"`
 	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
 	// refuses to start (a command path or a program other than npx or uvx
 	// with a package). They keep running without a scan. The Python upgrade
@@ -494,6 +500,16 @@ func MigratedFrom(configPath, sourceSHA256, installedSHA256 string) bool {
 func MigratedSource(configPath, sourceSHA256 string) bool {
 	record, ok := readMigrationRecord(configPath)
 	return ok && !record.Pending && strings.EqualFold(record.SourceSHA256, sourceSHA256)
+}
+
+// UnrebasedRulePacks returns the RulePackRebaseFailures of the committed
+// migration recorded next to configPath, until it is acknowledged.
+func UnrebasedRulePacks(configPath string) []string {
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.Pending || record.Acknowledged {
+		return nil
+	}
+	return record.RulePackRebaseFailures
 }
 
 // MigratedFromV8 returns the source digest of the committed config_version
@@ -2383,8 +2399,12 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 			// change, such as two rule files of one category (GAP-1339).
 			return "", "", fmt.Errorf("custom rule pack %s: %w", dir, err)
 		}
-		m.note("%s could not be rebased on the 1.0 default pack (%v): it is pinned as it is, and its rules without an "+
-			"expression only record tool-call matches; doctor counts them", dir, err)
+		failure := fmt.Sprintf("%s could not be rebased on the 1.0 default pack (%v). It is pinned as it is, so its "+
+			"0.8.x copies of built-in rules and its rules without an expression no longer block a tool call, they "+
+			"only record the match: copy policies/guardrail/default to a new folder, add your rules with an "+
+			"expression, then run defenseclaw guardrail use-pack <folder>", dir, err)
+		m.record.RulePackRebaseFailures = append(m.record.RulePackRebaseFailures, failure)
+		m.note("%s", failure)
 		return clean, digest, nil
 	}
 	if plan == nil {

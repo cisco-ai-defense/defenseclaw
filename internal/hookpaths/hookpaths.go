@@ -24,6 +24,41 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+const maxWriteTargetLinkDepth = 16
+
+// resolveWritePath follows existing links, including a link whose final file
+// does not exist yet. A shell redirect can create that final file. Resolve
+// the parent separately so links in directory components are covered too.
+func resolveWritePath(path string, linkDepth int) (string, bool) {
+	if linkDepth > maxWriteTargetLinkDepth || !filepath.IsAbs(path) {
+		return "", false
+	}
+	path = filepath.Clean(path)
+	info, err := os.Lstat(path)
+	if err != nil && !os.IsNotExist(err) {
+		return "", false
+	}
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		link, err := os.Readlink(path)
+		if err != nil {
+			return "", false
+		}
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(filepath.Dir(path), link)
+		}
+		return resolveWritePath(link, linkDepth+1)
+	}
+	parent := filepath.Dir(path)
+	if parent == path {
+		return path, true
+	}
+	resolvedParent, ok := resolveWritePath(parent, linkDepth)
+	if !ok {
+		return "", false
+	}
+	return filepath.Join(resolvedParent, filepath.Base(path)), true
+}
+
 // Resolve returns a bounded, header-safe map from absolute write operands to
 // their filesystem targets. An empty value means resolution was attempted but
 // could not be trusted. A regular file maps to itself.
@@ -98,20 +133,11 @@ func Resolve(payload []byte) string {
 		if _, present := targets[path]; !present {
 			writeCount++
 		}
-		_, statErr := os.Lstat(path)
-		resolved, err := filepath.EvalSymlinks(path)
-		if os.IsNotExist(err) && os.IsNotExist(statErr) {
-			// A new regular file has no leaf to resolve; its existing parent
-			// still may be a symlink into a protected directory.
-			parent, parentErr := filepath.EvalSymlinks(filepath.Dir(path))
-			if parentErr == nil {
-				resolved, err = filepath.Join(parent, filepath.Base(path)), nil
-			}
-		}
-		if err != nil || statErr != nil && !os.IsNotExist(statErr) {
+		resolved, ok := resolveWritePath(path, 0)
+		if !ok {
 			targets[path] = ""
 		} else {
-			targets[path] = filepath.Clean(resolved)
+			targets[path] = resolved
 		}
 	}
 	encoded, err := json.Marshal(targets)

@@ -3423,6 +3423,11 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
                 f"{', '.join(detection_only)}; add an expression, see policies/rules",
                 indent="    ",
             )
+        # GAP-1358: a custom pack whose 1.0 copy could not be made is pinned
+        # as it is, and its pattern-only rules no longer block a tool call.
+        for failure in record.get("rule_pack_rebase_failures") or []:
+            if isinstance(failure, str) and failure.isprintable():
+                ux.warn(failure, indent="    ")
         # GAP-1314/GAP-1344: name each rule of the operator's the rebase kept
         # blocking (a renamed built-in by both IDs), and the ones that block
         # less than on 0.8.x.

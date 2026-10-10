@@ -51,7 +51,7 @@ func TestRebasePreservesBuiltInRuleEdits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rebased, err := rebaseRuleFile(index.defaultFiles["command"], source.Bytes(), "command", &RulePackRebase{})
+	rebased, err := rebaseRuleFile(index.defaultFiles["command"], source.Bytes(), "command", map[string]bool{}, &RulePackRebase{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 		t.Fatal(err)
 	}
 	plan := &RulePackRebase{}
-	rebased, err := rebaseRuleFile(index.defaultFiles["command"], source.Bytes(), "command", plan)
+	rebased, err := rebaseRuleFile(index.defaultFiles["command"], source.Bytes(), "command", map[string]bool{}, plan)
 	if err != nil {
 		t.Fatal(err)
 	}

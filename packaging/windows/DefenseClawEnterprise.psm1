@@ -14005,7 +14005,17 @@ function Recover-DefenseClawQuiescingIntent {
         # that stripped NT SERVICE\DefenseClawGateway from runtime and etc
         # made every service restart fail here, so the transaction stayed
         # pending and every repair, ensure and uninstall failed the same way
-        # (GAP-0920). Put the deployment's access back first.
+        # (GAP-0920). Put the deployment's access back first, but only
+        # for a config that no standard user could have edited: resetting
+        # a user-writable config's ACL would turn its bytes into trusted
+        # policy and start the gateway with them (GAP-1357). Refuse with
+        # the services stopped and the intent left in place.
+        try {
+            Assert-DefenseClawRepairableConfigAcl -Layout $Layout
+        }
+        catch {
+            throw "refusing to recover the pending lifecycle transaction: $($_.Exception.Message). The DefenseClaw services stay stopped and the transaction stays pending. Remove the non-administrator write access, check config.yaml, and run the repair again."
+        }
         $recoveryGatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
         Set-DefenseClawRetainedRuntimeAcls `
             -RuntimeDirectory $Layout.RuntimeDirectory `

@@ -66,6 +66,59 @@ try {
             throw 'refused repair changed the config ACL'
         }
 
+        # Recovering a quiescing intent must refuse the same config: putting
+        # the canonical ACL back and restarting would trust the user's edits.
+        $id = [Guid]::NewGuid().ToString('N')
+        $layout.InstallRoot = [IO.Path]::Combine($State, 'install')
+        $layout.TransactionsDirectory = [IO.Path]::Combine($State, 'transactions')
+        $layout.PendingPath = [IO.Path]::Combine($State, 'pending.json')
+        $layout.GatewayPath = [IO.Path]::Combine($State, 'install', 'defenseclaw-gateway.exe')
+        $layout.ManifestPath = [IO.Path]::Combine($State, 'targets.yaml')
+        $layout.CertificationCodexHome = ''
+        $layout.CoreHardeningCertification = $false
+        $layout.BrokerEnabled = $false
+        $intent = [pscustomobject]@{
+            schema_version = 1
+            phase = 'quiescing'
+            id = $id
+            install_root = $layout.InstallRoot
+            state_root = $State
+            gateway_service = 'DefenseClawGateway'
+            guardian_service = 'DefenseClawHookGuardian'
+            certification_codex_home = ''
+            core_hardening_certification = $false
+            prior_deployment_active = $true
+            directory = [IO.Path]::Combine($layout.TransactionsDirectory, $id)
+            services = @(
+                [pscustomobject]@{ name = 'DefenseClawGateway'; existed = $true; running = $true },
+                [pscustomobject]@{ name = 'DefenseClawHookGuardian'; existed = $true; running = $true }
+            )
+        }
+        [IO.File]::WriteAllText($layout.PendingPath, '{}')
+        $script:started = 0
+        function Assert-DefenseClawOwnedServiceOrAbsent { }
+        function Test-DefenseClawServiceExists { return $true }
+        function Set-DefenseClawServiceStartMode { }
+        function Stop-DefenseClawService { }
+        function Set-DefenseClawServiceActivationPhase { }
+        function Test-DefenseClawStandaloneProfile { return $true }
+        function Start-DefenseClawTransactionServices { $script:started++ }
+        $recoveryError = ''
+        try {
+            Recover-DefenseClawQuiescingIntent `
+                -Intent $intent -Layout $layout `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian'
+        }
+        catch {
+            $recoveryError = $_.Exception.Message
+        }
+        if ($recoveryError -notmatch 'refusing to recover the pending lifecycle transaction' -or
+            $script:repairCalls -ne 0 -or $script:started -ne 0 -or
+            -not [IO.File]::Exists($layout.PendingPath)) {
+            throw "quiescing recovery trusted a user-writable config: '$recoveryError', ACL calls $($script:repairCalls), starts $($script:started)"
+        }
+
         # Trusted inherited ACL drift still permits the existing recovery path.
         Set-DefenseClawPathAcl -Path $Config -Kind ConfigFile -GatewayServiceSID $sid
         $trusted = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Config

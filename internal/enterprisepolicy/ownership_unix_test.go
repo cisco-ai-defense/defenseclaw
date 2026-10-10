@@ -24,7 +24,52 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
+
+type fakePublishedACLReader func(string, os.FileMode) (posixacl.View, error)
+
+func (f fakePublishedACLReader) Read(path string, mode os.FileMode) (posixacl.View, error) {
+	return f(path, mode)
+}
+
+// GAP-1363: mode 0644 can hide an owning-group and named-user read denial.
+func TestVerifyPublishedFileChecksEffectiveLinuxACL(t *testing.T) {
+	withHigherSources(t)
+	opts := publishTestOptions(t)
+	if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := loadRecord(opts, "claudecode")
+	if err != nil || record == nil {
+		t.Fatalf("published record: %v %v", record, err)
+	}
+	acl, err := posixacl.ParseGetfacl("user::rw-\nuser:54321:---\ngroup::---\nmask::r--\nother::r--\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := publishedACLReader
+	t.Cleanup(func() { publishedACLReader = previous })
+	publishedACLReader = fakePublishedACLReader(func(path string, mode os.FileMode) (posixacl.View, error) {
+		if path == record.Path {
+			return acl, nil
+		}
+		return posixacl.View{}, nil
+	})
+	result, err := VerifyAll(opts, []string{"claudecode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range result.States {
+		if state.Connector == "claudecode" {
+			if state.Covered || !hasConflict(state, "group::---") || !hasConflict(state, "user:54321:---") {
+				t.Fatalf("published file ACL denial was missed: %+v", state)
+			}
+			return
+		}
+	}
+	t.Fatal("missing Claude Code verification state")
+}
 
 // Every user's agent reads machine policy, so a policy file DefenseClaw
 // published is 0644. An administrator who tightens one (0600 on

@@ -5099,16 +5099,40 @@ def unset_mcp_server(
         return
     if name_n == "claudecode":
         path = claude_mcp_state_path()
+        legacy_path = claude_legacy_mcp_settings_path()
         try:
-            # Every location the reader merges, so no copy is left to list
-            # or scan (GAP-1340): the 0.8.x settings.json block, the other
-            # .claude.json, then the file mcp set writes (which may refuse an
-            # entry DefenseClaw no longer owns).
-            _remove_claude_legacy_mcp_server(name)
-            for other in claude_user_config_paths():
-                if os.path.normcase(other) != os.path.normcase(path):
-                    _unset_claudecode_mcp_server(other, name)
-            outcome = _unset_claudecode_mcp_server(path, name)
+            # Validate both active-profile targets before changing either.
+            # Discovery can also read the default profile, but an override
+            # must never delete another profile's MCP entry (GAP-1364).
+            with _locked_claude_mcp_mutation(path):
+                state_raw = _read_regular_bytes_if_present(path)
+                _parse_claude_settings(path, state_raw)
+                _load_claude_mcp_envelope(path)
+                metadata_path = _claude_mcp_ownership_path(path)
+                metadata_raw = _read_regular_bytes_if_present(metadata_path)
+            with _locked_claude_mcp_mutation(legacy_path):
+                legacy_raw = _read_regular_bytes_if_present(legacy_path)
+                _parse_claude_settings(legacy_path, legacy_raw)
+
+            legacy_changed = _remove_claude_legacy_mcp_server(name)
+            legacy_written = _read_regular_bytes_if_present(legacy_path) if legacy_changed else None
+            try:
+                outcome = _unset_claudecode_mcp_server(path, name)
+            except BaseException:
+                if legacy_changed:
+                    # A state write may have published before its final
+                    # metadata step failed. Restore both active files and
+                    # their ownership journal while their locks are held.
+                    with _locked_claude_mcp_mutation(path):
+                        current_state = _read_regular_bytes_if_present(path)
+                        current_metadata = _read_regular_bytes_if_present(metadata_path)
+                        if current_state != state_raw:
+                            _publish_claude_config_if_unchanged(path, current_state, state_raw)
+                        if current_metadata != metadata_raw:
+                            _publish_claude_config_if_unchanged(metadata_path, current_metadata, metadata_raw)
+                    with _locked_claude_mcp_mutation(legacy_path):
+                        _publish_claude_config_if_unchanged(legacy_path, legacy_written, legacy_raw)
+                raise
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
         return MCP_PRIOR_RESTORED if outcome == MCP_PRIOR_RESTORED else None

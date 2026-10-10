@@ -21,7 +21,14 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
+
+type fakeJSONLACLReader func(string, os.FileMode) (posixacl.View, error)
+
+func (f fakeJSONLACLReader) Read(path string, mode os.FileMode) (posixacl.View, error) {
+	return f(path, mode)
+}
 
 func TestManagedConfigRefusalsHideDiagnosticCodes(t *testing.T) {
 	h := newTestHost(t, "linux")
@@ -239,6 +246,34 @@ func TestManagedConfigRefusesJSONLUnderUnwritableAncestor(t *testing.T) {
 	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: events\n      kind: jsonl\n      path: " + path + "\n"
 	if got := installMessage(t, h, raw); !strings.Contains(got, "exports") || !strings.Contains(got, "cannot create") {
 		t.Fatalf("missing JSONL parent accepted or unclear refusal: %s", got)
+	}
+}
+
+// GAP-1362: an existing parent must be writable by the gateway account.
+func TestManagedConfigRefusesJSONLUnderExistingUnwritableParent(t *testing.T) {
+	h := newTestHost(t, "linux")
+	parent := "/var/log/defenseclaw/reports"
+	if err := os.MkdirAll(h.env.P(parent), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	account, err := h.accounts.Ensure(t.Context(), h.env.Layout.ServiceUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.owners[h.env.P(parent)] = [2]int{0, 0}
+	previous := jsonlACLReader
+	t.Cleanup(func() { jsonlACLReader = previous })
+	jsonlACLReader = fakeJSONLACLReader(func(path string, mode os.FileMode) (posixacl.View, error) {
+		if path == h.env.P(parent) {
+			return posixacl.View{Present: true, Owner: 7, Group: 5, Other: 5, Mask: 5,
+				Users: []posixacl.Entry{{Kind: "user", ID: account.UID, Perm: 0}}}, nil
+		}
+		return posixacl.View{}, nil
+	})
+	path := parent + "/events.jsonl"
+	raw := string(DefaultConfig(h.env.Layout)) + "observability:\n  destinations:\n    - name: events\n      kind: jsonl\n      path: " + path + "\n"
+	if got := installMessage(t, h, raw); !strings.Contains(got, "gateway service account") || !strings.Contains(got, "reports") {
+		t.Fatalf("existing JSONL parent accepted or unclear refusal: %s", got)
 	}
 }
 

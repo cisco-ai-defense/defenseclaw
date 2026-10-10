@@ -158,12 +158,21 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			// prepare that failed half way is not left for a hand clean-up (GAP-0263),
 			// and a missing one is reported with the Setup command that installs it.
 			reprepareInstalledWindowsScannerRuntime(result)
-			return
+		} else {
+			if err := installWindowsScannerRuntime(source, opts); err != nil {
+				result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
+			}
+			result.Scanners = windowsScannerRuntimeReader()
 		}
-		if err := installWindowsScannerRuntime(source, opts); err != nil {
-			result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
+		// A ready runtime the gateway service cannot run blocks every scan
+		// as a missing one does, so the run fails as verify does; before,
+		// an ensure with no other drift reported success (GAP-1361).
+		if result.Scanners != nil && result.Scanners.State == "ready" &&
+			!windowsEnterpriseResultHasError(result, "scanner_runtime_unavailable") {
+			if message := windowsScannerRuntimeServiceProblem(); message != "" {
+				result.AddError("scanner_runtime_unavailable", message)
+			}
 		}
-		result.Scanners = readWindowsScannerRuntime()
 	case "uninstall":
 		if len(result.Errors) != 0 {
 			return
@@ -182,11 +191,10 @@ func applyWindowsStandaloneScannerRuntime(result *enterprisestatus.Result, opts 
 			message := ""
 			if result.Scanners.State != "ready" {
 				message = windowsScannerRuntimeUnavailable(result.Scanners.State)
-			} else if err := windowsScannerRuntimeServiceCheck(); err != nil {
+			} else {
 				// Prepared, but not as the gateway service runs it: every
 				// scan failed while status and verify said ok (GAP-0686).
-				message = "the skill, MCP and plugin scanner runtime is prepared but the gateway service cannot run it (" + err.Error() +
-					"), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed); run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair"
+				message = windowsScannerRuntimeServiceProblem()
 			}
 			if message != "" {
 				if result.Action == "verify" {
@@ -354,6 +362,27 @@ func windowsEnterpriseResultHasWarning(result *enterprisestatus.Result, code str
 	return false
 }
 
+func windowsEnterpriseResultHasError(result *enterprisestatus.Result, code string) bool {
+	for _, message := range result.Errors {
+		if message.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsScannerRuntimeServiceProblem says why the gateway service cannot
+// run a prepared scanner runtime, or "" when it can.
+func windowsScannerRuntimeServiceProblem() string {
+	err := windowsScannerRuntimeServiceCheck()
+	if err == nil {
+		return ""
+	}
+	return "the skill, MCP and plugin scanner runtime is prepared but the gateway service cannot run it (" + err.Error() +
+		"), so every skill, MCP server and plugin install is blocked (scanner failure, fail-closed); " +
+		"restore the access it names, then run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair"
+}
+
 // windowsScannerRuntimeUnavailable says what a scanner runtime that is not
 // ready blocks and what restores it.
 func windowsScannerRuntimeUnavailable(state string) string {
@@ -376,8 +405,9 @@ func windowsScannerRuntimeUnavailable(state string) string {
 // alone. A missing one can only come from a Setup payload, which this run
 // does not have, so it is reported.
 func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
-	current := readWindowsScannerRuntime()
+	current := windowsScannerRuntimeReader()
 	if current.State == "ready" {
+		result.Scanners = current
 		return
 	}
 	if current.State == "missing" || current.State == "untrusted" {
@@ -399,7 +429,7 @@ func reprepareInstalledWindowsScannerRuntime(result *enterprisestatus.Result) {
 	if err != nil {
 		result.AddError("scanner_runtime_unavailable", windowsScannerRuntimePrepareFailed(err))
 	}
-	result.Scanners = readWindowsScannerRuntime()
+	result.Scanners = windowsScannerRuntimeReader()
 }
 
 // windowsScannerRuntimePrepareFailed is the error of a lifecycle run whose
