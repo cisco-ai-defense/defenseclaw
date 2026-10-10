@@ -192,6 +192,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			Connector:                     "claudecode",
 			EnforcementCapable:            true,
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
+			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
 			record:                        toolChainRecorderFromContext(ctx),
 		}, command, commandTool)
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
