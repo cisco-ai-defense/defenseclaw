@@ -130,7 +130,7 @@ installed. Every path keeps your configuration and data.
 - `defenseclaw upgrade` on 0.8.7 or older, and on Windows, stops with a message
   such as `missing release-provenance.json; refusing before services are
   stopped`. Nothing was changed; use the install command instead.
-- `observability.local.retention_days` now defaults to `7` days (0.8.x defaulted to `90`); run `defenseclaw config set observability.local.retention_days 90` to restore the old window.
+- Local audit retention (`observability.local.retention_days`) now defaults to 7 days (90 days in 0.8.x); restore 90 days by setting `observability.local.retention_days: 90` in `config.yaml` or running `defenseclaw config set observability.local.retention_days 90`.
 - The installer imports the 0.x install in place. Installs older than 0.8.5 get
   the schema-v8 observability conversion that `0.8.5` introduced, and an
   installed local observability bundle is refreshed.

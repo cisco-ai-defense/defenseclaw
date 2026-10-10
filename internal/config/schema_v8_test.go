@@ -165,6 +165,14 @@ func TestConfigV8SchemaMatchesTypedObservabilitySourceFields(t *testing.T) {
 }
 
 func TestConfigV8SchemaRetentionDefaultIsSevenDays(t *testing.T) {
+	compiled, err := compileObservabilityV8Local(ObservabilityV8LocalSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.RetentionDays != 7 {
+		t.Fatalf("compiled default retention = %d days, want 7", compiled.RetentionDays)
+	}
+
 	var schema map[string]any
 	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
 		t.Fatal(err)
