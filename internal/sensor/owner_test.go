@@ -42,13 +42,13 @@ func TestSessionOwnerEvidenceKeepsDistinctClaudeProfiles(t *testing.T) {
 			Path: path, At: at,
 		})
 	}
-	pids, evidence := sessionOwnerEvidence(99, session.Observations())
+	refs, evidence := sessionOwnerEvidence(procprobe.KeyOf(99, time.Time{}), "claude", at, session.Observations())
 	if len(evidence) != 2 ||
 		(evidence[0] != paths[0] && evidence[1] != paths[0]) ||
 		(evidence[0] != paths[1] && evidence[1] != paths[1]) {
 		t.Fatalf("config path evidence = %v, want both profiles", evidence)
 	}
-	got := newOwnerResolver(ownerTestLookups(), nil).resolve(pids, evidence)
+	got := resolverFor(ownerTestLookups(), nil, at).resolve(refs, evidence)
 	if got.Attribution != AttributionUnattributed || got.User != "" || got.SID != "" {
 		t.Fatalf("owner = %+v, want ambiguous and unattributed", got)
 	}
