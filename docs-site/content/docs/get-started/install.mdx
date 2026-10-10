@@ -352,14 +352,30 @@ Linux, `--binaries` removes `defenseclaw`, `defenseclaw-gateway`,
 `skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`,
 `mcp-scanner-api` and `litellm`) from `~/.local/bin`, and the `uv` and `uvx`
 an installer added there while they are unchanged; with `--all`, what that uv
-downloaded goes too. The 0.8.x installer kept no record of
-the uv, the uv cache (`~/.cache/uv`) or the `~/.sigstore` folder it added, so
-the upgrade from 0.8.x records them only when the evidence shows that
-installer put them there: uv's install receipt names `~/.local/bin` and the
-uv version there, and was written at most ten minutes before the 0.8.x
-install, and `~/.sigstore` holds only the public Sigstore cache, unused since,
-with no `cosign` on your `PATH`. A `uv`, uv cache or `~/.sigstore` of your
-own stays.
+downloaded goes too. The 0.8.x installer kept no record of the uv, the uv
+cache (`~/.cache/uv`) or the `~/.sigstore` folder it added, and it used a uv
+you already had, so the upgrade from 0.8.x records them only when all of this
+shows that installer put them there:
+
+- uv's install receipt (`~/.config/uv/uv-receipt.json`) names `~/.local/bin`,
+  only `uv` and `uvx`, and the uv version that `~/.local/bin/uv` reports and
+  that made the 0.8.x Python environment, and was written at most ten minutes
+  before that environment.
+- `uv` and `uvx` are your own regular files, not links.
+- Nothing in `~/.cache/uv` is older than the receipt, every package in it was
+  downloaded after the 0.8.x Python environment was made and is one that
+  environment holds (DefenseClaw among them), and uv has no tools installed.
+- For `~/.sigstore`: it holds only the public Sigstore cache, unused since,
+  and no `cosign` is on your `PATH`.
+
+`uninstall --all --binaries` then removes the recorded `uv` and `uvx` while
+they are unchanged, `~/.cache/uv` when nothing in it changed since the
+upgrade, and `~/.config/uv` when it holds only that receipt. uv's Python
+folder (`~/.local/share/uv/python`) always stays, since other tools can use
+it. When the evidence is missing, or you updated or replaced `uv` since, the
+uninstall plan and its result name what stays (`uv`, `uvx`, `~/.cache/uv`,
+`~/.config/uv`) as not recorded as installed by DefenseClaw: remove them
+yourself if DefenseClaw added them.
 
 Uninstall also removes DefenseClaw's OpenShell sandboxes and images. When
 Docker or OpenShell is gone or broken, add `--skip-sandbox-teardown` to leave
