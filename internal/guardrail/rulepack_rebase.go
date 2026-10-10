@@ -181,8 +181,9 @@ type RulePackRebase struct {
 	// Updated counts the built-in rules replaced by their 1.0 versions.
 	Updated int
 	// Carried names the operator's own rules carried into rebuilt files,
-	// Expressed the operator's own rules given an expression (a literal
-	// pattern, as an argument of a command), AlertOnly the enabled ones that
+	// Expressed the operator's own rules, and the built-in rules whose
+	// pattern they changed, given an expression (a literal pattern, as an
+	// argument of a command), AlertOnly the enabled ones that
 	// still have none and only record a tool call's match, and Disabled the
 	// built-in rules the copy had removed.
 	Carried, Expressed, AlertOnly, Disabled []string
@@ -384,7 +385,11 @@ func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebas
 		switch {
 		case builtin[id] != nil:
 			plan.Updated++
-			preserveRuleEdits(builtin[id], item, legacyRules[id])
+			if preserveRuleEdits(builtin[id], item, legacyRules[id]) {
+				// The operator's own 0.8.x regex blocked on its own; derive
+				// its expression or name it as alert-only (GAP-1314).
+				expressOwnRule(builtin[id], plan)
+			}
 		case slices.Contains(default08RuleIDs[category], id):
 			plan.Updated++ // a 0.8.x rule 1.0 no longer ships
 		default:
@@ -471,7 +476,9 @@ func encodeRuleFile(document *yaml.Node) ([]byte, error) {
 // preserveRuleEdits applies only fields the operator changed against the
 // shipped 0.8.x rule. Fields added in 1.0, including semantic expressions,
 // remain on the new rule unless the operator explicitly supplied a value.
-func preserveRuleEdits(current, custom, legacy *yaml.Node) {
+// It reports whether the operator changed the pattern without giving an
+// expression: the rule then has no expression and needs one of its own.
+func preserveRuleEdits(current, custom, legacy *yaml.Node) (ownPattern bool) {
 	if legacy == nil {
 		legacy = &yaml.Node{Kind: yaml.MappingNode}
 	}
@@ -489,6 +496,7 @@ func preserveRuleEdits(current, custom, legacy *yaml.Node) {
 	_, customHasExpression := yamlField(custom, "expression")
 	if !yamlValuesEqual(customPattern, customHasPattern, legacyPattern, legacyHasPattern) && !customHasExpression {
 		removeYAMLField(current, "expression")
+		ownPattern = true
 	}
 	for key := range keys {
 		if key == "id" {
@@ -505,6 +513,7 @@ func preserveRuleEdits(current, custom, legacy *yaml.Node) {
 		}
 		setYAMLField(current, key, oldValue)
 	}
+	return ownPattern
 }
 
 func yamlField(mapping *yaml.Node, key string) (*yaml.Node, bool) {
