@@ -164,6 +164,23 @@ func TestConfigV8SchemaMatchesTypedObservabilitySourceFields(t *testing.T) {
 	}
 }
 
+func TestConfigV8SchemaRetentionDefaultIsSevenDays(t *testing.T) {
+	var schema map[string]any
+	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	definitions := schema["$defs"].(map[string]any)
+	localStore := definitions["localStore"].(map[string]any)
+	properties := localStore["properties"].(map[string]any)
+	retentionDays, ok := properties["retention_days"].(map[string]any)
+	if !ok {
+		t.Fatal("observability.local.retention_days is absent from canonical schema")
+	}
+	if got := retentionDays["default"]; got != float64(7) {
+		t.Fatalf("observability.local.retention_days default = %v, want 7", got)
+	}
+}
+
 func TestConfigV8SchemaRetentionMaximumMatchesCompiler(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
