@@ -24,7 +24,10 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
-const maxWriteTargetLinkDepth = 16
+// maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
+// one path resolution. Every followed link counts, also in parent components,
+// so a link loop ends here and reports an unresolvable target.
+const maxWriteTargetLinkDepth = 40
 
 // resolveWritePath follows existing links, including a link whose final file
 // does not exist yet. A shell redirect can create that final file. Resolve
@@ -59,9 +62,55 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 	return filepath.Join(resolvedParent, filepath.Base(path)), true
 }
 
+// protectedFile is the identity of the user's authorized_keys file. A hard
+// link elsewhere names the same file under another path, so a target is
+// compared by file identity (device and inode on Unix, volume serial and file
+// index on Windows) and not by pathname alone.
+type protectedFile struct {
+	path    string
+	info    os.FileInfo
+	unknown bool
+}
+
+func newProtectedFile(home string) protectedFile {
+	protected := protectedFile{path: filepath.Join(home, ".ssh", "authorized_keys")}
+	info, err := os.Stat(protected.path)
+	switch {
+	case err == nil:
+		protected.info = info
+	case !os.IsNotExist(err):
+		protected.unknown = true
+	}
+	return protected
+}
+
+// target maps a resolved write target to the protected path when both name
+// the same file. When the protected file cannot be identified, a multiply
+// linked target may be an alias of it and is reported as unresolvable.
+func (p protectedFile) target(resolved string) (string, bool) {
+	if p.info == nil && !p.unknown {
+		return resolved, true
+	}
+	info, err := os.Stat(resolved)
+	if err != nil || !info.Mode().IsRegular() {
+		return resolved, true
+	}
+	if p.info != nil {
+		if os.SameFile(info, p.info) {
+			return p.path, true
+		}
+		return resolved, true
+	}
+	if linkCount(resolved, info) > 1 {
+		return "", false
+	}
+	return resolved, true
+}
+
 // Resolve returns a bounded, header-safe map from absolute write operands to
 // their filesystem targets. An empty value means resolution was attempted but
-// could not be trusted. A regular file maps to itself.
+// could not be trusted. A regular file maps to itself, unless it is a hard
+// link to the user's authorized_keys file.
 func Resolve(payload []byte) string {
 	var envelope map[string]json.RawMessage
 	if len(payload) > 1<<20 || json.Unmarshal(payload, &envelope) != nil {
@@ -106,6 +155,7 @@ func Resolve(payload []byte) string {
 		}
 	}
 	targets := map[string]string{CWDKey: cwd}
+	protected := newProtectedFile(home)
 	writeCount := 0
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
@@ -134,6 +184,9 @@ func Resolve(payload []byte) string {
 			writeCount++
 		}
 		resolved, ok := resolveWritePath(path, 0)
+		if ok {
+			resolved, ok = protected.target(resolved)
+		}
 		if !ok {
 			targets[path] = ""
 		} else {
