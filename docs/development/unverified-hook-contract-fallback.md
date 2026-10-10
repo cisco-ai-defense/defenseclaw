@@ -5,9 +5,9 @@
 The Unix enterprise hook guardian historically rejected an action-mode target
 when the discovered agent version was empty, malformed, outside every registered
 range, or different from the persisted hook-contract lock. That made version
-discovery a hard prerequisite for installation even though the Codex and Claude
-connectors can render and structurally verify a reviewed hook configuration
-without an exact version match.
+discovery a hard prerequisite for installation even though version-gated hook
+connectors such as Codex, Claude Code, and Cursor can render and structurally
+verify a reviewed hook configuration without an exact version match.
 
 The result was a worse protection state: no hook was installed, so the runtime
 hook failure policy could never run. This is the failure behind macOS targets
@@ -70,7 +70,8 @@ deny; this change does not turn action mode into observe mode.
 ## Verification
 
 - Unit-test missing, malformed, and below-minimum versions selecting the
-  best-effort contract with fail-open.
+  best-effort contract with fail-open, including installer coverage for Codex,
+  Claude Code, and Cursor.
 - Unit-test same-contract patch-version drift retaining fail-closed.
 - Unit-test cross-contract drift using fail-open for the first reconciliation.
 - Unit-test the explicit drift override retaining the configured mode.

@@ -330,6 +330,45 @@ func TestInstallUnversionedClaudeCodeUsesBestEffortFailOpenContract(t *testing.T
 	}
 }
 
+func TestInstallUnversionedCursorUsesBestEffortFailOpenContract(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	home := newTestHome(t)
+
+	result, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "cursor",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "cursor-test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("Install unversioned Cursor: %v", err)
+	}
+	if result.HookContractID != "cursor-hooks-v1" {
+		t.Fatalf("HookContractID=%q want cursor-hooks-v1", result.HookContractID)
+	}
+	lock := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "cursor")
+	if lock.CompatibilityStatus != connector.HookCompatibilityUnversioned {
+		t.Fatalf("CompatibilityStatus=%q want unversioned", lock.CompatibilityStatus)
+	}
+	if lock.HookFailMode != "open" {
+		t.Fatalf("HookFailMode=%q want open", lock.HookFailMode)
+	}
+	hooks, err := os.ReadFile(filepath.Join(home, ".cursor", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read Cursor hooks: %v", err)
+	}
+	if !strings.Contains(string(hooks), "cursor-hook.sh") {
+		t.Fatalf("Cursor hooks do not contain DefenseClaw hook: %s", hooks)
+	}
+}
+
 func TestInstallContractDriftFallsOpenThenPromotesAfterVerification(t *testing.T) {
 	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
