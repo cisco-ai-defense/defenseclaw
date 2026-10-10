@@ -277,6 +277,7 @@ def quickstart_cmd(
     report = run_first_run(
         FirstRunOptions(
             connector=connector,
+            rerun_command=f"defenseclaw quickstart --connector {connector}",
             connector_settings=[{"connector": connector}],
             profile=profile,
             scanner_mode=scanner_mode,
@@ -330,46 +331,12 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
     must leave the sidecar running. Promote only those warnings before
     rendering so human output, JSON, and the process exit status agree.
     """
-    from defenseclaw.bootstrap import _rollup_status
+    from defenseclaw.bootstrap import _rollup_status, remediate_unwritable_sidecar
 
     if gateway_requested:
-        settings_failure = any(
-            step.name == "Sidecar"
-            and step.status in {"warn", "fail"}
-            and (
-                "settings.json" in step.detail
-                or (
-                    "connector claudecode setup failed" in step.detail.lower()
-                    and "claudecode settings hooks" in step.detail.lower()
-                    and any(
-                        failure in step.detail.lower()
-                        for failure in ("operation not permitted", "permission denied", "read-only")
-                    )
-                )
-            )
-            for step in report.setup
+        remediate_unwritable_sidecar(
+            report, command=f"defenseclaw quickstart --connector {report.connector}"
         )
-        if settings_failure:
-            from defenseclaw.connector_paths import claude_config_dir
-
-            settings_path = os.path.join(claude_config_dir(), "settings.json")
-            repair = (
-                f"Make {settings_path} writable or ask your administrator, "
-                "then rerun defenseclaw quickstart --connector claudecode"
-            )
-            for step in report.setup + report.readiness:
-                if step.name == "Sidecar":
-                    step.status = "fail"
-                    step.detail = (
-                        f"Claude Code settings file {settings_path} cannot be written. "
-                        "Make it writable or ask your administrator, then rerun quickstart."
-                    )
-                    step.next_command = ""
-            report.next_commands = [repair] + [
-                command for command in report.next_commands
-                if command not in {"defenseclaw-gateway status", "defenseclaw-gateway start"}
-                and "in a minute" not in command.lower()
-            ]
         for step in report.setup + report.readiness:
             if step.name in {"Connector", "Connector runtime", "Sidecar"} and step.status == "warn":
                 step.status = "fail"
