@@ -40,7 +40,7 @@ import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import urlparse
@@ -322,6 +322,7 @@ class _StdioLaunchPlan:
     args: tuple[str, ...]
     env: dict[str, str]
     launcher: str
+    cwd: str | None = None
 
 
 class _ContainedWindowsProcess:
@@ -999,6 +1000,7 @@ async def _scan_windows_stdio_tools(
                     command=plan.command,
                     args=list(plan.args),
                     env=plan.env,
+                    cwd=plan.cwd,
                 )
                 # Keep transport, session, and all protocol messages in this
                 # task. The child remains attached through tools/list and the
@@ -1207,6 +1209,10 @@ class MCPScannerWrapper:
         # ``_llm`` is the canonical internal view. Prefer the explicit
         # ``llm=`` arg; fall back to inspect_llm's translated shape.
         self._llm: LLMConfig = llm if llm is not None else _inspect_to_llm(self.inspect_llm)
+        # Folder a local Windows stdio server starts in. Only the managed
+        # scanner runtime sets it, to the folder the gateway checked
+        # (GAP-1317); otherwise the server starts in this process's folder.
+        self.stdio_cwd = ""
 
     def name(self) -> str:
         return "mcp-scanner"
@@ -1472,6 +1478,8 @@ class MCPScannerWrapper:
 
         if os.name == "nt":
             plan = _windows_stdio_launch_plan(entry)
+            if self.stdio_cwd:
+                plan = replace(plan, cwd=self.stdio_cwd)
             errors: list[tuple[str, str]] = []
             try:
                 with _capture_sdk_error_logs(errors):

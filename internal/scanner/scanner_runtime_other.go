@@ -6,6 +6,8 @@
 
 package scanner
 
+import "os"
+
 // resolveScannerRuntime keeps binary: the embedded scanner runtime ships
 // only in the standalone Windows enterprise payload.
 func resolveScannerRuntime(binary string, _ ...string) string {
@@ -14,3 +16,6 @@ func resolveScannerRuntime(binary string, _ ...string) string {
 
 // Other platforms have no managed scanner runtime to preflight.
 func scannerRuntimePreflight(_ string, _ ...string) error { return nil }
+
+// fileInfoIsReparsePoint: links are os.ModeSymlink on these platforms.
+func fileInfoIsReparsePoint(os.FileInfo) bool { return false }

@@ -6,6 +6,8 @@ package scanner
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -119,7 +121,7 @@ func TestMCPRuntimeStdioEntry(t *testing.T) {
 		Config: config.MCPScannerConfig{Binary: "defenseclaw-scanners.exe"},
 		ServerEntry: &config.MCPServerEntry{
 			Name: "local", Command: "npx", Args: []string{"-y", "example-mcp"},
-			Env: map[string]string{"MODE": "test"}, CWD: "C:/workspace",
+			Env: map[string]string{"MODE": "test"},
 		},
 	}
 	args, err := mcp.commandArgs("local")
@@ -154,8 +156,52 @@ func TestMCPRuntimeStdioEntry(t *testing.T) {
 	}
 	if entry.Name != "local" || entry.Command != "npx" ||
 		!reflect.DeepEqual(entry.Args, []string{"-y", "example-mcp"}) ||
-		entry.Env["MODE"] != "test" || entry.CWD != "C:/workspace" {
+		entry.Env["MODE"] != "test" || entry.CWD != "" {
 		t.Fatalf("stdio entry lost launch fields: %+v", entry)
+	}
+}
+
+// GAP-1317: the runtime starts a project's server in its cwd, else in the
+// project, never in the gateway's folder; a cwd that leaves the project and
+// the user's home through a link is not used.
+func TestMCPRuntimeServerWorkDir(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := filepath.Join(base, "home"), filepath.Join(base, "outside")
+	project := filepath.Join(home, "project")
+	sub := filepath.Join(project, "server")
+	for _, dir := range []string{sub, outside} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(project, "link")
+	linked := os.Symlink(outside, link) == nil
+	for _, tc := range []struct{ cwd, want string }{
+		{"", project}, {sub, sub}, {"server", project}, {outside, project}, {link, project},
+	} {
+		if tc.cwd == link && !linked {
+			continue
+		}
+		mcp := &MCPScanner{ServerEntry: &config.MCPServerEntry{Name: "local", Command: "uvx",
+			Args: []string{"example-mcp"}, CWD: tc.cwd, Project: project, Home: home}}
+		input, err := mcp.runtimeInput()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload struct {
+			ServerEntry struct {
+				CWD string `json:"cwd"`
+			} `json:"server_entry"`
+		}
+		if err := json.Unmarshal(input, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.ServerEntry.CWD != tc.want {
+			t.Fatalf("cwd %q: server starts in %q, want %q", tc.cwd, payload.ServerEntry.CWD, tc.want)
+		}
 	}
 }
 
