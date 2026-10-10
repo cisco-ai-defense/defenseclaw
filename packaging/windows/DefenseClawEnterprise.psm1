@@ -897,24 +897,113 @@ namespace $nativeNamespace
             return driveTarget;
         }
 
+        // Opens a file for a metadata query (no data access). A runtime file
+        // the gateway created with its own private DACL grants Administrators
+        // nothing, so an elevated repair could not even read its link count
+        // and exited 1603 (GAP-1220). On access denied the open is retried
+        // once with backup semantics and SeBackupPrivilege enabled for that
+        // call only; a directory opened that way is still refused, as before.
+        private static IntPtr OpenFileMetadataHandle(
+            string path,
+            uint flags,
+            string failure)
+        {
+            const uint FILE_SHARE_ALL = 0x00000007;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+            const int ERROR_ACCESS_DENIED = 5;
+            const int ERROR_NOT_ALL_ASSIGNED = 1300;
+            const uint TOKEN_ADJUST_PRIVILEGES = 0x00000020;
+            const uint TOKEN_QUERY = 0x00000008;
+            const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+            IntPtr invalid = new IntPtr(-1);
+            IntPtr handle = CreateFileW(
+                path, 0, FILE_SHARE_ALL, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
+            if (handle != invalid)
+                return handle;
+            int error = Marshal.GetLastWin32Error();
+            IntPtr token;
+            LUID backupLuid;
+            if (error != ERROR_ACCESS_DENIED ||
+                !LookupPrivilegeValueW(null, "SeBackupPrivilege", out backupLuid) ||
+                !OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                    out token))
+                throw new Win32Exception(error, failure + path);
+            try
+            {
+                TOKEN_PRIVILEGES enabled = new TOKEN_PRIVILEGES();
+                enabled.PrivilegeCount = 1;
+                enabled.Privileges.Luid = backupLuid;
+                enabled.Privileges.Attributes = SE_PRIVILEGE_ENABLED;
+                TOKEN_PRIVILEGES previous;
+                uint previousLength;
+                if (!AdjustTokenPrivileges(
+                        token,
+                        false,
+                        ref enabled,
+                        checked((uint)Marshal.SizeOf(typeof(TOKEN_PRIVILEGES))),
+                        out previous,
+                        out previousLength))
+                    throw new Win32Exception(error, failure + path);
+                bool held = Marshal.GetLastWin32Error() != ERROR_NOT_ALL_ASSIGNED;
+                try
+                {
+                    if (held)
+                    {
+                        handle = CreateFileW(
+                            path,
+                            0,
+                            FILE_SHARE_ALL,
+                            IntPtr.Zero,
+                            OPEN_EXISTING,
+                            flags | FILE_FLAG_BACKUP_SEMANTICS,
+                            IntPtr.Zero);
+                    }
+                }
+                finally
+                {
+                    if (!RestoreTokenPrivileges(
+                            token,
+                            false,
+                            ref previous,
+                            0,
+                            IntPtr.Zero,
+                            IntPtr.Zero))
+                    {
+                        int restoreError = Marshal.GetLastWin32Error();
+                        if (handle != invalid)
+                            CloseHandle(handle);
+                        throw new Win32Exception(
+                            restoreError,
+                            "restore installer token privileges failed");
+                    }
+                }
+                if (handle == invalid)
+                    throw new Win32Exception(error, failure + path);
+                BY_HANDLE_FILE_INFORMATION information;
+                if (!GetFileInformationByHandle(handle, out information) ||
+                    (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                {
+                    CloseHandle(handle);
+                    throw new Win32Exception(error, failure + path);
+                }
+                return handle;
+            }
+            finally
+            {
+                CloseHandle(token);
+            }
+        }
+
         public static string GetFileIdentity(string path)
         {
-            const uint FILE_SHARE_READ = 0x00000001;
-            const uint FILE_SHARE_WRITE = 0x00000002;
-            const uint FILE_SHARE_DELETE = 0x00000004;
-            const uint OPEN_EXISTING = 3;
-            IntPtr handle = CreateFileW(
+            IntPtr handle = OpenFileMetadataHandle(
                 path,
                 0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                IntPtr.Zero,
-                OPEN_EXISTING,
-                0,
-                IntPtr.Zero);
-            if (handle == new IntPtr(-1))
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "open file for identity failed: " + path);
+                "open file for identity failed: ");
             try
             {
                 BY_HANDLE_FILE_INFORMATION information;
@@ -953,25 +1042,13 @@ namespace $nativeNamespace
 
         public static uint GetRegularFileLinkCountNoFollow(string path)
         {
-            const uint FILE_SHARE_READ = 0x00000001;
-            const uint FILE_SHARE_WRITE = 0x00000002;
-            const uint FILE_SHARE_DELETE = 0x00000004;
-            const uint OPEN_EXISTING = 3;
             const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
             const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
             const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
-            IntPtr handle = CreateFileW(
+            IntPtr handle = OpenFileMetadataHandle(
                 path,
-                0,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                IntPtr.Zero,
-                OPEN_EXISTING,
                 FILE_FLAG_OPEN_REPARSE_POINT,
-                IntPtr.Zero);
-            if (handle == new IntPtr(-1))
-                throw new Win32Exception(
-                    Marshal.GetLastWin32Error(),
-                    "open regular file for link-count query failed: " + path);
+                "open regular file for link-count query failed: ");
             try
             {
                 BY_HANDLE_FILE_INFORMATION information;
@@ -2171,9 +2248,22 @@ function Assert-DefenseClawDescendant {
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Label
     )
+    # An exact (\\?\) path, the form Get-DefenseClawExactItemPath gives a
+    # name ending in a dot or a space, is kept as it is: GetFullPath leaves
+    # it alone, and it is compared to the root without its prefix. Such a
+    # path is never normalized, so a '.' or '..' segment in it is refused.
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-    if (-not $full.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    $comparable = $full
+    if ($full.StartsWith('\\?\')) {
+        $comparable = $full.Substring(4)
+        if (@($comparable.Split('\') | Microsoft.PowerShell.Core\Where-Object {
+                    $_ -ceq '.' -or $_ -ceq '..'
+                }).Count -ne 0) {
+            throw "$Label escapes its managed root: $full"
+        }
+    }
+    if (-not $comparable.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw "$Label escapes its managed root: $full"
     }
     return $full
@@ -4648,6 +4738,7 @@ $script:ServiceStopTimeoutSeconds = 30
 # Each service process a standalone lifecycle ended because it did not
 # answer a stop, as "<service> (pid <n>)", for the result.
 $script:DefenseClawTerminatedServiceProcesses = @()
+$script:DefenseClawSkippedRuntimeFiles = @()
 
 function Wait-DefenseClawServiceStopped {
     param(
@@ -6675,8 +6766,12 @@ function Set-DefenseClawRetainedRuntimeAcls {
                 -LiteralPath $directory `
                 -Force `
                 -ErrorAction Stop)) {
+            # Every object is named by its exact path from here on: Win32
+            # normalization turns a quarantined skill 'rev.' or 'rev ' into
+            # 'rev', which does not exist, and repair stopped with "managed
+            # path is missing" (GAP-1221). Ordinary names keep their path.
             $full = Assert-DefenseClawDescendant `
-                -Path $item.FullName `
+                -Path (Get-DefenseClawExactItemPath -Path ([string]$item.FullName)) `
                 -Root $root `
                 -Label 'retained runtime object'
             if (-not $seen.Add($full)) {
@@ -6698,15 +6793,28 @@ function Set-DefenseClawRetainedRuntimeAcls {
                 $pending.Push($full)
                 continue
             }
-            $linkCount = [uint32]$nativeSecurity::GetRegularFileLinkCountNoFollow($full)
-            if ($linkCount -ne 1) {
-                throw "refusing retained runtime file with $linkCount hard links: $full"
-            }
             $isRedactionKey = [string]::Equals(
                 $full,
                 $redactionKeyPath,
                 [StringComparison]::OrdinalIgnoreCase
             )
+            try {
+                $linkCount = [uint32]$nativeSecurity::GetRegularFileLinkCountNoFollow($full)
+            }
+            catch {
+                # A file nobody here can open is left as it is and named in
+                # the result (GAP-1220), unless it is the audit database or
+                # the redaction key: those keep the hard-link refusal.
+                if ($isRedactionKey -or
+                    ([string]$item.Name).StartsWith('audit.db', [StringComparison]::OrdinalIgnoreCase)) {
+                    throw
+                }
+                $script:DefenseClawSkippedRuntimeFiles += $full
+                continue
+            }
+            if ($linkCount -ne 1) {
+                throw "refusing retained runtime file with $linkCount hard links: $full"
+            }
             if ($isRedactionKey -and [int64]$item.Length -ne 32) {
                 throw "retained redaction correlation key has an invalid fixed length: $full"
             }
@@ -19685,6 +19793,9 @@ function Get-DefenseClawLifecycleStatus {
         if (@($script:DefenseClawTerminatedServiceProcesses).Count -gt 0) {
             $status['terminated_service_processes'] = [string[]]@($script:DefenseClawTerminatedServiceProcesses)
         }
+        if (@($script:DefenseClawSkippedRuntimeFiles).Count -gt 0) {
+            $status['skipped_runtime_files'] = [string[]]@($script:DefenseClawSkippedRuntimeFiles)
+        }
         # Which gateway this run's pending-transaction recovery ran, and why.
         $recoveryRuns = @(Get-DefenseClawRecoveryGatewayRunRecords)
         if ($recoveryRuns.Count -gt 0) {
@@ -26205,6 +26316,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $script:DefenseClawQuarantinedRoots = @()
     $script:DefenseClawSquattedRootNotes = @()
     $script:DefenseClawTerminatedServiceProcesses = @()
+    $script:DefenseClawSkippedRuntimeFiles = @()
     Set-DefenseClawRecoveryGatewayCandidate `
         -GatewayBinary $GatewayBinary `
         -InstallerSource $InstallerSource `
