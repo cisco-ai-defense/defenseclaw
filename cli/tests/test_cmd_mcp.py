@@ -1636,6 +1636,41 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertIn("write surface unsupported", result.output)
         self.assertNotIn("failed [", result.output)
 
+    def test_devin_folder_a_managed_install_hardened_is_used_or_refused_plainly(self):
+        # GAP-1243: a managed install left %APPDATA%\devin with a read-only
+        # OWNER RIGHTS entry, so the account could not re-protect it and
+        # ``mcp set --connector devin`` ended in a Python traceback.
+        from defenseclaw import file_permissions as fp
+
+        me = "S-1-5-21-1-2-3-1001"
+        entries = [
+            (0x00020000, 1, 0, "S-1-3-4"),  # OWNER RIGHTS: read control only
+            (0x001301BF, 1, 0x03, me),  # the account: Modify
+            (0x001F01FF, 1, 0x03, "S-1-5-18"),
+            (0x001F01FF, 1, 0x03, "S-1-5-32-544"),
+        ]
+        with (
+            patch.object(fp.os, "name", "nt"),
+            patch.object(fp, "_windows_current_user_sid", return_value=me),
+            patch.object(fp, "_windows_acl_snapshot", side_effect=lambda _path: (me, False, entries)),
+            patch.object(fp, "_windows_dacl_is_protected", return_value=True),
+            patch.object(fp, "_set_windows_owner_only_acl", side_effect=PermissionError(13, "Access is denied")),
+        ):
+            fp._protect_private_directory("devin")  # private to the account and Windows: used as it is
+            entries.append((0x001301BF, 1, 0x03, "S-1-5-11"))  # Authenticated Users: Modify
+            with self.assertRaises(PermissionError) as refused:
+                fp._protect_private_directory("devin")
+
+        refused.exception.filename = "mcp_config.json"
+        self.app.cfg.active_connectors = lambda: ["devin"]  # type: ignore[method-assign]
+        with patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector", side_effect=refused.exception):
+            result = self.invoke(["set", "wpx", "--url", "https://x/mcp", "--skip-scan", "--connector", "devin"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("MCP server 'wpx' was not saved for devin: could not write mcp_config.json", result.output)
+        self.assertIn("cannot protect private directory devin", result.output)
+        self.assertNotIn("Traceback", result.output)
+
     @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
     def test_unset_isolates_unexpected_write_failure_and_exits_nonzero(self, mock_unset):
         # Symmetric with mcp set: an unexpected removal failure on one connector
