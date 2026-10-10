@@ -994,6 +994,12 @@ func prepareHookContract(mode string, conn connector.Connector, opts connector.S
 		return connector.SetupOpts{}, err
 	}
 	if incompatible {
+		if strictManagedRuntime {
+			return connector.SetupOpts{}, fmt.Errorf(
+				"enterprise hooks: connector %s hook contract drift detected",
+				conn.Name(),
+			)
+		}
 		opts.HookFailMode = "open"
 	}
 	return opts, nil
@@ -1052,8 +1058,9 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	return err
 }
 
-// hookContractsIncompatible reports whether current evidence requires a
-// best-effort fail-open transition instead of the configured delivery mode.
+// hookContractsIncompatible reports whether current evidence requires the
+// platform-specific drift policy: fail-open on Unix or rejection on managed
+// Windows.
 func hookContractsIncompatible(previous, current connector.HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false

@@ -41,6 +41,9 @@ whose `agent_version` is empty even though the native application is present.
   retain the bounded, identity-stable managed lock reader and runtime hasher in
   every guardrail mode. The Unix fallback must not widen the Windows managed
   file-read trust boundary.
+- A native Windows managed target whose selected contract is incompatible with
+  its persisted lock must reject Install or Verify preparation. It must not
+  convert contract drift into the Unix fail-open fallback in any guardrail mode.
 
 ## Design
 
@@ -70,8 +73,9 @@ is eligible to return to the configured failure mode.
 The preparation helper is also shared by native Windows callers. Windows
 managed targets keep their existing fail-closed contract behavior and use the
 strict bounded managed lock reader and runtime hasher for both action and
-non-action guardrail modes. Non-strict Unix paths retain the established
-permissive lock and digest behavior.
+non-action guardrail modes. Contract incompatibility remains a hard error for
+those Windows managed callers. Non-strict Unix paths retain the established
+permissive lock and digest behavior and use fail-open for incompatible locks.
 
 Fail-open applies only to hook delivery, authentication, timeout, and malformed
 response failures. A successfully delivered DefenseClaw deny verdict remains a
@@ -87,6 +91,8 @@ deny; this change does not turn action mode into observe mode.
 - Unit-test the explicit drift override retaining the configured mode.
 - Unit-test native Windows managed action and non-action preparation rejecting
   oversized lock and hook-runtime artifacts through the strict bounded readers.
+- Unit-test native Windows managed action and non-action preparation rejecting
+  contract drift while unmanaged preparation retains the Unix fail-open path.
 - Run focused connector and enterprise-hook installer tests.
 
 ## Top-level documentation impact

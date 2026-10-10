@@ -113,6 +113,30 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 				t.Fatalf("unmanaged runtime validation changed: %v", err)
 			}
 		})
+
+		t.Run("contract drift "+guardrailMode, func(t *testing.T) {
+			opts := newOpts(t.TempDir())
+			if err := connector.SaveHookContractLockEntry(opts.DataDir, connector.HookContractLockEntry{
+				Connector:           conn.Name(),
+				ContractID:          "claudecode-hooks-incompatible",
+				CompatibilityStatus: connector.HookCompatibilityKnown,
+			}); err != nil {
+				t.Fatalf("seed incompatible contract lock: %v", err)
+			}
+
+			err := validateHookContract(guardrailMode, conn, opts)
+			if err == nil || !strings.Contains(err.Error(), "enterprise hooks: connector claudecode hook contract drift detected") {
+				t.Fatalf("managed contract validation error = %v, want drift rejection", err)
+			}
+			opts.ManagedEnterprise = false
+			prepared, err := prepareHookContract(guardrailMode, conn, opts)
+			if err != nil {
+				t.Fatalf("unmanaged contract preparation changed: %v", err)
+			}
+			if prepared.HookFailMode != "open" {
+				t.Fatalf("unmanaged HookFailMode = %q, want open", prepared.HookFailMode)
+			}
+		})
 	}
 }
 
