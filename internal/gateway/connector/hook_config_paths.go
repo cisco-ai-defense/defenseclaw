@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -181,7 +183,17 @@ func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
 
 // OwnedHooksPresentContext is the cancellable form used by managed guardians
 // when a connector's effective policy check may perform bounded external work.
+// A registration that still holds an edited DefenseClaw entry next to the
+// working set is not present either (ownedHookConfigHoldsEditedEntry).
 func OwnedHooksPresentContext(ctx context.Context, conn Connector, opts SetupOpts) (bool, error) {
+	present, err := ownedHookRegistrationPresent(ctx, conn, opts)
+	if err != nil || !present {
+		return present, err
+	}
+	return !ownedHookConfigHoldsEditedEntry(conn, opts), nil
+}
+
+func ownedHookRegistrationPresent(ctx context.Context, conn Connector, opts SetupOpts) (bool, error) {
 	if inspector, ok := conn.(ownedHookContractContextInspector); ok {
 		return inspector.ownedHookContractPresentContext(ctx, opts)
 	}
@@ -211,6 +223,19 @@ func OwnedHooksPresentContext(ctx context.Context, conn Connector, opts SetupOpt
 func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 	paths := HookConfigPathsForConnector(conn, opts)
 	if len(paths) == 0 {
+		return true, nil
+	}
+	if hookOnly, ok := conn.(*hookOnlyConnector); ok && hookOnly.rendersExactHookEntries() {
+		for _, path := range paths {
+			decoded, err := decodeHookConfigFile(path)
+			if err != nil {
+				return false, err
+			}
+			document, _ := decoded.(map[string]interface{})
+			if !hookOnly.renderedHookEntriesPresent(opts, document) {
+				return false, nil
+			}
+		}
 		return true, nil
 	}
 	needles := ownedHookCommandNeedles(opts, conn)
@@ -381,12 +406,22 @@ func OwnedHookConfigReferences(conn Connector, opts SetupOpts) ([]string, error)
 // the guard re-installs. Any other read error is surfaced so the guard can log
 // and skip rather than heal on incomplete information.
 func configFileReferencesHook(path string, needles []string) (bool, error) {
+	decoded, err := decodeHookConfigFile(path)
+	if err != nil || decoded == nil {
+		return false, err
+	}
+	return structuredHookCommandReferences(decoded, needles), nil
+}
+
+// decodeHookConfigFile parses the JSON, YAML or TOML hook config at path. A
+// missing file, or one of another kind (a JavaScript plugin), decodes to nil.
+func decodeHookConfigFile(path string) (interface{}, error) {
 	data, err := readHookConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return false, nil
+			return nil, nil
 		}
-		return false, err
+		return nil, err
 	}
 	var decoded interface{}
 	switch strings.ToLower(filepath.Ext(path)) {
@@ -394,21 +429,212 @@ func configFileReferencesHook(path string, needles []string) (bool, error) {
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		decoder.UseNumber()
 		if err := decoder.Decode(&decoded); err != nil {
-			return false, fmt.Errorf("parse hook config %s: %w", path, err)
+			return nil, fmt.Errorf("parse hook config %s: %w", path, err)
 		}
 	case ".yaml", ".yml":
 		if err := yaml.Unmarshal(data, &decoded); err != nil {
-			return false, fmt.Errorf("parse hook config %s: %w", path, err)
+			return nil, fmt.Errorf("parse hook config %s: %w", path, err)
 		}
 	case ".toml":
 		if err := ParseCodexTOML(data, &decoded); err != nil {
-			return false, fmt.Errorf("parse hook config %s: %w", path, err)
+			return nil, fmt.Errorf("parse hook config %s: %w", path, err)
 		}
 	}
-	if decoded != nil {
-		return structuredHookCommandReferences(decoded, needles), nil
+	return decoded, nil
+}
+
+// rendersExactHookEntries reports whether conn's presence check compares its
+// hook config entry by entry with what Setup renders
+// (renderedHookEntriesPresent). Matching any one owned command was not
+// enough: with one of Hermes' 23 entries (or one Copilot event) edited, the
+// other 22 still matched, so the hook guard never repaired the file and the
+// edited event ran unguarded (GAP-0906).
+func (c *hookOnlyConnector) rendersExactHookEntries() bool {
+	switch c.name {
+	case "hermes", "copilot", "antigravity":
+		return true
 	}
-	return false, nil
+	return false
+}
+
+// renderedHookEntriesPresent reports whether document holds exactly the hook
+// entries Setup renders for c: each event's entry once, built by the same
+// functions Setup writes with, and no other entry that Setup's reconcile
+// claims as DefenseClaw's (an edited script path or name, a misplaced or
+// duplicate entry). Entries Setup does not claim, the user's own hooks, are
+// ignored. Every entry that fails the check is one Setup replaces, so a heal
+// always converges.
+func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document map[string]interface{}) bool {
+	if document == nil {
+		return false
+	}
+	hookCommand := c.hookCommand(opts)
+	hooks, _ := document["hooks"].(map[string]interface{})
+	switch c.name {
+	case "hermes":
+		command := hermesConfiguredHookCommand(hookCommand, opts.HookExecutable)
+		recognized := hermesRecognizedHookCommands(command)
+		want := make(map[string]interface{}, len(hermesRequiredHooks))
+		for _, spec := range hermesRequiredHooks {
+			want[spec.event] = hermesHookEntry(command, spec.matcher)
+		}
+		return hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
+			command, _ := hermesHookEntryCommand(entry)
+			return hermesReplaceableHookCommand(command, recognized)
+		})
+	case "copilot":
+		events := c.copilotHookEvents(opts)
+		want := make(map[string]interface{}, len(events))
+		for _, event := range events {
+			want[event] = copilotHookRegistration(runtime.GOOS, event, hookCommand)
+		}
+		edited := hookScriptBaseName(hookCommand)
+		return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
+			if _, registered := want[event]; registered {
+				return managedHookCommandEntry(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited)
+			}
+			return slices.Contains(copilotCurrentHookEvents, event) &&
+				(containsHookScript(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited))
+		})
+	case "antigravity":
+		// Setup rewrites each DefenseClaw-owned outer key whole.
+		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand) {
+			if !sameHookJSON(document[key], rendered) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// hookEventEntriesMatch checks an agent's event -> handler-list hook map
+// against the entries Setup renders (want): every event in want holds its
+// entry exactly once, and no event holds another entry claims marks as
+// DefenseClaw's.
+func hookEventEntriesMatch(
+	hooks map[string]interface{},
+	want map[string]interface{},
+	claims func(event string, entry interface{}) bool,
+) bool {
+	for event, rendered := range want {
+		entries, ok := hooks[event].([]interface{})
+		if !ok {
+			return false
+		}
+		exact := 0
+		for _, entry := range entries {
+			if exact == 0 && sameHookJSON(entry, rendered) {
+				exact++
+				continue
+			}
+			if claims(event, entry) {
+				return false
+			}
+		}
+		if exact != 1 {
+			return false
+		}
+	}
+	for event, raw := range hooks {
+		if _, registered := want[event]; registered {
+			continue
+		}
+		entries, ok := raw.([]interface{})
+		if !ok {
+			entries = []interface{}{raw}
+		}
+		for _, entry := range entries {
+			if claims(event, entry) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// sameHookJSON compares a decoded hook entry with a rendered one by their
+// JSON form, so a YAML int, a JSON number and a Go int of the same value are
+// equal.
+func sameHookJSON(left, right interface{}) bool {
+	a, errA := json.Marshal(left)
+	b, errB := json.Marshal(right)
+	return errA == nil && errB == nil && bytes.Equal(a, b)
+}
+
+// ownedHookConfigHoldsEditedEntry reports whether one of conn's hook config
+// files holds a DefenseClaw hook entry whose script path was edited (its
+// script name, hook directory or data directory) next to the working set.
+// The agent runs that entry too, and it fails on every call: Copilot denied
+// every tool call, Claude Code blocked every prompt (GAP-0906, GAP-0907).
+// Setup's reconcile replaces such an entry, so reporting the registration
+// absent lets the hook guard heal the file within seconds. Windows registers
+// native launcher commands, which never have the edited-script shape.
+func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	owner, ok := conn.(HookScriptOwner)
+	if !ok {
+		return false
+	}
+	for _, configPath := range HookConfigPathsForConnector(conn, opts) {
+		decoded, err := decodeHookConfigFile(configPath)
+		if err != nil || decoded == nil {
+			// The connector's own check already read this file.
+			continue
+		}
+		for _, name := range owner.HookScriptNames(opts) {
+			if hookDocumentHoldsEditedEntry(decoded, opts.DataDir, name) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hookDocumentHoldsEditedEntry is the rule the doctor's edited_hook_problems
+// applies (cli/defenseclaw/hook_integrity.py; both read
+// testdata/hook_edited_entries.json): a command or bash string whose script
+// word has DefenseClaw's hook shape for scriptName
+// (editedDefenseClawHookCommand), lies under the data directory's parent and
+// is not the script Setup registers. Claude Code's missing-script guard is
+// unwrapped first.
+func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName string) bool {
+	dataDir = filepath.ToSlash(filepath.Clean(dataDir))
+	current := path.Join(dataDir, "hooks", scriptName)
+	home := strings.TrimSuffix(path.Dir(dataDir), "/") + "/"
+	for _, command := range hookCommandStrings(document) {
+		command = claudeCodeUnguardedHookCommand(strings.TrimSpace(command))
+		if !editedDefenseClawHookCommand(command, scriptName) {
+			continue
+		}
+		if word, _, ok := posixHookCommandSplit(command); ok && word != current && strings.HasPrefix(word, home) {
+			return true
+		}
+	}
+	return false
+}
+
+// hookCommandStrings returns every string under a command or bash key of a
+// decoded hook config.
+func hookCommandStrings(raw interface{}) []string {
+	var found []string
+	switch value := raw.(type) {
+	case map[string]interface{}:
+		for key, item := range value {
+			if command, ok := item.(string); ok && (key == "command" || key == "bash") {
+				found = append(found, command)
+				continue
+			}
+			found = append(found, hookCommandStrings(item)...)
+		}
+	case []interface{}:
+		for _, item := range value {
+			found = append(found, hookCommandStrings(item)...)
+		}
+	}
+	return found
 }
 
 func structuredHookCommandReferences(raw interface{}, needles []string) bool {

@@ -15,6 +15,8 @@ package procprobe
 import (
 	"os"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
 
 func TestWMIProcessOwnerForCurrentProcess(t *testing.T) {
@@ -22,6 +24,29 @@ func TestWMIProcessOwnerForCurrentProcess(t *testing.T) {
 	owner, ok := lookupWMIProcessOwners(map[uint32]int{pid: 0})[pid]
 	if !ok || owner.name == "" || owner.sid == "" {
 		t.Fatalf("Win32_Process.GetOwnerSid returned no owner for pid %d: %+v", pid, owner)
+	}
+}
+
+// GAP-1250: the kernel's process list names each process's session without
+// a handle to it, and it agrees with ProcessIdToSessionId for this process.
+func TestProcessSessionsNamesTheSessionOfThisProcess(t *testing.T) {
+	pid := uint32(os.Getpid())
+	var want uint32
+	if err := windows.ProcessIdToSessionId(pid, &want); err != nil {
+		t.Skipf("ProcessIdToSessionId: %v", err)
+	}
+	sessions := processSessions()
+	if got, ok := sessions[pid]; !ok || got != want {
+		t.Fatalf("processSessions()[%d] = %d (%v), want session %d", pid, got, ok, want)
+	}
+	rows, _, err := snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.PID == int(pid) && row.SessionID != want {
+			t.Fatalf("snapshot row session = %d, want %d", row.SessionID, want)
+		}
 	}
 }
 

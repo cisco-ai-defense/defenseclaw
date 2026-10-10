@@ -594,7 +594,7 @@ def edited_hook_script(command: str, script_name: str) -> str:
     clean script path whose name is the connector's script name, possibly
     edited around ".sh" (copilot-hookX.sh), under a .defenseclaw directory,
     or the exact name under an edited DefenseClaw data directory, alone or
-    with ``--event``. Setup replaces such entries; doctor reports the ones
+    with ``--event`` or ``--hook-surface``. Setup replaces such entries; doctor reports the ones
     that are not the current command (GAP-0906, GAP-0907).
     """
 
@@ -612,7 +612,7 @@ def edited_hook_script(command: str, script_name: str) -> str:
         or posixpath.normpath(word) != word
     ):
         return ""
-    if rest and not rest.startswith(" --event "):
+    if rest and not rest.startswith((" --event ", " --hook-surface ")):
         return ""
     base = posixpath.basename(word)
     if not base.startswith(stem):

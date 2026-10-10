@@ -3616,6 +3616,23 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     detail = state
                     if sub == "guardrail" and isinstance(details, dict):
                         detail += f" ({_guardrail_health_mode(details)})"
+                    if (
+                        sub == "telemetry"
+                        and isinstance(details, dict)
+                        and details.get("optional_destination_state") == "degraded"
+                    ):
+                        # An optional destination (a jsonl file whose folder the
+                        # gateway cannot reach) fails while local history keeps
+                        # working: warn, it recovers without a restart (GAP-1265).
+                        summary = str(details.get("optional_destination_failure_summary") or "").strip()
+                        _emit(
+                            "warn",
+                            f"  └─ {sub}",
+                            f"{state}, optional destination failing: {summary or 'see gateway /health'}; "
+                            "the gateway retries it and the gateway log names the path",
+                            r=r,
+                        )
+                        continue
                     _emit("pass", f"  └─ {sub}", detail, r=r)
                 elif normalized_state in ("disabled", "stopped"):
                     # Cross-check the sidecar's view against on-disk

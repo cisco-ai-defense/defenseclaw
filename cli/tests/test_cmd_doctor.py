@@ -3482,6 +3482,33 @@ class TestLegacySandboxDoctor(unittest.TestCase):
         self.assertEqual(sandbox["status"], "warn")
         self.assertIn("legacy-cleanup", sandbox["detail"])
 
+    def test_failing_optional_destination_warns_on_running_telemetry(self):
+        # A jsonl destination the gateway cannot reach yet runs deferred: warn,
+        # do not pass or fail (GAP-1265).
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {
+                "state": "running",
+                "details": {
+                    "optional_destination_state": "degraded",
+                    "optional_destination_failure_summary": "rv13:degraded:file_write_failed",
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(health)),
+            ):
+                _check_sidecar(self._cfg(data_dir, legacy=False), result)
+        telemetry = next(row for row in result.checks if row.get("label", "").strip().endswith("telemetry"))
+        self.assertEqual(telemetry["status"], "warn", telemetry)
+        self.assertIn("rv13:degraded:file_write_failed", telemetry["detail"])
+
     def test_openshell_sandbox_running_is_not_a_stale_sidecar(self):
         # openshell.enabled makes the gateway run the sandbox subsystem; its
         # "running" must not read as a stale sidecar or drive restarts.

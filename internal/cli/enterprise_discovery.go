@@ -125,13 +125,17 @@ type enterpriseDiscoveryReport struct {
 // enterpriseRuntimeView is the part of GET /api/v1/ai-usage/runtime an
 // administrator needs: plane health, the last poll and the findings.
 type enterpriseRuntimeView struct {
-	Gateway         string                     `json:"gateway"`
-	Enabled         bool                       `json:"enabled"`
-	ScannedAt       string                     `json:"scanned_at,omitempty"`
-	Planes          []enterpriseRuntimePlane   `json:"planes"`
-	Findings        []enterpriseRuntimeFinding `json:"findings"`
-	Degraded        bool                       `json:"degraded"`
-	DegradedReasons []string                   `json:"degraded_reasons,omitempty"`
+	Gateway   string                     `json:"gateway"`
+	Enabled   bool                       `json:"enabled"`
+	ScannedAt string                     `json:"scanned_at,omitempty"`
+	Planes    []enterpriseRuntimePlane   `json:"planes"`
+	Findings  []enterpriseRuntimeFinding `json:"findings"`
+	// UnattributedFindings are, under --user, the host-wide findings no
+	// lookup tied to an account: listed and counted apart from the
+	// account's own findings, never as anyone's (GAP-1250).
+	UnattributedFindings []enterpriseRuntimeFinding `json:"unattributed_findings,omitempty"`
+	Degraded             bool                       `json:"degraded"`
+	DegradedReasons      []string                   `json:"degraded_reasons,omitempty"`
 }
 
 type enterpriseRuntimePlane struct {
@@ -144,14 +148,18 @@ type enterpriseRuntimePlane struct {
 }
 
 type enterpriseRuntimeFinding struct {
-	PID       int    `json:"pid"`
-	Process   string `json:"process"`
-	User      string `json:"user,omitempty"`
-	UserSID   string `json:"user_sid,omitempty"`
-	AgentName string `json:"agent_name,omitempty"`
-	Score     int    `json:"score"`
-	Severity  string `json:"severity"`
-	LastSeen  string `json:"last_seen,omitempty"`
+	PID     int    `json:"pid"`
+	Process string `json:"process"`
+	User    string `json:"user,omitempty"`
+	UserSID string `json:"user_sid,omitempty"`
+	// Attribution is how the gateway tied the finding to user;
+	// "unattributed" marks a host-wide finding (GAP-1250).
+	Attribution       string `json:"attribution,omitempty"`
+	AttributionReason string `json:"attribution_reason,omitempty"`
+	AgentName         string `json:"agent_name,omitempty"`
+	Score             int    `json:"score"`
+	Severity          string `json:"severity"`
+	LastSeen          string `json:"last_seen,omitempty"`
 }
 
 // runtimeCommand is the running discovery command, for the config load.
@@ -491,14 +499,22 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 	} else if view != nil {
 		if user != "" {
 			// The owner SID identifies local and domain names without relying
-			// on the spelling returned by the process token or WTS.
-			// Secure Client keeps the exact --user match of main (issue #1092).
+			// on the spelling returned by the process token or WTS. A finding
+			// no lookup tied to an account matches no account: it is listed
+			// apart, as host-wide (GAP-1250). Secure Client keeps the exact
+			// --user match of main (issue #1092).
 			secureClient := cfg != nil && cfg.SecureClientIntegration()
 			accountFilter := useridentity.NewAccountFilter(user, enterpriseDiscoveryAccountIDs(user)...)
-			findings := view.Findings[:0]
+			findings := []enterpriseRuntimeFinding{}
 			for _, finding := range view.Findings {
-				if (secureClient && strings.EqualFold(finding.User, user)) ||
-					(!secureClient && accountFilter.Matches(finding.UserSID, finding.User)) {
+				switch {
+				case secureClient:
+					if strings.EqualFold(finding.User, user) {
+						findings = append(findings, finding)
+					}
+				case runtimeFindingUnattributed(finding):
+					view.UnattributedFindings = append(view.UnattributedFindings, finding)
+				case accountFilter.Matches(finding.UserSID, finding.User):
 					findings = append(findings, finding)
 				}
 			}
@@ -636,7 +652,22 @@ func writeEnterpriseRuntime(w io.Writer, report enterpriseDiscoveryReport) {
 	if view.Degraded {
 		state = "degraded"
 	}
-	fmt.Fprintf(w, "Runtime discovery (gateway %s): %s, last poll %s, %d finding(s)\n", view.Gateway, state, scanned, len(view.Findings))
+	// Secure Client keeps the runtime section of main (issue #1092).
+	labelled := cfg == nil || !cfg.SecureClientIntegration()
+	unattributed := len(view.UnattributedFindings)
+	for _, finding := range view.Findings {
+		if labelled && runtimeFindingUnattributed(finding) {
+			unattributed++
+		}
+	}
+	counts := fmt.Sprintf("%d finding(s)", len(view.Findings))
+	switch {
+	case len(view.UnattributedFindings) > 0:
+		counts += fmt.Sprintf(" for this account, %d unattributed host-wide finding(s) listed apart", unattributed)
+	case unattributed > 0:
+		counts += fmt.Sprintf(", %d of them unattributed (host-wide)", unattributed)
+	}
+	fmt.Fprintf(w, "Runtime discovery (gateway %s): %s, last poll %s, %s\n", view.Gateway, state, scanned, counts)
 	for _, plane := range view.Planes {
 		switch {
 		case plane.Running && plane.Reason != "":
@@ -649,14 +680,33 @@ func writeEnterpriseRuntime(w io.Writer, report enterpriseDiscoveryReport) {
 			fmt.Fprintf(w, "  %s: unavailable -- %s\n", plane.Name, plane.Reason)
 		}
 	}
-	if len(view.Findings) == 0 {
+	writeEnterpriseRuntimeFindings(w, view.Findings, labelled)
+	if len(view.UnattributedFindings) > 0 {
+		fmt.Fprintln(w, "  Unattributed (host-wide; not this account's, and not counted for it):")
+		writeEnterpriseRuntimeFindings(w, view.UnattributedFindings, labelled)
+	}
+}
+
+func writeEnterpriseRuntimeFindings(w io.Writer, findings []enterpriseRuntimeFinding, labelled bool) {
+	if len(findings) == 0 {
 		return
 	}
 	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(table, "  SEVERITY\tSCORE\tPROCESS\tPID\tUSER\tAGENT\tLAST SEEN")
-	for _, finding := range view.Findings {
+	for _, finding := range findings {
+		user := defaultStr(finding.User, "-")
+		if labelled && runtimeFindingUnattributed(finding) {
+			user = "host-wide (unattributed)"
+		}
 		fmt.Fprintf(table, "  %s\t%d\t%s\t%d\t%s\t%s\t%s\n", finding.Severity, finding.Score, finding.Process, finding.PID,
-			defaultStr(finding.User, "-"), defaultStr(finding.AgentName, "-"), defaultStr(finding.LastSeen, "-"))
+			user, defaultStr(finding.AgentName, "-"), defaultStr(finding.LastSeen, "-"))
 	}
 	_ = table.Flush()
+}
+
+// runtimeFindingUnattributed reports a finding the gateway could not tie
+// to an account. One from a gateway that predates the label has neither a
+// user nor a SID.
+func runtimeFindingUnattributed(finding enterpriseRuntimeFinding) bool {
+	return finding.Attribution == "unattributed" || (finding.User == "" && finding.UserSID == "")
 }

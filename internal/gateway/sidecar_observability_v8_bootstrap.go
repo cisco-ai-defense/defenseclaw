@@ -155,6 +155,11 @@ func (s *Sidecar) BootstrapObservabilityRuntime(
 		}
 		return false, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapCompile, nil)
 	}
+	// A jsonl destination whose folder the gateway account cannot reach
+	// starts deferred; say which path and why (GAP-1265).
+	for _, warning := range compiled.PathWarnings {
+		_, _ = fmt.Fprintf(os.Stderr, "defenseclaw: warning: %s: %s\n", warning.Path, warning.Summary)
+	}
 	if err := applySidecarObservabilityV8ManagedDestination(
 		compiled, sidecarObservabilityV8ManagedOptionsFromConfig(cfg, raw),
 	); err != nil {

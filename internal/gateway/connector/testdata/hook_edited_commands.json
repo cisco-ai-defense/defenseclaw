@@ -6,6 +6,7 @@
   {"script": "claude-code-hook.sh", "command": "/home/u/.defenseclaw/xhooks/claude-code-hook.sh", "edited": true},
   {"script": "codex-hook.sh", "command": "/home/u/.defenseclawX/hooks/codex-hook.sh --event PreToolUse --hook-contract c1", "edited": true},
   {"script": "kiro-hook.sh", "command": "'/home/my dir/.defenseclaw/hooks/kiro-hookX.sh'", "edited": true},
+  {"script": "kiro-hook.sh", "command": "/home/u/.defenseclaw/xhooks/kiro-hook.sh --hook-surface v3", "edited": true},
   {"script": "codex-hook.sh", "command": "/home/u/.defenseclawX/hooks/codex-hookX.sh", "edited": false},
   {"script": "copilot-hook.sh", "command": "/home/u/bin/copilot-hookX.sh", "edited": false},
   {"script": "copilot-hook.sh", "command": "/home/u/bin/copilot-hook.sh", "edited": false},

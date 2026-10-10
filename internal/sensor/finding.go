@@ -46,8 +46,15 @@ type Finding struct {
 	Process string
 	// Cmdline is argv. It is a content-class field on the wire.
 	Cmdline string
+	// User is the owning account, DOMAIN\name (COMPUTER\name for a local
+	// Windows account), and UserSID its SID where the platform has one.
+	// Both are empty exactly when Attribution is unattributed.
 	User    string
 	UserSID string
+	// Attribution is how the finding was tied to User (Attribution* in
+	// owner.go); AttributionReason says why an unattributed one is not.
+	Attribution       string
+	AttributionReason string
 	// AgentName is the lineage-attributed agent, when one was found.
 	AgentName string
 	Score     int

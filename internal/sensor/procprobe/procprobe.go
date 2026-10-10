@@ -78,6 +78,10 @@ type Process struct {
 	User string
 	// UserSID is the stable Windows owner identity, when available.
 	UserSID string
+	// SessionID is the Windows Remote Desktop Services session the process
+	// runs in. Zero is the services session, or a platform without sessions,
+	// and names no user.
+	SessionID uint32
 	// CPUTime is cumulative CPU consumed by the process. Plane A works on the
 	// delta between two polls, not this absolute value: a long-lived process
 	// has a large total and may be entirely idle now.

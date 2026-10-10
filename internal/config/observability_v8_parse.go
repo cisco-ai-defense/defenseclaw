@@ -35,6 +35,10 @@ type ObservabilityV8CompiledConfig struct {
 	DataDir       string
 	Observability ObservabilityV8Source
 	Plan          *ObservabilityV8Plan
+	// PathWarnings name the jsonl destination paths this account could not
+	// inspect (GAP-1265). They describe the filesystem at compile time, so
+	// they stay out of the effective plan and its digest.
+	PathWarnings []ObservabilityV8Warning
 }
 
 type observabilityV8ConfigEnvelope struct {
@@ -95,7 +99,9 @@ func ParseCompileObservabilityV8(
 	if observabilityV8SourceNameIsPath(sourceName) {
 		configuredFiles = append(configuredFiles, sourceName)
 	}
-	if err := validateObservabilityV8FilePaths(&source, configuredFiles); err != nil {
+	secureClient := secureClientManagedDocument(runtime.GOOS, v8DocumentRoot(document.Document))
+	pathWarnings, err := validateObservabilityV8FilePaths(&source, configuredFiles, !secureClient)
+	if err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
 	if err := normalizeObservabilityV8EffectiveFilePaths(&source); err != nil {
@@ -116,7 +122,7 @@ func ParseCompileObservabilityV8(
 	if err != nil {
 		return nil, annotateObservabilityV8SemanticError(document, err)
 	}
-	if secureClientManagedDocument(runtime.GOOS, v8DocumentRoot(document.Document)) {
+	if secureClient {
 		plan, err = withObservabilityV8SecureClientAliasSwitch(plan, source.TracePolicy.CompatibilityAliases)
 		if err != nil {
 			return nil, annotateObservabilityV8SemanticError(document, err)
@@ -130,6 +136,7 @@ func ParseCompileObservabilityV8(
 		DataDir:       dataDir,
 		Observability: source,
 		Plan:          plan,
+		PathWarnings:  pathWarnings,
 	}, nil
 }
 

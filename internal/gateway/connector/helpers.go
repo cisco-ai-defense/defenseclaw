@@ -276,9 +276,10 @@ func posixShellUnsafeRune(r rune) bool {
 // replace or remove it. Recognising only an edited directory kept a renamed
 // script's entries: Copilot then denied every call next to the re-added set,
 // Hermes refused the repair and uninstall left them behind (GAP-0906,
-// GAP-0907). Presence checks do not use it: an edited entry is not a working
-// registration. Windows registers native launcher commands, which never match
-// here; their ownership stays exact.
+// GAP-0907). An edited entry is never a working registration: the presence
+// check uses this shape only to report one left beside the working set
+// (ownedHookConfigHoldsEditedEntry). Windows registers native launcher
+// commands, which never match here; their ownership stays exact.
 func editedDefenseClawHookScript(command, scriptName string) (string, bool) {
 	stem, ok := strings.CutSuffix(scriptName, ".sh")
 	if !ok || !strings.HasSuffix(stem, "-hook") || strings.Contains(scriptName, "/") {
@@ -304,10 +305,11 @@ func editedDefenseClawHookScript(command, scriptName string) (string, bool) {
 }
 
 // editedDefenseClawHookCommand is editedDefenseClawHookScript for a command
-// that is the script alone or the script with DefenseClaw's --event binding.
+// that is the script alone or the script with DefenseClaw's --event or
+// --hook-surface binding (Kiro v3 registers "kiro-hook.sh --hook-surface v3").
 func editedDefenseClawHookCommand(command, scriptName string) bool {
 	rest, ok := editedDefenseClawHookScript(command, scriptName)
-	return ok && (rest == "" || strings.HasPrefix(rest, " --event "))
+	return ok && (rest == "" || strings.HasPrefix(rest, " --event ") || strings.HasPrefix(rest, " --hook-surface "))
 }
 
 // editedDefenseClawHookHandler applies editedDefenseClawHookCommand to one

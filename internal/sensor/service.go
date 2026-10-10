@@ -95,6 +95,9 @@ type Options struct {
 	// plane is testable without a kernel event source. When set it overrides
 	// whatever the Acquirer would have supplied.
 	NewPlaneSource func(homeDirs []string) plane.Source
+	// Owners are the account lookups that attribute a finding whose process
+	// owner the probe could not read. The zero value skips them.
+	Owners OwnerLookups
 	// Acquirer is where the privileged reads come from: directly from this
 	// process, or brokered by a helper that holds the privilege the gateway
 	// deliberately does not. Defaults to reading directly.
@@ -398,6 +401,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	minRisk := s.options.Config.EffectiveMinRisk()
 	findings := make([]Finding, 0, 8)
 	live := make(map[int]bool, len(processes))
+	owners := newOwnerResolver(s.options.Owners, processes)
 
 	for _, process := range processes {
 		live[process.PID] = true
@@ -441,24 +445,29 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 			continue
 		}
 		agentName := ""
+		ownerPIDs := []int{process.PID}
 		if attribution, ok := s.tracker.Attribute(process.PID); ok {
 			agentName = attribution.AgentName
+			ownerPIDs = append(ownerPIDs, attribution.RootPID)
 		}
+		account := owners.resolve(ownerPIDs, nil)
 		findings = append(findings, Finding{
-			FindingID:   findingID(process, state.firstSeen),
-			PID:         process.PID,
-			Process:     process.Name,
-			Cmdline:     process.Cmdline,
-			User:        process.User,
-			UserSID:     process.UserSID,
-			AgentName:   agentName,
-			Score:       score,
-			Severity:    scoring.SeverityFor(score),
-			Signals:     signals,
-			Providers:   result.providers,
-			Correlation: correlation,
-			FirstSeen:   state.firstSeen,
-			LastSeen:    now,
+			FindingID:         findingID(process, state.firstSeen),
+			PID:               process.PID,
+			Process:           process.Name,
+			Cmdline:           process.Cmdline,
+			User:              account.User,
+			UserSID:           account.SID,
+			Attribution:       account.Attribution,
+			AttributionReason: account.Reason,
+			AgentName:         agentName,
+			Score:             score,
+			Severity:          scoring.SeverityFor(score),
+			Signals:           signals,
+			Providers:         result.providers,
+			Correlation:       correlation,
+			FirstSeen:         state.firstSeen,
+			LastSeen:          now,
 		})
 	}
 
@@ -467,7 +476,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 			delete(s.episodes, pid)
 		}
 	}
-	findings = append(findings, s.hostPlaneFindings(now, minRisk, correlator)...)
+	findings = append(findings, s.hostPlaneFindings(now, minRisk, correlator, owners)...)
 	sortFindings(findings)
 
 	snapshot := Snapshot{
@@ -735,8 +744,12 @@ func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool,
 // A host-plane finding is per agent session rather than per process: the whole
 // point is that five separate per-process findings for one credential-read-to-
 // exfiltration sequence would be five alerts nobody joins up.
+//
+// Each session is attributed to the account that runs its agent (GAP-1250):
+// a session no lookup ties to an account is labelled unattributed rather
+// than left with an empty user.
 func (s *Service) hostPlaneFindings(
-	now time.Time, minRisk int, correlator *correlate.Correlator,
+	now time.Time, minRisk int, correlator *correlate.Correlator, owners *ownerResolver,
 ) []Finding {
 	if s.hostPlane == nil {
 		return nil
@@ -747,17 +760,22 @@ func (s *Service) hostPlaneFindings(
 		correlation := correlator.Connector(correlate.Observation{
 			PID: session.RootPID, AgentName: session.AgentName, ExeName: session.AgentName,
 		})
+		account := owners.resolve(session.PIDs, session.ConfigPaths)
 		findings = append(findings, Finding{
-			FindingID:   hostFindingID(session),
-			PID:         session.RootPID,
-			Process:     session.AgentName,
-			AgentName:   session.AgentName,
-			Score:       session.Score,
-			Severity:    scoring.SeverityFor(session.Score),
-			Signals:     session.Signals,
-			Correlation: correlation,
-			FirstSeen:   session.FirstSeen,
-			LastSeen:    session.LastSeen,
+			FindingID:         hostFindingID(session),
+			PID:               session.RootPID,
+			Process:           session.AgentName,
+			User:              account.User,
+			UserSID:           account.SID,
+			Attribution:       account.Attribution,
+			AttributionReason: account.Reason,
+			AgentName:         session.AgentName,
+			Score:             session.Score,
+			Severity:          scoring.SeverityFor(session.Score),
+			Signals:           session.Signals,
+			Correlation:       correlation,
+			FirstSeen:         session.FirstSeen,
+			LastSeen:          session.LastSeen,
 		})
 	}
 	return findings
