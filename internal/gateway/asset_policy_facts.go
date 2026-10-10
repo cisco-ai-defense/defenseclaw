@@ -307,8 +307,11 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 
 // noteProjectSkillFolders registers, for the install watcher, the existing
 // skill folders of the project a hook comes from (GAP-1063). A managed
-// caller's project counts only inside the caller's home. Secure Client keeps
-// main's watched folders (issue #1092).
+// caller's project counts only inside the caller's home, compared after
+// symlinks and junctions are resolved, and its resolved folder is the one
+// registered, so a link below the home cannot point the watcher at another
+// user's tree (GAP-1297). Secure Client keeps main's watched folders (issue
+// #1092).
 func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd string) {
 	if a == nil || !a.projectSkills.isActive() || strings.TrimSpace(cwd) == "" || isSandboxHookRequest(ctx) {
 		return
@@ -323,9 +326,23 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 	}
 	_, peer := managedHookPeerFromContext(ctx)
 	managedCaller := peer || serviceAccountGatewayFromContext(ctx)
+	realHome := home
+	if managedCaller {
+		var err error
+		if realHome, err = filepath.EvalSymlinks(home); err != nil {
+			return
+		}
+	}
 	for _, folder := range projectSkillFolders(connector, home, cwd) {
-		if rel, err := filepath.Rel(home, folder); managedCaller && (err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
-			continue
+		if managedCaller {
+			real, err := filepath.EvalSymlinks(folder)
+			if err != nil {
+				continue
+			}
+			if rel, err := filepath.Rel(realHome, real); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				continue
+			}
+			folder = real
 		}
 		a.projectSkills.add(connector, folder)
 	}
@@ -342,9 +359,17 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 	for _, path := range paths {
 		// A hidden folder is not enumerated by the rescan, so it never gets
 		// a baseline to wait for.
-		if strings.TrimSpace(path) == "" || strings.HasPrefix(filepath.Base(path), ".") ||
-			!a.projectSkills.registered(filepath.Dir(path)) {
+		if strings.TrimSpace(path) == "" || strings.HasPrefix(filepath.Base(path), ".") {
 			continue
+		}
+		if dir := filepath.Dir(path); !a.projectSkills.registered(dir) {
+			// A managed caller's folder is registered resolved (GAP-1297),
+			// and the watcher records its skills under that path.
+			real, err := filepath.EvalSymlinks(dir)
+			if err != nil || !a.projectSkills.registered(real) {
+				continue
+			}
+			path = filepath.Join(real, filepath.Base(path))
 		}
 		if _, err := os.Lstat(path); err != nil {
 			continue

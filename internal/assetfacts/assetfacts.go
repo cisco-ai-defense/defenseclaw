@@ -28,6 +28,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -341,10 +342,38 @@ func collectStrings(value any, depth int, out *[]string) {
 			collectStrings(item, depth+1, out)
 		}
 	case map[string]any:
-		for _, item := range v {
-			collectStrings(item, depth+1, out)
+		for _, key := range inputKeys(v) {
+			collectStrings(v[key], depth+1, out)
 		}
 	}
+}
+
+// pathInputKeys are the tool-input fields that usually carry a path or a
+// command line. They are visited first so a large field such as the edits of
+// a MultiEdit cannot push them past maxInputStrings (GAP-1301).
+var pathInputKeys = map[string]bool{
+	"file_path": true, "filePath": true, "notebook_path": true, "path": true,
+	"paths": true, "file": true, "files": true, "target": true,
+	"target_file": true, "targetFile": true, "dir": true, "directory": true,
+	"cwd": true, "workdir": true, "working_directory": true,
+	"command": true, "cmd": true,
+}
+
+// inputKeys orders a map's keys deterministically: path-bearing keys first,
+// then the rest, each group sorted.
+func inputKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		pi, pj := pathInputKeys[keys[i]], pathInputKeys[keys[j]]
+		if pi != pj {
+			return pi
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
 }
 
 func isCommandSeparator(r rune) bool {

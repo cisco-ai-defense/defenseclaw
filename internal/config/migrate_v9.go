@@ -2626,20 +2626,35 @@ func v9NonEmptyLLM(node *yaml.Node) bool {
 
 // migrateSignaturePacks lists the packs installed under
 // <data_dir>/signature-packs in ai_discovery.signature_packs: v8 loaded that
-// folder implicitly, and since 9 only configured packs load. Pin the bytes
-// that v8 loaded so a managed standalone config can still apply.
+// folder implicitly, and since 9 only configured packs load. A managed
+// standalone host loads only pinned packs, so pin the bytes v8 loaded: the
+// installed packs, and on a managed host also the files the configured
+// signature_packs entries name, wherever they are (GAP-1287).
 func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) error {
 	dataDir := m.dataDir()
 	installed, _ := filepath.Glob(filepath.Join(dataDir, "signature-packs", "*.json"))
-	if len(installed) == 0 {
-		return nil
-	}
 	discovery := v8YAMLMapValue(root, "ai_discovery")
-	listed := map[string]bool{}
 	packs := v8YAMLMapValue(discovery, "signature_packs")
 	pins := v8YAMLMapValue(discovery, "signature_pack_digests")
+	secureClient := v9SecureClientDocument(root)
+	listed := map[string]bool{}
+	var listedFiles []string
 	for _, item := range v9SeqItems(packs) {
-		listed[filepath.Clean(expandPath(item.Value))] = true
+		entry := strings.TrimSpace(expandPath(strings.TrimSpace(item.Value)))
+		if entry == "" {
+			continue
+		}
+		listed[filepath.Clean(entry)] = true
+		if m.in.Managed && !secureClient {
+			files, err := v9SignaturePackFiles(entry)
+			if err != nil {
+				return err
+			}
+			listedFiles = append(listedFiles, files...)
+		}
+	}
+	if len(installed) == 0 && len(listedFiles) == 0 {
+		return nil
 	}
 	pinned := map[string]bool{}
 	if pins != nil && pins.Kind == yaml.MappingNode {
@@ -2647,21 +2662,40 @@ func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) error {
 			pinned[filepath.Clean(expandPath(pins.Content[i].Value))] = true
 		}
 	}
-	secureClient := v9SecureClientDocument(root)
+	var order []string
+	installedPins, listedPins := map[string]string{}, map[string]string{}
+	pin := func(path, why string, into map[string]string) error {
+		path = filepath.Clean(path)
+		if secureClient || pinned[path] {
+			return nil
+		}
+		if _, done := installedPins[path]; done {
+			return nil
+		}
+		if _, done := listedPins[path]; done {
+			return nil
+		}
+		raw, err := os.ReadFile(path) // #nosec G304 -- a pack in the data_dir or named by ai_discovery.signature_packs.
+		if err != nil {
+			return fmt.Errorf("config: read signature pack %s (%s): %w; a managed host loads only the packs pinned in ai_discovery.signature_pack_digests, so the migration pins it: make the file readable, or remove it from ai_discovery.signature_packs, and run the upgrade again", path, why, err)
+		}
+		into[path] = "sha256:" + cfgtxn.SHA256Hex(raw)
+		order = append(order, path)
+		return nil
+	}
 	var added []string
-	addedPins := map[string]string{}
 	for _, path := range installed {
 		if !listed[filepath.Clean(path)] {
 			added = append(added, path)
 		}
-		if secureClient || pinned[filepath.Clean(path)] {
-			continue
+		if err := pin(path, "installed in the data_dir", installedPins); err != nil {
+			return err
 		}
-		raw, err := os.ReadFile(path) // #nosec G304 -- pack found in the configured data_dir.
-		if err != nil {
-			return fmt.Errorf("config: read signature pack %s: %w", path, err)
+	}
+	for _, path := range listedFiles {
+		if err := pin(path, "listed in ai_discovery.signature_packs", listedPins); err != nil {
+			return err
 		}
-		addedPins[path] = "sha256:" + cfgtxn.SHA256Hex(raw)
 	}
 	if len(added) > 0 {
 		if packs == nil || packs.Kind != yaml.SequenceNode {
@@ -2673,19 +2707,54 @@ func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) error {
 		}
 		m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_packs", added)
 	}
-	if len(addedPins) > 0 {
+	if len(order) > 0 {
 		if pins == nil || pins.Kind != yaml.MappingNode {
 			pins = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 			v9Set(root, pins, "ai_discovery", "signature_pack_digests")
 		}
-		for _, path := range installed {
-			if digest, ok := addedPins[path]; ok {
-				v9Set(pins, v9Scalar(digest), path)
+		for _, path := range order {
+			digest, ok := installedPins[path]
+			if !ok {
+				digest = listedPins[path]
 			}
+			v9Set(pins, v9Scalar(digest), path)
 		}
-		m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_pack_digests", addedPins)
+	}
+	if len(installedPins) > 0 {
+		m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_pack_digests", installedPins)
+	}
+	if len(listedPins) > 0 {
+		m.moved("config", "ai_discovery.signature_packs", "ai_discovery.signature_pack_digests", listedPins)
 	}
 	return nil
+}
+
+// v9SignaturePackFiles lists the files one ai_discovery.signature_packs
+// entry names, the way the catalog loader expands it: a directory is its
+// *.json, a glob its *.json matches, a path the file. An entry that names no
+// file yet has nothing to pin.
+func v9SignaturePackFiles(entry string) ([]string, error) {
+	pattern := entry
+	if info, err := os.Stat(pattern); err == nil && info.IsDir() {
+		pattern = filepath.Join(pattern, "*.json")
+	}
+	if strings.ContainsAny(pattern, "*?[") {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("config: ai_discovery.signature_packs entry %s is not a valid glob: %w", entry, err)
+		}
+		var files []string
+		for _, match := range matches {
+			if info, err := os.Stat(match); err == nil && !info.IsDir() && strings.EqualFold(filepath.Ext(match), ".json") {
+				files = append(files, match)
+			}
+		}
+		return files, nil
+	}
+	if _, err := os.Stat(pattern); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return []string{pattern}, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -142,6 +143,13 @@ func (a *AdmissionAction) UnmarshalYAML(node *yaml.Node) error {
 		*a = AdmissionAction{Shorthand: node.Value}
 		return nil
 	case yaml.MappingNode:
+		present := map[string]bool{}
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			present[node.Content[i].Value] = true
+		}
+		if missing := missingAdmissionTripleKeys(present); missing != "" {
+			return fmt.Errorf("config: line %d: an admission action mapping must set install, file and runtime; it does not set %s (or use block, quarantine, warn or allow)", node.Line, missing)
+		}
 		var triple SeverityAction
 		if err := node.Decode(&triple); err != nil {
 			return err
@@ -151,6 +159,21 @@ func (a *AdmissionAction) UnmarshalYAML(node *yaml.Node) error {
 	default:
 		return fmt.Errorf("config: admission action must be a string or a mapping")
 	}
+}
+
+// missingAdmissionTripleKeys names the install/file/runtime keys an action
+// mapping leaves out, "" when it sets all three. A partial mapping would
+// compile its missing fields to none/none/allow and so permit a severity
+// the built-in action blocks (GAP-1290). Empty values are left to the
+// action validation: the gateway clone writes every key, even an empty one.
+func missingAdmissionTripleKeys(present map[string]bool) string {
+	var missing []string
+	for _, key := range []string{"install", "file", "runtime"} {
+		if !present[key] {
+			missing = append(missing, key)
+		}
+	}
+	return strings.Join(missing, ", ")
 }
 
 // MarshalYAML writes the form the action was declared in.
@@ -173,15 +196,20 @@ func (a *AdmissionAction) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var triple struct {
-		Install string `json:"install"`
-		File    string `json:"file"`
-		Runtime string `json:"runtime"`
+		Install *string `json:"install"`
+		File    *string `json:"file"`
+		Runtime *string `json:"runtime"`
 	}
 	if err := json.Unmarshal(data, &triple); err != nil {
 		return fmt.Errorf("config: admission action must be a string or a mapping: %w", err)
 	}
+	if missing := missingAdmissionTripleKeys(map[string]bool{
+		"install": triple.Install != nil, "file": triple.File != nil, "runtime": triple.Runtime != nil,
+	}); missing != "" {
+		return fmt.Errorf("config: an admission action mapping must set install, file and runtime; it does not set %s (or use block, quarantine, warn or allow)", missing)
+	}
 	*a = AdmissionAction{Triple: SeverityAction{
-		Install: InstallAction(triple.Install), File: FileAction(triple.File), Runtime: RuntimeAction(triple.Runtime),
+		Install: InstallAction(*triple.Install), File: FileAction(*triple.File), Runtime: RuntimeAction(*triple.Runtime),
 	}}
 	return nil
 }

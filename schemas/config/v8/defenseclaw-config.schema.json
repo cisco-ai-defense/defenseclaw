@@ -5033,7 +5033,12 @@
           ]
         },
         {
-          "$ref": "#/$defs/severityAction"
+          "$ref": "#/$defs/severityAction",
+          "required": [
+            "install",
+            "file",
+            "runtime"
+          ]
         }
       ],
       "description": "Shorthand (block, quarantine, warn, allow) or the exact install/file/runtime triple. block = {install: block, file: none, runtime: disable}; quarantine = {install: block, file: quarantine, runtime: disable}; warn and allow = {install: none, file: none, runtime: enable}."

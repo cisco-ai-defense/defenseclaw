@@ -55,6 +55,7 @@ type aiRuntimeFinding struct {
 	Process   string              `json:"process"`
 	Cmdline   string              `json:"cmdline,omitempty"`
 	User      string              `json:"user,omitempty"`
+	UserSID   string              `json:"user_sid,omitempty"`
 	AgentName string              `json:"agent_name,omitempty"`
 	Score     int                 `json:"score"`
 	Severity  string              `json:"severity"`
@@ -163,7 +164,7 @@ func renderAIRuntimeSnapshot(snapshot sensor.Snapshot) aiRuntimeResponse {
 	for _, finding := range snapshot.Findings {
 		rendered := aiRuntimeFinding{
 			FindingID: finding.FindingID, PID: finding.PID, Process: finding.Process,
-			Cmdline: finding.Cmdline, User: finding.User, AgentName: finding.AgentName,
+			Cmdline: finding.Cmdline, User: finding.User, UserSID: finding.UserSID, AgentName: finding.AgentName,
 			Score: finding.Score, Severity: string(finding.Severity),
 			Signals: make([]aiRuntimeSignal, 0, len(finding.Signals)),
 			Correlation: aiRuntimeCorrelation{
