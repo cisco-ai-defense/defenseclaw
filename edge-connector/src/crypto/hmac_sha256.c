@@ -9,6 +9,7 @@
 
 #include "hmac_sha256.h"
 #include "sha256.h"
+#include "platform.h"
 #include <string.h>
 
 void dclaw_hmac_sha256(const uint8_t *key, size_t key_len,
@@ -49,8 +50,8 @@ void dclaw_hmac_sha256(const uint8_t *key, size_t key_len,
     dclaw_sha256_final(&ctx, out);
 
     /* Zero sensitive material */
-    memset(k_prime, 0, sizeof(k_prime));
-    memset(ipad, 0, sizeof(ipad));
-    memset(opad, 0, sizeof(opad));
-    memset(inner_hash, 0, sizeof(inner_hash));
+    dclaw_secure_zero(k_prime, sizeof(k_prime));
+    dclaw_secure_zero(ipad, sizeof(ipad));
+    dclaw_secure_zero(opad, sizeof(opad));
+    dclaw_secure_zero(inner_hash, sizeof(inner_hash));
 }

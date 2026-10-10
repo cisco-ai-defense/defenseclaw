@@ -564,7 +564,7 @@ def handle_after_llm(params: dict[str, Any]) -> dict[str, Any]:
         log(f"PII_DETECT: found {findings} in LLM response")
         # L-6 fix: Truncate logged response to 50 chars to avoid leaking
         # the very PII/secrets we just detected.
-        log(f"  Response preview: {response[:50]!r} [REDACTED]")
+        log(f"  Response: [REDACTED — PII/secret patterns detected]")
         return {
             "action": "redact",
             "message": (

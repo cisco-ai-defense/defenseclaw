@@ -376,8 +376,10 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		if a.keyStore != nil {
 			deviceKey := make([]byte, 32)
 			if _, err := rand.Read(deviceKey); err != nil {
+				log.Printf("[fleet-api] failed to generate device key on re-registration: %v", err)
+				// H-2 fix: Do not leak internal error details to the client.
 				writeJSON(w, http.StatusInternalServerError, map[string]string{
-					"error": "failed to generate device key: " + err.Error(),
+					"error": "failed to generate device key",
 				})
 				return
 			}
@@ -396,7 +398,9 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		log.Printf("[fleet-api] register device failed: %v", err)
+		// H-2 fix: Do not leak internal error details to the client.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "device registration failed"})
 		return
 	}
 
@@ -420,8 +424,10 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 	if a.keyStore != nil {
 		deviceKey := make([]byte, 32)
 		if _, err := rand.Read(deviceKey); err != nil {
+			log.Printf("[fleet-api] failed to generate device key: %v", err)
+			// H-2 fix: Do not leak internal error details to the client.
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to generate device key: " + err.Error(),
+				"error": "failed to generate device key",
 			})
 			return
 		}
@@ -429,8 +435,10 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 			// Key save failed — roll back the device registration so we
 			// don't leave a device without a persisted key.
 			a.manager.DecommissionDevice(req.TenantID, req.FleetID, req.DeviceID)
+			log.Printf("[fleet-api] failed to save device key for %d: %v", dev.DeviceID, err)
+			// H-2 fix: Do not leak internal error details to the client.
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
-				"error": "failed to save device key: " + err.Error(),
+				"error": "failed to save device key",
 			})
 			return
 		}
@@ -533,9 +541,10 @@ func (a *API) sendCommand(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		if err := a.mqttClient.Publish(ctx, topic, 1, payload); err != nil {
 			log.Printf("[fleet-api] MQTT publish to %s failed: %v", topic, err)
+			// H-2 fix: Do not leak internal error details to the client.
 			writeJSON(w, http.StatusInternalServerError, map[string]string{
 				"error":  "failed to dispatch command",
-				"detail": err.Error(),
+				"detail": "command delivery failed",
 			})
 			return
 		}
@@ -597,9 +606,11 @@ func (a *API) simulatePolicy(w http.ResponseWriter, r *http.Request) {
 	// Dry-run: compile without signing or distributing
 	blob, err := a.policy.Compile([]byte(req.PolicyYAML), req.Profile, 0)
 	if err != nil {
+		log.Printf("[fleet-api] policy simulation compile failed: %v", err)
+		// H-2 fix: Do not leak internal error details to the client.
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{
 			"error":  "compilation failed",
-			"detail": err.Error(),
+			"detail": "policy compilation error",
 		})
 		return
 	}
@@ -658,17 +669,21 @@ func (a *API) pushPolicy(w http.ResponseWriter, r *http.Request) {
 
 	signed, version, err := a.policy.CompileSignAndStore([]byte(req.PolicyYAML), req.Profile, req.TenantID, req.FleetID)
 	if err != nil {
+		log.Printf("[fleet-api] policy compile/sign failed for tenant=%d fleet=%d: %v", req.TenantID, req.FleetID, err)
+		// H-2 fix: Do not leak internal error details to the client.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error":  "policy compilation/signing failed",
-			"detail": err.Error(),
+			"detail": "internal policy processing error",
 		})
 		return
 	}
 
 	if err := a.policy.Distribute(r.Context(), req.TenantID, req.FleetID, signed); err != nil {
+		log.Printf("[fleet-api] policy distribution failed for tenant=%d fleet=%d: %v", req.TenantID, req.FleetID, err)
+		// H-2 fix: Do not leak internal error details to the client.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error":  "distribution failed",
-			"detail": err.Error(),
+			"detail": "policy distribution error",
 		})
 		return
 	}
@@ -718,7 +733,9 @@ func (a *API) listPolicyVersions(w http.ResponseWriter, r *http.Request) {
 
 	versions, err := a.policy.Store().ListVersions(tenantID, fleetID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		log.Printf("[fleet-api] list policy versions failed for tenant=%d fleet=%d: %v", tenantID, fleetID, err)
+		// H-2 fix: Do not leak internal error details to the client.
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to list policy versions"})
 		return
 	}
 
@@ -781,9 +798,11 @@ func (a *API) pushEmergency(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.policy.DistributeEmergency(r.Context(), req.TenantID, req.FleetID, cmd); err != nil {
+		log.Printf("[fleet-api] emergency distribution failed for tenant=%d fleet=%d cmd=%s: %v", req.TenantID, req.FleetID, req.Command, err)
+		// H-2 fix: Do not leak internal error details to the client.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error":  "emergency distribution failed",
-			"detail": err.Error(),
+			"detail": "emergency command delivery error",
 		})
 		return
 	}
@@ -965,8 +984,10 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 
 	newToken := make([]byte, 32)
 	if _, err := rand.Read(newToken); err != nil {
+		log.Printf("[fleet-api] failed to generate random token: %v", err)
+		// H-2 fix: Do not leak internal error details to the client.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to generate random token: " + err.Error(),
+			"error": "failed to generate random token",
 		})
 		return
 	}
@@ -1030,16 +1051,20 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 	newKey := make([]byte, 32)
 	if _, err := rand.Read(newKey); err != nil {
 		a.rotationMu.Unlock()
+		log.Printf("[fleet-api] failed to generate device key for %d: %v", deviceID, err)
+		// H-2 fix: Do not leak internal error details to the client.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to generate device key: " + err.Error(),
+			"error": "failed to generate device key",
 		})
 		return
 	}
 
 	if err := a.keyStore.SaveDeviceKey(deviceID, newKey); err != nil {
 		a.rotationMu.Unlock()
+		log.Printf("[fleet-api] failed to save device key for %d: %v", deviceID, err)
+		// H-2 fix: Do not leak internal error details to the client.
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to save device key: " + err.Error(),
+			"error": "failed to save device key",
 		})
 		return
 	}

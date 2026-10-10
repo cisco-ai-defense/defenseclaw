@@ -348,11 +348,11 @@ class _SocketBackend:
             sock.sendall(json.dumps(payload).encode() + b"\n")
             data = b""
             while b"\n" not in data:
+                if len(data) >= MAX_RESPONSE_SIZE:
+                    raise RuntimeError("response exceeds MAX_RESPONSE_SIZE")
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
-                if len(data) + len(chunk) > MAX_RESPONSE_SIZE:
-                    raise RuntimeError("IPC response too large")
                 data += chunk
         finally:
             sock.close()

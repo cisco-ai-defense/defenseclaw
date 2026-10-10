@@ -194,6 +194,7 @@ type VerdictRequest struct {
 	ContentScope uint8
 	Content      string
 	Findings     uint8
+	BootNonce    [16]byte // B-1 fix: included in verdict HMAC for cross-reboot replay protection
 }
 
 // VerdictResponse is the 28-byte binary response sent back to the device.
@@ -335,11 +336,25 @@ func DecodeVerdictRequest(data []byte) (*VerdictRequest, error) {
 
 	// 11. findings (CBOR uint)
 	if len(remaining) > 0 {
-		val, _, err = decodeCBORUint(remaining)
+		val, n, err = decodeCBORUint(remaining)
 		if err != nil {
 			return nil, fmt.Errorf("decoding findings: %w", err)
 		}
 		vr.Findings = uint8(val)
+		pos += n
+		remaining = data[pos:]
+	}
+
+	// 12. boot_nonce (CBOR byte string, 16 bytes) - B-1 fix
+	if pos < len(data) {
+		nonce, n, err := decodeCBORBytes(remaining)
+		if err == nil && len(nonce) == 16 {
+			copy(vr.BootNonce[:], nonce)
+			pos += n
+			remaining = data[pos:]
+		}
+		// If missing or wrong size, BootNonce stays zero — backward compatible
+		// with older edge-connector firmware that doesn't send it.
 	}
 
 	return vr, nil

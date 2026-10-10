@@ -112,6 +112,11 @@ class HomeAssistantAdapter:
                 "Auth tokens will be transmitted in cleartext. Use HTTPS in production.",
                 stacklevel=2,
             )
+            if os.environ.get("DCLAW_PRODUCTION"):
+                raise ValueError(
+                    f"Plaintext HTTP to non-loopback host {host} is not allowed in production. "
+                    "Use HTTPS or set the URL to https://."
+                )
         self._connector = connector or EdgeConnector(
             fail_open=False, tool_cap_map=HAMCP_TOOL_CAP_MAP, session_id=session_id,
         )

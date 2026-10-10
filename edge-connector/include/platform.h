@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <string.h>
 
 /* Hardware Abstraction Layer — platform-specific operations. */
 
@@ -49,5 +50,12 @@ void hal_watchdog_feed(void);
 /* Platform init/shutdown */
 int hal_init(void);
 void hal_shutdown(void);
+
+/* B-2 fix: Portable secure-zero that the compiler cannot optimize away.
+ * Volatile function pointer prevents dead-store elimination. */
+static void *(*const volatile dclaw_secure_zero_ptr)(void *, int, size_t) = memset;
+static inline void dclaw_secure_zero(void *buf, size_t len) {
+    dclaw_secure_zero_ptr(buf, 0, len);
+}
 
 #endif /* DCLAW_PLATFORM_H */

@@ -4,6 +4,28 @@ Secure any AI agent on Linux with sub-microsecond policy enforcement and AI-awar
 
 ---
 
+## Security Requirements
+
+### MQTT Broker ACL (CRITICAL)
+
+**The MQTT broker MUST enforce per-device topic ACLs in production.** Without
+broker-level access control, any authenticated MQTT client can publish to any
+device's topic, enabling cross-tenant and cross-device spoofing attacks.
+
+Each device should only be permitted to publish to its own topics:
+
+```
+defenseclaw/{tenant_id}/{fleet_id}/{device_id}/heartbeat
+defenseclaw/{tenant_id}/{fleet_id}/{device_id}/verdict/req
+defenseclaw/{tenant_id}/{fleet_id}/{device_id}/register
+```
+
+The fleet manager subscribes to wildcard topics and trusts the topic structure
+for routing. HMAC verification provides a second layer of defense, but broker
+ACLs are the primary isolation mechanism for multi-tenant deployments.
+
+---
+
 ## Build From Source
 
 Required: `gcc`, `cmake` (3.22+), `make`.

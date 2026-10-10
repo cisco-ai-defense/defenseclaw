@@ -269,6 +269,11 @@ int dclaw_cbor_encode_verdict_request(const dclaw_tool_request_t *req,
     /* findings: uint8 (bitmask of categories found locally - placeholder for now) */
     CBOR_CHECK(cbor_encode_uint_safe(buf + pos, buf_size - pos, 0, 0));
 
+    /* B-1 fix: boot_nonce (16 bytes) — included so the fleet manager can
+     * reproduce the verdict HMAC which covers this nonce. */
+    CBOR_CHECK(cbor_encode_bytes_safe(buf + pos, buf_size - pos,
+               dclaw_get_state()->boot_nonce, 16));
+
 #undef CBOR_CHECK
 
     *out_len = pos;

@@ -7,6 +7,11 @@
  * DO NOT EDIT MANUALLY
  */
 
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-variable"
+#endif
+
 #include "defenseclaw.h"
 
 #ifdef __GNUC__
@@ -6375,5 +6380,9 @@ static const uint16_t ac_transitions[324][256] = {
 };
 
 #define DCLAW_AC_DFA_AVAILABLE 1
+
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
 
 #endif /* DCLAW_POLICY_TABLES_H */

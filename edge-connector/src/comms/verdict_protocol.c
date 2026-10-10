@@ -96,6 +96,10 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     /* Feed: tool_hash[0:32] */
     mbedtls_md_hmac_update(&ctx, tool_hash, 32);
 
+    /* B-1 fix: Include boot_nonce so verdict HMACs are unique per boot.
+     * Prevents cross-reboot verdict replay. */
+    mbedtls_md_hmac_update(&ctx, dclaw_get_state()->boot_nonce, 16);
+
     mbedtls_md_hmac_finish(&ctx, hmac_full);
     mbedtls_md_free(&ctx);
 
@@ -122,7 +126,7 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
      * Matches the mbedTLS path semantics exactly.
      */
     uint8_t hmac_full[32];
-    uint8_t msg[256]; /* session_id + 2 + 1 + 1 + 2 + 1 + 1 + 4 + 32 = ~76 bytes max */
+    uint8_t msg[280]; /* session_id + 2 + 1 + 1 + 2 + 1 + 1 + 4 + 32 + 16 = ~92 bytes max */
     size_t msg_len = 0;
 
     /* Feed: session_id (NUL-terminated string, excluding NUL) */
@@ -160,10 +164,16 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
     memcpy(msg + msg_len, tool_hash, 32);
     msg_len += 32;
 
+    /* B-1 fix: Include boot_nonce (16 bytes) */
+    memcpy(msg + msg_len, dclaw_get_state()->boot_nonce, 16);
+    msg_len += 16;
+
     dclaw_hmac_sha256(device_key, key_len, msg, msg_len, hmac_full);
 
     /* BLK-1: Truncate to 16 bytes (was 4) */
     memcpy(out_16bytes, hmac_full, 16);
+    dclaw_secure_zero(hmac_full, sizeof(hmac_full));
+    dclaw_secure_zero(msg, sizeof(msg));
 }
 
 #endif /* DCLAW_HAS_MBEDTLS */

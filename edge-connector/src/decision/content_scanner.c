@@ -619,7 +619,7 @@ static bool parse_ipv4(const char *dest, uint8_t octets[4]) {
         /* Hex: 0x7f000001 */
         char *end;
         unsigned long val = strtoul(dest, &end, 16);
-        if (*end == '\0' && val <= 0xFFFFFFFF) {
+        if ((*end == '\0' || *end == ':' || *end == '/') && val <= 0xFFFFFFFF) {
             octets[0] = (uint8_t)(val >> 24);
             octets[1] = (uint8_t)(val >> 16);
             octets[2] = (uint8_t)(val >> 8);

@@ -582,7 +582,7 @@ async def _run_http(proxy: MCPProxy, port: int) -> None:
     async def handle_health(_: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "defenseclaw-mcp-proxy"})
 
-    app = web.Application(middlewares=[_auth_middleware])
+    app = web.Application(client_max_size=1024 * 1024, middlewares=[_auth_middleware])
     app.router.add_post("/mcp", handle_mcp)
     app.router.add_get("/health", handle_health)
 

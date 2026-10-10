@@ -60,8 +60,17 @@ def _ssh_cmd(target: str, user: str, remote_cmd: str) -> list[str]:
     """Build an SSH command list with common options."""
     return [
         "ssh", "-o", "StrictHostKeyChecking=yes",
-        f"{user}@{target}", remote_cmd,
+        "--", f"{user}@{target}", remote_cmd,
     ]
+
+
+def _run_ssh_output(target: str, user: str, remote_cmd: str) -> str:
+    """Run a remote SSH command and return its stdout."""
+    cmd = _ssh_cmd(target, user, remote_cmd)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise click.ClickException(f"SSH command failed: {result.stderr.strip()}")
+    return result.stdout
 
 
 def _check_remote_prereqs(target: str, user: str) -> bool:
@@ -95,13 +104,9 @@ def _copy_source(source: Path, target: str, user: str) -> str:
     """Copy the edge-connector source to the remote device. Returns remote path."""
     ux.echo()
     ux.section("Copying edge-connector source to device")
-    remote_dir = "/tmp/defenseclaw-edge-connector"
-
-    # Clean any previous copy
-    subprocess.run(
-        _ssh_cmd(target, user, f"rm -rf {remote_dir}"),
-        capture_output=True,
-    )
+    remote_dir = _run_ssh_output(target, user, "mktemp -d /tmp/defenseclaw-XXXXXXXX").strip()
+    if not remote_dir or not remote_dir.startswith("/tmp/defenseclaw-"):
+        raise click.ClickException("Failed to create secure temp directory on remote host")
 
     rsync = shutil.which("rsync")
     if rsync:

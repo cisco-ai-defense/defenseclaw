@@ -807,6 +807,8 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
             import nacl.signing
             with open(key_path, 'rb') as f:
                 key_data = f.read()
+            if len(key_data) < 32:
+                raise ValueError(f"Signing key file too short ({len(key_data)} bytes, need >= 32)")
             signing_key = nacl.signing.SigningKey(key_data[:32])
             signed = signing_key.sign(blob)
             return signed.signature

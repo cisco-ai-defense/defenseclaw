@@ -328,11 +328,13 @@ static int tcp_connect(const char *host, uint16_t port) {
  */
 static int sock_write_all(int fd, const uint8_t *buf, size_t len) {
     size_t sent = 0;
+    int attempts = 0;
     while (sent < len) {
         ssize_t n = write(fd, buf + sent, len - sent);
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                if (++attempts > 100) return -1; /* H-9: prevent indefinite spin */
                 /* Brief poll to wait for writability */
                 struct pollfd pfd = { .fd = fd, .events = POLLOUT };
                 poll(&pfd, 1, 100);
@@ -366,7 +368,7 @@ static int mqtt_write_all(int fd, const uint8_t *buf, size_t len) {
 #if defined(DCLAW_HAS_MBEDTLS) && DCLAW_HAS_MBEDTLS
     if (mqtt_ctx.tls_active) {
         int ret = dclaw_tls_write(buf, len);
-        return (ret == (int)len) ? 0 : -1;
+        return (ret >= 0 && (size_t)ret == len) ? 0 : -1;
     }
 #endif
     return sock_write_all(fd, buf, len);
@@ -406,6 +408,11 @@ static int mqtt_send_connect(int fd) {
     /* Read optional MQTT credentials from environment */
     const char *mqtt_user = getenv("DCLAW_MQTT_USER");
     const char *mqtt_pass = getenv("DCLAW_MQTT_PASS");
+    if ((mqtt_user && strlen(mqtt_user) > 65535) ||
+        (mqtt_pass && strlen(mqtt_pass) > 65535)) {
+        fprintf(stderr, "[DCLAW-MQTT] MQTT credentials too long (max 65535 bytes)\n");
+        return -1;
+    }
     uint16_t user_len = (mqtt_user && mqtt_user[0]) ? (uint16_t)strlen(mqtt_user) : 0;
     uint16_t pass_len = (mqtt_pass && mqtt_pass[0]) ? (uint16_t)strlen(mqtt_pass) : 0;
 
@@ -949,9 +956,14 @@ int dclaw_mqtt_connect(void) {
                         {
                             size_t rt_len = strlen(reg_topic);
                             uint8_t rtmp[128 + 32];
-                            memcpy(rtmp, reg_topic, rt_len);
-                            memcpy(rtmp + rt_len, reg_buf, 32);
-                            dclaw_hmac_sha256(rk, rk_len, rtmp, rt_len + 32, reg_hmac);
+                            if (rt_len + 32 > sizeof(rtmp)) {
+                                fprintf(stderr, "[DCLAW-MQTT] registration topic too long for HMAC buffer\n");
+                                rk_len = 0; /* skip signing */
+                            } else {
+                                memcpy(rtmp, reg_topic, rt_len);
+                                memcpy(rtmp + rt_len, reg_buf, 32);
+                                dclaw_hmac_sha256(rk, rk_len, rtmp, rt_len + 32, reg_hmac);
+                            }
                         }
 #endif
                         memcpy(reg_buf + 32, reg_hmac, 32);
@@ -1025,7 +1037,9 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
     if (mqtt_ctx.state != MQTT_STATE_CONNECTED) return -1;
     if (mqtt_ctx.socket_fd < 0) return -1;
 
-    uint16_t topic_len = (uint16_t)strlen(topic);
+    size_t raw_topic_len = strlen(topic);
+    if (raw_topic_len > 65535) return -1;
+    uint16_t topic_len = (uint16_t)raw_topic_len;
     uint32_t remaining = 2 + topic_len + (uint32_t)len;
     uint16_t packet_id = 0;
 
@@ -1231,6 +1245,10 @@ int dclaw_mqtt_send_heartbeat(void) {
             {
                 size_t topic_len = strlen(topic);
                 uint8_t tmp[128 + 32]; /* topic (max 128) + payload (32) */
+                if (topic_len + 32 > sizeof(tmp)) {
+                    fprintf(stderr, "[DCLAW-MQTT] heartbeat topic too long for HMAC buffer\n");
+                    return -1;
+                }
                 memcpy(tmp, topic, topic_len);
                 memcpy(tmp + topic_len, hb_buf, 32);
                 dclaw_hmac_sha256(device_key, key_len, tmp, topic_len + 32, hmac_tag);

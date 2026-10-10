@@ -820,7 +820,7 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 	}
 	resp.HMACTag = computeVerdictHMACFull(deviceKey, sessionID,
 		vr.RequestID, resp.Action, resp.Severity, resp.TTL,
-		resp.Reason, resp.Flags, resp.ServerTS, vr.ToolHash)
+		resp.Reason, resp.Flags, resp.ServerTS, vr.ToolHash, vr.BootNonce)
 
 	// Publish the response to the device's verdict/resp topic
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
@@ -856,12 +856,14 @@ func (b *Bridge) incErrors() {
 // RequestID and ToolHash. The C agent discards responses with RequestID==0
 // because 0 is its sentinel for "unused slot."
 func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte) {
-	// Decode the verdict request to get the real RequestID and ToolHash.
+	// Decode the verdict request to get the real RequestID, ToolHash, and BootNonce.
 	var requestID uint16
 	var toolHash [32]byte
+	var bootNonce [16]byte
 	if vr, err := DecodeVerdictRequest(rawPayload); err == nil {
 		requestID = vr.RequestID
 		toolHash = vr.ToolHash
+		bootNonce = vr.BootNonce
 	} else {
 		b.logger.Printf("[mqtt-bridge] lockdown BLOCK: failed to decode verdict request: %v (using request_id=1)", err)
 		requestID = 1 // fallback to non-zero so the C agent does not discard
@@ -884,7 +886,7 @@ func (b *Bridge) sendLockdownBlockResponse(parts *TopicParts, rawPayload []byte)
 	}
 	resp.HMACTag = computeVerdictHMACFull(deviceKey, sessionID,
 		resp.RequestID, resp.Action, resp.Severity, resp.TTL,
-		resp.Reason, resp.Flags, resp.ServerTS, toolHash)
+		resp.Reason, resp.Flags, resp.ServerTS, toolHash, bootNonce)
 
 	respTopic := fmt.Sprintf("defenseclaw/%d/%d/%d/verdict/resp",
 		parts.TenantID, parts.FleetID, parts.DeviceID)
@@ -956,7 +958,8 @@ func (b *Bridge) verifyMessageHMAC(msg Message, parts *TopicParts, hw *Heartbeat
 // response fields plus the tool hash. BLK-1: extended from 4 to 16 bytes.
 func computeVerdictHMACFull(deviceKey []byte, sessionID string,
 	requestID uint16, action, severity uint8, ttl uint16,
-	reason, flags uint8, serverTS uint32, toolHash [32]byte) [16]byte {
+	reason, flags uint8, serverTS uint32, toolHash [32]byte,
+	bootNonce [16]byte) [16]byte {
 
 	mac := hmac.New(sha256.New, deviceKey)
 
@@ -992,6 +995,9 @@ func computeVerdictHMACFull(deviceKey []byte, sessionID string,
 
 	// L-1 fix: Use full 32-byte tool_hash (was truncated to 8 bytes)
 	mac.Write(toolHash[:])
+
+	// B-1 fix: Include boot_nonce for cross-reboot replay protection
+	mac.Write(bootNonce[:])
 
 	full := mac.Sum(nil)
 	var tag [16]byte
