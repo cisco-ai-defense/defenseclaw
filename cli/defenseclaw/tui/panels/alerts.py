@@ -1858,6 +1858,9 @@ def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
         action = tokens.get("action", "").strip().lower()
         mode = tokens.get("mode", "").strip().lower()
         if action == "block":
+            # A block on PostToolUse held the result back; the call had run (GAP-1344).
+            if detection_only_hook_label(hook_target) == POST_TOOL_DECISION:
+                return POST_TOOL_DECISION
             return f"blocked ({mode} mode)" if mode else "blocked"
         raw_action = tokens.get("raw_action", "").strip().lower()
         observed_block = action == "allow" and raw_action == "block"

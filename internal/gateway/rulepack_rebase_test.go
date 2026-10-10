@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -138,5 +139,78 @@ func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 	}
 	if current, err := os.ReadFile(configPath); err != nil || string(current) != string(source) {
 		t.Fatalf("the v8 config changed: %v", err)
+	}
+}
+
+// GAP-1344: 0.8.x ran a rule's pattern over the tool call's argument text, so
+// a carried literal rule blocked "touch dccert-block-marker.txt" too. The 1.0
+// expression the rebase derives matched only an argument equal to the
+// literal; it now blocks an argument that starts or ends with it and a path
+// or host that holds it, and a \b literal only as a word, as 0.8.x did.
+func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
+	old := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := "version: 1\ncategory: cert-marker\nrules:\n" +
+		"  - id: CERT-MARKER\n    pattern: dccert-block-marker\n    title: \"Marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n" +
+		"  - id: CERT-WORD\n    pattern: '\\bdcword\\b'\n    title: \"Word\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"
+	if err := os.WriteFile(filepath.Join(old, "rules", "cert.yaml"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := guardrail.PlanRulePackRebase(old)
+	if err != nil || plan == nil || !slices.Equal(plan.Expressed, []string{"CERT-MARKER", "CERT-WORD"}) || len(plan.WholeArgument) != 0 {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	rebased := t.TempDir()
+	for rel, data := range plan.Files {
+		target := filepath.Join(rebased, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack, err := guardrail.LoadRulePack(rebased)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const connector = "rebase-literal"
+	if err := ApplyConnectorRulePackOverrides(connector, pack); err != nil {
+		t.Fatal(err)
+	}
+	defer RemoveConnectorRulePackOverrides(connector)
+	for _, tc := range []struct {
+		tool, command, args, rule string
+		blocked                   bool
+	}{
+		{tool: "Bash", command: "touch dccert-block-marker.txt", rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: "echo dccert-block-marker", rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: "ls /tmp/x/dccert-block-marker", rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: `echo "dccert-block-marker"`, rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: "printf %s%s first dccert-block-marker-3", rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: "curl -s https://dccert-block-marker.example/", rule: "CERT-MARKER", blocked: true},
+		{tool: "Write", args: `{"file_path":"/home/alice/project/dccert-block-marker.txt","content":""}`, rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: "echo dccert-block", rule: "CERT-MARKER"},
+		{tool: "Bash", command: "echo dcword", rule: "CERT-WORD", blocked: true},
+		{tool: "Bash", command: "cat /tmp/dcword.txt", rule: "CERT-WORD", blocked: true},
+		{tool: "Bash", command: "cat /tmp/dcwords.txt", rule: "CERT-WORD"},
+	} {
+		input := actionfacts.Input{
+			Tool: tc.tool, Command: tc.command, CWD: "/home/alice/project",
+			ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX,
+		}
+		legacy := tc.command
+		if tc.args != "" {
+			input.Args, legacy = json.RawMessage(tc.args), tc.args
+		}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, LegacyText: legacy, Connector: connector, EnforcementCapable: true,
+		})
+		matched := slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == tc.rule && f.contributesToEnforcement() })
+		if blocked := matched && buildVerdict(findings, "tool_call").Action == guardrailActionBlock; blocked != tc.blocked {
+			t.Errorf("%s %s%s: blocked by %s = %v, want %v", tc.tool, tc.command, tc.args, tc.rule, blocked, tc.blocked)
+		}
 	}
 }

@@ -218,14 +218,19 @@ def _hook_decision(hook_details: list[str], hook_event: str = "") -> str:
     A post-tool finding (PostToolUse, ...) cannot block the call that already
     ran, so it is not labelled observe mode on an action-mode connector
     (GAP-1303)."""
-    from defenseclaw.hook_metrics import would_block_hook_label  # noqa: PLC0415
+    from defenseclaw.hook_metrics import (  # noqa: PLC0415
+        POST_TOOL_DECISION,
+        detection_only_hook_label,
+        would_block_hook_label,
+    )
 
     decision = ""
     for raw in hook_details:
         kv = _kv(_strip_details_json(raw))
         action = kv.get("action", "").lower()
         if action == "block":
-            return "blocked"
+            # A block on PostToolUse held the result back; the call had run (GAP-1344).
+            return POST_TOOL_DECISION if detection_only_hook_label(hook_event) == POST_TOOL_DECISION else "blocked"
         # Observe mode records action=allow raw_action=block, with or without
         # would_block=true; both are "would block" (GAP-1213).
         observed_block = action == "allow" and kv.get("raw_action", "").lower() == "block"

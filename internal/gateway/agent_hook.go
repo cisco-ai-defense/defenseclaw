@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2266,7 +2267,8 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// original verdict reason, so telemetry retains the "why" while the agent
 	// shows the operator's message. Resolved per connector.
 	responseReason, responsePolicy := resolveHookBlockReasonForConfig(
-		a.decisionConfig(ctx), req.ConnectorName, action, reason, sinkPolicyFor(ctx, verdict.RedactionEnabled),
+		a.decisionConfig(ctx), req.ConnectorName, req.HookEventName, action, reason, evalCtx.RuleIDs,
+		sinkPolicyFor(ctx, verdict.RedactionEnabled),
 	)
 	if action == "alert" {
 		if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
@@ -3034,10 +3036,22 @@ func promptNoticeOnlyEvent(connectorName, event string) bool {
 // the proxy's blockMessage() does. The message is operator-authored, not
 // scanned content, so the default projection shows it verbatim; an explicit
 // managed redaction directive still applies. Other actions, and a block with
-// no configured message, keep the verdict reason and policy.
-func resolveHookBlockReasonForConfig(cfg *config.Config, connector, action, reason string, policy redaction.SinkPolicy) (string, redaction.SinkPolicy) {
+// no configured message, keep the verdict reason and policy. A block on an
+// event that fires after the tool ran (PostToolUse and its kin) did not stop
+// the call, so it gets postToolBlockReason instead of a message that says it
+// did (GAP-1344).
+func resolveHookBlockReasonForConfig(
+	cfg *config.Config, connector, event, action, reason string, ruleIDs []string, policy redaction.SinkPolicy,
+) (string, redaction.SinkPolicy) {
 	if action != "block" || cfg == nil {
 		return reason, policy
+	}
+	// Secure Client keeps the verdict reason and its sink policy (issue #1092).
+	if toolAlreadyRanEvent(event) && !cfg.SecureClientIntegration() {
+		if policy == redaction.SinkPolicyDefault {
+			policy = redaction.SinkPolicyRaw
+		}
+		return postToolBlockReason(ruleIDs), policy
 	}
 	custom := strings.TrimSpace(cfg.EffectiveBlockMessageForConnector(connector))
 	if custom == "" {
@@ -3048,6 +3062,40 @@ func resolveHookBlockReasonForConfig(cfg *config.Config, connector, action, reas
 		policy = redaction.SinkPolicyRaw
 	}
 	return custom, policy
+}
+
+// toolAlreadyRanEvent reports a hook event that fires after the tool ran: a
+// block there can hold its result back from the agent, not stop the call.
+func toolAlreadyRanEvent(event string) bool {
+	switch canonicalEvent(event) {
+	case "posttooluse", "posttoolusefailure", "posttoolbatch", "aftertool", "posttoolcall",
+		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
+		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
+		"toolexecuteafter", "toolresult":
+		return true
+	}
+	return false
+}
+
+// postToolBlockReason is the agent-facing reason of a block after the tool
+// ran: it names the rules (at most five) and says the call was not stopped.
+func postToolBlockReason(ruleIDs []string) string {
+	var ids []string
+	for _, id := range ruleIDs {
+		if agentRuleIDPattern.MatchString(id) && !slices.Contains(ids, id) && len(ids) < 5 {
+			ids = append(ids, id)
+		}
+	}
+	rules := ""
+	switch len(ids) {
+	case 0:
+	case 1:
+		rules = " (rule " + ids[0] + ")"
+	default:
+		rules = " (rules " + strings.Join(ids, ", ") + ")"
+	}
+	return "DefenseClaw flagged the result of this tool call after it ran" + rules +
+		". The call itself was not stopped; check what it did."
 }
 
 func connectorReason(connectorName, action, tool, reason string) string {

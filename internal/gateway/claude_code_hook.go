@@ -292,7 +292,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// #1092).
 	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
 	if !a.managedAIDOnly() {
-		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", action, reason, policy)
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "claudecode", req.HookEventName, action, reason,
+			evalCtx.RuleIDs, policy)
 	}
 	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
 	resp.SourceReason = verdict.Reason
