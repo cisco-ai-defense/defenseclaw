@@ -100,12 +100,29 @@ type sinkHealthV8Occurrence struct {
 	errorCode                    observability.Optional[string]
 	durableHealthTransition      bool
 	protectedBoundaryAuthFailure bool
+	controlPlaneMutation         bool
+	enforcedOutcome              bool
 	timestamp                    time.Time
 	event                        Event
+	// P1-11 fix: Per-action bucket override. When non-empty, the
+	// classification context uses this bucket instead of the default
+	// BucketPlatformHealth. Fleet actions need different buckets
+	// (asset.lifecycle, enforcement.action, compliance.activity,
+	// security.finding) to match the generated telemetry families.
+	bucket observability.Bucket
+	// P1-11 fix: Per-action event-name override. Fleet actions have
+	// their own generated families (fleet.device.registered,
+	// fleet.device.command, etc.) that differ from the generic
+	// platform-health subsystem families (subsystem.lifecycle,
+	// subsystem.degraded, etc.). When non-empty, classification and
+	// the family builder use this event name instead of the one
+	// derived from the sinkHealthV8Family enum.
+	fleetEventName observability.EventName
 }
 
 func (occurrence sinkHealthV8Occurrence) mandatory() bool {
-	return occurrence.durableHealthTransition || occurrence.protectedBoundaryAuthFailure
+	return occurrence.durableHealthTransition || occurrence.protectedBoundaryAuthFailure ||
+		occurrence.controlPlaneMutation || occurrence.enforcedOutcome
 }
 
 func (occurrence sinkHealthV8Occurrence) eventName() observability.EventName {
@@ -157,7 +174,13 @@ func (l *Logger) emitPlatformHealthV8Occurrence(
 	if occurrence.timestamp.IsZero() {
 		occurrence.timestamp = time.Now().UTC()
 	}
+	// P1-11 fix: Fleet actions supply their own generated event names
+	// that differ from the generic subsystem families. Use the
+	// fleet-specific event name when available.
 	eventName := occurrence.eventName()
+	if occurrence.fleetEventName != "" {
+		eventName = occurrence.fleetEventName
+	}
 	if eventName == "" || !observability.IsStableToken(occurrence.phase) ||
 		!observability.IsStableToken(occurrence.subsystem) {
 		return auditV8Persisted, fmt.Errorf("audit: v8 platform health occurrence is invalid")
@@ -184,13 +207,24 @@ func (l *Logger) emitPlatformHealthV8Occurrence(
 		occurrence.errorSummary = platformHealthErrorSummary(event.Details)
 	}
 	stampAuditEventEnvelope(&event)
+	// P1-11 fix: Use per-action bucket when set, otherwise default to
+	// BucketPlatformHealth. Fleet actions that represent asset lifecycle,
+	// enforcement, compliance, or security findings must be routed to
+	// their correct bucket so generated telemetry families receive
+	// well-formed records.
+	classificationBucket := observability.BucketPlatformHealth
+	if occurrence.bucket != "" {
+		classificationBucket = occurrence.bucket
+	}
 	classification := observability.ClassificationContext{
-		Bucket:      observability.BucketPlatformHealth,
+		Bucket:      classificationBucket,
 		EventName:   eventName,
 		RawSeverity: occurrence.severity,
 		MandatoryFacts: observability.MandatoryFacts{
 			DurableHealthTransition:      occurrence.durableHealthTransition,
 			ProtectedBoundaryAuthFailure: occurrence.protectedBoundaryAuthFailure,
+			ControlPlaneMutation:         occurrence.controlPlaneMutation,
+			EnforcedOutcome:              occurrence.enforcedOutcome,
 		},
 	}
 	metadata, err := router.NewClassifiedLogMetadata(
@@ -336,6 +370,78 @@ func auditPlatformHealthV8Occurrence(event Event) (sinkHealthV8Occurrence, bool)
 		occurrence.outcome, occurrence.severity = observability.OutcomeFailed, "HIGH"
 		occurrence.subsystem, occurrence.healthState = "judge_bodies", "degraded"
 		occurrence.errorCode = observability.Present("worker_still_running")
+
+	// Fleet (Edge Connector) platform-health actions. These need explicit
+	// routing so the generated fleet families (log.fleet.device.heartbeat,
+	// log.fleet.device.offline, log.fleet.alert) receive well-formed
+	// platform-health records instead of falling through to the compatibility
+	// adapter, which cannot supply the required family-specific fields.
+	// P1-11 fix: Route each fleet action to its correct bucket instead
+	// of defaulting all to BucketPlatformHealth. The generated telemetry
+	// families require specific buckets to produce valid records.
+	case ActionFleetDeviceHeartbeat:
+		occurrence.family, occurrence.phase = sinkHealthV8Ready, "heartbeat"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetDeviceHeartbeat)
+	case ActionFleetDeviceOffline:
+		occurrence.durableHealthTransition = true
+		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "heartbeat"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "WARN"
+		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
+		occurrence.errorCode = observability.Present("device_offline")
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetDeviceOffline)
+	case ActionFleetAlert:
+		occurrence.durableHealthTransition = true
+		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "alert"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, event.Severity
+		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
+		occurrence.errorCode = observability.Present("fleet_alert")
+		occurrence.bucket = observability.BucketPlatformHealth
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetAlert)
+	case ActionFleetDeviceRegistered:
+		occurrence.durableHealthTransition = false
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "registration"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.bucket = observability.BucketAssetLifecycle
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetDeviceRegistered)
+	case ActionFleetDeviceDecommission:
+		occurrence.durableHealthTransition = false
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "decommission"
+		occurrence.outcome, occurrence.severity = observability.OutcomeCompleted, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "stopped"
+		occurrence.bucket = observability.BucketAssetLifecycle
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetDeviceDecommission)
+	case ActionFleetDeviceCommand:
+		occurrence.enforcedOutcome = true
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "command"
+		occurrence.outcome, occurrence.severity = observability.OutcomeApplied, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.bucket = observability.BucketEnforcementAction
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetDeviceCommand)
+	case ActionFleetPolicyPush:
+		occurrence.controlPlaneMutation = true
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "policy"
+		occurrence.outcome, occurrence.severity = observability.OutcomeApplied, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.bucket = observability.BucketComplianceActivity
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetPolicyPush)
+	case ActionFleetPolicyEmergency:
+		occurrence.controlPlaneMutation = true
+		occurrence.family, occurrence.phase = sinkHealthV8Degraded, "emergency"
+		occurrence.outcome, occurrence.severity = observability.OutcomeApplied, "HIGH"
+		occurrence.subsystem, occurrence.healthState = "fleet", "degraded"
+		occurrence.errorCode = observability.Present("emergency_command")
+		occurrence.bucket = observability.BucketComplianceActivity
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetPolicyEmergency)
+	case ActionFleetThreatIntel:
+		occurrence.family, occurrence.phase = sinkHealthV8Lifecycle, "threat_intel"
+		occurrence.outcome, occurrence.severity = observability.OutcomeApplied, "INFO"
+		occurrence.subsystem, occurrence.healthState = "fleet", "ready"
+		occurrence.bucket = observability.BucketSecurityFinding
+		occurrence.fleetEventName = observability.EventName(observability.TelemetryEventFleetThreatIntelPush)
+
 	default:
 		return sinkHealthV8Occurrence{}, false
 	}
@@ -349,6 +455,13 @@ func buildSinkHealthV8Family(
 	logLevel observability.Optional[observability.LogLevel],
 	occurrence sinkHealthV8Occurrence,
 ) (observability.Record, error) {
+	// P1-11 fix: Fleet actions have their own generated family builders
+	// that accept fleet-specific fields rather than generic platform-health
+	// subsystem fields. Dispatch to the correct fleet builder when a
+	// fleet event name override is present.
+	if occurrence.fleetEventName != "" {
+		return buildFleetV8Family(builder, envelope, severity, logLevel, occurrence)
+	}
 	subsystem := occurrence.subsystem
 	switch occurrence.family {
 	case sinkHealthV8AuthenticationFailed:
@@ -430,6 +543,131 @@ func buildSinkHealthV8Family(
 	default:
 		return observability.Record{}, fmt.Errorf("audit: unsupported v8 sink health family")
 	}
+}
+
+// buildFleetV8Family dispatches fleet actions to their dedicated generated
+// family builders. Each fleet family has a distinct field schema: health-like
+// families (heartbeat, offline, alert) carry subsystem/state fields, asset
+// lifecycle families (registered, decommission) carry asset fields, admin
+// operation families (command, policy-push, policy-emergency) carry admin
+// fields, and threat-intel carries runtime observation fields. Without this
+// dispatch, fleet actions would fall into the generic subsystem builders whose
+// identity (bucket + event name) does not match the generated fleet family
+// registry, causing the record to be rejected.
+func buildFleetV8Family(
+	builder *observability.FamilyBuilder,
+	envelope observability.FamilyEnvelopeInput,
+	severity observability.Optional[observability.Severity],
+	logLevel observability.Optional[observability.LogLevel],
+	occurrence sinkHealthV8Occurrence,
+) (observability.Record, error) {
+	switch occurrence.action {
+	// Health-like fleet families: same field shape as subsystem health.
+	case ActionFleetDeviceHeartbeat:
+		return builder.BuildLogFleetDeviceHeartbeat(observability.LogFleetDeviceHeartbeatInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                       occurrence.outcome,
+			DefenseClawHealthSubsystem:    occurrence.subsystem,
+			DefenseClawHealthState:        occurrence.healthState,
+			DefenseClawHealthErrorSummary: occurrence.errorSummary,
+			DefenseClawSchemaErrorCode:    occurrence.errorCode,
+		})
+	case ActionFleetDeviceOffline:
+		return builder.BuildLogFleetDeviceOffline(observability.LogFleetDeviceOfflineInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                          occurrence.outcome,
+			DefenseClawHealthSubsystem:       occurrence.subsystem,
+			DefenseClawHealthState:           occurrence.healthState,
+			DefenseClawHealthErrorSummary:    occurrence.errorSummary,
+			DefenseClawSchemaErrorCode:       occurrence.errorCode,
+			MandatoryDurableHealthTransition: occurrence.durableHealthTransition,
+		})
+	case ActionFleetAlert:
+		return builder.BuildLogFleetAlert(observability.LogFleetAlertInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                          occurrence.outcome,
+			DefenseClawHealthSubsystem:       occurrence.subsystem,
+			DefenseClawHealthState:           occurrence.healthState,
+			DefenseClawHealthErrorSummary:    occurrence.errorSummary,
+			DefenseClawSchemaErrorCode:       occurrence.errorCode,
+			MandatoryDurableHealthTransition: occurrence.durableHealthTransition,
+		})
+
+	// Asset lifecycle fleet families: carry asset identity and transition fields.
+	// The audit event's Target field is used as the asset ID; the phase field
+	// provides the transition name.
+	case ActionFleetDeviceRegistered:
+		return builder.BuildLogFleetDeviceRegistered(observability.LogFleetDeviceRegisteredInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                    occurrence.outcome,
+			DefenseClawAssetID:         fleetAssetID(occurrence.event),
+			DefenseClawAssetTransition: occurrence.phase,
+		})
+	case ActionFleetDeviceDecommission:
+		return builder.BuildLogFleetDeviceDecommission(observability.LogFleetDeviceDecommissionInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                    occurrence.outcome,
+			DefenseClawAssetID:         fleetAssetID(occurrence.event),
+			DefenseClawAssetTransition: occurrence.phase,
+		})
+
+	// Admin operation fleet families: carry the operation name and optional
+	// admin metadata. The audit event's Action field names the operation.
+	case ActionFleetDeviceCommand:
+		return builder.BuildLogFleetDeviceCommand(observability.LogFleetDeviceCommandInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                      occurrence.outcome,
+			DefenseClawAdminOperation:    string(occurrence.action),
+			MandatoryEnforcedOutcome:     occurrence.enforcedOutcome,
+			ConditionAdminPrincipalKnown: false,
+		})
+	case ActionFleetPolicyPush:
+		return builder.BuildLogFleetPolicyPush(observability.LogFleetPolicyPushInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                       occurrence.outcome,
+			DefenseClawAdminOperation:     string(occurrence.action),
+			MandatoryControlPlaneMutation: occurrence.controlPlaneMutation,
+			ConditionAdminPrincipalKnown:  false,
+		})
+	case ActionFleetPolicyEmergency:
+		return builder.BuildLogFleetPolicyEmergency(observability.LogFleetPolicyEmergencyInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                       occurrence.outcome,
+			DefenseClawAdminOperation:     string(occurrence.action),
+			MandatoryControlPlaneMutation: occurrence.controlPlaneMutation,
+			ConditionAdminPrincipalKnown:  false,
+		})
+
+	// Threat intel fleet family: carries runtime observation counters.
+	// Default zero values are used for the observation fields since the audit
+	// event does not carry structured threat intel payloads; the family
+	// schema marks most of these as non-required.
+	case ActionFleetThreatIntel:
+		return builder.BuildLogFleetThreatIntelPush(observability.LogFleetThreatIntelPushInput{
+			Envelope: envelope, Severity: severity, LogLevel: logLevel,
+			Outcome:                                occurrence.outcome,
+			DefenseClawAIRuntimeFindingID:          fleetAssetID(occurrence.event),
+			DefenseClawAIRuntimeScore:              0,
+			DefenseClawAIRuntimeSeverity:           strings.ToLower(occurrence.severity),
+			DefenseClawAIRuntimeProcess:            "fleet_threat_intel",
+			DefenseClawAIRuntimeCorrelationVerdict: "accounted",
+			DefenseClawAIRuntimeCorrelationReason:  "threat_intel_push",
+		})
+
+	default:
+		return observability.Record{}, fmt.Errorf("audit: unsupported fleet v8 action %q", occurrence.action)
+	}
+}
+
+// fleetAssetID extracts the asset identifier from an audit event. Fleet
+// actions use the Target field for the device/asset identity. If empty,
+// a stable placeholder is returned so the required asset-ID field is
+// always populated.
+func fleetAssetID(event Event) string {
+	if event.Target != "" {
+		return event.Target
+	}
+	return "unknown"
 }
 
 // platformHealthErrorSummary retains the source diagnostic until the central

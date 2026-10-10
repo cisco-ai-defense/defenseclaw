@@ -1,0 +1,27 @@
+[Unit]
+Description=DefenseClaw Edge Connector
+Wants=network-online.target
+After=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/edge-connector
+EnvironmentFile=-/etc/defenseclaw/edge-connector.env
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+User=defenseclaw
+Group=defenseclaw
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/defenseclaw
+LimitNOFILE=1024
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

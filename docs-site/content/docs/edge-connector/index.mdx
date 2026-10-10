@@ -1,0 +1,76 @@
+---
+title: Edge Connector
+description: Sub-microsecond AI agent security enforcement for IoT and edge devices. A purpose-built C-language engine (~68KB) that evaluates tool calls locally and escalates to the cloud only when needed.
+keywords:
+  - DefenseClaw Edge Connector
+  - IoT security
+  - edge device AI agent
+  - sub-microsecond enforcement
+  - embedded AI security
+  - PicoClaw
+  - MQTT escalation
+---
+
+The Edge Connector is a purpose-built C-language enforcement engine (~68KB binary) that provides local policy enforcement with AI-aware content inspection on resource-constrained devices. It evaluates every tool call an AI agent makes in under 5 microseconds, blocking dangerous operations before they reach the physical world.
+
+<Callout type="info">
+The Edge Connector is designed for **IoT and edge devices** — Raspberry Pi, Jetson, industrial SBCs, and similar Linux platforms. For desktop AI coding agents (Claude Code, Codex, Cursor, etc.), use the standard [connectors](/docs/connectors).
+</Callout>
+
+## Why a separate engine?
+
+Desktop connectors intercept tool calls via hooks or proxy and delegate evaluation to the Go gateway sidecar. That architecture assumes reliable networking, plentiful memory, and a human at the keyboard. Edge devices have none of those:
+
+| Constraint | Desktop | Edge |
+| --- | --- | --- |
+| Binary budget | ~50MB (Go + Python) | **~68KB** (C, static) |
+| RAM budget | GB | **14–19KB** |
+| Latency budget | 50–200ms acceptable | **&lt;5μs required** |
+| Network | Always-on | Intermittent or absent |
+| Consequences of failure | Bad file on disk | **Physical world action** |
+
+The Edge Connector solves this by running an 8-stage evaluation pipeline entirely on-device, delegating complex analysis to a cloud DefenseClaw instance only when local policy cannot decide.
+
+## What it does
+
+<Cards>
+  <Card title="Content scanning" description="Detects secrets, PII, credentials, data exfiltration, prompt injection, and dangerous commands in tool arguments and LLM responses." />
+  <Card title="SSRF validation" description="Blocks requests to private/internal IP ranges and cloud metadata endpoints before they reach the network." />
+  <Card title="Sequence correlation" description="FSM-based detection of dangerous multi-step capability patterns (e.g., net_fetch → exec_shell)." />
+  <Card title="Rate limiting" description="Three independent token buckets — tool calls, network requests, and physical actuations — each configurable per-minute." />
+  <Card title="Verdict caching" description="LRU cache with TTL and clock-trust validation so repeated safe calls skip the full pipeline." />
+  <Card title="Cloud escalation" description="Forwards content snippets via MQTT 3.1.1 to a cloud DefenseClaw instance for further analysis when local policy is insufficient." />
+</Cards>
+
+## 8-stage evaluation pipeline
+
+Every tool call passes through all eight stages in order. The pipeline short-circuits on the first BLOCK verdict.
+
+```
+1. Input validation     →  Reject malformed requests at the IPC boundary
+2. Rate limiting        →  Three token buckets (tools, network, actuations)
+3. Content scanning     →  Secrets, PII, credentials, exfil, injection, commands
+4. Hash deny-list       →  Known-bad tool hashes from threat intel
+5. Destination filter   →  Allowlist/denylist + SSRF validation
+6. Sequence correlation →  Multi-step pattern detection via DFA
+7. Verdict cache        →  LRU lookup with TTL
+8. Cloud escalation     →  MQTT 3.1.1 with enriched content snippets
+```
+
+## Build profiles
+
+| Profile | Binary | RAM | Use case |
+| --- | --- | --- | --- |
+| `MINIMAL` | ~22KB | ~8KB | MCUs, ultra-constrained devices |
+| `STANDARD` | ~68KB | ~14–19KB | Raspberry Pi, Jetson, SBCs |
+| `EDGE` | ~131KB | ~64KB | Edge gateways with bloom filter |
+
+> **Note:** Sizes shown are for stripped Release builds with `-Os -flto`. Debug builds are larger (~79KB MINIMAL, ~265KB STANDARD/EDGE).
+
+## Next steps
+
+<Cards>
+  <Card title="Install" href="/docs/edge-connector/install" description="Build from source, configure a policy, and integrate with your AI agent." />
+  <Card title="Architecture" href="/docs/edge-connector/architecture" description="Deep dive into the evaluation pipeline, trust boundaries, and cloud escalation." />
+  <Card title="Policies" href="/docs/edge-connector/policies" description="Write capability sequences, content patterns, and destination rules." />
+</Cards>

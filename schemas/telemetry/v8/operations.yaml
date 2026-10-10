@@ -10136,6 +10136,205 @@ groups:
     - enforcement_state_change
     compatibility_profiles:
     - local-observability-v1
+- id: log.fleet.alert
+  type: log
+  brief: Fleet-wide alert raised by a managed edge device or the fleet controller.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.platform.health
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.alert
+  x-defenseclaw:
+    bucket: platform.health
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor:
+    - durable_health_transition
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.device.command
+  type: log
+  brief: Command dispatched to a managed edge device in the fleet.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.compliance.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.device.command
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.device.decommission
+  type: log
+  brief: Edge connector device decommissioned and removed from the fleet.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.asset.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.device.decommission
+  x-defenseclaw:
+    bucket: asset.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.device.heartbeat
+  type: log
+  brief: Periodic heartbeat received from a managed edge device.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.platform.health
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.device.heartbeat
+  x-defenseclaw:
+    bucket: platform.health
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.device.offline
+  type: log
+  brief: Managed edge device detected as offline or unreachable.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.platform.health
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.device.offline
+  x-defenseclaw:
+    bucket: platform.health
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor:
+    - durable_health_transition
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.device.registered
+  type: log
+  brief: Edge connector device registered in the fleet.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.asset.lifecycle
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.device.registered
+  x-defenseclaw:
+    bucket: asset.lifecycle
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.policy.emergency
+  type: log
+  brief: Emergency policy push to all fleet devices triggered by the fleet controller.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.compliance.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.policy.emergency
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.policy.push
+  type: log
+  brief: Policy configuration pushed to one or more fleet devices.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.compliance.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.policy.push
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    - no_change
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.fleet.threat_intel.push
+  type: log
+  brief: Threat intelligence update pushed to fleet devices.
+  stability: development
+  introduced_in: telemetry-registry-v3
+  extends:
+  - body.ai.runtime.finding
+  attributes: []
+  body_fields: []
+  log:
+    event_name: fleet.threat_intel.push
+  x-defenseclaw:
+    bucket: security.finding
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: metric.defenseclaw.sandbox.transitions
   type: metric
   brief: Sandbox lifecycle phase transitions aggregated by harness connector and phase pair; sandbox identities are never labels.
@@ -12331,6 +12530,51 @@ producer_identity_sets:
   - event_name: finding.observed
     bucket: security.finding
     family: log.finding.observed
+- id: identity_set.fleet_alert
+  identities:
+  - event_name: fleet.alert
+    bucket: platform.health
+    family: log.fleet.alert
+- id: identity_set.fleet_device_command
+  identities:
+  - event_name: fleet.device.command
+    bucket: enforcement.action
+    family: log.fleet.device.command
+- id: identity_set.fleet_device_decommission
+  identities:
+  - event_name: fleet.device.decommission
+    bucket: asset.lifecycle
+    family: log.fleet.device.decommission
+- id: identity_set.fleet_device_heartbeat
+  identities:
+  - event_name: fleet.device.heartbeat
+    bucket: platform.health
+    family: log.fleet.device.heartbeat
+- id: identity_set.fleet_device_offline
+  identities:
+  - event_name: fleet.device.offline
+    bucket: platform.health
+    family: log.fleet.device.offline
+- id: identity_set.fleet_device_registered
+  identities:
+  - event_name: fleet.device.registered
+    bucket: asset.lifecycle
+    family: log.fleet.device.registered
+- id: identity_set.fleet_policy_emergency
+  identities:
+  - event_name: fleet.policy.emergency
+    bucket: compliance.activity
+    family: log.fleet.policy.emergency
+- id: identity_set.fleet_policy_push
+  identities:
+  - event_name: fleet.policy.push
+    bucket: compliance.activity
+    family: log.fleet.policy.push
+- id: identity_set.fleet_threat_intel_push
+  identities:
+  - event_name: fleet.threat_intel.push
+    bucket: security.finding
+    family: log.fleet.threat_intel.push
 producer_mappings:
 - producer: gateway_event
   key: verdict
@@ -15439,6 +15683,110 @@ producer_mappings:
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.alert
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_alert
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - durable_health_transition
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.command
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_command
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.decommission
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_decommission
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.heartbeat
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_heartbeat
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.offline
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_offline
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - durable_health_transition
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.device.registered
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_device_registered
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.policy.emergency
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_policy_emergency
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.policy.push
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_policy_push
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
+    disposition: translate_to_v8
+- producer: audit_action
+  key: fleet.threat_intel.push
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.fleet_threat_intel_push
+  severity_policy: canonical_or_info
+  mandatory_rules: []
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v3
     disposition: translate_to_v8
 - producer: audit_action
   key: scan

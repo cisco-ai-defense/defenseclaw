@@ -42,6 +42,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/fleet"
+	fleetmanager "github.com/defenseclaw/defenseclaw/internal/fleet/manager"
+	fleetmqtt "github.com/defenseclaw/defenseclaw/internal/fleet/mqtt"
+	fleetpolicy "github.com/defenseclaw/defenseclaw/internal/fleet/policy"
+	fleetverdict "github.com/defenseclaw/defenseclaw/internal/fleet/verdict"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -6817,6 +6822,207 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		_ = reg.DiscoverPlugins(s.currentConfig().PluginDir)
 	}
 	api.SetConnectorRegistry(reg)
+	// Wire the Edge Connector fleet management API. The manager and verdict
+	// cache are lightweight in-process singletons; metrics are connected once
+	// so Prometheus scrapes reflect live fleet state.
+	fleetMgr := fleetmanager.New(func(alert fleetmanager.Alert) {
+		// Stderr line for immediate local visibility (unchanged).
+		fmt.Fprintf(os.Stderr, "[fleet-alert] type=%s device=%d severity=%s: %s\n",
+			alert.Type, alert.DeviceID, alert.Severity, alert.Message)
+
+		// Route through the gateway's audit pipeline so fleet alerts
+		// reach SQLite, Splunk, OTLP, JSONL, and webhooks automatically.
+		if s.logger != nil {
+			severity := strings.ToUpper(alert.Severity)
+			if severity == "" {
+				severity = "WARN"
+			}
+			_ = s.logger.LogAlert("fleet", severity,
+				fmt.Sprintf("fleet.%s device=%d: %s", alert.Type, alert.DeviceID, alert.Message),
+				map[string]any{
+					"alert_type": string(alert.Type),
+					"device_id":  alert.DeviceID,
+					"severity":   alert.Severity,
+				})
+		}
+
+		// Dispatch to webhook endpoints so external integrations
+		// (PagerDuty, Slack, SIEM) receive fleet events in real time.
+		if webhooks := s.webhooksSnapshot(); webhooks != nil {
+			webhooks.Dispatch(audit.Event{
+				Timestamp: alert.Timestamp,
+				Action:    string(audit.ActionFleetAlert),
+				Target:    fmt.Sprintf("%d", alert.DeviceID),
+				Actor:     "fleet-manager",
+				Details:   fmt.Sprintf("type=%s severity=%s: %s", alert.Type, alert.Severity, alert.Message),
+				Severity:  strings.ToUpper(alert.Severity),
+			})
+		}
+	})
+	// Persist fleet device state to SQLite so data survives gateway
+	// restarts.  Falls back to in-memory (no persistence) if the DB
+	// cannot be opened.
+	fleetDataDir := filepath.Join(s.currentConfig().DataDir, "fleet")
+	if err := os.MkdirAll(fleetDataDir, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] fleet data dir: %v\n", err)
+	}
+	var deviceStore *fleet.SQLiteStore // nil when DB cannot be opened
+	if ds, err := fleet.NewSQLiteStore(filepath.Join(fleetDataDir, "devices.db")); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] fleet SQLite store: %v (using in-memory)\n", err)
+	} else {
+		deviceStore = ds
+		fleetMgr.SetStore(deviceStore)
+		if n, err := fleetMgr.LoadFromStore(); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet load from store: %v\n", err)
+		} else if n > 0 {
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet loaded %d devices from store\n", n)
+			// Initialize Prometheus metrics from restored device state so
+			// gauges reflect reality immediately after a gateway restart
+			// instead of showing 0 until the next heartbeat cycle.
+			devices := fleetMgr.ListDevices()
+			for _, d := range devices {
+				switch d.Status {
+				case fleetmanager.StatusOnline:
+					fleet.GlobalMetrics.DevicesOnline.Add(1)
+				case fleetmanager.StatusOffline:
+					fleet.GlobalMetrics.DevicesOffline.Add(1)
+				case fleetmanager.StatusDegraded:
+					fleet.GlobalMetrics.DevicesDegraded.Add(1)
+				case fleetmanager.StatusLockdown:
+					fleet.GlobalMetrics.DevicesLockdown.Add(1)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet metrics initialized from %d restored devices\n", len(devices))
+		}
+	}
+	fleetCache := fleetverdict.NewCache(4096, func(h [32]byte) (fleetverdict.Action, uint8) {
+		// Default-deny: unknown tool hashes must not be auto-allowed
+		// when no cloud inspection pipeline is configured.
+		return fleetverdict.ActionBlock, 3 // severity=3 (high)
+	})
+	fleet.WireMetrics(fleetMgr, fleetCache, nil)
+
+	// Wire the policy service so policy endpoints (push, emergency, versions)
+	// are functional instead of returning 501.
+	policySigner, _ := fleetpolicy.NewHMACSignerFromEnv()
+	var policyStore fleetpolicy.PolicyStore
+	if sqlPS, err := fleetpolicy.NewSQLitePolicyStore(filepath.Join(fleetDataDir, "policies.db")); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] policy SQLite store: %v (using in-memory)\n", err)
+		policyStore = fleetpolicy.NewMemoryPolicyStore()
+	} else {
+		policyStore = sqlPS
+	}
+	var fleetMQTTClient fleetmqtt.Client // nil until a real broker is configured
+	var fleetBridge *fleetmqtt.Bridge    // nil until a real broker is configured
+
+	// Start the MQTT bridge if a broker URL is configured. The bridge
+	// subscribes to heartbeat and verdict-request topics from edge devices
+	// and routes them to the fleet manager / verdict cache.
+	if brokerURL := os.Getenv("DCLAW_MQTT_BROKER_URL"); brokerURL != "" {
+		clientID := fmt.Sprintf("dclaw-sidecar-%d", os.Getpid())
+		tcpClient := fleetmqtt.NewTCPClient(brokerURL, clientID)
+
+		// NEW-4 fix: Always wire the client and bridge so the fleet API has
+		// references to them even before the broker is reachable. MQTT-dependent
+		// fleet API endpoints already return errors when the client is not
+		// connected, so this is safe. The bridge will start processing messages
+		// once the connection succeeds.
+		fleetMQTTClient = tcpClient
+		bridge := fleetmqtt.NewBridge(tcpClient, fleetMgr, fleetCache)
+		fleetBridge = bridge
+		// Wire block metric so BLOCK verdicts increment the Prometheus counter
+		bridge.SetOnBlock(func() { fleet.GlobalMetrics.BlocksTotal.Add(1) })
+		// Wire per-device key resolution from the SQLite store so the
+		// bridge verifies/computes verdict HMACs with the correct key
+		// instead of falling back to the fleet-wide shared key.
+		if deviceStore != nil {
+			bridge.SetDeviceKeyStore(deviceStore)
+			// NEW-3 fix: Restore decommission tombstones from SQLite so the
+			// bridge rejects messages from previously decommissioned devices
+			// even after a gateway restart.
+			if ids, err := deviceStore.LoadDecommissioned(); err != nil {
+				fmt.Fprintf(os.Stderr, "[sidecar] fleet load decommissioned: %v\n", err)
+			} else if len(ids) > 0 {
+				for _, id := range ids {
+					bridge.MarkDecommissioned(id)
+				}
+				fmt.Fprintf(os.Stderr, "[sidecar] fleet restored %d decommission tombstones\n", len(ids))
+			}
+		}
+		// P0-6 fix: Only allow auto-registration of unknown devices when
+		// DCLAW_FLEET_AUTO_REGISTER=true (dev mode). In production (default),
+		// operators must register devices via CLI/API.
+		if strings.EqualFold(os.Getenv("DCLAW_FLEET_AUTO_REGISTER"), "true") {
+			bridge.AllowAutoRegistration = true
+			fmt.Fprintln(os.Stderr, "[sidecar] fleet auto-registration enabled (DCLAW_FLEET_AUTO_REGISTER=true)")
+		}
+
+		initialErr := tcpClient.Connect(ctx)
+		if initialErr != nil {
+			// NEW-4 fix: Instead of giving up when the broker is down at
+			// startup, start a background goroutine that retries with
+			// exponential backoff (same strategy as tcp_client.go's
+			// reconnectLoop). When the broker becomes available, the bridge
+			// is started. Fleet API endpoints work without MQTT — they
+			// return errors for MQTT-dependent operations.
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT connect to %s failed: %v — will retry in background\n", brokerURL, initialErr)
+			go func() {
+				backoff := 1 * time.Second
+				const maxBackoff = 30 * time.Second
+				for {
+					select {
+					case <-ctx.Done():
+						fmt.Fprintln(os.Stderr, "[sidecar] fleet MQTT startup retry cancelled")
+						return
+					case <-time.After(backoff):
+					}
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT retrying connect to %s\n", brokerURL)
+					if err := tcpClient.Connect(ctx); err != nil {
+						fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT retry failed: %v (next in %v)\n", err, backoff*2)
+						backoff *= 2
+						if backoff > maxBackoff {
+							backoff = maxBackoff
+						}
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT connected to %s after retry — starting bridge\n", brokerURL)
+					if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
+						fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
+					}
+					return
+				}
+			}()
+		} else {
+			go func() {
+				if err := bridge.Start(ctx); err != nil && ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge error: %v\n", err)
+				}
+			}()
+			fmt.Fprintf(os.Stderr, "[sidecar] fleet MQTT bridge started (broker=%s)\n", brokerURL)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "[sidecar] DCLAW_MQTT_BROKER_URL not set — fleet MQTT bridge disabled")
+	}
+
+	policySvc := fleetpolicy.NewService(policyStore, policySigner, fleetMQTTClient, nil)
+
+	fleetOpts := []fleet.APIOption{fleet.WithPolicyService(policySvc)}
+	if fleetMQTTClient != nil {
+		fleetOpts = append(fleetOpts, fleet.WithMQTTClient(fleetMQTTClient))
+	}
+	if fleetBridge != nil {
+		fleetOpts = append(fleetOpts, fleet.WithMQTTBridge(fleetBridge))
+	}
+	if s.logger != nil {
+		fleetOpts = append(fleetOpts, fleet.WithAuditEmitter(s.logger))
+	}
+	if deviceStore != nil {
+		fleetOpts = append(fleetOpts, fleet.WithDeviceKeyStore(deviceStore))
+		// NEW-3 fix: Wire the decommission tombstone store so that
+		// decommissioned device IDs are persisted across gateway restarts.
+		fleetOpts = append(fleetOpts, fleet.WithDecommissionStore(deviceStore))
+	}
+	api.SetFleetAPI(fleet.NewAPI(ctx, fleetMgr, fleetCache, fleetOpts...))
 	// Load scoped tokens that connector setup or the enterprise hook guardian
 	// previously minted. Failures are non-fatal: tokenAuth still accepts the
 	// master gateway bearer for legacy/manual installs, while scoped-token

@@ -1,0 +1,72 @@
+# DefenseClaw MCP Proxy Configuration
+# ====================================
+#
+# The MCP proxy sits between an LLM client (Claude, Codex, etc.) and
+# a real MCP server, intercepting every tools/call request and
+# evaluating it through the 8-stage policy pipeline.
+#
+# Usage:
+#   python3 -m mcp_proxy --config mcp_proxy_config.yaml
+
+# ---------------------------------------------------------------------------
+# Upstream MCP server (the real hardware controller)
+# ---------------------------------------------------------------------------
+upstream:
+  # --- Option A: stdio transport (most common for local MCP servers) ---
+  transport: stdio
+  command: ["python3", "-m", "esp_claw.mcp_server"]
+
+  # --- Option B: HTTP transport (for remote MCP servers) ---
+  # transport: http
+  # url: "http://192.168.1.100:8088/mcp"
+
+# ---------------------------------------------------------------------------
+# Edge Connector engine settings
+# ---------------------------------------------------------------------------
+edge_connector:
+  # Path to the shared library (FFI backend).
+  # Falls back to Unix socket if unavailable.
+  lib_path: /usr/local/lib/libdclaw_core.so
+
+  # Path to the Edge Connector daemon Unix socket (JSON-RPC backend).
+  socket_path: /tmp/defenseclaw.sock
+
+  # What to do when the engine is unavailable:
+  #   closed = block all tool calls (safe default)
+  #   open   = allow all tool calls (use only for testing)
+  fail_mode: closed
+
+# ---------------------------------------------------------------------------
+# Proxy settings (only used when serving HTTP)
+# ---------------------------------------------------------------------------
+proxy:
+  http_port: 8089
+
+# ---------------------------------------------------------------------------
+# Example configurations for common MCP frameworks
+# ---------------------------------------------------------------------------
+#
+# ESP-Claw (Espressif physical AI):
+#   upstream:
+#     transport: stdio
+#     command: ["python3", "-m", "esp_claw.mcp_server"]
+#
+# HA-MCP (Home Assistant):
+#   upstream:
+#     transport: stdio
+#     command: ["python3", "-m", "ha_mcp.server", "--config", "/etc/ha-mcp/config.yaml"]
+#
+# Bubbaloop (Kornia fleet agent):
+#   upstream:
+#     transport: http
+#     url: "http://localhost:8088/mcp"
+#
+# IoT-Edge-MCP-Server (industrial gateway):
+#   upstream:
+#     transport: http
+#     url: "http://192.168.1.50:9000/mcp"
+#
+# Claude Code MCP server (development tools):
+#   upstream:
+#     transport: stdio
+#     command: ["npx", "-y", "@anthropic-ai/mcp-server-filesystem", "/home/user/projects"]

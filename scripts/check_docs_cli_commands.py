@@ -118,10 +118,17 @@ def _extract_defenseclaw_command(text: str) -> str | None:
 def documentation_paths() -> list[Path]:
     """Return every public and supporting Markdown documentation file."""
 
+    # Exclude internal design specs/plans — they reference future commands
+    # that may not be implemented yet.
+    exclude_dirs = {"superpowers", "design"}
+
+    edge_connector_docs_root = REPO_ROOT / "edge-connector"
+
     paths = [
         *PUBLIC_DOCS_ROOT.rglob("*.mdx"),
-        *SUPPORTING_DOCS_ROOT.rglob("*.md"),
+        *(p for p in SUPPORTING_DOCS_ROOT.rglob("*.md") if not any(d in p.parts for d in exclude_dirs)),
         *REPO_ROOT.glob("*.md"),
+        *(p for p in edge_connector_docs_root.glob("*.md")),
     ]
     return sorted(set(paths))
 

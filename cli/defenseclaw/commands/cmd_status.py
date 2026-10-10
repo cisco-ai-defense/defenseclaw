@@ -475,6 +475,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_semantic_routing(cfg, health=health)
         _print_llm_judge(health)
         _print_hook_guardian(cfg)
+        _print_fleet_health(client)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
@@ -516,6 +517,7 @@ def status(app: AppContext, as_json: bool) -> None:
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
+        _print_fleet_health(client)
         if holder:
             first_hint = (
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
@@ -1691,9 +1693,80 @@ def _status_payload(app) -> dict:
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["semantic_routing"] = _semantic_routing_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
+    payload["fleet"] = _fleet_health_payload(client)
     payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload
+
+
+def _fetch_fleet_health(client) -> dict | None:
+    """GET /api/v1/fleet/health from the gateway; None when unavailable."""
+    import os
+
+    try:
+        # Use the fleet bearer token (DCLAW_FLEET_API_TOKEN), not the gateway token.
+        fleet_token = os.environ.get("DCLAW_FLEET_API_TOKEN", "").strip()
+        headers = {}
+        if fleet_token:
+            headers["Authorization"] = f"Bearer {fleet_token}"
+
+        resp = client._session.get(
+            f"{client.base_url}/api/v1/fleet/health",
+            timeout=client.timeout,
+            allow_redirects=False,
+            headers=headers,
+        )
+        if resp.status_code in (404, 503):
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None
+        # The fleet health endpoint returns {"fleet": {...}, "cache_hits": ..., ...}.
+        # Extract the nested "fleet" object which contains online/offline/total_devices.
+        return data.get("fleet") if "fleet" in data else data
+    except Exception:  # noqa: BLE001 - status is observational; fleet is optional
+        return None
+
+
+def _safe_int(val, default=0):
+    """Convert a value to int, returning *default* on failure."""
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _print_fleet_health(client) -> None:
+    """Render a Fleet row when the fleet API is reachable."""
+    data = _fetch_fleet_health(client)
+    if data is None:
+        _status_row("Fleet", ux.dim("not configured"))
+        return
+    online = _safe_int(data.get("online", 0))
+    offline = _safe_int(data.get("offline", 0))
+    total = _safe_int(data.get("total_devices", online + offline))
+    if total == 0:
+        _status_row("Fleet", ux.dim("no devices registered"))
+        return
+    online_text = ux._style(f"{online} devices online", fg="green") if online else ux.dim("0 devices online")
+    offline_text = ux._style(f"{offline} offline", fg="yellow") if offline else ux.dim("0 offline")
+    _status_row("Fleet", f"{online_text}, {offline_text}")
+
+
+def _fleet_health_payload(client) -> dict:
+    """Fleet health as a JSON-friendly dict for ``status --json``."""
+    data = _fetch_fleet_health(client)
+    if data is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "total_devices": _safe_int(data.get("total_devices", 0)),
+        "online": _safe_int(data.get("online", 0)),
+        "offline": _safe_int(data.get("offline", 0)),
+        "degraded": _safe_int(data.get("degraded", 0)),
+        "lockdown": int(data.get("lockdown", 0)),
+    }
 
 
 def _sandboxes_enabled(cfg) -> bool:

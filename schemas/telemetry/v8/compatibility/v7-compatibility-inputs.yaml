@@ -238,6 +238,15 @@ classes:
       ActionToolBlock: "tool-block"
       ActionToolAllow: "tool-allow"
       ActionToolUnblock: "tool-unblock"
+      ActionFleetDeviceRegistered: "fleet.device.registered"
+      ActionFleetDeviceHeartbeat: "fleet.device.heartbeat"
+      ActionFleetDeviceOffline: "fleet.device.offline"
+      ActionFleetDeviceDecommission: "fleet.device.decommission"
+      ActionFleetDeviceCommand: "fleet.device.command"
+      ActionFleetPolicyPush: "fleet.policy.push"
+      ActionFleetPolicyEmergency: "fleet.policy.emergency"
+      ActionFleetThreatIntel: "fleet.threat_intel.push"
+      ActionFleetAlert: "fleet.alert"
 
   emitted_metrics:
     items:

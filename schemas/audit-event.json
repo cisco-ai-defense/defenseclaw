@@ -226,7 +226,16 @@
             "mcp-unset",
             "tool-block",
             "tool-allow",
-            "tool-unblock"
+            "tool-unblock",
+            "fleet.device.registered",
+            "fleet.device.heartbeat",
+            "fleet.device.offline",
+            "fleet.device.decommission",
+            "fleet.device.command",
+            "fleet.policy.push",
+            "fleet.policy.emergency",
+            "fleet.threat_intel.push",
+            "fleet.alert"
           ]
         },
         {

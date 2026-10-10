@@ -1,0 +1,356 @@
+#ifndef DEFENSECLAW_H
+#define DEFENSECLAW_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include "config.h"
+
+/* === Enumerations === */
+
+typedef enum {
+    DCLAW_ACTION_ALLOW    = 0,
+    DCLAW_ACTION_BLOCK    = 1,
+    DCLAW_ACTION_WARN     = 2,
+    DCLAW_ACTION_ESCALATE = 3,
+} dclaw_action_t;
+
+typedef enum {
+    DCLAW_CAP_UNKNOWN     = 0x00,
+    DCLAW_CAP_READ_FS     = 0x01,
+    DCLAW_CAP_WRITE_FS    = 0x02,
+    DCLAW_CAP_EXEC_SHELL  = 0x04,
+    DCLAW_CAP_NET_FETCH   = 0x08,
+    DCLAW_CAP_SEND_MSG    = 0x10,
+    DCLAW_CAP_ACTUATE     = 0x20,
+    DCLAW_CAP_SENSOR_READ = 0x40,
+} dclaw_capability_t;
+
+typedef enum {
+    DCLAW_SEV_INFO     = 0,
+    DCLAW_SEV_LOW      = 1,
+    DCLAW_SEV_MEDIUM   = 2,
+    DCLAW_SEV_HIGH     = 3,
+    DCLAW_SEV_CRITICAL = 4,
+} dclaw_severity_t;
+
+typedef enum {
+    DCLAW_REASON_POLICY_TABLE   = 0x01,
+    DCLAW_REASON_CAP_SEQUENCE   = 0x02,
+    DCLAW_REASON_DEST_DENY      = 0x03,
+    DCLAW_REASON_HASH_DENY      = 0x04,
+    DCLAW_REASON_RATE_LIMIT     = 0x05,
+    DCLAW_REASON_CLOUD_BLOCK    = 0x06,
+    DCLAW_REASON_CLOUD_TIMEOUT  = 0x07,
+    DCLAW_REASON_PII_DETECTED   = 0x08,
+    DCLAW_REASON_BLOOM_HIT      = 0x09,
+    DCLAW_REASON_INVALID_INPUT  = 0x0A,
+    DCLAW_REASON_RETROACTIVE    = 0x0B,
+    DCLAW_REASON_CONTENT_BLOCK  = 0x0C,
+    DCLAW_REASON_SSRF_BLOCK     = 0x0D,
+    DCLAW_REASON_HASH_MISMATCH  = 0x0E,
+} dclaw_reason_t;
+
+typedef enum {
+    DCLAW_VERDICT_SYNC,
+    DCLAW_VERDICT_PENDING,
+    DCLAW_VERDICT_RETROACTIVE_BLOCK,
+} dclaw_verdict_mode_t;
+
+typedef enum {
+    DCLAW_EXEC_STAGE_QUEUED,
+    DCLAW_EXEC_STAGE_STARTED,
+    DCLAW_EXEC_STAGE_COMMITTED,
+    DCLAW_EXEC_STAGE_COMPLETE,
+} dclaw_exec_stage_t;
+
+typedef enum {
+    DCLAW_SE_MODE_STRICT,
+    DCLAW_SE_MODE_DEGRADED,
+    DCLAW_SE_MODE_DISABLED,
+} dclaw_se_failure_mode_t;
+
+typedef enum {
+    DCLAW_CONTENT_CATEGORY_NONE       = 0,
+    DCLAW_CONTENT_CATEGORY_SECRET     = 1,
+    DCLAW_CONTENT_CATEGORY_PII        = 2,
+    DCLAW_CONTENT_CATEGORY_CREDENTIAL = 3,
+    DCLAW_CONTENT_CATEGORY_EXFIL      = 4,
+    DCLAW_CONTENT_CATEGORY_INJECTION  = 5,
+    DCLAW_CONTENT_CATEGORY_COMMAND    = 6,
+} dclaw_content_category_t;
+
+typedef enum {
+    DCLAW_CONTENT_SCOPE_UNKNOWN     = 0,
+    DCLAW_CONTENT_SCOPE_SYSTEM      = 1,
+    DCLAW_CONTENT_SCOPE_USER_INPUT  = 2,
+    DCLAW_CONTENT_SCOPE_TOOL_OUTPUT = 3,
+} dclaw_content_scope_t;
+
+typedef enum {
+    DCLAW_DIRECTION_REQUEST  = 0,
+    DCLAW_DIRECTION_RESPONSE = 1,
+} dclaw_direction_t;
+
+/* === Core Structures === */
+
+typedef struct {
+    uint16_t tenant_id;
+    uint16_t fleet_id;
+    uint32_t device_id;
+    uint16_t policy_version;
+    uint16_t fw_version;
+    uint8_t  hw_profile;
+    uint8_t  capabilities;
+} dclaw_device_info_t;
+
+#define DCLAW_FULL_ID(t, f, d) \
+    (((uint64_t)(t) << 48) | ((uint64_t)(f) << 32) | (uint64_t)(d))
+
+typedef struct {
+    uint32_t cloud_epoch;
+    uint64_t local_ticks;
+    uint64_t ticks_at_sync;
+    bool     time_trusted;
+} dclaw_clock_t;
+
+typedef struct {
+    char     tool_name[DCLAW_TOOL_NAME_MAX];
+    uint8_t  tool_hash[32];
+    uint8_t  cap_flags;
+    char     destination[DCLAW_DESTINATION_MAX];
+    uint16_t session_id;
+    uint8_t  direction;
+    uint8_t  content_scope;
+    char     content_buf[DCLAW_CONTENT_MAX];
+    const char *content;
+    uint16_t content_len;
+    int32_t  request_id;    /* JSON-RPC id from incoming request (0 = not set, default to 1) */
+} dclaw_tool_request_t;
+
+typedef struct {
+    dclaw_action_t       action;
+    dclaw_reason_t       reason;
+    dclaw_severity_t     severity;
+    dclaw_verdict_mode_t mode;
+    uint16_t             ttl_minutes;
+    bool                 from_cache;
+} dclaw_verdict_t;
+
+/* === Audit === */
+
+typedef struct {
+    uint64_t timestamp;     /* 8 */
+    uint16_t target_hash;   /* 2 */
+    uint16_t session_id;    /* 2 */
+    uint8_t  hmac[16];      /* 16 (BLK-1: truncated HMAC-SHA256, was 4) */
+    uint8_t  action;        /* 1 */
+    uint8_t  reason;        /* 1 */
+    uint8_t  _pad[2];       /* 2 (align to 32 for uint64_t) */
+} dclaw_audit_entry_t;      /* 32 bytes, naturally aligned */
+
+_Static_assert(sizeof(dclaw_audit_entry_t) == 32, "audit entry must be 32 bytes");
+
+/* B-5 fix: Ensure DCLAW_CONTENT_MAX fits in uint16_t content_len field */
+_Static_assert(DCLAW_CONTENT_MAX <= UINT16_MAX,
+               "DCLAW_CONTENT_MAX must fit in uint16_t content_len");
+/* M-1 fix: Ensure DCLAW_AUDIT_RAM_BUFFER_SIZE fits in uint8_t count field */
+_Static_assert(DCLAW_AUDIT_RAM_BUFFER_SIZE <= 255,
+               "DCLAW_AUDIT_RAM_BUFFER_SIZE must fit in uint8_t count");
+
+typedef struct {
+    dclaw_audit_entry_t buffer[DCLAW_AUDIT_RAM_BUFFER_SIZE];
+    uint8_t  count;
+    uint64_t last_flush_tick;
+    uint32_t total_flash_writes;
+    uint8_t  prev_hmac[16];      /* BLK-1: HMAC of last entry written (for chaining across flushes) */
+} dclaw_audit_writer_t;
+
+/* === Session Correlator === */
+
+typedef struct {
+    uint16_t session_id;
+    uint8_t  cap_history[DCLAW_SESSION_HISTORY_DEPTH];
+    uint8_t  cap_head;
+    uint8_t  cap_count;
+    uint64_t started_at;
+    uint64_t last_activity;
+    uint8_t  risk_score;
+} dclaw_session_t;
+
+/* === Verdict Cache === */
+
+typedef struct {
+    uint8_t  tool_hash[32];
+    uint8_t  action;
+    uint8_t  severity;
+    uint8_t  category;          /* dclaw_content_category_t */
+    char     evidence[64];      /* truncated evidence snippet */
+    uint16_t ttl_minutes;
+    uint64_t cached_at_tick;
+    bool     occupied;
+} dclaw_cache_entry_t;
+
+/* === Pending Verdict Dedup === */
+
+typedef struct {
+    uint16_t request_id;
+    bool     resolved;
+    uint64_t resolved_at;
+} dclaw_pending_verdict_t;
+
+/* === Speculative Execution === */
+
+typedef struct {
+    uint16_t         session_id;
+    uint16_t         request_id;
+    uint8_t          cap_flags;
+    dclaw_exec_stage_t stage;
+    bool             verdict_received;
+    dclaw_action_t   cloud_verdict;
+} dclaw_speculative_slot_t;
+
+typedef struct {
+    uint8_t cap_flag;
+    uint8_t mode; /* 0=sync_block, 1=speculative */
+} dclaw_escalation_entry_t;
+
+/* === Rate Limiter === */
+
+typedef struct {
+    uint16_t tokens;
+    uint16_t bucket_size;
+    uint16_t refill_rate;
+    uint64_t last_refill_tick;
+} dclaw_rate_limiter_t;
+
+/* === IPC Peer Verification === */
+
+typedef struct {
+    uint32_t expected_uid;
+    uint32_t expected_gid;
+    uint8_t  reg_token[16];
+    int32_t  registered_pid;
+    uint64_t start_time;
+    bool     verified;
+} dclaw_ipc_peer_t;
+
+/* === Policy OTA Canary === */
+
+typedef struct {
+    uint16_t baseline_blocks_per_min;
+    uint64_t canary_blocks[10];  /* LOW-2: widened to uint64_t to prevent overflow even at extreme block rates */
+    uint8_t  canary_minute;
+    uint8_t  spike_streak;
+    bool     canary_active;
+    uint64_t canary_started_at;
+} dclaw_canary_state_t;
+
+/* === Emergency Broadcast === */
+
+typedef struct {
+    uint32_t last_seen_seq;
+    uint32_t gap_start;
+    bool     replay_requested;
+    bool     initialized;
+    bool     block_all_active;  /* P1-6: global BLOCK_ALL / LOCKDOWN flag */
+    uint64_t lockdown_timestamp; /* CRT-5: Unix epoch when lockdown was activated (0 = not set)
+                                 * L-4 fix: widened from uint32_t to uint64_t to avoid 49.7-day wrap */
+} dclaw_emergency_state_t;
+
+/* === Runtime Policy Tables === */
+
+/* Maximum counts for runtime policy table entries.
+ * Sized to keep dclaw_state_t within the profile RAM budgets
+ * (STANDARD < 25KB, EDGE < 40KB). */
+#define DCLAW_RT_MAX_DENY_HASHES    32
+#define DCLAW_RT_MAX_DEST_ALLOWLIST 32
+#define DCLAW_RT_MAX_DEST_LEN       64
+#define DCLAW_RT_MAX_SEVERITY_RULES 8
+#define DCLAW_RT_MAX_SEQUENCE_RULES 16
+
+typedef struct {
+    /* Deny hash list (sorted for binary search) */
+    uint8_t  deny_hashes[DCLAW_RT_MAX_DENY_HASHES][32];
+    size_t   deny_hashes_count;
+
+    /* Destination allowlist (NUL-terminated strings, max 64 chars each) */
+    char     dest_allowlist[DCLAW_RT_MAX_DEST_ALLOWLIST][DCLAW_RT_MAX_DEST_LEN];
+    size_t   dest_allowlist_count;
+
+    /* Severity rules */
+    struct { uint8_t severity; uint8_t action; } severity_rules[DCLAW_RT_MAX_SEVERITY_RULES];
+    size_t   severity_rules_count;
+
+    /* Capability sequence rules */
+    struct { uint8_t seq[4]; uint8_t seq_len; uint8_t action; } sequence_rules[DCLAW_RT_MAX_SEQUENCE_RULES];
+    size_t   sequence_rules_count;
+
+    /* Set to true once runtime tables have been loaded from flash */
+    bool     loaded;
+} dclaw_policy_table_t;
+
+/* === Global Agent State === */
+
+typedef struct {
+    dclaw_device_info_t     device;
+    dclaw_clock_t           clock;
+    dclaw_session_t         sessions[DCLAW_MAX_SESSIONS];
+#if DCLAW_VERDICT_CACHE_SIZE > 0
+    dclaw_cache_entry_t     cache[DCLAW_VERDICT_CACHE_SIZE];
+#endif
+    dclaw_pending_verdict_t pending[DCLAW_PENDING_SLOTS];
+    dclaw_speculative_slot_t speculative[DCLAW_SPECULATIVE_SLOTS];
+    dclaw_rate_limiter_t    rate_limiters[DCLAW_RATE_LIMITERS];
+    dclaw_audit_writer_t    audit_writer;
+    dclaw_canary_state_t    canary;
+    dclaw_emergency_state_t emergency;
+    dclaw_ipc_peer_t        ipc_peer;
+    dclaw_policy_table_t    rt_policy; /* Runtime-modifiable policy tables */
+    /* Evaluation counters for heartbeat reporting */
+    uint32_t eval_allowed_count;
+    uint32_t eval_denied_count;
+    uint32_t eval_warned_count;
+    uint32_t eval_escalated_count;
+    uint32_t eval_count;            /* total evaluations (for cache_hit_pct) */
+    uint32_t eval_cache_hit_count;  /* cache hits (for cache_hit_pct) */
+    uint16_t                next_request_id;
+    /* H-2 fix: Random boot nonce generated at init. Included in verdict HMAC
+     * computation (B-1 fix) and transmitted in CBOR verdict requests so the
+     * fleet manager can verify. Prevents verdict replay across reboots. */
+    uint8_t                 boot_nonce[16];
+    bool                    online;
+    bool                    initialized;
+    /* P2-19 fix: One-shot flag set by dclaw_policy_rollback() so the next
+     * heartbeat includes flag 0x08 (canary rollback). Cleared after send. */
+    bool                    rollback_pending;
+} dclaw_state_t;
+
+/* === Public API === */
+
+int dclaw_init(const dclaw_device_info_t *info);
+dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req);
+int dclaw_flush_audit(void);
+bool dclaw_audit_key_provisioned(void);
+int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
+                       const uint8_t *signature);
+int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);
+void dclaw_policy_tables_init(void);
+int dclaw_policy_reload_from_flash(void);
+int dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer);
+void dclaw_get_health(uint8_t *out_heartbeat, size_t *out_len, size_t buf_size);
+void dclaw_shutdown(void);
+
+typedef void (*dclaw_retroactive_block_fn)(uint16_t session_id,
+                                           const char *tool_name);
+void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb);
+
+/* === TLS Engine (mbedTLS transport for MQTT) === */
+
+int  dclaw_tls_init(void);
+int  dclaw_tls_connect(int tcp_fd, const char *hostname);
+int  dclaw_tls_write(const uint8_t *data, size_t len);
+int  dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms);
+void dclaw_tls_shutdown(void);
+
+#endif /* DEFENSECLAW_H */

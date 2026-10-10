@@ -1,0 +1,260 @@
+cmake_minimum_required(VERSION 3.22)
+project(edge-connector C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Profile selection (maps to Kconfig)
+set(DCLAW_PROFILE "STANDARD" CACHE STRING "Agent profile: MINIMAL, STANDARD, EDGE")
+set_property(CACHE DCLAW_PROFILE PROPERTY STRINGS MINIMAL STANDARD EDGE)
+
+# Profile-dependent defaults
+if(DCLAW_PROFILE STREQUAL "MINIMAL")
+    set(DCLAW_AUDIT_RING_SIZE 64)
+    set(DCLAW_VERDICT_CACHE_SIZE 0)
+    set(DCLAW_HEARTBEAT_INTERVAL_SEC 0)
+    set(DCLAW_MQTT_ENABLED OFF)
+    set(DCLAW_PII_REDACTION OFF)
+    set(DCLAW_BLOOM_FILTER OFF)
+    set(DCLAW_SPECULATIVE_EXECUTION OFF)
+    set(DCLAW_CONTENT_SCAN OFF)
+    set(DCLAW_AUDIT_RAM_BUFFER_SIZE 4)
+    set(DCLAW_CANARY_WINDOW_SEC 0)
+    set(DCLAW_BROKER_FALLBACK_LIST_SIZE 1)
+    set(DCLAW_MAX_SESSIONS 4)
+    set(DCLAW_ESCALATION_PAYLOAD_MAX 256)
+elseif(DCLAW_PROFILE STREQUAL "STANDARD")
+    set(DCLAW_AUDIT_RING_SIZE 256)
+    set(DCLAW_VERDICT_CACHE_SIZE 64)
+    set(DCLAW_HEARTBEAT_INTERVAL_SEC 30)
+    set(DCLAW_MQTT_ENABLED ON)
+    set(DCLAW_PII_REDACTION ON)
+    set(DCLAW_BLOOM_FILTER OFF)
+    set(DCLAW_SPECULATIVE_EXECUTION ON)
+    set(DCLAW_CONTENT_SCAN ON)
+    set(DCLAW_AUDIT_RAM_BUFFER_SIZE 16)
+    set(DCLAW_CANARY_WINDOW_SEC 600)
+    set(DCLAW_BROKER_FALLBACK_LIST_SIZE 3)
+    set(DCLAW_MAX_SESSIONS 16)
+    set(DCLAW_ESCALATION_PAYLOAD_MAX 1024)
+    # BLOCKER fix: Production profiles default DEV_MODE OFF.
+    # MINIMAL keeps ON for development/test convenience.
+    set(DCLAW_DEV_MODE OFF)
+elseif(DCLAW_PROFILE STREQUAL "EDGE")
+    set(DCLAW_AUDIT_RING_SIZE 1024)
+    set(DCLAW_VERDICT_CACHE_SIZE 256)
+    set(DCLAW_HEARTBEAT_INTERVAL_SEC 10)
+    set(DCLAW_MQTT_ENABLED ON)
+    set(DCLAW_PII_REDACTION ON)
+    set(DCLAW_BLOOM_FILTER ON)
+    set(DCLAW_SPECULATIVE_EXECUTION ON)
+    set(DCLAW_CONTENT_SCAN ON)
+    set(DCLAW_AUDIT_RAM_BUFFER_SIZE 32)
+    set(DCLAW_CANARY_WINDOW_SEC 600)
+    set(DCLAW_BROKER_FALLBACK_LIST_SIZE 3)
+    set(DCLAW_MAX_SESSIONS 64)
+    set(DCLAW_ESCALATION_PAYLOAD_MAX 2048)
+    # BLOCKER fix: Production profiles default DEV_MODE OFF.
+    set(DCLAW_DEV_MODE OFF)
+endif()
+
+# P2-18 fix: Dev mode flag — controls audit key enforcement behavior.
+# ON (default for dev/test): missing DCLAW_AUDIT_KEY uses dev fallback key with warning.
+# OFF (required for production): audit ring refuses to start without a real key.
+# BLOCKER fix: Installers pass -DDCLAW_DEV_MODE=OFF. CI tests run with ON.
+option(DCLAW_DEV_MODE "Enable development mode (relaxed key requirements)" ON)
+
+# BLOCKER: Warn when building non-MINIMAL profiles with DEV_MODE=ON
+if(DCLAW_DEV_MODE AND NOT DCLAW_PROFILE STREQUAL "MINIMAL")
+    message(WARNING "⚠ DCLAW_DEV_MODE=ON for ${DCLAW_PROFILE} profile. "
+        "Production deployments MUST pass -DDCLAW_DEV_MODE=OFF. "
+        "This disables security guards: audit key, zero-key rejection, TLS, OTA Ed25519.")
+endif()
+
+# Sanitizer support (ASan + UBSan)
+option(DCLAW_SANITIZE "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+if(DCLAW_SANITIZE)
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+endif()
+
+# Generate config.h from profile settings
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/config.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/include/config.h
+    @ONLY
+)
+
+# Compiler flags
+add_compile_options(
+    -Wall -Wextra -Werror
+    -fstack-protector-strong
+    -fno-strict-aliasing
+    -Os
+)
+
+# Fortify source in release builds (requires optimization, incompatible with -O0 debug)
+add_compile_options($<$<CONFIG:Release>:-D_FORTIFY_SOURCE=2>)
+add_compile_options($<$<CONFIG:RelWithDebInfo>:-D_FORTIFY_SOURCE=2>)
+# Also apply unconditionally since the default build uses -Os above
+if(NOT CMAKE_BUILD_TYPE OR CMAKE_BUILD_TYPE STREQUAL "")
+    add_compile_options(-D_FORTIFY_SOURCE=2)
+endif()
+
+# Sources common to all profiles
+set(CORE_SOURCES
+    src/dclaw_core.c
+    src/crypto/sha256.c
+    src/crypto/hmac_sha256.c
+    src/decision/policy_table.c
+    src/decision/correlator.c
+    src/decision/verdict_cache.c
+    src/enforce/ipc_hook.c
+    src/enforce/ipc_json.c
+    src/enforce/rate_limiter.c
+    src/persist/audit_ring.c
+    src/persist/config_store.c
+    src/platform/hal_linux.c
+)
+
+# Sources only for profiles with MQTT
+if(DCLAW_MQTT_ENABLED)
+    list(APPEND CORE_SOURCES
+        src/comms/mqtt_client.c
+        src/comms/tls_engine.c
+        src/comms/cbor_codec.c
+        src/comms/verdict_protocol.c
+        src/comms/ota_receiver.c
+    )
+endif()
+
+# Sources only for profiles with content scanning
+if(DCLAW_CONTENT_SCAN)
+    list(APPEND CORE_SOURCES
+        src/decision/content_scanner.c
+    )
+endif()
+
+# Main library (static)
+add_library(dclaw_core STATIC ${CORE_SOURCES})
+target_include_directories(dclaw_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/generated
+)
+
+# Shared library (for Python ctypes integration, e.g. PicoClaw hook)
+add_library(dclaw_shared SHARED ${CORE_SOURCES})
+target_include_directories(dclaw_shared PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_BINARY_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/generated
+)
+set_target_properties(dclaw_shared PROPERTIES
+    OUTPUT_NAME "dclaw_core"
+    POSITION_INDEPENDENT_CODE ON
+)
+
+# Link mbedTLS for STANDARD/EDGE profiles
+if(DCLAW_MQTT_ENABLED)
+    find_package(MbedTLS QUIET)
+    if(MbedTLS_FOUND)
+        target_link_libraries(dclaw_core PRIVATE MbedTLS::mbedtls MbedTLS::mbedcrypto)
+        target_link_libraries(dclaw_shared PRIVATE MbedTLS::mbedtls MbedTLS::mbedcrypto)
+        target_compile_definitions(dclaw_core PRIVATE DCLAW_HAS_MBEDTLS=1)
+        target_compile_definitions(dclaw_shared PRIVATE DCLAW_HAS_MBEDTLS=1)
+    else()
+        find_library(MBEDTLS_LIB mbedtls)
+        if(MBEDTLS_LIB)
+            target_link_libraries(dclaw_core PRIVATE mbedtls mbedcrypto mbedx509)
+            target_link_libraries(dclaw_shared PRIVATE mbedtls mbedcrypto mbedx509)
+            target_compile_definitions(dclaw_core PRIVATE DCLAW_HAS_MBEDTLS=1)
+            target_compile_definitions(dclaw_shared PRIVATE DCLAW_HAS_MBEDTLS=1)
+        else()
+            message(WARNING "mbedTLS not found — TLS/MQTT stubs will be used (dev mode)")
+            target_compile_definitions(dclaw_core PRIVATE DCLAW_HAS_MBEDTLS=0)
+            target_compile_definitions(dclaw_shared PRIVATE DCLAW_HAS_MBEDTLS=0)
+        endif()
+    endif()
+endif()
+
+# Main executable
+add_executable(edge-connector src/main.c)
+target_link_libraries(edge-connector PRIVATE dclaw_core)
+
+# Tests
+option(DCLAW_BUILD_TESTS "Build unit tests" ON)
+if(DCLAW_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
+# Print build summary
+message(STATUS "Edge Connector Configuration:")
+message(STATUS "  Profile:          ${DCLAW_PROFILE}")
+message(STATUS "  Audit ring:       ${DCLAW_AUDIT_RING_SIZE} entries")
+message(STATUS "  Verdict cache:    ${DCLAW_VERDICT_CACHE_SIZE} entries")
+message(STATUS "  Sessions:         ${DCLAW_MAX_SESSIONS}")
+message(STATUS "  MQTT:             ${DCLAW_MQTT_ENABLED}")
+message(STATUS "  Speculative exec: ${DCLAW_SPECULATIVE_EXECUTION}")
+message(STATUS "  Canary window:    ${DCLAW_CANARY_WINDOW_SEC}s")
+
+# --- Install targets ---
+include(GNUInstallDirs)
+
+# The static library
+install(TARGETS dclaw_core
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+# The shared library
+install(TARGETS dclaw_shared
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+# The standalone binary
+install(TARGETS edge-connector
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Public headers
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/defenseclaw.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/platform.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/content_scanner.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/sha256.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/hmac_sha256.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/defenseclaw
+)
+
+# The PicoClaw hook
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/picoclaw_hook.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+
+# The policy compiler
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/policy_compiler.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+
+# Python adapter hooks (P2-21)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/generic_hook.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/mcp_proxy.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/langchain_hook.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/tools/http_middleware.py
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/defenseclaw
+)
+
+# Default policy
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/policies/strict.yaml
+    DESTINATION ${CMAKE_INSTALL_SYSCONFDIR}/defenseclaw
+    RENAME policy.yaml
+)

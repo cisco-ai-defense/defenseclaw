@@ -1106,6 +1106,60 @@
           "unit": "short"
         }
       }
+    },
+    {
+      "title": "Fleet Alerts (Total)",
+      "description": "P2-19: Real alert count wired from fleet manager events",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 100 },
+      "datasource": { "type": "prometheus", "uid": "defenseclaw-prometheus" },
+      "targets": [
+        {
+          "expr": "defenseclaw_fleet_alerts_total",
+          "legendFormat": "alerts",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "OTA Canary Rollbacks",
+      "description": "P2-19: OTA canary rollback count from fleet devices",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 100 },
+      "datasource": { "type": "prometheus", "uid": "defenseclaw-prometheus" },
+      "targets": [
+        {
+          "expr": "defenseclaw_fleet_ota_rollbacks_total",
+          "legendFormat": "rollbacks",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          }
+        }
+      }
     }
   ],
   "preload": false,

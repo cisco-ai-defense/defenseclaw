@@ -33,6 +33,10 @@ def audit() -> None:
     'export' and 'findings' run 'defenseclaw-gateway audit <command>' with the
     same options. Show the newest gateway or watchdog log lines:
         defenseclaw audit logs [--source watchdog] [-n 50] [--grep TEXT]
+
+    \b
+    Fleet device events are available via the Fleet API.
+    Use 'defenseclaw status' or 'defenseclaw edge-connector health' to see a summary.
     """
 
 

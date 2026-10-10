@@ -69,6 +69,7 @@ cli/defenseclaw/_data/config/*
 # Local binaries
 /defenseclaw
 /defenseclaw-*
+!/defenseclaw-lite/
 /custom-scanner
 
 # Collector builder output
@@ -195,10 +196,24 @@ outputs/
 
 # Local native-Windows manual acceptance walkthrough.
 /WINDOWS_NATIVE_MANUAL_TEST.md
-# Local AI planning artifacts
+
+# Compiled object files and static libraries
+*.o
+*.a
+
+# Local AI planning artifacts and internal dev docs
 /.superpowers/
 /docs/superpowers/
+/docs/papers/
+/docs/architecture/defenseclaw-lite-*
+
+# GRPO training engine (separate feature branch)
+/internal/training/
+/internal/config/training.go
+/benchmarks/grpo/
+/cli/defenseclaw/commands/cmd_training.py
 
 # DefenseClaw-managed Kiro hook config. Written by `defenseclaw setup kiro`
 # with machine-absolute hook-script paths, so it is per-machine state.
 .kiro/hooks/defenseclaw.json
+/docs/specs/001-defenseclaw-lite-phase1/
