@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -229,6 +230,7 @@ func TestRebasedEditedBuiltinRuleBlocksUnderItsOwnID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacy = bytes.ReplaceAll(legacy, []byte("\r\n"), []byte("\n")) // a Windows checkout
 	edit := func(data []byte, id, pattern, rest string) []byte {
 		t.Helper()
 		block := regexp.MustCompile(`(?m)^  - id: ` + id + `\n    pattern: .*\n    title: .*\n    severity: .*\n`)
