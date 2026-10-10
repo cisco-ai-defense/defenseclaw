@@ -302,6 +302,41 @@ func jsonlFolderProblem(folder string, _ os.FileInfo, allowedWriters []string) s
 	return ""
 }
 
+// jsonlMissingFolderProblem is JSONLPathProblem for a missing folder that
+// the gateway creates depth levels below ancestor with MkdirAll. The folder
+// gets only the container-inherit entries of ancestor, without the
+// no-propagate ones below its first new subfolder, and the gateway refuses
+// it at open, like jsonlFolderProblem, when one of them lets an account
+// other than SYSTEM, Administrators, the creator (CREATOR OWNER) or
+// allowedWriters write it.
+func jsonlMissingFolderProblem(folder, ancestor string, depth int, allowedWriters []string) string {
+	descriptor, err := windows.GetNamedSecurityInfo(ancestor, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil || descriptor == nil {
+		return ""
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return ""
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil ||
+			ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.CONTAINER_INHERIT_ACE == 0 ||
+			(depth > 1 && ace.Header.AceFlags&windows.NO_PROPAGATE_INHERIT_ACE != 0) ||
+			!windowsWriteLikeAccess(ace.Mask) {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.IsWellKnown(windows.WinCreatorOwnerSid) || windowsAllowedACEPrincipal(sid) || jsonlAllowedWriter(sid, allowedWriters) {
+			continue
+		}
+		return fmt.Sprintf("is in %s, a missing folder that would inherit from %s write access for %s",
+			folder, ancestor, windowsAccountName(sid))
+	}
+	return ""
+}
+
 // jsonlAllowedWriter reports whether sid is one of allowed, given as SIDs
 // or account names.
 func jsonlAllowedWriter(sid *windows.SID, allowed []string) bool {

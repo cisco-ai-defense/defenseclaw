@@ -5069,6 +5069,43 @@ def set_mcp_server(
 MCP_PRIOR_RESTORED = "prior-restored"
 
 
+def _roll_back_claude_unset(
+    exc: BaseException,
+    path: str,
+    legacy_path: str,
+    publications: dict[str, dict[str, Any]],
+) -> None:
+    """Undo a failed Claude unset without overwriting another writer's edit.
+
+    The state write may have published before its final metadata step
+    failed. Each file is restored only while it still holds exactly what this
+    command wrote; the ownership journal follows only a restored state file,
+    so it never comes back describing settings that are no longer there.
+    """
+    left: list[str] = []
+    with _locked_claude_mcp_mutation(path):
+        state_key = os.path.normcase(os.path.abspath(path))
+        if not _undo_claude_publication(path, publications):
+            left.append(path)
+        elif state_key in publications:
+            metadata_path = _claude_mcp_ownership_path(path)
+            if not _undo_claude_publication(metadata_path, publications):
+                left.append(metadata_path)
+    with _locked_claude_mcp_mutation(legacy_path):
+        if not _undo_claude_publication(legacy_path, publications):
+            left.append(legacy_path)
+    if not left:
+        return
+    note = (
+        f"Another program changed {', '.join(left)} during the unset, so DefenseClaw "
+        "kept that change and did not restore its earlier copy."
+    )
+    if isinstance(exc, Exception) and len(exc.args) == 1 and isinstance(exc.args[0], str):
+        exc.args = (f"{exc.args[0]} {note}",)
+    elif hasattr(exc, "add_note"):
+        exc.add_note(note)
+
+
 def unset_mcp_server(
     connector: str | None,
     name: str,
@@ -5105,34 +5142,26 @@ def unset_mcp_server(
             # Discovery can also read the default profile, but an override
             # must never delete another profile's MCP entry (GAP-1364).
             with _locked_claude_mcp_mutation(path):
-                state_raw = _read_regular_bytes_if_present(path)
-                _parse_claude_settings(path, state_raw)
+                _parse_claude_settings(path, _read_regular_bytes_if_present(path))
                 _load_claude_mcp_envelope(path)
-                metadata_path = _claude_mcp_ownership_path(path)
-                metadata_raw = _read_regular_bytes_if_present(metadata_path)
             with _locked_claude_mcp_mutation(legacy_path):
-                legacy_raw = _read_regular_bytes_if_present(legacy_path)
-                _parse_claude_settings(legacy_path, legacy_raw)
+                _parse_claude_settings(legacy_path, _read_regular_bytes_if_present(legacy_path))
 
-            legacy_changed = _remove_claude_legacy_mcp_server(name)
-            legacy_written = _read_regular_bytes_if_present(legacy_path) if legacy_changed else None
+            publications: dict[str, dict[str, Any]] = {}
+            legacy_changed = False
+            token = _CLAUDE_PUBLICATIONS.set(publications)
             try:
+                legacy_changed = _remove_claude_legacy_mcp_server(name)
                 outcome = _unset_claudecode_mcp_server(path, name)
-            except BaseException:
+            except BaseException as exc:
+                _CLAUDE_PUBLICATIONS.reset(token)
+                token = None
                 if legacy_changed:
-                    # A state write may have published before its final
-                    # metadata step failed. Restore both active files and
-                    # their ownership journal while their locks are held.
-                    with _locked_claude_mcp_mutation(path):
-                        current_state = _read_regular_bytes_if_present(path)
-                        current_metadata = _read_regular_bytes_if_present(metadata_path)
-                        if current_state != state_raw:
-                            _publish_claude_config_if_unchanged(path, current_state, state_raw)
-                        if current_metadata != metadata_raw:
-                            _publish_claude_config_if_unchanged(metadata_path, current_metadata, metadata_raw)
-                    with _locked_claude_mcp_mutation(legacy_path):
-                        _publish_claude_config_if_unchanged(legacy_path, legacy_written, legacy_raw)
+                    _roll_back_claude_unset(exc, path, legacy_path, publications)
                 raise
+            finally:
+                if token is not None:
+                    _CLAUDE_PUBLICATIONS.reset(token)
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
         return MCP_PRIOR_RESTORED if outcome == MCP_PRIOR_RESTORED else None
@@ -5678,6 +5707,64 @@ _CLAUDE_MUTATION_GUARD: ContextVar[dict[str, Any] | None] = ContextVar(
     "claude_mcp_mutation_guard",
     default=None,
 )
+# Files one Claude MCP command published, keyed by path: the snapshot before
+# its first write and after its last one. A failed unset rolls back only
+# what this log proves the command itself wrote (GAP-1378).
+_CLAUDE_PUBLICATIONS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
+    "claude_mcp_publications",
+    default=None,
+)
+
+
+def _record_claude_publication(path: str, before: Any, after: Any) -> None:
+    log = _CLAUDE_PUBLICATIONS.get()
+    if log is None:
+        return
+    key = os.path.normcase(os.path.abspath(path))
+    entry = log.get(key)
+    if entry is None:
+        log[key] = {"before": before, "after": after, "foreign": False}
+        return
+    prior = entry["after"]
+    if prior.existed != before.existed or prior.payload != before.payload:
+        # Another writer changed the file between two of this command's
+        # writes, so the first pre-image is no longer the one to restore.
+        entry["foreign"] = True
+    entry["after"] = after
+
+
+def _undo_claude_publication(path: str, log: dict[str, dict[str, Any]]) -> bool:
+    """Restore *path* to its pre-image only while it holds this command's write.
+
+    Returns False, leaving the file alone, when another writer changed its
+    content, mode, owner or inode since this command wrote it.
+    """
+    from defenseclaw.observability import v8_activation
+
+    entry = log.get(os.path.normcase(os.path.abspath(path)))
+    if entry is None:
+        return True
+    if entry["foreign"]:
+        return False
+    after = entry["after"]
+    current = v8_activation._snapshot_regular_file(path, required=False)
+    if current.existed != after.existed or (
+        after.existed
+        and (current.payload != after.payload or not v8_activation._same_snapshot_identity(current, after))
+    ):
+        return False
+    before = entry["before"]
+    if current.existed == before.existed and current.payload == before.payload:
+        return True
+    try:
+        _publish_claude_config_if_unchanged(
+            path,
+            current.payload if current.existed else None,
+            before.payload if before.existed else None,
+        )
+    except MCPWriteUnsupportedError:
+        return False
+    return True
 
 
 def _read_regular_bytes_if_present(path: str) -> bytes | None:
@@ -6278,6 +6365,7 @@ def _write_claude_private_metadata(
             raise MCPWriteUnsupportedError(
                 f"refusing Claude MCP mutation: private metadata was replaced after publication: {path}",
             )
+        _record_claude_publication(path, snapshot, observed)
         if is_ownership:
             guard["ownership_snapshot"] = published
     except MCPWriteUnsupportedError:
@@ -6363,6 +6451,8 @@ def _clear_claude_mcp_ownership(path: str) -> None:
         metadata_path,
         required=False,
     )
+    if expected.existed:
+        _record_claude_publication(metadata_path, expected, guard["ownership_snapshot"])
 
 
 def _directory_identity(path: str) -> tuple[int, int]:
@@ -7538,6 +7628,7 @@ def _publish_claude_config_if_unchanged(
                 path,
                 expected_snapshot=snapshot,
             )
+            _record_claude_publication(path, snapshot, v8_activation._snapshot_regular_file(path, required=False))
         else:
             metadata = None
             if os.name == "nt" and not snapshot.existed:
@@ -7580,6 +7671,7 @@ def _publish_claude_config_if_unchanged(
         # staged file object with the expected bytes and security.  The
         # pre-publication journal remains the crash-safe fallback until this
         # callback durably records the observed public identity.
+        _record_claude_publication(path, snapshot, observed)
         observed_identity = _claude_postimage_identity_from_snapshot(observed)
         if candidate_verified is not None:
             candidate_verified(observed_identity)

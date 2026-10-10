@@ -44,14 +44,16 @@ func (l *lifecycle) inputsChanged() bool {
 	if _, secretsSHA, err := env.listSecrets(); err == nil && secretsSHA != planned.secretsSHA {
 		return true
 	}
-	if len(r.Errors) > 0 && !planned.configFromInstalled {
-		// A failed --config run put the previous config.yaml back, and the
-		// one another writer put in place during the run after it.
-		return l.configWrittenDuringRun != nil
-	}
 	current, err := sha256File(env.P(env.Layout.ConfigPath))
 	if err != nil {
 		return false
+	}
+	if len(r.Errors) > 0 && !planned.configFromInstalled {
+		// A failed --config run put the previous deployment's config.yaml
+		// back. Any other config.yaml on disk now is a newer input: one
+		// another writer put in place during the run (put back after the
+		// restart), or one written after the restore (GAP-1379).
+		return l.rollbackConfigSHA != "" && planned.appliedConfigSHA != "" && current != planned.appliedConfigSHA
 	}
 	if len(r.Errors) > 0 && hasMessageCode(r.Warnings, codeConfigReverted) {
 		// A rejected in-place edit was reverted on purpose; only a

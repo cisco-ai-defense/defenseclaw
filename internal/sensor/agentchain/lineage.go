@@ -44,20 +44,21 @@ const (
 	// cycle after pid reuse, and an unbounded walk would hang the poll.
 	maxAncestryWalk = 64
 
-	// startTolerance is how far apart two readings of one process's start
-	// may be. An exec event stamps the instant the backend logged the exec,
-	// a process-table poll the kernel's creation time; the two agree to
-	// well under a second. Two starts further apart than this on one pid
-	// are two processes.
+	// startTolerance allows for rounding between kernel start-time sources.
+	// Exec time is not a process start time: a process may exec long after
+	// fork. Two known starts further apart than this on one pid are two
+	// processes.
 	startTolerance = 2 * time.Second
 )
 
 type processRecord struct {
 	pid int
-	// start is when the process was created, from the first source that
-	// saw it, zero when none could say. It never changes for the life of
-	// the record, so (pid, start) names one process instance (GAP-1372).
+	// start is the kernel creation time when known. keyStart is the first
+	// observed start used for the session key, zero when the first source
+	// could not say. It stays fixed when a later poll refines or fills start.
 	start          time.Time
+	keyStart       time.Time
+	instance       uint64
 	ppid           int
 	responsiblePID int
 	name           string
@@ -85,7 +86,8 @@ type Tracker struct {
 	// processes skip the scan entirely instead of walking every record to
 	// discover there is nothing to drop -- which, under sustained process
 	// churn, is a full-table scan for every new pid, on the poll path.
-	exited int
+	exited       int
+	nextInstance uint64
 }
 
 // NewTracker returns an empty tracker using the real clock.
@@ -98,8 +100,8 @@ func newTracker(ttl time.Duration, now func() time.Time) *Tracker {
 // ObserveExec records an exec event. This is the authoritative source: it
 // carries the parent at the moment of exec, which a later process-table poll
 // cannot recover once the parent has exited and the child is reparented.
-// start is when the process was created (the exec event's own time), zero
-// when unknown.
+// start is the kernel creation time when the backend knows it, zero otherwise.
+// The event's timestamp is not the process creation time.
 func (t *Tracker) ObserveExec(pid, ppid, responsiblePID int, name, cmdline string, start time.Time) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -146,21 +148,23 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 		existing = &processRecord{pid: pid}
 		t.records[pid] = existing
 	}
-	// A pid that has already exited, or that now reports a different image,
-	// is a different process: the kernel recycled the number, or the process
-	// exec'd into something else. Either way the identity recorded before
-	// belongs to a process that is gone.
-	// A start time that differs from the recorded one is the surest sign of
-	// all: same number, different process.
-	recycled := !existing.exitedAt.IsZero() || existing.name != name ||
-		differentStart(existing.start, start)
+	// Exec replaces an image, not a process. Only an observed exit or a
+	// different kernel start means the pid names a new process instance.
+	recycled := !existing.exitedAt.IsZero() || differentStart(existing.start, start)
+	reimaged := existing.name != name
 	if !existing.exitedAt.IsZero() {
 		t.exited--
 	}
-	if recycled || existing.start.IsZero() {
+	if existing.instance == 0 || recycled {
+		t.nextInstance++
+		existing.instance = t.nextInstance
+		existing.start = start
+		existing.keyStart = start
+	} else if existing.start.IsZero() && !start.IsZero() {
+		// Learn the real start without changing the key of a live session
+		// first seen while its creation time was unavailable.
 		existing.start = start
 	}
-
 	existing.ppid = ppid
 	existing.responsiblePID = responsiblePID
 	existing.name = name
@@ -176,7 +180,7 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 		}
 		return
 	}
-	if recycled {
+	if recycled || reimaged {
 		// Clear rather than carry forward. The lineage gate is the whole
 		// false-positive control for the host plane, so a stale agent name on
 		// a recycled pid turns ordinary developer activity -- in this process
@@ -296,7 +300,8 @@ func (t *Tracker) attributeLocked(pid int) (Attribution, bool) {
 		// the finding.
 		root := t.outermostSameAgentLocked(pid, record.agentName)
 		return Attribution{
-			RootPID: root, RootStart: t.records[root].start, RootName: t.records[root].name,
+			RootPID: root, RootStart: t.records[root].start, RootKeyStart: t.records[root].keyStart,
+			RootInstance: t.records[root].instance, RootName: t.records[root].name,
 			AgentName: record.agentName, Depth: 0,
 			Via: record.via, State: StateAttributed,
 		}, true
@@ -355,7 +360,8 @@ func (t *Tracker) walkAncestryLocked(
 				via = "responsible"
 			}
 			return Attribution{
-				RootPID: next, RootStart: parent.start, RootName: parent.name, AgentName: parent.agentName, Depth: depth,
+				RootPID: next, RootStart: parent.start, RootKeyStart: parent.keyStart,
+				RootInstance: parent.instance, RootName: parent.name, AgentName: parent.agentName, Depth: depth,
 				Via: via, State: StateAttributed,
 			}, true
 		}

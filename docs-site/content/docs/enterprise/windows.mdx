@@ -264,7 +264,10 @@ stops with exit code `1639` and names the line and the reason.
 A `kind: jsonl` destination needs a folder that only SYSTEM, Administrators
 and the gateway service account `NT SERVICE\DefenseClawGateway` can write, and
 that this account can create files in (Modify); Setup refuses any other folder
-with `1639` and prints the `icacls` grant.
+with `1639` and prints the `icacls` grant. A missing folder gets what its
+nearest existing parent passes on to new subfolders when the gateway creates
+it, so Setup refuses it the same way when that parent lets standard users
+(for example Authenticated Users) write the folders created in it.
 
 Setup accepts the config only from an absolute local path that standard
 users cannot change. Stage it in a folder that Administrators own and that
