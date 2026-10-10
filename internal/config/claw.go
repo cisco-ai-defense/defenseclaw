@@ -83,6 +83,15 @@ type MCPServerEntry struct {
 	// Project is the project folder whose local or .mcp.json scope lists
 	// the server (never serialized); empty for a user-scope server.
 	Project string `json:"-"`
+	// WorkDir is the folder the server starts in, as the managed Windows
+	// enumerator checked it where the user profile is readable (GAP-1317):
+	// absolute, inside Project or the user home, no link or reparse point
+	// on the way, re-resolved after the check. WorkDirRefused is the folder
+	// it did not accept and why ("<folder>: <reason>"). Only the
+	// enumerator spool record sets them (never serialized), so no
+	// configuration file a user writes can name a vetted folder.
+	WorkDir        string `json:"-"`
+	WorkDirRefused string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never

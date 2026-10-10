@@ -8,9 +8,13 @@ package enterprisehooks
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"golang.org/x/sys/windows"
 )
 
 // Project names in .claude.json are controlled by the enrolled user. A UNC
@@ -119,5 +123,51 @@ func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {
 	servers, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
 	if err != nil || len(servers) != 0 || unreadable == nil || unreadable.Path != filepath.Join(project, ".mcp.json") {
 		t.Fatalf("servers %v, unreadable %+v (err %v); want rejected project marked unreadable", servers, unreadable, err)
+	}
+}
+
+// GAP-1317: the enumerator check runs on the real file system: a project
+// folder is accepted under its long path, while a junction (as the cwd or as
+// the project) and a short-name alias of the project are refused.
+func TestWindowsClaudeMCPWorkDirChecksRejectJunctionAndAlias(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(base, "home")
+	project := filepath.Join(home, "long project folder")
+	outside := filepath.Join(base, "outside")
+	junction := filepath.Join(home, "via-junction")
+	for _, dir := range []string{project, outside} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", junction, outside).CombinedOutput(); err != nil {
+		t.Skipf("mklink /J: %v: %s", err, out)
+	}
+	vet := func(cwd, project string) (string, string) {
+		return vetClaudeMCPWorkDir(config.MCPServerEntry{Name: "srv", Command: "npx", CWD: cwd, Project: project},
+			home, nil, windowsClaudeMCPWorkDirChecks)
+	}
+	if dir, refused := vet("", project); !strings.EqualFold(dir, project) || refused != "" {
+		t.Fatalf("project: %q (%q)", dir, refused)
+	}
+	if dir, refused := vet(junction, project); !strings.EqualFold(dir, project) || !strings.Contains(refused, "link or reparse point") {
+		t.Fatalf("junction cwd: %q (%q), want the project and the junction refused", dir, refused)
+	}
+	if dir, refused := vet("", junction); dir != "" || !strings.Contains(refused, "link or reparse point") {
+		t.Fatalf("junction project: %q (%q)", dir, refused)
+	}
+	buf := make([]uint16, windows.MAX_PATH)
+	ptr, _ := windows.UTF16PtrFromString(project)
+	if n, err := windows.GetShortPathName(ptr, &buf[0], uint32(len(buf))); err == nil && n > 0 {
+		// Only the last folder in its short form: the rest of the path is
+		// the home as the manifest names it.
+		if short := filepath.Join(home, filepath.Base(windows.UTF16ToString(buf[:n]))); !strings.EqualFold(short, project) {
+			if dir, refused := vet(short, project); !strings.EqualFold(dir, project) || !strings.Contains(refused, "alias") {
+				t.Fatalf("short name %s: %q (%q)", short, dir, refused)
+			}
+		}
 	}
 }

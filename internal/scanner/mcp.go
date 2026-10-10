@@ -176,6 +176,10 @@ type MCPScanner struct {
 	// looked up from the gateway folder was never found (GAP-0623).
 	Project   string
 	Connector string
+
+	// workDirRefused is the server working folder the scan did not use and
+	// why, for the scan failure message.
+	workDirRefused string
 }
 
 // mcpScannerBinary returns the executable to invoke, coercing the
@@ -298,10 +302,20 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 // it is absolute, inside the project or the user's home, and no folder on the
 // way down from there is a link or reparse point; otherwise the scan keeps
 // the scanner's folder, as before, and says so.
+//
+// On managed Windows the gateway service account cannot read user profiles,
+// so the enumerator checks the folder as LocalSystem and its spool record
+// carries the result (entry.WorkDir, entry.WorkDirRefused); the gateway then
+// only checks the path's form and that it can open the folder itself.
 func (s *MCPScanner) serverWorkDir() string {
+	s.workDirRefused = ""
 	entry := s.ServerEntry
 	if entry == nil || entry.Command == "" || entry.URL != "" {
 		return ""
+	}
+	refuse := func(dir string, err error) {
+		fmt.Fprintf(os.Stderr, "[scan] MCP server %q: not starting it in %s: %v\n", entry.Name, dir, err)
+		s.workDirRefused = fmt.Sprintf("%s: %v", dir, err)
 	}
 	var roots []string
 	for _, root := range []string{entry.Project, entry.Home} {
@@ -309,18 +323,69 @@ func (s *MCPScanner) serverWorkDir() string {
 			roots = append(roots, filepath.Clean(root))
 		}
 	}
+	if entry.WorkDir != "" || entry.WorkDirRefused != "" {
+		if entry.WorkDirRefused != "" {
+			fmt.Fprintf(os.Stderr, "[scan] MCP server %q: not starting it in %s\n", entry.Name, entry.WorkDirRefused)
+			s.workDirRefused = entry.WorkDirRefused
+		}
+		if entry.WorkDir == "" {
+			return ""
+		}
+		if err := verifiedWorkDir(entry.WorkDir, roots); err != nil {
+			refuse(entry.WorkDir, err)
+			return ""
+		}
+		s.workDirRefused = ""
+		return filepath.Clean(entry.WorkDir)
+	}
 	for _, dir := range []string{entry.CWD, entry.Project} {
 		if dir == "" {
 			continue
 		}
 		if err := containedWorkDir(dir, roots); err != nil {
-			fmt.Fprintf(os.Stderr, "[scan] MCP server %q: not starting it in %s: %v\n", entry.Name, dir, err)
+			refuse(dir, err)
 			continue
 		}
+		s.workDirRefused = ""
 		return filepath.Clean(dir)
 	}
 	return ""
 }
+
+// verifiedWorkDir checks a folder the enumerator verified: its form, that it
+// is still inside the project or the home the gateway resolved, and that the
+// gateway can open it, since the server's process runs as the gateway.
+func verifiedWorkDir(dir string, roots []string) error {
+	if !filepath.IsAbs(dir) || strings.ContainsRune(dir, 0) || strings.HasPrefix(dir, `\\`) || strings.HasPrefix(dir, "//") {
+		return errors.New("the verified folder is not a local absolute path")
+	}
+	dir = filepath.Clean(dir)
+	inside := false
+	for _, root := range roots {
+		if rel, err := filepath.Rel(root, dir); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			inside = true
+			break
+		}
+	}
+	if !inside {
+		return errors.New("the verified folder is outside the project and the user's home folder")
+	}
+	folder, err := workDirOpen(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrPermission) {
+			return errors.New("the DefenseClaw gateway service cannot read this folder")
+		}
+		return err
+	}
+	return folder.Close()
+}
+
+// workDirOpen and workDirLstat are test seams for the gateway's access to a
+// server's folder.
+var (
+	workDirOpen  = os.Open
+	workDirLstat = os.Lstat
+)
 
 // containedWorkDir checks a folder for serverWorkDir.
 func containedWorkDir(dir string, roots []string) error {
@@ -342,7 +407,7 @@ func containedWorkDir(dir string, roots []string) error {
 			if i >= 0 {
 				path = filepath.Join(path, parts[i])
 			}
-			info, err := os.Lstat(path)
+			info, err := workDirLstat(path)
 			if err != nil {
 				return err
 			}
@@ -356,6 +421,15 @@ func containedWorkDir(dir string, roots []string) error {
 		return nil
 	}
 	return errors.New("the folder is outside the project and the user's home folder")
+}
+
+// workDirNote leads a failed scan's message when the server could not be
+// started in its own folder, the likely cause of the failure (GAP-1317).
+func (s *MCPScanner) workDirNote() string {
+	if s.workDirRefused == "" {
+		return ""
+	}
+	return "the server was not started in its folder " + s.workDirRefused + "; it ran in the scanner folder instead: "
 }
 
 // runMCPScannerCommand owns the runtime process and its Python descendants.
@@ -446,7 +520,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, scannerFailureText(stderrStr))
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s%s", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
 			return nil, scanErr
 		}
 	}
@@ -475,7 +549,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	// watcher and REST scan handlers. See finding "Non-zero MCP
 	// scanner exits can be treated as successful scans".
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, scannerFailureText(stderrStr))
+		scanErr = fmt.Errorf("scanner %s exited %d (%sstderr=%s)", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
 		return result, scanErr
 	}
 
