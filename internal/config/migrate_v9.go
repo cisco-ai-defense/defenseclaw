@@ -121,10 +121,10 @@ type MigrateV9Input struct {
 // import: the rebased pack's files and FilesDigest (no Files: the pack is
 // pinned as it is), and what changed.
 type RulePackRebasePlan struct {
-	Files                                           map[string][]byte
-	Digest                                          string
-	Updated                                         int
-	Carried, Expressed, AlertOnly, Disabled, Merged []string
+	Files                                                   map[string][]byte
+	Digest                                                  string
+	Updated                                                 int
+	Carried, Expressed, AlertOnly, Disabled, Merged, Linked []string
 }
 
 // MigrateV9Result is the outcome of one migration.
@@ -2427,6 +2427,13 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 		m.note("%s has rules of yours that blocked a tool call with their pattern alone, which 1.0 does only with an "+
 			"expression. Its 1.0 copy %s is pinned instead (%s); %s is kept for a rollback to 0.8.x",
 			dir, target, expressed, dir)
+	}
+	if len(plan.Linked) > 0 {
+		// 0.8.x read a rule file through a link; 1.0 refuses a link in a
+		// pack (GAP-1346).
+		m.note("%s reads files through links, which 1.0 refuses in a rule pack (%s). Its 1.0 copy %s holds the "+
+			"files they point to and is pinned instead: edit the copy from now on; %s is kept for a rollback to 0.8.x",
+			dir, strings.Join(plan.Linked, ", "), target, dir)
 	}
 	m.noteDetectionOnly(target, plan.AlertOnly)
 	return target, plan.Digest, nil
