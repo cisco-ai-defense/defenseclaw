@@ -18,7 +18,7 @@
 
 Reads MCP server configuration from the configured connector(s)'
 connector-specific config (openclaw.json, .codex/config.toml,
-.claude/settings.json, .zeptoclaw/config.json, …). For OpenClaw, writes
+~/.claude.json, .zeptoclaw/config.json, …). For OpenClaw, writes
 go through the ``openclaw config`` CLI so OpenClaw validates the schema
 and hot-reloads cleanly; other connectors are written to their own
 config files. ``list`` defaults to every configured connector; ``scan --all``
@@ -261,6 +261,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             allow_legacy_plain=allow_legacy_plain_scans,
         )
         _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
+        _echo_legacy_mcp_locations(servers)
         not_loaded.extend((connector, s) for s in servers if s.load_problem)
         by_name = {s.name: s for s in servers}
         failed_rows.extend(
@@ -490,9 +491,30 @@ def _mcp_list_json_items(
             entry["not_loaded"] = s.load_problem
             entry["not_loaded_repair"] = _mcp_not_loaded_next_step(s, connector)
             verdict_label = "not loaded"
+        if s.source_scope == connector_paths.CLAUDE_LEGACY_MCP_SCOPE:
+            entry["source"] = s.source
         entry["verdict"] = verdict_label
         out.append(entry)
     return out
+
+
+def _echo_legacy_mcp_locations(servers: list[MCPServerEntry]) -> None:
+    """Say which entries come only from the settings.json block 0.8.x wrote (GAP-1340)."""
+    legacy = [s for s in servers if s.source_scope == connector_paths.CLAUDE_LEGACY_MCP_SCOPE]
+    if not legacy:
+        return
+    home = os.path.abspath(os.path.expanduser("~"))
+
+    def tilde(path: str) -> str:
+        return "~" + path[len(home):] if path.startswith(home + os.sep) else path
+
+    state = tilde(connector_paths.claude_mcp_state_path())
+    for s in legacy:
+        click.echo(
+            f"  {s.name}: read from {tilde(s.source)}, where DefenseClaw 0.8.x wrote it; "
+            f"Claude Code reads {state}. `defenseclaw mcp set {s.name} ... --connector claudecode` "
+            f"moves it there, `defenseclaw mcp unset {s.name} --connector claudecode` removes it."
+        )
 
 
 def _print_mcp_list_table(
@@ -875,7 +897,7 @@ def _resolve_scan_target(
         hint = f"  Available: {', '.join(names)}" if names else "  No MCP servers configured."
         # Name the connector actually searched rather than a hardcoded
         # "openclaw.json" — in a multi-connector install the source is the
-        # connector-specific config (e.g. claudecode → .claude/settings.json),
+        # connector-specific config (e.g. claudecode → ~/.claude.json),
         # so the legacy filename was misleading. ``connector`` may be None
         # (single-connector default), in which case resolve the active one.
         raise click.ClickException(
@@ -2384,7 +2406,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
 #
 # OpenClaw uses ``openclaw config set/unset`` (schema-validated +
 # hot-reloaded). Claude Code and Codex have no equivalent CLI, so
-# we patch ``~/.claude/settings.json`` and ``~/.codex/config.toml``
+# we patch ``~/.claude.json`` and ``~/.codex/config.toml``
 # directly, with explicit workspace overlays handled by the atomic JSON
 # helpers in :mod:`defenseclaw.connector_paths`.
 # ZeptoClaw owns its config.json from the TUI and does not expose a

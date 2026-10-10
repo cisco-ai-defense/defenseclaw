@@ -530,13 +530,15 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		// their servers. `.mcp.json` at the project root is unaffected because
 		// it's the workspace-scope file the CLI reads regardless.
 		if _, hasEnv := os.LookupEnv("CLAUDE_CONFIG_DIR"); !hasEnv {
-			tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
 			// ~/.claude.json holds both user-scope (top-level `mcpServers`)
 			// and per-project local-scope (`projects.<path>.mcpServers`)
 			// entries. Read the file once and take the union instead of
 			// decoding the (often multi-megabyte) conversation-state file
-			// twice.
+			// twice. It comes before the settings.json block DefenseClaw
+			// 0.8.x wrote: the first source wins a name, and Claude Code
+			// reads ~/.claude.json (GAP-1340).
 			tryFile(config.ReadMCPFromClaudeJSONBothScopes, ".claude.json")
+			tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
 		}
 		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
 	case "cursor":
