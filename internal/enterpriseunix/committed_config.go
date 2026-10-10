@@ -142,9 +142,14 @@ func (l *lifecycle) revertRejectedConfig(record *Deployment, committed, planned 
 // restoreNewerConfig puts back a config.yaml written during a run whose
 // in-place edit was rejected and reverted (revertRejectedConfig), after the
 // rollback restarted the previous deployment. inputsChanged then sees it and
-// the apply trigger runs ensure for it once this run ends.
+// the apply trigger runs ensure for it once this run ends. A config.yaml
+// written again since the rollback put its file in place is newer still and
+// stays (GAP-1379).
 func (l *lifecycle) restoreNewerConfig(record *Deployment, newer []byte) {
 	env, r := l.env, l.result
+	if current, err := sha256File(env.P(env.Layout.ConfigPath)); err == nil && current != l.rollbackConfigSHA {
+		return
+	}
 	owner := fileOwner{UID: 0, GID: record.ServiceGID}
 	if err := env.writeFileAtomic(env.P(env.Layout.ConfigPath), newer, 0o640, owner); err != nil {
 		r.AddWarning(codeConfigReverted, "the config.yaml written during this run could not be put back ("+err.Error()+"); the last applied config is in place, push the newer config.yaml again")
