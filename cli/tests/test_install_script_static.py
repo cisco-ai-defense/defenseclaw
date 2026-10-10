@@ -677,30 +677,30 @@ def test_a_rollback_whose_gateway_does_not_start_says_so_and_exits_1(tmp_path: P
     dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
     (dc_home / "previous" / "bin").mkdir(parents=True)
     bin_dir.mkdir(parents=True)
-    for folder, version, start in ((bin_dir, "1.0.1", "exit 0"), (dc_home / "previous" / "bin", "0.8.10", "exit 1")):
+    for folder, version, start in ((bin_dir, "1.0.2", "exit 0"), (dc_home / "previous" / "bin", "1.0.1", "exit 1")):
         gateway = folder / "defenseclaw-gateway"
         gateway.write_text(
             f'#!/bin/sh\ncase "$1" in --version) echo "defenseclaw-gateway version {version}" ;; start) {start} ;; esac\n',
             encoding="utf-8",
         )
         gateway.chmod(0o755)
-    (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    (dc_home / "previous" / "VERSION").write_text("1.0.1\n", encoding="utf-8")
     (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
-    script = _stamped(tmp_path, "1.0.1")
+    script = _stamped(tmp_path, "1.0.2")
     env = {"DEFENSECLAW_APP_PATH": "none"}
 
     back = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert back.returncode == 1, back.stdout + back.stderr
-    assert "Rolling back to DefenseClaw 0.8.10" in back.stdout
-    assert "Now running DefenseClaw 0.8.10, but its gateway is not up" in back.stdout
+    assert "Rolling back to DefenseClaw 1.0.1" in back.stdout
+    assert "Now running DefenseClaw 1.0.1, but its gateway is not up" in back.stdout
     assert "✓ Now running" not in back.stdout
 
     forward = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert forward.returncode == 0, forward.stdout + forward.stderr
-    assert "Rolling forward to DefenseClaw 1.0.1" in forward.stdout
-    assert "Now running DefenseClaw 1.0.1." in forward.stdout
+    assert "Rolling forward to DefenseClaw 1.0.2" in forward.stdout
+    assert "Now running DefenseClaw 1.0.2." in forward.stdout
     # GAP-1497: rolling forward asked to replace 0.8.10 "with the previous
     # install (1.0.1)", though 1.0.1 is the newer one.
     for path in (INSTALL_SH, ROOT / "scripts" / "install.ps1"):
@@ -754,6 +754,107 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     assert not calls.exists()
 
 
+def _damaged_audit_db(path: Path) -> bytes:
+    import sqlite3
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE audit_events (detail TEXT)")
+        conn.executemany("INSERT INTO audit_events VALUES (?)", [("x" * 500,)] * 2000)
+    conn.close()
+    with path.open("r+b") as handle:  # overwrite b-tree pages: integrity_check fails
+        handle.seek(4096 * 2)
+        handle.write(b"\xff" * 4096 * 3)
+    return path.read_bytes()
+
+
+def _rollback_to_0_8_with_a_damaged_store(tmp_path: Path, starts: bool) -> tuple[subprocess.CompletedProcess[str], Path]:
+    # A 1.0.1 install with a connector over a saved 0.8.10 install whose
+    # audit.db SQLite reports damaged (GAP-1388). The 0.8.10 gateway, like the
+    # real one, starts only on a store it can write.
+    home = tmp_path / "home"
+    dc_home, bin_dir = home / ".defenseclaw", home / ".local" / "bin"
+    (dc_home / "previous" / "bin").mkdir(parents=True)
+    (dc_home / "previous" / "data").mkdir()
+    (dc_home / ".venv" / "bin").mkdir(parents=True)
+    (dc_home / ".venv" / "bin" / "python").symlink_to(sys.executable)
+    bin_dir.mkdir(parents=True)
+    shutil.copy(shutil.which("sleep") or "/bin/sleep", tmp_path / "defenseclaw-sleep")
+    calls = tmp_path / "calls.txt"
+    log = f"echo \"$V $*\" >> '{calls}'"
+    pid = '"$DEFENSECLAW_HOME/gateway.pid"'
+    new = f"connector|start) {log} ;; esac\n"
+    guard = '[ ! -e "$DEFENSECLAW_HOME/audit.db" ] || ' if starts else ""
+    old = (
+        f"start) {log}; {guard}exit 1\n"
+        f"  '{tmp_path}/defenseclaw-sleep' 60 >/dev/null 2>&1 & echo $! > {pid} ;;\n"
+        f"status) kill -0 \"$(cat {pid})\" ;;\nstop) {log}; kill \"$(cat {pid})\"; rm -f {pid} ;; esac\n"
+    )
+    for folder, version, body in ((bin_dir, "1.0.1", new), (dc_home / "previous" / "bin", "0.8.10", old)):
+        gateway = folder / "defenseclaw-gateway"
+        gateway.write_text(
+            f'#!/bin/sh\nV={version}\ncase "$1" in --version) echo "defenseclaw-gateway version $V" ;;\n{body}',
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    (dc_home / "active_connector.json").write_text('{"version": 3, "names": ["claudecode"]}', encoding="utf-8")
+    (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
+    (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
+    _damaged_audit_db(dc_home / "previous" / "data" / "audit.db")
+    try:
+        result = _run([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+    finally:
+        subprocess.run(["pkill", "-f", str(tmp_path / "defenseclaw-sleep")], check=False)
+    return result, dc_home
+
+
+def test_a_rollback_to_0_x_moves_a_damaged_audit_store_aside(tmp_path: Path) -> None:
+    # GAP-1388: the rollback restored a damaged 0.8.10 audit.db; 0.8.10's
+    # gateway then failed (local_write_failed), with the 1.0 hooks removed.
+    back, dc_home = _rollback_to_0_8_with_a_damaged_store(tmp_path, starts=True)
+
+    out = back.stdout + back.stderr
+    assert back.returncode == 0, out
+    archives = [path.name for path in dc_home.glob("audit.db.corrupt-*")]
+    assert len(archives) == 1 and re.fullmatch(r"audit\.db\.corrupt-\d{8}T\d{6}Z", archives[0]), archives
+    assert not (dc_home / "audit.db").exists()
+    assert out.count("failed SQLite's integrity check") == 1, out
+    assert "Now running DefenseClaw 0.8.10." in out
+    assert (tmp_path / "calls.txt").read_text(encoding="utf-8").splitlines() == [
+        "1.0.1 connector teardown --connector claudecode",
+        "0.8.10 start",
+    ]
+    # The check runs before anything of the 1.0 install changes.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    block = text[text.index('if [[ "${ROLLBACK}" == true ]]; then') :]
+    assert block.index("check_rollback_data") < block.index("stop_gateway") < block.index(
+        "remove_connector_registrations_for_legacy"
+    )
+
+
+def test_a_rollback_to_0_x_whose_gateway_does_not_start_is_undone(tmp_path: Path) -> None:
+    # GAP-1388: left with 0.8.10 files, no gateway and no hooks. Now the 1.0.1
+    # install comes back and its gateway start writes its registrations again.
+    back, dc_home = _rollback_to_0_8_with_a_damaged_store(tmp_path, starts=False)
+
+    out = back.stdout + back.stderr
+    assert back.returncode == 1, out
+    assert "the rollback is being undone" in out
+    assert "run 'defenseclaw rollback' again" in out
+    assert (tmp_path / "calls.txt").read_text(encoding="utf-8").splitlines() == [
+        "1.0.1 connector teardown --connector claudecode",
+        "0.8.10 start",
+        "1.0.1 start",
+    ]
+    assert "1.0.1" in (dc_home.parent / ".local" / "bin" / "defenseclaw-gateway").read_text(encoding="utf-8")
+    assert (dc_home / "active_connector.json").is_file()
+    previous = dc_home / "previous"
+    assert (previous / "VERSION").read_text(encoding="utf-8").strip() == "0.8.10"
+    assert not (previous / "ROLLED_BACK").exists()
+    # The saved store is back as it was, so a later upgrade keeps it.
+    assert (previous / "data" / "audit.db").is_file()
+    assert not list((previous / "data").glob("audit.db.corrupt-*"))
+
+
 def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_path: Path) -> None:
     # GAP-0012: after naming the drift and its restart fix, the rollback also
     # said "Start it with: defenseclaw-gateway start", which does nothing then.
@@ -782,6 +883,8 @@ def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_pat
     out = back.stdout + back.stderr
     assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart" in out
     assert "Start it with: defenseclaw-gateway start" not in out
+    # GAP-1388: 0.8.10 is not left down; the retry that accepts the drift is named.
+    assert "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw rollback" in out
 
 
 def test_both_installers_say_when_an_upgrade_leaves_the_gateway_stopped() -> None:

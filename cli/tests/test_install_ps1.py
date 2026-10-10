@@ -704,6 +704,54 @@ def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path
     )
 
 
+def test_a_rollback_to_0_x_checks_the_saved_stores_and_undoes_itself_when_0_x_stays_down(tmp_path: Path) -> None:
+    # GAP-1388: a rollback restored a damaged 0.8.10 audit.db, its gateway
+    # could not start, and the agents were left unguarded. Both installers
+    # check the saved stores with the same code, without writing beside them.
+    import sqlite3
+    import sys
+
+    ps1 = re.search(r"^\$RollbackDbCheckPy = @'\n(.*?)'@$", _text(), re.M | re.S)
+    sh_text = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    sh = re.search(r"^ROLLBACK_DB_CHECK_PY='(.*?)'$", sh_text, re.M | re.S)
+    assert ps1 and sh and ps1.group(1) == sh.group(1)
+    good, bad = tmp_path / "good.db", tmp_path / "audit.db"
+    stores = {}
+    for path in (good, bad):
+        stores[path] = sqlite3.connect(path)
+        stores[path].execute("PRAGMA journal_mode=WAL")
+        stores[path].execute("CREATE TABLE audit_events (detail TEXT)")
+        stores[path].executemany("INSERT INTO audit_events VALUES (?)", [("x" * 500,)] * 2000)
+        stores[path].commit()
+    stores[bad].close()
+    with bad.open("r+b") as handle:
+        handle.seek(4096 * 2)
+        handle.write(b"\xff" * 4096 * 3)
+    # good.db is still open, with its -wal: the check reads a copy of it.
+    before = sorted(p.name for p in tmp_path.iterdir())
+    found = subprocess.run(
+        [sys.executable, "-I", "-c", sh.group(1), str(good), str(bad), str(tmp_path / "missing.db")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    after = sorted(p.name for p in tmp_path.iterdir())
+    stores[good].close()
+    assert found.stdout.splitlines() == [str(bad)], found.stdout + found.stderr
+    assert after == before
+    rollback = _ps1_function("Invoke-Rollback")
+    assert (
+        rollback.index("Test-RollbackData $backTo")
+        < rollback.index("Stop-Gateway")
+        < rollback.index("Switch-WithPrevious")
+        < rollback.index("Move-DamagedAuditStore $backTo")
+        < rollback.index("if ($startAfter -and (Start-Gateway)")
+        < rollback.index("if ($toLegacy) { return Undo-Rollback")
+    )
+    undo = _ps1_function("Undo-Rollback")
+    assert undo.index("Switch-WithPrevious $BackTo") < undo.index("Start-Gateway") < undo.rindex("return 1")
+
+
 def test_install_folders_set_only_the_acl_part_that_changed() -> None:
     # GAP-2004: Set-Acl writes every part of the security descriptor and was
     # refused for a standard user on a second NTFS volume, so a

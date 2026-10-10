@@ -519,11 +519,16 @@ if [[ "${ROLLBACK}" == true ]]; then
         question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
     fi
     ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
+    # GAP-1388: a 0.x release cannot start on a damaged audit store, so check
+    # the saved data before anything of this install changes.
+    AUDIT_DAMAGED=""
+    if version_lt "${back_to}" 1.0.0; then check_rollback_data; fi
     was_running=false
     [[ -n "$(gateway_pid || true)" ]] && was_running=true
     # The swap overwrites previous/GATEWAY_WAS_RUNNING with this install's state.
+    saved_was_running="$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null || true)"
     restart="${was_running}"
-    [[ "$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null)" == true ]] && restart=true
+    [[ "${saved_was_running}" == true ]] && restart=true
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
         remove_connector_registrations_for_legacy
@@ -534,10 +539,17 @@ if [[ "${ROLLBACK}" == true ]]; then
     swap_with_previous || swapped=$?
     if [[ "${swapped}" -ne 0 ]]; then
         # 1: the swap undid itself, so this install is back and may run again.
-        [[ "${swapped}" -eq 1 && "${was_running}" == true ]] && { start_gateway || true; }
+        # Its start also writes the connector registrations removed above.
+        if [[ "${swapped}" -eq 1 && ( "${was_running}" == true || -n "${LEGACY_TORN_DOWN:-}" ) ]]; then
+            start_gateway || true
+        fi
         die "Rollback failed part-way; see ${LOG}"
     fi
     rollback_rc=0
+    QUARANTINED=""
+    if [[ -n "${AUDIT_DAMAGED}" ]] && ! quarantine_rolled_back_audit; then
+        undo_rollback "The damaged audit store of DefenseClaw ${back_to} could not be moved aside"
+    fi
     if [[ "${restart}" == true ]]; then
         start_gateway || rollback_rc=$?
         case "${rollback_rc}" in
@@ -545,6 +557,11 @@ if [[ "${ROLLBACK}" == true ]]; then
             3) warn "A connector needs attention before it is guarded again (see the gateway output above)"; restart_openclaw ;;
             *) rollback_rc=1 ;;
         esac
+    fi
+    # A 0.x release has no rollback command, and its gateway writes its own
+    # connector registrations only once it runs: never leave it down.
+    if [[ ${rollback_rc} -eq 1 ]] && version_lt "${back_to}" 1.0.0; then
+        undo_rollback "The gateway of DefenseClaw ${back_to} did not start"
     fi
     if [[ ${rollback_rc} -eq 1 ]]; then
         # The swap is done, but the hooks are unguarded: say so, and exit 1.
@@ -1617,6 +1634,7 @@ explain_start_failure() {
             # restart, not start: a gateway that refused its connector can
             # still be running, and start then only says it is (GAP-0012).
             info "To accept the new agent version and refresh the lock, restart it once with: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
+            START_DRIFT=1
         else
             info "Refresh the lock with: defenseclaw setup ${conn:-<connector>}"
         fi
@@ -1795,6 +1813,117 @@ swap_with_previous() {
     mv "${hold}" "${PREVIOUS}"
 }
 
+# GAP-1388: check_rollback_data runs SQLite's integrity check on each database
+# in previous/data before a rollback to 0.x, which has no recovery for a
+# damaged audit store, and prints the damaged ones. Nothing is written beside
+# them: opening a store that has a -wal or -journal, even read-only, writes
+# there, so such a store is checked on a copy. install.ps1 runs the same code.
+ROLLBACK_DB_CHECK_PY='import os, shutil, sqlite3, sys, tempfile
+from pathlib import Path
+
+
+def damaged(path):
+    logs = [suffix for suffix in ("-wal", "-journal") if os.path.exists(path + suffix)]
+    with tempfile.TemporaryDirectory() as tmp:
+        uri = Path(os.path.abspath(path)).as_uri() + "?immutable=1"
+        if logs:
+            copy = os.path.join(tmp, "check.db")
+            for suffix in ["", *logs]:
+                shutil.copyfile(path + suffix, copy + suffix)
+            uri = Path(copy).as_uri()
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                result = conn.execute("pragma integrity_check(1)").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError as exc:
+            result = str(exc)
+            if "malformed" not in result and "not a database" not in result:
+                return False
+    if result != "ok":
+        print(path + ": " + " ".join(result.split()), file=sys.stderr)
+    return result != "ok"
+
+
+for path in sys.argv[1:]:
+    try:
+        bad = os.path.isfile(path) and not os.path.islink(path) and damaged(path)
+    except OSError:
+        bad = False
+    if bad:
+        print(path)
+'
+
+check_rollback_data() {
+    local python="${VENV}/bin/python" db
+    [[ -x "${python}" && -d "${PREVIOUS}/data" ]] || return 0
+    while IFS= read -r db; do
+        if [[ "${db}" == "${PREVIOUS}/data/audit.db" ]]; then
+            AUDIT_DAMAGED=1
+        elif [[ -n "${db}" ]]; then
+            warn "The saved database ${db} of DefenseClaw ${back_to} failed SQLite's integrity check; ${back_to} may not start with it (see ${LOG})"
+        fi
+    done < <("${python}" -I -c "${ROLLBACK_DB_CHECK_PY}" "${PREVIOUS}"/data/*.db 2>>"${LOG}" || true)
+}
+
+# quarantine_rolled_back_audit: after the swap, move the damaged audit store
+# aside under the name the 1.0 gateway and doctor use (audit.db.corrupt-<UTC
+# time>), so the restored release starts on a new one.
+quarantine_rolled_back_audit() {
+    local db="${DEFENSECLAW_HOME}/audit.db" moved suffix
+    [[ -f "${db}" ]] || return 0
+    moved="${db}.corrupt-$(date -u +%Y%m%dT%H%M%SZ)"
+    [[ ! -e "${moved}" ]] || moved="${moved}-$$"
+    for suffix in -wal -shm -journal; do
+        [[ ! -e "${db}${suffix}" ]] || mv "${db}${suffix}" "${moved}${suffix}" || return 1
+    done
+    mv "${db}" "${moved}" || return 1
+    QUARANTINED="${moved}"
+    warn "The saved ${back_to} audit store failed SQLite's integrity check; it was kept as ${moved} and ${back_to} starts on a new audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)"
+}
+
+# undo_rollback REASON: put back the install the rollback replaced, and exit 1
+# (GAP-1388). The restored 0.x gateway is not running, and the connector
+# registrations of this install were removed for it: agents would be unguarded.
+undo_rollback() {
+    local left="${current}" undone=0 kept suffix
+    warn "$1, so the rollback is being undone"
+    stop_gateway "${BIN_DIR}/defenseclaw-gateway" || true
+    # The same swap the other way: previous/ holds the install just left.
+    current="${back_to}" was_running=false restart=true
+    swap_with_previous || undone=$?
+    current="${left}"
+    if [[ ${undone} -ne 0 ]]; then
+        err "DefenseClaw ${back_to} is installed, but its gateway is not running, so agent hooks are not guarded"
+        [[ ${undone} -ne 1 ]] || info "To return to ${current:-1.x}, run: bash ${PREVIOUS}/installer/install.sh --rollback"
+        exit 1
+    fi
+    # previous/ is again the install this rollback started from, as it was.
+    rm -f "${PREVIOUS}/ROLLED_BACK" "${PREVIOUS}/START_AFTER"
+    printf '%s\n' "${saved_was_running:-false}" > "${PREVIOUS}/GATEWAY_WAS_RUNNING"
+    if [[ -n "${QUARANTINED}" && ! -e "${PREVIOUS}/data/audit.db" ]]; then
+        kept="${PREVIOUS}/data/$(basename "${QUARANTINED}")"
+        for suffix in "" -wal -shm -journal; do
+            [[ ! -f "${kept}${suffix}" ]] || mv "${kept}${suffix}" "${PREVIOUS}/data/audit.db${suffix}" || true
+        done
+    fi
+    if start_gateway; then
+        ok "DefenseClaw ${current:-1.x} is back, with its gateway and agent hooks"
+    else
+        warn_not_started
+        warn "DefenseClaw ${current:-1.x} is back, but it registers its agent hooks again only once its gateway runs"
+    fi
+    # Paths in the older release's errors above now hold this install's files.
+    info "The files of DefenseClaw ${back_to} are in ${PREVIOUS}/data again; fix them there (paths above under ${DEFENSECLAW_HOME} named them)"
+    if [[ -n "${START_DRIFT:-}" ]]; then
+        info "To roll back anyway and accept the new agent version, run: DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw rollback"
+    else
+        info "Fix the cause above, then run 'defenseclaw rollback' again (log: ${LOG})"
+    fi
+    exit 1
+}
+
 # A 0.x release does not know the agent-side registrations 1.0 writes (hook
 # entries with --event, the OpenCode plugin, the Hermes rendering), so its
 # gateway adds its own next to them and runs every hook twice (GAP-1521).
@@ -1835,6 +1964,9 @@ PY
         [[ -f "${token}" && ! -L "${token}" ]] && cp -p "${token}" "${tokens}/"
     done
     info "Removing the connector registrations of DefenseClaw ${current}; ${back_to} writes its own when its gateway starts"
+    # A rollback that fails from here on starts this install's gateway again,
+    # which writes them back from active_connector.json.
+    LEGACY_TORN_DOWN=1
     for name in ${names}; do
         "${gateway}" connector teardown --connector "${name}" >>"${LOG}" 2>&1 \
             || warn "Could not remove the ${name} registrations of DefenseClaw ${current}; ${back_to} may run its ${name} hooks twice until you run: defenseclaw setup ${name}"
