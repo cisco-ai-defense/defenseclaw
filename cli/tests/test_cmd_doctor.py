@@ -3518,9 +3518,7 @@ class TestLegacySandboxDoctor(unittest.TestCase):
                 "state": "running",
                 "details": {
                     "skill_dirs": 1,
-                    "project_skill_roots_unverified": [
-                        "C:\\Users\\w1\\projA\\.claude\\skills: the hook guardian refused it: folder ancestry"
-                    ],
+                    "project_skill_roots_unverified": 1,
                 },
             },
             "guardrail": {"state": "disabled"},
@@ -3538,7 +3536,7 @@ class TestLegacySandboxDoctor(unittest.TestCase):
                 _check_sidecar(cfg, result)
         watcher = next(row for row in result.checks if row.get("label", "").strip().endswith("watcher"))
         self.assertEqual(watcher["status"], "warn", watcher)
-        self.assertIn("projA", watcher["detail"])
+        self.assertIn("1 project skill folder(s) could not be verified", watcher["detail"])
 
     def test_openshell_sandbox_running_is_not_a_stale_sidecar(self):
         # openshell.enabled makes the gateway run the sandbox subsystem; its

@@ -408,20 +408,21 @@ func (a *APIServer) verifyEnrolledProjectSkillFolder(cfg *config.Config, connect
 		roots.refuse(folder, reason, time.Now())
 		fmt.Fprintf(os.Stderr, "[watcher] project skill folder %s could not be verified and is not watched; its skills are refused: %s\n", folder, reason)
 		if a.health != nil {
-			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, roots.unverifiedFolders())
+			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, len(roots.unverifiedFolders()))
 		}
 		return
 	}
 	if roots.add(connector, folder) {
 		fmt.Fprintf(os.Stderr, "[watcher] project skill folder %s registered for install admission\n", folder)
 		if a.health != nil {
-			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, roots.unverifiedFolders())
+			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, len(roots.unverifiedFolders()))
 		}
 	}
 }
 
-// projectSkillRootsUnverifiedDetail names, in the watcher health, the
-// project skill folders that could not be verified (GAP-1356).
+// projectSkillRootsUnverifiedDetail counts, in the watcher health, the
+// project skill folders that could not be verified (GAP-1356). /health needs
+// no credential, so it gives only their number; the gateway log names them.
 const projectSkillRootsUnverifiedDetail = "project_skill_roots_unverified"
 
 // projectSkillScanPending refuses a skill in a registered project skill

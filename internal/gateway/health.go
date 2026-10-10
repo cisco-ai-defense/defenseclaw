@@ -752,14 +752,14 @@ func (h *SidecarHealth) SetWatcher(state SubsystemState, lastErr string, details
 }
 
 // SetWatcherDetail sets one detail of the watcher health, keeping its state
-// and since; an empty value removes it.
-func (h *SidecarHealth) SetWatcherDetail(key string, value []string) {
+// and since; a zero value removes it.
+func (h *SidecarHealth) SetWatcherDetail(key string, value int) {
 	h.mu.Lock()
 	details := make(map[string]interface{}, len(h.watcher.Details)+1)
 	for k, v := range h.watcher.Details {
 		details[k] = v
 	}
-	if len(value) == 0 {
+	if value == 0 {
 		delete(details, key)
 	} else {
 		details[key] = value

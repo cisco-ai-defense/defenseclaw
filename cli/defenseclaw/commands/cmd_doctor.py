@@ -3617,15 +3617,15 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     if sub == "guardrail" and isinstance(details, dict):
                         detail += f" ({_guardrail_health_mode(details)})"
                     unverified = details.get("project_skill_roots_unverified") if isinstance(details, dict) else None
-                    if sub == "watcher" and isinstance(unverified, list) and unverified:
+                    if sub == "watcher" and isinstance(unverified, int) and unverified > 0:
                         # A managed Windows gateway could not verify a project
                         # skill folder: it is not watched and its skills are
-                        # refused (GAP-1356).
+                        # refused (GAP-1356). The gateway log names it.
                         _emit(
                             "warn",
                             f"  └─ {sub}",
-                            f"{state}, {len(unverified)} project skill folder(s) could not be verified, are not "
-                            f"watched and their skills are refused: {unverified[0]}",
+                            f"{state}, {unverified} project skill folder(s) could not be verified, are not "
+                            "watched and their skills are refused; the gateway log names each folder",
                             r=r,
                         )
                         continue

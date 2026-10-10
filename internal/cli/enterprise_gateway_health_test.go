@@ -25,6 +25,13 @@ func TestStandaloneGatewayHealthWarnings(t *testing.T) {
 	if len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0].Message, "2 guardrail profile assignment warning(s) are unavailable without the gateway credential") {
 		t.Fatalf("warnings without the credential = %+v", result.Warnings)
 	}
+	// A project skill folder that could not be verified is reported
+	// (GAP-1356).
+	result = enterprisestatus.New("status", "standalone", "windows", "test")
+	appendStandaloneGatewayWarnings(result, []byte(`{"watcher":{"details":{"project_skill_roots_unverified":1}}}`), nil)
+	if len(result.Warnings) != 1 || result.Warnings[0].Code != "project_skill_root_unverified" {
+		t.Fatalf("unverified project skill folder warnings = %+v", result.Warnings)
+	}
 }
 
 // GAP-1026: a judge whose calls all fail is a judge_failing warning on

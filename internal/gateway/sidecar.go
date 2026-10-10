@@ -3759,7 +3759,7 @@ func warnUnenforcedAssetPolicy(cfg *config.Config, skillDirs, pluginDirs []strin
 // watcherHealthDetails adds to details the project skill folders that could
 // not be verified, which a watcher restart keeps refusing (GAP-1356).
 func (s *Sidecar) watcherHealthDetails(details map[string]interface{}) map[string]interface{} {
-	if unverified := s.projectSkills.unverifiedFolders(); len(unverified) > 0 {
+	if unverified := len(s.projectSkills.unverifiedFolders()); unverified > 0 {
 		details[projectSkillRootsUnverifiedDetail] = unverified
 	}
 	return details

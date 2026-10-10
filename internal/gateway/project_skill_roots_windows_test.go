@@ -197,9 +197,10 @@ func TestManagedWindowsProjectSkillRootFromFirstHook(t *testing.T) {
 	if roots.registered(filepath.Join(projC, ".claude", "skills")) || grants != 1 {
 		t.Fatalf("junction registered or not checked once (grants=%d)", grants)
 	}
-	listed, _ := health.Snapshot().Watcher.Details[projectSkillRootsUnverifiedDetail].([]string)
-	if len(listed) != 2 || !strings.Contains(strings.Join(listed, "\n"), projC) {
-		t.Fatalf("watcher health unverified folders = %v", listed)
+	listed := roots.unverifiedFolders()
+	if count, _ := health.Snapshot().Watcher.Details[projectSkillRootsUnverifiedDetail].(int); count != 2 ||
+		!strings.Contains(strings.Join(listed, "\n"), projC) {
+		t.Fatalf("watcher health unverified folders = %d, %v", count, listed)
 	}
 
 	// The project under the home, reported in another case: registered on
