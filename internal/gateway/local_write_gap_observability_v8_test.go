@@ -37,11 +37,21 @@ func TestLocalWriteGapSurvivesRestartAndIsReportedOnce(t *testing.T) {
 		_ = fixture.store.Close()
 	}
 	storePath := filepath.Join(dataDir, config.DefaultAuditDBName)
-	gapReports := func() []string {
-		database, err := sql.Open("sqlite", storePath)
+	// The gateway writes in the background after start (the retention run,
+	// the write-recovery report), so the test connection waits for the write
+	// lock as the store's own connection does instead of failing with
+	// SQLITE_BUSY.
+	openTestDB := func() *sql.DB {
+		database, err := sql.Open("sqlite", storePath+"?_pragma=busy_timeout(10000)")
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Closed before t.TempDir is removed; Windows cannot delete an open file.
+		t.Cleanup(func() { _ = database.Close() })
+		return database
+	}
+	gapReports := func() []string {
+		database := openTestDB()
 		defer database.Close()
 		rows, err := database.Query(`SELECT COALESCE(details, '') || COALESCE(structured_json, '') FROM audit_events
 			WHERE COALESCE(details, '') || COALESCE(structured_json, '') LIKE '%loss journal generation%'`)
@@ -61,10 +71,7 @@ func TestLocalWriteGapSurvivesRestartAndIsReportedOnce(t *testing.T) {
 	}
 
 	first, owner := start()
-	database, err := sql.Open("sqlite", first.store.DatabasePath())
-	if err != nil {
-		t.Fatal(err)
-	}
+	database := openTestDB()
 	if _, err := database.Exec(`CREATE TRIGGER local_history_full BEFORE INSERT ON audit_events
 		BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END`); err != nil {
 		t.Fatal(err)
