@@ -313,20 +313,19 @@ func patchDevinHooks(path, hookScript string, ownedHookScripts ...string) error 
 func replaceManagedDevinHooks(raw interface{}, ownedHookScripts []string, entry map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
-	edited := ""
-	if len(ownedHookScripts) > 0 {
-		edited = path.Base(filepath.ToSlash(ownedHookScripts[0]))
-	}
 	for _, item := range list {
-		// A group whose DefenseClaw handler path was edited is replaced too,
-		// not kept next to a second hook set (GAP-0907).
-		if devinHookGroupReferences(item, ownedHookScripts...) || editedDefenseClawHookEntry(item, edited) {
+		// A group whose DefenseClaw handler path or script name was edited is
+		// replaced too, not kept next to a second hook set (GAP-0907).
+		if devinHookGroupReferences(item, ownedHookScripts...) || editedDefenseClawHookEntry(item, devinHookScriptName) {
 			continue
 		}
 		out = append(out, item)
 	}
 	return append(out, entry)
 }
+
+// devinHookScriptName is the Devin hook script Setup generates on Unix.
+const devinHookScriptName = "devin-hook.sh"
 
 func devinHookGroupReferences(raw interface{}, hookScripts ...string) bool {
 	group, ok := raw.(map[string]interface{})
@@ -361,7 +360,7 @@ func removeDevinHookReferences(path string, hookScripts ...string) error {
 		list, _ := hooks[event].([]interface{})
 		out := make([]interface{}, 0, len(list))
 		for _, item := range list {
-			if devinHookGroupReferences(item, hookScripts...) {
+			if devinHookGroupReferences(item, hookScripts...) || editedDefenseClawHookEntry(item, devinHookScriptName) {
 				changed = true
 				continue
 			}

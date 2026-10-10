@@ -5367,7 +5367,7 @@ func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 	CodexConfigPathOverride = path
 	defer func() { CodexConfigPathOverride = "" }()
 	c := NewCodexConnector()
-	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	opts := SetupOpts{DataDir: filepath.Join(dir, ".defenseclaw"), APIAddr: "127.0.0.1:18970"}
 	if err := c.Setup(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}

@@ -267,35 +267,36 @@ func posixShellUnsafeRune(r rune) bool {
 
 // editedDefenseClawHookScript reports whether a Unix hook command runs the
 // DefenseClaw hook script scriptName (claude-code-hook.sh, codex-hook.sh, ...)
-// from a path other than the one Setup writes: its first shell word is an
-// absolute path ending in /scriptName under a .defenseclaw directory, for
-// example ~/.defenseclaw/xhooks/claude-code-hook.sh after the path was edited
-// by hand. It returns the text after that word. Setup's repair claims such an
-// entry and replaces it; it used to keep it and add a second hook set, so the
-// edited entry kept running and failing (GAP-0907). Presence checks do not
-// use it: an edited entry is not a working registration.
+// in a form Setup did not write, and returns the text after the script word.
+// The first shell word must be an absolute, clean path whose basename is the
+// connector's script name, with or without an edit around ".sh"
+// (copilot-hookX.sh, hermes-hook.sh.off), under a .defenseclaw directory, or
+// the exact script name under an edited DefenseClaw data directory
+// (.defenseclawX). Setup's repair and teardown claim such an entry and
+// replace or remove it. Recognising only an edited directory kept a renamed
+// script's entries: Copilot then denied every call next to the re-added set,
+// Hermes refused the repair and uninstall left them behind (GAP-0906,
+// GAP-0907). Presence checks do not use it: an edited entry is not a working
+// registration. Windows registers native launcher commands, which never match
+// here; their ownership stays exact.
 func editedDefenseClawHookScript(command, scriptName string) (string, bool) {
-	if !strings.HasSuffix(scriptName, "-hook.sh") || strings.Contains(scriptName, "/") {
+	stem, ok := strings.CutSuffix(scriptName, ".sh")
+	if !ok || !strings.HasSuffix(stem, "-hook") || strings.Contains(scriptName, "/") {
 		return "", false
 	}
-	command = strings.TrimSpace(command)
-	quoted := strings.HasPrefix(command, "'")
-	command = posixHookCommandUnquoted(command)
-	end := strings.Index(command, "/"+scriptName)
-	if end <= 0 {
+	word, rest, ok := posixHookCommandSplit(strings.TrimSpace(command))
+	if !ok || strings.ContainsAny(word, "\x00\r\n") || !path.IsAbs(word) || path.Clean(word) != word {
 		return "", false
 	}
-	end += len(scriptName) + 1
-	rest := command[end:]
-	if rest != "" && rest[0] != ' ' {
-		return "", false
-	}
-	word := command[:end]
-	if (!quoted && strings.ContainsAny(word, " \t")) || !path.IsAbs(word) || path.Clean(word) != word {
+	base := path.Base(word)
+	edit, ok := strings.CutPrefix(base, stem)
+	if !ok || !strings.Contains(edit, ".sh") || strings.ContainsAny(edit, " \t") {
 		return "", false
 	}
 	for _, part := range strings.Split(path.Dir(word), "/") {
-		if strings.EqualFold(part, ".defenseclaw") {
+		part = strings.ToLower(part)
+		if part == ".defenseclaw" ||
+			(base == scriptName && strings.HasPrefix(part, ".") && strings.Contains(part, "defenseclaw")) {
 			return rest, true
 		}
 	}
@@ -309,9 +310,9 @@ func editedDefenseClawHookCommand(command, scriptName string) bool {
 	return ok && (rest == "" || strings.HasPrefix(rest, " --event "))
 }
 
-// editedDefenseClawHookEntry applies editedDefenseClawHookCommand to a hook
-// entry's command fields and to the handlers of a matcher group.
-func editedDefenseClawHookEntry(raw interface{}, scriptName string) bool {
+// editedDefenseClawHookHandler applies editedDefenseClawHookCommand to one
+// hook handler: its command or bash field, or the command of a Kiro action.
+func editedDefenseClawHookHandler(raw interface{}, scriptName string) bool {
 	entry, ok := raw.(map[string]interface{})
 	if !ok {
 		return false
@@ -321,13 +322,31 @@ func editedDefenseClawHookEntry(raw interface{}, scriptName string) bool {
 			return true
 		}
 	}
+	action, _ := entry["action"].(map[string]interface{})
+	command, _ := action["command"].(string)
+	return editedDefenseClawHookCommand(command, scriptName)
+}
+
+// editedDefenseClawHookEntry is editedDefenseClawHookHandler for a handler or
+// any handler of a matcher group.
+func editedDefenseClawHookEntry(raw interface{}, scriptName string) bool {
+	if editedDefenseClawHookHandler(raw, scriptName) {
+		return true
+	}
+	entry, _ := raw.(map[string]interface{})
 	handlers, _ := entry["hooks"].([]interface{})
 	for _, handler := range handlers {
-		if editedDefenseClawHookEntry(handler, scriptName) {
+		if editedDefenseClawHookHandler(handler, scriptName) {
 			return true
 		}
 	}
 	return false
+}
+
+// hookScriptBaseName is the script name editedDefenseClawHookEntry matches
+// for a hook script path Setup writes.
+func hookScriptBaseName(hookScript string) string {
+	return path.Base(filepath.ToSlash(strings.TrimSpace(hookScript)))
 }
 
 // posixHookCommandUnquoted undoes posixHookCommandWord on the leading word of
@@ -339,29 +358,47 @@ func posixHookCommandUnquoted(command string) string {
 	if !strings.HasPrefix(command, "'") {
 		return command
 	}
-	var word strings.Builder
+	word, rest, ok := posixHookCommandSplit(command)
+	if !ok {
+		return command
+	}
+	return word + rest
+}
+
+// posixHookCommandSplit splits a hook command into its first shell word,
+// unquoted when it is single-quoted (posixHookCommandWord), and the rest,
+// which is empty or starts with the separating blank. ok is false for a
+// quoted word that does not parse.
+func posixHookCommandSplit(command string) (word, rest string, ok bool) {
+	if !strings.HasPrefix(command, "'") {
+		if i := strings.IndexAny(command, " \t"); i >= 0 {
+			return command[:i], command[i:], true
+		}
+		return command, "", true
+	}
+	var b strings.Builder
 	for i := 0; i < len(command); {
 		switch {
 		case command[i] == '\'':
 			end := strings.IndexByte(command[i+1:], '\'')
 			if end < 0 {
-				return command
+				return "", "", false
 			}
-			word.WriteString(command[i+1 : i+1+end])
+			b.WriteString(command[i+1 : i+1+end])
 			i += end + 2
 		case strings.HasPrefix(command[i:], `"'"`):
-			word.WriteByte('\'')
+			b.WriteByte('\'')
 			i += 3
 		case strings.HasPrefix(command[i:], `\'`):
-			word.WriteByte('\'')
+			b.WriteByte('\'')
 			i += 2
 		case command[i] == ' ':
-			return word.String() + command[i:]
+			return b.String(), command[i:], true
 		default:
-			return command
+			return "", "", false
 		}
 	}
-	return word.String()
+	return b.String(), "", true
 }
 
 func windowsHermesDirectHookCommand(binary string) string {

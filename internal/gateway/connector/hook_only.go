@@ -25,7 +25,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -5062,7 +5061,7 @@ func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[stri
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
 	replaced := false
-	edited := path.Base(filepath.ToSlash(hookScript))
+	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
 		if managedHookCommandEntry(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
 			if !replaced {
@@ -5211,7 +5210,8 @@ func removeHookScriptReferences(raw interface{}, hookScripts ...string) interfac
 		for _, item := range v {
 			owned := false
 			for _, command := range hookScripts {
-				owned = owned || managedHookCommandEntry(item, command)
+				owned = owned || managedHookCommandEntry(item, command) ||
+					editedDefenseClawHookHandler(item, hookScriptBaseName(command))
 			}
 			if owned {
 				continue
@@ -5233,8 +5233,9 @@ func removeHookScriptReferences(raw interface{}, hookScripts ...string) interfac
 func removeOwnedFlatHooks(raw interface{}, hookScript string) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list))
+	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
-		if containsHookScript(item, hookScript) {
+		if containsHookScript(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
 			continue
 		}
 		out = append(out, item)
