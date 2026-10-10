@@ -214,6 +214,14 @@ rest also reach per-user installs.
 
 ### Fixed
 
+- **Uninstall removes the uv a 0.8.x installer added, or names it.** The
+  0.8.x installer ran uv's own installer without a record, so after an
+  upgrade `uninstall --all --binaries` left `uv`, `uvx`, `~/.cache/uv` and
+  `~/.config/uv` without saying so. The upgrade from 0.8.x now records them
+  when uv's receipt, versions, file owners and timing, and a cache that holds
+  only what that install downloaded, show the 0.8.x installer put them there;
+  uninstall removes them while unchanged. Otherwise the uninstall plan and
+  result name what they leave. uv's Python folder is never removed.
 - **macOS app: the Local observability wizard no longer fails when "Configure
   audit sink" is cleared.** The field passed `--no-audit-sink`, which
   `defenseclaw setup local-observability up` does not accept, so the command

@@ -311,14 +311,12 @@ def test_all_binaries_preserves_shared_uv_cache_and_python_after_legacy_upgrade(
 
 
 @posix_only
-@pytest.mark.parametrize("recorded", [True, False])
-def test_all_binaries_after_an_upgrade_from_0_8_removes_only_recorded_leftovers(
-    per_user_install, recorded: bool
-) -> None:
+@pytest.mark.parametrize("state", ["recorded", "unrecorded", "uv-replaced"])
+def test_all_binaries_after_an_upgrade_from_0_8_removes_only_recorded_leftovers(per_user_install, state: str) -> None:
     # GAP-0908: a 0.8.x install upgraded to 1.0 (uv's cache now in
     # data_dir/.uv) left the 0.8.x installer's uv, uvx, uv's receipt,
-    # ~/.cache/uv and ~/.sigstore. Shared uv cache data stays even with the
-    # upgrade record; the recorded receipt and Sigstore cache can go.
+    # ~/.cache/uv and ~/.sigstore. What the upgrade recorded goes; a uv it
+    # did not record, or one replaced since, stays and the output names it.
     home, data_dir, bin_dir = per_user_install.home, per_user_install.data_dir, per_user_install.bin_dir
     (data_dir / ".uv" / "cache").mkdir(parents=True)
     cache = home / ".cache" / "uv"
@@ -331,10 +329,15 @@ def test_all_binaries_after_an_upgrade_from_0_8_removes_only_recorded_leftovers(
     (tuf / "root.json").write_text("{}", encoding="utf-8")
     for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
         os.utime(path, (1_700_000_000, 1_700_000_000))
-    if recorded:
-        (data_dir / "legacy-install-leftovers").write_text("uv-cache\nsigstore\n", encoding="utf-8")
-    else:
+    if state == "unrecorded":
         (bin_dir / "defenseclaw-uv.sha256").unlink()
+    else:
+        (data_dir / "legacy-install-leftovers").write_text("uv-cache\nsigstore\n", encoding="utf-8")
+    if state == "uv-replaced":
+        (bin_dir / "uv").write_bytes(b"a uv the user installed after the upgrade")
+    # uv's installer adds env when the folder is not on PATH; a shell profile loads it.
+    (bin_dir / "env").write_text('export PATH="$HOME/.local/bin:$PATH"\n', encoding="utf-8")
+    recorded = state == "recorded"
     env = {"PATH": str(bin_dir), "XDG_CACHE_HOME": "", "XDG_CONFIG_HOME": ""}
     with patch.dict(os.environ, env), patch.object(cmd_uninstall, "_clean_uv_cache_entries"):
         os.environ.pop("UV_CACHE_DIR", None)
@@ -342,10 +345,14 @@ def test_all_binaries_after_an_upgrade_from_0_8_removes_only_recorded_leftovers(
 
     assert result.exit_code == 0, result.output
     left = [name for name in ("uv", "uvx") if (bin_dir / name).exists()]
-    assert left == ([] if recorded else ["uv", "uvx"])
-    assert cache.exists()
+    assert left == {"recorded": [], "unrecorded": ["uv", "uvx"], "uv-replaced": ["uv"]}[state]
+    assert cache.exists() is not recorded
     assert receipt.exists() is not recorded
-    assert (home / ".sigstore").exists() is not recorded
+    assert (bin_dir / "defenseclaw-uv.sha256").exists() is False
+    assert (home / ".sigstore").exists() is (state == "unrecorded")
+    output = " ".join(result.output.split())
+    assert (f"kept {bin_dir / 'uv'}," in output) is not recorded
+    assert (bin_dir / "env").exists() and f"{bin_dir / 'env'}" in output.rpartition("kept ")[2]
 
 
 @posix_only

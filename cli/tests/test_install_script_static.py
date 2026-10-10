@@ -1183,8 +1183,8 @@ def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     assert "info: Kept the audit history DefenseClaw 0.8.10 recorded in" in out
 
 
-def _legacy_0_8_home(home: Path, receipt_age: int) -> tuple[Path, Path]:
-    """Lay out a 0.8.x install with uv and a temporary Cosign cache."""
+def _legacy_0_8_home(home: Path, receipt_age: int, cache_age: int, cache_wheel: str) -> tuple[Path, Path]:
+    """Lay out a 0.8.10 install that ran uv's installer and a temporary Cosign, without a marker."""
     bin_dir, dc_home = home / ".local" / "bin", home / ".defenseclaw"
     bin_dir.mkdir(parents=True)
     (bin_dir / "uv").write_text("#!/bin/sh\necho 'uv 0.12.24 (x86_64-unknown-linux-gnu)'\n", encoding="utf-8")
@@ -1195,33 +1195,56 @@ def _legacy_0_8_home(home: Path, receipt_age: int) -> tuple[Path, Path]:
     receipt.write_text(
         f'{{"binaries":["uv","uvx"],"install_prefix":"{bin_dir}","version":"0.12.24"}}', encoding="utf-8"
     )
-    python = home / ".local" / "share" / "uv" / "python" / "cpython-3.12.14-linux-x86_64-gnu"
-    (dc_home / ".venv").mkdir(parents=True)
+    site = dc_home / ".venv" / "lib" / "python3.12" / "site-packages"
+    for wheel in ("defenseclaw-0.8.10", "litellm-1.91.5"):
+        (site / f"{wheel}.dist-info").mkdir(parents=True)
     cfg = dc_home / ".venv" / "pyvenv.cfg"
-    cfg.write_text(f"home = {python}/bin\nuv = 0.12.24\nversion_info = 3.12.14\n", encoding="utf-8")
+    cfg.write_text("home = /usr/bin\nuv = 0.12.24\nversion_info = 3.12.14\n", encoding="utf-8")
+    cache = home / ".cache" / "uv"
+    for archive, wheel in (("a1", "defenseclaw-0.8.10"), ("a2", cache_wheel)):
+        (cache / "archive-v0" / archive / f"{wheel}.dist-info").mkdir(parents=True)
+    (cache / "CACHEDIR.TAG").write_text("Signature: 8a477f597d28d172789f06886806bc55\n", encoding="utf-8")
     tuf = home / ".sigstore" / "root" / "tuf-repo-cdn.sigstore.dev"
     tuf.mkdir(parents=True)
     (tuf / "root.json").write_text("{}", encoding="utf-8")
     venv_t = 1_700_000_000
     for path in (tuf / "root.json", tuf, tuf.parent, home / ".sigstore"):
         os.utime(path, (venv_t - 5, venv_t - 5))
+    (cache / "CACHEDIR.TAG").touch()
+    os.utime(cache / "CACHEDIR.TAG", (venv_t - 1, venv_t - 1))
+    for path in (*cache.glob("archive-v0/*/*"), *cache.glob("archive-v0/*"), cache / "archive-v0", cache):
+        os.utime(path, (venv_t - cache_age, venv_t - cache_age))
     os.utime(receipt, (venv_t - receipt_age, venv_t - receipt_age))
     os.utime(cfg, (venv_t, venv_t))
     return bin_dir, dc_home
 
 
-def test_upgrade_from_0_8_does_not_claim_uv_from_recent_receipt(tmp_path: Path) -> None:
-    # A user-installed uv can have a receipt only seconds older than the
-    # 0.8.x venv: that installer reused uv instead of installing it.
+@pytest.mark.parametrize(
+    ("cache_age", "cache_wheel", "claimed"),
+    [
+        (-5, "litellm-1.91.5", True),  # the 0.8.10 installer's uv: wheels unpacked for its venv
+        (3600, "litellm-1.91.5", False),  # the user's uv: its cache predates the receipt
+        (30, "litellm-1.91.5", False),  # the user's uv, used just before the 0.8.10 install
+        (-5, "ruff-0.15.7", False),  # the user's uv, used for something DefenseClaw never installed
+    ],
+)
+def test_upgrade_from_0_8_records_uv_only_when_the_0_8_installer_placed_it(
+    tmp_path: Path, cache_age: int, cache_wheel: str, claimed: bool
+) -> None:
+    # GAP-0908: the 0.8.10 installer ran uv's installer and kept no marker,
+    # and it also reused a uv the user already had. The upgrade records the
+    # uv (the digests install_uv writes) and its cache only on evidence that
+    # user's own uv cannot meet.
     home = tmp_path / "home"
-    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=7)
+    bin_dir, dc_home = _legacy_0_8_home(home, receipt_age=60, cache_age=cache_age, cache_wheel=cache_wheel)
     text = INSTALL_SH.read_text(encoding="utf-8")
     script = tmp_path / "legacy.sh"
     script.write_text(
         'set -euo pipefail\nhas() { [[ "$1" != cosign ]] && command -v "$1" >/dev/null 2>&1; }\n'
         + text[text.index("readonly LEGACY_WINDOW") : text.index("find_legacy_leftovers() {")].replace("readonly ", "")
-        + _install_sh_functions("find_legacy_leftovers", "record_legacy_leftovers")
-        + f'HOME="{home}" BIN_DIR="{bin_dir}" DEFENSECLAW_HOME="{dc_home}"\nunset XDG_CONFIG_HOME XDG_DATA_HOME\n'
+        + _install_sh_functions("sha256_of", "find_legacy_leftovers", "record_legacy_leftovers")
+        + f'HOME="{home}" BIN_DIR="{bin_dir}" DEFENSECLAW_HOME="{dc_home}"\n'
+        + "unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME UV_CACHE_DIR\n"
         + "find_legacy_leftovers\nrecord_legacy_leftovers\n",
         encoding="utf-8",
     )
@@ -1229,9 +1252,17 @@ def test_upgrade_from_0_8_does_not_claim_uv_from_recent_receipt(tmp_path: Path) 
     proc = _run([str(script)], tmp_path)
 
     assert proc.returncode == 0, proc.stderr
-    assert not (bin_dir / "defenseclaw-uv.sha256").exists()
     assert (bin_dir / "uv").exists() and (bin_dir / "uvx").exists()
-    assert (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8") == "sigstore\n"
+    record = bin_dir / "defenseclaw-uv.sha256"
+    leftovers = (dc_home / "legacy-install-leftovers").read_text(encoding="utf-8")
+    if not claimed:
+        assert not record.exists()
+        assert leftovers == "sigstore\n"
+        return
+    uv_digest = hashlib.sha256((bin_dir / "uv").read_bytes()).hexdigest()
+    uvx_digest = hashlib.sha256(b"uvx").hexdigest()
+    assert record.read_text(encoding="utf-8") == f"{uv_digest}  uv\n{uvx_digest}  uvx\n"
+    assert leftovers == "uv-cache\nsigstore\n"
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the read-only bin folder")
