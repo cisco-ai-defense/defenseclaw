@@ -418,11 +418,18 @@ func buildGatewayExecutable(t *testing.T) string {
 	t.Helper()
 	repoRoot := executableTestRepoRoot(t)
 	binary := filepath.Join(t.TempDir(), "defenseclaw-gateway.exe")
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	// A cold -trimpath build of the gateway takes 80-145 s on a hosted
+	// Windows runner and has passed 180 s under load, so allow 6 minutes.
+	// The CI stress step runs this test twice inside the default 10-minute
+	// go test limit; the second run builds from the warm cache.
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", binary, "./cmd/defenseclaw")
 	cmd.Dir = repoRoot
 	if output, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			err = fmt.Errorf("%w (%v)", ctx.Err(), err)
+		}
 		t.Fatalf("build gateway executable: %v\n%s", err, output)
 	}
 	return binary
