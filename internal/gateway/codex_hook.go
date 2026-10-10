@@ -285,7 +285,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 		if runtime.GOOS == "windows" && !isSandboxHookRequest(ctx) &&
 			(cfg == nil || !cfg.SecureClientIntegration()) {
-			actionInput.DialectHint = codexWindowsShellDialect(
+			actionInput.DialectHint = selectWindowsShellDialect(
 				toolName, codexExactMapString(req.ToolInput, "command"), actionInput,
 			)
 		}
@@ -807,30 +807,6 @@ func reasonOrDefault(reason string) string {
 
 func normalizeCodexAction(action string) string {
 	return normalizedGuardrailAction(action)
-}
-
-// codexWindowsShellDialect is the grammar of a Codex shell call on native
-// Windows. Codex names its shell tool Bash everywhere, but on Windows it runs
-// the command in PowerShell, so a PowerShell command such as
-// `Add-Content -Path $HOME\.ssh\authorized_keys -Value k` was parsed as POSIX
-// and ran with no finding (GAP-0912), and so was the POSIX-looking
-// `echo k >> $HOME\.ssh\authorized_keys` (GAP-1134). A complete PowerShell
-// reading therefore decides. The PowerShell model leaves an unqualified
-// native program such as curl incomplete, because Windows PowerShell aliases
-// it; such a command keeps its inferred grammar, as before GAP-1134, so its
-// POSIX reading can still enforce instead of every finding turning into
-// detection-only.
-func codexWindowsShellDialect(tool, command string, input actionfacts.Input) actionfacts.Dialect {
-	tool = strings.ToLower(strings.TrimSpace(tool))
-	if (tool != "bash" && tool != "exec_command" && tool != "shell_command") || command == "" {
-		return ""
-	}
-	input.DialectHint = actionfacts.DialectPowerShell
-	if actionfacts.Analyze(input).Authoritative() ||
-		actionfacts.InferredRawCommandDialect(command) == actionfacts.DialectPowerShell {
-		return actionfacts.DialectPowerShell
-	}
-	return ""
 }
 
 func codexToolName(req codexHookRequest) string {
