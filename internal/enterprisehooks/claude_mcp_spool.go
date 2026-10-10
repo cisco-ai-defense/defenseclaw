@@ -35,6 +35,12 @@ const maxClaudeMCPSpoolRecordBytes = 4 << 20
 type ClaudeMCPSpoolServer struct {
 	Server  config.MCPServerEntry `json:"server"`
 	Project string                `json:"project,omitempty"`
+	// WorkDir is the folder a local stdio server starts in, which the
+	// enumerator checked as LocalSystem, where the profile is readable; the
+	// gateway service account cannot read the profile and so cannot check it
+	// (GAP-1317). WorkDirRefused is the folder it did not accept and why.
+	WorkDir        string `json:"work_dir,omitempty"`
+	WorkDirRefused string `json:"work_dir_refused,omitempty"`
 }
 
 // ClaudeMCPSpoolRecord lists the Claude Code MCP servers of one account.
@@ -81,7 +87,9 @@ func ClaudeMCPSpoolDir(authorizationDir string) string {
 func MarshalClaudeMCPSpoolRecord(sid string, servers []config.MCPServerEntry) ([]byte, error) {
 	record := ClaudeMCPSpoolRecord{Version: ClaudeMCPSpoolRecordVersion, Key: sid, Servers: []ClaudeMCPSpoolServer{}}
 	for _, server := range servers {
-		record.Servers = append(record.Servers, ClaudeMCPSpoolServer{Server: server, Project: server.Project})
+		record.Servers = append(record.Servers, ClaudeMCPSpoolServer{
+			Server: server, Project: server.Project, WorkDir: server.WorkDir, WorkDirRefused: server.WorkDirRefused,
+		})
 	}
 	return json.Marshal(record)
 }
@@ -143,6 +151,11 @@ func ReadClaudeMCPSpool(dir, sid string, trust func(path, label string) error) (
 	for _, server := range record.Servers {
 		entry := server.Server
 		entry.Connector, entry.Project = "claudecode", server.Project
+		// The working folder is the enumerator result only when trust has
+		// proved the record is the enumerator one.
+		if trust != nil {
+			entry.WorkDir, entry.WorkDirRefused = server.WorkDir, server.WorkDirRefused
+		}
 		out = append(out, entry)
 	}
 	return out, record.Unreadable, nil
@@ -166,4 +179,128 @@ func ReadClaudeStateUnreadable(dir string) []ClaudeStateUnreadable {
 		}
 	}
 	return out
+}
+
+// claudeMCPWorkDirChecks are the file system checks of a server working
+// folder, made by the enumerator where the user profile is readable.
+type claudeMCPWorkDirChecks struct {
+	// volume fails for a path that is not on a fixed local volume (UNC,
+	// device, mapped or substituted drive).
+	volume func(path string) error
+	// noLinks fails when any folder of path is a link or reparse point.
+	noLinks func(path string) error
+	// final opens the folder itself, never what a link names, and returns
+	// the path the system reports for it; it fails for a missing folder,
+	// a file and a folder that cannot be opened.
+	final func(path string) (string, error)
+}
+
+// vetClaudeMCPWorkDirs sets WorkDir and WorkDirRefused of each local stdio
+// server of the account whose profile is home (GAP-1317).
+func vetClaudeMCPWorkDirs(servers []config.MCPServerEntry, home string, otherHomes []string, checks claudeMCPWorkDirChecks) {
+	for i := range servers {
+		servers[i].WorkDir, servers[i].WorkDirRefused = vetClaudeMCPWorkDir(servers[i], home, otherHomes, checks)
+	}
+}
+
+// vetClaudeMCPWorkDir is the folder a local stdio server starts in, as its
+// agent starts it: the entry cwd, else the project that lists the server.
+// A folder is accepted only when it is absolute, on a fixed local volume,
+// inside the project or the user home and in no other user profile, no
+// folder of it is a link or reparse point, and the opened folder has the
+// same path (no short-name, junction or other alias). The returned folder
+// is the opened one. refused names the first folder not accepted and why.
+func vetClaudeMCPWorkDir(entry config.MCPServerEntry, home string, otherHomes []string, checks claudeMCPWorkDirChecks) (dir, refused string) {
+	if entry.Command == "" || entry.URL != "" {
+		return "", ""
+	}
+	var roots []string
+	for _, root := range []string{entry.Project, home} {
+		if root != "" && filepath.IsAbs(root) && !strings.ContainsRune(root, 0) {
+			roots = append(roots, filepath.Clean(root))
+		}
+	}
+	for _, candidate := range []string{entry.CWD, entry.Project} {
+		if candidate == "" {
+			continue
+		}
+		vetted, err := vetClaudeMCPWorkDirCandidate(candidate, home, roots, otherHomes, checks)
+		if err == nil {
+			return vetted, refused
+		}
+		if refused == "" {
+			refused = candidate + ": " + err.Error()
+		}
+	}
+	return "", refused
+}
+
+func vetClaudeMCPWorkDirCandidate(dir, home string, roots, otherHomes []string, checks claudeMCPWorkDirChecks) (string, error) {
+	if !filepath.IsAbs(dir) || strings.ContainsRune(dir, 0) {
+		return "", errors.New("the folder is not an absolute path")
+	}
+	dir = filepath.Clean(dir)
+	if checks.volume != nil {
+		if err := checks.volume(dir); err != nil {
+			return "", err
+		}
+	}
+	if err := claudeMCPWorkDirPlacement(dir, home, roots, otherHomes); err != nil {
+		return "", err
+	}
+	if checks.noLinks != nil {
+		if err := checks.noLinks(dir); err != nil {
+			return "", err
+		}
+	}
+	if checks.final == nil {
+		return "", errors.New("the folder cannot be opened")
+	}
+	final, err := checks.final(dir)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(filepath.Clean(final), dir) {
+		return "", fmt.Errorf("the folder opens as %s (a link, short name or other alias)", final)
+	}
+	return filepath.Clean(final), nil
+}
+
+// claudeMCPWorkDirPlacement fails for a folder outside every root or in
+// another user profile: an enrolled user, or any folder beside home in the
+// profiles folder.
+func claudeMCPWorkDirPlacement(dir, home string, roots, otherHomes []string) error {
+	inside := false
+	for _, root := range roots {
+		if claudeMCPPathWithin(dir, root) {
+			inside = true
+			break
+		}
+	}
+	if !inside {
+		return errors.New("the folder is outside the project and the user home folder")
+	}
+	if home != "" && claudeMCPPathWithin(dir, home) {
+		return nil
+	}
+	profiles := []string{}
+	if home != "" {
+		profiles = append(profiles, filepath.Dir(filepath.Clean(home)))
+	}
+	for _, other := range append(profiles, otherHomes...) {
+		if other != "" && claudeMCPPathWithin(dir, filepath.Clean(other)) {
+			return errors.New("the folder is in another user profile")
+		}
+	}
+	return nil
+}
+
+// claudeMCPPathWithin reports whether path is root or below it. Windows
+// paths compare without case.
+func claudeMCPPathWithin(path, root string) bool {
+	path, root = strings.ToLower(filepath.Clean(path)), strings.ToLower(filepath.Clean(root))
+	if path == root {
+		return true
+	}
+	return strings.HasPrefix(path, strings.TrimRight(root, string(filepath.Separator))+string(filepath.Separator))
 }

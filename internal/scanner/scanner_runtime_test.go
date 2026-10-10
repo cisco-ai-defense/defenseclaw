@@ -205,6 +205,44 @@ func TestMCPRuntimeServerWorkDir(t *testing.T) {
 	}
 }
 
+// GAP-1317: on managed Windows the gateway service account cannot stat the
+// user profile. A folder the enumerator verified is used without that walk;
+// an unverified one is refused, as is a verified one the gateway cannot open
+// or that is outside the project and home, and a failed scan says why.
+func TestMCPRuntimeVerifiedServerWorkDir(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "home")
+	project := filepath.Join(home, "project")
+	denied := filepath.Join(project, "denied")
+	restoreLstat, restoreOpen := workDirLstat, workDirOpen
+	t.Cleanup(func() { workDirLstat, workDirOpen = restoreLstat, restoreOpen })
+	workDirLstat = func(string) (os.FileInfo, error) { return nil, os.ErrPermission }
+	workDirOpen = func(path string) (*os.File, error) {
+		if path == denied {
+			return nil, os.ErrPermission
+		}
+		return os.Open(os.DevNull)
+	}
+	for _, tc := range []struct {
+		name, workDir, refusedIn, want, note string
+	}{
+		{"verified", project, "", project, ""},
+		{"verified after refused cwd", project, "C:\\link: link", project, ""},
+		{"unverified", "", "", "", "permission denied"},
+		{"refused by the enumerator", "", "C:\\other: in another user profile", "", "in another user profile"},
+		{"gateway cannot read it", denied, "", "", "gateway service cannot read"},
+		{"outside project and home", filepath.Join(t.TempDir(), "x"), "", "", "outside the project"},
+	} {
+		mcp := &MCPScanner{ServerEntry: &config.MCPServerEntry{Name: "local", Command: "npx", Args: []string{"-y", "."},
+			Project: project, Home: home, WorkDir: tc.workDir, WorkDirRefused: tc.refusedIn}}
+		if got := mcp.serverWorkDir(); got != tc.want {
+			t.Errorf("%s: server starts in %q, want %q", tc.name, got, tc.want)
+		}
+		if note := mcp.workDirNote(); (tc.note == "") != (note == "") || !strings.Contains(note, tc.note) {
+			t.Errorf("%s: failure note %q, want one containing %q", tc.name, note, tc.note)
+		}
+	}
+}
+
 // Large pinned rule sets are carried on stdin, outside the Windows command line.
 func TestMCPRuntimeLargeSettingsStayOffCommandLine(t *testing.T) {
 	rules := make([]config.AssetFileRef, 200)

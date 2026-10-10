@@ -16,6 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
 
 // maxClaudeStateBytes bounds the ~/.claude.json read; the file holds the
@@ -47,6 +48,12 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 		}
 	}
 	keep := map[string]bool{}
+	var homes []string
+	for _, target := range manifest.Targets {
+		if home := strings.TrimSpace(target.UserHome); filepath.IsAbs(home) {
+			homes = append(homes, filepath.Clean(home))
+		}
+	}
 	for _, target := range manifest.Targets {
 		if !strings.EqualFold(strings.TrimSpace(target.Connector), "claudecode") || (target.Enabled != nil && !*target.Enabled) {
 			continue
@@ -68,6 +75,7 @@ func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func
 				User: strings.TrimSpace(target.User), Home: home, Path: unreadablePath, Reason: err.Error(),
 			})
 		} else {
+			vetClaudeMCPWorkDirs(servers, home, otherWindowsHomes(homes, home), windowsClaudeMCPWorkDirChecks)
 			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
 			if err == nil && len(data) > maxClaudeMCPSpoolRecordBytes {
 				if logf != nil {
@@ -155,4 +163,66 @@ func readWindowsProfileFile(home, rel string, limit int64) ([]byte, error) {
 		return nil, fmt.Errorf("%s is unreadable, changing, a link or larger than %d bytes", filepath.Base(path), limit)
 	}
 	return data, nil
+}
+
+// otherWindowsHomes is homes without home.
+func otherWindowsHomes(homes []string, home string) []string {
+	var out []string
+	for _, other := range homes {
+		if !strings.EqualFold(other, home) {
+			out = append(out, other)
+		}
+	}
+	return out
+}
+
+// windowsClaudeMCPWorkDirChecks check a server working folder as the
+// enumerator, which runs as LocalSystem and can read every profile.
+var windowsClaudeMCPWorkDirChecks = claudeMCPWorkDirChecks{
+	volume: func(path string) error {
+		_, err := winpath.ValidateFixedNTFSMountedPath(path)
+		return err
+	},
+	noLinks: func(path string) error {
+		if err := rejectWindowsReparseChain(path); err != nil {
+			return errors.New("a folder on the way is a link or reparse point")
+		}
+		return nil
+	},
+	final: windowsWorkDirFinalPath,
+}
+
+// windowsWorkDirFinalPath opens the folder itself (never what a reparse
+// point names) and returns the path Windows reports for the open folder,
+// which expands short names and shows a folder replaced after the walk.
+func windowsWorkDirFinalPath(path string) (string, error) {
+	ptr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return "", err
+	}
+	handle, err := windows.CreateFile(ptr, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return "", fmt.Errorf("the folder cannot be opened: %w", err)
+	}
+	defer windows.CloseHandle(handle)
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return "", err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return "", errors.New("the folder is a link or reparse point")
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return "", errors.New("the path is not a folder")
+	}
+	final, err := inventoryDACLFinalPath(handle)
+	if err != nil {
+		return "", err
+	}
+	if trimmed, ok := strings.CutPrefix(final, `\\?\`); ok && !strings.HasPrefix(strings.ToUpper(trimmed), `UNC\`) {
+		return trimmed, nil
+	}
+	return "", fmt.Errorf("the folder opens as %s, not a local drive path", final)
 }
