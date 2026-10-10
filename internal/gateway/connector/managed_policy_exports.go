@@ -144,6 +144,24 @@ func CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event string) string
 		" --hook-surface " + CopilotHookSurfaceVSCodeLocal
 }
 
+// CopilotVSCodeLocalPriorReleaseHookCommand is the command DefenseClaw 1.0.0
+// rendered for event in the VS Code Local hook file and the Copilot plugin:
+// CopilotVSCodeLocalManagedHookCommand without the removed-deployment guard
+// (GAP-0999, GAP-1043). Each enrolled user of a managed 1.0.0 install that
+// upgrades holds it until the hook guardian's next pass rewrites the files,
+// so it stays DefenseClaw's own: ensure replaces it, uninstall and the
+// orphan cleanup remove it, and the foreign-hook guard never denies it
+// (GAP-1232). Supported upgrade path: 1.0.0 to any later 1.x release; keep
+// it while 1.0.0 is a supported upgrade source.
+func CopilotVSCodeLocalPriorReleaseHookCommand(goos, hookBinary, event string) string {
+	if goos == "windows" {
+		return windowsNativePowerShellHookCommandForBoundEvent("copilot", event, "", hookBinary,
+			"--enterprise-managed", "--hook-surface", CopilotHookSurfaceVSCodeLocal)
+	}
+	return shellSingleQuote(hookBinary) + " hook --connector copilot --enterprise-managed --event " +
+		shellSingleQuote(event) + " --hook-surface " + CopilotHookSurfaceVSCodeLocal
+}
+
 // managedDeploymentMarker is the file whose presence says the managed
 // deployment that owns hookBinary is still installed: the gateway binary in
 // the same administrator-owned folder. Uninstall and package removal take

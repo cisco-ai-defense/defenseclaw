@@ -37,6 +37,36 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+func TestMigrateV9NormalizesCursorActionFailMode(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + dir +
+		"\nguardrail:\n  connector: cursor\n  mode: action\n  hook_fail_mode: open" +
+		"\n  rule_pack_dir: \"\"\n  connectors:\n    cursor:" +
+		"\n      mode: action\n      hook_fail_mode: open\nobservability: {}\n")
+	migrated, err := MigrateV8InMemory(configPath, source, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	root := v8DocumentRoot(&doc)
+	stored := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "guardrail"), "connectors"), "cursor")
+	if got := yamlScalarValue(v8YAMLMapValue(stored, "hook_fail_mode")); got != "closed" {
+		t.Fatalf("migrated Cursor hook fail mode = %q, want closed", got)
+	}
+	cfg := &Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"cursor": {Mode: "action", HookFailMode: "open"}}
+	if got := cfg.EffectiveHookFailModeForConnector("cursor"); got != "closed" {
+		t.Fatalf("effective Cursor action fail mode = %q, want closed", got)
+	}
+}
+
 // An unreadable custom scanner policy must leave the v8 source intact so an
 // upgrade can retry after access to the policy is restored.
 func TestMigrateV9RetriesUnreadableCustomScannerPolicy(t *testing.T) {
