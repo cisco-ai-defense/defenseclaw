@@ -958,18 +958,72 @@ install_uv() {
     return 1
 }
 
-# A 0.8.x installer could reuse an existing uv, so its receipt and the
-# venv's creation time cannot prove DefenseClaw owns uv, uvx, their cache or
-# downloaded Python. Leave all of them with the user on upgrade. That installer
-# also ran a temporary Cosign; its public Sigstore TUF cache can be claimed
-# only when it matches the narrow window and contents below (GAP-0908).
+# What a 0.8.x install left outside the data dir without a record (GAP-0908).
+# When uv was missing, the 0.8.x installer ran uv's own installer into BIN_DIR
+# and that uv filled uv's default cache; when Cosign was missing it ran a
+# temporary one that left ~/.sigstore. It kept no marker, and it reused a uv
+# the user already had, so the upgrade from 0.8.x records these for
+# `defenseclaw uninstall --all --binaries` only on evidence a user's own uv
+# or Cosign cannot meet. LEGACY_WINDOW covers the 0.8.x steps between uv's
+# installer and the venv: the Python check, the release policy and Cosign,
+# the connector menu and the gateway download.
+#   uv, uvx and uv's cache: legacy_uv_from_0_8 below.
+#   ~/.sigstore: no cosign on PATH, it holds only the public Sigstore TUF
+#     cache, and nothing in it is older than that window or newer than the
+#     venv, so no other Cosign has used it.
 readonly LEGACY_WINDOW=600
-LEGACY_LEFTOVERS=""
+LEGACY_UV_RECORD="" LEGACY_LEFTOVERS=""
 mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+# legacy_uv_from_0_8 succeeds only when all of this holds:
+#   - uv's receipt is a plain file of this account that names BIN_DIR, only
+#     uv and uvx, and the version BIN_DIR/uv reports and the 0.8.x venv was
+#     made with (pyvenv.cfg "uv ="); it was written at most LEGACY_WINDOW
+#     seconds before that venv;
+#   - BIN_DIR/uv and uvx are plain files of this account;
+#   - uv's default cache is a plain folder of this account; nothing in it is
+#     older than the receipt (a uv the user had before has a history there);
+#     every unpacked wheel in it was unpacked after the 0.8.x venv was made
+#     (the 0.8.x installer installs only into that venv) and is one that venv
+#     holds, DefenseClaw's among them; and uv has no tools installed.
+# A uv the user had earlier, used for anything else, or updated since fails
+# this and stays the user's; uninstall then names what it leaves.
+legacy_uv_from_0_8() {
+    local cfg=$1 venv_t=$2 version receipt receipt_t cache site entry info name
+    version="$(awk -F' *= *' '$1 == "uv" {print $2}' "${cfg}")"
+    receipt="${XDG_CONFIG_HOME:-${HOME}/.config}/uv/uv-receipt.json"
+    cache="${XDG_CACHE_HOME:-${HOME}/.cache}/uv"
+    [[ -n "${version}" ]] || return 1
+    [[ -z "${UV_CACHE_DIR:-}" || "${UV_CACHE_DIR}" == "${DEFENSECLAW_HOME}/.uv/cache" ]] || return 1
+    [[ -f "${receipt}" && ! -L "${receipt}" && -O "${receipt}" ]] || return 1
+    receipt_t="$(mtime_of "${receipt}")" || return 1
+    (( venv_t >= receipt_t && venv_t - receipt_t <= LEGACY_WINDOW )) || return 1
+    grep -qF '"binaries":["uv","uvx"]' "${receipt}" || return 1
+    grep -qF "\"install_prefix\":\"${BIN_DIR}\"" "${receipt}" || return 1
+    grep -qF "\"version\":\"${version}\"" "${receipt}" || return 1
+    for name in uv uvx; do
+        [[ -f "${BIN_DIR}/${name}" && ! -L "${BIN_DIR}/${name}" && -O "${BIN_DIR}/${name}" ]] || return 1
+    done
+    [[ "$("${BIN_DIR}/uv" --version 2>/dev/null | awk '{print $2}')" == "${version}" ]] || return 1
+    [[ ! -e "${XDG_DATA_HOME:-${HOME}/.local/share}/uv/tools" ]] || return 1
+    [[ -d "${cache}" && ! -L "${cache}" && -O "${cache}" ]] || return 1
+    [[ -z "$(find "${cache}" -maxdepth 2 ! -newer "${receipt}" -print -quit 2>/dev/null || echo error)" ]] || return 1
+    [[ -z "$(find "${cache}" -mindepth 2 -maxdepth 2 -path '*/archive-v*/*' ! -newer "${cfg}" -print -quit 2>/dev/null || echo error)" ]] || return 1
+    site="$(find "${cfg%/*}/lib" -mindepth 2 -maxdepth 2 -name site-packages -type d -print -quit 2>/dev/null)"
+    [[ -n "${site}" ]] && compgen -G "${cache}/archive-v*/*/defenseclaw-*.dist-info" >/dev/null || return 1
+    for entry in "${cache}"/archive-v*/*; do
+        for info in "${entry}"/*.dist-info; do
+            [[ -d "${info}" && ! -L "${info}" && -d "${site}/${info##*/}" ]] || return 1
+        done
+    done
+}
 find_legacy_leftovers() {
     local cfg="${DEFENSECLAW_HOME}/.venv/pyvenv.cfg" venv_t sigstore_t sigstore
     [[ -f "${cfg}" && ! -L "${cfg}" ]] || return 0
     venv_t="$(mtime_of "${cfg}")" || return 0
+    if legacy_uv_from_0_8 "${cfg}" "${venv_t}"; then
+        LEGACY_UV_RECORD="$(sha256_of "${BIN_DIR}/uv")  uv"$'\n'"$(sha256_of "${BIN_DIR}/uvx")  uvx"
+        LEGACY_LEFTOVERS="uv-cache"
+    fi
     sigstore="${HOME}/.sigstore"
     if [[ -d "${sigstore}" && ! -L "${sigstore}" && -O "${sigstore}" ]] && ! has cosign \
         && sigstore_t="$(mtime_of "${sigstore}")" && (( venv_t - sigstore_t <= LEGACY_WINDOW )) \
@@ -980,7 +1034,12 @@ find_legacy_leftovers() {
         LEGACY_LEFTOVERS+="${LEGACY_LEFTOVERS:+$'\n'}sigstore"
     fi
 }
+# After the swap. `defenseclaw uninstall --binaries` removes the 0.8.x uv
+# while it still matches this record, the one install_uv writes too.
 record_legacy_leftovers() {
+    if [[ -n "${LEGACY_UV_RECORD}" && ! -e "${BIN_DIR}/defenseclaw-uv.sha256" ]]; then
+        printf '%s\n' "${LEGACY_UV_RECORD}" > "${BIN_DIR}/defenseclaw-uv.sha256" || true
+    fi
     [[ -z "${LEGACY_LEFTOVERS}" ]] || printf '%s\n' "${LEGACY_LEFTOVERS}" > "${DEFENSECLAW_HOME}/legacy-install-leftovers" || true
 }
 
