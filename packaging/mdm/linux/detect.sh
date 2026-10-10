@@ -54,12 +54,37 @@ dc_stat_mode() { # octal permission bits including setuid/setgid/sticky, e.g. 17
     if [ "$DC_SCRIPT_OS" = darwin ]; then stat -f %Mp%Lp "$1"; else stat -c %a "$1"; fi
 }
 
+# dc_acl_write_entry <path>: on macOS, print the first ACL entry of path (as
+# ls -lde shows it) that lets an account other than root or the admin group
+# change, delete or re-own it; return 1 when there is none. macOS grants such
+# an entry without changing the owner or the mode bits, so a check of those
+# alone trusts a path another account can change. An unreadable listing
+# counts as such an entry.
+dc_acl_write_entry() {
+    [ "$DC_SCRIPT_OS" = darwin ] || return 1
+    listing=$(ls -lde -- "$1" 2>/dev/null) || { printf 'unreadable ACL\n'; return 0; }
+    entry=$(printf '%s\n' "$listing" | awk '
+        /^ *[0-9]+: / {
+            sub(/^ *[0-9]+: */, "")
+            n = split(tolower($0), word, " ")
+            kind = ""; rights = ""
+            for (i = 2; i < n; i++) if (word[i] == "allow" || word[i] == "deny") { kind = word[i]; rights = word[i + 1] }
+            if (kind != "allow" || word[1] == "user:root" || word[1] == "group:wheel" || word[1] == "group:admin") next
+            split(rights, right, ",")
+            for (r in right) if (right[r] ~ /^(write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)$/) { print; exit }
+        }')
+    [ -n "$entry" ] || return 1
+    printf '%s\n' "$entry"
+}
+
 # dc_trusted_path <path>: the file and every ancestor directory are owned by
 # root, and none is writable by group or others unless it is a sticky
 # directory (such as /tmp), whose root-owned entries other accounts cannot
-# rename or delete. So no other account can swap what root reads or runs.
+# rename or delete, and (macOS) no ACL entry lets another account change
+# one of them. So no other account can swap what root reads or runs.
+# DC_TRUST_ACL names a refusing ACL entry for messages.
 dc_trusted_path() {
-    path=$1 child=""
+    path=$1 child="" DC_TRUST_ACL=""
     case "$path" in /*) ;; *) return 1 ;; esac
     [ ! -L "$path" ] || return 1
     while :; do
@@ -75,6 +100,10 @@ dc_trusted_path() {
                 case "$mode" in 1??? | 3??? | 5??? | 7???) ;; *) return 1 ;; esac
                 ;;
         esac
+        if acl=$(dc_acl_write_entry "$path"); then
+            DC_TRUST_ACL="; the macOS ACL entry '$acl' on $path lets another account change it (remove it with chmod -N $path)"
+            return 1
+        fi
         [ "$path" = / ] && return 0
         child=$path
         path=$(dirname "$path")
@@ -227,7 +256,7 @@ if [ "$DC_SCRIPT_OS" = darwin ]; then
 else
     gateway=/opt/defenseclaw/bin/defenseclaw-gateway group=linux
 fi
-dc_trusted_path "$gateway" || dc_report 0 not-installed "$gateway is missing or not root-owned"
+dc_trusted_path "$gateway" || dc_report 0 not-installed "$gateway is missing or not root-owned$DC_TRUST_ACL"
 # An empty binary (a power loss during a package upgrade) runs as an empty
 # script that prints nothing and exits 0 (GAP-0467).
 [ -s "$gateway" ] || dc_report 0 not-installed "$gateway is empty, likely from a power loss during a package upgrade; reinstall the package"
