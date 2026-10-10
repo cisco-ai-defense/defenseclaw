@@ -92,8 +92,9 @@ func orphanCopilotPluginHoldsOnlyRenders(plugin string) bool {
 }
 
 // orphanedCopilotVSCodeLocalDocument reports a regular file holding a hook
-// document whose every handler is the enterprise vscode-local command for
-// one absolute hook binary that no longer exists.
+// document whose every handler is the enterprise vscode-local command (the
+// current render or the one 1.0.0 wrote) for one absolute hook binary that
+// no longer exists.
 func orphanedCopilotVSCodeLocalDocument(path string) bool {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
@@ -123,7 +124,8 @@ func orphanedCopilotVSCodeLocalDocument(path string) bool {
 			command, _ := handler["command"].(string)
 			bin, ok := orphanCopilotVSCodeCommandBinary(command)
 			if !ok || (binary != "" && bin != binary) ||
-				command != CopilotVSCodeLocalManagedHookCommand(runtime.GOOS, bin, event) {
+				(command != CopilotVSCodeLocalManagedHookCommand(runtime.GOOS, bin, event) &&
+					command != CopilotVSCodeLocalPriorReleaseHookCommand(runtime.GOOS, bin, event)) {
 				return false
 			}
 			binary = bin

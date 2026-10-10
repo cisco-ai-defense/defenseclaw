@@ -330,7 +330,9 @@ profile. A folder on an enrolled connector's hook path
 stays at the guardian's protected permissions, so the service is not granted
 it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
 `.gemini` for Antigravity, `.copilot` for Copilot and
-`%APPDATA%\devin` for Devin. The Kiro IDE plugins in `.kiro\extensions` are
+`%APPDATA%\devin` for Devin. Devin's user MCP servers are still listed:
+the service is granted read on `%APPDATA%\devin\mcp_config.json` alone, not
+on the folder or the hook file `config.json` beside it. The Kiro IDE plugins in `.kiro\extensions` are
 still listed: the service is granted that folder alone and reads it without
 any access to `.kiro`. Kiro CLI is then found by its install folder
 `%LOCALAPPDATA%\Kiro-Cli`, Copilot CLI by its package cache

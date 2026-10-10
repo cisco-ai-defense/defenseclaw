@@ -582,6 +582,9 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	}
 	m.migrateAdmission(root, data)
 	m.migrateThresholds(root, data)
+	if !v9SecureClientDocument(root) {
+		m.normalizeCursorFailMode(root)
+	}
 	if err := m.migrateScanners(root); err != nil {
 		return nil, false, err
 	}
@@ -623,6 +626,60 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config: encode the migrated config: %w", err)
 	}
 	return out.Bytes(), false, nil
+}
+
+// normalizeCursorFailMode removes a v8 Cursor value that contradicts the
+// native hook contract. Other connectors keep their independent fail mode.
+func (m *v9Migrator) normalizeCursorFailMode(root *yaml.Node) {
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	if guardrail == nil || guardrail.Kind != yaml.MappingNode {
+		return
+	}
+	globalMode := yamlScalarValue(v8YAMLMapValue(guardrail, "mode"))
+	pinned := func(mode string) string {
+		if strings.EqualFold(strings.TrimSpace(mode), "action") {
+			return "closed"
+		}
+		return "open"
+	}
+	connectors := v8YAMLMapValue(guardrail, "connectors")
+	if connectors != nil && connectors.Kind == yaml.MappingNode && len(connectors.Content) > 0 {
+		for i := 0; i+1 < len(connectors.Content); i += 2 {
+			if normalizeConnectorKey(connectors.Content[i].Value) != "cursor" {
+				continue
+			}
+			entry := connectors.Content[i+1]
+			if entry.Kind != yaml.MappingNode {
+				continue
+			}
+			stored := v8YAMLMapValue(entry, "hook_fail_mode")
+			if stored == nil {
+				continue
+			}
+			mode := yamlScalarValue(v8YAMLMapValue(entry, "mode"))
+			if strings.TrimSpace(mode) == "" {
+				mode = globalMode
+			}
+			want := pinned(mode)
+			if !strings.EqualFold(strings.TrimSpace(stored.Value), want) {
+				stored.Value = want
+				m.moved("config", "guardrail.connectors.cursor.hook_fail_mode",
+					"guardrail.connectors.cursor.hook_fail_mode", want)
+			}
+		}
+		return
+	}
+	if normalizeConnectorKey(yamlScalarValue(v8YAMLMapValue(guardrail, "connector"))) != "cursor" {
+		return
+	}
+	stored := v8YAMLMapValue(guardrail, "hook_fail_mode")
+	if stored != nil {
+		want := pinned(globalMode)
+		if !strings.EqualFold(strings.TrimSpace(stored.Value), want) {
+			stored.Value = want
+			m.moved("config", "guardrail.hook_fail_mode", "guardrail.hook_fail_mode", want)
+		}
+	}
 }
 
 // migratePolicyDir writes a "~/" policy_dir as the folder it names: the 1.0

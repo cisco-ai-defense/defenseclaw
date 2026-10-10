@@ -483,6 +483,7 @@ func hasNativeMCPReader(connectorName string) bool {
 		"zeptoclaw",
 		"hermes",
 		"cursor",
+		"kiro",
 		"devin",
 		"copilot",
 		"openhands",
@@ -540,6 +541,8 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
 	case "cursor":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".cursor/mcp.json")
+	case "kiro":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".kiro/settings/mcp.json")
 	case "devin":
 		if strings.EqualFold(strings.TrimSpace(goos), "windows") {
 			tryFile(config.ReadMCPFromDevinConfig, "AppData/Roaming/devin/mcp_config.json")
