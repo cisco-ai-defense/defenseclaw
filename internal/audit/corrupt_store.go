@@ -54,11 +54,13 @@ func isSQLiteCorrupt(err error) bool {
 
 // OpenDaemonStore opens and initializes the gateway daemon's audit store. When
 // SQLite reports the store corrupt (on open, in a bounded startup quick_check,
-// or while migrating), the database and its WAL and SHM files are moved aside
-// under a ".corrupt-<time>" name and a new store is created, carrying the
-// block/allow list over, so the daemon starts instead of failing. The move is
-// refused while another process still has the database open. Only the daemon,
-// the store's long-lived owner, calls this; other commands keep failing.
+// or while migrating), a store DefenseClaw 0.x wrote is first rebuilt in place
+// (rebuildAuditDB). A store that is still damaged is moved aside, with its WAL
+// and SHM files, under a ".corrupt-<time>" name and a new store is created,
+// carrying the block/allow list over, so the daemon starts instead of failing.
+// The move is refused while another process still has the database open. Only
+// the daemon, the store's long-lived owner, calls this; other commands keep
+// failing.
 func OpenDaemonStore(dbPath string, warn io.Writer, opts ...StoreOption) (*Store, error) {
 	return openDaemonStore(dbPath, warn, nil, opts...)
 }
@@ -79,6 +81,21 @@ func openDaemonStore(dbPath string, warn, progress io.Writer, opts ...StoreOptio
 	if err == nil || !isSQLiteCorrupt(err) {
 		return store, err
 	}
+	// Secure Client keeps the recovery of main (issue #1092).
+	preCutover := !secureClientStoreOptions(opts) && preCutoverAuditDB(dbPath)
+	if preCutover {
+		if rebuildErr := rebuildAuditDB(dbPath, progress, opts...); rebuildErr != nil {
+			err = fmt.Errorf("%w; rebuilding it failed: %v", err, rebuildErr)
+		} else if rebuilt, retryErr := openCheckedStore(dbPath, warn, progress, opts...); retryErr == nil {
+			fmt.Fprintf(warn, "[audit] the audit store DefenseClaw 0.x wrote failed SQLite's integrity check (%v); "+
+				"it was rebuilt in place and passes the check now.\n", err)
+			return rebuilt, nil
+		} else if !isSQLiteCorrupt(retryErr) {
+			return nil, retryErr
+		} else {
+			err = fmt.Errorf("%w (still damaged after a rebuild)", retryErr)
+		}
+	}
 	moved, moveErr := quarantineCorruptAuditDB(dbPath)
 	if moveErr != nil {
 		return nil, fmt.Errorf("%w (the corrupt store was not moved aside: %v)", err, moveErr)
@@ -94,7 +111,17 @@ func openDaemonStore(dbPath string, warn, progress io.Writer, opts ...StoreOptio
 		return nil, fmt.Errorf("audit: create a new store after moving the corrupt one to %s: %w", moved, freshErr)
 	}
 	kept, keepErr := store.carryOverActions(moved)
-	writeCarryOverNote(moved, kept, keepErr)
+	writeCarryOverNote(moved, kept, keepErr, preCutover)
+	if preCutover {
+		archived := MovedCorruptStore{Path: moved, CarryOverKnown: true, CarriedOver: kept, PreCutover: true}
+		if keepErr != nil {
+			archived.CarryOverError = keepErr.Error()
+		}
+		fmt.Fprintf(warn, "[audit] WARNING: the audit store DefenseClaw 0.x wrote is damaged (%v) and could not be rebuilt, "+
+			"so it was kept as an archive in %s and a new store was created. %s Read the archive with: sqlite3 %s .recover; "+
+			"delete it and its -wal/-shm files when you no longer need it.\n", err, moved, archived.BlockAllowSummary(), moved)
+		return store, nil
+	}
 	fmt.Fprintf(warn, "[audit] WARNING: the audit store was corrupt (%v). It was moved to %s and a new store was created; block/allow entries carried over: %d.",
 		err, moved, kept)
 	if keepErr != nil {
@@ -116,10 +143,14 @@ const carryOverNoteSuffix = ".carryover.json"
 type carryOverNote struct {
 	CarriedOver int    `json:"carried_over"`
 	Error       string `json:"error,omitempty"`
+	// PreCutover marks a store DefenseClaw 0.x wrote: 1.0 does not carry its
+	// history over in any case, so the moved file is an archive. Doctor reads
+	// it too (cli/defenseclaw/commands/cmd_doctor.py).
+	PreCutover bool `json:"pre_1_0,omitempty"`
 }
 
-func writeCarryOverNote(moved string, kept int, keepErr error) {
-	note := carryOverNote{CarriedOver: kept}
+func writeCarryOverNote(moved string, kept int, keepErr error, preCutover bool) {
+	note := carryOverNote{CarriedOver: kept, PreCutover: preCutover}
 	if keepErr != nil {
 		note.Error = keepErr.Error()
 	}
@@ -185,11 +216,25 @@ type MovedCorruptStore struct {
 	CarriedOver    int
 	// CarryOverError says why some or all block/allow entries were not read.
 	CarryOverError string
+	// PreCutover is set for a store DefenseClaw 0.x wrote: an archive of the
+	// history 1.0 does not carry over, not a 1.0 history that was lost.
+	PreCutover bool
 }
 
 // BlockAllowSummary says what happened to the block/allow lists of a moved
 // store, for start, status and doctor.
 func (store MovedCorruptStore) BlockAllowSummary() string {
+	if store.PreCutover {
+		summary := "1.0 starts a new audit history after a 0.x upgrade in any case, and block/allow lists live in " +
+			"config.yaml, so they are not affected"
+		switch {
+		case store.CarryOverError != "":
+			return summary + "; some entries of the archive could not be read, so " + ReviewBlockAllowListsHint
+		case store.CarriedOver > 0:
+			return summary + "; " + blockAllowEntriesCarriedOver(store.CarriedOver) + " from the archive as well."
+		}
+		return summary + "."
+	}
 	switch {
 	case !store.CarryOverKnown:
 		return "a new store was started; DefenseClaw cannot tell whether the old block/allow entries were carried over (the store was moved by an earlier version that kept no record), so " +
@@ -246,6 +291,7 @@ func MovedCorruptStores(dbPath string) []MovedCorruptStore {
 		store := MovedCorruptStore{Path: name, MovedAt: movedAt}
 		if note, ok := readCarryOverNote(name); ok {
 			store.CarryOverKnown, store.CarriedOver, store.CarryOverError = true, note.CarriedOver, note.Error
+			store.PreCutover = note.PreCutover
 		}
 		stores = append(stores, store)
 	}
@@ -260,6 +306,75 @@ func hasAuditDBSidecarSuffix(name string) bool {
 		}
 	}
 	return false
+}
+
+// preCutoverAuditDB reports whether dbPath is a store DefenseClaw 0.x wrote:
+// its one-time purge of the pre-1.0 history is still pending. The caller
+// holds no connection to dbPath.
+func preCutoverAuditDB(dbPath string) bool {
+	absolute, err := filepath.Abs(filepath.Clean(dbPath))
+	if err != nil {
+		return false
+	}
+	db, err := openAuditReadOnly(absolute)
+	if err != nil {
+		return false
+	}
+	defer db.Close() //nolint:errcheck -- read-only handle.
+	var version int
+	if err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&version); err != nil {
+		return false
+	}
+	for index, m := range migrations {
+		if m.description == historicalEvidencePurgeMigrationDescription {
+			return version > 0 && version <= index
+		}
+	}
+	return false
+}
+
+// rebuildAuditDB rewrites every table and index of the store from a full read
+// (VACUUM), in place. 0.8.x closed its own descriptors of audit.db while
+// SQLite held POSIX locks through them (fixed in 1.0 by #672), so a gateway,
+// a hook and the CLI could write at the same time. The stores that left fail
+// quick_check ("Rowid N out of order") but still read in full, and VACUUM
+// writes them anew. The caller checks the store again before it uses it.
+func rebuildAuditDB(dbPath string, progress io.Writer, opts ...StoreOption) error {
+	absolute, err := filepath.Abs(filepath.Clean(dbPath))
+	if err != nil {
+		return err
+	}
+	if err := auditDBOpenElsewhere(absolute); err != nil {
+		return err
+	}
+	store, err := NewStore(dbPath, opts...)
+	if err != nil {
+		return err
+	}
+	defer store.Close() //nolint:errcheck -- the caller reopens and checks the store.
+	store.progress = progress
+	fmt.Fprintln(store.migrationProgress(), "[audit] rebuilding the 0.x audit store, which failed SQLite's integrity check")
+	ctx := context.Background()
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close() //nolint:errcheck -- returns the connection to the pool.
+	if _, err := conn.ExecContext(ctx, `VACUUM`); err != nil {
+		return err
+	}
+	// Give back the WAL the rebuild wrote; best effort, the store is correct either way.
+	var busy, frames, checkpointed int
+	_ = conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed)
+	return nil
+}
+
+func secureClientStoreOptions(opts []StoreOption) bool {
+	var probe Store
+	for _, opt := range opts {
+		opt(&probe)
+	}
+	return probe.secureClientSchema
 }
 
 // quarantineCorruptAuditDB renames the database and its sidecars to
