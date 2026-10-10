@@ -15,6 +15,7 @@ package procprobe
 import (
 	"os"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -29,23 +30,32 @@ func TestWMIProcessOwnerForCurrentProcess(t *testing.T) {
 
 // GAP-1250: the kernel's process list names each process's session without
 // a handle to it, and it agrees with ProcessIdToSessionId for this process.
+// GAP-1372: it also carries the creation time GetProcessTimes reports, which
+// the snapshot row keeps as the start half of the process's ProcKey.
 func TestProcessSessionsNamesTheSessionOfThisProcess(t *testing.T) {
 	pid := uint32(os.Getpid())
 	var want uint32
 	if err := windows.ProcessIdToSessionId(pid, &want); err != nil {
 		t.Skipf("ProcessIdToSessionId: %v", err)
 	}
-	sessions := processSessions()
-	if got, ok := sessions[pid]; !ok || got != want {
-		t.Fatalf("processSessions()[%d] = %d (%v), want session %d", pid, got, ok, want)
+	fact, ok := processFacts()[pid]
+	if !ok || fact.session != want {
+		t.Fatalf("processFacts()[%d] = %+v (%v), want session %d", pid, fact, ok, want)
+	}
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &creation, &exit, &kernel, &user); err != nil {
+		t.Fatal(err)
+	}
+	if !fact.created.Equal(time.Unix(0, creation.Nanoseconds())) {
+		t.Fatalf("processFacts()[%d].created = %s, want %s", pid, fact.created, time.Unix(0, creation.Nanoseconds()))
 	}
 	rows, _, err := snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, row := range rows {
-		if row.PID == int(pid) && row.SessionID != want {
-			t.Fatalf("snapshot row session = %d, want %d", row.SessionID, want)
+		if row.PID == int(pid) && (row.SessionID != want || !row.StartedAt.Equal(fact.created)) {
+			t.Fatalf("snapshot row session = %d start = %s, want %d %s", row.SessionID, row.StartedAt, want, fact.created)
 		}
 	}
 }

