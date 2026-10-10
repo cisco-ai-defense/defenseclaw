@@ -513,6 +513,13 @@ func printMovedCorruptAuditStores(cfg *config.Config, since time.Time) {
 	}
 	newest := moved[len(moved)-1]
 	fmt.Println()
+	if newest.PreCutover {
+		// Not lost history: 1.0 does not carry 0.x history over (GAP-1222).
+		OK(fmt.Sprintf("The audit store DefenseClaw 0.x wrote could not be upgraded and is kept as an archive in %s (since %s); %s",
+			newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
+		Subhead("Delete the archive and its -wal/-shm files when you no longer need it.")
+		return
+	}
 	Warn(fmt.Sprintf("The audit store was corrupt and was moved to %s on %s; %s",
 		newest.Path, newest.MovedAt.Local().Format(time.RFC3339), newest.BlockAllowSummary()))
 	recoverHint := "Recover older audit records with: sqlite3 " + newest.Path + " .recover"

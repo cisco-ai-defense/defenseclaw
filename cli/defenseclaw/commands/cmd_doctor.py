@@ -2129,6 +2129,34 @@ def _moved_store_block_allow_summary(moved: Path) -> str:
     )
 
 
+def _is_pre_1_0_archive(moved: Path) -> bool:
+    """True when the gateway's note marks ``moved`` as a store DefenseClaw 0.x
+    wrote (internal/audit/corrupt_store.go, ``pre_1_0``)."""
+    try:
+        note = json.loads(Path(str(moved) + _CARRY_OVER_NOTE_SUFFIX).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(note, dict) and note.get("pre_1_0") is True
+
+
+def _report_pre_1_0_audit_archive(archive: Path, r: _DoctorResult) -> None:
+    """A damaged 0.x store the gateway could not rebuild is an archive, not lost
+    history: 1.0 starts a new audit history after a 0.x upgrade in any case, so
+    this is no warning (GAP-1222)."""
+    size = _human_size(sum(p.stat().st_size for p in archive.parent.glob(archive.name + "*") if p.is_file()))
+    _emit(
+        "pass",
+        "0.x audit store archive",
+        f"the audit store DefenseClaw 0.x wrote failed SQLite's integrity check during the upgrade, so it is kept as "
+        f"an archive in {archive} ({size}). 1.0 starts a new audit history after a 0.x upgrade in any case, and "
+        f"block/allow lists live in config.yaml, so they are not affected. Read it with: sqlite3 {archive} .recover; "
+        f"delete {archive} and its -wal/-shm files when you no longer need it",
+        r=r,
+        check_id="doctor.state.audit-db-archive",
+        reason_code="audit-db-0x-archive",
+    )
+
+
 def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     """Report audit stores the gateway moved aside as corrupt.
 
@@ -2146,6 +2174,10 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
         )
     except OSError:
         return
+    archives = [path for path in moved if _is_pre_1_0_archive(path)]
+    if archives:
+        _report_pre_1_0_audit_archive(archives[-1], r)
+    moved = [path for path in moved if path not in archives]
     if not moved:
         return
     newest = moved[-1]
@@ -2438,7 +2470,8 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
         elif reason == "audit-db-corrupt":
             detail = "SQLite quick_check reported corruption"
             remediation = (
-                "run 'defenseclaw-gateway restart': the gateway moves the corrupt store aside, starts a new "
+                "run 'defenseclaw-gateway restart': the gateway rebuilds a damaged 0.x store in place, moves "
+                "any other corrupt store aside, starts a new "
                 "one and keeps the block/allow lists; or stop the gateway and restore "
                 f"{db_path} from a trusted backup"
             )
