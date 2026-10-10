@@ -34,10 +34,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
-    import tomli as tomllib
+from defenseclaw import codex_toml
 
 _LOCK_LIMIT = 4 * 1024 * 1024
 
@@ -104,8 +101,7 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
                 continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            document = tomllib.loads(text) if path.suffix == ".toml" else json.loads(text)
+            document = _load_agent_document(path)
         except (OSError, ValueError):
             continue
         for value in _strings(document):
@@ -401,10 +397,14 @@ def _read_agent_config(path: Path) -> Any:
     try:
         if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
             return None
-        text = path.read_text(encoding="utf-8", errors="replace")
-        return tomllib.loads(text) if path.suffix == ".toml" else json.loads(text)
+        return _load_agent_document(path)
     except (OSError, ValueError):
         return None
+
+
+def _load_agent_document(path: Path) -> Any:
+    raw = path.read_bytes()
+    return codex_toml.loads(raw) if path.suffix == ".toml" else json.loads(raw.decode("utf-8", errors="replace"))
 
 
 def _commandless_codex_handlers(document: Any) -> int:
@@ -517,8 +517,7 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
                 continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            document = tomllib.loads(text) if path.suffix == ".toml" else json.loads(text)
+            document = _load_agent_document(path)
         except (OSError, ValueError):
             continue
         for command in _registered_commands(document):

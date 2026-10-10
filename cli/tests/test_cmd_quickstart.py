@@ -45,12 +45,16 @@ def test_unwritable_claude_settings_has_actionable_quickstart_failure() -> None:
             "connector setup rollback incomplete: connector claudecode teardown: claudecode teardown error",
         )],
         readiness=[StepResult("Sidecar", "warn", "not answering yet", "check it in a minute")],
+        next_commands=["defenseclaw-gateway status", "check it in a minute with defenseclaw-gateway status"],
     )
     _require_operational_success(report, gateway_requested=True)
     for step in (report.setup[0], report.readiness[0]):
         assert step.status == "fail"
         assert ".claude" in step.detail and "cannot be written" in step.detail
         assert "tombstone" not in step.detail and not step.next_command
+    next_section = "\n".join(report.next_commands)
+    assert "in a minute" not in next_section
+    assert "settings.json" in next_section and "writable" in next_section
 
 
 class QuickstartProfileDefaultsTests(unittest.TestCase):

@@ -709,12 +709,9 @@ def _managed_otel_block_intact(target: Path, connector: str, api_addr: str = "")
     """
     if target.suffix.lower() != ".toml":
         return False
+    from defenseclaw import codex_toml
     try:
-        import tomllib
-    except ModuleNotFoundError:  # Python 3.10
-        import tomli as tomllib  # type: ignore[no-redef]
-    try:
-        document = tomllib.loads(target.read_text(encoding="utf-8"))
+        document = codex_toml.loads(target.read_bytes())
     except (OSError, UnicodeError, ValueError):
         return False
     otel = document.get("otel")

@@ -57,12 +57,7 @@ from types import SimpleNamespace
 
 import click
 
-try:  # Python 3.11+; the project supports 3.10 via its pinned fallback.
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
-    import tomli as tomllib
-
-from defenseclaw import credential_provenance, envvars, legacy_connector, rulepack_validation, ux
+from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_contracts import (
     resolve_connector_contract,
@@ -5707,10 +5702,10 @@ def _check_codex_hooks(
         _check_generated_hook_freshness(cfg, "codex", "Codex hooks", r)
         try:
             with open(config_path, "rb") as stream:
-                document = tomllib.loads(stream.read(1024 * 1024 + 1).decode("utf-8-sig"))
+                document = codex_toml.loads(stream.read(1024 * 1024 + 1))
             hooks = document.get("hooks", {})
             wired = isinstance(hooks, dict) and "defenseclaw" in str(hooks).lower()
-        except (OSError, UnicodeError, ValueError, tomllib.TOMLDecodeError):
+        except (OSError, UnicodeError, ValueError):
             wired = False
         if not wired:
             _emit(
@@ -5785,8 +5780,8 @@ def _foreign_defenseclaw_codex_hook_scripts(
             raw = fh.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             return [], []
-        document = tomllib.loads(raw.decode("utf-8-sig"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        document = codex_toml.loads(raw)
+    except (OSError, UnicodeError, ValueError):
         return [], []
     hooks = document.get("hooks") if isinstance(document, dict) else None
     if not isinstance(hooks, dict):
@@ -5955,7 +5950,7 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
             raw = fh.read(1024 * 1024 + 1)
         if len(raw) > 1024 * 1024:
             raise ValueError("config.toml exceeds the 1 MiB Doctor limit")
-        document = tomllib.loads(raw.decode("utf-8-sig"))
+        document = codex_toml.loads(raw)
         otel = document.get("otel", {}) if isinstance(document, dict) else {}
         actual = otel.get("environment", "") if isinstance(otel, dict) else ""
         if not isinstance(actual, str):
@@ -5964,7 +5959,7 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     except FileNotFoundError:
         actual = ""
         config_error = f"config.toml not found under CODEX_HOME ({config_path})"
-    except (OSError, UnicodeError, TypeError, ValueError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeError, TypeError, ValueError) as exc:
         actual = ""
         config_error = f"could not validate CODEX_HOME/config.toml: {exc}"
     else:

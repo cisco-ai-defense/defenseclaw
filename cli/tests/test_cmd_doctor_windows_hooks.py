@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import defenseclaw.doctor_hooks as doctor_hooks
 import yaml
+from defenseclaw.hook_integrity import _read_agent_config
 
 try:
     import tomllib
@@ -55,6 +56,13 @@ from defenseclaw.doctor_hooks import (
 
 
 class WindowsHookDoctorTests(unittest.TestCase):
+    def test_codex_bom_config_is_read_by_hook_inspectors(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root, "config.toml")
+            path.write_bytes(b"\xef\xbb\xbf# user comment\n[features]\nhooks = true\n")
+            self.assertTrue(doctor_hooks._read_config(str(path), "codex")["features"]["hooks"])
+            self.assertTrue(_read_agent_config(path)["features"]["hooks"])
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="doctor-win-hooks-")
         self.root = Path(self.temp.name)

@@ -11,10 +11,37 @@
 package enterprisepolicy
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestCodexBOMRequirementsPresent(t *testing.T) {
+	opts := publishTestOptions(t)
+	if _, err := Publish(opts, []string{"codex"}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := CodexRequirementsPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withBOM := append([]byte{0xef, 0xbb, 0xbf}, append([]byte("# admin comment\n"), raw...)...)
+	if err := os.WriteFile(path, withBOM, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := MachinePolicyPresent(opts, "codex"); err != nil || !present {
+		t.Fatalf("Codex policy with BOM: present=%v err=%v", present, err)
+	}
+	if findings := newGuardScan(GuardRequest{}).scanCodexTOML(hookSource{}, withBOM); len(findings) > 0 && strings.Contains(findings[0].Reason, "cannot verify hook file") {
+		t.Fatalf("Codex guard rejected BOM: %+v", findings[0])
+	}
+}
 
 func TestMachinePolicyPresentTracksOwnedEntries(t *testing.T) {
 	opts := publishTestOptions(t)

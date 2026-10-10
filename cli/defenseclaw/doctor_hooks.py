@@ -36,12 +36,7 @@ from typing import Any
 
 import yaml
 
-try:  # Python 3.11+
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib
-
-from defenseclaw import connector_paths
+from defenseclaw import codex_toml, connector_paths
 from defenseclaw.connector_contracts import resolve_connector_contract
 from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
@@ -814,14 +809,14 @@ def _read_config(path: str, connector: str) -> dict[str, Any]:
         raise _InspectionError("stale", f"hook registration file changed during inspection: {path}")
     try:
         if connector == "codex":
-            document = tomllib.loads(raw.decode("utf-8"))
+            document = codex_toml.loads(raw)
         elif connector == "hermes":
             document = yaml.safe_load(raw.decode("utf-8"))
         elif connector == "devin":
             document = json.loads(connector_paths._normalize_jsonc(raw.decode("utf-8")))
         else:
             document = json.loads(raw)
-    except (UnicodeError, ValueError, tomllib.TOMLDecodeError, yaml.YAMLError) as exc:
+    except (UnicodeError, ValueError, yaml.YAMLError) as exc:
         raise _InspectionError("malformed", f"cannot parse hook registration file {path}: {exc}") from exc
     if not isinstance(document, dict):
         raise _InspectionError("malformed", f"hook registration file does not contain an object: {path}")

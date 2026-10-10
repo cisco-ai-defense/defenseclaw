@@ -353,6 +353,10 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
             from defenseclaw.connector_paths import claude_config_dir
 
             settings_path = os.path.join(claude_config_dir(), "settings.json")
+            repair = (
+                f"Make {settings_path} writable or ask your administrator, "
+                "then rerun defenseclaw quickstart --connector claudecode"
+            )
             for step in report.setup + report.readiness:
                 if step.name == "Sidecar":
                     step.status = "fail"
@@ -361,6 +365,11 @@ def _require_operational_success(report, *, gateway_requested: bool) -> None:
                         "Make it writable or ask your administrator, then rerun quickstart."
                     )
                     step.next_command = ""
+            report.next_commands = [repair] + [
+                command for command in report.next_commands
+                if command not in {"defenseclaw-gateway status", "defenseclaw-gateway start"}
+                and "in a minute" not in command.lower()
+            ]
         for step in report.setup + report.readiness:
             if step.name in {"Connector", "Connector runtime", "Sidecar"} and step.status == "warn":
                 step.status = "fail"
