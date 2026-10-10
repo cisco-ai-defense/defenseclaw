@@ -102,6 +102,41 @@ type Process struct {
 	StartedAt time.Time
 }
 
+// ProcKey names one process instance: its pid together with the instant the
+// kernel created it.
+//
+// A pid names a process only while it lives. Windows hands an exited
+// process's pid to the next process within seconds, so anything that
+// remembers a process across polls -- an episode, an agent session, the
+// owner a finding is attributed to -- keys on this pair, and a process that
+// reuses an exited process's pid is never merged with it (GAP-1372).
+//
+// Start is in Unix nanoseconds, zero when the platform could not supply it;
+// two zero-start keys of one pid cannot be told apart by the key alone.
+type ProcKey struct {
+	PID   int
+	Start int64
+}
+
+// KeyOf is the ProcKey of the process pid created at started.
+func KeyOf(pid int, started time.Time) ProcKey {
+	if started.IsZero() {
+		return ProcKey{PID: pid}
+	}
+	return ProcKey{PID: pid, Start: started.UnixNano()}
+}
+
+// Key is the process instance this row describes.
+func (p Process) Key() ProcKey { return KeyOf(p.PID, p.StartedAt) }
+
+// Started is the creation time the key carries, zero when unknown.
+func (k ProcKey) Started() time.Time {
+	if k.Start == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, k.Start)
+}
+
 // Snapshot reads the current process table.
 //
 // A row the caller is not allowed to inspect is omitted rather than returned

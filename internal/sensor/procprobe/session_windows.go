@@ -19,6 +19,7 @@
 package procprobe
 
 import (
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -35,10 +36,22 @@ const (
 	wtsDomainName = 7
 )
 
-// processSessions maps every pid to its session. The kernel's process list
-// names the session of each process without a handle to it, so it answers
-// for other accounts' processes too, which this service cannot open.
-func processSessions() map[uint32]uint32 {
+// processFact is what the kernel's process list says about one process
+// without a handle to it.
+type processFact struct {
+	ppid    uint32
+	session uint32
+	// created is the kernel's creation time, the start half of the
+	// process's ProcKey (GAP-1372).
+	created time.Time
+}
+
+// processFacts maps every pid to its parent, session and creation time. The
+// kernel's process list names them without a handle to the process, so it
+// answers for other accounts' processes too, which this service cannot
+// open -- and a creation time read without OpenProcess is what keeps a
+// recycled pid from passing for the process that held it before.
+func processFacts() map[uint32]processFact {
 	size := uint32(1 << 20)
 	for attempt := 0; attempt < 4; attempt++ {
 		buffer := make([]byte, size)
@@ -52,27 +65,34 @@ func processSessions() map[uint32]uint32 {
 		if err != nil {
 			return nil
 		}
-		return parseProcessSessions(buffer)
+		return parseProcessFacts(buffer)
 	}
 	return nil
 }
 
-// parseProcessSessions walks a SystemProcessInformation buffer. Each entry
-// is bounds-checked against the buffer before it is read.
-func parseProcessSessions(buffer []byte) map[uint32]uint32 {
+// parseProcessFacts walks a SystemProcessInformation buffer. Each entry is
+// bounds-checked against the buffer before it is read.
+func parseProcessFacts(buffer []byte) map[uint32]processFact {
 	entrySize := int(unsafe.Sizeof(windows.SYSTEM_PROCESS_INFORMATION{}))
-	sessions := make(map[uint32]uint32, 256)
+	facts := make(map[uint32]processFact, 256)
 	for offset := 0; offset >= 0 && offset+entrySize <= len(buffer); {
 		info := (*windows.SYSTEM_PROCESS_INFORMATION)(unsafe.Pointer(&buffer[offset]))
 		if info.UniqueProcessID != 0 {
-			sessions[uint32(info.UniqueProcessID)] = info.SessionID
+			fact := processFact{ppid: uint32(info.InheritedFromUniqueProcessID), session: info.SessionID}
+			if info.CreateTime > 0 {
+				filetime := windows.Filetime{
+					LowDateTime: uint32(info.CreateTime), HighDateTime: uint32(info.CreateTime >> 32),
+				}
+				fact.created = time.Unix(0, filetime.Nanoseconds())
+			}
+			facts[uint32(info.UniqueProcessID)] = fact
 		}
 		if info.NextEntryOffset == 0 {
 			break
 		}
 		offset += int(info.NextEntryOffset)
 	}
-	return sessions
+	return facts
 }
 
 // SessionUser names the account signed in to a Windows session as

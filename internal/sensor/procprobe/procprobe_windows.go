@@ -61,14 +61,19 @@ func snapshot() ([]Process, int, error) {
 
 	rows := make([]Process, 0, 256)
 	missingOwners := make(map[uint32]int)
-	sessions := processSessions()
+	facts := processFacts()
 	partial := 0
 	for {
 		row := Process{
-			PID:       int(entry.ProcessID),
-			PPID:      int(entry.ParentProcessID),
-			Name:      windows.UTF16ToString(entry.ExeFile[:]),
-			SessionID: sessions[entry.ProcessID],
+			PID:  int(entry.ProcessID),
+			PPID: int(entry.ParentProcessID),
+			Name: windows.UTF16ToString(entry.ExeFile[:]),
+		}
+		// The kernel list is read apart from the toolhelp snapshot; a pid
+		// whose parent differs between the two was recycled in between, and
+		// its facts belong to the other process.
+		if fact, ok := facts[entry.ProcessID]; ok && fact.ppid == entry.ParentProcessID {
+			row.SessionID, row.StartedAt = fact.session, fact.created
 		}
 		if row.PID > 0 {
 			if !enrich(&row) {
@@ -146,7 +151,7 @@ func readTimes(process windows.Handle, row *Process) {
 	row.CPUTime = time.Duration(ticks) * 100 * time.Nanosecond
 	// The creation time comes back from the same call, so the start instant
 	// that disambiguates a recycled pid costs nothing extra here.
-	if creation.Nanoseconds() > 0 {
+	if row.StartedAt.IsZero() && creation.Nanoseconds() > 0 {
 		row.StartedAt = time.Unix(0, creation.Nanoseconds())
 	}
 }

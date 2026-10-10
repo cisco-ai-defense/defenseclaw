@@ -56,8 +56,8 @@ func TestExitedCounterTracksTheTable(t *testing.T) {
 		}
 	}
 
-	tracker.ObserveExec(10, 1, 0, "claude", "claude")
-	tracker.ObserveExec(11, 10, 0, "bash", "bash -c id")
+	tracker.ObserveExec(10, 1, 0, "claude", "claude", time.Time{})
+	tracker.ObserveExec(11, 10, 0, "bash", "bash -c id", time.Time{})
 	check("two execs")
 
 	tracker.ObserveExit(11)
@@ -74,7 +74,7 @@ func TestExitedCounterTracksTheTable(t *testing.T) {
 	}
 
 	// The kernel recycles the number: the record comes back to life.
-	tracker.ObserveExec(11, 10, 0, "curl", "curl https://example.invalid")
+	tracker.ObserveExec(11, 10, 0, "curl", "curl https://example.invalid", time.Time{})
 	check("recycled pid")
 	if tracker.exited != 0 {
 		t.Fatalf("exited = %d after the pid was reused, want 0", tracker.exited)
