@@ -238,17 +238,19 @@ func deepestV8SchemaError(root *jsonschema.ValidationError) *jsonschema.Validati
 }
 
 // v8SchemaMatchingBranches is the causes of a oneOf failure without the
-// branches whose kind does not match: an http_jsonl destination that set
-// both bearer_env and bearer_credential was reported as "kind must be the
-// literal jsonl", the deeper error of a branch that never applied
-// (GAP-0940). Other errors keep all their causes.
+// branches whose kind or value type does not match: an http_jsonl
+// destination that set both bearer_env and bearer_credential was reported as
+// "kind must be the literal jsonl", the deeper error of a branch that never
+// applied (GAP-0940), and an admission action mapping without runtime as
+// "expected a value of type string" (GAP-1290). Other errors keep all their
+// causes.
 func v8SchemaMatchingBranches(current *jsonschema.ValidationError) []*jsonschema.ValidationError {
 	if !strings.HasSuffix(current.KeywordLocation, "/oneOf") {
 		return current.Causes
 	}
 	matching := make([]*jsonschema.ValidationError, 0, len(current.Causes))
 	for _, branch := range current.Causes {
-		if !v8SchemaKindMismatch(branch) {
+		if !v8SchemaKindMismatch(branch) && !v8SchemaTypeMismatch(branch, current.InstanceLocation) {
 			matching = append(matching, branch)
 		}
 	}
@@ -256,6 +258,21 @@ func v8SchemaMatchingBranches(current *jsonschema.ValidationError) []*jsonschema
 		return current.Causes
 	}
 	return matching
+}
+
+// v8SchemaTypeMismatch reports a oneOf branch that fails only because the
+// value at the location of the oneOf has another type (a string branch for
+// a mapping).
+func v8SchemaTypeMismatch(validation *jsonschema.ValidationError, instance string) bool {
+	if len(validation.Causes) == 0 {
+		return validation.InstanceLocation == instance && strings.HasSuffix(validation.KeywordLocation, "/type")
+	}
+	for _, cause := range validation.Causes {
+		if !v8SchemaTypeMismatch(cause, instance) {
+			return false
+		}
+	}
+	return true
 }
 
 func v8SchemaKindMismatch(validation *jsonschema.ValidationError) bool {
@@ -405,6 +422,13 @@ func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string)
 		}
 		switch {
 		case strings.HasSuffix(validation.KeywordLocation, "/required"):
+			var missing []string
+			for _, quoted := range observabilityV8QuotedPropertyPattern.FindAllStringSubmatch(validation.Message, -1) {
+				missing = append(missing, quoted[1])
+			}
+			if len(missing) > 0 {
+				return "all required fields (missing " + strings.Join(missing, ", ") + ")", ""
+			}
 			return "all required fields", ""
 		case strings.HasSuffix(validation.KeywordLocation, "/type"):
 			return "the schema-declared value type", ""
