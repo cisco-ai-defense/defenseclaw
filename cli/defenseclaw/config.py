@@ -2595,11 +2595,14 @@ class GuardrailConfig:
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Explicit connector posture > observe compatibility > global.
 
-        Existing observe-only installs remain fail-open when they only carry
-        the legacy global value. A connector-scoped value is an explicit
-        runtime response-integrity choice, however, and must not be collapsed
-        back to open merely because policy findings are being observed.
+        Cursor always follows its guardrail mode: action is closed and
+        observe is open. Other connector-scoped values remain explicit
+        runtime response-integrity choices in observe mode.
         """
+        # Cursor's native hook registration follows policy mode. A stored
+        # fail mode from an older setup cannot override that contract.
+        if str(connector).strip().lower() == "cursor":
+            return "closed" if self.effective_mode(connector).strip().lower() == "action" else "open"
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":

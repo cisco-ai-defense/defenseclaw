@@ -4553,7 +4553,7 @@ def mode_cmd(
     A changed hook fail mode is re-rendered into the hook scripts of Claude
     Code, Codex, Amp and OpenCode in place; the other hook connectors need a
     gateway restart (``--no-restart`` to skip; a stopped gateway is never
-    started).
+    started). Cursor's hook fail mode follows its guardrail mode.
     """
     from defenseclaw import policy_catalog
 
@@ -4626,7 +4626,7 @@ def mode_cmd(
         return (getattr(block, "mode", "") or "").strip() if block is not None else ""
 
     affected = [connector_key] if connector_key else [c for c in actives if not _override(c)]
-    fail_before = {c: gc.effective_hook_fail_mode(c) for c in affected}
+    fail_before = {c: _cursor_pinned_fail_mode(gc, c) or gc.effective_hook_fail_mode(c) for c in affected}
     previous = _effective(connector_key)
 
     if connector_key is None:
@@ -4707,7 +4707,15 @@ def mode_cmd(
         _connector_block_for_write(gc, connector_key).mode = mode
     new_mode = _effective(connector_key)
     source = "override" if connector_key and not clear else "global"
-    fail_after = {c: gc.effective_hook_fail_mode(c) for c in affected}
+    fail_after = {c: _cursor_pinned_fail_mode(gc, c) or gc.effective_hook_fail_mode(c) for c in affected}
+    # Keep the persisted Cursor value in sync so later setup, status and
+    # migration reads cannot see the previous mode's hook posture.
+    for c in affected:
+        if normalize_connector(c) == "cursor":
+            if gc.connectors:
+                _connector_block_for_write(gc, c).hook_fail_mode = fail_after[c]
+            else:
+                gc.hook_fail_mode = fail_after[c]
     fail_flips = {c: fm for c, fm in fail_after.items() if fm != fail_before[c]}
     if fail_flips:
         # Only hook connectors bake a fail mode into their registration.
