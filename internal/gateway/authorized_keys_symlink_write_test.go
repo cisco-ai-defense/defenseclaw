@@ -316,6 +316,20 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 	if err := os.Link(keys, hardLink); err != nil {
 		t.Fatal(err)
 	}
+	// Valid 17-link chain, and a 41-link chain past the kernel limit that the
+	// hook reports unresolvable.
+	chain := func(prefix string, links int) string {
+		next := keys
+		for i := links - 1; i >= 0; i-- {
+			link := filepath.Join(external, fmt.Sprintf("%s-%02d", prefix, i))
+			if err := os.Symlink(next, link); err != nil {
+				t.Fatal(err)
+			}
+			next = link
+		}
+		return next
+	}
+	chain17, chain41 := chain("c17", 17), chain("c41", 41)
 	t.Setenv("HOME", home)
 	t.Chdir(project)
 	cfg := &config.Config{}
@@ -323,19 +337,25 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 	cfg.Guardrail.Connector = "claudecode"
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	symlinkKeys := func(link string) error { return os.Symlink(keys, link) }
+	symlinkTo := func(target string) func(string) error {
+		return func(link string) error { return os.Symlink(target, link) }
+	}
 	for _, row := range []struct {
 		name, link string
 		count      int
 		block      bool
 		relink     func(string) error
+		resolved   string
 	}{
-		{"external one", externalLink, 0, true, symlinkKeys},
-		{"external thirty one", externalLink, 31, true, symlinkKeys},
-		{"external thirty three", externalLink, 33, true, symlinkKeys},
-		{"home link", homeLink, 0, true, symlinkKeys},
-		{"relative link", "./relative", 0, true, symlinkKeys},
-		{"hard link", hardLink, 0, true, func(link string) error { return os.Link(keys, link) }},
-		{"benign home", filepath.Join(project, "notes.txt"), 0, false, nil},
+		{"external one", externalLink, 0, true, symlinkKeys, keys},
+		{"external thirty one", externalLink, 31, true, symlinkKeys, keys},
+		{"external thirty three", externalLink, 33, true, symlinkKeys, keys},
+		{"home link", homeLink, 0, true, symlinkKeys, keys},
+		{"relative link", "./relative", 0, true, symlinkKeys, keys},
+		{"hard link", hardLink, 0, true, func(link string) error { return os.Link(keys, link) }, keys},
+		{"seventeen link chain", chain17, 0, true, symlinkTo(filepath.Join(external, "c17-01")), keys},
+		{"forty one link chain", chain41, 0, true, symlinkTo(filepath.Join(external, "c41-01")), ""},
+		{"benign home", filepath.Join(project, "notes.txt"), 0, false, nil, ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			writes := make([]string, 0, row.count+1)
@@ -360,8 +380,8 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 					operand = filepath.Join(project, operand)
 				}
 				operand = filepath.Clean(operand)
-				if row.count < 32 && targets[operand] != keys {
-					t.Fatalf("resolved operand = %q, want %q", targets[operand], keys)
+				if got, present := targets[operand]; row.count < 32 && (!present || got != row.resolved) {
+					t.Fatalf("resolved operand = %q (present %v), want %q", got, present, row.resolved)
 				}
 				if row.count >= 32 && targets[hookpaths.TruncatedKey] != "1" {
 					t.Fatal("omitted target lacked truncation marker")

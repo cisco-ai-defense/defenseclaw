@@ -24,7 +24,10 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
-const maxWriteTargetLinkDepth = 16
+// maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
+// one path resolution. Every followed link counts, also in parent components,
+// so a link loop ends here and reports an unresolvable target.
+const maxWriteTargetLinkDepth = 40
 
 // resolveWritePath follows existing links, including a link whose final file
 // does not exist yet. A shell redirect can create that final file. Resolve

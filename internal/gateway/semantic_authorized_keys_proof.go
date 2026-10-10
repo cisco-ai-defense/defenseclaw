@@ -743,14 +743,21 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
-			if present {
+			cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
+			switch {
+			case present && resolved != "":
 				return canonicalSemanticPath(resolved) == active
-			}
-			// An omitted external operand may be a link into the protected
-			// home. The bounded map is incomplete in this case; a home path
-			// alone is never proof of a protected write.
-			if !underHome && request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" &&
-				(request.ProtectedHomeHook || request.SkipLocalFilesystemResolution) {
+			case present:
+				// The user's hook could not resolve the operand (a link
+				// loop, a chain past the kernel limit or an unreadable
+				// component). Resolve it here, or fail closed.
+				if cannotResolveLocally {
+					return true
+				}
+			case !underHome && request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" && cannotResolveLocally:
+				// An omitted external operand may be a link into the
+				// protected home. The bounded map is incomplete in this
+				// case; a home path alone is never proof of a protected write.
 				return true
 			}
 		}
