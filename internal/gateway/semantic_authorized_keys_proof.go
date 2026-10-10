@@ -23,7 +23,6 @@ import (
 
 var (
 	trustedPathlibAuthorizedKeysWrite    = regexp.MustCompile(`(?s)\bp\s*=\s*(?:pathlib\.)?Path\.home\(\)\s*/\s*['"]\.ssh['"]\s*/\s*['"]authorized_keys['"];.*\bp\.write_text\(`)
-	trustedPythonOpenAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bopen\s*\(\s*os\.path\.expanduser\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\s*,\s*['"][aw](?:b|\+)?['"]\s*\)\.write\s*\(`)
 	trustedPythonPathAuthorizedKeysWrite = regexp.MustCompile(`(?s)\bPath\s*\(\s*['"]~/\.ssh/authorized_keys['"]\s*\)\.expanduser\s*\(\s*\)\.write_text\s*\(`)
 	trustedPerlAuthorizedKeysWrite       = regexp.MustCompile(`^open\(F,\s*">>",\s*"\$ENV\{HOME\}/\.ssh/authorized_keys"\);\s*print F "[^"\\]*(?:\\n)?";?(?:\s*close\(F\))?$`)
 	trustedCMDInvoke                     = regexp.MustCompile(`(?is)^cmd(?:\.exe)?\s+/c\s+(.+)$`)
@@ -167,7 +166,6 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	case "python", "python3":
 		return command.Argv[1] == "-c" && facts.ActiveHome != "" &&
 			(trustedPathlibAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
-				trustedPythonOpenAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
 				trustedPythonPathAuthorizedKeysWrite.MatchString(command.Argv[2]) ||
 				trustedInterpreterAuthorizedKeysWrite(command.Argv[2], facts.ActiveHome))
 	case "perl":
@@ -305,8 +303,16 @@ func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
 			continue
 		}
 		call, ok := boundedInterpreterCall(code, location[1]-1)
-		if ok && trustedAuthorizedKeysPathInText(call, activeHome) &&
-			trustedInterpreterWriteMode.MatchString(call) {
+		args := interpreterCallArgs(call)
+		if ok && len(args) >= 2 &&
+			trustedAuthorizedKeysPathInText(args[0], activeHome) &&
+			trustedInterpreterWriteMode.MatchString(args[1]) {
+			return true
+		}
+		// Perl's three-argument open puts the mode before the target.
+		if ok && len(args) >= 3 && strings.TrimSpace(code[location[0]:location[1]-1]) == "open" &&
+			trustedInterpreterWriteMode.MatchString(args[1]) &&
+			trustedAuthorizedKeysPathInText(args[2], activeHome) {
 			return true
 		}
 	}
@@ -314,12 +320,52 @@ func trustedInterpreterAuthorizedKeysWrite(code, activeHome string) bool {
 		if !interpreterCodePosition(code, location[0]) {
 			continue
 		}
-		if call, ok := boundedInterpreterCall(code, location[1]-1); ok &&
-			trustedAuthorizedKeysPathInText(call, activeHome) {
-			return true
+		if call, ok := boundedInterpreterCall(code, location[1]-1); ok {
+			args := interpreterCallArgs(call)
+			if len(args) > 0 && trustedAuthorizedKeysPathInText(args[0], activeHome) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// interpreterCallArgs separates only top-level arguments. Nested path helpers
+// remain in the target argument, while a path in write data cannot prove a
+// mutation of that path.
+func interpreterCallArgs(call string) []string {
+	open := strings.IndexByte(call, '(')
+	if open < 0 || !strings.HasSuffix(call, ")") {
+		return nil
+	}
+	var args []string
+	start, depth := open+1, 0
+	var quote byte
+	for i := start; i < len(call)-1; i++ {
+		c := call[i]
+		if quote != 0 {
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				args = append(args, strings.TrimSpace(call[start:i]))
+				start = i + 1
+			}
+		}
+	}
+	return append(args, strings.TrimSpace(call[start:len(call)-1]))
 }
 
 func interpreterCodePosition(code string, position int) bool {

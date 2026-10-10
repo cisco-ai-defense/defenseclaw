@@ -103,7 +103,7 @@ func TestWindowsHomeSSHPathsAreJudgedLikeSpelledOutPaths(t *testing.T) {
 		input := actionfacts.Input{Tool: test.tool, Args: args, CWD: `C:\Users\alice\project`, ActiveHome: `C:\Users\alice`}
 		if test.tool == "codex-windows" {
 			input.Tool = "Bash"
-			input.DialectHint = codexWindowsShellDialect("Bash", test.command, input)
+			input.DialectHint = selectWindowsShellDialect("Bash", test.command, input)
 		}
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input:              input,
@@ -143,7 +143,7 @@ func TestWindowsCodexShellGrammarKeepsEnforcement(t *testing.T) {
 			Tool: "Bash", Args: args, CWD: `C:\Users\alice\project`,
 			ActiveHome: `C:\Users\alice`,
 		}
-		input.DialectHint = codexWindowsShellDialect("Bash", test.command, input)
+		input.DialectHint = selectWindowsShellDialect("Bash", test.command, input)
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: input, LegacyText: string(args), Connector: connector, EnforcementCapable: true,
 		})
@@ -175,7 +175,7 @@ func TestWindowsHomeWithSpacesStillEnforcesSSHPath(t *testing.T) {
 				}
 				if tool == "codex-windows" {
 					input.Tool = "Bash"
-					input.DialectHint = codexWindowsShellDialect("Bash", command, input)
+					input.DialectHint = selectWindowsShellDialect("Bash", command, input)
 				}
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, LegacyText: string(args),
