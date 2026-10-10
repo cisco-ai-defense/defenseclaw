@@ -792,6 +792,22 @@ def test_moved_audit_store_with_unreadable_block_lists_says_none_were_carried_ov
     assert "kept the block/allow" not in notice["detail"]
 
 
+def test_archived_0x_audit_store_is_not_reported_as_corrupt(tmp_path) -> None:
+    # GAP-1222: a damaged 0.8.x store kept as an archive drew a permanent WARN
+    # that called it corrupt and its block/allow entries lost.
+    moved = tmp_path / "audit.db.corrupt-20261010T021509Z"
+    moved.write_bytes(b"x")
+    Path(str(moved) + ".carryover.json").write_text('{"carried_over": 0, "pre_1_0": true}', encoding="utf-8")
+
+    result = _DoctorResult()
+    cmd_doctor._check_moved_aside_audit_stores(str(tmp_path / "audit.db"), result)
+
+    (notice,) = result.checks
+    assert notice["status"] == "pass" and notice["reason_code"] == "audit-db-0x-archive"
+    assert f"kept as an archive in {moved}" in notice["detail"] and "config.yaml" in notice["detail"]
+    assert "was corrupt" not in notice["detail"] and "carried over" not in notice["detail"]
+
+
 def test_moved_audit_store_with_one_carried_over_entry_uses_singular(tmp_path) -> None:
     # GAP-2053: "carried over 1 block/allow entries" read wrong.
     moved = tmp_path / "audit.db.corrupt-20261002T222056Z"

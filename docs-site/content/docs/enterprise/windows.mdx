@@ -175,7 +175,8 @@ guardrail:
 Each key under `guardrail.connectors` turns on protection for that agent; an
 empty value (`{}`) enables it with the default settings. A config with no
 connectors protects nothing: `status` warns `no_connectors_enabled` and
-`verify` fails. See
+`verify` fails. Per-user agents count: a config that lists only per-user
+agents, such as OpenCode, Copilot and Hermes, is valid. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
