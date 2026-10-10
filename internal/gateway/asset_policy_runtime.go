@@ -1416,6 +1416,51 @@ func skillProbeFromFields(toolName string, toolInput, payload map[string]interfa
 	return skillRuntimeProbe{ToolName: toolName}
 }
 
+// nativeSkillLoaderTools are the skill-loading tools of hook connectors
+// whose input names the skill under a plain "name" key, which
+// skillProbeFromFields does not read (an ordinary tool's "name" argument is
+// not a skill). Measured shapes: Amp skill {"name": <skill>} and Hermes
+// skill_view {"name": "<category>:<skill>"} (live audit, GAP-1234); OpenCode
+// skill {"name": <skill>} (its tool/skill.ts).
+var nativeSkillLoaderTools = map[string]string{
+	"amp":      "skill",
+	"hermes":   "skill_view",
+	"opencode": "skill",
+}
+
+// nativeSkillToolProbe recognizes a call of the connector's own skill
+// loader. A qualified "<plugin or category>:<skill>" name is matched as the
+// skill and keeps the qualified form as a declared name, so a denied rule
+// written either way refuses it. An Amp skill on asset_policy.skill.denied
+// was loaded and followed because the probe saw no skill (GAP-1234).
+func nativeSkillToolProbe(connector, toolName string, toolInput map[string]interface{}) skillRuntimeProbe {
+	loader, ok := nativeSkillLoaderTools[strings.ToLower(strings.TrimSpace(connector))]
+	if !ok || !strings.EqualFold(strings.TrimSpace(toolName), loader) {
+		return skillRuntimeProbe{}
+	}
+	raw := firstMapString(toolInput, "name")
+	bare := raw
+	if i := strings.LastIndex(bare, ":"); i >= 0 {
+		bare = bare[i+1:]
+	}
+	name := normalizeSkillRuntimeName(bare)
+	if name == "" {
+		return skillRuntimeProbe{}
+	}
+	probe := skillRuntimeProbe{
+		TargetType: "skill",
+		SkillName:  name,
+		ToolName:   strings.TrimSpace(toolName),
+		RawName:    skillRawNameIfNormalized(raw, name),
+		Surface:    "hook",
+		Matched:    true,
+	}
+	if qualified := normalizeSkillRuntimeName(raw); qualified != "" && !config.SameAssetName(qualified, name) {
+		probe.DeclaredNames = []string{qualified}
+	}
+	return probe
+}
+
 // codexSkillProbeFromPrompt recognizes Codex's native fresh-session skill
 // selection shape: UserPromptSubmit carries the literal prompt and a selected
 // skill is the first token, written as "$<skill-name>". Codex does not emit a
