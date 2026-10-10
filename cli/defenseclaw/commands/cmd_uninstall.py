@@ -1774,6 +1774,7 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.remove_data_dir and plan.data_dir:
         # Before the data dir (and the registry naming them) goes.
         _remove_mcp_writer_backups(plan.data_dir)
+        _remove_legacy_codex_candidate()
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
@@ -1940,6 +1941,30 @@ def _remove_mcp_writer_backups(data_dir: str) -> None:
             ux.warn(f"could not remove the MCP config backup {expected}: {exc}")
             continue
         ux.ok(f"removed {expected}")
+
+
+def _remove_legacy_codex_candidate() -> None:
+    """Remove empty 0.8.x guardrail staging files left beside Codex config."""
+    home = os.path.abspath(os.path.expanduser("~"))
+    codex_dir = os.path.join(home, ".codex")
+    if not _real_dir_chain(home, codex_dir):
+        return
+    try:
+        with os.scandir(codex_dir) as entries:
+            for entry in entries:
+                if not re.fullmatch(
+                    r"\.\.defenseclaw-config\.toml\.bak\.observability-v8-candidate-[0-9a-f]{32}\.tmp",
+                    entry.name,
+                ):
+                    continue
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISREG(info.st_mode) and info.st_size == 0:
+                    os.unlink(entry.path)
+                    ux.ok(f"removed {entry.path}")
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        ux.warn(f"could not remove legacy Codex staging file in {codex_dir}: {exc}")
 
 
 def _remove_orphan_copilot_plugin() -> None:

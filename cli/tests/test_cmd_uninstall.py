@@ -1495,6 +1495,25 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
             self.assertTrue(config.exists())
             self.assertIn(str(backup), buf.getvalue())
 
+    def test_full_uninstall_removes_only_empty_legacy_codex_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}):
+            codex = Path(tmp) / ".codex"
+            codex.mkdir()
+            prefix = "..defenseclaw-config.toml.bak.observability-v8-candidate-"
+            candidate = codex / f"{prefix}{'a' * 32}.tmp"
+            nonempty = codex / f"{prefix}{'b' * 32}.tmp"
+            unrelated = codex / f"{prefix}invalid.tmp"
+            candidate.touch()
+            nonempty.write_text("keep")
+            unrelated.touch()
+
+            with capture_click_output():
+                cmd_uninstall._remove_legacy_codex_candidate()
+
+            self.assertFalse(candidate.exists())
+            self.assertTrue(nonempty.exists())
+            self.assertTrue(unrelated.exists())
+
 
 class GatewayTeardownOutputTests(unittest.TestCase):
     def test_gateway_teardown_uses_utf8_and_preserves_checkmark(self):
