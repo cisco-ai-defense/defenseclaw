@@ -457,6 +457,17 @@ func MigratedSource(configPath, sourceSHA256 string) bool {
 	return ok && !record.Pending && strings.EqualFold(record.SourceSHA256, sourceSHA256)
 }
 
+// MigratedFromV8 returns the source digest of the committed config_version
+// 9 migration of a v8 file recorded next to configPath. The gateway uses it
+// to recognise its first start after a 0.8.x upgrade.
+func MigratedFromV8(configPath string) (string, bool) {
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.Pending || record.FromVersion >= ConfigVersionV9 {
+		return "", false
+	}
+	return record.SourceSHA256, true
+}
+
 func readMigrationRecord(configPath string) (MigrationRecord, bool) {
 	var record MigrationRecord
 	raw, err := os.ReadFile(MigrationRecordPath(configPath))

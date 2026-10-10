@@ -79,6 +79,50 @@ func TestRescanFirstCycleAdmitsMCPServerPresentAtStart(t *testing.T) {
 	}
 }
 
+// GAP-1227: after a 0.8.10 upgrade the first start admitted every MCP server
+// again, so /usr/bin/true (added with mcp set --skip-scan, which the scanner
+// cannot start) was blocked in Claude Code, and the Codex copy, which had the
+// same key, only got a failed rescan. The first start after the config
+// migration records baselines for both copies and blocks neither; a server
+// added while the gateway is stopped afterwards is admitted in each connector.
+func TestFirstStartAfterV8MigrationKeepsConfiguredMCPServers(t *testing.T) {
+	t.Setenv("PATH", "")
+	cfg, store, logger, _ := setupTestEnv(t)
+	record := `{"from_version":8,"to_version":9,"source_sha256":"` + strings.Repeat("a", 64) + `"}`
+	if err := os.WriteFile(config.MigrationRecordPath(filepath.Join(cfg.DataDir, "config.yaml")), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	servers := []config.MCPServerEntry{
+		{Name: "upg810-mcp", Command: "/usr/bin/true", Connector: "claudecode"},
+		{Name: "upg810-mcp", Command: "/usr/bin/true", Connector: "codex"},
+	}
+	start := func() []AdmissionResult {
+		var admitted []AdmissionResult
+		w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+		w.scannerFactory = func(InstallEvent) scanner.Scanner { return &failingScanner{countingScanner{name: "mcp-scanner"}} }
+		w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
+		w.runRescanCycle(context.Background())
+		return admitted
+	}
+	if admitted := start(); len(admitted) != 0 {
+		t.Fatalf("the first start after the upgrade admitted %+v, want baselines only", admitted)
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		if entry, err := store.GetActionForConnector("mcp", "upg810-mcp", connector); err != nil || (entry != nil && !entry.Actions.IsEmpty()) {
+			t.Fatalf("%s journal %+v (err %v), want no block", connector, entry, err)
+		}
+	}
+
+	servers = append(servers,
+		config.MCPServerEntry{Name: "late", Command: "/usr/bin/true", Connector: "claudecode"},
+		config.MCPServerEntry{Name: "late", Command: "/usr/bin/true", Connector: "codex"})
+	admitted := start()
+	if len(admitted) != 2 || admitted[0].Verdict != VerdictBlocked || admitted[1].Verdict != VerdictBlocked ||
+		admitted[0].Event.Connector == admitted[1].Event.Connector {
+		t.Fatalf("the next start admitted %+v, want late blocked in claudecode and codex", admitted)
+	}
+}
+
 // auditRows records the audit rows logger emits; rows() returns them as JSON.
 func auditRows(t *testing.T, logger *audit.Logger) (rows func() []string) {
 	t.Helper()

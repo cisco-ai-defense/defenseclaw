@@ -160,6 +160,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 			}
 		}
 		defer func() { w.startupAdmitRoots = nil }()
+		w.mcpUpgradeBaseline = w.pendingMCPUpgradeBaseline()
 	}
 	targets := w.enumerateTargets()
 	if !w.startupRescanDone {
@@ -167,6 +168,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	}
 	if len(targets) == 0 {
 		w.markWatchRoots()
+		w.markMCPUpgradeBaseline()
 		return
 	}
 
@@ -252,6 +254,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		return
 	}
 	w.markWatchRoots()
+	w.markMCPUpgradeBaseline()
 
 	fmt.Fprintf(os.Stderr, "[rescan] cycle complete: targets=%d scanned=%d skipped=%d\n",
 		len(targets), scanned, skipped)
@@ -388,6 +391,59 @@ func (w *InstallWatcher) markWatchRoots() {
 			w.markedWatchRoots[key] = true
 		}
 	}
+}
+
+// mcpUpgradeBaselineType is the target_snapshots type of the row recording
+// that a rescan cycle baselined the MCP servers of a 0.8.x install; its path
+// is the source digest of that config migration.
+const mcpUpgradeBaselineType = "mcp_upgrade_baseline"
+
+// pendingMCPUpgradeBaseline returns the source digest of the 0.8.x config
+// migration recorded next to the config.yaml of the data directory
+// (migration-v9.json) when no rescan cycle has baselined the MCP servers of
+// that install yet. A 0.8.x audit store holds no 1.0 baseline,
+// so without it every server the earlier release ran was admitted again at
+// the first start: one the scanner cannot start was blocked (GAP-1227).
+// Secure Client keeps the baseline of main (issue #1092).
+func (w *InstallWatcher) pendingMCPUpgradeBaseline() string {
+	if w.store == nil || w.cfg == nil || !w.admitNewMCP || w.secureClientActive() {
+		return ""
+	}
+	digest, ok := config.MigratedFromV8(filepath.Join(w.cfg.DataDir, config.DefaultConfigName))
+	if !ok {
+		return ""
+	}
+	if _, err := w.store.GetTargetSnapshot(mcpUpgradeBaselineType, digest); !errors.Is(err, sql.ErrNoRows) {
+		return ""
+	}
+	return digest
+}
+
+// markMCPUpgradeBaseline records, after the first complete cycle following a
+// 0.8.x upgrade, that its MCP servers have baselines, so a later start admits
+// a server without one.
+func (w *InstallWatcher) markMCPUpgradeBaseline() {
+	if w.mcpUpgradeBaseline == "" {
+		return
+	}
+	if err := w.store.SetTargetSnapshot(mcpUpgradeBaselineType, w.mcpUpgradeBaseline, "", "{}", "{}", "[]", "", ""); err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] record the MCP baselines of the upgrade: %v\n", err)
+		return
+	}
+	w.mcpUpgradeBaseline = ""
+}
+
+// configuredBeforeUpgrade reports an MCP server of this account that the
+// first rescan after a 0.8.x upgrade lists without a baseline: the earlier
+// release ran it, so it gets a baseline scan, as at a first start, and no
+// install admission. A server on a denied list was refused before this
+// check; one changed or added later is admitted.
+func (w *InstallWatcher) configuredBeforeUpgrade(evt InstallEvent) bool {
+	if evt.Type != InstallMCP || w.startupRescanDone || w.mcpUpgradeBaseline == "" {
+		return false
+	}
+	entry, err := w.lookupMCPServer(evt)
+	return err == nil && entry.Home == ""
 }
 
 // admitsNewAtStartup reports a skill or plugin the startup rescan admits:
@@ -895,7 +951,8 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			if evt.Type == InstallMCP && w.admitNewMCP && (w.startupRescanDone || !w.secureClientActive()) {
+			upgraded := w.configuredBeforeUpgrade(evt)
+			if evt.Type == InstallMCP && w.admitNewMCP && !upgraded && (w.startupRescanDone || !w.secureClientActive()) {
 				// A server added to an enrolled user's agent after the
 				// watcher started: admit it as `mcp set` would (GAP-0132).
 				// One that was there at start is admitted too, so its
@@ -926,6 +983,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 					w.persistSnapshot(evt, currentSnap, res.ScanID, w.admissionFingerprint(res, fingerprint))
 				}
 				return rescanScanned
+			}
+			if upgraded {
+				fmt.Fprintf(os.Stderr, "[rescan] mcp %s was configured before the upgrade; recording its baseline without install admission\n", evt.Name)
+				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path, "type=mcp reason=configured-before-upgrade")
 			}
 			// First time we've seen this target: scan once to establish a
 			// baseline that future cycles can diff against.
@@ -1911,12 +1972,20 @@ func (w *InstallWatcher) snapshotMCPServer(evt InstallEvent) (*TargetSnapshot, e
 // MCPEventPath is the key of an MCP server in the watcher: its event Path
 // and target snapshot. A server a managed gateway read from a user home is
 // keyed by its name, connector and home, so a second user's server with the
-// same name has its own baseline and admission; any other server is keyed by
-// its name.
+// same name has its own baseline and admission. A user-scope server a
+// connector lists is keyed by its name and connector; a server read without
+// a connector is keyed by its name.
 func MCPEventPath(server config.MCPServerEntry) string {
 	key := server.Name
-	if server.Home != "" {
+	switch {
+	case server.Home != "":
 		key += "@" + server.Connector + ":" + server.Home
+	case server.Connector != "" && server.Project == "":
+		// Claude Code and Codex each listing the server are two servers.
+		// Under one key the first copy was admitted (blocked when its scan
+		// failed) and the second got only a rescan of the first copy baseline,
+		// which recorded a failed scan and did nothing (GAP-1227).
+		key += "@" + server.Connector
 	}
 	// A project's server is its own: another project's server with the
 	// same name has its own baseline and admission (GAP-0405).

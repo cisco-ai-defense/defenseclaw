@@ -3423,6 +3423,15 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
                 f"{', '.join(detection_only)}; add an expression, see policies/rules",
                 indent="    ",
             )
+        # MCP servers already configured keep running after the upgrade; the
+        # gateway records their baselines at its first start (GAP-1227). Name
+        # the ones a block entry keeps blocked.
+        blocked = sorted({
+            str(move.get("value")) for move in record.get("moved") or []
+            if move.get("to") == "asset_policy.mcp.denied" and move.get("value")
+        })
+        if blocked:
+            ctx.changes.append(f"MCP servers that stay blocked (asset_policy.mcp.denied): {', '.join(blocked)}")
 
 
 CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {8: _migrate_config_v9}

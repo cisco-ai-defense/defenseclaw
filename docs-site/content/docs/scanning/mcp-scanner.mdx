@@ -278,7 +278,11 @@ commands add them, and rescanned on a schedule:
     (`claude mcp add`) and each project's `.mcp.json` for every project Claude
     Code knows, and within about 30 seconds scans and admits a server it has
     not seen before, as `mcp set` would. A server that was there when the
-    gateway started is scanned once to record its baseline.
+    gateway started is admitted the same way, except at the first start after
+    an upgrade from 0.8.x: the servers the earlier release already ran are
+    scanned once to record their baseline and keep running, so findings raise
+    alerts and a server the scanner cannot start shows `scan failed` instead
+    of being blocked. A server on a block list stays blocked.
   </Step>
   <Step>
     **Act on the verdict.** The top severity maps through `admission.mcp` (below):
