@@ -31,7 +31,8 @@ whose `agent_version` is empty even though the native application is present.
   actual version resolves to a known contract and the installed registration
   verifies against the new lock.
 - `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` remains an explicit exploratory
-  override and preserves the caller-selected failure mode.
+  override for non-strict runtimes and preserves the caller-selected failure
+  mode. It must not bypass native Windows managed contract validation.
 - Hook configuration verification, ownership checks, atomic writes, rollback,
   and unrelated manually configured hooks must retain their existing behavior.
 - Native Windows managed hooks are outside this change. Their version and
@@ -74,8 +75,11 @@ The preparation helper is also shared by native Windows callers. Windows
 managed targets keep their existing fail-closed contract behavior and use the
 strict bounded managed lock reader and runtime hasher for both action and
 non-action guardrail modes. Contract incompatibility remains a hard error for
-those Windows managed callers. Non-strict Unix paths retain the established
-permissive lock and digest behavior and use fail-open for incompatible locks.
+those Windows managed callers, including when the exploratory drift override
+is set. The override preserves their configured delivery-failure mode but does
+not short-circuit strict artifact reads or drift rejection. Non-strict Unix
+paths retain the established permissive lock and digest behavior and use
+fail-open for incompatible locks.
 
 Fail-open applies only to hook delivery, authentication, timeout, and malformed
 response failures. A successfully delivered DefenseClaw deny verdict remains a
@@ -88,11 +92,14 @@ deny; this change does not turn action mode into observe mode.
   Claude Code, and Cursor.
 - Unit-test same-contract patch-version drift retaining fail-closed.
 - Unit-test cross-contract drift using fail-open for the first reconciliation.
-- Unit-test the explicit drift override retaining the configured mode.
+- Unit-test the explicit drift override retaining the configured mode on
+  non-strict runtimes.
 - Unit-test native Windows managed action and non-action preparation rejecting
   oversized lock and hook-runtime artifacts through the strict bounded readers.
 - Unit-test native Windows managed action and non-action preparation rejecting
   contract drift while unmanaged preparation retains the Unix fail-open path.
+- Unit-test the explicit drift override retaining native Windows managed
+  bounded reads and drift rejection in action and non-action modes.
 - Run focused connector and enterprise-hook installer tests.
 
 ## Top-level documentation impact

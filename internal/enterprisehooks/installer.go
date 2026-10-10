@@ -969,13 +969,13 @@ func prepareHookContract(mode string, conn connector.Connector, opts connector.S
 	if strings.TrimSpace(opts.HookContractID) == "" {
 		opts.HookContractID = connector.BestEffortHookContract(resolution).ContractID
 	}
-	if os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" {
+	strictManagedRuntime := opts.ManagedEnterprise && runtime.GOOS == "windows"
+	if os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" && !strictManagedRuntime {
 		return opts, nil
 	}
-	if connector.HookContractNeedsActionOverride(resolution) {
+	if !strictManagedRuntime && connector.HookContractNeedsActionOverride(resolution) {
 		opts.HookFailMode = "open"
 	}
-	strictManagedRuntime := opts.ManagedEnterprise && runtime.GOOS == "windows"
 	if !strings.EqualFold(strings.TrimSpace(mode), "action") && !strictManagedRuntime {
 		incompatible, err := compareHookContractLock(conn, opts, false)
 		if err != nil {

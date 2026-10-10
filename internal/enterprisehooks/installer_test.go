@@ -47,13 +47,13 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("strict managed runtime artifacts are native Windows-only")
 	}
-	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
 	const oversizedManagedArtifact = int64(4<<20 + 1)
 	conn := connector.NewClaudeCodeConnector()
 	newOpts := func(dataDir string) connector.SetupOpts {
 		return connector.SetupOpts{
 			DataDir:           dataDir,
 			AgentVersion:      "2.1.152",
+			HookFailMode:      "closed",
 			ManagedEnterprise: true,
 		}
 	}
@@ -72,69 +72,81 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 		}
 	}
 
-	for _, guardrailMode := range []string{"action", "observe"} {
-		t.Run("contract lock "+guardrailMode, func(t *testing.T) {
-			opts := newOpts(t.TempDir())
-			writeSparse(t, filepath.Join(opts.DataDir, "hook_contract_lock.json"))
+	for _, override := range []struct {
+		name                  string
+		value                 string
+		wantUnmanagedFailMode string
+	}{
+		{name: "without drift override", wantUnmanagedFailMode: "open"},
+		{name: "with drift override", value: "1", wantUnmanagedFailMode: "closed"},
+	} {
+		t.Run(override.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", override.value)
+			for _, guardrailMode := range []string{"action", "observe"} {
+				t.Run("contract lock "+guardrailMode, func(t *testing.T) {
+					opts := newOpts(t.TempDir())
+					writeSparse(t, filepath.Join(opts.DataDir, "hook_contract_lock.json"))
 
-			err := validateHookContract(guardrailMode, conn, opts)
-			if err == nil ||
-				!strings.Contains(err.Error(), "enterprise hooks: load hook contract lock:") ||
-				!strings.Contains(err.Error(), "byte limit") {
-				t.Fatalf("managed lock validation error = %v, want bounded load context", err)
-			}
-			opts.ManagedEnterprise = false
-			if err := validateHookContract(guardrailMode, conn, opts); err != nil {
-				t.Fatalf("unmanaged lock validation changed: %v", err)
-			}
-		})
+					err := validateHookContract(guardrailMode, conn, opts)
+					if err == nil ||
+						!strings.Contains(err.Error(), "enterprise hooks: load hook contract lock:") ||
+						!strings.Contains(err.Error(), "byte limit") {
+						t.Fatalf("managed lock validation error = %v, want bounded load context", err)
+					}
+					opts.ManagedEnterprise = false
+					if err := validateHookContract(guardrailMode, conn, opts); err != nil {
+						t.Fatalf("unmanaged lock validation changed: %v", err)
+					}
+				})
 
-		t.Run("hook runtime "+guardrailMode, func(t *testing.T) {
-			opts := newOpts(t.TempDir())
-			unmanagedOpts := opts
-			unmanagedOpts.ManagedEnterprise = false
-			entry := connector.NewHookContractLockEntry(unmanagedOpts, conn, "test-build")
-			if err := connector.SaveHookContractLockEntry(opts.DataDir, entry); err != nil {
-				t.Fatalf("seed contract lock: %v", err)
-			}
-			hookDir := filepath.Join(opts.DataDir, "hooks")
-			if err := os.MkdirAll(hookDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			writeSparse(t, filepath.Join(hookDir, "_hardening.sh"))
+				t.Run("hook runtime "+guardrailMode, func(t *testing.T) {
+					opts := newOpts(t.TempDir())
+					unmanagedOpts := opts
+					unmanagedOpts.ManagedEnterprise = false
+					entry := connector.NewHookContractLockEntry(unmanagedOpts, conn, "test-build")
+					if err := connector.SaveHookContractLockEntry(opts.DataDir, entry); err != nil {
+						t.Fatalf("seed contract lock: %v", err)
+					}
+					hookDir := filepath.Join(opts.DataDir, "hooks")
+					if err := os.MkdirAll(hookDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					writeSparse(t, filepath.Join(hookDir, "_hardening.sh"))
 
-			err := validateHookContract(guardrailMode, conn, opts)
-			if err == nil ||
-				!strings.Contains(err.Error(), "enterprise hooks: hash managed hook runtime:") ||
-				!strings.Contains(err.Error(), "byte limit") {
-				t.Fatalf("managed runtime validation error = %v, want bounded hash context", err)
-			}
-			if err := validateHookContract(guardrailMode, conn, unmanagedOpts); err != nil {
-				t.Fatalf("unmanaged runtime validation changed: %v", err)
-			}
-		})
+					err := validateHookContract(guardrailMode, conn, opts)
+					if err == nil ||
+						!strings.Contains(err.Error(), "enterprise hooks: hash managed hook runtime:") ||
+						!strings.Contains(err.Error(), "byte limit") {
+						t.Fatalf("managed runtime validation error = %v, want bounded hash context", err)
+					}
+					if err := validateHookContract(guardrailMode, conn, unmanagedOpts); err != nil {
+						t.Fatalf("unmanaged runtime validation changed: %v", err)
+					}
+				})
 
-		t.Run("contract drift "+guardrailMode, func(t *testing.T) {
-			opts := newOpts(t.TempDir())
-			if err := connector.SaveHookContractLockEntry(opts.DataDir, connector.HookContractLockEntry{
-				Connector:           conn.Name(),
-				ContractID:          "claudecode-hooks-incompatible",
-				CompatibilityStatus: connector.HookCompatibilityKnown,
-			}); err != nil {
-				t.Fatalf("seed incompatible contract lock: %v", err)
-			}
+				t.Run("contract drift "+guardrailMode, func(t *testing.T) {
+					opts := newOpts(t.TempDir())
+					if err := connector.SaveHookContractLockEntry(opts.DataDir, connector.HookContractLockEntry{
+						Connector:           conn.Name(),
+						ContractID:          "claudecode-hooks-incompatible",
+						CompatibilityStatus: connector.HookCompatibilityKnown,
+					}); err != nil {
+						t.Fatalf("seed incompatible contract lock: %v", err)
+					}
 
-			err := validateHookContract(guardrailMode, conn, opts)
-			if err == nil || !strings.Contains(err.Error(), "enterprise hooks: connector claudecode hook contract drift detected") {
-				t.Fatalf("managed contract validation error = %v, want drift rejection", err)
-			}
-			opts.ManagedEnterprise = false
-			prepared, err := prepareHookContract(guardrailMode, conn, opts)
-			if err != nil {
-				t.Fatalf("unmanaged contract preparation changed: %v", err)
-			}
-			if prepared.HookFailMode != "open" {
-				t.Fatalf("unmanaged HookFailMode = %q, want open", prepared.HookFailMode)
+					err := validateHookContract(guardrailMode, conn, opts)
+					if err == nil || !strings.Contains(err.Error(), "enterprise hooks: connector claudecode hook contract drift detected") {
+						t.Fatalf("managed contract validation error = %v, want drift rejection", err)
+					}
+					opts.ManagedEnterprise = false
+					prepared, err := prepareHookContract(guardrailMode, conn, opts)
+					if err != nil {
+						t.Fatalf("unmanaged contract preparation changed: %v", err)
+					}
+					if prepared.HookFailMode != override.wantUnmanagedFailMode {
+						t.Fatalf("unmanaged HookFailMode = %q, want %q", prepared.HookFailMode, override.wantUnmanagedFailMode)
+					}
+				})
 			}
 		})
 	}
