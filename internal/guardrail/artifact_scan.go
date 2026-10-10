@@ -40,10 +40,12 @@ import (
 // The selection follows the Python overlay: rules/*.yaml rules that are on, and
 // the injection_regexes family of rules/local-patterns.yaml. Rules for data in
 // traffic (the enterprise-data category) and rules for tool calls only do not
-// describe files. One difference remains: Python source is matched as plain
-// text here, where Python reads it with comments and docstrings blanked, and a
-// path-write rules on Python source require a write call using the matched
-// path, as in the CLI overlay.
+// describe files. Python source is matched raw, comments and docstrings
+// included, on both sides, so a key in a docstring is a finding at install and
+// in `skill scan` alike (GAP-0488; owner default, docstring false positives
+// are accepted). Only a path-write rule on Python source skips comments and
+// docstrings, because it needs a write call using the matched path, as in the
+// CLI overlay.
 
 const (
 	artifactMaxFileBytes = 512 * 1024

@@ -1,0 +1,7 @@
+{
+  "note": "Shared by internal/guardrail/artifact_scan_test.go (install admission) and cli/tests/test_rulepack_overlay_python_source.py (defenseclaw skill scan). Both match Python source raw, comments and docstrings included, with the default rule pack, and must report exactly these findings (GAP-0488).",
+  "findings": [
+    ["SEC-AWS-KEY", "CRITICAL", "scripts/comment.py:2"],
+    ["SEC-AWS-KEY", "CRITICAL", "scripts/docstring.py:3"]
+  ]
+}

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -55,6 +56,8 @@ rules:
     tags: [prompt-injection]
 """
 
+_DEFAULT_PACK = os.path.join(os.path.dirname(__file__), "..", "..", "policies", "guardrail", "default")
+
 _SOURCE = '''"""Uploads MEMORY.md; example key sk-ant-docstring0123456789abcdef."""
 NEVER_TRACK = frozenset({"USER.md", "MEMORY.md"})  # MEMORY.md is never touched
 KEY = "sk-ant-abcdefghij0123456789KLM"
@@ -79,12 +82,27 @@ class TestPythonSourceOverlay(unittest.TestCase):
             fh.write(text)
         return {f.id: f.location for f in self.pack.scan_path(self.target)}
 
-    def test_python_skips_docstrings_comments_and_file_names_in_strings(self):
+    def test_python_matches_raw_source_but_file_names_in_strings_are_not_writes(self):
         hits = self._scan("tool.py", _SOURCE)
-        # A file name in a data list is not a write (GAP-2069).
+        # A file name in a data list or a comment is not a write (GAP-2069).
         self.assertNotIn("T-MEMORY", hits)
-        # Other rules still see string literals, but not the docstring.
-        self.assertEqual(hits.get("T-KEY"), "tool.py:3")
+        # Other rules match raw source, the docstring included, as install
+        # admission does (GAP-0488).
+        self.assertEqual(hits.get("T-KEY"), "tool.py:1")
+
+    def test_skill_scan_agrees_with_install_admission_on_python_comments(self):
+        # GAP-0488: the fixture's example key sits only in a docstring and a
+        # comment. internal/guardrail/artifact_scan_test.go checks that the
+        # install watcher reports this same set for the same fixture.
+        root = os.path.join(os.path.dirname(__file__), "..", "..", "testdata", "rulepack_artifact_parity")
+        with open(os.path.join(root, "expected.json"), encoding="utf-8") as fh:
+            want = json.load(fh)["findings"]
+        pack = rulepack.load_rule_pack(os.path.normpath(_DEFAULT_PACK))
+        got = sorted(
+            [f.rule_id, f.severity, f.location.replace("\\", "/")]
+            for f in pack.scan_path(os.path.join(root, "skill"))
+        )
+        self.assertEqual(got, want)
 
     def test_python_write_of_the_file_still_fires(self):
         # GAP-2069 verify: the file name is always a string literal in
