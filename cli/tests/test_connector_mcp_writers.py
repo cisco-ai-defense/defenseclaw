@@ -79,6 +79,53 @@ def _pin_claude_home(monkeypatch, home: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_claude_unset_only_changes_active_profile_and_rolls_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dc"))
+    active = tmp_path / "other-profile"
+    active.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(active))
+    default = tmp_path / ".claude.json"
+    state = active / ".claude.json"
+    legacy = active / "settings.json"
+    entry = {"mcpServers": {"demo": {"command": "inert-demo"}}}
+    original = json.dumps(entry).encode()
+    for target in (default, state, legacy):
+        target.write_bytes(original)
+
+    unset_mcp_server("claudecode", "demo")
+    assert default.read_bytes() == original
+    assert "demo" not in json.loads(state.read_bytes()).get("mcpServers", {})
+    assert "demo" not in json.loads(legacy.read_bytes()).get("mcpServers", {})
+
+    state.write_bytes(original)
+    legacy.write_bytes(original)
+    state.unlink()
+    try:
+        state.symlink_to(default)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    with pytest.raises(ValueError, match="symlink"):
+        unset_mcp_server("claudecode", "demo")
+    assert default.read_bytes() == original
+    assert legacy.read_bytes() == original
+
+    state.unlink()
+    state.write_bytes(original)
+
+    def failed_state_write(*_args):
+        state.write_bytes(b'{"mcpServers":{}}')
+        raise OSError("injected state write failure")
+
+    monkeypatch.setattr(connector_paths, "_unset_claudecode_mcp_server", failed_state_write)
+    with pytest.raises(OSError, match="injected"):
+        unset_mcp_server("claudecode", "demo")
+    assert state.read_bytes() == original
+    assert legacy.read_bytes() == original
+    assert default.read_bytes() == original
+
+
 class TestOpenClawDelegation:
     def test_set_calls_setter_with_dotted_path_and_json(self):
         calls: list[tuple[str, str]] = []
@@ -2565,7 +2612,7 @@ class TestHermesWrites:
             "- web\r\n"
             "# mcp_servers:\r\n"
             "#   example: {}\r\n"
-        ).encode("utf-8")
+        ).encode()
         config.write_bytes(original)
 
         set_mcp_server("hermes", "deepwiki", {"url": "https://mcp.example.invalid/mcp"})

@@ -38,7 +38,7 @@ type Observation struct {
 	PID      int
 	// Path is the file the observation concerns, for file kinds. It names
 	// the profile an agent's configuration lives in, which can attribute
-	// the session to its account; it is not part of the dedup key.
+	// the session to its account.
 	Path       string
 	Confidence float64
 	At         time.Time
@@ -48,7 +48,9 @@ type Observation struct {
 // credential by the same pid are one observation, not two, or a loop would
 // look like escalating activity.
 func (o Observation) Key() string {
-	return o.SignalID + "|" + o.Detail
+	// Retain distinct file paths even when their signal and detail agree.
+	// Ownership resolution needs every profile touched by the session.
+	return o.SignalID + "|" + o.Detail + "|" + o.Path
 }
 
 // Session accumulates the observations attributed to one agent root pid.

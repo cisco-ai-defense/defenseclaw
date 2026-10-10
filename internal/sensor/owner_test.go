@@ -23,11 +23,35 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/agentchain"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 )
+
+func TestSessionOwnerEvidenceKeepsDistinctClaudeProfiles(t *testing.T) {
+	t.Parallel()
+	paths := []string{`C:\Users\alice\.claude\settings.json`, `C:\Users\bob\.claude\settings.json`}
+	at := time.Unix(1_760_000_000, 0)
+	session := agentchain.NewSession(99, "claude", at)
+	for _, path := range paths {
+		session.Record(agentchain.Observation{
+			SignalID: "agent_config_persistence", Detail: "Claude settings updated",
+			Path: path, At: at,
+		})
+	}
+	pids, evidence := sessionOwnerEvidence(99, session.Observations())
+	if len(evidence) != 2 ||
+		(evidence[0] != paths[0] && evidence[1] != paths[0]) ||
+		(evidence[0] != paths[1] && evidence[1] != paths[1]) {
+		t.Fatalf("config path evidence = %v, want both profiles", evidence)
+	}
+	got := newOwnerResolver(ownerTestLookups(), nil).resolve(pids, evidence)
+	if got.Attribution != AttributionUnattributed || got.User != "" || got.SID != "" {
+		t.Fatalf("owner = %+v, want ambiguous and unattributed", got)
+	}
+}
 
 const (
 	aliceSID = "S-1-5-21-1-2-3-1104"
