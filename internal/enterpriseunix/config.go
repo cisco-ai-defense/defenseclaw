@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -340,9 +341,11 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 		} else if problem != "" {
 			return fmt.Errorf("observability destination %q writes %s, which %s", destination.Name, path, problem)
 		}
-		if problem := e.jsonlMissingParentProblem(path); problem != "" {
-			return fmt.Errorf("observability destination %q writes %s, which %s; choose a directory the %s gateway service account can create and write",
-				destination.Name, path, problem, e.Layout.ServiceUser)
+		if _, err := os.Lstat(e.P(path)); errors.Is(err, os.ErrNotExist) {
+			if problem := e.jsonlMissingParentProblem(path); problem != "" {
+				return fmt.Errorf("observability destination %q writes %s, which %s; choose a directory the %s gateway service account can create and write",
+					destination.Name, path, problem, e.Layout.ServiceUser)
+			}
 		}
 		// A safe parent does not make an existing file writable. The gateway
 		// opens it as the service account with O_APPEND and never changes its
@@ -365,16 +368,13 @@ func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
 	return nil
 }
 
-// jsonlMissingParentProblem checks the first existing ancestor of a missing
-// output directory. The gateway creates missing subdirectories as its service
-// account; lifecycle-created service directories are available after apply.
+var jsonlACLReader posixacl.Reader = posixacl.System
+
+// jsonlMissingParentProblem checks the first existing parent or ancestor.
+// The gateway creates missing subdirectories as its service account;
+// lifecycle-created service directories are available after apply.
 func (e *Env) jsonlMissingParentProblem(path string) string {
 	parent := filepath.Dir(path)
-	if _, err := os.Lstat(e.P(parent)); err == nil {
-		return ""
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Sprintf("cannot inspect its parent %s: %v", parent, err)
-	}
 	for dir := parent; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
 		// These roots are created for the gateway during a fresh install.
 		if dir == e.Layout.DataDir ||
@@ -402,7 +402,15 @@ func (e *Env) jsonlMissingParentProblem(path string) string {
 		if err != nil {
 			return fmt.Sprintf("cannot inspect the owner of %s: %v", dir, err)
 		}
-		if !accountMayAccess(uid, gid, info.Mode(), account, 0o3) {
+		allowed := accountMayAccess(uid, gid, info.Mode(), account, 0o3)
+		if e.GOOS == "linux" {
+			acl, err := jsonlACLReader.Read(e.P(dir), info.Mode())
+			if err != nil {
+				return fmt.Sprintf("cannot inspect the ACL of %s: %v", dir, err)
+			}
+			allowed = acl.Allows(uid, gid, info.Mode(), account.UID, account.GID, 0o3)
+		}
+		if !allowed {
 			return fmt.Sprintf("cannot create its missing directory below %s as the %s gateway service account", dir, e.Layout.ServiceUser)
 		}
 		return ""
