@@ -311,23 +311,31 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 	if err := os.Symlink(filepath.Join("..", ".ssh", "authorized_keys"), relativeLink); err != nil {
 		t.Fatal(err)
 	}
+	// A hard link is a regular file with the protected file's identity.
+	hardLink := filepath.Join(external, "hard.cfg")
+	if err := os.Link(keys, hardLink); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	t.Chdir(project)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	symlinkKeys := func(link string) error { return os.Symlink(keys, link) }
 	for _, row := range []struct {
 		name, link string
 		count      int
 		block      bool
+		relink     func(string) error
 	}{
-		{"external one", externalLink, 0, true},
-		{"external thirty one", externalLink, 31, true},
-		{"external thirty three", externalLink, 33, true},
-		{"home link", homeLink, 0, true},
-		{"relative link", "./relative", 0, true},
-		{"benign home", filepath.Join(project, "notes.txt"), 0, false},
+		{"external one", externalLink, 0, true, symlinkKeys},
+		{"external thirty one", externalLink, 31, true, symlinkKeys},
+		{"external thirty three", externalLink, 33, true, symlinkKeys},
+		{"home link", homeLink, 0, true, symlinkKeys},
+		{"relative link", "./relative", 0, true, symlinkKeys},
+		{"hard link", hardLink, 0, true, func(link string) error { return os.Link(keys, link) }},
+		{"benign home", filepath.Join(project, "notes.txt"), 0, false, nil},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			writes := make([]string, 0, row.count+1)
@@ -366,7 +374,7 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() {
-					if err := os.Symlink(keys, row.link); err != nil {
+					if err := row.relink(row.link); err != nil {
 						t.Error(err)
 					}
 				})

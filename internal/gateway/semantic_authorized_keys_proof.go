@@ -762,7 +762,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
-			return false
+			// A hard link names the protected file under another path.
+			protected, err := os.Stat(filepath.Join(facts.ActiveHome, ".ssh", "authorized_keys"))
+			return err == nil && info.Mode().IsRegular() && os.SameFile(info, protected)
 		}
 		resolved, err := filepath.EvalSymlinks(target)
 		return err == nil && canonicalSemanticPath(resolved) == active
