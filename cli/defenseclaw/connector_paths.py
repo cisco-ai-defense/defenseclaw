@@ -652,17 +652,17 @@ def claude_user_config_paths() -> list[str]:
     raises a finding when a plugin reads its credentials. MCP discovery
     was the one place that did not.
 
-    Two candidates, not one: ``~/.claude.json`` always, plus
-    ``$CLAUDE_CONFIG_DIR/.claude.json`` when that variable is set. I could
-    not confirm from the outside whether Claude Code relocates this file
-    along with the directory, and probing a path that does not exist costs
-    one failed ``open`` — guessing wrong costs another silent zero.
+    Two candidates, not one: :func:`claude_mcp_state_path` (the file
+    ``mcp set`` writes, ``$CLAUDE_CONFIG_DIR/.claude.json`` when that
+    variable is set) first, so it wins a same-named entry, then
+    ``~/.claude.json``. Probing a path that does not exist costs one failed
+    ``open``.
     """
 
-    paths = [os.path.join(os.path.abspath(str(Path.home())), ".claude.json")]
-    if (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip():
-        paths.append(os.path.join(claude_config_dir(), ".claude.json"))
-    return _dedup(paths)
+    return _dedup([
+        claude_mcp_state_path(),
+        os.path.join(os.path.abspath(str(Path.home())), ".claude.json"),
+    ])
 
 
 def claude_mcp_state_path() -> str:
@@ -677,6 +677,18 @@ def claude_mcp_state_path() -> str:
     if configured:
         return os.path.join(claude_config_dir(), ".claude.json")
     return os.path.join(os.path.abspath(str(Path.home())), ".claude.json")
+
+
+def claude_legacy_mcp_settings_path() -> str:
+    """Return the ``settings.json`` whose ``mcpServers`` DefenseClaw 0.8.x wrote.
+
+    Claude Code reads user MCP servers from :func:`claude_mcp_state_path`.
+    DefenseClaw still reads this block, last, so an entry 0.8.x wrote stays
+    visible after an upgrade, and ``mcp set`` / ``mcp unset`` remove a
+    same-named entry from it (GAP-1340).
+    """
+
+    return os.path.join(claude_config_dir(), "settings.json")
 
 
 def claude_settings_paths(workspace_dir: str | None = None) -> list[str]:
@@ -2248,9 +2260,9 @@ def mcp_source_locations(
     if name == "claudecode":
         return _dedup(
             [
-                os.path.join(claude_config_dir(), "settings.json"),
-                ws(".mcp.json"),
                 *claude_user_config_paths(),
+                ws(".mcp.json"),
+                claude_legacy_mcp_settings_path(),
                 ws(".claude", "settings.json"),
                 ws(".claude", "settings.local.json"),
             ]
@@ -3565,6 +3577,9 @@ def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
 # --- MCP readers -----------------------------------------------------------
 
 
+CLAUDE_LEGACY_MCP_SCOPE = "legacy-settings"
+
+
 def _claudecode_mcp_servers(
     workspace_dir: str | None = None,
     *,
@@ -3573,27 +3588,15 @@ def _claudecode_mcp_servers(
 ) -> list[MCPServerEntry]:
     """Return Claude Code's MCP registrations across all five read surfaces.
 
-    Order is additive on purpose. ``_dedup_mcp_entries`` is first-wins, so
-    the two pre-existing sources stay in front and any name that resolved
-    before resolves to the same entry now; the sources added below can only
-    contribute names that were previously invisible. Making
-    ``~/.claude.json`` *win* over settings.json would match Claude Code's
-    own precedence more closely, but that is a behaviour change for
-    existing installs and belongs in its own commit.
+    ``_dedup_mcp_entries`` is first-wins, so the order is Claude Code's own
+    precedence: local, then project ``.mcp.json``, then user
+    (``~/.claude.json``). The ``settings.json`` block DefenseClaw 0.8.x
+    wrote comes after them, tagged ``legacy-settings``: a name in both
+    files counts once and resolves to the entry Claude Code reads, as the
+    Go reader does (GAP-1340).
     """
 
     entries: list[MCPServerEntry] = []
-    # settings.json stays first so names that resolved before this change
-    # still resolve to the same entry. Claude's own local → project → user
-    # order then applies to ~/.claude.json and workspace .mcp.json.
-    entries.extend(
-        _read_mcp_settings_block(
-            os.path.join(claude_config_dir(), "settings.json"),
-            keys=("mcpServers",),
-            diagnostic_sink=diagnostic_sink,
-        )
-    )
-
     workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd) or None
     local_entries: list[MCPServerEntry] = []
     user_entries: list[MCPServerEntry] = []
@@ -3617,6 +3620,15 @@ def _claudecode_mcp_servers(
             )
         )
     entries.extend(user_entries)
+    legacy_path = claude_legacy_mcp_settings_path()
+    entries.extend(
+        replace(entry, source=legacy_path, source_scope=CLAUDE_LEGACY_MCP_SCOPE)
+        for entry in _read_mcp_settings_block(
+            legacy_path,
+            keys=("mcpServers",),
+            diagnostic_sink=diagnostic_sink,
+        )
+    )
 
     # Workspace settings, which agent_discovery already probes but MCP
     # discovery never did. `.local.` is the git-ignored personal override.
@@ -4966,6 +4978,18 @@ def set_mcp_server(
             _set_claudecode_mcp_server(path, name, _claude_mcp_entry(entry))
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
+        # The new entry is in the file Claude Code reads; a same-named copy
+        # that 0.8.x left in settings.json would linger in list, doctor and
+        # inventory (GAP-1340). The write above already succeeded, so a
+        # failure here is a warning, not a failed set.
+        try:
+            _remove_claude_legacy_mcp_server(name)
+        except (MCPWriteUnsupportedError, UnsafePathError, ValueError, OSError) as exc:
+            sys.stderr.write(
+                f"[defenseclaw] warning: the old {name!r} entry in "
+                f"{claude_legacy_mcp_settings_path()} was not removed ({exc}); Claude Code "
+                "does not read it, delete it from mcpServers there by hand\n"
+            )
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
@@ -5076,6 +5100,14 @@ def unset_mcp_server(
     if name_n == "claudecode":
         path = claude_mcp_state_path()
         try:
+            # Every location the reader merges, so no copy is left to list
+            # or scan (GAP-1340): the 0.8.x settings.json block, the other
+            # .claude.json, then the file mcp set writes (which may refuse an
+            # entry DefenseClaw no longer owns).
+            _remove_claude_legacy_mcp_server(name)
+            for other in claude_user_config_paths():
+                if os.path.normcase(other) != os.path.normcase(path):
+                    _unset_claudecode_mcp_server(other, name)
             outcome = _unset_claudecode_mcp_server(path, name)
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
@@ -7923,6 +7955,29 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
             next_released=next_released,
         )
         return MCP_PRIOR_RESTORED if prior_restored else True
+
+
+def _remove_claude_legacy_mcp_server(name: str) -> bool:
+    """Remove *name* from the ``mcpServers`` block 0.8.x wrote in settings.json.
+
+    Only that entry goes; the other keys (hooks, env) stay. An emptied block
+    is dropped. The publish is atomic, keeps the file's mode and refuses a
+    file changed concurrently. Returns True when an entry was removed.
+    """
+    path = claude_legacy_mcp_settings_path()
+    if not os.path.lexists(path):
+        return False
+    with _locked_claude_mcp_mutation(path):
+        raw = _read_regular_bytes_if_present(path)
+        data = _parse_claude_settings(path, raw)
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict) or name not in servers:
+            return False
+        del servers[name]
+        if not servers:
+            del data["mcpServers"]
+        _publish_claude_config_if_unchanged(path, raw, _render_json_bytes(data))
+    return True
 
 
 def _reject_symlink_config(path: str) -> None:
