@@ -595,13 +595,29 @@ func TestValidateCandidateResolvesDestinationSecretsFromTheDataDirDotEnv(t *test
 	}
 }
 
-// TestRuntimeV8RejectsAdmissionTool: no enforcement path admits a tool
+// TestRuntimeV8RejectsInvalidAdmission: no enforcement path admits a tool
 // definition, so admission.tool is not a setting that validates and does
-// nothing; tool block/allow is asset_policy.tool.
-func TestRuntimeV8RejectsAdmissionTool(t *testing.T) {
-	raw := []byte("config_version: 9\nadmission:\n  tool:\n    actions: {medium: block}\nobservability: {}\n")
-	if err := ValidateCandidate(filepath.Join(t.TempDir(), "config.yaml"), raw); err == nil {
-		t.Fatal("admission.tool loaded; want a validation error")
+// nothing (tool block/allow is asset_policy.tool); and an action mapping that
+// leaves out install, file or runtime would compile them to none/none/allow
+// and permit a severity the built-in action blocks (GAP-1290).
+func TestRuntimeV8RejectsInvalidAdmission(t *testing.T) {
+	for name, admission := range map[string]string{
+		"admission.tool":       "  tool:\n    actions: {medium: block}\n",
+		"empty action mapping": "  skill:\n    actions: {high: {}}\n",
+		"action without file":  "  skill:\n    actions: {high: {install: block, runtime: disable}}\n",
+	} {
+		raw := []byte("config_version: 9\nadmission:\n" + admission + "observability: {}\n")
+		if err := ValidateCandidate(filepath.Join(t.TempDir(), "config.yaml"), raw); err == nil {
+			t.Errorf("%s loaded; want a validation error", name)
+		}
+	}
+	// The gateway clones a config through JSON, which writes every key.
+	var action AdmissionAction
+	if err := json.Unmarshal([]byte(`{"install":"block","runtime":"disable"}`), &action); err == nil {
+		t.Error("JSON action without file decoded; want an error")
+	}
+	if err := json.Unmarshal([]byte(`{"install":"","file":"","runtime":""}`), &action); err != nil {
+		t.Errorf("JSON clone of an empty triple: %v", err)
 	}
 }
 
