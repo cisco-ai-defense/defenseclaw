@@ -343,7 +343,7 @@ func TestObservabilityV8FileValidationAllowsSharedReadOnlyCA(t *testing.T) {
 		{Name: "one", Kind: ObservabilityV8DestinationHTTPJSONL, TLS: ObservabilityV8TLSSource{CACert: caPath}},
 		{Name: "two", Kind: ObservabilityV8DestinationOTLP, TLS: ObservabilityV8TLSSource{CACert: caPath}},
 	}}
-	if err := validateObservabilityV8FilePaths(source, nil); err != nil {
+	if _, err := validateObservabilityV8FilePaths(source, nil, true); err != nil {
 		t.Fatalf("shared read-only CA was treated as a writable collision: %v", err)
 	}
 }
@@ -567,5 +567,38 @@ observability:
 	}
 	if _, ok := byName[ObservabilityV8LocalDestinationName]; !ok {
 		t.Fatalf("summaries %+v leave out the local-sqlite destination", summaries)
+	}
+}
+
+// compileObservabilityV8JSONLAt compiles a config with one jsonl destination
+// at jsonlPath and, when localPath is set, the audit database there.
+func compileObservabilityV8JSONLAt(dataDir, localPath, jsonlPath string) (*ObservabilityV8CompiledConfig, error) {
+	raw := "config_version: 8\ndata_dir: " + dataDir + "\nobservability:\n"
+	if localPath != "" {
+		raw += "  local:\n    path: " + localPath + "\n"
+	}
+	raw += "  destinations:\n    - name: rv13\n      kind: jsonl\n      path: " + jsonlPath + "\n"
+	return ParseCompileObservabilityV8("config.yaml", []byte(raw), ObservabilityV8CompileOptions{})
+}
+
+// assertObservabilityV8DeniedJSONLWarns checks that a jsonl destination behind
+// a denied folder compiles with one warning naming it, while the audit
+// database behind that folder stays a config error (GAP-1265).
+func assertObservabilityV8DeniedJSONLWarns(t *testing.T, dataDir, deniedFolder string) {
+	t.Helper()
+	jsonlPath := filepath.Join(deniedFolder, "out", "events.jsonl")
+	compiled, err := compileObservabilityV8JSONLAt(dataDir, "", jsonlPath)
+	if err != nil {
+		t.Fatalf("jsonl destination behind a denied folder: %v", err)
+	}
+	if len(compiled.PathWarnings) != 1 ||
+		compiled.PathWarnings[0].Path != "observability.destinations[0].path" ||
+		!strings.Contains(compiled.PathWarnings[0].Summary, jsonlPath) {
+		t.Fatalf("path warnings = %#v", compiled.PathWarnings)
+	}
+	_, err = compileObservabilityV8JSONLAt(dataDir, filepath.Join(deniedFolder, "audit.db"), filepath.Join(dataDir, "events.jsonl"))
+	var pathError *V8ConfigPathError
+	if !errors.As(err, &pathError) || pathError.Path != "observability.local.path" {
+		t.Fatalf("audit database behind a denied folder = %v, want a config path error", err)
 	}
 }
