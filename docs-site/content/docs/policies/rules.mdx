@@ -77,6 +77,10 @@ A custom pack is a directory of rule files that you review and pin. `config.yaml
     facts as above. `tool_call_only` limits where the pattern runs; it does not
     make the pattern enforceable. The [CEL rule guide](/docs/policies/cel/authoring)
     explains the available facts and proof requirements.
+    A 0.8.x rule blocked a tool call with its pattern alone. The upgrade to 1.0
+    gives each of your rules whose pattern is a plain literal an expression, and
+    names the others so you can add one; see the
+    [v8 to v9 migration guide](/docs/reference/migrate-v9).
   </Step>
   <Step>
     **Validate it.** The gateway's own loader checks the whole directory offline and prints the digest:

@@ -7,9 +7,13 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
+
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // A v8 copy may tune built-in action rules. Rebase carries those fields while
@@ -103,4 +107,64 @@ func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 		}
 	}
 	t.Fatal("rebased rule missing")
+}
+
+// GAP-1228: the 0.8.9 macOS upgrade shape. A full copy of the 0.8.9 default
+// pack (its action files are legacy08 byte for byte) plus the operator's own
+// file: one plain-regex CRITICAL rule in its own category, no expression. On
+// 0.8.9 it blocked a Claude Code tool call; the rebase must give it an
+// expression, and must not take any shipped rule of the copy for one of the
+// operator's.
+func TestRebaseOfAZeroEightNineDefaultCopyKeepsTheOperatorRuleBlocking(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel string, data []byte) {
+		t.Helper()
+		target := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := policyassets.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if rel, ok := strings.CutPrefix(file.Path, "guardrail/default/"); ok {
+			write(rel, file.Data)
+		}
+	}
+	for _, name := range legacy08FileNames {
+		data, err := legacy08RuleFiles.ReadFile("legacy08/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write("rules/"+name, data)
+	}
+	write("rules/upg89-marker.yaml", []byte("version: 1\ncategory: upg89-marker\nrules:\n"+
+		"  - id: UPG89-MARKER-BLOCK\n    pattern: \"upg89-block-marker\"\n    title: \"Marker\"\n"+
+		"    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"))
+
+	before, err := LoadRulePack(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary := before.Summary(); summary.AlertOnlyRuleCount != 1 {
+		t.Fatalf("the 0.8.9 copy: %d alert-only rules, want the operator rule counted", summary.AlertOnlyRuleCount)
+	}
+	plan, err := PlanRulePackRebase(dir)
+	if err != nil || plan == nil {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	if !slices.Equal(plan.Expressed, []string{"UPG89-MARKER-BLOCK"}) || len(plan.AlertOnly) != 0 || len(plan.Carried) != 0 {
+		t.Fatalf("expressed %v alert-only %v carried %v; want only the operator rule expressed",
+			plan.Expressed, plan.AlertOnly, plan.Carried)
+	}
+	var marker RulesFileYAML
+	if err := yaml.Unmarshal(plan.Files["rules/upg89-marker.yaml"], &marker); err != nil || len(marker.Rules) != 1 ||
+		marker.Rules[0].Expression != "f.commands.exists(c, 'upg89-block-marker' in c.argv)" {
+		t.Fatalf("rebased marker rule %+v, %v", marker.Rules, err)
+	}
 }
