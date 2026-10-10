@@ -126,8 +126,7 @@ type RulePackRebasePlan struct {
 	Updated                                                 int
 	Carried, Expressed, AlertOnly, Disabled, Merged, Linked []string
 	// WholeArgument names the Expressed rules that match only a command
-	// argument equal to their literal (the pack's semantic cost budget had
-	// no room for the full form).
+	// argument equal to their literal when the semantic cost budget is full.
 	WholeArgument []string
 }
 

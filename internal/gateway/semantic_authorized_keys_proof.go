@@ -182,32 +182,120 @@ func trustedInlineAuthorizedKeysWrite(facts actionfacts.Facts) bool {
 	}
 }
 
-// A redirection truncates its target before the command runs. In particular,
-// a shell no-op (or a redirect without a command) still changes the file.
-func trustedNoOpAuthorizedKeysRedirect(input actionfacts.Input) bool {
-	if input.Command == "" || len(input.Command) > 64<<10 {
+// A static shell redirect writes its target independently of the program's
+// operand grammar. Check every parsed statement, including unmodeled programs
+// and redirects on commands with assignment prefixes or in shell lists.
+func trustedStaticRedirectAuthorizedKeysWrite(input actionfacts.Input, facts actionfacts.Facts) bool {
+	if input.Command == "" || len(input.Command) > 64<<10 ||
+		facts.Parse.Dialect != actionfacts.DialectPOSIX {
 		return false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(input.Command), "")
-	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 1 {
+	if err != nil {
 		return false
 	}
-	stmt := file.Stmts[0]
-	if stmt.Background || stmt.Negated || stmt.Redirs[0].Op != syntax.RdrOut {
+	// A direct cd && prefix changes the base for a relative redirect.
+	var cdRight *syntax.Stmt
+	cdCWD := ""
+	if len(file.Stmts) == 1 {
+		if list, ok := file.Stmts[0].Cmd.(*syntax.BinaryCmd); ok && list.Op == syntax.AndStmt {
+			if call, ok := list.X.Cmd.(*syntax.CallExpr); ok && len(call.Assigns) == 0 &&
+				len(call.Args) == 2 && len(call.Args[0].Parts) == 1 {
+				if program, ok := call.Args[0].Parts[0].(*syntax.Lit); ok && program.Value == "cd" {
+					cdRight = list.Y
+					cdCWD = trustedStaticRedirectDirectory(input, call.Args[1])
+				}
+			}
+		}
+	}
+	matched := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if matched {
+			return false
+		}
+		if _, declaration := node.(*syntax.FuncDecl); declaration {
+			return false
+		}
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		redirectInput := input
+		if stmt == cdRight {
+			// An unresolved directory cannot make a relative target definite.
+			redirectInput.CWD = cdCWD
+		}
+		for _, redirect := range stmt.Redirs {
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.RdrClob, syntax.AppOut, syntax.AppClob,
+				syntax.RdrAll, syntax.RdrAllClob, syntax.AppAll, syntax.AppAllClob:
+				if trustedActiveAuthorizedKeysRedirectTarget(redirectInput, redirect.Word) {
+					matched = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return matched
+}
+
+func trustedStaticRedirectDirectory(input actionfacts.Input, target *syntax.Word) string {
+	if target == nil {
+		return ""
+	}
+	start, end := int(target.Pos().Offset()), int(target.End().Offset())
+	if start < 0 || end <= start || end > len(input.Command) {
+		return ""
+	}
+	inner := input
+	inner.Args, inner.Argv = nil, nil
+	inner.Command = "true > " + input.Command[start:end]
+	inner.DialectHint = actionfacts.DialectPOSIX
+	parsed := actionfacts.Analyze(inner)
+	if !parsed.Authoritative() {
+		var ok bool
+		parsed, ok = actionfacts.HomeResolvedTwin(inner)
+		if !ok {
+			return ""
+		}
+	}
+	for _, path := range parsed.Paths {
+		if path.Access == actionfacts.PathAccessWrite && isAbsoluteSemanticPath(path.Resolved) {
+			return path.Resolved
+		}
+	}
+	return ""
+}
+
+func trustedActiveAuthorizedKeysRedirectTarget(input actionfacts.Input, target *syntax.Word) bool {
+	if target == nil {
 		return false
 	}
-	if stmt.Cmd != nil {
-		call, ok := stmt.Cmd.(*syntax.CallExpr)
-		if !ok || len(call.Assigns) != 0 || len(call.Args) != 1 ||
-			len(call.Args[0].Parts) != 1 {
-			return false
-		}
-		literal, ok := call.Args[0].Parts[0].(*syntax.Lit)
-		if !ok || literal.Value != ":" {
-			return false
-		}
+	start, end := int(target.Pos().Offset()), int(target.End().Offset())
+	if start < 0 || end <= start || end > len(input.Command) {
+		return false
 	}
-	return trustedAuthorizedKeysRedirectTarget(input, stmt.Redirs[0].Word)
+	inner := input
+	inner.Args, inner.Argv = nil, nil
+	inner.Command = "true > " + input.Command[start:end]
+	inner.DialectHint = actionfacts.DialectPOSIX
+	parsed := actionfacts.Analyze(inner)
+	check := func(facts actionfacts.Facts) bool {
+		for _, path := range facts.Paths {
+			if path.Access != actionfacts.PathAccessWrite && path.Access != actionfacts.PathAccessAppend {
+				continue
+			}
+			relative, ok := activeHomeRelative(facts, path)
+			if ok && (relative == ".ssh/authorized_keys" || relative == ".ssh/authorized_keys2") {
+				return true
+			}
+		}
+		return false
+	}
+	enforcement := parsed.EnforcementProjection()
+	return enforcement.EnforcementEligible() && check(enforcement) ||
+		homeResolvedTwinProves(inner, parsed, check)
 }
 
 func trustedHereStringAuthorizedKeysWrite(input actionfacts.Input) bool {
