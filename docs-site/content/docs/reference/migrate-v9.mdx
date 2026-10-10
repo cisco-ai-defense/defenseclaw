@@ -363,8 +363,19 @@ that one instead:
   or removed stay off;
 - your own rules, in any rule file and category, are kept. A rule whose
   `pattern` is a plain literal (such as `acme-marker-7f3c` or `acme\.internal`)
-  gets the expression `f.commands.exists(c, '<literal>' in c.argv)`, so it
-  blocks a command that has that argument;
+  gets an expression that blocks what the 0.8.x pattern blocked, which was the
+  literal anywhere in the tool call's arguments, as far as the parsed action
+  shows it: a command argument that starts or ends with the literal (so
+  `echo acme-marker-7f3c` and `touch acme-marker-7f3c.txt`), or a file path or
+  network host of the call that contains it (`cat /tmp/acme-marker-7f3c/x`, a
+  file write to `acme-marker-7f3c.txt`, `curl https://acme.internal/`). A
+  literal between `\b` word boundaries (`\bacme-marker\b`) still has to be a
+  whole word, as in 0.8.x: an argument equal to it, or a word of a path or
+  host. A literal inside a longer argument that is neither a path nor a URL
+  (`echo xacme-marker-7f3cy`) is not blocked; the rule's pattern still records
+  that match. The upgrade names these rules; when the pack's semantic cost
+  budget has no room left, the remaining ones block only an argument equal to
+  the literal, and the upgrade names those too;
 - rule files that share a category are merged into the first of them, in
   file-name order, and every rule is kept. 1.0 needs one file per category
   (0.8.x took several and enforced only the last one). Categories match
