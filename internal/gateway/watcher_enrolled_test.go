@@ -232,3 +232,27 @@ func TestUnreadableClaudeStateRefusesThatUsersMCPToolCalls(t *testing.T) {
 		t.Fatalf("carol: refused=%v decision %+v; want the call refused for the missing spool record", refused, decision)
 	}
 }
+
+// An enrolled user's project skill folder is in the running watcher's set;
+// the poll compares like with like, so an unchanged state never restarts
+// the watcher (GAP-1349).
+func TestPollEnrolledWatchSetKeepsWatcherWithProjectRoot(t *testing.T) {
+	old := enrolledWatchPollInterval
+	enrolledWatchPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() { enrolledWatchPollInterval = old })
+	cfg := &config.Config{DataDir: t.TempDir()}
+	s := &Sidecar{cfg: cfg}
+	reg := connector.NewDefaultRegistry()
+	project := []projectSkillRoot{{Path: filepath.Join(t.TempDir(), ".claude", "skills"), Connector: "claudecode"}}
+	current := resolveEnrolledWatchSet(cfg, reg, cfg.Gateway.Watcher, serviceHomeDir())
+	current.addProjectRoots(project)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	changed := make(chan struct{})
+	s.pollEnrolledWatchSet(ctx, reg, cfg.Gateway.Watcher, current, project, nil, changed)
+	select {
+	case <-changed:
+		t.Fatal("the poll restarted the watcher although nothing changed")
+	default:
+	}
+}

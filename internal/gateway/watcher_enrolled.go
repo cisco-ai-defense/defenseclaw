@@ -370,10 +370,25 @@ func enrolledRootPrecedence(connectorName string) int {
 	}
 }
 
+// addProjectRoots adds the project skill folders the watcher watches to the
+// set's roots, each owned by the connector that reported it.
+func (e *enrolledWatchSet) addProjectRoots(roots []projectSkillRoot) {
+	for _, root := range roots {
+		if e.roots == nil {
+			e.roots = map[string]string{}
+		}
+		e.roots[root.Path] = root.Connector
+	}
+}
+
 // pollEnrolledWatchSet re-reads the enrolled watch set until ctx ends. A
 // changed folder set closes changed (the watcher restarts on it); a changed
-// MCP server list asks the running watcher for a rescan.
-func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Registry, wcfg config.GatewayWatcherConfig, current enrolledWatchSet, w *watcher.InstallWatcher, changed chan struct{}) {
+// MCP server list asks the running watcher for a rescan. projectRoots are
+// the project skill folders the running watcher added to current: the
+// re-read set gets them too, or every poll would see a changed set and
+// restart the watcher (GAP-1349). A new project folder restarts the watcher
+// through its own signal.
+func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Registry, wcfg config.GatewayWatcherConfig, current enrolledWatchSet, projectRoots []projectSkillRoot, w *watcher.InstallWatcher, changed chan struct{}) {
 	ticker := time.NewTicker(enrolledWatchPollInterval)
 	defer ticker.Stop()
 	dirs, mcp := current.dirsKey(), current.mcpKey()
@@ -383,6 +398,7 @@ func (s *Sidecar) pollEnrolledWatchSet(ctx context.Context, reg *connector.Regis
 			return
 		case <-ticker.C:
 			next := resolveEnrolledWatchSet(s.currentConfig(), reg, wcfg, serviceHomeDir())
+			next.addProjectRoots(projectRoots)
 			publishClaudeStatesUnreadable(next.claudeUnreadable)
 			if next.dirsKey() != dirs {
 				close(changed)

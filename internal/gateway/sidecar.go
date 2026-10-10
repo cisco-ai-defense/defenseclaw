@@ -3842,22 +3842,23 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		cfgNow.Watch.RescanEnabled && !cfgNow.SecureClientIntegration()
 	baseSkillDirs := skillDirs
 	projectRoots, freshProjectRoots := s.projectSkills.start(projectActive)
+	var enrolledProjectRoots []projectSkillRoot
 	for _, root := range projectRoots {
 		if slices.ContainsFunc(skillDirs, func(dir string) bool { return projectRootKey(dir) == projectRootKey(root.Path) }) {
 			continue
 		}
 		skillDirs = append(append([]string(nil), skillDirs...), root.Path)
 		if enrolled != nil {
-			if enrolled.roots == nil {
-				enrolled.roots = map[string]string{}
-			}
-			enrolled.roots[root.Path] = root.Connector
+			enrolledProjectRoots = append(enrolledProjectRoots, root)
 			continue
 		}
 		if roots == nil {
 			roots = map[string]string{}
 		}
 		roots[root.Path] = root.Connector
+	}
+	if enrolled != nil {
+		enrolled.addProjectRoots(enrolledProjectRoots)
 	}
 	watchCtx := ctx
 	changed := make(chan struct{})
@@ -4025,7 +4026,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	})
 
 	if enrolled != nil {
-		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, w, changed)
+		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, enrolledProjectRoots, w, changed)
 	}
 	s.installWatcher.Store(w)
 	runErr := w.Run(watchCtx)
