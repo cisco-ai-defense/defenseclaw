@@ -128,6 +128,10 @@ type windowsEnterpriseInstallerReport struct {
 	// TerminatedServiceProcesses names each service process the lifecycle
 	// ended because it did not answer a stop ("<service> (pid <n>)").
 	TerminatedServiceProcesses []string `json:"terminated_service_processes"`
+	// SkippedRuntimeFiles names each runtime file whose access list the
+	// lifecycle left as it was because it could not open the file at all
+	// (GAP-1220).
+	SkippedRuntimeFiles []string `json:"skipped_runtime_files"`
 	// SquattedRootNotes says what Install did with each standalone root a
 	// standard user created first: a link removed, a folder moved aside.
 	SquattedRootNotes []string `json:"squatted_root_notes"`
@@ -1136,6 +1140,13 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 			Code: "service_process_terminated",
 			Message: "these DefenseClaw service processes did not answer a stop request within 30 seconds and were ended " +
 				"(by the lifecycle, or by Windows for a stuck stop) before it continued: " + windowsEnterpriseBoundedLabels(report.TerminatedServiceProcesses),
+		})
+	}
+	if len(report.SkippedRuntimeFiles) != 0 {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "runtime_file_skipped",
+			Message: "the lifecycle could not open these runtime files and left their access lists unchanged: " +
+				windowsEnterpriseBoundedLabels(report.SkippedRuntimeFiles),
 		})
 	}
 	if report.CursorAdapterRestored {

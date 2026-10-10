@@ -623,6 +623,19 @@ $runtimeAdoption = & $module {
             }
         }
 
+        # GAP-1220: a loss journal whose DACL grants Administrators nothing
+        # is adopted.
+        $journal = Microsoft.PowerShell.Management\Join-Path $root 'local-write-losses.journal'
+        [IO.File]::WriteAllBytes($journal, [byte[]]::new(64))
+        $privateJournal = [Security.AccessControl.FileSecurity]::new()
+        $privateJournal.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;;FA;;;SY)')
+        Microsoft.PowerShell.Security\Set-Acl -LiteralPath $journal -AclObject $privateJournal
+        Set-DefenseClawRetainedRuntimeAcls `
+            -RuntimeDirectory $root `
+            -GatewayServiceSID $GatewaySID
+        Assert-DefenseClawCanonicalPathAcl -Path $journal -Expected $expectedFile
+        $unreadableJournalAdopted = @($script:DefenseClawSkippedRuntimeFiles).Count -eq 0
+
         $linked = Microsoft.PowerShell.Management\Join-Path $root 'linked.db'
         $linkedAlias = Microsoft.PowerShell.Management\Join-Path $root 'linked-alias.db'
         [IO.File]::WriteAllText($linked, 'linked-runtime')
@@ -665,6 +678,7 @@ $runtimeAdoption = & $module {
                 $keyIdentityBefore -ceq $keyIdentityAfter
             )
             hard_link_rejected = $hardLinkRejected
+            unreadable_journal_adopted = $unreadableJournalAdopted
             hard_link_preflight_preserved_acl = (
                 $descriptorBefore -ceq $descriptorAfter
             )

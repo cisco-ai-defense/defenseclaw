@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // LocalWriteLossJournalFile is the reserved file in the gateway data
@@ -235,7 +235,14 @@ func (journal *localWriteLossJournal) openLocked() error {
 		return fmt.Errorf("%s is not a regular file", journal.path)
 	}
 	if err != nil || info.Size() != localWriteLossJournalSize {
-		if err := safefile.Write(journal.path, make([]byte, localWriteLossJournalSize)); err != nil {
+		// A managed gateway publishes it like its other runtime files, under
+		// the runtime folder's access list: a private DACL of the service
+		// account and SYSTEM left the elevated repair unable to open it
+		// (GAP-1220).
+		if err := managed.WriteServiceRuntimeFile(
+			managed.PinnedDeploymentMode(), journal.path, "local write loss journal",
+			make([]byte, localWriteLossJournalSize),
+		); err != nil {
 			return err
 		}
 		if info, err = os.Lstat(journal.path); err != nil {
