@@ -121,10 +121,10 @@ type MigrateV9Input struct {
 // import: the rebased pack's files and FilesDigest (no Files: the pack is
 // pinned as it is), and what changed.
 type RulePackRebasePlan struct {
-	Files                                   map[string][]byte
-	Digest                                  string
-	Updated                                 int
-	Carried, Expressed, AlertOnly, Disabled []string
+	Files                                           map[string][]byte
+	Digest                                          string
+	Updated                                         int
+	Carried, Expressed, AlertOnly, Disabled, Merged []string
 }
 
 // MigrateV9Result is the outcome of one migration.
@@ -174,6 +174,10 @@ type MigrationRecord struct {
 	// call on 0.8.x with their pattern and in 1.0, without an expression,
 	// only record it; the upgrade prints them (GAP-1225).
 	DetectionOnlyRules []string `json:"detection_only_rules,omitempty"`
+	// RuleFileMerges says which rule files of a custom pack that shared a
+	// category, which 1.0 refuses, were merged into one; the upgrade prints
+	// them (GAP-1339).
+	RuleFileMerges []string `json:"rule_file_merges,omitempty"`
 	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
 	// refuses to start (a command path or a program other than npx or uvx
 	// with a package). They keep running without a scan. The Python upgrade
@@ -2314,7 +2318,7 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	if err != nil {
 		return "", nil, err
 	}
-	if target == clean {
+	if target == clean && digest == "" {
 		if digest, err = m.in.RulePackDigest(clean); err != nil {
 			return "", nil, fmt.Errorf("load custom rule pack %s: %w", dir, err)
 		}
@@ -2357,9 +2361,15 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 	}
 	plan, err := m.in.RebaseRulePack(clean)
 	if err != nil {
+		digest, loadErr := m.in.RulePackDigest(clean)
+		if loadErr != nil {
+			// Nor does it load as it is: the rebase error names what to
+			// change, such as two rule files of one category (GAP-1339).
+			return "", "", fmt.Errorf("custom rule pack %s: %w", dir, err)
+		}
 		m.note("%s could not be rebased on the 1.0 default pack (%v): it is pinned as it is, and its rules without an "+
 			"expression only record tool-call matches; doctor counts them", dir, err)
-		return clean, "", nil
+		return clean, digest, nil
 	}
 	if plan == nil {
 		return clean, "", nil
@@ -2388,6 +2398,16 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 		expressed = fmt.Sprintf("these got an expression that blocks a command with their pattern as an argument "+
 			"(review it): %s", strings.Join(plan.Expressed, ", "))
 	}
+	if len(plan.Merged) > 0 {
+		// 1.0 refuses two rule files of one category; 0.8.x enforced only
+		// the last of them (GAP-1339).
+		for _, merged := range plan.Merged {
+			m.record.RuleFileMerges = append(m.record.RuleFileMerges, target+": "+merged)
+		}
+		m.note("%s has rule files that share a category, which 1.0 refuses (0.8.x enforced only the last of them). "+
+			"Its 1.0 copy %s has one file per category and keeps every rule: %s; %s is kept for a rollback to 0.8.x",
+			dir, target, strings.Join(plan.Merged, "; "), dir)
+	}
 	if plan.Updated > 0 {
 		kept := fmt.Sprintf("%d built-in rules are their 1.0 versions", plan.Updated)
 		if len(plan.Disabled) > 0 {
@@ -2402,7 +2422,7 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 		m.note("%s is a 0.8.x copy of the default pack's command, path, agent-file or C2 rules, which have no expression; "+
 			"in 1.0 such a rule blocks only with one, so the pack enforced nothing. It was rebased on the 1.0 default "+
 			"pack in %s, which is pinned instead (%s); %s is kept for a rollback to 0.8.x", dir, target, kept, dir)
-	} else {
+	} else if expressed != "" {
 		// Only the operator's own rules changed (GAP-1225).
 		m.note("%s has rules of yours that blocked a tool call with their pattern alone, which 1.0 does only with an "+
 			"expression. Its 1.0 copy %s is pinned instead (%s); %s is kept for a rollback to 0.8.x",

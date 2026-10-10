@@ -3423,6 +3423,11 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
                 f"{', '.join(detection_only)}; add an expression, see policies/rules",
                 indent="    ",
             )
+        # GAP-1339: 1.0 refuses two rule files of one category, which 0.8.x
+        # took; the 1.0 copy of the pack merged them.
+        for merge in record.get("rule_file_merges") or []:
+            if isinstance(merge, str) and merge.isprintable():
+                ctx.changes.append(f"rule pack {merge}")
         # MCP servers already configured keep running after the upgrade; the
         # gateway records their baselines at its first start (GAP-1227). Name
         # the ones a block entry keeps blocked.

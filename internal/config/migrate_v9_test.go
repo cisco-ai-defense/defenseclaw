@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -722,6 +723,72 @@ func TestMigrateV9NamesCustomRulesThatNoLongerBlockToolCalls(t *testing.T) {
 		return strings.Contains(note, "2 custom rule(s) in "+acme+" now detection-only for tool calls: ACME-SPACED, ACME-REGEX")
 	}) {
 		t.Errorf("no note names the rules: %q", result.Record.Notes)
+	}
+}
+
+func TestMigrateV9MergesRuleFilesThatShareACategory(t *testing.T) {
+	// GAP-1339: 0.8.x took two rule files of one category and 1.0 refuses
+	// them, so the upgrade stopped with no way forward. The 1.0 copy merges
+	// them and the upgrade says so; a pack that can not be merged, or an
+	// administrator's pack, fails with the edit to make.
+	refused := errors.New("rule pack duplicate_category at rules/x.yaml: category repeats rules/commands.yaml; " +
+		"categories must be unique: move the rules of rules/x.yaml into rules/commands.yaml and delete rules/x.yaml")
+	cases := []struct {
+		name    string
+		managed bool
+		rebase  func(string) (*RulePackRebasePlan, error)
+		want    string
+	}{
+		{name: "merged", rebase: func(string) (*RulePackRebasePlan, error) {
+			return &RulePackRebasePlan{
+				Files: map[string][]byte{"rules/commands.yaml": []byte("merged\n")}, Digest: strings.Repeat("b", 64),
+				Merged: []string{`rules/x.yaml (category "command") merged into rules/commands.yaml; 1 rule(s) kept`},
+			}, nil
+		}},
+		{name: "merge refused", rebase: func(string) (*RulePackRebasePlan, error) {
+			return nil, errors.New("rules/x.yaml (category \"command\") can not be merged into rules/commands.yaml, " +
+				"which would then have more than 2048 rules. Categories must be unique in 1.0: move the rules of " +
+				"rules/x.yaml into rules/commands.yaml and delete rules/x.yaml, then run the upgrade again")
+		}, want: "Categories must be unique in 1.0: move the rules of rules/x.yaml into rules/commands.yaml"},
+		{name: "administrator pack", managed: true, rebase: func(string) (*RulePackRebasePlan, error) {
+			return nil, errors.New("a managed host's pack must not be rebased")
+		}, want: "move the rules of rules/x.yaml into rules/commands.yaml and delete rules/x.yaml"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			configPath := filepath.Join(dir, "config.yaml")
+			acme := filepath.Join(dir, "policies", "guardrail", "acme")
+			source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + acme + "\nobservability: {}\n"
+			if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := MigrateV9(context.Background(), MigrateV9Input{
+				ConfigPath: configPath, Managed: tc.managed, RebaseRulePack: tc.rebase,
+				RulePackDigest: func(string) (string, error) { return "", refused },
+			})
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("MigrateV9 = %v, want an error naming the edit %q", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MigrateV9: %v", err)
+			}
+			if got := string(result.Migrated); !strings.Contains(got, "path: "+acme+"-1.0") {
+				t.Errorf("want the merged copy pinned:\n%s", got)
+			}
+			want := acme + `-1.0: rules/x.yaml (category "command") merged into rules/commands.yaml; 1 rule(s) kept`
+			if !slices.Equal(result.Record.RuleFileMerges, []string{want}) {
+				t.Errorf("rule file merges %q, want %q", result.Record.RuleFileMerges, want)
+			}
+			if !slices.ContainsFunc(result.Record.Notes, func(note string) bool { return strings.Contains(note, "share a category") }) {
+				t.Errorf("no note names the merge: %q", result.Record.Notes)
+			}
+		})
 	}
 }
 
