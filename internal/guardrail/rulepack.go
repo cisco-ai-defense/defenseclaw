@@ -33,6 +33,7 @@ import (
 	"reflect"
 	"regexp"
 	"regexp/syntax"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -566,11 +567,14 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return rulePackErr(safeInventoryPath(rel), "file_type", "component must be a regular file")
 		}
-		if rel == PackManifestFile {
+		if isPackManifestName(rel) {
 			if !entry.Type().IsRegular() {
-				return rulePackErr(rel, "file_type", "component must be a regular file")
+				return rulePackErr(PackManifestFile, "file_type", "component must be a regular file")
 			}
-			inventory.manifest = &diskRulePackFile{relPath: rel, full: full}
+			if inventory.manifest != nil {
+				return rulePackErr(PackManifestFile, "inventory_unexpected", "rule pack has more than one manifest")
+			}
+			inventory.manifest = &diskRulePackFile{relPath: PackManifestFile, full: full}
 			return nil
 		}
 		extension := strings.ToLower(path.Ext(rel))
@@ -612,6 +616,20 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 		return nil, rulePackErr(".", "inventory_unreadable", "rule-pack inventory cannot be inspected")
 	}
 	return inventory, nil
+}
+
+// isPackManifestName reports whether rel names the pack manifest. Windows
+// and macOS volumes are normally case-insensitive, so ReadPackPosture opens a
+// differently cased manifest there and the pin must cover it (GAP-1313).
+func isPackManifestName(rel string) bool {
+	return packManifestNameMatches(rel, runtime.GOOS == "windows" || runtime.GOOS == "darwin")
+}
+
+func packManifestNameMatches(rel string, caseInsensitive bool) bool {
+	if caseInsensitive {
+		return strings.EqualFold(rel, PackManifestFile)
+	}
+	return rel == PackManifestFile
 }
 
 func isRecognizedRulePackYAML(rel string) bool {
