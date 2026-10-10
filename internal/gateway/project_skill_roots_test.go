@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -88,5 +89,34 @@ func TestManagedProjectSkillLinkOutsideHomeIsNotRegistered(t *testing.T) {
 	}
 	if roots.registered(filepath.Join(link, ".claude", "skills")) || roots.registered(realOther) {
 		t.Fatal("a project link below the caller's home registered another user's skill folder")
+	}
+}
+
+// GAP-1375: a skill in a registered project folder that the gateway cannot
+// stat for any reason but its absence (access denied, a sharing violation)
+// stays refused; only a skill that is gone is not held.
+func TestProjectSkillThatCannotBeCheckedStaysRefused(t *testing.T) {
+	restore := projectSkillLstat
+	t.Cleanup(func() { projectSkillLstat = restore })
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	skills := filepath.Join(t.TempDir(), "proj", ".claude", "skills")
+	roots := &projectSkillRoots{}
+	roots.start(true)
+	if !roots.add("claudecode", skills) {
+		t.Fatal("could not register the project skill folder")
+	}
+	api := &APIServer{store: store, logger: logger, projectSkills: roots}
+	skill := filepath.Join(skills, "locked-skill")
+	for _, tc := range []struct {
+		err  error
+		held bool
+	}{{fs.ErrPermission, true}, {fs.ErrNotExist, false}} {
+		projectSkillLstat = func(path string) (fs.FileInfo, error) {
+			return nil, &fs.PathError{Op: "lstat", Path: path, Err: tc.err}
+		}
+		decision, held := api.projectSkillScanPending("skill", "claudecode", "hook", []string{skill})
+		if held != tc.held || (held && decision.Action != "block") {
+			t.Fatalf("lstat %v: decision=%+v held=%v; want held=%v", tc.err, decision, held, tc.held)
+		}
 	}
 }
