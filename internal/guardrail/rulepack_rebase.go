@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"regexp/syntax"
 	"slices"
 	"strings"
@@ -183,11 +184,15 @@ type RulePackRebase struct {
 	Updated int
 	// Carried names the operator's own rules carried into rebuilt files,
 	// Expressed the operator's own rules, and the built-in rules whose
-	// pattern they changed, given an expression (a literal pattern, as an
-	// argument of a command), AlertOnly the enabled ones that
-	// still have none and only record a tool call's match, and Disabled the
-	// built-in rules the copy had removed.
+	// pattern they changed, given an expression (a literal pattern, see
+	// literalRuleExpression), AlertOnly the enabled ones that still have
+	// none and only record a tool call's match, and Disabled the built-in
+	// rules the copy had removed.
 	Carried, Expressed, AlertOnly, Disabled []string
+	// WholeArgument names the Expressed rules that match only a command
+	// argument equal to their literal: the full form of the others did not
+	// fit the pack's semantic cost budget (semantic_catalog_cost_limit).
+	WholeArgument []string
 	// Merged says, per rule file folded into another of its category, what
 	// was done ("rules/b.yaml (category \"acme\") merged into rules/a.yaml;
 	// 2 rule(s) kept"): 1.0 refuses two files of one category (GAP-1339).
@@ -198,12 +203,42 @@ type RulePackRebase struct {
 	Linked []string
 	// mergedAway holds the files Merged folded into another.
 	mergedAway map[string]bool
+	// literals counts the literal rules met so far, in order; from the
+	// wholeArgumentFrom-th on (0: none) they get the whole-argument form.
+	literals, wholeArgumentFrom int
 }
 
 // PlanRulePackRebase returns the 1.0 copy of the custom pack in dir, a plan
 // without Files when it only names rules that stay detection-only for tool
 // calls, or nil when the pack needs neither.
 func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
+	plan, err := planRulePackRebase(dir, -1)
+	var packErr *RulePackError
+	if err == nil || !errors.As(err, &packErr) || packErr.Code != "semantic_catalog_cost_limit" {
+		return plan, err
+	}
+	// The full literal forms do not fit the pack's semantic cost budget:
+	// give it to as many literal rules as fit, in the order they are met,
+	// and the others the whole-argument form (named in WholeArgument).
+	// Fewer full forms cost less, so the most that fit is bisected.
+	narrow, err := planRulePackRebase(dir, 0)
+	if err != nil {
+		return nil, err
+	}
+	best, low, high := narrow, 0, narrow.literals
+	for low < high {
+		mid := (low + high + 1) / 2
+		candidate, err := planRulePackRebase(dir, mid)
+		if err != nil {
+			high = mid - 1
+			continue
+		}
+		best, low = candidate, mid
+	}
+	return best, nil
+}
+
+func planRulePackRebase(dir string, fullLiterals int) (*RulePackRebase, error) {
 	index, err := shippedRuleIndex()
 	if err != nil {
 		return nil, err
@@ -213,6 +248,9 @@ func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
 		return nil, err
 	}
 	plan := &RulePackRebase{Files: files, Linked: linked}
+	if fullLiterals >= 0 {
+		plan.wholeArgumentFrom = fullLiterals + 1
+	}
 	if err := mergeDuplicateCategories(files, plan); err != nil {
 		return nil, err
 	}
@@ -675,17 +713,22 @@ func expressOwnRules(custom []byte, category string, index *shippedRules, plan *
 }
 
 // expressOwnRule gives one of the operator's own enabled rules without an
-// expression the one its pattern implies when that pattern is a literal: a
-// command that has the literal as an argument, which blocks as the 0.8.x
-// pattern did. A rule with any other pattern keeps only its pattern and is
-// named in AlertOnly: in 1.0 it records a tool call's match and never blocks.
+// expression the one its pattern implies when that pattern is a literal
+// (literalRuleExpression), which blocks as the 0.8.x pattern did. A rule
+// with any other pattern keeps only its pattern and is named in AlertOnly:
+// in 1.0 it records a tool call's match and never blocks.
 func expressOwnRule(item *yaml.Node, plan *RulePackRebase) bool {
 	if strings.TrimSpace(yamlScalarField(item, "expression")) != "" || yamlRuleDisabled(item) {
 		return false
 	}
 	id := yamlScalarField(item, "id")
-	if literal := literalPattern(yamlScalarField(item, "pattern")); literal != "" {
-		setYAMLScalarField(item, "expression", "f.commands.exists(c, '"+literal+"' in c.argv)", "!!str")
+	if literal, before, after := literalPattern(yamlScalarField(item, "pattern")); literal != "" {
+		plan.literals++
+		full := plan.wholeArgumentFrom == 0 || plan.literals < plan.wholeArgumentFrom
+		if !full {
+			plan.WholeArgument = append(plan.WholeArgument, id)
+		}
+		setYAMLScalarField(item, "expression", literalRuleExpression(literal, before, after, full), "!!str")
 		plan.Expressed = append(plan.Expressed, id)
 		return true
 	}
@@ -802,32 +845,75 @@ func removeYAMLField(mapping *yaml.Node, key string) {
 }
 
 // literalPattern is the text a pattern matches when it is a case-sensitive
-// literal (escaped metacharacters such as \. included, optionally between \b
-// word boundaries) that a CEL string holds as is, else "".
-func literalPattern(pattern string) string {
+// literal (escaped metacharacters such as \. included, optionally after
+// and before \b word boundaries, reported in before and after) that a CEL
+// string holds as is, else "". The literal has no quote, backslash, space
+// or unprintable character, so it goes into a CEL string unescaped.
+func literalPattern(pattern string) (literal string, before, after bool) {
 	re, err := syntax.Parse(pattern, syntax.Perl)
 	if err != nil {
-		return ""
+		return "", false, false
 	}
 	parts := []*syntax.Regexp{re}
 	if re.Op == syntax.OpConcat {
 		parts = re.Sub
 	}
 	if len(parts) > 1 && parts[0].Op == syntax.OpWordBoundary {
-		parts = parts[1:]
+		parts, before = parts[1:], true
 	}
 	if len(parts) > 1 && parts[len(parts)-1].Op == syntax.OpWordBoundary {
-		parts = parts[:len(parts)-1]
+		parts, after = parts[:len(parts)-1], true
 	}
 	if len(parts) != 1 || parts[0].Op != syntax.OpLiteral || parts[0].Flags&syntax.FoldCase != 0 {
-		return ""
+		return "", false, false
 	}
-	literal := string(parts[0].Rune)
+	literal = string(parts[0].Rune)
 	if literal == "" || len(literal) > 256 || strings.ContainsAny(literal, `\'"`) ||
 		strings.ContainsFunc(literal, func(r rune) bool { return unicode.IsSpace(r) || !unicode.IsPrint(r) }) {
-		return ""
+		return "", false, false
 	}
-	return literal
+	return literal, before, after
+}
+
+// literalRuleExpression is the expression of a carried literal rule. 0.8.x
+// ran a rule's pattern over the text of a tool call's arguments
+// (internal/gateway/rules.go scanRuleCategories at tag 0.8.9), so a plain
+// literal matched anywhere in it. The full form keeps that as far as the 1.0
+// facts tell: a command argument that starts or ends with the literal (so
+// is, or names a file such as literal.txt), or a file path or network host
+// of the call that contains it. A \b word boundary meant a word boundary in
+// 0.8.x (Go's ASCII \b) and still does: an argument must then start (\b
+// before), end (\b after) or be (both) the literal, and a path or host must
+// hold it as a word. A literal inside a longer argument that is neither a
+// path nor a URL (echo xLITERALy) is not matched; the rule's pattern still
+// records it. The whole-argument form (full false) matches only a command
+// argument equal to the literal.
+func literalRuleExpression(literal string, before, after, full bool) string {
+	quoted := "'" + literal + "'"
+	if !full {
+		return "f.commands.exists(c, " + quoted + " in c.argv)"
+	}
+	if !before && !after {
+		return "f.commands.exists(c, c.argv.exists(a, a.startsWith(" + quoted + ") || a.endsWith(" + quoted + "))) || " +
+			"f.paths.exists(p, p.value.contains(" + quoted + ")) || f.network.exists(n, n.host.contains(" + quoted + "))"
+	}
+	argument := "f.commands.exists(c, " + quoted + " in c.argv)"
+	switch {
+	case before && !after:
+		argument = "f.commands.exists(c, c.argv.exists(a, a.startsWith(" + quoted + ")))"
+	case after && !before:
+		argument = "f.commands.exists(c, c.argv.exists(a, a.endsWith(" + quoted + ")))"
+	}
+	word := regexp.QuoteMeta(literal)
+	if before {
+		word = `\b` + word
+	}
+	if after {
+		word += `\b`
+	}
+	// A raw CEL string keeps the backslashes; the literal has no quote.
+	word = "r'" + word + "'"
+	return argument + " || f.paths.exists(p, p.value.matches(" + word + ")) || f.network.exists(n, n.host.matches(" + word + "))"
 }
 
 func yamlRulesSequence(document *yaml.Node) *yaml.Node {

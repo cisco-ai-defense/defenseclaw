@@ -125,6 +125,9 @@ type RulePackRebasePlan struct {
 	Digest                                                  string
 	Updated                                                 int
 	Carried, Expressed, AlertOnly, Disabled, Merged, Linked []string
+	// WholeArgument names the Expressed rules that match only a command
+	// argument equal to their literal when the semantic cost budget is full.
+	WholeArgument []string
 }
 
 // MigrateV9Result is the outcome of one migration.
@@ -2395,8 +2398,17 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 	m.rebasedPacks[target], m.rebasedFrom[clean], m.rebasedDigests[target] = plan.Files, target, plan.Digest
 	expressed := ""
 	if len(plan.Expressed) > 0 {
-		expressed = fmt.Sprintf("these got an expression that blocks a command with their pattern as an argument "+
+		// GAP-1344: 0.8.x matched the literal anywhere in the tool call's
+		// arguments; say how far the 1.0 expression follows that.
+		expressed = fmt.Sprintf("these got an expression that blocks a tool call with a command argument that "+
+			"starts or ends with their literal, or a file path or network host that contains it (as a whole word "+
+			"when the pattern has \\b); a literal inside a longer argument that is neither is only recorded "+
 			"(review it): %s", strings.Join(plan.Expressed, ", "))
+		if len(plan.WholeArgument) > 0 {
+			expressed += fmt.Sprintf("; the pack's semantic cost budget left room only for a command argument "+
+				"equal to the literal for %s (turn off rules you do not need, then run the upgrade again)",
+				strings.Join(plan.WholeArgument, ", "))
+		}
 	}
 	if len(plan.Merged) > 0 {
 		// 1.0 refuses two rule files of one category; 0.8.x enforced only

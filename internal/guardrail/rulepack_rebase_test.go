@@ -108,7 +108,7 @@ func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"CMD-RM-RF": "f.commands.exists(c, 'operator-marker' in c.argv)",
+		"CMD-RM-RF": literalRuleExpression("operator-marker", false, false, true),
 		"CMD-SUDO":  "",
 	}
 	for _, rule := range result.Rules {
@@ -182,7 +182,7 @@ func TestRebaseOfAZeroEightNineDefaultCopyKeepsTheOperatorRuleBlocking(t *testin
 	}
 	var marker RulesFileYAML
 	if err := yaml.Unmarshal(plan.Files["rules/upg89-marker.yaml"], &marker); err != nil || len(marker.Rules) != 1 ||
-		marker.Rules[0].Expression != "f.commands.exists(c, 'upg89-block-marker' in c.argv)" {
+		marker.Rules[0].Expression != literalRuleExpression("upg89-block-marker", false, false, true) {
 		t.Fatalf("rebased marker rule %+v, %v", marker.Rules, err)
 	}
 }
@@ -413,5 +413,61 @@ func symlinkOrSkip(t *testing.T, target, link string) {
 	t.Helper()
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
+	}
+}
+
+// GAP-1344: a literal goes into the CEL string unescaped, so literalPattern
+// takes none that would need escaping; and a pack whose literal rules do not
+// all fit the semantic cost budget in their full form still rebases: the
+// ones that do not fit match a whole argument and are named.
+func TestLiteralRuleExpressionsStayValidAndWithinBudget(t *testing.T) {
+	for _, pattern := range []string{`it's`, `say"hi`, `a\\b`, `two words`, `(?i)marker`, `marker-[0-9]`} {
+		if literal, _, _ := literalPattern(pattern); literal != "" {
+			t.Errorf("literalPattern(%q) = %q, want none", pattern, literal)
+		}
+	}
+	if literal, before, after := literalPattern(`\bacme\.own\b`); literal != "acme.own" || !before || !after {
+		t.Errorf("literalPattern(\\bacme\\.own\\b) = %q, %v, %v", literal, before, after)
+	}
+	dir := t.TempDir()
+	files, err := policyassets.Files()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if rel, ok := strings.CutPrefix(file.Path, "guardrail/default/"); ok {
+			target := filepath.Join(dir, filepath.FromSlash(rel))
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, file.Data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	own := "version: 1\ncategory: many-markers\nrules:\n"
+	for i := range 40 {
+		own += fmt.Sprintf("  - id: MARKER-%02d\n    pattern: 'marker-%02d\\.example'\n    title: Marker\n"+
+			"    severity: HIGH\n    confidence: 0.9\n    tags: [marker]\n", i, i)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rules", "many.yaml"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanRulePackRebase(dir)
+	if err != nil || plan == nil {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	full := len(plan.Expressed) - len(plan.WholeArgument)
+	if len(plan.Expressed) != 40 || len(plan.WholeArgument) == 0 || full == 0 ||
+		plan.WholeArgument[0] != fmt.Sprintf("MARKER-%02d", full) {
+		t.Fatalf("expressed %d, whole-argument %v", len(plan.Expressed), plan.WholeArgument)
+	}
+	var rules RulesFileYAML
+	if err := yaml.Unmarshal(plan.Files["rules/many.yaml"], &rules); err != nil {
+		t.Fatal(err)
+	}
+	if rules.Rules[0].Expression != literalRuleExpression("marker-00.example", false, false, true) ||
+		rules.Rules[39].Expression != literalRuleExpression("marker-39.example", false, false, false) {
+		t.Fatalf("expressions %q, %q", rules.Rules[0].Expression, rules.Rules[39].Expression)
 	}
 }

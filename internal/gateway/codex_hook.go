@@ -386,7 +386,8 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// (issue #1092).
 	reason, policy := verdict.Reason, sinkPolicyFor(ctx, verdict.RedactionEnabled)
 	if !a.managedAIDOnly() {
-		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "codex", action, reason, policy)
+		reason, policy = resolveHookBlockReasonForConfig(a.decisionConfig(ctx), "codex", req.HookEventName, action, reason,
+			evalCtx.RuleIDs, policy)
 	}
 	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, reason, verdict.Findings, mode, wouldBlock, policy)
 	if action == "alert" && hasAlertOnlySQLFinding(verdict.Findings) {
