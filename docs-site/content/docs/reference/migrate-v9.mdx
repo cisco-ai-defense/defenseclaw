@@ -364,7 +364,18 @@ that one instead:
 - your own rules, in any rule file and category, are kept. A rule whose
   `pattern` is a plain literal (such as `acme-marker-7f3c` or `acme\.internal`)
   gets the expression `f.commands.exists(c, '<literal>' in c.argv)`, so it
-  blocks a command that has that argument.
+  blocks a command that has that argument;
+- rule files that share a category are merged into the first of them, in
+  file-name order, and every rule is kept. 1.0 needs one file per category
+  (0.8.x took several and enforced only the last one). Categories match
+  regardless of case and surrounding spaces. A moved rule whose ID that file
+  already has is dropped when it is the same rule, and otherwise gets the name
+  of its file as a suffix (`ACME-1` from `rules/acme-extra.yaml` becomes
+  `ACME-1-acme-extra`). The upgrade prints each merge:
+
+  ```text title="Upgrade output"
+  ✓ rule pack /home/<you>/.defenseclaw/policies/guardrail/acme-1.0: rules/acme-extra.yaml (category "command") merged into rules/commands.yaml; 3 rule(s) kept
+  ```
 
 Any other rule of yours keeps only its pattern. The migration names each one,
 and the upgrade prints them on one line:
@@ -377,11 +388,17 @@ and the upgrade prints them on one line:
 ([CEL rules](/docs/policies/cel/authoring)). A pack with nothing to rewrite is
 pinned as it is, and its rules are still named. The original folder is kept
 for a rollback to 0.8.x. The migration record (`migration-v9.json`) lists what
-moved and, under `detection_only_rules`, the rules that no longer block a tool
-call.
+moved, under `detection_only_rules` the rules that no longer block a tool
+call, and under `rule_file_merges` the merged rule files.
 
 A custom pack that cannot be loaded stops the migration with an error that
-names the scope, so a pack you rely on is never dropped silently. Later edits
+names the scope, so a pack you rely on is never dropped silently. So does a
+merge that cannot be done safely (the file would have more than 2,048 rules,
+the files have different versions, or one sets more than `version`, `category`
+and `rules`), and two files of one category in an administrator's pack on a
+managed host, which the migration never rewrites. The error names the edit:
+move the rules of one file into the other, delete it, and run the upgrade
+again. Later edits
 to the pack's files change its digest: validate the pack and update the digest
 (see [Rules](/docs/policies/rules)).
 

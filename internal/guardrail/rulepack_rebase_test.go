@@ -5,6 +5,7 @@ package guardrail
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -182,5 +183,148 @@ func TestRebaseOfAZeroEightNineDefaultCopyKeepsTheOperatorRuleBlocking(t *testin
 	if err := yaml.Unmarshal(plan.Files["rules/upg89-marker.yaml"], &marker); err != nil || len(marker.Rules) != 1 ||
 		marker.Rules[0].Expression != "f.commands.exists(c, 'upg89-block-marker' in c.argv)" {
 		t.Fatalf("rebased marker rule %+v, %v", marker.Rules, err)
+	}
+}
+
+// GAP-1339: 0.8.x took a pack with two rule files of one category (its gateway
+// enforced only the last of them); 1.0 refuses it, so the upgrade stopped.
+// The rebase merges them into the first file of the category, keeping every
+// rule, and a merge it can not do safely names the edit instead.
+func TestRebaseMergesRuleFilesThatShareACategory(t *testing.T) {
+	rule := func(id, pattern, severity string) string {
+		return fmt.Sprintf("  - id: %s\n    pattern: %q\n    title: \"Marker\"\n    severity: %s\n    confidence: 0.9\n    tags: [marker]\n",
+			id, pattern, severity)
+	}
+	file := func(category string, rules ...string) string {
+		return "version: 1\ncategory: " + category + "\nrules:\n" + strings.Join(rules, "")
+	}
+	many := make([]string, maxRulesPerFile)
+	for i := range many {
+		many[i] = rule(fmt.Sprintf("ACME-%d", i), fmt.Sprintf("acme-%d", i), "LOW")
+	}
+	a, b, c := rule("ACME-A", "acme-a", "HIGH"), rule("ACME-B", "acme-b[0-9]", "LOW"), rule("ACME-C", "acme-c", "MEDIUM")
+	cases := []struct {
+		name        string
+		defaultCopy bool
+		files       map[string]string
+		want        map[string]string // rule ID -> severity in the 1.0 copy ("" any)
+		gone        []string
+		merged      string
+		err         string
+	}{
+		{name: "two files of a category of yours",
+			files: map[string]string{"rules/a.yaml": file("acme", a), "rules/b.yaml": file("acme", b)},
+			want:  map[string]string{"ACME-A": "HIGH", "ACME-B": "LOW"}, gone: []string{"rules/b.yaml"},
+			merged: `rules/b.yaml (category "acme") merged into rules/a.yaml; 1 rule(s) kept`},
+		{name: "default pack copy plus a file of its command category", defaultCopy: true,
+			files:  map[string]string{"rules/upg89b-marker.yaml": file("command", rule("UPG89B-MARKER", "upg89b-block-marker", "CRITICAL"))},
+			want:   map[string]string{"UPG89B-MARKER": "CRITICAL", "CMD-RM-RF": ""},
+			gone:   []string{"rules/upg89b-marker.yaml"},
+			merged: `rules/upg89b-marker.yaml (category "command") merged into rules/commands.yaml; 1 rule(s) kept`},
+		{name: "three files",
+			files: map[string]string{"rules/a.yaml": file("acme", a), "rules/b.yaml": file("acme", b), "rules/c.yaml": file("acme", c)},
+			want:  map[string]string{"ACME-A": "HIGH", "ACME-B": "LOW", "ACME-C": "MEDIUM"},
+			gone:  []string{"rules/b.yaml", "rules/c.yaml"}},
+		{name: "case and spacing",
+			files: map[string]string{"rules/a.yaml": file("Acme", a), "rules/b.yaml": file(`" acme "`, b)},
+			want:  map[string]string{"ACME-A": "HIGH", "ACME-B": "LOW"}, gone: []string{"rules/b.yaml"}},
+		{name: "rule ID collision",
+			files: map[string]string{"rules/a.yaml": file("acme", a), "rules/b.yaml": file("acme", a, rule("ACME-A", "acme-z", "MEDIUM"))},
+			want:  map[string]string{"ACME-A": "HIGH", "ACME-A-b": "MEDIUM"}, gone: []string{"rules/b.yaml"},
+			merged: `rules/b.yaml (category "acme") merged into rules/a.yaml; 1 rule(s) kept, 1 identical one(s) were ` +
+				`already there (renamed, as rules/a.yaml has the ID: ACME-A is now ACME-A-b)`},
+		{name: "distinct categories are not merged",
+			files: map[string]string{"rules/a.yaml": file("acme", a), "rules/b.yaml": file("acme-other", b)},
+			want:  map[string]string{"ACME-A": "HIGH", "ACME-B": "LOW"}},
+		{name: "too many rules for one file",
+			files: map[string]string{"rules/a.yaml": file("acme", many...), "rules/b.yaml": file("acme", b)},
+			err:   "Categories must be unique in 1.0: move the rules of rules/b.yaml into rules/a.yaml and delete rules/b.yaml"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			files := map[string][]byte{}
+			if tc.defaultCopy {
+				shipped, err := policyassets.Files()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, f := range shipped {
+					if rel, ok := strings.CutPrefix(f.Path, "guardrail/default/"); ok {
+						files[rel] = f.Data
+					}
+				}
+				for _, name := range legacy08FileNames {
+					if files["rules/"+name], err = legacy08RuleFiles.ReadFile("legacy08/" + name); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			for rel, data := range tc.files {
+				files[rel] = []byte(data)
+			}
+			for rel, data := range files {
+				target := filepath.Join(dir, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			plan, err := PlanRulePackRebase(dir)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("PlanRulePackRebase = %v, want an error naming the edit %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil || plan == nil || plan.Files == nil {
+				t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+			}
+			if tc.merged == "" && len(tc.gone) == 0 && len(plan.Merged) > 0 {
+				t.Errorf("merged %q, want no merge", plan.Merged)
+			}
+			if tc.merged != "" && !slices.Contains(plan.Merged, tc.merged) {
+				t.Errorf("merged %q, want %q", plan.Merged, tc.merged)
+			}
+			copyDir := t.TempDir()
+			for rel, data := range plan.Files {
+				target := filepath.Join(copyDir, filepath.FromSlash(rel))
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, rel := range tc.gone {
+				if _, ok := plan.Files[rel]; ok {
+					t.Errorf("%s is still in the 1.0 copy", rel)
+				}
+			}
+			pack, err := LoadRulePack(copyDir)
+			if err != nil {
+				t.Fatalf("the 1.0 copy does not load: %v", err)
+			}
+			if got := pack.FilesDigest(); got != plan.Digest {
+				t.Errorf("digest %s, plan pins %s", got, plan.Digest)
+			}
+			got := map[string]RuleDefYAML{}
+			for _, ruleFile := range pack.RuleFiles {
+				for _, r := range ruleFile.Rules {
+					got[r.ID] = r
+				}
+			}
+			for id, severity := range tc.want {
+				r, ok := got[id]
+				if !ok || (severity != "" && r.Severity != severity) || (r.Enabled != nil && !*r.Enabled) {
+					t.Errorf("rule %s in the 1.0 copy: %+v (present %v), want enabled with severity %q", id, r, ok, severity)
+				}
+			}
+			if marker, ok := got["UPG89B-MARKER"]; ok && marker.Expression == "" {
+				t.Errorf("the marker rule has no expression, so it no longer blocks a tool call: %+v", marker)
+			}
+		})
 	}
 }
