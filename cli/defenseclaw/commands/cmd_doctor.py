@@ -10121,6 +10121,19 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
     if record.get("acknowledged"):
         return
     _check_migrated_rules(record, r)
+    # GAP-1358: the upgrade pinned a custom pack without its 1.0 copy.
+    for failure in record.get("rule_pack_rebase_failures") or []:
+        if isinstance(failure, str) and failure.isprintable():
+            _emit(
+                "warn",
+                "Rule pack rebase",
+                failure,
+                r=r,
+                check_id="doctor.config.rule-pack-rebase",
+                reason_code="rule-pack-not-rebased",
+                remediation="Rebase the pack on the 1.0 default pack, run `defenseclaw guardrail use-pack <folder>`, "
+                "then `defenseclaw-gateway config migrate --ack`",
+            )
     moved = len(record.get("moved") or [])
     conflicts = len(record.get("conflicts") or [])
     when = str(record.get("migrated_at") or "")[:10] or "an earlier upgrade"

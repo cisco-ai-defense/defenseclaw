@@ -377,7 +377,8 @@ that one instead:
   budget has no room left, the remaining ones block only an argument equal to
   the literal, and the upgrade names those too;
 - a built-in rule whose `pattern` you changed is kept as a rule of yours under
-  an ID of its own, `CUSTOM-<ID>` (`CMD-RM-RF` becomes `CUSTOM-CMD-RM-RF`),
+  an ID of its own, `CUSTOM-<ID>` (`CMD-RM-RF` becomes `CUSTOM-CMD-RM-RF`, or
+  `CUSTOM-CMD-RM-RF-2` when a rule file of the pack already has that ID),
   with your pattern, title, severity and other fields, and gets an expression
   as above (or is named alert-only). The built-in ID keeps the shipped 1.0
   rule: the gateway checks a match of a built-in ID against what the shipped
@@ -432,6 +433,15 @@ moved, under `detection_only_rules` the rules that no longer block a tool
 call, under `rule_file_merges` the merged rule files, and under
 `renamed_rules`, `expressed_rules` and `whole_argument_rules` the rules
 named above.
+
+If the 1.0 copy of a pack that loads as it is can not be made, the pack is
+pinned as it is and its 0.8.x copies of built-in rules and its rules without
+an expression only record tool-call matches. The upgrade prints a warning
+that names the pack and the reason, `migration-v9.json` lists it under
+`rule_pack_rebase_failures`, doctor shows a `Rule pack rebase` warning and
+the gateway writes a HIGH `upgrade` audit event at each start until you run
+`defenseclaw-gateway config migrate --ack`. Rebase the pack by hand on the 1.0
+default pack and pin it with `defenseclaw guardrail use-pack <folder>`.
 
 A custom pack that cannot be loaded stops the migration with an error that
 names the scope, so a pack you rely on is never dropped silently. So does a
@@ -751,6 +761,7 @@ Every run that writes also writes `migration-v9.json` next to `config.yaml`
 | `actions_rows_moved`, `actions_rows_ignored` | The `audit.db` rows moved, and (managed host) left in place. |
 | `notes[]` | Behaviour changes to read, such as the threshold note above. |
 | `renamed_rules[]`, `expressed_rules[]`, `whole_argument_rules[]`, `detection_only_rules[]` | The custom-pack rules the rebase changed: built-in rules you gave a pattern of your own and their new ID (`CMD-RM-RF -> CUSTOM-CMD-RM-RF`), the rules that still block with an expression derived from their literal pattern, the ones of those that block only a command argument equal to the literal, and the ones that only record tool-call matches. |
+| `rule_pack_rebase_failures[]` | The custom packs pinned without their 1.0 copy, each with the reason; their pattern-only rules no longer block a tool call. |
 | `unscannable_mcp[]` | The MCP servers a scan refuses to start: `name`, `connector`, `command`, the scanner's `reason`, the `runtime_effect` and the `fix` command. Written by `defenseclaw migrate` after the commit. |
 | `acknowledged` | Set by `--ack`. |
 

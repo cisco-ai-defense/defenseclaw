@@ -17,13 +17,17 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
@@ -161,6 +165,22 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		return nil, fmt.Errorf("%s rule pack %q: %w", scope, s.dir, err)
 	}
 	return composed, nil
+}
+
+// reportUnrebasedRulePacks raises an alert for each 0.8.x custom pack the
+// upgrade pinned without its 1.0 copy (config.UnrebasedRulePacks): its rules
+// that blocked a tool call with a pattern alone now only record the match
+// (GAP-1358). It repeats at each start until the record is acknowledged.
+func (s *Sidecar) reportUnrebasedRulePacks(ctx context.Context) {
+	cfg := s.currentConfig()
+	if cfg == nil || s.logger == nil || strings.TrimSpace(cfg.DataDir) == "" {
+		return
+	}
+	for _, failure := range config.UnrebasedRulePacks(filepath.Join(cfg.DataDir, config.DefaultConfigName)) {
+		fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+failure)
+		_ = s.logger.LogActionCtxSeverity(ctx, string(audit.ActionUpgrade), "rule-pack",
+			"rule_pack_rebase=failed "+failure, "HIGH")
+	}
 }
 
 func guardrailCustomizations(layers []config.GuardrailRulesConfig) []guardrail.Customization {

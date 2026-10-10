@@ -645,7 +645,10 @@ func copyConfigSharingProfiles(c *Config) (*Config, error) {
 }
 
 // deepCopyConfig copies c through JSON, which keeps nil and empty maps and
-// slices apart (the gateway's cloneConfig uses the same encoding).
+// slices apart (the gateway's cloneConfig uses the same encoding). JSON
+// drops RuntimeV8RulePackRebase (json:"-"), so it is copied explicitly: a
+// derived profile without it scanned with the 0.8.x pack unrebased while
+// every other user got the rebased one (GAP-1359).
 func deepCopyConfig(c *Config) (*Config, error) {
 	data, err := json.Marshal(c)
 	if err != nil {
@@ -655,5 +658,6 @@ func deepCopyConfig(c *Config) (*Config, error) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("copy configuration: %w", err)
 	}
+	out.RuntimeV8RulePackRebase = c.RuntimeV8RulePackRebase
 	return &out, nil
 }

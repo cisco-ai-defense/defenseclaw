@@ -261,8 +261,23 @@ func planRulePackRebase(dir string, fullLiterals int) (*RulePackRebase, error) {
 		return nil, err
 	}
 	changed := len(plan.Merged) > 0 || len(linked) > 0
+	isRuleFile := func(rel string) bool {
+		return path.Dir(rel) == "rules" && path.Ext(rel) == ".yaml" && rel != "rules/local-patterns.yaml"
+	}
+	// Rule IDs are unique across the pack, not per file: the ID a renamed
+	// rule gets must be free in every rule file, or the rebased copy does
+	// not load (GAP-1358).
+	taken := map[string]bool{}
+	for rel, data := range files {
+		var parsed RulesFileYAML
+		if isRuleFile(rel) && yaml.Unmarshal(data, &parsed) == nil {
+			for _, rule := range parsed.Rules {
+				taken[strings.TrimSpace(rule.ID)] = true
+			}
+		}
+	}
 	for _, rel := range slices.Sorted(maps.Keys(files)) {
-		if path.Dir(rel) != "rules" || path.Ext(rel) != ".yaml" || rel == "rules/local-patterns.yaml" {
+		if !isRuleFile(rel) {
 			continue
 		}
 		var parsed RulesFileYAML
@@ -278,7 +293,7 @@ func planRulePackRebase(dir string, fullLiterals int) (*RulePackRebase, error) {
 		var data []byte
 		var err error
 		if shipped, ok := index.defaultFiles[parsed.Category]; ok && has(true) {
-			data, err = rebaseRuleFile(shipped, files[rel], parsed.Category, plan)
+			data, err = rebaseRuleFile(shipped, files[rel], parsed.Category, taken, plan)
 		} else if has(false) {
 			data, err = expressOwnRules(files[rel], parsed.Category, index, plan)
 		}
@@ -627,7 +642,8 @@ func pathWithin(root, target string) (string, bool) {
 // rebaseRuleFile rebuilds a 0.8.x copy of an action rule file on the shipped
 // default's: the built-in rules become their 1.0 versions (kept off when the
 // copy turned them off or removed them) and the operator's own rules follow.
-func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebase) ([]byte, error) {
+// taken holds the rule IDs of the whole pack; the IDs this file adds join it.
+func rebaseRuleFile(shipped, custom []byte, category string, taken map[string]bool, plan *RulePackRebase) ([]byte, error) {
 	var base, old yaml.Node
 	if err := yaml.Unmarshal(shipped, &base); err != nil {
 		return nil, err
@@ -661,9 +677,9 @@ func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebas
 			builtin[id] = item
 		}
 	}
-	present, taken := map[string]bool{}, map[string]bool{}
+	present := map[string]bool{}
 	for _, item := range slices.Concat(baseRules.Content, oldRules.Content) {
-		taken[yamlScalarField(item, "id")] = true
+		taken[strings.TrimSpace(yamlScalarField(item, "id"))] = true
 	}
 	for _, item := range oldRules.Content {
 		id := yamlScalarField(item, "id")
@@ -762,7 +778,7 @@ func expressOwnRule(item *yaml.Node, plan *RulePackRebase) bool {
 }
 
 // operatorRuleID is the ID of a built-in rule the operator gave a pattern of
-// their own: CUSTOM-<ID>, with a -2, -3 suffix when the file has that ID.
+// their own: CUSTOM-<ID>, with a -2, -3 suffix when the pack has that ID.
 func operatorRuleID(id string, taken map[string]bool) string {
 	own := "CUSTOM-" + id
 	for suffix := 2; taken[own]; suffix++ {
