@@ -619,6 +619,47 @@ func TestOTLPInboundRejectsUnverifiedIdentityClaims(t *testing.T) {
 	}
 }
 
+// Claude Code sends semantic-convention user.id (its installation id) on
+// every record: the record is imported without it instead of dropped
+// (GAP-1229).
+func TestOTLPInboundImportsWithoutSenderUserID(t *testing.T) {
+	previousInstance := gatewaylog.SidecarInstanceID()
+	gatewaylog.SetSidecarInstanceID("otlp-sender-user-id-test")
+	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID(previousInstance) })
+
+	fixture := newOTLPTraceFixture(t, "always_on", true, nil)
+	api := &APIServer{}
+	api.bindOTLPObservabilityRuntime(fixture.runtime)
+	classifier := mustOTLPInboundClassifierV8(t)
+	match, ok := classifier.catalog.Match("otlp.genai.span.operation.v1.span.model.chat")
+	if !ok {
+		t.Fatal("generated GenAI chat span match missing")
+	}
+	leaf, source := inboundFixtureLeafForMatch(t, match)
+	now := time.Now().UTC()
+	leaf.span.StartTimeUnixNano = uint64(now.Add(-time.Second).UnixNano())
+	leaf.span.EndTimeUnixNano = uint64(now.UnixNano())
+	leaf.span.Kind = tracepb.Span_SPAN_KIND_CLIENT
+	leaf.span.Attributes = append(leaf.span.Attributes, otlpClassifierStringAttribute("user.id", "sender-install-id"))
+	message := &collectortracepb.ExportTraceServiceRequest{ResourceSpans: []*tracepb.ResourceSpans{{
+		Resource:   &resourcepb.Resource{Attributes: inboundFixtureResourceAttributes(&leaf)},
+		ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{leaf.span}}},
+	}}}
+	accounting, err := api.importDecodedOTLPRequestV8(
+		context.Background(), message, otelSignalTraces, source, now,
+	)
+	if err != nil || !accounting.valid() || accounting.imported != 1 || accounting.invalidMappedField != 0 {
+		t.Fatalf("sender user.id accounting = %+v err=%v", accounting, err)
+	}
+	spans := fixture.pipelines.capture(t, 1).snapshot()
+	if len(spans) != 1 {
+		t.Fatalf("imported spans = %d, want 1", len(spans))
+	}
+	if encoded, _ := json.Marshal(spans[0].Record()); strings.Contains(string(encoded), "sender-install-id") {
+		t.Fatalf("sender user.id reached the canonical span: %s", encoded)
+	}
+}
+
 func TestOTLPInboundIdentityTimeAndProvenance(t *testing.T) {
 	previousInstance := gatewaylog.SidecarInstanceID()
 	gatewaylog.SetSidecarInstanceID("otlp-inbound-identity-test")

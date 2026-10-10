@@ -111,6 +111,9 @@ func (a *APIServer) importDecodedOTLPRequestV8(
 		// Secure Client retains the pre-1.0 import behavior (issue #1092).
 		// Native projection markers are sender-controlled too. Check their
 		// projected body as well as the OTLP leaf attributes.
+		if !a.managedAIDOnly() {
+			leaf = withoutSenderUserIDV8(leaf)
+		}
 		if !a.managedAIDOnly() &&
 			(unverifiedOTLPIdentityClaimV8(leaf.attributes()) ||
 				(classification.match.Shape() == observability.InboundShapeNativeExact &&
@@ -309,6 +312,50 @@ func unverifiedOTLPIdentityClaimV8(index otlpTypedAttributeIndex) bool {
 		}
 	}
 	return false
+}
+
+// Semantic-convention user.id on an OTLP leaf is an identifier of the
+// sender itself: Claude Code puts its anonymous installation id on every log
+// and metric point. That is no DefenseClaw identity claim, so it must not
+// drop the record (every Claude Code batch was dropped, GAP-1229), and it
+// must not reach a canonical record either. Remove it from the leaf so the
+// import never sees it; the local resolver adds the verified user.
+func withoutSenderUserIDV8(leaf otlpDecodedLeaf) otlpDecodedLeaf {
+	const key = "user.id"
+	if _, state := leaf.attributes().lookup(key); state == otlpTypedAttributeAbsent {
+		return leaf
+	}
+	switch {
+	case leaf.signal == otelSignalLogs && leaf.logRecord != nil:
+		leaf.logRecord.Attributes = withoutOTLPAttributeV8(leaf.logRecord.Attributes, key)
+		leaf.leafAttributes = newOTLPTypedAttributeIndex(leaf.logRecord.Attributes)
+	case leaf.signal == otelSignalTraces && leaf.span != nil:
+		leaf.span.Attributes = withoutOTLPAttributeV8(leaf.span.Attributes, key)
+		leaf.leafAttributes = newOTLPTypedAttributeIndex(leaf.span.Attributes)
+	case leaf.numberPoint != nil:
+		leaf.numberPoint.Attributes = withoutOTLPAttributeV8(leaf.numberPoint.Attributes, key)
+		leaf.metricPointAttributes = newOTLPTypedAttributeIndex(leaf.numberPoint.Attributes)
+	case leaf.histogramPoint != nil:
+		leaf.histogramPoint.Attributes = withoutOTLPAttributeV8(leaf.histogramPoint.Attributes, key)
+		leaf.metricPointAttributes = newOTLPTypedAttributeIndex(leaf.histogramPoint.Attributes)
+	case leaf.exponentialHistogram != nil:
+		leaf.exponentialHistogram.Attributes = withoutOTLPAttributeV8(leaf.exponentialHistogram.Attributes, key)
+		leaf.metricPointAttributes = newOTLPTypedAttributeIndex(leaf.exponentialHistogram.Attributes)
+	case leaf.summaryPoint != nil:
+		leaf.summaryPoint.Attributes = withoutOTLPAttributeV8(leaf.summaryPoint.Attributes, key)
+		leaf.metricPointAttributes = newOTLPTypedAttributeIndex(leaf.summaryPoint.Attributes)
+	}
+	return leaf
+}
+
+func withoutOTLPAttributeV8(attributes []*commonpb.KeyValue, key string) []*commonpb.KeyValue {
+	kept := make([]*commonpb.KeyValue, 0, len(attributes))
+	for _, attribute := range attributes {
+		if attribute == nil || attribute.GetKey() != key {
+			kept = append(kept, attribute)
+		}
+	}
+	return kept
 }
 
 func unverifiedNativeOTLPIdentityClaimV8(leaf otlpDecodedLeaf) bool {
