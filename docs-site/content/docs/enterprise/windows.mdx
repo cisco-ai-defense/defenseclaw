@@ -175,7 +175,8 @@ guardrail:
 Each key under `guardrail.connectors` turns on protection for that agent; an
 empty value (`{}`) enables it with the default settings. A config with no
 connectors protects nothing: `status` warns `no_connectors_enabled` and
-`verify` fails. See
+`verify` fails. Per-user agents count: a config that lists only per-user
+agents, such as OpenCode, Copilot and Hermes, is valid. See
 [Choose the agents to protect](/docs/enterprise/configuration#choose-the-agents-to-protect)
 and the [settings reference](/docs/enterprise/configuration#settings-reference).
 
@@ -700,7 +701,11 @@ signals; it takes the account name or SID), then the runtime discovery
 planes (`ai_discovery.runtime`) with their state, last poll and findings.
 Standard accounts cannot run it.
 
-The `discovery` view names each skill and MCP server per user. Install
+The `discovery` view names each skill and MCP server per user, including
+the Devin servers in each user's `%APPDATA%\devin\mcp_config.json`. The
+service may read that one file, not the guardian-protected folder around it;
+a file Devin replaces is readable again after the next hook enumerator cycle
+(every 5 minutes). Install
 admission is separate: see [Scan skills, MCP servers and plugins](#scan-skills-mcp-servers-and-plugins). Your observability destinations get the
 `ai_component.discovered`, `changed` and `removed` records with the user
 (`user.id`, `defenseclaw.user.name`) but without the skill or MCP server
@@ -717,8 +722,8 @@ for the folders the service may read in each profile.
 ## Scan skills, MCP servers and plugins
 
 The gateway service watches the skill and plugin folders of every user the
-hook guardian protects, for each connector, and the Codex and Claude Code MCP
-server lists in those users' profiles. A skill, plugin or MCP server that
+hook guardian protects, for each connector, and the Codex, Claude Code and
+Devin MCP server lists in those users' profiles. A skill, plugin or MCP server that
 appears there goes through install admission with the scanners in the scanner
 runtime and the `admission` and `scanners` keys of the admin config, as on a
 per-user install:

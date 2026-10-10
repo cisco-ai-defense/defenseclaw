@@ -97,7 +97,8 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 			{ID: "hermes", Name: "Hermes", SupportedConnector: "hermes", ConfigPaths: []string{"$LOCALAPPDATA/hermes/skills"}},
 			{ID: "kiro", Name: "Kiro", SupportedConnector: "kiro", ConfigPaths: []string{"~/.kiro/settings/cli.json", "$LOCALAPPDATA/Kiro-Cli"}},
 			{ID: "copilot", Name: "GitHub Copilot", SupportedConnector: "copilot", ConfigPaths: []string{"~/.copilot/config.json", "$LOCALAPPDATA/copilot/pkg"}},
-			{ID: "devin", Name: "Devin", SupportedConnector: "devin", ConfigPaths: []string{"$APPDATA/devin/config.json", "$LOCALAPPDATA/devin/cli"}},
+			{ID: "devin", Name: "Devin", SupportedConnector: "devin", ConfigPaths: []string{"$APPDATA/devin/config.json", "$LOCALAPPDATA/devin/cli"},
+				MCPPaths: []string{"$APPDATA/devin/mcp_config.json"}},
 			{ID: "amp", Name: "Amp", SupportedConnector: "amp", ConfigPaths: []string{"~/.config/amp/settings.json", "$APPDATA/npm/node_modules/@ampcode/cli"}},
 			{ID: "cursor", Name: "Cursor", SupportedConnector: "cursor", ConfigPaths: []string{"~/.cursor/mcp.json", "$LOCALAPPDATA/cursor-agent"}},
 		},
@@ -121,6 +122,21 @@ func TestServiceContextScanAttributesSignalsToProfileOwner(t *testing.T) {
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("config signals by signature/user = %v, want %v", got, want)
+	}
+
+	// GAP-1237: bob's Devin MCP server is listed for bob.
+	bobDevin := filepath.Join(bob, "AppData", "Roaming", "devin")
+	if err := os.MkdirAll(bobDevin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	devinMCP := `{"mcpServers":{"wma-mcp-memory":{"command":"npx","args":["-y","@modelcontextprotocol/server-memory"]}}}`
+	if err := os.WriteFile(filepath.Join(bobDevin, "mcp_config.json"), []byte(devinMCP), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mcp := s.detectMCPPaths()
+	if len(mcp) != 1 || mcp[0].SignatureID != "devin" || mcp[0].UserName != "bob" ||
+		fmt.Sprint(mcp[0].Basenames) != "[mcp_config.json wma-mcp-memory]" {
+		t.Fatalf("Devin MCP signals = %+v", mcp)
 	}
 
 	procs := []processInfo{

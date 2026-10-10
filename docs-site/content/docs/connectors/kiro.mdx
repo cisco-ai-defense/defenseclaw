@@ -38,6 +38,11 @@ Kiro has two hook surfaces, so setup installs two hook configs:
 
 Restart Kiro CLI or run `/agent swap defenseclaw` so `/hooks` lists them.
 
+When you add an MCP server with Kiro, the running gateway reads the user
+`~/.kiro/settings/mcp.json` and the configured workspace's
+`.kiro/settings/mcp.json`. It scans a new server and records an admission
+verdict within about 30 seconds. In action mode, a blocked server is denied.
+
 ### How the hook files are written
 
 - **Agent hooks (CLI 2.x).** The `preToolUse` and `postToolUse` hooks use the

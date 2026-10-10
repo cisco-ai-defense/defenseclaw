@@ -88,8 +88,17 @@ _DISPLAY_HOOK_EVENTS = frozenset({"messagedisplay", "post_llm_call"})
 # promptNoticeOnlyEvent). Keyed by (connector, event).
 _PROMPT_NOTICE_HOOK_EVENTS = frozenset({("hermes", "pre_llm_call"), ("amp", "agent.start")})
 
+# Copilot CLI has no hook that can stop a prompt and DefenseClaw adds no
+# notice there, so a prompt finding is only detected, in every mode
+# (GAP-1244). Keyed by (connector, event), events lower-cased.
+_PROMPT_DETECTION_ONLY_HOOK_EVENTS = frozenset({
+    ("copilot", "userpromptsubmitted"), ("copilot", "userpromptsubmit"),
+    ("copilot", "userprompttransformed"),
+})
+
 POST_TOOL_DECISION = "detected after the tool ran (cannot block)"
 DISPLAY_DECISION = "detected in the displayed reply (cannot block)"
+PROMPT_DETECTED_DECISION = "detected in the prompt (cannot block)"
 PROMPT_NOTICE_DECISION = "agent told not to carry out the prompt (prompts cannot be blocked)"
 OBSERVE_DECISION = "would block (observe mode)"
 
@@ -98,7 +107,10 @@ def detection_only_hook_label(event: str) -> str:
     """Decision label of a finding on a hook event that cannot block, else "".
 
     Accepts a bare event name or a ``connector:Event`` hook target."""
-    name = str(event or "").strip().rsplit(":", 1)[-1].strip().lower()
+    connector, _, name = str(event or "").strip().rpartition(":")
+    name = name.strip().lower()
+    if (connector.strip().lower(), name) in _PROMPT_DETECTION_ONLY_HOOK_EVENTS:
+        return PROMPT_DETECTED_DECISION
     if name in _POST_TOOL_HOOK_EVENTS:
         return POST_TOOL_DECISION
     if name in _DISPLAY_HOOK_EVENTS:
