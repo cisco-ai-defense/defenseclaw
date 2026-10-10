@@ -147,6 +147,13 @@ installed. Every path keeps your configuration and data.
   `data.json` becomes `data.json.migrated-v9`, and `migration-v9.json` records
   every value that moved and every conflict that was settled. An unmodified
   install moves one value. See [Config migration](#config-migration).
+- MCP servers your agents already have keep running. At its first start the
+  gateway records a baseline for each one (one scan; findings raise alerts)
+  instead of admitting it again, so a server the scanner cannot start, such
+  as a command path added with `mcp set --skip-scan`, shows `scan failed` in
+  `defenseclaw mcp list` and is not blocked. A server on a block list stays
+  blocked, and the upgrade summary names it. A server you change or add
+  afterwards goes through install admission.
 - On Windows, the installer also removes a 0.8.x native Setup installation
   (its program folder, sign-in start entry, Add/Remove Programs entry, and
   `PATH` entry). The old program files are kept in

@@ -231,7 +231,9 @@ def test_failing_step_names_itself(data_dir: Path, monkeypatch: pytest.MonkeyPat
         migrate(str(data_dir), from_version="0.8.4")
 
 
-def test_v8_config_runs_the_go_v9_step(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_v8_config_runs_the_go_v9_step(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
     from defenseclaw import config_inspect
 
     config = _write_config(data_dir, "config_version: 8\nobservability: {}\n")
@@ -240,7 +242,8 @@ def test_v8_config_runs_the_go_v9_step(data_dir: Path, monkeypatch: pytest.Monke
     def go_migrate(*, config_path: str, **_kwargs):
         calls.append(config_path)
         Path(config_path).write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
-        return {"migrated": True, "record": {"moved": [{"to": "update.check"}], "conflicts": []}}
+        moved = [{"to": "update.check"}, {"to": "asset_policy.mcp.denied", "value": "bad-mcp"}]
+        return {"migrated": True, "record": {"moved": moved, "conflicts": []}}
 
     monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
     monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
@@ -250,6 +253,8 @@ def test_v8_config_runs_the_go_v9_step(data_dir: Path, monkeypatch: pytest.Monke
     assert calls == [str(config)]
     assert result.applied == ["config_version 8 → 9"]
     assert result.to_config_version == 9
+    # GAP-1227: the summary names the MCP servers the upgrade keeps blocked.
+    assert "MCP servers that stay blocked (asset_policy.mcp.denied): bad-mcp" in capsys.readouterr().out
 
 
 def test_secure_client_config_stays_on_v8_without_a_migration(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
