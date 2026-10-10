@@ -6,6 +6,7 @@ package guardrail
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -326,5 +327,91 @@ func TestRebaseMergesRuleFilesThatShareACategory(t *testing.T) {
 				t.Errorf("the marker rule has no expression, so it no longer blocks a tool call: %+v", marker)
 			}
 		})
+	}
+}
+
+// GAP-1346: the 0.8.x loader read rule files through links, and 1.0 refuses a
+// link in a pack. The rebase reads a link inside the pack into the 1.0 copy in
+// its place; a link that does not resolve, leads out of the pack or loops
+// fails it, so the copy never misses a rule 0.8.x enforced.
+func TestRebaseFollowsLinksInsideThePackOnly(t *testing.T) {
+	commands, err := legacy08RuleFiles.ReadFile("legacy08/commands.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom := []byte("version: 1\ncategory: link-marker\nrules:\n" +
+		"  - id: LINK-MARKER-BLOCK\n    pattern: \"link-block-marker\"\n    title: \"Marker\"\n" +
+		"    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n")
+	for _, tc := range []struct {
+		name  string
+		build func(t *testing.T, pack, outside string)
+		err   string
+	}{
+		{name: "linked rule file", build: func(t *testing.T, pack, _ string) {
+			writeRebaseTestFile(t, filepath.Join(pack, "rules", "commands.yaml"), commands)
+			writeRebaseTestFile(t, filepath.Join(pack, "shared", "custom.yaml"), custom)
+			symlinkOrSkip(t, filepath.Join("..", "shared", "custom.yaml"), filepath.Join(pack, "rules", "custom.yaml"))
+		}},
+		{name: "linked rules folder", build: func(t *testing.T, pack, _ string) {
+			writeRebaseTestFile(t, filepath.Join(pack, "rules-src", "commands.yaml"), commands)
+			writeRebaseTestFile(t, filepath.Join(pack, "rules-src", "custom.yaml"), custom)
+			symlinkOrSkip(t, "rules-src", filepath.Join(pack, "rules"))
+		}},
+		{name: "dangling link", err: "does not resolve", build: func(t *testing.T, pack, _ string) {
+			writeRebaseTestFile(t, filepath.Join(pack, "rules", "commands.yaml"), commands)
+			symlinkOrSkip(t, "gone.yaml", filepath.Join(pack, "rules", "custom.yaml"))
+		}},
+		{name: "link out of the pack", err: "outside the rule pack", build: func(t *testing.T, pack, outside string) {
+			writeRebaseTestFile(t, filepath.Join(pack, "rules", "commands.yaml"), commands)
+			writeRebaseTestFile(t, filepath.Join(outside, "custom.yaml"), custom)
+			symlinkOrSkip(t, filepath.Join(outside, "custom.yaml"), filepath.Join(pack, "rules", "custom.yaml"))
+		}},
+		{name: "link loop", err: "a loop", build: func(t *testing.T, pack, _ string) {
+			writeRebaseTestFile(t, filepath.Join(pack, "rules", "commands.yaml"), commands)
+			symlinkOrSkip(t, "..", filepath.Join(pack, "rules", "again"))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pack, outside := t.TempDir(), t.TempDir()
+			tc.build(t, pack, outside)
+			plan, err := PlanRulePackRebase(pack)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("PlanRulePackRebase returned plan %t, error %v; want an error with %q", plan != nil, err, tc.err)
+				}
+				return
+			}
+			if err != nil || plan == nil || len(plan.Linked) != 1 {
+				t.Fatalf("PlanRulePackRebase returned plan %t, error %v; want a copy that names the link", plan != nil, err)
+			}
+			copyDir := t.TempDir()
+			for rel, data := range plan.Files {
+				writeRebaseTestFile(t, filepath.Join(copyDir, filepath.FromSlash(rel)), data)
+			}
+			copied, err := LoadRulePack(copyDir)
+			if err != nil || copied.FilesDigest() != plan.Digest {
+				t.Fatalf("the 1.0 copy loads %v with digest %s, want the pinned %s", err, copied.FilesDigest(), plan.Digest)
+			}
+			if !bytes.Contains(plan.Files["rules/custom.yaml"], []byte("LINK-MARKER-BLOCK")) {
+				t.Fatalf("the 1.0 copy lost the linked rule: files %v", slices.Sorted(maps.Keys(plan.Files)))
+			}
+		})
+	}
+}
+
+func writeRebaseTestFile(t *testing.T, target string, data []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func symlinkOrSkip(t *testing.T, target, link string) {
+	t.Helper()
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
 	}
 }

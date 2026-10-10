@@ -304,10 +304,11 @@ func (l *lifecycle) restoreTamperedMachinePolicy(record *Deployment) bool {
 	want := intersectSorted(record.MachinePolicyConnectors, intended)
 	// Verify checks hook command coverage, but a narrowed Claude matcher can
 	// leave those commands present while disabling the hook for other tools.
-	// The guardian detects byte drift in the drop-in DefenseClaw owns whole;
-	// use that same ownership record before deciding that ensure is a no-op.
+	// The guardian detects byte drift in the drop-ins DefenseClaw owns whole
+	// (Claude Code and Copilot); use those same ownership records before
+	// deciding that ensure is a no-op.
 	tamperedDropIn := false
-	if contains(want, enterprisepolicy.ConnectorClaudeCode) {
+	if contains(want, enterprisepolicy.ConnectorClaudeCode) || contains(want, enterprisepolicy.ConnectorCopilot) {
 		if manager, ok := env.MachinePolicy.(*policyManager); ok {
 			if opts, err := manager.options(nil); err == nil {
 				tamperedDropIn = len(enterprisepolicy.TamperedDropIns(opts)) != 0

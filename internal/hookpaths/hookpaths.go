@@ -20,6 +20,10 @@ const Header = "X-DefenseClaw-Resolved-Writes"
 // prevents it from validating that directory locally.
 const CWDKey = "\x00cwd"
 
+// TruncatedKey means at least one static write target could not fit in the
+// bounded evidence. The gateway must not treat the remaining map as complete.
+const TruncatedKey = "\x00truncated"
+
 // Resolve returns a bounded, header-safe map from absolute write operands to
 // their filesystem targets. An empty value means resolution was attempted but
 // could not be trusted. A regular file maps to itself.
@@ -67,6 +71,7 @@ func Resolve(payload []byte) string {
 		}
 	}
 	targets := map[string]string{CWDKey: cwd}
+	writeCount := 0
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
 			continue
@@ -82,8 +87,16 @@ func Resolve(payload []byte) string {
 			path = filepath.Join(cwd, path)
 		}
 		path = filepath.Clean(path)
-		if len(path) > 1024 || len(targets) >= 32 {
+		if len(path) > 1024 {
+			targets[TruncatedKey] = "1"
 			continue
+		}
+		if _, present := targets[path]; !present && writeCount >= 32 {
+			targets[TruncatedKey] = "1"
+			continue
+		}
+		if _, present := targets[path]; !present {
+			writeCount++
 		}
 		_, statErr := os.Lstat(path)
 		resolved, err := filepath.EvalSymlinks(path)
@@ -102,8 +115,17 @@ func Resolve(payload []byte) string {
 		}
 	}
 	encoded, err := json.Marshal(targets)
-	if err != nil || len(encoded) > 6<<10 {
+	if err != nil {
 		return ""
+	}
+	if len(encoded) > 6<<10 {
+		// Preserve a non-authoritative header even when short paths fill
+		// the byte budget before the target-count budget is reached.
+		targets = map[string]string{CWDKey: cwd, TruncatedKey: "1"}
+		encoded, err = json.Marshal(targets)
+		if err != nil || len(encoded) > 6<<10 {
+			return ""
+		}
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
@@ -118,7 +140,8 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > 32 {
+	if json.Unmarshal(data, &targets) != nil || len(targets) > 34 ||
+		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") {
 		return nil, false
 	}
 	return targets, true

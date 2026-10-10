@@ -15,24 +15,31 @@ import "time"
 // TamperedDropIns lists the machine-policy drop-ins DefenseClaw owns whole
 // and published (an ownership record names them) whose bytes are no longer
 // the ones it wrote, or that are gone: the Claude Code managed-settings
-// drop-in. The standalone Unix hook guardian checks them between lifecycle
-// runs, because an edited or deleted drop-in left the hooks off for every
-// user until an administrator ran repair (GAP-1178). Shared vendor files,
-// which administrators edit too, are left to verify.
+// drop-in and the GitHub Copilot CLI policy.d drop-in. The standalone Unix
+// hook guardian checks them between lifecycle runs, because an edited or
+// deleted drop-in left the hooks off for every user until an administrator
+// ran repair (GAP-1178, GAP-1348). Shared vendor files, which administrators
+// edit too, are left to verify.
 func TamperedDropIns(opts Options) []string {
-	expected, err := claudeDropInPath(opts)
-	if err != nil {
-		return nil
+	var tampered []string
+	for _, owned := range []struct {
+		connector string
+		path      func(Options) (string, error)
+	}{{claudeConnector, claudeDropInPath}, {copilotConnector, copilotDropInPath}} {
+		expected, err := owned.path(opts)
+		if err != nil {
+			continue
+		}
+		record, err := loadRecord(opts, owned.connector)
+		if err != nil || record == nil || record.Path != expected || record.PostimageSHA256 == "" {
+			continue
+		}
+		current, exists, err := readPolicyFile(opts, record.Path)
+		if err != nil || !exists || sha256Hex(current) != record.PostimageSHA256 {
+			tampered = append(tampered, record.Path)
+		}
 	}
-	record, err := loadRecord(opts, claudeConnector)
-	if err != nil || record == nil || record.Path != expected || record.PostimageSHA256 == "" {
-		return nil
-	}
-	current, exists, err := readPolicyFile(opts, record.Path)
-	if err != nil || !exists || sha256Hex(current) != record.PostimageSHA256 {
-		return []string{record.Path}
-	}
-	return nil
+	return tampered
 }
 
 // ClaudeDropInRestoredAt is when DefenseClaw last put back its Claude Code

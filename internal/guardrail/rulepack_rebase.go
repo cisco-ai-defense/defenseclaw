@@ -21,6 +21,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -191,6 +192,10 @@ type RulePackRebase struct {
 	// was done ("rules/b.yaml (category \"acme\") merged into rules/a.yaml;
 	// 2 rule(s) kept"): 1.0 refuses two files of one category (GAP-1339).
 	Merged []string
+	// Linked names each link of the pack and its target ("rules/custom.yaml
+	// -> shared/custom.yaml"): 1.0 refuses a link in a pack, so the copy
+	// holds the file it points to in its place (GAP-1346).
+	Linked []string
 	// mergedAway holds the files Merged folded into another.
 	mergedAway map[string]bool
 }
@@ -203,15 +208,15 @@ func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
 	if err != nil {
 		return nil, err
 	}
-	files, err := readRulePackTree(dir)
+	files, linked, err := readRulePackTree(dir)
 	if err != nil {
 		return nil, err
 	}
-	plan := &RulePackRebase{Files: files}
+	plan := &RulePackRebase{Files: files, Linked: linked}
 	if err := mergeDuplicateCategories(files, plan); err != nil {
 		return nil, err
 	}
-	changed := len(plan.Merged) > 0
+	changed := len(plan.Merged) > 0 || len(linked) > 0
 	for _, rel := range slices.Sorted(maps.Keys(files)) {
 		if path.Dir(rel) != "rules" || path.Ext(rel) != ".yaml" || rel == "rules/local-patterns.yaml" {
 			continue
@@ -288,7 +293,11 @@ func RebaseLoadedRulePack(dir string, source *RulePack) (*RulePack, error) {
 	if currentDigest != source.FilesDigest() {
 		return nil, fmt.Errorf("source rule pack changed while rebasing in memory")
 	}
-	absDir, err := filepath.Abs(dir)
+	// The loader records each rule file under the pack's resolved folder.
+	absDir, err := filepath.EvalSymlinks(dir)
+	if err == nil {
+		absDir, err = filepath.Abs(absDir)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -442,36 +451,133 @@ func mergeDuplicateCategories(files map[string][]byte, plan *RulePackRebase) err
 	return nil
 }
 
-// readRulePackTree reads every regular file under dir, within the loader's limits.
-func readRulePackTree(dir string) (map[string][]byte, error) {
-	files := map[string][]byte{}
+// readRulePackTree reads the files of the pack in dir, within the loader's
+// limits, the way the 0.8.x loader read them: through links (GAP-1346). 1.0
+// refuses a link in a pack, so the 1.0 copy holds the file a link points to
+// in its place, and leaves out a YAML file outside the 1.0 layout that only a
+// link reaches. A link that does not resolve, leads out of the pack or loops
+// fails the rebase: its copy would miss rules 0.8.x enforced. linked names
+// each link and its target.
+func readRulePackTree(dir string) (files map[string][]byte, linked []string, err error) {
+	root, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	type treeFile struct {
+		real    string
+		data    []byte
+		viaLink bool
+	}
+	tree := map[string]treeFile{}
+	var targets []string
 	var total int64
-	err := filepath.WalkDir(dir, func(full string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() || !entry.Type().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(dir, full)
+	entries := 0
+	read := func(rel, real string, viaLink bool) error {
+		handle, err := openRulePackFile(real)
 		if err != nil {
-			return err
+			return fmt.Errorf("read %s: %w", rel, err)
 		}
-		info, err := entry.Info()
+		defer handle.Close()
+		if info, err := handle.Stat(); err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("read %s: not a regular file", rel)
+		}
+		data, err := io.ReadAll(io.LimitReader(handle, maxRulePackAggregateBytes-total+1))
 		if err != nil {
-			return err
+			return fmt.Errorf("read %s: %w", rel, err)
 		}
-		if total += info.Size(); total > maxRulePackAggregateBytes || len(files) >= maxRulePackInventoryEntries {
+		if total += int64(len(data)); total > maxRulePackAggregateBytes {
 			return errors.New("the rule pack is larger than a rule pack may be")
 		}
-		data, err := os.ReadFile(full)
+		tree[rel] = treeFile{real: real, data: data, viaLink: viaLink}
+		return nil
+	}
+	var walk func(real, rel string, ancestors []string, viaLink bool) error
+	walk = func(real, rel string, ancestors []string, viaLink bool) error {
+		list, err := os.ReadDir(real)
 		if err != nil {
 			return err
 		}
-		files[filepath.ToSlash(rel)] = data
+		for _, entry := range list {
+			if entries++; entries > maxRulePackInventoryEntries {
+				return errors.New("the rule pack is larger than a rule pack may be")
+			}
+			full, name := filepath.Join(real, entry.Name()), path.Join(rel, entry.Name())
+			mode := entry.Type()
+			switch {
+			case mode.IsDir():
+				if err := walk(full, name, append(ancestors[:len(ancestors):len(ancestors)], full), viaLink); err != nil {
+					return err
+				}
+				continue
+			case mode.IsRegular():
+				if err := read(name, full, viaLink); err != nil {
+					return err
+				}
+				continue
+			case mode&(fs.ModeSymlink|fs.ModeIrregular) == 0:
+				continue // a socket, pipe or device is no rule file
+			}
+			// A link (or a Windows junction).
+			target, err := filepath.EvalSymlinks(full)
+			if err != nil {
+				return fmt.Errorf("%s is a link that does not resolve (its target is missing, or the links loop): "+
+					"point it at the file, or remove it, then run the upgrade again", name)
+			}
+			inside, ok := pathWithin(root, target)
+			if !ok {
+				return fmt.Errorf("%s links to %s, outside the rule pack %s, and 1.0 reads no file outside a pack: "+
+					"replace the link with the file it points to, then run the upgrade again", name, target, root)
+			}
+			info, err := os.Stat(target)
+			if err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			linked = append(linked, name+" -> "+inside)
+			targets = append(targets, target)
+			switch {
+			case info.IsDir():
+				if slices.Contains(ancestors, target) {
+					return fmt.Errorf("%s links to %s, a folder it is in (a loop): remove the link, then run the "+
+						"upgrade again", name, inside)
+				}
+				err = walk(target, name, append(ancestors[:len(ancestors):len(ancestors)], target), true)
+			case info.Mode().IsRegular():
+				err = read(name, target, true)
+			default:
+				err = fmt.Errorf("%s links to %s, which is not a file or a folder", name, inside)
+			}
+			if err != nil {
+				return err
+			}
+		}
 		return nil
-	})
-	return files, err
+	}
+	if err := walk(root, "", []string{root}, false); err != nil {
+		return nil, nil, err
+	}
+	files = make(map[string][]byte, len(tree))
+	for rel, file := range tree {
+		extension := strings.ToLower(path.Ext(rel))
+		stray := (extension == ".yaml" || extension == ".yml") && !isRecognizedRulePackYAML(rel)
+		if stray && !file.viaLink && slices.ContainsFunc(targets, func(target string) bool {
+			_, ok := pathWithin(target, file.real)
+			return ok
+		}) {
+			continue // the copy holds it where the link was
+		}
+		files[rel] = file.data
+	}
+	return files, linked, nil
+}
+
+// pathWithin returns target relative to root (slash-separated) when target
+// is root or below it.
+func pathWithin(root, target string) (string, bool) {
+	rel, err := filepath.Rel(root, target)
+	if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(rel), true
 }
 
 // rebaseRuleFile rebuilds a 0.8.x copy of an action rule file on the shipped

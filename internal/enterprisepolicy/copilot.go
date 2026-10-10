@@ -104,6 +104,20 @@ func copilotHandlerIsOwned(opts Options, raw any) bool {
 	return strings.HasPrefix(command, shellQuote(opts.HookBinary)+" hook --connector copilot --enterprise-managed --event ")
 }
 
+// copilotHandlerIsIntact reports a DefenseClaw handler whose command is the
+// one DefenseClaw renders for event, byte for byte. Copilot runs the field
+// through a shell, so the prefix match that identifies DefenseClaw's
+// handler also accepted trailing shell text (a redirection and an || true
+// fallback) that discards the hook's deny while verify reported coverage
+// (GAP-1348).
+func copilotHandlerIsIntact(opts Options, event string, raw any) bool {
+	field := "bash"
+	if opts.goos() == "windows" {
+		field = "powershell"
+	}
+	return stringField(raw, "type") == "command" && stringField(raw, field) == stringField(copilotHandler(opts, event, 0), field)
+}
+
 func inspectCopilot(opts Options, state *State) error {
 	dir, err := CopilotPolicyDir(opts)
 	if err != nil {
@@ -167,6 +181,9 @@ func inspectCopilot(opts Options, state *State) error {
 				if copilotHandlerIsOwned(opts, handler) {
 					state.OwnedEntries++
 					ownedPerEvent[event]++
+					if !copilotHandlerIsIntact(opts, event, handler) {
+						state.entryConflict("%s: the DefenseClaw policy hook for Copilot event %s is not the command DefenseClaw publishes, so it may not enforce; the next lifecycle run that applies changes (ensure, repair or reconcile) rewrites it", file, event)
+					}
 				} else {
 					state.ForeignEntries++
 				}
