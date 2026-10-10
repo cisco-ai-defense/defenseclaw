@@ -297,17 +297,22 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 // published for the account sid: the gateway service account cannot read
 // ~/.claude.json in the profile root, which holds the user-scope and
 // local-scope servers (GAP-0424). The marker is set when the enumerator
-// could not read that file either (GAP-0829).
+// could not read that file either (GAP-0829). The enumerator publishes a
+// record for every user it enrolls for Claude Code, an empty one when the
+// user has no state, so a missing record is unreadable state too: the
+// publication failed and the gateway does not know that user's servers
+// (GAP-1298).
 func enrolledClaudeMCPServers(cfg *config.Config, sid string) ([]config.MCPServerEntry, *enterprisehooks.ClaudeStateUnreadable) {
 	dir := enterprisehooks.ClaudeMCPSpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
 	servers, unreadable, err := enterprisehooks.ReadClaudeMCPSpool(dir, sid, validateManagedGuardianAuthorization)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
 	if err != nil {
+		reason := err.Error()
+		if errors.Is(err, os.ErrNotExist) {
+			reason = "MCP spool record missing"
+		}
 		return nil, &enterprisehooks.ClaudeStateUnreadable{
 			Path:   filepath.Join(dir, strings.ToUpper(strings.TrimSpace(sid))+".json"),
-			Reason: err.Error(),
+			Reason: reason,
 		}
 	}
 	return servers, unreadable
