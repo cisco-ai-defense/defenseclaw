@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -512,6 +513,77 @@ func TestWindowsEnterpriseDiscoveryQualifiedUserExcludesAmbiguousRuntimeFinding(
 			(tc.want != 3 && (len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != tc.want)) {
 			t.Fatalf("--user %q runtime findings: %s", tc.user, out.String())
 		}
+	}
+}
+
+// GAP-1117/GAP-1250: every spelling of one account lists that account and
+// exactly its runtime findings; a host-wide finding the gateway could not
+// attribute matches no account and is listed apart.
+func TestWindowsEnterpriseDiscoveryUserFormsListOnlyThatAccountsRuntimeFindings(t *testing.T) {
+	const aliceSID, bobSID = "S-1-5-21-1-2-3-1104", "S-1-5-21-9-8-7-1001"
+	previousReport, previousIDs, previousCfg := enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg
+	t.Cleanup(func() {
+		enterpriseDiscoveryGatewayReport, enterpriseDiscoveryAccountIDs, cfg = previousReport, previousIDs, previousCfg
+	})
+	cfg = nil
+	enterpriseDiscoveryGatewayReport = func() (enterpriseGatewayAIUsage, string, error) {
+		return enterpriseGatewayAIUsage{Enabled: true, Signals: []inventory.AISignal{
+			{Name: "Codex", Category: "supported_connector", UserName: "alice", UserID: aliceSID},
+			{Name: "Codex", Category: "supported_connector", UserName: "bob", UserID: bobSID},
+		}}, "127.0.0.1:18970", nil
+	}
+	// A fake LSA: the workgroup test host has no DCLAB domain.
+	enterpriseDiscoveryAccountIDs = func(user string) []string {
+		return map[string][]string{`DCLAB\alice`: {aliceSID}, `DCFC-WIN2-RS1\bob`: {bobSID}, `.\bob`: {bobSID}}[user]
+	}
+	findings := []enterpriseRuntimeFinding{
+		{PID: 10, Process: "codex.exe", User: `DCLAB\alice`, UserSID: aliceSID, Attribution: "process_owner"},
+		{PID: 11, Process: "uvx.exe", User: `DCLAB\alice`, UserSID: aliceSID, Attribution: "session"},
+		{PID: 20, Process: "python.exe", User: `DCFC-WIN2-RS1\bob`, UserSID: bobSID, Attribution: "enrolled_profile"},
+		{PID: 30, Process: "claude", Attribution: "unattributed", AttributionReason: "owner unknown"},
+	}
+	stubEnterpriseDiscoveryRuntime(t, nil, nil)
+	enterpriseDiscoveryRuntime = func() (*enterpriseRuntimeView, error) {
+		return &enterpriseRuntimeView{Enabled: true, Findings: append([]enterpriseRuntimeFinding(nil), findings...)}, nil
+	}
+	for _, test := range []struct {
+		user, sid string
+		pids      []int
+	}{
+		{"alice", aliceSID, []int{10, 11}},
+		{`DCLAB\alice`, aliceSID, []int{10, 11}},
+		{aliceSID, aliceSID, []int{10, 11}},
+		{"bob", bobSID, []int{20}},
+		{`DCFC-WIN2-RS1\bob`, bobSID, []int{20}},
+		{`.\bob`, bobSID, []int{20}},
+		{bobSID, bobSID, []int{20}},
+	} {
+		var out bytes.Buffer
+		var report enterpriseDiscoveryReport
+		if err := writeWindowsEnterpriseDiscovery(&out, test.user, true); err != nil || json.Unmarshal(out.Bytes(), &report) != nil {
+			t.Fatalf("--user %s: %v\n%s", test.user, err, out.String())
+		}
+		if len(report.Accounts) != 1 || report.Accounts[0].SID != test.sid || report.Runtime == nil {
+			t.Fatalf("--user %s accounts: %s", test.user, out.String())
+		}
+		var pids []int
+		for _, finding := range report.Runtime.Findings {
+			pids = append(pids, finding.PID)
+		}
+		if !slices.Equal(pids, test.pids) {
+			t.Errorf("--user %s runtime findings = %v, want %v", test.user, pids, test.pids)
+		}
+		if len(report.Runtime.UnattributedFindings) != 1 || report.Runtime.UnattributedFindings[0].PID != 30 {
+			t.Errorf("--user %s unattributed = %+v, want the host-wide pid 30 apart", test.user, report.Runtime.UnattributedFindings)
+		}
+	}
+	var text bytes.Buffer
+	if err := writeWindowsEnterpriseDiscovery(&text, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), "4 finding(s), 1 of them unattributed (host-wide)") ||
+		!strings.Contains(text.String(), "host-wide (unattributed)") {
+		t.Fatalf("summary does not label the unattributed finding:\n%s", text.String())
 	}
 }
 

@@ -697,9 +697,25 @@ LocalSystem from an MDM script:
 ```
 
 It lists each account's signals by category (`--user` lists one account's
-signals; it takes the account name or SID), then the runtime discovery
-planes (`ai_discovery.runtime`) with their state, last poll and findings.
-Standard accounts cannot run it.
+signals; it takes the bare account name, `COMPUTER\name`, `.\name`,
+`DOMAIN\name` or the SID, and each form selects the same account), then the
+runtime discovery planes (`ai_discovery.runtime`) with their state, last poll
+and findings. Standard accounts cannot run it.
+
+The gateway attributes each runtime finding to the account that runs it:
+`user` is `COMPUTER\name` or `DOMAIN\name` and `user_sid` its SID, and
+`attribution` says how it was found. It reads the process owner from the
+process token or the `Win32_Process` owner (`process_owner`), else the user
+signed in to the process's Windows session (`session`), else the enrolled
+account whose profile holds the agent's configuration files
+(`enrolled_profile`). A finding none of these lookups names is labelled
+`attribution: unattributed`, with no user and an `attribution_reason`; it is
+host-wide, not any account's. `--user` lists only the findings of the account
+it selects, and lists unattributed findings apart under
+`unattributed_findings`, counted separately. The `ai_discovery.runtime` helper setting is not
+available on Windows: the deployment config has no
+`ai_discovery.runtime.acquisition` key, and a config that sets one is refused
+with `config_schema_invalid`.
 
 The `discovery` view names each skill and MCP server per user, including
 the Devin servers in each user's `%APPDATA%\devin\mcp_config.json`. The
