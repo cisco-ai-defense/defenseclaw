@@ -542,6 +542,7 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 	homeOf := map[string]string{}
 	for _, home := range env.accountHomes(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)) {
 		homeOf[enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)] = home
+		homeOf[enterprisepolicy.CopilotPluginHooksPath(home)] = home
 	}
 	// The guardian keeps its record in its data directory (GAP-1761); an
 	// earlier build left it next to the manifest.
@@ -569,6 +570,12 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 				continue
 			}
 			changed = append(changed, path)
+		}
+		if len(state.UserFileForeign) > 0 {
+			drift = append(drift, fmt.Sprintf(
+				"DefenseClaw's %s plugin holds hooks DefenseClaw did not write for %d enrolled user(s): %s; the hook guardian leaves such a file in place and the foreign-hook guard denies that user's %s calls while it is there: move the file aside, and the guardian writes DefenseClaw's plugin on its next pass",
+				state.Connector, len(state.UserFileForeign), firstPaths(state.UserFileForeign), state.Connector))
+			r.SecurityComplete = false
 		}
 		if len(pending) > 0 {
 			r.AddWarning(codeGuardianUserFilePending, fmt.Sprintf(

@@ -338,8 +338,12 @@ The Local hook file is DefenseClaw's own: the hook guardian rewrites it when a
 user deletes or edits it (a directory or link at that name is replaced too),
 status and verify fail while it is missing or modified, and uninstall removes
 whatever is at that name. For the plugin files, DefenseClaw rewrites only
-files it rendered and keeps any other file at those paths, reporting it;
-verify reports their drift, and uninstall removes only DefenseClaw's copies.
+files it rendered, including an earlier release's render, so an upgrade
+replaces them. It keeps any other file at those paths: the foreign-hook guard
+then denies that user's Copilot calls, so status and verify fail and name the
+file. Move it aside, and the guardian writes DefenseClaw's plugin on its next
+pass. Status and verify also fail while DefenseClaw's plugin is missing or
+out of date, and uninstall removes only DefenseClaw's copies.
 
 Copilot CLI also reads `~/.copilot/hooks` and runs the file's `command`, and
 VS Code runs both the file and the plugin. When the Copilot CLI runs the

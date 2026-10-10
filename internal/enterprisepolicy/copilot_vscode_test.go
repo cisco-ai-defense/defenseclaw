@@ -19,6 +19,7 @@ package enterprisepolicy
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -94,6 +95,62 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 	ensure(false, false)
 	if _, err := os.Stat(filepath.Dir(CopilotPluginDir(home))); !os.IsNotExist(err) {
 		t.Fatalf("plugin directories left behind: %v", err)
+	}
+}
+
+// A managed 1.0.0 install wrote the Local hook file and plugin without the
+// removed-deployment guard; testdata holds the bytes 1.0.0 (06b1c9e68)
+// rendered. After the upgrade both are DefenseClaw's: the guard allows the
+// user's calls, verify reports the plugin as drift the guardian rewrites,
+// and ensure replaces it instead of keeping it. A user's own hook at the
+// plugin path stays foreign, and verify names it (GAP-1232).
+func TestCopilotVSCodeUpgradeFromTheReleasedRender(t *testing.T) {
+	for goos, hookBinary := range map[string]string{"linux": testHookBinary, "windows": `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`} {
+		t.Run(goos, func(t *testing.T) {
+			released, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-1.0.0", goos+"-hooks.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := guardRequest(t, copilotConnector, config.ForeignHooksRemove)
+			req.GOOS, req.HookBinary = goos, hookBinary
+			home := req.Home
+			manifest, _ := renderCopilotPluginManifest()
+			writeFile(t, CopilotVSCodeLocalHookFilePath(home), string(released))
+			writeFile(t, CopilotPluginHooksPath(home), string(released))
+			writeFile(t, filepath.Join(CopilotPluginDir(home), "plugin.json"), string(manifest))
+			opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
+				p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
+			})
+			opts.GOOS, opts.HookBinary, opts.CopilotUserHomes = goos, hookBinary, []string{home}
+			status := func() State {
+				t.Helper()
+				var state State
+				copilotVSCodeStatus(opts, &state)
+				return state
+			}
+
+			if decision := EvaluateForeignHooks(req); decision.Deny || len(decision.Findings) != 0 {
+				t.Fatalf("the 1.0.0 render must not be a foreign hook: %+v", decision)
+			}
+			if state := status(); len(state.UserFileForeign) != 0 || !slices.Contains(state.UserFileDrift, CopilotPluginHooksPath(home)) {
+				t.Fatalf("verify must report the 1.0.0 plugin as drift to rewrite: %+v", state)
+			}
+			result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, HookFile: true, Plugin: true})
+			if err != nil || len(result.Kept) != 0 || !result.HookFileOK || !result.PluginOK {
+				t.Fatalf("ensure must replace the 1.0.0 files: %+v %v", result, err)
+			}
+			if state := status(); len(state.UserFileDrift)+len(state.UserFileForeign) != 0 {
+				t.Fatalf("verify after ensure: %+v", state)
+			}
+
+			writeFile(t, CopilotPluginHooksPath(home), `{"hooks":{"PreToolUse":[{"type":"command","command":"user-tool"}]}}`)
+			if decision := EvaluateForeignHooks(req); !decision.Deny {
+				t.Fatalf("a user hook at the plugin path must stay foreign: %+v", decision)
+			}
+			if state := status(); !slices.Contains(state.UserFileForeign, CopilotPluginHooksPath(home)) {
+				t.Fatalf("verify must name the kept plugin file: %+v", state)
+			}
+		})
 	}
 }
 

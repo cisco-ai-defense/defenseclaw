@@ -692,11 +692,13 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 			t.Fatalf("%s must fail naming the missing Local hook file: %+v", action, got.Errors)
 		}
 	}
-	hooks, err := enterprisepolicy.RenderCopilotVSCodeLocalHooks("linux", enterprisepolicy.HookBinaryPath(h.env.Layout))
-	if err != nil {
+	// The guardian writes the Local hook file and the plugin; verify fails
+	// while either is missing (GAP-1232).
+	if _, err := enterprisepolicy.EnsureCopilotVSCodeUser(enterprisepolicy.CopilotVSCodeUserRequest{
+		Home: h.env.P("/home/alice"), GOOS: "linux", HookBinary: enterprisepolicy.HookBinaryPath(h.env.Layout), HookFile: true, Plugin: true,
+	}); err != nil {
 		t.Fatal(err)
 	}
-	writeHostFile(t, h, hookFile, string(hooks))
 	requireOK(t, h.run(Options{Action: ActionStatus}))
 	requireOK(t, h.run(Options{Action: ActionVerify}))
 	// A deleted account's home is gone: nothing to rewrite, no failure
