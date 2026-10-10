@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -353,6 +354,76 @@ func EnrolledWatchRoots(cfg *config.Config) []EnrolledWatchRoot {
 	}
 	sort.Slice(roots, func(i, j int) bool { return roots[i].Dir < roots[j].Dir })
 	return roots
+}
+
+// EnrolledProjectSkillRoot returns the project skill folder that path is or
+// lies in for a user enrolled on a managed Windows gateway: a folder an
+// enrolled connector of that user loads project skills from
+// (assetfacts.ProjectSkillDirs), in a project inside the user's home,
+// compared lexically (insideHome). The hook guardian lets the gateway read
+// one, and removes a quarantined skill from one, as that user after it
+// checked that no link leads to it; the gateway watches one that a hook of
+// that user registered (GAP-1356).
+func EnrolledProjectSkillRoot(cfg *config.Config, path string) (EnrolledWatchRoot, bool) {
+	if !watcherUsesEnrolledUserDirs(cfg) {
+		return EnrolledWatchRoot{}, false
+	}
+	authorization, _ := readManagedGuardianAuthorization(cfg.DataDir)
+	if authorization == nil {
+		return EnrolledWatchRoot{}, false
+	}
+	return enrolledProjectSkillRootIn(authorization, path)
+}
+
+func enrolledProjectSkillRootIn(authorization *managedGuardianAuthorization, path string) (EnrolledWatchRoot, bool) {
+	path = strings.TrimSpace(path)
+	type enrolledHome struct {
+		home, sid  string
+		connectors []string
+	}
+	// The innermost enrolled home that holds path owns it.
+	var owner *enrolledHome
+	for _, target := range authorization.ProtectedTargets {
+		home := strings.TrimSpace(target.UserHome)
+		if home == "" && target.Result != nil {
+			home = strings.TrimSpace(target.Result.UserHome)
+		}
+		sid := strings.TrimSpace(target.SID)
+		if !target.OK || sid == "" || !filepath.IsAbs(home) || !insideHome(home, path) {
+			continue
+		}
+		home = filepath.Clean(home)
+		switch {
+		case owner == nil || len(home) > len(owner.home):
+			owner = &enrolledHome{home: home, sid: sid}
+		case projectRootKey(home) != projectRootKey(owner.home):
+			continue
+		}
+		owner.connectors = append(owner.connectors, managedGuardianTargetConnector(target))
+	}
+	if owner == nil {
+		return EnrolledWatchRoot{}, false
+	}
+	for dir := filepath.Clean(path); insideHome(owner.home, dir); dir = filepath.Dir(dir) {
+		project := filepath.Dir(filepath.Dir(dir))
+		if !insideHome(owner.home, project) {
+			break
+		}
+		for _, name := range owner.connectors {
+			for _, rel := range assetfacts.ProjectSkillDirs(name) {
+				if projectRootKey(filepath.Join(project, rel)) != projectRootKey(dir) {
+					continue
+				}
+				// Spelled from the enrolled home, so the guardian's walk
+				// from the folder up to the home meets it.
+				if inHome, err := filepath.Rel(owner.home, dir); err == nil {
+					dir = filepath.Join(owner.home, inHome)
+				}
+				return EnrolledWatchRoot{Dir: dir, Home: owner.home, SID: owner.sid}, true
+			}
+		}
+	}
+	return EnrolledWatchRoot{}, false
 }
 
 // enrolledRootPrecedence orders the connectors whose folder layout the

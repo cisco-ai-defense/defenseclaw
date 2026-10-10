@@ -751,6 +751,24 @@ func (h *SidecarHealth) SetWatcher(state SubsystemState, lastErr string, details
 	h.notifySubscribers()
 }
 
+// SetWatcherDetail sets one detail of the watcher health, keeping its state
+// and since; an empty value removes it.
+func (h *SidecarHealth) SetWatcherDetail(key string, value []string) {
+	h.mu.Lock()
+	details := make(map[string]interface{}, len(h.watcher.Details)+1)
+	for k, v := range h.watcher.Details {
+		details[k] = v
+	}
+	if len(value) == 0 {
+		delete(details, key)
+	} else {
+		details[key] = value
+	}
+	h.watcher.Details = details
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
 func (h *SidecarHealth) SetAPI(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
 	h.api = SubsystemHealth{

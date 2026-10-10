@@ -845,7 +845,11 @@ per-user install:
 - The skill and plugin folders of the agents in each profile are watched,
   and the skill folders of a project inside the profile
   (`<project>\.claude\skills`, `<project>\.agents\skills`) from the first
-  hook an agent sends from it. A project outside the profile gets no install
+  hook an agent sends from it: the hook guardian checks that no link leads to
+  the folder and lets the gateway read it, and the hooks refuse a skill there
+  until install admission has scanned it (or, for a folder that could not be
+  verified, always; `defenseclaw doctor` names that folder under the watcher).
+  A project outside the profile gets no install
   admission; the agent hooks still refuse a denied skill name there (see
   [Where a denied skill is refused](/docs/policies/admission#where-a-denied-skill-is-refused)).
 - Claude Code runs a plugin installed from a local marketplace folder from

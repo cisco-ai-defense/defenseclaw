@@ -450,6 +450,35 @@ func VerifyAssetReadGrant(request QuarantineRemovalRequest, sourceRoots []string
 	return source, sourceRoot, nil
 }
 
+// VerifyProjectSkillRootReadGrant is the guardian's check of a read grant
+// for a project skill folder itself, which a hook registers for the watcher
+// (GAP-1356): a skill request that names root, which is reached from home,
+// the enrolled user's profile, without a link. It returns the folder.
+func VerifyProjectSkillRootReadGrant(request QuarantineRemovalRequest, root, home string) (string, error) {
+	if request.Version != quarantineRemovalVersion || request.Kind != QuarantineRequestReadGrant ||
+		!safePathSegment(request.ID) || request.TargetType != "skill" {
+		return "", fmt.Errorf("unsupported read grant request")
+	}
+	source, _, err := pathWithinRoots(request.SourcePath, []string{root}, true)
+	if err != nil || !pathWithin(root, source, true) {
+		return "", fmt.Errorf("the folder is not the project skill folder %s", root)
+	}
+	if err := ValidateLinkFreeRoot(root, home); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+// ValidateLinkFreeRoot checks that root and every folder between it and
+// home, the enrolled user's profile, is reached without a link: a project
+// skill folder counts only inside that user's own tree (GAP-1297).
+func ValidateLinkFreeRoot(root, home string) error {
+	if err := validateContainedAncestors(root, home); err != nil {
+		return fmt.Errorf("folder ancestry: %w", err)
+	}
+	return nil
+}
+
 // VerifyQuarantineRemoval is the guardian's check of one request: the source
 // is inside one of sourceRoots (an enrolled user's watched folder), the copy
 // is inside quarantineRoot, both carry the same name, and both still hash to

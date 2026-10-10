@@ -253,21 +253,32 @@ func frontmatterName(text string) string {
 	return ""
 }
 
+// ProjectSkillDirs lists the folders, relative to a project folder, that
+// connector loads project skills from.
+func ProjectSkillDirs(connector string) []string {
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "claudecode":
+		return []string{filepath.Join(".claude", "skills")}
+	case "codex":
+		return []string{filepath.Join(".agents", "skills"), filepath.Join(".codex", "skills")}
+	}
+	return nil
+}
+
 // SkillRoots lists the folders connector loads skills from for a user with
 // home and working folder cwd: the user skill folders and the project ones
 // from cwd up to the repository root (or a few levels).
 func SkillRoots(connector, home, cwd string) []string {
-	var user, project []string
+	var user []string
 	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
 		user = []string{filepath.Join(".claude", "skills")}
-		project = []string{filepath.Join(".claude", "skills")}
 	case "codex":
 		user = []string{filepath.Join(".codex", "skills"), filepath.Join(".agents", "skills")}
-		project = []string{filepath.Join(".agents", "skills"), filepath.Join(".codex", "skills")}
 	default:
 		return nil
 	}
+	project := ProjectSkillDirs(connector)
 	var roots []string
 	if home = strings.TrimSpace(home); filepath.IsAbs(home) {
 		for _, rel := range user {

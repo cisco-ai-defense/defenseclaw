@@ -3616,6 +3616,19 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     detail = state
                     if sub == "guardrail" and isinstance(details, dict):
                         detail += f" ({_guardrail_health_mode(details)})"
+                    unverified = details.get("project_skill_roots_unverified") if isinstance(details, dict) else None
+                    if sub == "watcher" and isinstance(unverified, list) and unverified:
+                        # A managed Windows gateway could not verify a project
+                        # skill folder: it is not watched and its skills are
+                        # refused (GAP-1356).
+                        _emit(
+                            "warn",
+                            f"  └─ {sub}",
+                            f"{state}, {len(unverified)} project skill folder(s) could not be verified, are not "
+                            f"watched and their skills are refused: {unverified[0]}",
+                            r=r,
+                        )
+                        continue
                     if (
                         sub == "telemetry"
                         and isinstance(details, dict)

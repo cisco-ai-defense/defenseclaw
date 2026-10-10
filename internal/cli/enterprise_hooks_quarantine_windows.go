@@ -145,7 +145,7 @@ func enterpriseHookQuarantineCurrentConfig(startup *config.Config) (*config.Conf
 // with remove. A signed-out user Windows gives no S4U logon for defers the
 // removal to the next sign-in.
 func removeEnrolledRequestedAsset(current *config.Config, request enforce.QuarantineRemovalRequest, remove func(sid, home, path string) error) error {
-	roots := enrolledWatchRootsForGuardian(current)
+	roots := guardianAssetRoots(current, request.SourcePath)
 	dirs := make([]string, 0, len(roots))
 	for _, root := range roots {
 		dirs = append(dirs, root.Dir)
@@ -177,7 +177,16 @@ func removeEnrolledRequestedAsset(current *config.Config, request enforce.Quaran
 // users' watched folders and has grant give the gateway service read access
 // to the folder as the user who owns that watched folder (GAP-0825).
 func grantEnrolledAssetRead(current *config.Config, request enforce.QuarantineRemovalRequest, grant func(sid, home, path string) error) error {
-	roots := enrolledWatchRootsForGuardian(current)
+	// A hook registers a project skill folder itself (GAP-1356).
+	if project, ok := gateway.EnrolledProjectSkillRoot(current, request.SourcePath); ok &&
+		strings.EqualFold(filepath.Clean(project.Dir), filepath.Clean(strings.TrimSpace(request.SourcePath))) {
+		source, err := enforce.VerifyProjectSkillRootReadGrant(request, project.Dir, project.Home)
+		if err != nil {
+			return err
+		}
+		return grant(project.SID, project.Home, source)
+	}
+	roots := guardianAssetRoots(current, request.SourcePath)
 	dirs := make([]string, 0, len(roots))
 	for _, root := range roots {
 		dirs = append(dirs, root.Dir)
@@ -192,6 +201,19 @@ func grantEnrolledAssetRead(current *config.Config, request enforce.QuarantineRe
 		}
 	}
 	return fmt.Errorf("no enrolled user owns %s", rootDir)
+}
+
+// guardianAssetRoots are the watched folders a request about path may name:
+// the enrolled users' connector folders and, when path lies in one, the
+// project skill folder of an enrolled user that no link leads to, which the
+// gateway watches once a hook registered it (GAP-1356).
+func guardianAssetRoots(current *config.Config, path string) []gateway.EnrolledWatchRoot {
+	roots := enrolledWatchRootsForGuardian(current)
+	if project, ok := gateway.EnrolledProjectSkillRoot(current, path); ok &&
+		enforce.ValidateLinkFreeRoot(project.Dir, project.Home) == nil {
+		roots = append(roots, project)
+	}
+	return roots
 }
 
 // enrolledWatchRootsForGuardian resolves the enrolled watch roots while no

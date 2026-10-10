@@ -3509,6 +3509,37 @@ class TestLegacySandboxDoctor(unittest.TestCase):
         self.assertEqual(telemetry["status"], "warn", telemetry)
         self.assertIn("rv13:degraded:file_write_failed", telemetry["detail"])
 
+    def test_unverified_project_skill_folder_warns_on_running_watcher(self):
+        # A project skill folder a managed Windows gateway could not verify is
+        # not watched and its skills are refused: warn and name it (GAP-1356).
+        health = {
+            "gateway": {"state": "disabled"},
+            "watcher": {
+                "state": "running",
+                "details": {
+                    "skill_dirs": 1,
+                    "project_skill_roots_unverified": [
+                        "C:\\Users\\w1\\projA\\.claude\\skills: the hook guardian refused it: folder ancestry"
+                    ],
+                },
+            },
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = self._cfg(data_dir, legacy=False)
+            cfg.gateway.watcher.enabled = True
+            result = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(health)),
+            ):
+                _check_sidecar(cfg, result)
+        watcher = next(row for row in result.checks if row.get("label", "").strip().endswith("watcher"))
+        self.assertEqual(watcher["status"], "warn", watcher)
+        self.assertIn("projA", watcher["detail"])
+
     def test_openshell_sandbox_running_is_not_a_stale_sidecar(self):
         # openshell.enabled makes the gateway run the sandbox subsystem; its
         # "running" must not read as a stale sidecar or drive restarts.

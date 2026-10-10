@@ -3756,6 +3756,15 @@ func warnUnenforcedAssetPolicy(cfg *config.Config, skillDirs, pluginDirs []strin
 	}
 }
 
+// watcherHealthDetails adds to details the project skill folders that could
+// not be verified, which a watcher restart keeps refusing (GAP-1356).
+func (s *Sidecar) watcherHealthDetails(details map[string]interface{}) map[string]interface{} {
+	if unverified := s.projectSkills.unverifiedFolders(); len(unverified) > 0 {
+		details[projectSkillRootsUnverifiedDetail] = unverified
+	}
+	return details
+}
+
 // runWatcher starts the skill/MCP install watcher if enabled in config,
 // and restarts it when a managed gateway's enrolled folders change.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
@@ -3823,6 +3832,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				// a skill or plugin link the service may not delete
 				// (GAP-1188).
 				enforce.SetAssetReadGranter(channel.ReadGranter(guardianReadGrantTimeout))
+				// And to a project skill folder a hook registers (GAP-1356).
+				s.projectSkills.setReadGranter(channel.ReadGranter(projectSkillRootGrantTimeout))
 				enforce.SetLinkedAssetRemover(channel.LinkRemover(guardianQuarantineRemovalTimeout))
 			}
 			if src.Skill != watcherDirsFromConfig {
@@ -3923,13 +3934,13 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		return false, nil
 	}
 
-	s.health.SetWatcher(StateStarting, "", map[string]interface{}{
+	s.health.SetWatcher(StateStarting, "", s.watcherHealthDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
 		"plugin_dirs":        len(pluginDirs),
 		"skill_take_action":  wcfg.Skill.TakeAction,
 		"plugin_take_action": wcfg.Plugin.TakeAction,
 		"mcp_take_action":    wcfg.MCP.TakeAction,
-	})
+	}))
 
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
@@ -4017,13 +4028,13 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
 		len(skillDirs), len(pluginDirs), wcfg.Skill.TakeAction, wcfg.Plugin.TakeAction)
 
-	s.health.SetWatcher(StateRunning, "", map[string]interface{}{
+	s.health.SetWatcher(StateRunning, "", s.watcherHealthDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
 		"plugin_dirs":        len(pluginDirs),
 		"skill_take_action":  wcfg.Skill.TakeAction,
 		"plugin_take_action": wcfg.Plugin.TakeAction,
 		"mcp_take_action":    wcfg.MCP.TakeAction,
-	})
+	}))
 
 	if enrolled != nil {
 		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, enrolledProjectRoots, w, changed)

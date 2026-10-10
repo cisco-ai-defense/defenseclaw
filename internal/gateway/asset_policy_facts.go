@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -326,6 +327,10 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 	}
 	_, peer := managedHookPeerFromContext(ctx)
 	managedCaller := peer || serviceAccountGatewayFromContext(ctx)
+	if managedCaller && watcherUsesEnrolledUserDirs(cfg) {
+		a.noteEnrolledProjectSkillFolders(cfg, connector, home, cwd)
+		return
+	}
 	realHome := home
 	if managedCaller {
 		var err error
@@ -348,6 +353,77 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 	}
 }
 
+// projectSkillLstat is os.Lstat; tests stand in for a service account that
+// may not read the caller's profile.
+var projectSkillLstat = os.Lstat
+
+// noteEnrolledProjectSkillFolders is noteProjectSkillFolders on a managed
+// Windows gateway. Its service account may not stat the caller's profile,
+// so the home and the project never resolved and every folder was skipped
+// silently (GAP-1356). A folder counts when it lies, compared lexically,
+// inside the caller's own home and that home is an enrolled user's; the hook
+// guardian then checks, as that user, that no link leads to it and lets the
+// gateway read it, as it does for the connectors' user folders (GAP-0913).
+// A folder that cannot be verified is not watched, its skills are refused,
+// and the watcher health lists it (doctor warns).
+func (a *APIServer) noteEnrolledProjectSkillFolders(cfg *config.Config, connector, home, cwd string) {
+	for _, folder := range enrolledProjectSkillCandidates(connector, home, cwd) {
+		if a.projectSkills.registered(folder) {
+			continue
+		}
+		if _, recent := a.projectSkills.refusal(folder, time.Now()); recent {
+			continue
+		}
+		if _, err := projectSkillLstat(folder); errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		a.verifyEnrolledProjectSkillFolder(cfg, connector, home, folder)
+	}
+}
+
+func (a *APIServer) verifyEnrolledProjectSkillFolder(cfg *config.Config, connector, home, folder string) {
+	roots := a.projectSkills
+	roots.verifying.Lock()
+	defer roots.verifying.Unlock()
+	if _, recent := roots.refusal(folder, time.Now()); recent || roots.registered(folder) {
+		return
+	}
+	reason := ""
+	root, ok := EnrolledProjectSkillRoot(cfg, folder)
+	switch {
+	case !ok || projectRootKey(root.Dir) != projectRootKey(folder) || projectRootKey(root.Home) != projectRootKey(home):
+		reason = "it is not a project skill folder of an enrolled user in that user's own home"
+	case roots.readGranter() == nil:
+		reason = "the hook guardian cannot grant the gateway read access here"
+	default:
+		if err := roots.readGranter()("skill", folder); err != nil {
+			reason = "the hook guardian refused it: " + err.Error()
+		} else if info, err := projectSkillLstat(folder); err != nil {
+			reason = "the gateway still cannot read it: " + err.Error()
+		} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode()&os.ModeIrregular != 0 {
+			reason = "it is a link, not a folder"
+		}
+	}
+	if reason != "" {
+		roots.refuse(folder, reason, time.Now())
+		fmt.Fprintf(os.Stderr, "[watcher] project skill folder %s could not be verified and is not watched; its skills are refused: %s\n", folder, reason)
+		if a.health != nil {
+			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, roots.unverifiedFolders())
+		}
+		return
+	}
+	if roots.add(connector, folder) {
+		fmt.Fprintf(os.Stderr, "[watcher] project skill folder %s registered for install admission\n", folder)
+		if a.health != nil {
+			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, roots.unverifiedFolders())
+		}
+	}
+}
+
+// projectSkillRootsUnverifiedDetail names, in the watcher health, the
+// project skill folders that could not be verified (GAP-1356).
+const projectSkillRootsUnverifiedDetail = "project_skill_roots_unverified"
+
 // projectSkillScanPending refuses a skill in a registered project skill
 // folder that install admission has not recorded yet: its first scan is
 // running or about to (the watcher restarts to watch the folder), so it is
@@ -362,9 +438,20 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 		if strings.TrimSpace(path) == "" || strings.HasPrefix(filepath.Base(path), ".") {
 			continue
 		}
-		if dir := filepath.Dir(path); !a.projectSkills.registered(dir) {
-			// A managed caller's folder is registered resolved (GAP-1297),
-			// and the watcher records its skills under that path.
+		dir := filepath.Dir(path)
+		if reason, _ := a.projectSkills.refusal(dir, time.Now()); reason != "" {
+			name := filepath.Base(path)
+			return runtimeAssetDisableBlockDecision("skill", name, connector, surface,
+				fmt.Sprintf("skill %q in %s is refused: DefenseClaw could not verify this project skill folder (%s)", name, dir, reason),
+				"project-skill-unverified"), true
+		}
+		if root, ok := a.projectSkills.registeredPath(dir); ok {
+			// The watcher records the skills under the folder as it was
+			// registered; a later hook may spell it in another case.
+			path = filepath.Join(root, filepath.Base(path))
+		} else {
+			// A managed Unix caller's folder is registered resolved
+			// (GAP-1297), and the watcher records its skills under that path.
 			real, err := filepath.EvalSymlinks(dir)
 			if err != nil || !a.projectSkills.registered(real) {
 				continue
