@@ -17,6 +17,7 @@
 package enterprisepolicy
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // TestCopilotVSCodeLocalAndManagedSettings covers the per-user Local hook
@@ -110,6 +112,13 @@ func TestCopilotVSCodeUpgradeFromTheReleasedRender(t *testing.T) {
 			released, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-1.0.0", goos+"-hooks.json"))
 			if err != nil {
 				t.Fatal(err)
+			}
+			if goos == "windows" {
+				// The bridge starts powershell.exe from the system directory
+				// the host reports, as 1.0.0 did on that host.
+				exe, _, _ := strings.Cut(connector.CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, "Stop"), " -NoLogo")
+				released = bytes.ReplaceAll(released, []byte(`C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`),
+					[]byte(strings.ReplaceAll(exe, `\`, `\\`)))
 			}
 			req := guardRequest(t, copilotConnector, config.ForeignHooksRemove)
 			req.GOOS, req.HookBinary = goos, hookBinary
