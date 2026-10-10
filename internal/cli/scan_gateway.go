@@ -50,7 +50,7 @@ func init() {
 	for _, command := range []*cobra.Command{scanSkillCmd, scanMCPCmd, scanPluginCmd} {
 		command.Flags().BoolVar(&scanGatewayJSON, "json", false, "Print the gateway's scan response as JSON")
 		// A managed computer has no per-user config for the bootstrap to
-		// load: the managed gateway's endpoint comes from its layout, and
+		// load: the managed gateway's endpoint comes from its installed config, and
 		// any other host loads its config in scanGatewayEndpoint.
 		command.Annotations = map[string]string{"defenseclaw.skip-daemon-bootstrap": "true", secureClientAbsentAnnotation: "true"}
 		scanCmd.AddCommand(command)
