@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import shlex
 import stat
@@ -512,6 +513,9 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
 
     if os.name == "nt":
         return []
+    edited = edited_hook_problems(cfg, connector)
+    if edited:
+        return edited
     hooks_dir = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks")
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -534,4 +538,151 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
                 f"hook command in {path} cannot run: the shell runs {program!r}, not the hook script "
                 f"under {hooks_dir} (a path with a space must be quoted)"
             ]
+    return []
+
+
+# The Unix hook script Setup registers for each hook connector. Windows
+# registers the native launcher, whose ownership stays exact.
+HOOK_SCRIPT_NAMES = {
+    "antigravity": "antigravity-hook.sh",
+    "claudecode": "claude-code-hook.sh",
+    "codex": "codex-hook.sh",
+    "copilot": "copilot-hook.sh",
+    "cursor": "cursor-hook.sh",
+    "devin": "devin-hook.sh",
+    "hermes": "hermes-hook.sh",
+    "kiro": "kiro-hook.sh",
+}
+
+_EDITED_HOOK_PREFIX = "hook command edited: "
+
+
+def _split_hook_command(command: str) -> tuple[str, str] | None:
+    """Split a hook command into its first shell word (unquoted) and the rest."""
+
+    if not command.startswith("'"):
+        match = re.search(r"[ \t]", command)
+        return (command[: match.start()], command[match.start() :]) if match else (command, "")
+    word: list[str] = []
+    i = 0
+    while i < len(command):
+        if command[i] == "'":
+            end = command.find("'", i + 1)
+            if end < 0:
+                return None
+            word.append(command[i + 1 : end])
+            i = end + 1
+        elif command.startswith('"\'"', i):
+            word.append("'")
+            i += 3
+        elif command.startswith("\\'", i):
+            word.append("'")
+            i += 2
+        elif command[i] == " ":
+            return "".join(word), command[i:]
+        else:
+            return None
+    return "".join(word), ""
+
+
+def edited_hook_script(command: str, script_name: str) -> str:
+    """The script path when *command* has the shape of a DefenseClaw hook entry, else "".
+
+    Mirrors ``editedDefenseClawHookScript`` / ``editedDefenseClawHookCommand``
+    in internal/gateway/connector/helpers.go (the shared golden
+    testdata/hook_edited_commands.json keeps them in step): an absolute,
+    clean script path whose name is the connector's script name, possibly
+    edited around ".sh" (copilot-hookX.sh), under a .defenseclaw directory,
+    or the exact name under an edited DefenseClaw data directory, alone or
+    with ``--event``. Setup replaces such entries; doctor reports the ones
+    that are not the current command (GAP-0906, GAP-0907).
+    """
+
+    stem = script_name[:-3] if script_name.endswith(".sh") else ""
+    if not stem.endswith("-hook") or "/" in script_name:
+        return ""
+    split = _split_hook_command(command.strip())
+    if split is None:
+        return ""
+    word, rest = split
+    if (
+        any(char in word for char in "\x00\r\n")
+        or not word.startswith("/")
+        or word.startswith("//")
+        or posixpath.normpath(word) != word
+    ):
+        return ""
+    if rest and not rest.startswith(" --event "):
+        return ""
+    base = posixpath.basename(word)
+    if not base.startswith(stem):
+        return ""
+    edit = base[len(stem) :]
+    if ".sh" not in edit or " " in edit or "\t" in edit:
+        return ""
+    for part in posixpath.dirname(word).split("/"):
+        part = part.lower()
+        if part == ".defenseclaw" or (base == script_name and part.startswith(".") and "defenseclaw" in part):
+            return word
+    return ""
+
+
+def _hook_command_strings(value: Any) -> list[str]:
+    """Every string under a ``command`` or ``bash`` key of a decoded hook config."""
+
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in ("command", "bash") and isinstance(item, str):
+                found.append(item)
+            else:
+                found.extend(_hook_command_strings(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_hook_command_strings(item))
+    return found
+
+
+def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
+    """Report DefenseClaw hook entries whose script path or name was edited.
+
+    An edited entry keeps running a script that is not there: Copilot then
+    denied every call next to the set setup added again, and Hermes, whose
+    hook failures are fail-open, ran unguarded (GAP-0906, GAP-0907). Setup
+    (``doctor --fix`` restarts the gateway, which runs it) replaces them.
+    """
+
+    script_name = HOOK_SCRIPT_NAMES.get(connector)
+    if os.name == "nt" or not script_name:
+        return []
+    data_dir = os.path.normpath(str(getattr(cfg, "data_dir", "") or ""))
+    current = os.path.join(data_dir, "hooks", script_name)
+    # Only an edit of this install's own path is reported; setup also
+    # replaces another data directory's entries, which are not an edit.
+    owner = os.path.dirname(data_dir).rstrip("/") + "/"
+    for path in _hook_config_paths(cfg, connector):
+        try:
+            if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
+                continue
+            if path.suffix in (".yaml", ".yml"):
+                import yaml
+
+                document = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
+            else:
+                document = _load_agent_document(path)
+        except (OSError, ValueError, ImportError):
+            continue
+        except Exception:  # yaml.YAMLError: the registration rows report an unreadable file
+            continue
+        for command in _hook_command_strings(document):
+            word = edited_hook_script(command, script_name)
+            if word and word != current and word.startswith(owner):
+                return [
+                    HookProblem(
+                        f"{_EDITED_HOOK_PREFIX}{connector}: {path} runs {word}, not the hook script setup "
+                        f"registered ({current}), so that entry fails or runs unguarded",
+                        f"run `defenseclaw doctor --fix` or `{setup_command(connector)} --yes`; "
+                        "it replaces the edited entries",
+                    )
+                ]
     return []
