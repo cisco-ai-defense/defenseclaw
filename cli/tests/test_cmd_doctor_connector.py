@@ -753,6 +753,14 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 mode="action",
                 fail_closed=True,
             )
+            from defenseclaw.config import GuardrailConfig, PerConnectorGuardrailConfig
+
+            # An upgraded v8 action-mode config may still store open.
+            cfg.guardrail = GuardrailConfig(
+                mode="action",
+                hook_fail_mode="open",
+                connectors={"cursor": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="open")},
+            )
             r = _DoctorResult()
             _check_cursor_configured_runtime(
                 cfg,

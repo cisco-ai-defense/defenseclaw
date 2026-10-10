@@ -185,7 +185,11 @@ def _report_hook_fail_mode_changes(data_dir: str) -> None:
         return
     for name, entry in sorted(connectors.items()):
         sealed = str(entry.get("hook_fail_mode", "")).strip().lower() if isinstance(entry, dict) else ""
-        if sealed != "closed" or guardrail.effective_hook_fail_mode(name) != "open":
+        if (
+            sealed != "closed"
+            or guardrail.effective_mode(name).strip().lower() != "observe"
+            or guardrail.effective_hook_fail_mode(name) != "open"
+        ):
             continue
         ux.warn(
             f"{name} hooks now fail open: in observe mode they let a call through when "
