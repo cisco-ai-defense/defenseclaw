@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +55,21 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bob, ".codex", "config.toml"), []byte("[mcp_servers.p0-mcp]\ncommand = \"p0-server\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// bob's Devin servers are in his roaming AppData, not the service's
+	// %APPDATA% (GAP-1237).
+	devinRoot := func(home string) string {
+		if runtime.GOOS == "windows" {
+			return mkdir(home, "AppData", "Roaming", "devin")
+		}
+		return mkdir(home, ".config", "devin")
+	}
+	t.Setenv("APPDATA", filepath.Join(serviceHome, "AppData", "Roaming"))
+	for home, name := range map[string]string{bob: "wma-mcp-memory", serviceHome: "service-only"} {
+		body := []byte(`{"mcpServers":{"` + name + `":{"command":"npx"}}}`)
+		if err := os.WriteFile(filepath.Join(devinRoot(home), "mcp_config.json"), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// alice has another server under the same name (GAP-0276).
 	if err := os.WriteFile(filepath.Join(alice, ".claude.json"), []byte(`{"mcpServers":{"p0-mcp":{"command":"other-server"}}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -62,11 +78,12 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	dataDir := mkdir(root, "data")
 	record := map[string]any{
 		"version": 1, "updated_at": time.Now().UTC().Format(time.RFC3339), "ok": true,
-		"target_count": 3, "success_count": 3, "failure_count": 0,
+		"target_count": 4, "success_count": 4, "failure_count": 0,
 		"protected_targets": []map[string]any{
 			{"user": "alice", "user_home": alice, "sid": "S-1-5-21-1-1001", "connector": "amp", "ok": true},
 			{"user": "alice", "user_home": alice, "sid": "S-1-5-21-1-1001", "connector": "claudecode", "ok": true},
 			{"user": "bob", "user_home": bob, "sid": "S-1-5-21-1-1002", "connector": "codex", "ok": true},
+			{"user": "bob", "user_home": bob, "sid": "S-1-5-21-1-1002", "connector": "devin", "ok": true},
 		},
 	}
 	raw, _ := json.Marshal(record)
@@ -136,9 +153,10 @@ func TestResolveEnrolledWatchSetWatchesEachEnrolledUser(t *testing.T) {
 	}
 	// Each user's server is its own watcher target, even with the same name.
 	servers, _ := set.live.list()
-	if len(servers) != 3 || servers[0].Connector != "claudecode" || servers[0].Home != alice ||
+	if len(servers) != 4 || servers[0].Connector != "claudecode" || servers[0].Home != alice ||
 		servers[1].Name != "proj-notes" || servers[1].Connector != "claudecode" || servers[1].Home != alice || servers[1].Project != project ||
 		servers[2].Connector != "codex" || servers[2].Home != bob ||
+		servers[3].Name != "wma-mcp-memory" || servers[3].Connector != "devin" || servers[3].Home != bob ||
 		watcher.MCPEventPath(servers[0]) == watcher.MCPEventPath(servers[2]) {
 		t.Fatalf("enrolled MCP servers = %+v", servers)
 	}
