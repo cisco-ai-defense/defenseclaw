@@ -163,9 +163,9 @@ func (r restReader) Read(p []byte) (int, error) {
 }
 
 // relaunchCommand is the guard the editor entry names now, once setup wrote
-// it again: this same guard executable with other arguments. ok is false
-// while the entry is unchanged or names another program.
-func relaunchCommand(contractLock, agentID string, current []string) (*exec.Cmd, bool) {
+// it again: this same guard executable with changed arguments or a binding
+// that the gateway admits again. A still-refused binding cannot relaunch.
+func relaunchCommand(contractLock, agentID string, current []string, bindingRecovered func() bool) (*exec.Cmd, bool) {
 	body, err := safefile.ReadRegularFileBounded(filepath.Clean(contractLock), acp.MaxContractLockBytes)
 	if err != nil {
 		return nil, false
@@ -194,7 +194,10 @@ func relaunchCommand(contractLock, agentID string, current []string) (*exec.Cmd,
 	}
 	entry, found := document.Servers[acp.ManagedEntryName(agentID)]
 	guard, err := guardExecutable()
-	if !found || err != nil || !sameGuardPath(entry.Command, guard) || slices.Equal(entry.Args, current) {
+	if !found || err != nil || !sameGuardPath(entry.Command, guard) {
+		return nil, false
+	}
+	if slices.Equal(entry.Args, current) && !bindingRecovered() {
 		return nil, false
 	}
 	command := exec.Command(guard, entry.Args...)
@@ -209,7 +212,7 @@ func relaunchCommand(contractLock, agentID string, current []string) (*exec.Cmd,
 // for a central change: every request gets message, until a new thread
 // (session/new or session/load) finds the editor entry set up again; that
 // thread and every later frame go to the guard the entry names now.
-func serveAfterSessionEnd(editor io.Reader, out io.Writer, initialize []byte, message string, relaunch func() (*exec.Cmd, bool)) error {
+func serveAfterSessionEnd(editor io.Reader, out io.Writer, initialize []byte, message string, relaunch func([]byte) (*exec.Cmd, bool)) error {
 	reader := bufio.NewReaderSize(editor, 64<<10)
 	for {
 		line, readErr := reader.ReadBytes('\n')
@@ -217,7 +220,7 @@ func serveAfterSessionEnd(editor io.Reader, out io.Writer, initialize []byte, me
 		if msg, err := acp.ParseMessage(frame); len(frame) > 0 && err == nil && msg.IsRequest() {
 			reason := message
 			if (msg.Method == "session/new" || msg.Method == "session/load") && len(initialize) > 0 {
-				if command, ok := relaunch(); ok {
+				if command, ok := relaunch(frame); ok {
 					done, err := spliceRelaunchedGuard(command, reader, out, initialize, frame)
 					if done {
 						return err

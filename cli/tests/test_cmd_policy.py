@@ -425,6 +425,27 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", "MEDIUM"))
 
 
+    def test_activate_keeps_the_operators_hilt(self):
+        # GAP-1304: HITL is not part of a preset; activating the default
+        # preset or a custom one that carries a hilt section keeps it.
+        import yaml
+        from defenseclaw.config import HILTConfig
+
+        self.app.cfg.guardrail.hilt = HILTConfig(enabled=True, min_severity="CRITICAL")
+        created = self.invoke(["create", "carries-hilt"])
+        self.assertEqual(created.exit_code, 0, created.output)
+        path = os.path.join(self.app.cfg.policy_dir, "carries-hilt.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        data.setdefault("guardrail", {})["hilt"] = {"enabled": False, "min_severity": "LOW"}
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+        for name in ("default", "carries-hilt"):
+            result = self.invoke(["activate", name, "--no-reload"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(self.app.cfg.guardrail.hilt, HILTConfig(enabled=True, min_severity="CRITICAL"))
+
+
 class TestPolicyActivateNamesLevelChanges(PolicyCommandTestBase):
     def test_activate_default_names_the_block_level_it_clears(self):
         # A hand-set block_at HIGH is cleared by the default preset (pack
