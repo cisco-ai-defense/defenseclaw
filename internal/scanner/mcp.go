@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -287,7 +288,74 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 		Args    []string          `json:"args"`
 		Env     map[string]string `json:"env"`
 		CWD     string            `json:"cwd"`
-	}{entry.Name, entry.Command, entry.Args, entry.Env, entry.CWD})
+	}{entry.Name, entry.Command, entry.Args, entry.Env, s.serverWorkDir()})
+}
+
+// serverWorkDir is the folder the Windows scanner runtime starts a local
+// stdio server in, as its agent does (GAP-1317): the entry's cwd, else the
+// project that lists the server. The runtime itself keeps the gateway's
+// folder; only the server's process starts here. A folder is used only when
+// it is absolute, inside the project or the user's home, and no folder on the
+// way down from there is a link or reparse point; otherwise the scan keeps
+// the scanner's folder, as before, and says so.
+func (s *MCPScanner) serverWorkDir() string {
+	entry := s.ServerEntry
+	if entry == nil || entry.Command == "" || entry.URL != "" {
+		return ""
+	}
+	var roots []string
+	for _, root := range []string{entry.Project, entry.Home} {
+		if root != "" && filepath.IsAbs(root) {
+			roots = append(roots, filepath.Clean(root))
+		}
+	}
+	for _, dir := range []string{entry.CWD, entry.Project} {
+		if dir == "" {
+			continue
+		}
+		if err := containedWorkDir(dir, roots); err != nil {
+			fmt.Fprintf(os.Stderr, "[scan] MCP server %q: not starting it in %s: %v\n", entry.Name, dir, err)
+			continue
+		}
+		return filepath.Clean(dir)
+	}
+	return ""
+}
+
+// containedWorkDir checks a folder for serverWorkDir.
+func containedWorkDir(dir string, roots []string) error {
+	if !filepath.IsAbs(dir) {
+		return errors.New("the folder is not an absolute path")
+	}
+	dir = filepath.Clean(dir)
+	for _, root := range roots {
+		rel, err := filepath.Rel(root, dir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		path := root
+		var parts []string
+		if rel != "." {
+			parts = strings.Split(rel, string(filepath.Separator))
+		}
+		for i := -1; i < len(parts); i++ {
+			if i >= 0 {
+				path = filepath.Join(path, parts[i])
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || fileInfoIsReparsePoint(info) {
+				return fmt.Errorf("%s is a link or reparse point", path)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("%s is not a folder", path)
+			}
+		}
+		return nil
+	}
+	return errors.New("the folder is outside the project and the user's home folder")
 }
 
 // runMCPScannerCommand owns the runtime process and its Python descendants.

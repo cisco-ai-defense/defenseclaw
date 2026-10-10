@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -158,4 +159,11 @@ func scannerRuntimePreflight(binary string, defaults ...string) error {
 			"and the DefenseClaw Setup with /repair prepares it again", ErrScannerRuntimeUnavailable, problem)
 	}
 	return nil
+}
+
+// fileInfoIsReparsePoint reports a reparse point Lstat names neither a
+// symlink nor irregular, such as a junction under an older GODEBUG.
+func fileInfoIsReparsePoint(info os.FileInfo) bool {
+	data, ok := info.Sys().(*syscall.Win32FileAttributeData)
+	return ok && data.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
