@@ -5,19 +5,24 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
-// appendStandaloneGatewayWarnings uses the same gateway /health facts as the
-// Unix lifecycle. It is called only by Windows standalone status and verify.
-func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body []byte) {
+// appendStandaloneGatewayWarnings uses the same gateway facts as the Unix
+// lifecycle. It is called only by Windows standalone status and verify:
+// health is the /health document, status the /status one read with the
+// gateway credential, or nil when it could not be read. /health gives only
+// the number of the profile warnings, because they name the configured
+// groups and accounts and /health needs no credential (GAP-1268).
+func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body, status []byte) {
 	var health struct {
-		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
-		ProfileWarnings           []string `json:"profile_warnings"`
-		Telemetry                 struct {
+		ProfileAssignmentWarningCount int `json:"profile_assignment_warning_count"`
+		ProfileWarningCount           int `json:"profile_warning_count"`
+		Telemetry                     struct {
 			Details struct {
 				OptionalState  string `json:"optional_destination_state"`
 				FailureSummary string `json:"optional_destination_failure_summary"`
@@ -30,13 +35,23 @@ func appendStandaloneGatewayWarnings(result *enterprisestatus.Result, body []byt
 	if json.Unmarshal(body, &health) != nil {
 		return
 	}
-	for _, warning := range health.ProfileAssignmentWarnings {
+	var profiles struct {
+		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
+		ProfileWarnings           []string `json:"profile_warnings"`
+	}
+	if status == nil || json.Unmarshal(status, &profiles) != nil {
+		if withheld := max(health.ProfileAssignmentWarningCount, health.ProfileWarningCount); withheld > 0 {
+			result.AddWarning("profile_assignment_unmatched", fmt.Sprintf("%d guardrail profile assignment warning(s) are "+
+				"unavailable without the gateway credential; run this command from an elevated Administrator prompt to list them", withheld))
+		}
+	}
+	for _, warning := range profiles.ProfileAssignmentWarnings {
 		if strings.TrimSpace(warning) != "" {
 			result.AddWarning("profile_assignment_unmatched", warning)
 		}
 	}
-	for _, warning := range health.ProfileWarnings {
-		if strings.TrimSpace(warning) != "" && !slices.Contains(health.ProfileAssignmentWarnings, warning) {
+	for _, warning := range profiles.ProfileWarnings {
+		if strings.TrimSpace(warning) != "" && !slices.Contains(profiles.ProfileAssignmentWarnings, warning) {
 			result.AddWarning("guardrail_profile", warning)
 		}
 	}
