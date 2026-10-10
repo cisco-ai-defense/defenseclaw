@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
@@ -306,6 +307,72 @@ func TestRebasedEditedBuiltinRuleBlocksUnderItsOwnID(t *testing.T) {
 		if blocked := verdict.Action == guardrailActionBlock; !matched || blocked != tc.blocked {
 			t.Errorf("%s: verdict %s (%s), want blocked %v by %s", tc.command, verdict.Action, verdict.Reason,
 				tc.blocked, tc.rule)
+		}
+	}
+}
+
+// GAP-1359: a guardrail profile copied the configuration through JSON, which
+// dropped RuntimeV8RulePackRebase, so a user matched to the profile scanned
+// with the 0.8.x pack as it was and an edited rule that blocked for every
+// other user let the same tool call through.
+func TestRuntimeV8RebaseReachesGuardrailProfiles(t *testing.T) {
+	legacy, err := os.ReadFile(filepath.Join("..", "guardrail", "legacy08", "commands.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy = bytes.ReplaceAll(legacy, []byte("\r\n"), []byte("\n")) // a Windows checkout
+	block := regexp.MustCompile(`(?m)^  - id: CMD-RM-RF\n    pattern: .*\n`)
+	if !block.Match(legacy) {
+		t.Fatal("no CMD-RM-RF in the 0.8.x commands.yaml")
+	}
+	commands := block.ReplaceAllLiteral(legacy, []byte("  - id: CMD-RM-RF\n    pattern: dccert-profile-marker\n"))
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "rules", "commands.yaml"), commands, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := guardrail.RulePackDigest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{RuntimeV8RulePackRebase: true}
+	cfg.Guardrail.RulePack = "acme"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"acme": {Path: dir, Digest: "sha256:" + digest}}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"devs": {Description: "inherits the pack"}}
+	cache := guardrail.NewRulePackCache()
+	base, err := loadGlobalRulePack(cache, cfg, "guardrail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := newGuardrailProfileSet(cfg, cache, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := set.packs[effectiveRulePackKey(set.profiles["devs"].Config, "")]
+	for _, tc := range []struct {
+		name string
+		pack *guardrail.RulePack
+	}{{"unprofiled user", base}, {"profile devs", profile}} {
+		if tc.pack == nil {
+			t.Fatalf("%s: no rule pack", tc.name)
+		}
+		const connector = "rebase-profile"
+		if err := ApplyConnectorRulePackOverrides(connector, tc.pack); err != nil {
+			t.Fatal(err)
+		}
+		const command = "echo dccert-profile-marker"
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: actionfacts.Input{
+				Tool: "Bash", Command: command, CWD: "/home/alice/project",
+				ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX,
+			},
+			LegacyText: command, Connector: connector, EnforcementCapable: true,
+		})
+		RemoveConnectorRulePackOverrides(connector)
+		if verdict := buildVerdict(findings, "tool_call"); verdict.Action != guardrailActionBlock {
+			t.Errorf("%s: verdict %s (%s), want the edited 0.8.x rule to block", tc.name, verdict.Action, verdict.Reason)
 		}
 	}
 }
