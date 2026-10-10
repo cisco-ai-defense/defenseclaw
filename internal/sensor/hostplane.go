@@ -51,7 +51,7 @@ type hostPlane struct {
 	mu sync.Mutex
 	// sessions are keyed by the root process instance, not its pid: an agent
 	// that reuses an exited agent's pid starts its own session (GAP-1372).
-	sessions map[procprobe.ProcKey]*agentchain.Session
+	sessions map[hostSessionKey]*agentchain.Session
 	// gated counts observations discarded for having no agent above them. It
 	// is the denominator that makes the lineage gate auditable rather than
 	// invisible.
@@ -62,6 +62,13 @@ type hostPlane struct {
 	coverage   plane.Coverage
 }
 
+// hostSessionKey keeps the first pid/start key stable through a late exec or
+// a later poll, while instance separates pid reuse when start was unknown.
+type hostSessionKey struct {
+	process  procprobe.ProcKey
+	instance uint64
+}
+
 func newHostPlane(
 	source plane.Source, tracker *agentchain.Tracker,
 	indicators tactics.IndicatorSet, window time.Duration, minStages int,
@@ -69,7 +76,7 @@ func newHostPlane(
 	return &hostPlane{
 		source: source, tracker: tracker, indicators: indicators,
 		window: window, minStages: minStages,
-		sessions: make(map[procprobe.ProcKey]*agentchain.Session),
+		sessions: make(map[hostSessionKey]*agentchain.Session),
 	}
 }
 
@@ -115,7 +122,7 @@ func (h *hostPlane) handle(event plane.Event) {
 	// attribution for the agent -> sh -> cat chain this exists to follow.
 	switch event.Kind {
 	case plane.KindExec:
-		h.tracker.ObserveExec(event.PID, event.PPID, event.ResponsiblePID, event.Name, event.Cmdline, event.At)
+		h.tracker.ObserveExec(event.PID, event.PPID, event.ResponsiblePID, event.Name, event.Cmdline, time.Time{})
 	case plane.KindExit:
 		h.tracker.ObserveExit(event.PID)
 		return
@@ -149,12 +156,18 @@ func (h *hostPlane) handle(event plane.Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.classified++
-	root := procprobe.KeyOf(attribution.RootPID, attribution.RootStart)
+	root := hostSessionKey{
+		process:  procprobe.KeyOf(attribution.RootPID, attribution.RootKeyStart),
+		instance: attribution.RootInstance,
+	}
 	session, exists := h.sessions[root]
 	if !exists {
 		session = agentchain.NewSession(attribution.RootPID, attribution.AgentName, at)
 		session.RootName = attribution.RootName
 		h.sessions[root] = session
+	}
+	if session.RootStart.IsZero() && !attribution.RootStart.IsZero() {
+		session.RootStart = attribution.RootStart
 	}
 	session.Record(agentchain.Observation{
 		Tactic:     match.Tactic,
@@ -210,9 +223,9 @@ func (h *hostPlane) harvest(now time.Time, minRisk int) []hostFinding {
 		if score < minRisk {
 			continue
 		}
-		processes, configPaths := sessionOwnerEvidence(root, session.RootName, session.LastSeen, session.Observations())
+		processes, configPaths := sessionOwnerEvidence(root.process.PID, session.RootStart, session.RootName, session.LastSeen, session.Observations())
 		findings = append(findings, hostFinding{
-			RootPID: root.PID, RootStart: root.Started(), AgentName: session.AgentName,
+			RootPID: root.process.PID, RootStart: session.RootStart, AgentName: session.AgentName,
 			Processes: processes, ConfigPaths: configPaths,
 			Score: score, Signals: signals, Stages: session.TacticsSeen(),
 			FirstSeen: session.FirstSeen, LastSeen: session.LastSeen,
@@ -225,9 +238,10 @@ func (h *hostPlane) harvest(now time.Time, minRisk int) []hostFinding {
 // each with when the session last saw it, and the agent configuration files
 // it wrote.
 func sessionOwnerEvidence(
-	root procprobe.ProcKey, rootName string, lastSeen time.Time, observations []agentchain.Observation,
+	rootPID int, rootStart time.Time, rootName string, lastSeen time.Time, observations []agentchain.Observation,
 ) ([]procRef, []string) {
-	processes := []procRef{{PID: root.PID, Start: root.Started(), Name: rootName, At: lastSeen}}
+	root := procprobe.KeyOf(rootPID, rootStart)
+	processes := []procRef{{PID: rootPID, Start: rootStart, Name: rootName, At: lastSeen}}
 	seen := map[procprobe.ProcKey]int{root: 0}
 	var configPaths []string
 	for _, observation := range observations {

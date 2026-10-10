@@ -74,9 +74,13 @@ func AncestralAuthority(depth int) float64 {
 type Attribution struct {
 	RootPID int
 	// RootStart is when the root process was created, zero when unknown.
-	// With RootPID it names the root's process instance, so a later process
-	// that reuses the pid is not taken for the same agent (GAP-1372).
+	// With RootPID it identifies the root when known. RootInstance keeps
+	// sessions distinct when the kernel start was initially unavailable.
 	RootStart time.Time
+	// RootKeyStart is the first known kernel start used for the session key.
+	// RootInstance separates generations even when the start is unavailable.
+	RootKeyStart time.Time
+	RootInstance uint64
 	// RootName is the root process's image name.
 	RootName  string
 	AgentName string
