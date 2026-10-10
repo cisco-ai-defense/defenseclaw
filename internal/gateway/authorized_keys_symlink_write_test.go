@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -193,7 +194,7 @@ func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
-	for _, count := range []int{31, 32, 40} {
+	for _, count := range []int{31, 32, 40, hookpaths.MaxWriteTargets} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			writes := make([]string, 0, count+1)
 			for i := range count {
@@ -209,10 +210,10 @@ func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 			if !ok || targets[hookpaths.CWDKey] == "" {
 				t.Fatalf("hook evidence lost cwd or failed to decode: ok=%v", ok)
 			}
-			if count == 31 && targets[link] != keys {
+			if count < hookpaths.MaxWriteTargets && targets[link] != keys {
 				t.Fatalf("final write resolved to %q, want %q", targets[link], keys)
 			}
-			if count > 31 && targets["\x00truncated"] != "1" {
+			if count >= hookpaths.MaxWriteTargets && targets[hookpaths.TruncatedKey] != "1" {
 				t.Fatal("omitted write target was not marked as truncated")
 			}
 			input := actionfacts.Input{Tool: "Bash", Command: command, CWD: root, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
@@ -258,10 +259,8 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
-			targets := map[string]string{hookpaths.CWDKey: row.cwd, hookpaths.TruncatedKey: "1"}
-			if row.name == "external redirect" {
-				targets = map[string]string{hookpaths.CWDKey: row.cwd, "/tmp/x": "/tmp/x"}
-			}
+			// A complete client map: no listed operand is a link.
+			targets := map[string]string{hookpaths.CWDKey: row.cwd}
 			findings := dispatchTrustedAction(ctx, trustedActionRequest{
 				Input: input, Connector: "claudecode", EnforcementCapable: true,
 				ResolvedWriteTargets: targets,
@@ -352,10 +351,10 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 					operand = filepath.Join(project, operand)
 				}
 				operand = filepath.Clean(operand)
-				if row.count < 32 && targets[operand] != keys {
+				if row.count < hookpaths.MaxWriteTargets && targets[operand] != keys {
 					t.Fatalf("resolved operand = %q, want %q", targets[operand], keys)
 				}
-				if row.count >= 32 && targets[hookpaths.TruncatedKey] != "1" {
+				if row.count >= hookpaths.MaxWriteTargets && targets[hookpaths.TruncatedKey] != "1" {
 					t.Fatal("omitted target lacked truncation marker")
 				}
 			}
@@ -398,4 +397,110 @@ func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
 	if !ok || targets[externalLink] != keys {
 		t.Fatalf("missing final file resolved to %q, want %q", targets[externalLink], keys)
 	}
+}
+
+// TestResolvedWriteHeaderNeverDropsTarget covers the live && chains that
+// exceeded the client shell analysis limits and sent a map without the
+// final linked operand or a truncation marker (GAP-1370).
+func TestResolvedWriteHeaderNeverDropsTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hook paths")
+	}
+	root := t.TempDir()
+	home, project, external := filepath.Join(root, "home"), filepath.Join(root, "home", "proj"), filepath.Join(root, "external")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project, external} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(external, "kfile")
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	post := func(t *testing.T, connector, mode, command, header string) string {
+		t.Helper()
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = mode
+		cfg.Guardrail.Connector = connector
+		api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+		body := string(mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
+			"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}}))
+		if header == "" {
+			header = hookpaths.Resolve([]byte(body))
+		}
+		// The managed gateway may not see the link of the caller: keep only
+		// the header evidence of the hook client.
+		_ = os.Remove(link)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(body))
+		req.Header.Set(hookpaths.Header, header)
+		if connector == "codex" {
+			setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+		}
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+		recorder := httptest.NewRecorder()
+		api.handleAgentHook(connector).ServeHTTP(recorder, req)
+		return recorder.Body.String()
+	}
+	chain := func(count int, final string) string {
+		writes := make([]string, 0, count+1)
+		for i := range count {
+			writes = append(writes, fmt.Sprintf("echo x > %s", filepath.Join(external, fmt.Sprintf("t%03d", i))))
+		}
+		if final != "" {
+			writes = append(writes, "echo marker >> "+final)
+		}
+		return strings.Join(writes, " && ")
+	}
+	// "action" (not "raw_action") is the enforced decision.
+	const block, allow = `{"action":"block"`, `{"action":"allow"`
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, count := range []int{29, 30, 31, 33, 64, 200} {
+			t.Run(fmt.Sprintf("%s %d", connector, count), func(t *testing.T) {
+				if err := os.Symlink(keys, link); err != nil && !os.IsExist(err) {
+					t.Fatal(err)
+				}
+				command := chain(count, link)
+				header := hookpaths.Resolve(mustJSON(t, map[string]any{"tool_name": "Bash",
+					"tool_input": map[string]string{"command": command}}))
+				if got := post(t, connector, "action", command, header); !strings.HasPrefix(got, block) ||
+					!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+					t.Fatalf("linked append after %d targets = %.400s", count, got)
+				}
+			})
+		}
+		t.Run(connector+" benign only", func(t *testing.T) {
+			if got := post(t, connector, "action", chain(31, ""), ""); !strings.HasPrefix(got, allow) {
+				t.Fatalf("benign targets = %.400s", got)
+			}
+		})
+		t.Run(connector+" unresolved target", func(t *testing.T) {
+			header := encodeTargets(t, map[string]string{hookpaths.CWDKey: project, link: ""})
+			if got := post(t, connector, "action", "echo marker >> "+link, header); !strings.HasPrefix(got, block) {
+				t.Fatalf("unresolved target = %.400s", got)
+			}
+		})
+		t.Run(connector+" undecodable header", func(t *testing.T) {
+			if got := post(t, connector, "action", "echo marker >> "+link, "!"); !strings.HasPrefix(got, block) {
+				t.Fatalf("undecodable header = %.400s", got)
+			}
+		})
+		t.Run(connector+" truncated observe", func(t *testing.T) {
+			header := encodeTargets(t, map[string]string{hookpaths.CWDKey: project, hookpaths.TruncatedKey: "1"})
+			if got := post(t, connector, "action", "echo marker >> "+link, header); !strings.HasPrefix(got, block) {
+				t.Fatalf("truncated action = %.400s", got)
+			}
+			if got := post(t, connector, "observe", "echo marker >> "+link, header); !strings.HasPrefix(got, allow) ||
+				!strings.Contains(got, `"would_block":true`) {
+				t.Fatalf("truncated observe = %.400s", got)
+			}
+		})
+	}
+}
+
+func encodeTargets(t *testing.T, targets map[string]string) string {
+	t.Helper()
+	return base64.RawURLEncoding.EncodeToString(mustJSON(t, targets))
 }

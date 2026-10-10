@@ -737,20 +737,23 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if canonicalSemanticPath(target) == active {
 			return true
 		}
-		underHome := false
-		if relative, err := filepath.Rel(facts.ActiveHome, target); err == nil {
-			underHome = relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-		}
 		if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
-			if present {
+			cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
+			switch {
+			case present && resolved != "":
 				return canonicalSemanticPath(resolved) == active
-			}
-			// An omitted external operand may be a link into the protected
-			// home. The bounded map is incomplete in this case; a home path
-			// alone is never proof of a protected write.
-			if !underHome && request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" &&
-				(request.ProtectedHomeHook || request.SkipLocalFilesystemResolution) {
+			case present:
+				// The user's hook could not resolve the operand (a link
+				// loop, a chain past the kernel limit or an unreadable
+				// component). Resolve it here, or fail closed.
+				if cannotResolveLocally {
+					return true
+				}
+			case request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" && cannotResolveLocally:
+				// The bounded map omits this operand, which may be a link
+				// into the protected home, in or outside the home. Its target
+				// is unknown, so fail closed.
 				return true
 			}
 		}
@@ -782,28 +785,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	if input.Command != "" && len(input.Command) <= 64<<10 {
-		if file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), ""); err == nil {
-			matched := false
-			syntax.Walk(file, func(node syntax.Node) bool {
-				redirect, ok := node.(*syntax.Redirect)
-				if !ok || redirect.Word == nil ||
-					(redirect.Op != syntax.RdrOut && redirect.Op != syntax.AppOut) {
-					return true
-				}
-				start, end := int(redirect.Word.Pos().Offset()), int(redirect.Word.End().Offset())
-				if start < 0 || end > len(input.Command) || end <= start {
-					return true
-				}
-				name := strings.Trim(input.Command[start:end], `"'`)
-				if name == "" || strings.ContainsAny(name, "*?[]`") ||
-					strings.Contains(name, "$") && !strings.HasPrefix(name, "$HOME/") {
-					return true
-				}
-				matched = matched || writeTarget(trustedSymlinkName(input, name))
-				return !matched
-			})
-			if matched {
+	if input.Command != "" {
+		operands, _ := hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		for _, operand := range operands {
+			if writeTarget(operand) {
 				return true
 			}
 		}

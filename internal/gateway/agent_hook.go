@@ -371,7 +371,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				return
 			}
 		}
-		if targets, ok := hookpaths.Decode(r.Header.Get(hookpaths.Header)); ok {
+		if header := r.Header.Get(hookpaths.Header); header != "" {
+			targets, ok := hookpaths.Decode(header)
+			if !ok {
+				// Evidence that is present but unreadable never proves a
+				// write safe: every operand is unknown.
+				targets = map[string]string{hookpaths.TruncatedKey: "1"}
+			}
 			r = r.WithContext(context.WithValue(r.Context(), resolvedWritesContextKey{}, targets))
 		}
 		if registeredEvent != "" && !eventIn(registeredEvent, profile.SupportedEvents) {
