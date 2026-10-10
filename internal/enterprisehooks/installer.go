@@ -350,7 +350,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
 			reason := resolution.Reason
 			if resolution.Status == connector.HookCompatibilityKnown {
-				reason = "selected contract differs from the installed hook-contract lock"
+				reason = "the installed hook-contract lock does not verify the selected contract"
 			}
 			fmt.Fprintf(
 				os.Stderr,
@@ -962,6 +962,8 @@ func hookSidecarFiles(dataDir, connectorName string) ([]string, error) {
 	return append(files, scopedToken), nil
 }
 
+// prepareHookContract selects the effective contract and delivery-failure mode
+// while preserving each platform's established lock and runtime trust boundary.
 func prepareHookContract(mode string, conn connector.Connector, opts connector.SetupOpts) (connector.SetupOpts, error) {
 	resolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
 	if strings.TrimSpace(opts.HookContractID) == "" {
@@ -973,10 +975,13 @@ func prepareHookContract(mode string, conn connector.Connector, opts connector.S
 	if connector.HookContractNeedsActionOverride(resolution) {
 		opts.HookFailMode = "open"
 	}
-	if !strings.EqualFold(strings.TrimSpace(mode), "action") {
-		previous := connector.LoadHookContractLockEntry(opts.DataDir, conn.Name())
-		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
-		if hookContractsIncompatible(previous, current) {
+	strictManagedRuntime := opts.ManagedEnterprise && runtime.GOOS == "windows"
+	if !strings.EqualFold(strings.TrimSpace(mode), "action") && !strictManagedRuntime {
+		incompatible, err := compareHookContractLock(conn, opts, false)
+		if err != nil {
+			return connector.SetupOpts{}, err
+		}
+		if incompatible {
 			opts.HookFailMode = "open"
 		}
 		return opts, nil
@@ -984,30 +989,58 @@ func prepareHookContract(mode string, conn connector.Connector, opts connector.S
 	// Native Windows managed runtimes are administrator-published regular
 	// files. Unix guardians intentionally install hardened per-user symlinks,
 	// so keep their established contract reader and digest semantics.
-	strictManagedRuntime := opts.ManagedEnterprise && runtime.GOOS == "windows"
-	previous, err := connector.LoadHookContractLockEntryForMode(
-		opts.DataDir,
-		conn.Name(),
-		strictManagedRuntime,
-	)
+	incompatible, err := compareHookContractLock(conn, opts, strictManagedRuntime)
 	if err != nil {
-		return connector.SetupOpts{}, fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
+		return connector.SetupOpts{}, err
 	}
-	if previous.Connector != "" {
-		current, err := connector.NewHookContractLockEntryForMode(
+	if incompatible {
+		opts.HookFailMode = "open"
+	}
+	return opts, nil
+}
+
+// compareHookContractLock loads and hashes compatibility evidence with strict
+// bounded managed readers when requested. Ordinary Unix targets deliberately
+// retain the permissive legacy reader and digest behavior.
+func compareHookContractLock(
+	conn connector.Connector,
+	opts connector.SetupOpts,
+	strictManagedRuntime bool,
+) (bool, error) {
+	var previous connector.HookContractLockEntry
+	if strictManagedRuntime {
+		loaded, err := connector.LoadHookContractLockEntryForMode(
+			opts.DataDir,
+			conn.Name(),
+			true,
+		)
+		if err != nil {
+			return false, fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
+		}
+		previous = loaded
+	} else {
+		previous = connector.LoadHookContractLockEntry(opts.DataDir, conn.Name())
+	}
+	if previous.Connector == "" {
+		return false, nil
+	}
+
+	var current connector.HookContractLockEntry
+	if strictManagedRuntime {
+		generated, err := connector.NewHookContractLockEntryForMode(
 			opts,
 			conn,
 			version.Current().BinaryVersion,
-			strictManagedRuntime,
+			true,
 		)
 		if err != nil {
-			return connector.SetupOpts{}, fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
+			return false, fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
 		}
-		if hookContractsIncompatible(previous, current) {
-			opts.HookFailMode = "open"
-		}
+		current = generated
+	} else {
+		current = connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
 	}
-	return opts, nil
+	return hookContractsIncompatible(previous, current), nil
 }
 
 // validateHookContract is retained as a read-only compatibility wrapper for
@@ -1019,6 +1052,8 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	return err
 }
 
+// hookContractsIncompatible reports whether current evidence requires a
+// best-effort fail-open transition instead of the configured delivery mode.
 func hookContractsIncompatible(previous, current connector.HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false
@@ -1031,6 +1066,8 @@ func hookContractsIncompatible(previous, current connector.HookContractLockEntry
 	return previousID == "" || currentID == "" || previousID != currentID
 }
 
+// canonicalHookFailMode normalizes every non-open value to the secure closed
+// default used by hook generation and lock comparison.
 func canonicalHookFailMode(mode string) string {
 	if strings.EqualFold(strings.TrimSpace(mode), "open") {
 		return "open"
