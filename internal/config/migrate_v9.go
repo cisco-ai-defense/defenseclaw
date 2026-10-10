@@ -129,8 +129,7 @@ type RulePackRebasePlan struct {
 	// own now have an ID of theirs ("CMD-RM-RF -> CUSTOM-CMD-RM-RF").
 	Renamed []string
 	// WholeArgument names the Expressed rules that match only a command
-	// argument equal to their literal (the pack's semantic cost budget had
-	// no room for the full form).
+	// argument equal to their literal when the semantic cost budget is full.
 	WholeArgument []string
 }
 

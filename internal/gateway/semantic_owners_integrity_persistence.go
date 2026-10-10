@@ -1484,7 +1484,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				sshAuthorizedKeysStructuredPrerequisite(enforcementFacts)) ||
 			homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
 			trustedStaticStatementAuthorizedKeysWrite(input) ||
-			trustedNoOpAuthorizedKeysRedirect(input) ||
+			trustedStaticRedirectAuthorizedKeysWrite(input, facts) ||
 			trustedHereStringAuthorizedKeysWrite(input) ||
 			trustedDDOutputAuthorizedKeysWrite(input) ||
 			trustedSedInPlaceAuthorizedKeysWrite(input) ||
