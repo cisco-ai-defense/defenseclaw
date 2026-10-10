@@ -982,7 +982,7 @@ func (rp *RulePack) validate(allowEmptyCategories bool) error {
 }
 
 func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
-	seenCategories := make(map[string]struct{}, len(rp.RuleFiles))
+	seenCategories := make(map[string]string, len(rp.RuleFiles))
 	seenIDs := make(map[string]struct{})
 	totalRules := 0
 	semanticRules := 0
@@ -1000,10 +1000,12 @@ func (rp *RulePack) validateRuleFiles(allowEmptyCategories bool) error {
 		if category == "" {
 			return rulePackErr(rel, "validation", "category must not be blank")
 		}
-		if _, exists := seenCategories[category]; exists {
-			return rulePackErr(rel, "duplicate_category", "category duplicates another rule file")
+		if first, exists := seenCategories[category]; exists {
+			// Name the edit: 0.8.x took such a pack (GAP-1339).
+			return rulePackErr(rel, "duplicate_category", fmt.Sprintf("category repeats %s; categories must be "+
+				"unique: move the rules of %s into %s and delete %s", first, rel, first, rel))
 		}
-		seenCategories[category] = struct{}{}
+		seenCategories[category] = rel
 		if len(ruleFile.Rules) > maxRulesPerFile {
 			return rulePackErr(rel, "rule_count_limit", "rule file contains too many rules")
 		}
