@@ -29,7 +29,9 @@ import (
 // GAP-0360: a custom pack copied from the 0.8.x default kept its pattern-only
 // command rules, which 1.0 runs as candidate filters that never block: the
 // operator's marker rule and the old built-in rules stopped enforcing, and
-// doctor said PASS. The migration's rebase restores both.
+// doctor said PASS. The migration's rebase restores both. GAP-1225: the
+// operator's own rule file of another category was left as it was, so its
+// marker rule stopped blocking too and nothing said so.
 func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 	old := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
@@ -45,6 +47,12 @@ func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 		"  - id: CMD-ACME-MARKER\n    pattern: acme-marker-7f3c\n    title: \"Acme marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [execution]\n" +
 		"  - id: CMD-ACME-SPACED\n    pattern: 'acme\\s+spaced'\n    title: \"Acme spaced\"\n    severity: HIGH\n    confidence: 0.9\n    tags: [execution]\n"
 	if err := os.WriteFile(filepath.Join(old, "rules", "commands.yaml"), []byte(commands), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	own := "version: 1\ncategory: acme-markers\nrules:\n" +
+		"  - id: ACME-OWN-MARKER\n    pattern: 'acme\\.own-7f3c'\n    title: \"Own marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n" +
+		"  - id: ACME-OWN-SPACED\n    pattern: 'acme\\s+own'\n    title: \"Own spaced\"\n    severity: HIGH\n    confidence: 0.9\n    tags: [marker]\n"
+	if err := os.WriteFile(filepath.Join(old, "rules", "acme.yaml"), []byte(own), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	blocks := func(pack *guardrail.RulePack, command string) bool {
@@ -64,21 +72,23 @@ func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 		return buildVerdict(findings, "tool_call").Action == guardrailActionBlock
 	}
 	const marker = "echo acme-marker-7f3c > /tmp/x.txt"
+	const ownMarker = "echo acme.own-7f3c > /tmp/y.txt"
 
 	before, err := guardrail.LoadRulePack(old)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary := before.Summary(); blocks(before, marker) || summary.StaleRuleCount != 1 || summary.AlertOnlyRuleCount != 2 {
-		t.Fatalf("the 0.8.x copy: marker blocked=%t, summary %+v; want an unblocked marker, 1 stale and 2 alert-only rules",
-			blocks(before, marker), summary)
+	if summary := before.Summary(); blocks(before, marker) || blocks(before, ownMarker) ||
+		summary.StaleRuleCount != 1 || summary.AlertOnlyRuleCount != 4 {
+		t.Fatalf("the 0.8.x copy: summary %+v; want unblocked markers, 1 stale and 4 alert-only rules", summary)
 	}
 
 	plan, err := guardrail.PlanRulePackRebase(old)
 	if err != nil || plan == nil {
 		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
 	}
-	if !slices.Equal(plan.Expressed, []string{"CMD-ACME-MARKER"}) || !slices.Equal(plan.AlertOnly, []string{"CMD-ACME-SPACED"}) {
+	if !slices.Equal(plan.Expressed, []string{"ACME-OWN-MARKER", "CMD-ACME-MARKER"}) ||
+		!slices.Equal(plan.AlertOnly, []string{"ACME-OWN-SPACED", "CMD-ACME-SPACED"}) {
 		t.Fatalf("expressed %v alert-only %v", plan.Expressed, plan.AlertOnly)
 	}
 	rebased := t.TempDir()
@@ -98,9 +108,9 @@ func TestRebasedZeroEightPackKeepsTheOperatorRuleBlocking(t *testing.T) {
 	if after.FilesDigest() != plan.Digest {
 		t.Fatalf("digest %s, plan %s", after.FilesDigest(), plan.Digest)
 	}
-	if summary := after.Summary(); !blocks(after, marker) || !blocks(after, "rm -rf /") ||
-		summary.StaleRuleCount != 0 || summary.AlertOnlyRuleCount != 1 {
-		t.Fatalf("the rebased pack: summary %+v; want the marker and rm -rf / blocked, 0 stale and 1 alert-only rule", summary)
+	if summary := after.Summary(); !blocks(after, marker) || !blocks(after, ownMarker) || !blocks(after, "rm -rf /") ||
+		summary.StaleRuleCount != 0 || summary.AlertOnlyRuleCount != 2 {
+		t.Fatalf("the rebased pack: summary %+v; want both markers and rm -rf / blocked, 0 stale and 2 alert-only rules", summary)
 	}
 
 	// A gateway reload of the un-migrated v8 source must enforce the same

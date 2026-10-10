@@ -1725,6 +1725,17 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         self.assertIn("never block", rp["detail"])
         self.assertIn("guardrail use-pack", rp["remediation"])
 
+        # GAP-1225: a pack whose only gap is the operator's own pattern rules
+        # (any category) warns too, and says how to make them block again.
+        validate.return_value = self._valid(alert_only_rule_count=2)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/acme"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("2 are custom rules of yours", rp["detail"])
+        self.assertIn("detection-only for tool calls", rp["detail"])
+        self.assertIn("expression", rp["remediation"])
+
     @patch(
         "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
     )

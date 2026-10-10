@@ -107,7 +107,8 @@ type RulePackSummary struct {
 	// StaleRuleCount counts enabled action rules (command, sensitive-path,
 	// cognitive-file, c2) that are 0.8.x copies of built-in rules without
 	// the expression 1.0 needs to block; AlertOnlyRuleCount the operator's
-	// own action rules without one, which record matches and never block.
+	// own rules, of any category, without one: on a tool call they record a
+	// match and never block (GAP-1225).
 	StaleRuleCount     int    `json:"stale_rule_count"`
 	AlertOnlyRuleCount int    `json:"alert_only_rule_count"`
 	Digest             string `json:"digest"`
@@ -1552,7 +1553,7 @@ func (rp *RulePack) counts() RulePackSummary {
 	if tools := rp.SensitiveTools; tools != nil {
 		summary.SensitiveToolCount = len(tools.Tools)
 	}
-	summary.StaleRuleCount, summary.AlertOnlyRuleCount = rp.actionRuleGaps()
+	summary.StaleRuleCount, summary.AlertOnlyRuleCount = rp.ruleGaps()
 	return summary
 }
 

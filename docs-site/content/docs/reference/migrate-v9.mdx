@@ -350,25 +350,35 @@ guardrail:
 | A `protected-<scope>/<preset>` folder composed from protections (only pre-release builds wrote these) | The preset name, plus the folder's `protection` list as `rules.protections`. The `protected-*` folders are not used in v9 and are composed in memory. |
 | Any other folder | A new `custom_packs` entry named after the folder (accented letters folded, so `équipe sécu` is `equipe-secu`), with the pack's digest pinned. A name that is taken gets a `-2`, `-3` suffix. |
 
-In 1.0 a command, path, agent-file or C2 rule blocks only with an
-`expression` over the parsed action; its `pattern` alone records a match on a
-tool call but never blocks it. The 0.8.x rules had no expressions, so a custom
-pack copied from the 0.8.x default pack would enforce nothing. When the
-migration finds such a copy, it writes a 1.0 copy next to it,
-`<folder>-1.0`, and pins that one instead:
+In 1.0 a rule blocks a tool call only with an `expression` over the parsed
+action; its `pattern` alone records a match on a tool call but never blocks it
+(prompts and content still block on the pattern). The 0.8.x rules had no
+expressions, so a custom pack copied from the 0.8.x default pack would enforce
+nothing, and your own rules would stop blocking tool calls. When the migration
+finds such a pack, it writes a 1.0 copy next to it, `<folder>-1.0`, and pins
+that one instead:
 
-- the built-in rules become their 1.0 versions, and the ones your copy turned
-  off or removed stay off;
-- your own rules are carried over. A rule whose `pattern` is a plain literal
-  (such as `acme-marker-7f3c`) gets the expression
-  `f.commands.exists(c, '<literal>' in c.argv)`, so it blocks a command that has
-  that argument. Any other rule of yours keeps only its pattern: the migration
-  names it, and `defenseclaw doctor` warns until you give it an expression
-  ([CEL rules](/docs/policies/cel/authoring)).
+- a rule file copied from the 0.8.x default pack is rebuilt on the 1.0 one: the
+  built-in rules become their 1.0 versions, and the ones your copy turned off
+  or removed stay off;
+- your own rules, in any rule file and category, are kept. A rule whose
+  `pattern` is a plain literal (such as `acme-marker-7f3c` or `acme\.internal`)
+  gets the expression `f.commands.exists(c, '<literal>' in c.argv)`, so it
+  blocks a command that has that argument.
 
-The original folder is kept for a rollback to 0.8.x. The migration record
-(`migration-v9.json`) lists what moved. `defenseclaw doctor` also warns about
-any pack whose action rules have no expression.
+Any other rule of yours keeps only its pattern. The migration names each one,
+and the upgrade prints them on one line:
+
+```text title="Upgrade output"
+⚠ 2 custom rule(s) now detection-only for tool calls: ACME-SPACED, ACME-REGEX; add an expression, see policies/rules
+```
+
+`defenseclaw doctor` warns about them until you give each an expression
+([CEL rules](/docs/policies/cel/authoring)). A pack with nothing to rewrite is
+pinned as it is, and its rules are still named. The original folder is kept
+for a rollback to 0.8.x. The migration record (`migration-v9.json`) lists what
+moved and, under `detection_only_rules`, the rules that no longer block a tool
+call.
 
 A custom pack that cannot be loaded stops the migration with an error that
 names the scope, so a pack you rely on is never dropped silently. Later edits
