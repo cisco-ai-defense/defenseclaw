@@ -7,6 +7,10 @@
 package cli
 
 import (
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -34,5 +38,31 @@ func TestManagedScanGatewayEndpointUsesInstalledAPIPort(t *testing.T) {
 	endpoint, token, managedHost, err := managedScanGatewayEndpoint()
 	if err != nil || !managedHost || endpoint != "http://127.0.0.1:18971" || token != "test-token" {
 		t.Fatalf("endpoint = %q, token = %q, managed = %v, err = %v", endpoint, token, managedHost, err)
+	}
+}
+
+// status and verify read /health on the gateway.api_port of the installed
+// config, as they read /status there (GAP-1351).
+func TestWindowsStandaloneGatewayHealthUsesInstalledAPIPort(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			_, _ = w.Write([]byte("configured-port"))
+		}
+	}))
+	defer server.Close()
+	_, port, _ := net.SplitHostPort(server.Listener.Addr().String())
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(fmt.Sprintf("gateway:\n  api_port: %s\n", port)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousLayout := managedScanWindowsLayout
+	t.Cleanup(func() { managedScanWindowsLayout = previousLayout })
+	managedScanWindowsLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{ConfigPath: configPath, DataDir: root, APIAddr: managed.StandaloneAPIAddr}, nil
+	}
+	body, err := windowsStandaloneGatewayHealth()
+	if err != nil || string(body) != "configured-port" {
+		t.Fatalf("health = %q, %v", body, err)
 	}
 }

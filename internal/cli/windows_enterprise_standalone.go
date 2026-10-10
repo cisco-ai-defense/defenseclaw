@@ -520,11 +520,21 @@ func writeFileKeepingDACL(path string, data []byte, sibling string) error {
 	return nil
 }
 
-// The standalone gateway's machine API uses the default loopback port. This
-// advisory read is bounded; the installer has already established readiness.
+// windowsStandaloneGatewayHealth reads /health of the standalone gateway on
+// the gateway.api_port of the installed config, the port /status is read on:
+// the default port may be another listener (GAP-1351). This advisory read is
+// bounded; the installer has already established readiness.
 func windowsStandaloneGatewayHealth() ([]byte, error) {
+	layout, err := managedScanWindowsLayout()
+	if err != nil {
+		return nil, err
+	}
+	base, err := managedWindowsGatewayBase(layout)
+	if err != nil {
+		return nil, err
+	}
 	client := &http.Client{Timeout: 1500 * time.Millisecond, Transport: &http.Transport{Proxy: nil}}
-	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/health", config.DefaultGatewayAPIPort))
+	resp, err := client.Get(base + "/health")
 	if err != nil {
 		return nil, err
 	}
