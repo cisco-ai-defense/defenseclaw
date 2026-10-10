@@ -7,6 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -219,6 +222,7 @@ func TestAuthorizedKeysWriteTargetCap(t *testing.T) {
 			}
 		})
 	}
+
 }
 
 func TestClaudeWriteTargetMarkerRule(t *testing.T) {
@@ -243,6 +247,7 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"external redirect", "hostname > /tmp/x", project, false},
 		{"read keys", "hostname < ~/.ssh/authorized_keys", project, false},
 		{"keys redirect", "hostname > ~/.ssh/authorized_keys", project, true},
+		{"home variable keys", "hostname > $HOME/.ssh/authorized_keys", project, true},
 		{"keys append", "uptime >> ~/.ssh/authorized_keys", project, true},
 		{"keys stderr append", "uptime 2>> ~/.ssh/authorized_keys", project, true},
 		{"empty command redirect", ": > ~/.ssh/authorized_keys", project, true},
@@ -279,5 +284,118 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestClaudeResolvedWriteHeaderMarkerRule(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX hook paths")
+	}
+	root := t.TempDir()
+	home, project, external := filepath.Join(root, "home"), filepath.Join(root, "home", "proj"), filepath.Join(root, "external")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project, external} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.WriteFile(keys, []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	externalLink, homeLink, relativeLink := filepath.Join(external, "kfile"), filepath.Join(project, "inside"), filepath.Join(project, "relative")
+	for _, link := range []string{externalLink, homeLink} {
+		if err := os.Symlink(keys, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join("..", ".ssh", "authorized_keys"), relativeLink); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Chdir(project)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	for _, row := range []struct {
+		name, link string
+		count      int
+		block      bool
+	}{
+		{"external one", externalLink, 0, true},
+		{"external thirty one", externalLink, 31, true},
+		{"external thirty three", externalLink, 33, true},
+		{"home link", homeLink, 0, true},
+		{"relative link", "./relative", 0, true},
+		{"benign home", filepath.Join(project, "notes.txt"), 0, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			writes := make([]string, 0, row.count+1)
+			for i := range row.count {
+				writes = append(writes, fmt.Sprintf("echo marker > %s", filepath.Join(external, fmt.Sprintf("note-%02d", i))))
+			}
+			writes = append(writes, "echo marker >> "+row.link)
+			command := strings.Join(writes, "; ")
+			body, err := json.Marshal(map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
+				"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			header := hookpaths.Resolve(body)
+			targets, ok := hookpaths.Decode(header)
+			if !ok || targets[hookpaths.CWDKey] != project {
+				t.Fatalf("write header lacks cwd: %v", targets)
+			}
+			if row.block {
+				operand := row.link
+				if !filepath.IsAbs(operand) {
+					operand = filepath.Join(project, operand)
+				}
+				operand = filepath.Clean(operand)
+				if row.count < 32 && targets[operand] != keys {
+					t.Fatalf("resolved operand = %q, want %q", targets[operand], keys)
+				}
+				if row.count >= 32 && targets[hookpaths.TruncatedKey] != "1" {
+					t.Fatal("omitted target lacked truncation marker")
+				}
+			}
+			if row.block {
+				// The managed gateway runs under a different account and may
+				// not see the caller's link. Keep only the client's header proof.
+				if err := os.Remove(row.link); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := os.Symlink(keys, row.link); err != nil {
+						t.Error(err)
+					}
+				})
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(string(body)))
+			req.Header.Set(hookpaths.Header, header)
+			req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook("claudecode").ServeHTTP(recorder, req)
+			want := `"raw_action":"allow"`
+			if row.block {
+				want = `"raw_action":"block"`
+			}
+			if !strings.Contains(recorder.Body.String(), want) {
+				t.Fatalf("response = %d %s, want %s", recorder.Code, recorder.Body.String(), want)
+			}
+		})
+	}
+	if err := os.Remove(keys); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"tool_name": "Bash", "tool_input": map[string]any{
+		"command": "echo marker >> " + externalLink,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, ok := hookpaths.Decode(hookpaths.Resolve(payload))
+	if !ok || targets[externalLink] != keys {
+		t.Fatalf("missing final file resolved to %q, want %q", targets[externalLink], keys)
 	}
 }
