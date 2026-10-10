@@ -164,6 +164,12 @@ type lifecycle struct {
 	// A rollback restores the earlier file, so the newer one is put back
 	// after it and applied once the run ends.
 	configWrittenDuringRun []byte
+	// rollbackConfigSHA is the config.yaml a rollback left in place for the
+	// restored deployment's restart (the snapshot, or the reverted last
+	// applied config), or "" when the restore failed. A config.yaml with
+	// other bytes after the restart was written by another writer since and
+	// is never overwritten (restoreNewerConfig, GAP-1379).
+	rollbackConfigSHA string
 	// machinePolicyPublished is set once a transaction of this run wrote
 	// vendor machine policy for its config, which a rollback then undoes.
 	machinePolicyPublished bool
@@ -187,6 +193,9 @@ type plannedInputs struct {
 	// config.yaml rather than --config.
 	configFromInstalled bool
 	secretsSHA          string
+	// appliedConfigSHA is the config of the deployment this transaction
+	// started from, which a rollback restores ("" on a first install).
+	appliedConfigSHA string
 }
 
 // Run executes one lifecycle action and returns its result; the result's
@@ -1227,6 +1236,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	l.serviceUID = account.UID
 	l.planned = &plannedInputs{configSHA: p.config.SHA, configFromInstalled: p.configFromInstalled, secretsSHA: p.secretsSHA}
+	if record != nil {
+		l.planned.appliedConfigSHA = record.ConfigSHA256
+	}
 	l.reportChanges = record != nil && (l.opts.Action == ActionRepair || l.opts.Action == ActionEnsure)
 	changesBefore := len(r.Changes)
 	if account.Created {
@@ -1334,13 +1346,24 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		var revertConfig func()
 		var newerConfig []byte
+		keepNewerConfig := func() {
+			// A --config run: a config.yaml another writer put in place after
+			// this transaction wrote its own (a push during activation) would
+			// be lost to the snapshot restore, so it is kept and put back
+			// after the restart like one applyFiles kept.
+			current, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
+			if err == nil && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
+				l.configWrittenDuringRun = current
+			}
+		}
 		if committedConfig != nil {
+			keepNewerConfig = nil
 			// The snapshot of an in-place edit holds the edited bytes; the
 			// previous deployment's config is the last applied copy. It goes
 			// back before the services restart.
 			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
 		}
-		restored, err := l.rollback(ctx, snap, pending, false, revertConfig)
+		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, revertConfig)
 		if newerConfig != nil {
 			l.restoreNewerConfig(record, newerConfig)
 		}
@@ -1980,9 +2003,11 @@ const keptSnapshotAdvice = "the previous deployment could not be fully restored;
 // and enabled again. With restoreFirst the files are put back before any
 // service is touched (linking and renaming are safe while the services
 // run), and a restore that fails returns without stopping or starting
-// anything. restored is false when any file could not be put back; the
-// snapshot must then be kept for a retry.
-func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeStart func()) (restored bool, err error) {
+// anything. beforeRestore runs once the services are stopped, just before
+// the snapshot is put back, and beforeStart right after. restored is false
+// when any file could not be put back; the snapshot must then be kept for a
+// retry.
+func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeRestore, beforeStart func()) (restored bool, err error) {
 	env := l.env
 	units := env.Services.Units()
 	previouslyActive, previouslyEnabled := intent.PreviouslyActive, intent.PreviouslyEnabled
@@ -2021,9 +2046,16 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		}
 		_ = env.Services.Stop(ctx, unit)
 	}
+	if beforeRestore != nil {
+		beforeRestore()
+	}
 	restoreErr := env.restore(snap)
 	if beforeStart != nil {
 		beforeStart()
+	}
+	l.rollbackConfigSHA = ""
+	if restoreErr == nil {
+		l.rollbackConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	}
 	if err := l.recordRestoredGeneration(ctx); err != nil {
 		l.result.AddWarning(codeRolledBack, "could not record the restored config.yaml in "+configwrite.GenerationFileName+": "+err.Error())
@@ -2120,7 +2152,7 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	// still fails (the disk is still full) then leaves the running services
 	// alone instead of stopping and restarting the gateway on every apply
 	// trigger, MDM ensure or package postinstall until it succeeds.
-	restored, err := l.rollback(ctx, snap, pending, true, nil)
+	restored, err := l.rollback(ctx, snap, pending, true, nil, nil)
 	switch {
 	case !restored:
 		r.AddError(codeRollbackFailed, fmt.Sprintf("could not roll back the interrupted %s started at %s: %v", pending.Action, pending.StartedAt, err))
