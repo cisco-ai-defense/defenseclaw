@@ -3791,6 +3791,10 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	wcfg := s.currentConfig().Gateway.Watcher
 
 	if !wcfg.Enabled {
+		// No watcher admits a project skill folder now, so hooks stop
+		// registering them and holding their skills, as at a cold start
+		// with this config (GAP-1377).
+		s.projectSkills.start(false)
 		s.health.SetWatcher(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher disabled (set gateway.watcher.enabled=true to enable)\n")
 		warnUnenforcedAssetPolicy(s.currentConfig(), nil, nil, false)

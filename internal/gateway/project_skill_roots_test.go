@@ -120,3 +120,32 @@ func TestProjectSkillThatCannotBeCheckedStaysRefused(t *testing.T) {
 		}
 	}
 }
+
+// GAP-1377: disabling the watcher by hot reload stops project skill
+// admission, as a cold start with that config does: no folder is
+// registered and a new project skill is not held as pending.
+func TestDisabledWatcherStopsProjectSkillAdmission(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	skills := filepath.Join(t.TempDir(), "proj", ".claude", "skills")
+	skill := filepath.Join(skills, "new-skill")
+	if err := os.MkdirAll(skill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Gateway.Watcher.Enabled = false
+	s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
+	s.projectSkills.start(true) // the watcher that ran before the reload
+	s.projectSkills.add("claudecode", skills)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.runWatcher(ctx); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{store: store, logger: logger, projectSkills: &s.projectSkills}
+	if decision, held := api.projectSkillScanPending("skill", "claudecode", "hook", []string{skill}); held {
+		t.Fatalf("new project skill after the watcher was disabled = %+v; want not held", decision)
+	}
+	if s.projectSkills.add("claudecode", filepath.Join(t.TempDir(), "other", ".claude", "skills")) {
+		t.Fatal("a project skill folder was registered with the watcher disabled")
+	}
+}
