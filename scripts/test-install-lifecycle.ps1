@@ -498,7 +498,8 @@ function Test-UpgradeLegacy([string]$From) {
         # GAP-1388: a damaged 0.x audit store is moved aside, so the restored
         # gateway starts on a new one instead of failing with no hooks.
         Write-Log "rollback over a damaged $From audit store"
-        Invoke-Python "import sys; f = open(sys.argv[1], 'r+b'); f.write(b'not a database!!'); f.close()" @((Join-Path $DcHome "previous\data\audit.db")) | Out-Null
+        # Its -wal or -journal would repair the header, so they go too.
+        Invoke-Python "import os, sys; p = sys.argv[1]; f = open(p, 'r+b'); f.write(b'not a database!!'); f.close(); [os.remove(p + s) for s in ('-wal', '-shm', '-journal') if os.path.exists(p + s)]" @((Join-Path $DcHome "previous\data\audit.db")) | Out-Null
         Check ((Invoke-Installer (Join-Path $DcHome "installer\install.ps1") @("-Rollback", "-Yes")) -eq 0) "the rollback over a damaged audit store failed"
         Check (@(Get-ChildItem -LiteralPath $DcHome -Filter "audit.db.corrupt-*" -File).Count -eq 1) "the damaged audit store was not kept as audit.db.corrupt-*"
         Assert-Versions $From
