@@ -723,6 +723,89 @@ function Reset-AuditJournalMode {
     }
 }
 
+# GAP-1388: a 0.x release has no recovery for a damaged audit store, so its
+# gateway does not start on one. Before a rollback to 0.x changes anything,
+# Test-RollbackData runs SQLite's integrity check on each database the
+# rollback restores, with the same code as install.sh (ROLLBACK_DB_CHECK_PY).
+$RollbackDbCheckPy = @'
+import os, shutil, sqlite3, sys, tempfile
+from pathlib import Path
+
+
+def damaged(path):
+    logs = [suffix for suffix in ("-wal", "-journal") if os.path.exists(path + suffix)]
+    with tempfile.TemporaryDirectory() as tmp:
+        uri = Path(os.path.abspath(path)).as_uri() + "?immutable=1"
+        if logs:
+            copy = os.path.join(tmp, "check.db")
+            for suffix in ["", *logs]:
+                shutil.copyfile(path + suffix, copy + suffix)
+            uri = Path(copy).as_uri()
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                result = conn.execute("pragma integrity_check(1)").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError as exc:
+            result = str(exc)
+            if "malformed" not in result and "not a database" not in result:
+                return False
+    if result != "ok":
+        print(path + ": " + " ".join(result.split()), file=sys.stderr)
+    return result != "ok"
+
+
+for path in sys.argv[1:]:
+    try:
+        bad = os.path.isfile(path) and not os.path.islink(path) and damaged(path)
+    except OSError:
+        bad = False
+    if bad:
+        print(path)
+'@
+
+function Test-RollbackData([string]$BackTo) {
+    # $true when the saved audit store is damaged; other damaged databases are only named.
+    $python = Join-Path $Venv "Scripts\python.exe"
+    $data = Join-Path $Previous "data"
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return $false }
+    $stores = @(Get-ChildItem -LiteralPath $data -Filter "*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    if (-not $stores.Count) { return $false }
+    $check = Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-rollback-check-$PID.py"
+    $ErrorActionPreference = "Continue"
+    try {
+        [IO.File]::WriteAllText($check, $RollbackDbCheckPy)
+        $damaged = @(& $python -I $check @stores 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    } catch {
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $check -Force -ErrorAction SilentlyContinue
+    }
+    $audit = Join-Path $data "audit.db"
+    foreach ($store in $damaged) {
+        if ($store -ne $audit) { Write-Warn "The saved database $store of DefenseClaw $BackTo failed SQLite's integrity check; $BackTo may not start with it" }
+    }
+    return $damaged -contains $audit
+}
+
+function Move-DamagedAuditStore([string]$BackTo) {
+    # After the swap, move the damaged store aside under the name the 1.0
+    # gateway and doctor use (audit.db.corrupt-<UTC time>), so the restored
+    # release starts on a new one. Returns the archive's path.
+    $db = Join-Path $DataDir "audit.db"
+    if (-not (Test-Path -LiteralPath $db -PathType Leaf)) { return "" }
+    $moved = "$db.corrupt-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
+    if (Test-Path -LiteralPath $moved) { $moved += "-$PID" }
+    foreach ($suffix in @("-wal", "-shm", "-journal")) {
+        if (Test-Path -LiteralPath "$db$suffix") { Move-Path "$db$suffix" "$moved$suffix" }
+    }
+    Move-Path $db $moved
+    Write-Warn ("The saved $BackTo audit store failed SQLite's integrity check; it was kept as $moved and $BackTo starts on a new " +
+        "audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)")
+    return $moved
+}
+
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that).
@@ -1693,6 +1776,44 @@ function Convert-HooksForRollback([string]$From, [string]$BackTo) {
     }
 }
 
+function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [string]$SavedWasRunning, [string]$Quarantined) {
+    # Put back the install the rollback replaced, and return 1 (GAP-1388): a
+    # restored 0.x release whose gateway is not running leaves agents
+    # unguarded, and it has no rollback command to come back with.
+    $forward = if ($Current) { $Current } else { "1.x" }
+    Write-Warn "$Reason, so the rollback is being undone"
+    [void](Stop-Gateway)
+    # The same swap the other way: previous\ holds the install just left.
+    $undone = @(Switch-WithPrevious $BackTo $false $true)[-1]
+    if ($undone -ne 0) {
+        Write-Err "DefenseClaw $BackTo is installed, but its gateway is not running, so agent hooks are not guarded"
+        if ($undone -eq 1) {
+            Write-Info "To return to $forward, run: powershell -ExecutionPolicy Bypass -File `"$Previous\installer\install.ps1`" -Rollback"
+        }
+        return 1
+    }
+    # previous\ is again the install this rollback started from, as it was.
+    foreach ($marker in @("ROLLED_BACK", "START_AFTER")) { Remove-Item -LiteralPath (Join-Path $Previous $marker) -Force -ErrorAction SilentlyContinue }
+    $state = if ($SavedWasRunning) { $SavedWasRunning } else { "false" }
+    Set-Content -LiteralPath (Join-Path $Previous "GATEWAY_WAS_RUNNING") -Value $state -Encoding Ascii
+    $audit = Join-Path $Previous "data\audit.db"
+    if ($Quarantined -and -not (Test-Path -LiteralPath $audit)) {
+        $kept = Join-Path $Previous "data\$(Split-Path -Leaf $Quarantined)"
+        foreach ($suffix in @("", "-wal", "-shm", "-journal")) {
+            if (Test-Path -LiteralPath "$kept$suffix") { Invoke-Quietly { Move-Path "$kept$suffix" "$audit$suffix" } }
+        }
+    }
+    if ((Start-Gateway) -in @(0, 3)) {
+        Write-Ok "DefenseClaw $forward is back, with its gateway and agent hooks"
+    } else {
+        Write-Warn "DefenseClaw $forward is back, but its gateway did not start; run 'defenseclaw-gateway start' and check its log"
+    }
+    # Paths in the older release's errors above now hold this install's files.
+    Write-Info "The files of DefenseClaw $BackTo are in $Previous\data again; fix them there (paths above under $DataDir named them)"
+    Write-Info "Fix the cause above, then run 'defenseclaw rollback' again (log: $($Run.Log))"
+    return 1
+}
+
 function Invoke-Rollback {
     $backTo = Read-Text (Join-Path $Previous "VERSION")
     if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
@@ -1716,8 +1837,12 @@ function Invoke-Rollback {
         Die "Rollback cancelled; nothing was changed"
     }
     Wait-VenvFree
+    # GAP-1388: check the saved data before anything of this install changes.
+    $toLegacy = [version]$backTo -lt [version]"1.0.0"
+    $auditDamaged = $toLegacy -and (Test-RollbackData $backTo)
     $wasRunning = [bool](Get-GatewayProcess)
-    $startAfter = $wasRunning -or (Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")) -eq "true"
+    $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
+    $startAfter = $wasRunning -or $savedWasRunning -eq "true"
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
     if (-not $rollForward) { Convert-HooksForRollback $currentLabel $backTo }
     $swapped = @(Switch-WithPrevious $current $wasRunning $startAfter)[-1]
@@ -1728,7 +1853,16 @@ function Invoke-Rollback {
     }
     # Homes upgraded before the uv folder was protected (GAP-1988).
     Protect-UvDirectory
+    $quarantined = ""
+    if ($auditDamaged) {
+        try { $quarantined = Move-DamagedAuditStore $backTo } catch {
+            $why = "The damaged audit store of DefenseClaw $backTo could not be moved aside ($($_.Exception.Message))"
+            return Undo-Rollback $why $current $backTo $savedWasRunning ""
+        }
+    }
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
+        # A 0.x release has no rollback command: never leave it down.
+        if ($toLegacy) { return Undo-Rollback "The gateway of DefenseClaw $backTo did not start" $current $backTo $savedWasRunning $quarantined }
         Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
     $forward = if ($current) { $current } else { "1.x" }
