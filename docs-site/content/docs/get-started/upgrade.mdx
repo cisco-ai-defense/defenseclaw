@@ -169,6 +169,12 @@ installed. Every path keeps your configuration and data.
   once you no longer need the old history. `make all` from a source checkout
   over a 0.x install keeps a copy in
   `~/.defenseclaw/backups/audit-history-<time>.db` and says so.
+  0.8.x could leave an audit database that fails SQLite's integrity check
+  ("Rowid N out of order"). 1.0 rebuilds such a database in place before it
+  upgrades it. A 0.x database it cannot rebuild is kept as an archive next to
+  `audit.db` (`audit.db.corrupt-<time>`), and `defenseclaw doctor` lists it
+  without a warning; block/allow lists live in `config.yaml` and are not
+  affected.
 - On a host that several accounts share, `defenseclaw-gateway start` and
   `restart` in 0.8.4 and older stop every `defenseclaw-gateway` process the
   account may signal, not only its own (0.8.5 and later stop only the gateway
