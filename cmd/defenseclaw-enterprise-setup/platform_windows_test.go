@@ -147,8 +147,8 @@ func TestRemoveStaleEnterpriseSetupStagesSkipsYoungAndBusyFolders(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	var diagnostics bytes.Buffer
-	removeStaleEnterpriseSetupStages(programData, time.Now(), &diagnostics)
+	var progress, diagnostics bytes.Buffer
+	removeStaleEnterpriseSetupStages(programData, time.Now(), &progress, &diagnostics)
 	for _, dir := range []string{stale, busy, other} {
 		if _, err := os.Stat(dir); err != nil {
 			t.Fatalf("a young folder was taken: %v", err)
@@ -164,10 +164,11 @@ func TestRemoveStaleEnterpriseSetupStagesSkipsYoungAndBusyFolders(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(handle)
-	removeStaleEnterpriseSetupStages(programData, time.Now().Add(time.Hour), &diagnostics)
+	removeStaleEnterpriseSetupStages(programData, time.Now().Add(time.Hour), &progress, &diagnostics)
 	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the stale folder stayed: %v", err)
 	}
+
 	for _, dir := range []string{busy, other} {
 		if _, err := os.Stat(dir); err != nil {
 			t.Fatalf("a held or foreign folder was taken: %v", err)
@@ -175,5 +176,22 @@ func TestRemoveStaleEnterpriseSetupStagesSkipsYoungAndBusyFolders(t *testing.T) 
 	}
 	if !strings.Contains(diagnostics.String(), "an interrupted Setup run left") {
 		t.Fatalf("diagnostics = %q", diagnostics.String())
+	}
+}
+
+// A removed stale stage is progress: an MDM reads any stderr output as a
+// failed Setup, so nothing goes to diagnostics (GAP-1353).
+func TestRemoveStaleEnterpriseSetupStagesReportsRemovalOffStderr(t *testing.T) {
+	programData := t.TempDir()
+	if err := os.Mkdir(filepath.Join(programData, enterpriseSetupStagePrefix+strings.Repeat("c", 32)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := cleanupStaleEnterpriseSetupStage
+	t.Cleanup(func() { cleanupStaleEnterpriseSetupStage = previous })
+	cleanupStaleEnterpriseSetupStage = func(stage, _ string) error { return os.RemoveAll(stage) }
+	var progress, diagnostics bytes.Buffer
+	removeStaleEnterpriseSetupStages(programData, time.Now().Add(time.Hour), &progress, &diagnostics)
+	if diagnostics.Len() != 0 || !strings.Contains(progress.String(), "removed the staging folder") {
+		t.Fatalf("progress = %q, diagnostics = %q", progress.String(), diagnostics.String())
 	}
 }

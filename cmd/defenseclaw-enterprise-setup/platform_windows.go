@@ -104,7 +104,14 @@ func executeEnterpriseSetup(
 		// Refuse a too-full volume before anything is staged. The Secure
 		// Client Setup keeps its historical behavior.
 		if programData, err := winpath.TrustedProgramData(); err == nil {
-			removeStaleEnterpriseSetupStages(programData, time.Now(), stderr)
+			// A removed folder is progress, not a failure: an MDM reads any
+			// stderr output as a failed script (GAP-1353, GAP-1069), and in
+			// a JSON run stdout is the result alone.
+			progress := stdout
+			if opts.JSON {
+				progress = io.Discard
+			}
+			removeStaleEnterpriseSetupStages(programData, time.Now(), progress, stderr)
 			if err := requireEnterpriseSetupFreeSpace(programData, payload, opts.Action); err != nil {
 				return 0, err
 			}
@@ -474,6 +481,11 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 	return os.Remove(cleanStage)
 }
 
+// cleanupStaleEnterpriseSetupStage removes a renamed stale staging folder.
+// A seam for tests: a test folder is not owned by the administrators group,
+// so the real cleanup keeps it.
+var cleanupStaleEnterpriseSetupStage = cleanupEnterpriseSetupStage
+
 // removeStaleEnterpriseSetupStages removes the staging folders that
 // interrupted standalone Setup runs left in ProgramData (a stopped Setup
 // cannot clean up; each holds the whole payload, GAP-0525). Only a folder
@@ -481,8 +493,9 @@ func cleanupEnterpriseSetupStage(stageRoot, programData string) error {
 // Setup whose lifecycle still runs holds its folder as the working
 // directory, so the rename fails for it. The renamed folder keeps the stage
 // prefix, so one this run cannot clean (unexpected content) is swept by a
-// later run or by uninstall. What happened goes to diagnostics.
-func removeStaleEnterpriseSetupStages(programData string, now time.Time, diagnostics io.Writer) {
+// later run or by uninstall. A removed folder is reported to progress, one
+// it had to keep to diagnostics.
+func removeStaleEnterpriseSetupStages(programData string, now time.Time, progress, diagnostics io.Writer) {
 	entries, err := os.ReadDir(programData)
 	if err != nil {
 		return
@@ -518,11 +531,11 @@ func removeStaleEnterpriseSetupStages(programData string, now time.Time, diagnos
 		if retired == "" {
 			continue
 		}
-		if err := cleanupEnterpriseSetupStage(retired, programData); err != nil {
+		if err := cleanupStaleEnterpriseSetupStage(retired, programData); err != nil {
 			fmt.Fprintf(diagnostics, "%s: kept the staging folder an interrupted Setup run left, %s: %v\n", standaloneSetupArtifactName, retired, err)
 			continue
 		}
-		fmt.Fprintf(diagnostics, "%s: removed the staging folder an interrupted Setup run left, %s\n", standaloneSetupArtifactName, path)
+		fmt.Fprintf(progress, "%s: removed the staging folder an interrupted Setup run left, %s\n", standaloneSetupArtifactName, path)
 	}
 }
 
