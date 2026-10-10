@@ -194,10 +194,12 @@ def _registry_path() -> Path:
     A module imported from ``<repo>/cli/defenseclaw`` uses the authoritative
     source registry. An installed package uses only its adjacent package-data
     mirror, even when its virtualenv happens to live below a source checkout.
-    DEFENSECLAW_REPO_ROOT remains an explicit override for CI sandboxes.
+    DEFENSECLAW_REPO_ROOT remains an explicit override for CI sandboxes and
+    per-user hosts. A managed standalone host ignores it: the registry decides
+    which variables that host ignores, so a standard user must not pick it.
     """
     env_root = os.environ.get("DEFENSECLAW_REPO_ROOT", "").strip()
-    if env_root:
+    if env_root and not managed_standalone():
         p = Path(env_root) / _REGISTRY_RELATIVE_PATH
         if p.is_file():
             return p
@@ -411,11 +413,15 @@ def active_security_overrides(
 
 
 def managed_policy(name: str) -> str:
-    """The registry's managed policy for ``name`` (``allow`` when undeclared)."""
+    """The registry's managed policy for ``name`` (``allow`` when undeclared).
+
+    A registry that cannot be loaded fails closed (``ignore``). Callers drop a
+    value only on a managed standalone host, so other hosts are unchanged.
+    """
     try:
         entry = load_registry().get(name)
-    except (OSError, ValueError):
-        return MANAGED_ALLOW
+    except (OSError, ValueError, KeyError, TypeError):
+        return MANAGED_IGNORE
     return entry.managed if entry is not None else MANAGED_ALLOW
 
 
