@@ -651,6 +651,42 @@ func TestMigrateV9PinsTheRebasedCopyOfAZeroEightPack(t *testing.T) {
 	}
 }
 
+func TestMigrateV9NamesCustomRulesThatNoLongerBlockToolCalls(t *testing.T) {
+	// GAP-1225: a 0.8.x pack rule that blocked a tool call with its pattern
+	// alone only records it in 1.0, and the upgrade said nothing.
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	acme := filepath.Join(dir, "policies", "guardrail", "acme")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + acme +
+		"\n  connectors:\n    codex:\n      rule_pack_dir: " + acme + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath:     configPath,
+		RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+		RebaseRulePack: func(string) (*RulePackRebasePlan, error) {
+			return &RulePackRebasePlan{AlertOnly: []string{"ACME-SPACED", "ACME-REGEX"}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	if got := string(result.Migrated); !strings.Contains(got, "path: "+acme+"\n") || strings.Contains(got, acme+"-1.0") {
+		t.Errorf("want the pack pinned as it is:\n%s", got)
+	}
+	if !slices.Equal(result.Record.DetectionOnlyRules, []string{"ACME-SPACED", "ACME-REGEX"}) {
+		t.Errorf("detection-only rules %q, want each named once", result.Record.DetectionOnlyRules)
+	}
+	if !slices.ContainsFunc(result.Record.Notes, func(note string) bool {
+		return strings.Contains(note, "2 custom rule(s) in "+acme+" now detection-only for tool calls: ACME-SPACED, ACME-REGEX")
+	}) {
+		t.Errorf("no note names the rules: %q", result.Record.Notes)
+	}
+}
+
 func TestWriteRebasedRulePackPreservesExistingStagingSibling(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "acme-1.0")
 	sibling := dir + ".rebasing"

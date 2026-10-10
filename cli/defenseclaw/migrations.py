@@ -3412,6 +3412,17 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
             f"moved {moved} policy values into config.yaml (config_version 9); {conflicts} conflicts "
             f"recorded in {os.path.join(os.path.dirname(config_path), 'migration-v9.json')}"
         )
+        # GAP-1225: these custom rules blocked a tool call on 0.8.x with their
+        # pattern alone; with no expression they only record it in 1.0.
+        detection_only = [
+            rule for rule in record.get("detection_only_rules") or [] if isinstance(rule, str) and rule.isprintable()
+        ]
+        if detection_only:
+            ux.warn(
+                f"{len(detection_only)} custom rule(s) now detection-only for tool calls: "
+                f"{', '.join(detection_only)}; add an expression, see policies/rules",
+                indent="    ",
+            )
 
 
 CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {8: _migrate_config_v9}
