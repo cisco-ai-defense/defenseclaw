@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -53,7 +54,7 @@ func TestSessionEndedGuardServesTheNextThread(t *testing.T) {
 	outReader, out := io.Pipe()
 	setUpAgain := make(chan bool, 1)
 	setUpAgain <- false
-	relaunch := func() (*exec.Cmd, bool) {
+	relaunch := func([]byte) (*exec.Cmd, bool) {
 		if !<-setUpAgain {
 			setUpAgain <- true
 			return nil, false
@@ -135,8 +136,53 @@ func TestSessionEndedGuardServesTheNextThread(t *testing.T) {
 		if err := os.WriteFile(settings, []byte(entry), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := relaunchCommand(lock, "hermes", []string{"--mode", "observe"}); ok != test.ok {
+		if _, ok := relaunchCommand(lock, "hermes", []string{"--mode", "observe"}, func() bool { return false }); ok != test.ok {
 			t.Fatalf("relaunch of %s %v = %v, want %v", test.command, test.args, ok, test.ok)
 		}
+	}
+}
+
+func TestSessionEndedGuardRelaunchesUnchangedEntryAfterBindingRecovers(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := guardExecutable
+	t.Cleanup(func() { guardExecutable = previous })
+	guardExecutable = func() (string, error) { return self, nil }
+	dir := t.TempDir()
+	settings, lock := filepath.Join(dir, "settings.json"), filepath.Join(dir, "lock.json")
+	if err := os.WriteFile(lock, []byte(fmt.Sprintf(`{"client":{"config_path":%q}}`, settings)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"-test.run=TestRelaunchHelperGuard"}
+	entry := fmt.Sprintf(`{"agent_servers":{"DefenseClaw · Hermes":{"command":%q,"args":[%q],"env":{"DC_ACP_RELAUNCH_HELPER":"1"}}}}`, self, args[0])
+	if err := os.WriteFile(settings, []byte(entry), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	editorIn, editorWriter := io.Pipe()
+	outReader, out := io.Pipe()
+	var recovered atomic.Bool
+	done := make(chan error, 1)
+	initialize := []byte(`{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":1}}`)
+	go func() {
+		done <- serveAfterSessionEnd(editorIn, out, initialize, "binding refused", func([]byte) (*exec.Cmd, bool) {
+			return relaunchCommand(lock, "hermes", args, recovered.Load)
+		})
+		_ = out.Close()
+	}()
+	answers := bufio.NewScanner(outReader)
+	for id, want := range []string{`"message":"binding refused"`, `"sessionId":"relaunched"`} {
+		recovered.Store(id > 0)
+		if _, err := fmt.Fprintf(editorWriter, `{"jsonrpc":"2.0","id":%d,"method":"session/new","params":{}}`+"\n", id+1); err != nil {
+			t.Fatal(err)
+		}
+		if !answers.Scan() || !strings.Contains(answers.Text(), want) {
+			t.Fatalf("thread %d: answer %q, want %s", id+1, answers.Text(), want)
+		}
+	}
+	_ = editorWriter.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
