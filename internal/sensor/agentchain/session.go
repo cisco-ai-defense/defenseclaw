@@ -62,6 +62,8 @@ func (o Observation) Key() string {
 // Session accumulates the observations attributed to one agent root pid.
 type Session struct {
 	RootPID int
+	// RootStart is the kernel creation time when known.
+	RootStart time.Time
 	// RootName is the root process's image name, empty when unknown.
 	RootName     string
 	AgentName    string

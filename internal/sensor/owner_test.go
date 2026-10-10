@@ -42,7 +42,7 @@ func TestSessionOwnerEvidenceKeepsDistinctClaudeProfiles(t *testing.T) {
 			Path: path, At: at,
 		})
 	}
-	refs, evidence := sessionOwnerEvidence(procprobe.KeyOf(99, time.Time{}), "claude", at, session.Observations())
+	refs, evidence := sessionOwnerEvidence(99, time.Time{}, "claude", at, session.Observations())
 	if len(evidence) != 2 ||
 		(evidence[0] != paths[0] && evidence[1] != paths[0]) ||
 		(evidence[0] != paths[1] && evidence[1] != paths[1]) {

