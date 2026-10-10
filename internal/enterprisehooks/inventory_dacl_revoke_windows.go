@@ -25,7 +25,11 @@ import (
 // removal trust check there expects the exact protected DACL, so the extra
 // ACEs made it refuse to remove the registrations (GAP-1765). The service
 // SIDs are derived from the names, so this works after the services are
-// deleted. The single profile files (inventoryDACLProfileFiles), the IDE
+// deleted. The agent folders, list-only folders and single profile files
+// (inventoryDACLProfileFiles) come from the table the grant uses
+// (inventoryDACLAgentGrants), so a path the grant adds is revoked too: the
+// profile-root .claude.json kept its read ACE after an exclude or an
+// uninstall while the revoke listed folders by hand (GAP-1257). The IDE
 // plugin inventory's folders and files, and every
 // connector skill and plugin folder (GAP-0913), are revoked on every
 // profile, whatever the profile granted. A missing path is skipped;
@@ -43,7 +47,6 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 		}
 		sids = append(sids, sid)
 	}
-	dirs := append(append(append([]string(nil), inventoryDACLDotdirs...), inventoryDACLListOnlyDirs...), inventoryDACLProfileFiles...)
 	seen := map[string]struct{}{}
 	var failures []error
 	for _, target := range manifest.Targets {
@@ -56,7 +59,10 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 			continue
 		}
 		seen[key] = struct{}{}
-		homeDirs := append([]string(nil), dirs...)
+		var homeDirs []string
+		for _, grant := range inventoryDACLAgentGrants(home, nil, true) {
+			homeDirs = append(homeDirs, grant.dir)
+		}
 		for _, ide := range inventoryDACLIDEGrants(home, nil) {
 			homeDirs = append(homeDirs, ide.dir)
 		}
