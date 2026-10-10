@@ -623,18 +623,36 @@ $runtimeAdoption = & $module {
             }
         }
 
-        # GAP-1220: a loss journal whose DACL grants Administrators nothing
-        # is adopted.
+        # GAP-1220, GAP-1221: a loss journal whose DACL grants Administrators
+        # nothing, and quarantined skills whose exact names end in a dot or a
+        # space, are adopted under those exact names.
         $journal = Microsoft.PowerShell.Management\Join-Path $root 'local-write-losses.journal'
         [IO.File]::WriteAllBytes($journal, [byte[]]::new(64))
         $privateJournal = [Security.AccessControl.FileSecurity]::new()
         $privateJournal.SetSecurityDescriptorSddlForm('O:SYG:SYD:P(A;;FA;;;SY)')
         Microsoft.PowerShell.Security\Set-Acl -LiteralPath $journal -AclObject $privateJournal
+        $quarantine = [IO.Path]::Combine($root, 'quarantine', 'skills', 'claudecode')
+        $exactEntries = @(foreach ($name in @('rev.', 'rev ', 'tdot')) {
+                '\\?\' + [IO.Path]::Combine($quarantine, $name)
+            })
+        foreach ($entry in $exactEntries) {
+            [void][IO.Directory]::CreateDirectory($entry)
+            [IO.File]::WriteAllText($entry + '\SKILL.md', 'x')
+        }
         Set-DefenseClawRetainedRuntimeAcls `
             -RuntimeDirectory $root `
             -GatewayServiceSID $GatewaySID
         Assert-DefenseClawCanonicalPathAcl -Path $journal -Expected $expectedFile
-        $unreadableJournalAdopted = @($script:DefenseClawSkippedRuntimeFiles).Count -eq 0
+        foreach ($entry in $exactEntries) {
+            Assert-DefenseClawCanonicalPathAcl -Path $entry -Expected $expectedDirectory
+            Assert-DefenseClawCanonicalPathAcl -Path ($entry + '\SKILL.md') -Expected $expectedFile
+        }
+        $exactNamesAdopted = (
+            @($script:DefenseClawSkippedRuntimeFiles).Count -eq 0 -and
+            @($exactEntries | Microsoft.PowerShell.Core\Where-Object {
+                    [IO.Directory]::Exists($_)
+                }).Count -eq 3
+        )
 
         $linked = Microsoft.PowerShell.Management\Join-Path $root 'linked.db'
         $linkedAlias = Microsoft.PowerShell.Management\Join-Path $root 'linked-alias.db'
@@ -678,7 +696,7 @@ $runtimeAdoption = & $module {
                 $keyIdentityBefore -ceq $keyIdentityAfter
             )
             hard_link_rejected = $hardLinkRejected
-            unreadable_journal_adopted = $unreadableJournalAdopted
+            exact_names_and_unreadable_journal_adopted = $exactNamesAdopted
             hard_link_preflight_preserved_acl = (
                 $descriptorBefore -ceq $descriptorAfter
             )
@@ -687,7 +705,7 @@ $runtimeAdoption = & $module {
     finally {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root) {
             Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $root `
+                -LiteralPath ('\\?\' + $root) `
                 -Recurse `
                 -Force `
                 -ErrorAction SilentlyContinue

@@ -2248,9 +2248,22 @@ function Assert-DefenseClawDescendant {
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Label
     )
+    # An exact (\\?\) path, the form Get-DefenseClawExactItemPath gives a
+    # name ending in a dot or a space, is kept as it is: GetFullPath leaves
+    # it alone, and it is compared to the root without its prefix. Such a
+    # path is never normalized, so a '.' or '..' segment in it is refused.
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
-    if (-not $full.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    $comparable = $full
+    if ($full.StartsWith('\\?\')) {
+        $comparable = $full.Substring(4)
+        if (@($comparable.Split('\') | Microsoft.PowerShell.Core\Where-Object {
+                    $_ -ceq '.' -or $_ -ceq '..'
+                }).Count -ne 0) {
+            throw "$Label escapes its managed root: $full"
+        }
+    }
+    if (-not $comparable.StartsWith($rootFull + '\', [StringComparison]::OrdinalIgnoreCase)) {
         throw "$Label escapes its managed root: $full"
     }
     return $full
@@ -6753,8 +6766,12 @@ function Set-DefenseClawRetainedRuntimeAcls {
                 -LiteralPath $directory `
                 -Force `
                 -ErrorAction Stop)) {
+            # Every object is named by its exact path from here on: Win32
+            # normalization turns a quarantined skill 'rev.' or 'rev ' into
+            # 'rev', which does not exist, and repair stopped with "managed
+            # path is missing" (GAP-1221). Ordinary names keep their path.
             $full = Assert-DefenseClawDescendant `
-                -Path $item.FullName `
+                -Path (Get-DefenseClawExactItemPath -Path ([string]$item.FullName)) `
                 -Root $root `
                 -Label 'retained runtime object'
             if (-not $seen.Add($full)) {
