@@ -327,6 +327,44 @@ func TestTamperedClaudeDropInIsFoundAndPutBackByEnsure(t *testing.T) {
 	}
 }
 
+// GAP-1348: a Copilot drop-in whose hook command kept DefenseClaw's prefix
+// but gained a redirection and a successful fallback discarded the deny,
+// while verify reported coverage and the guardian checked only Claude's
+// drop-in. Verify fails, the guardian finds it, and ensure puts it back.
+func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
+	writeFreshLedger(t, h)
+	dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+	want := h.read(dropIn)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(want), &doc); err != nil {
+		t.Fatal(err)
+	}
+	pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+	pre["bash"] = pre["bash"].(string) + " >/dev/null 2>&1 || true"
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(dropIn), edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "not the command DefenseClaw publishes") {
+		t.Fatalf("verify must report the modified Copilot hook: %+v", verify.Errors)
+	}
+	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{dropIn}) {
+		t.Fatalf("the guardian check found %v", got)
+	}
+	ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireOK(t, ensure)
+	if h.read(dropIn) != want || len(h.env.TamperedFiles()) != 0 {
+		t.Fatalf("ensure did not put the Copilot drop-in back: changes=%v", ensure.Changes)
+	}
+}
+
 // A narrowed matcher leaves the hook commands in place, so coverage-only
 // verification still passes. Ensure must restore the owned drop-in bytes.
 func TestEnsureRestoresTamperedClaudeMatcher(t *testing.T) {

@@ -14,15 +14,20 @@ package enterprisepolicy
 
 import (
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -389,11 +394,117 @@ var publishedDirACLEntries = func(path string) ([]managed.DarwinACLEntry, error)
 	return entries[path], err
 }
 
+// linuxAccessACLXattr holds a Linux file's POSIX access ACL.
+const linuxAccessACLXattr = "system.posix_acl_access"
+
+// publishedDirLinuxACL reads a directory's POSIX access ACL; nil when it has
+// none (mode bits alone apply) or the file system has no ACLs.
+var publishedDirLinuxACL = func(path string) ([]byte, error) {
+	if runtime.GOOS != "linux" {
+		return nil, nil
+	}
+	for {
+		size, err := unix.Getxattr(path, linuxAccessACLXattr, nil)
+		if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.ENOTSUP) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		data := make([]byte, size)
+		n, err := unix.Getxattr(path, linuxAccessACLXattr, data)
+		if errors.Is(err, unix.ERANGE) {
+			continue // the ACL grew between the two calls
+		}
+		if errors.Is(err, unix.ENODATA) {
+			return nil, nil
+		}
+		return data[:n], err
+	}
+}
+
 var clearPublishedDirACL = func(path string) error {
+	if runtime.GOOS == "linux" {
+		if err := unix.Removexattr(path, linuxAccessACLXattr); err != nil && !errors.Is(err, unix.ENODATA) {
+			return err
+		}
+		return nil
+	}
 	return exec.Command("/bin/chmod", "-h", "-N", path).Run()
 }
 
+// linuxACLDenial names the named-user and named-group entries of a Linux
+// POSIX access ACL (the xattr format: a version 2 header, then 8-byte tag,
+// permission, id entries) whose effective permission, after the mask, lacks
+// want. Mode bits cover the owner, the owning group and other users; these
+// entries override "other" for the users they name (GAP-1350).
+func linuxACLDenial(data []byte, want os.FileMode) (string, error) {
+	const (
+		aclUser  = 0x02
+		aclGroup = 0x08
+		aclMask  = 0x10
+	)
+	if len(data) < 4 || (len(data)-4)%8 != 0 || binary.LittleEndian.Uint32(data) != 2 {
+		return "", fmt.Errorf("unrecognised POSIX ACL (%d bytes)", len(data))
+	}
+	type entry struct {
+		tag, perm uint16
+		id        uint32
+	}
+	mask := uint16(7)
+	var named []entry
+	for off := 4; off < len(data); off += 8 {
+		e := entry{binary.LittleEndian.Uint16(data[off:]), binary.LittleEndian.Uint16(data[off+2:]), binary.LittleEndian.Uint32(data[off+4:])}
+		switch e.tag {
+		case aclMask:
+			mask = e.perm
+		case aclUser, aclGroup:
+			named = append(named, e)
+		}
+	}
+	var denied []string
+	for _, e := range named {
+		effective := e.perm & mask
+		if os.FileMode(effective)&want == want {
+			continue
+		}
+		id := strconv.FormatUint(uint64(e.id), 10)
+		kind, name := "user", id
+		if e.tag == aclGroup {
+			kind = "group"
+			if g, err := user.LookupGroupId(id); err == nil {
+				name = g.Name
+			}
+		} else if u, err := user.LookupId(id); err == nil {
+			name = u.Username
+		}
+		denied = append(denied, fmt.Sprintf("%s:%s:%s", kind, name, rwx(effective)))
+	}
+	return strings.Join(denied, ", "), nil
+}
+
+func rwx(perm uint16) string {
+	out := []byte("---")
+	for i, c := range "rwx" {
+		if perm&(4>>i) != 0 {
+			out[i] = byte(c)
+		}
+	}
+	return string(out)
+}
+
 func publishedDirACLProblem(opts Options, dir string, index int) (string, error) {
+	if opts.goos() == "linux" {
+		data, err := publishedDirLinuxACL(dir)
+		if err != nil || data == nil {
+			return "", err
+		}
+		denied, err := linuxACLDenial(data, publishedDirAccess(index))
+		if err != nil || denied == "" {
+			return "", err
+		}
+		return fmt.Sprintf("%s has POSIX ACL entries without access (effective) %s", dir, denied), nil
+	}
 	if opts.goos() != "darwin" {
 		return "", nil
 	}
@@ -410,7 +521,8 @@ func publishedDirACLProblem(opts Options, dir string, index int) (string, error)
 }
 
 // publishedDirProblem names the directories above a policy file DefenseClaw
-// published that users cannot pass because of mode or a macOS deny ACL. After an administrator hardened
+// published that users cannot pass because of mode, a macOS deny ACL or a
+// Linux POSIX ACL entry without access. After an administrator hardened
 // /etc/claude-code/managed-settings.d to 0700, Claude Code skipped every
 // managed setting (and offered to continue without them) while verify and
 // status said the deployment was healthy (GAP-0913). "" when users can.
@@ -425,7 +537,7 @@ func publishedDirProblem(opts Options, path string) string {
 			problems = append(problems, fmt.Sprintf("%s has mode %04o", dir, info.Mode().Perm()))
 		}
 		if problem, err := publishedDirACLProblem(opts, dir, index); err != nil {
-			problems = append(problems, fmt.Sprintf("cannot inspect %s macOS ACL: %v", dir, err))
+			problems = append(problems, fmt.Sprintf("cannot inspect the ACL of %s: %v", dir, err))
 		} else if problem != "" {
 			problems = append(problems, problem)
 		}
@@ -435,7 +547,7 @@ func publishedDirProblem(opts Options, path string) string {
 
 // restorePublishedDirs gives the administrator-owned directories above a
 // published policy file to the access DefenseClaw creates: mode 0755 and no
-// macOS ACL denying list or search. It returns the directories it changed.
+// macOS ACL or Linux POSIX access ACL denying list or search. It returns the directories it changed.
 func restorePublishedDirs(opts Options, path string) ([]string, error) {
 	var restored []string
 	for index, dir := range publishedDirs(opts, path) {
@@ -457,7 +569,7 @@ func restorePublishedDirs(opts Options, path string) ([]string, error) {
 		}
 		if aclProblem != "" {
 			if err := clearPublishedDirACL(dir); err != nil {
-				return restored, fmt.Errorf("remove macOS ACL of %s: %w", dir, err)
+				return restored, fmt.Errorf("remove the ACL of %s: %w", dir, err)
 			}
 		}
 		if needMode {

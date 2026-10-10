@@ -13,10 +13,15 @@
 package enterprisepolicy
 
 import (
+	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -128,6 +133,50 @@ func TestVerifyAndRestorePublishedDirWithMacOSDenyACL(t *testing.T) {
 	restored, err := RestorePublishedPolicyDirs(opts)
 	if err != nil || !containsString(restored, dir) || denied {
 		t.Fatalf("restore published dirs = %v, %v; denied=%v", restored, err, denied)
+	}
+	result, err = VerifyAll(opts, []string{"claudecode"})
+	if err != nil || !containsString(result.MachinePolicyConnectors, "claudecode") {
+		t.Fatalf("verify after ACL repair: %+v, %v", result, err)
+	}
+}
+
+// GAP-1350: a Linux named-user ACL entry without search on the 0755
+// managed-settings directory keeps that user's Claude Code from loading the
+// policy while the mode bits look right. Verify reports it and the restore
+// removes the ACL.
+func TestVerifyAndRestorePublishedDirWithLinuxDenyACL(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("POSIX ACL xattrs are Linux-only")
+	}
+	withHigherSources(t)
+	opts := publishTestOptions(t)
+	if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(opts.Root, "etc/claude-code/managed-settings.d")
+	acl := binary.LittleEndian.AppendUint32(nil, 2)
+	for _, e := range [][3]uint32{{0x01, 7, 0xffffffff}, {0x02, 0, 54321}, {0x04, 5, 0xffffffff}, {0x10, 5, 0xffffffff}, {0x20, 5, 0xffffffff}} {
+		acl = binary.LittleEndian.AppendUint16(acl, uint16(e[0]))
+		acl = binary.LittleEndian.AppendUint16(acl, uint16(e[1]))
+		acl = binary.LittleEndian.AppendUint32(acl, e[2])
+	}
+	if err := unix.Setxattr(dir, "system.posix_acl_access", acl, 0); errors.Is(err, unix.ENOTSUP) {
+		t.Skipf("no POSIX ACLs on %s", dir)
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	result, err := VerifyAll(opts, []string{"claudecode"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range result.States {
+		if state.Connector == "claudecode" && (state.Covered || !hasConflict(state, "user:54321:---")) {
+			t.Fatalf("a managed directory a named user cannot search was reported covered: %+v", state)
+		}
+	}
+	restored, err := RestorePublishedPolicyDirs(opts)
+	if err != nil || !containsString(restored, dir) {
+		t.Fatalf("restore published dirs = %v, %v", restored, err)
 	}
 	result, err = VerifyAll(opts, []string{"claudecode"})
 	if err != nil || !containsString(result.MachinePolicyConnectors, "claudecode") {
