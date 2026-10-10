@@ -448,11 +448,19 @@ func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConne
 	if g := a.generation(); g.published() {
 		ctx = withPinnedGeneration(ctx, g)
 	}
-	set := a.guardrailProfileSet()
+	return withGuardrailProfile(ctx, a.requestProfileSet(ctx), routeConnector)
+}
+
+// requestProfileSet is the profile set decisions for ctx read: the set of
+// the generation pinned on ctx, else this API server's live set. A reload
+// publishes the next generation before the live set changes, so reading the
+// live set could pair one generation's rules with another's mode and
+// thresholds (GAP-1295).
+func (a *APIServer) requestProfileSet(ctx context.Context) *guardrailProfileSet {
 	if g := pinnedGeneration(ctx); g.published() {
-		set = g.Profiles
+		return g.Profiles
 	}
-	return withGuardrailProfile(ctx, set, routeConnector)
+	return a.guardrailProfileSet()
 }
 
 // withGuardrailProfile is withGuardrailProfileDecision for set. The LLM
@@ -490,12 +498,7 @@ func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.guardrailProfileSet() != nil {
-			r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), ""))
-		} else {
-			r = a.pinRequestGeneration(r)
-		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
 	})
 }
 
@@ -516,7 +519,7 @@ func (a *APIServer) resolveProfile(ctx context.Context) profileDecision {
 }
 
 func (a *APIServer) resolvedProfile(ctx context.Context) *resolvedGuardrailProfile {
-	set := a.guardrailProfileSet()
+	set := a.requestProfileSet(ctx)
 	if set == nil {
 		return nil
 	}

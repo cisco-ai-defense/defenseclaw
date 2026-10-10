@@ -92,6 +92,20 @@ var inventoryDACLListOnlyDirs = []string{
 	`AppData\Local\cursor-agent`,
 }
 
+// inventoryDACLProfileFiles are single files the standalone gateway reads,
+// each granted alone with no inheritance, so nothing beside them becomes
+// readable. Claude Code writes user and local-scope MCP servers in the
+// profile-root .claude.json (GAP-1204). Devin keeps its user MCP servers in
+// mcp_config.json beside its hook file config.json; the guardian keeps that
+// folder at its protected DACL (GAP-1210), so the folder and config.json get
+// nothing (GAP-1237). A file Devin or an editor replaces regains the grant at
+// the next cycle. The revoke on uninstall and on a dropped profile takes the
+// same list.
+var inventoryDACLProfileFiles = []string{
+	".claude.json",
+	`AppData\Roaming\devin\mcp_config.json`,
+}
+
 // gatewayServiceNamePattern matches the certification-scoped gateway service
 // name. The scope suffix (10 lowercase hex chars) is generated at install time
 // and shared across CertGateway/CertGuardian/CertEnumerator/CertCMIDBroker.
@@ -404,10 +418,9 @@ func inventoryDACLAgentGrants(home string, guardianOwned map[string]struct{}, re
 		grants = append(grants, grant(dir, ensureInventoryListACE, inventoryListACE))
 	}
 	if rejectLinks {
-		// Claude Code writes user and local-scope MCP servers in this
-		// profile-root file. Grant the standalone gateway this file alone;
-		// no grant is inherited by its neighbours in the profile root.
-		grants = append(grants, grant(".claude.json", ensureInventorySelfACE, inventorySelfACE))
+		for _, file := range inventoryDACLProfileFiles {
+			grants = append(grants, grant(file, ensureInventorySelfACE, inventorySelfACE))
+		}
 	}
 	return grants
 }
@@ -492,20 +505,32 @@ var inventoryDACLAfterLinkCheck = func() {}
 // path must equal the requested child of the pinned profile even if a parent
 // was replaced with a junction after the path walk.
 func openInventoryDACLHandle(home, rel string) (windows.Handle, error) {
+	return openWindowsProfileChildNoFollow(home, rel, windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+}
+
+// openWindowsProfileChildNoFollow opens home\rel with access and share as
+// the object itself, never what a reparse point names. It fails with
+// errInventoryDACLLink when an existing element below home is a reparse
+// point, or when the opened objects final path is not homes followed by
+// rel, which catches a parent swapped for a junction after the path walk.
+// The inventory grants and revokes and the ACP purge (GAP-1256) pin their
+// objects with it.
+func openWindowsProfileChildNoFollow(home, rel string, access, share uint32) (windows.Handle, error) {
 	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
 		return 0, err
 	}
 	inventoryDACLAfterLinkCheck()
-	open := func(path string, access uint32) (windows.Handle, error) {
+	open := func(path string, access, share uint32) (windows.Handle, error) {
 		ptr, err := winpath.UTF16Ptr(path)
 		if err != nil {
 			return 0, err
 		}
-		return windows.CreateFile(ptr, access,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		return windows.CreateFile(ptr, access, share, nil,
 			windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	}
-	homeHandle, err := open(home, windows.FILE_READ_ATTRIBUTES)
+	homeHandle, err := open(home, windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
 	if err != nil {
 		return 0, err
 	}
@@ -518,7 +543,7 @@ func openInventoryDACLHandle(home, rel string) (windows.Handle, error) {
 		homeInfo.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		return 0, errInventoryDACLLink
 	}
-	target, err := open(filepath.Join(home, rel), windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|windows.WRITE_DAC)
+	target, err := open(filepath.Join(home, rel), access, share)
 	if err != nil {
 		return 0, err
 	}
@@ -711,6 +736,11 @@ func ensureInventoryACEPinned(home, rel string, sid *windows.SID, kind inventory
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 &&
 		!(kind.files && info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0) {
 		return inventoryDACLSkippedMissing, nil
+	}
+	// A file's DACL is shared by all its names: a hard link in the profile
+	// to another file would grant the service that file.
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 && info.NumberOfLinks != 1 {
+		return inventoryDACLSkippedMissing, errInventoryDACLLink
 	}
 	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {

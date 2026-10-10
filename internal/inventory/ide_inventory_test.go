@@ -387,6 +387,48 @@ func TestUserPluginCapPreservesLaterInstallationBaseline(t *testing.T) {
 	t.Fatal("later installation baseline missing from the published inventory")
 }
 
+func TestIDEFileBudgetKeepsLaterJetBrainsBaseline(t *testing.T) {
+	home := t.TempDir()
+	for _, editor := range []string{".vscode", ".cursor"} {
+		for i := 0; i < 8192; i++ {
+			path := filepath.Join(home, editor, "extensions", fmt.Sprintf("bulk.ext%d-1", i), "package.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(fmt.Sprintf(`{"name":"ext%d","publisher":"bulk"}`, i)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	pluginPath := filepath.Join(home, ".local", "share", "JetBrains", "IdeaIC2025.2", "ai", "META-INF", "plugin.xml")
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pluginPath, []byte(`<idea-plugin><id>com.example.ai</id></idea-plugin>`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The VS Code-family files exceed the default 16,384-file budget
+	// before the JetBrains descriptor is reached.
+	installs := ideplugins.Scan(home, "linux", ideplugins.Limits{})
+	inv := &IDEInventory{Scope: config.IDEInventoryAll}
+	inv.add(installs, ideOwner{}, nil, time.Now())
+	var jetbrains *IDEPlugin
+	for i := range inv.Plugins {
+		if inv.Plugins[i].PluginID == "com.example.ai" {
+			jetbrains = &inv.Plugins[i]
+		}
+	}
+	if jetbrains == nil {
+		t.Fatal("JetBrains plugin starved by VS Code file budget")
+	}
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{IDEInventory: config.IDEInventoryAll},
+		ideBaseline: map[string]IDEPlugin{jetbrains.Fingerprint: *jetbrains}}
+	got := svc.finishIDEInventory(inv, true, time.Now())
+	if len(got.Removed) != 0 {
+		t.Fatalf("still-installed JetBrains plugin reported removed: %+v", got.Removed)
+	}
+}
+
 // A capped IDE scan cannot prove that an AI extension missing beyond the cap
 // was removed while the IDE inventory still retains that plugin.
 func TestPartialIDEInventoryKeepsEditorExtensionSignal(t *testing.T) {

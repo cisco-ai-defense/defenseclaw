@@ -1334,6 +1334,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		return false, nil
 	}
 	userConfigPath := codexConfigPath()
+	var userCfg map[string]interface{}
 	data, err := os.ReadFile(userConfigPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -1344,6 +1345,7 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		if err := parseCodexTOML(data, &cfg); err != nil {
 			return false, fmt.Errorf("parse Codex config for hook guardian: %w", err)
 		}
+		userCfg = cfg
 		if rawFeatures, exists := cfg["features"]; exists {
 			features, ok := rawFeatures.(map[string]interface{})
 			if !ok {
@@ -1411,6 +1413,14 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 		verifyErr = verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"), opts)
 	}
 	if verifyErr != nil {
+		return false, nil
+	}
+	// Setup always writes the top-level notify entry into config.toml. A missing
+	// or edited entry leaves Codex launching a program that is not DefenseClaw's
+	// (or does not exist) on every completed turn, so report the contract as
+	// broken and let the guard re-run Setup (GAP-1248). A managed Windows install
+	// whose user config.toml is absent keeps relying on managed_config.toml.
+	if userCfg != nil && !codexNotifyIsCurrent(userCfg["notify"], opts) {
 		return false, nil
 	}
 	return true, nil
@@ -1599,6 +1609,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 
 	var transformed []byte
 	var backupToSave codexConfigBackup
+	adoptedNotify := false
 	render := func(raw []byte) error {
 		cfg := map[string]interface{}{}
 		if len(raw) > 0 {
@@ -1652,6 +1663,24 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 				backup.OriginalNotify = raw
 			}
 			backupToSave = backup
+		} else if existing, ok := cfg["notify"]; ok && !codexNotifyLooksManaged(existing, opts) {
+			// The operator replaced the notifier after Setup. Keep it as the
+			// chained original that Teardown restores instead of dropping it when
+			// Setup (or the hook guard) writes DefenseClaw's notifier back.
+			if argv, ok := codexNotifyArgv(existing); ok && len(argv) > 0 && strings.TrimSpace(argv[0]) != "" {
+				loaded, err := c.loadConfigBackup(opts.DataDir)
+				if err != nil {
+					return fmt.Errorf("load original Codex notifier: %w", err)
+				}
+				raw, err := json.Marshal(argv)
+				if err != nil {
+					return fmt.Errorf("capture replaced Codex notify config: %w", err)
+				}
+				loaded.HadNotify = true
+				loaded.OriginalNotify = raw
+				backupToSave = loaded
+				adoptedNotify = true
+			}
 		}
 
 		// Codex's [hooks] table is an inline struct (HookEventsToml) with
@@ -1735,7 +1764,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			_ = os.Remove(filepath.Join(opts.DataDir, "notify-bridge.sh"))
 		} else {
 			original := backupToSave
-			if backupExists {
+			if backupExists && !adoptedNotify {
 				original, err = c.loadConfigBackup(opts.DataDir)
 				if err != nil {
 					return fmt.Errorf("load original Codex notifier: %w", err)
@@ -1856,7 +1885,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		} else if err := verifyNoOwnedCodexHooks(persistedConfig, hooksDir); err != nil {
 			return fmt.Errorf("verify persisted legacy Codex user hook cleanup: %w", err)
 		}
-		if !backupExists {
+		if !backupExists || adoptedNotify {
 			if err := c.saveConfigBackup(opts.DataDir, backupToSave); err != nil {
 				return fmt.Errorf("save codex config backup: %w", err)
 			}
@@ -2377,6 +2406,40 @@ func codexShellNotifyCommand(opts SetupOpts) []string {
 	return []string{"bash", filepath.Join(opts.DataDir, "notify-bridge.sh")}
 }
 
+// codexNotifyArgv returns a notify value as an argv list, or false when it is
+// not a list of strings.
+func codexNotifyArgv(v interface{}) ([]string, bool) {
+	switch list := v.(type) {
+	case []string:
+		return append([]string(nil), list...), true
+	case []interface{}:
+		argv := make([]string, 0, len(list))
+		for _, raw := range list {
+			s, ok := raw.(string)
+			if !ok {
+				return nil, false
+			}
+			argv = append(argv, s)
+		}
+		return argv, true
+	default:
+		return nil, false
+	}
+}
+
+// codexNotifyIsCurrent reports whether v is the notifier Setup writes on this
+// platform: the native launcher on Windows, the data-root Bash bridge on Unix.
+func codexNotifyIsCurrent(v interface{}, opts SetupOpts) bool {
+	argv, ok := codexNotifyArgv(v)
+	if !ok || len(argv) != 2 {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return argv[1] == "notify" && isDefenseClawManagedHookExecutable(argv[0])
+	}
+	return argv[0] == "bash" && pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh"))
+}
+
 // codexNotifyLooksManaged recognizes both the current platform command and the
 // legacy Bash bridge. Native matching is strict on argv shape and DefenseClaw
 // executable basename so teardown never removes an unrelated user notifier
@@ -2385,29 +2448,27 @@ func codexNotifyLooksManaged(v interface{}, opts SetupOpts) bool {
 	if codexValueMatches(v, codexShellNotifyCommand(opts)) {
 		return true
 	}
-	var argv []string
-	switch list := v.(type) {
-	case []string:
-		argv = append(argv, list...)
-	case []interface{}:
-		for _, raw := range list {
-			s, ok := raw.(string)
-			if !ok {
-				return false
-			}
-			argv = append(argv, s)
-		}
-	default:
+	argv, ok := codexNotifyArgv(v)
+	if !ok || len(argv) != 2 {
 		return false
 	}
-	if len(argv) == 2 && argv[0] == "bash" &&
-		pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
+	if argv[0] == "bash" {
 		// Older Windows releases serialized this path with either slash style.
-		// Treat lexical spellings of the same bound data-root bridge alike, but
-		// never claim another absolute script merely because its basename matches.
-		return true
+		// Treat lexical spellings of the same bound data-root bridge alike, and a
+		// notify-bridge* script edited in place inside the data root, but never
+		// claim a script elsewhere merely because its basename matches.
+		if pathidentity.Same(argv[1], filepath.Join(opts.DataDir, "notify-bridge.sh")) {
+			return true
+		}
+		return strings.TrimSpace(opts.DataDir) != "" &&
+			strings.HasPrefix(strings.ToLower(filepath.Base(argv[1])), "notify-bridge") &&
+			pathidentity.Same(filepath.Dir(argv[1]), opts.DataDir)
 	}
-	return len(argv) == 2 && argv[1] == "notify" && isDefenseClawHookExecutable(argv[0])
+	// A launcher name edited in place next to DefenseClaw's own launcher keeps
+	// our exact argv, so teardown removes it instead of leaving Codex pointing at
+	// a program that does not exist (GAP-1248).
+	return argv[1] == "notify" &&
+		(isDefenseClawHookExecutable(argv[0]) || isRenamedDefenseClawHookExecutable(argv[0]))
 }
 
 func restoreCodexNotify(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {

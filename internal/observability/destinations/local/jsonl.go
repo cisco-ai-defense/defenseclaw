@@ -94,13 +94,22 @@ func NewJSONL(config JSONLConfig) (*JSONL, error) {
 		int64(config.MaxSizeMB) > (int64(^uint64(0)>>1))/(1024*1024) {
 		return nil, newError(ErrorInvalidConfig)
 	}
-	if err := prepareSecureParent(config.Path); err != nil {
-		if isUnsafeFailure(err) {
+	prepareErr := prepareSecureParent(config.Path)
+	if prepareErr != nil {
+		if isUnsafeFailure(prepareErr) {
 			return nil, newError(ErrorUnsafePath)
 		}
-		return nil, newError(ErrorOpenFailed)
+		if config.FailOnOpenError {
+			return nil, newError(ErrorOpenFailed)
+		}
 	}
-	file, identity, size, err := secureOpenAppend(config.Path, !config.FailOnOpenError)
+	var file *os.File
+	var identity os.FileInfo
+	var size int64
+	var err error
+	if prepareErr == nil {
+		file, identity, size, err = secureOpenAppend(config.Path, !config.FailOnOpenError)
+	}
 	if err != nil {
 		if isUnsafeFailure(err) {
 			return nil, newError(ErrorUnsafePath)
@@ -117,7 +126,7 @@ func NewJSONL(config JSONLConfig) (*JSONL, error) {
 	adapter := &JSONL{
 		config: config, maxBytes: int64(config.MaxSizeMB) * 1024 * 1024,
 		gate: make(chan struct{}, 1), file: file, identity: identity, size: size,
-		openDeferred: err != nil,
+		openDeferred: prepareErr != nil || err != nil,
 	}
 	adapter.gate <- struct{}{}
 	if adapter.openDeferred {
@@ -356,6 +365,11 @@ func (adapter *JSONL) lock(ctx context.Context) bool {
 func (adapter *JSONL) unlock() { adapter.gate <- struct{}{} }
 
 func (adapter *JSONL) ensureActive() error {
+	if adapter.openDeferred {
+		if err := prepareSecureParent(adapter.config.Path); err != nil {
+			return err
+		}
+	}
 	if adapter.file != nil {
 		same, err := securePathMatches(adapter.config.Path, adapter.file, adapter.identity, !adapter.config.FailOnOpenError)
 		if err == nil && same {
@@ -373,6 +387,7 @@ func (adapter *JSONL) ensureActive() error {
 		return err
 	}
 	adapter.file, adapter.identity, adapter.size = file, identity, size
+	adapter.openDeferred = false
 	return nil
 }
 

@@ -5719,6 +5719,7 @@ def _check_codex_hooks(
         )
         if switched_off:
             _emit("fail", "Codex hook settings", switched_off, r=r, remediation=switched_off.repair)
+        _check_codex_notify(cfg, config_path, r, windows=True)
         return
     hook_dir = os.path.join(cfg.data_dir, "hooks")
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
@@ -5750,6 +5751,7 @@ def _check_codex_hooks(
             )
             return
         _emit("pass", "Codex hooks", f"hook script at {hook_script}; registered in {config_path}", r=r)
+        _check_codex_notify(cfg, config_path, r, windows=False)
         config_toml = config_path
         live, broken = _foreign_defenseclaw_codex_hook_scripts(config_toml, hook_script)
         if live or broken:
@@ -5791,6 +5793,47 @@ def _check_codex_hooks(
             f"hook script not found at {hook_script}",
             r=r,
             remediation="re-register the hooks: defenseclaw setup codex --yes",
+        )
+
+
+def _codex_notify_problem(cfg, config_path: str, *, windows: bool) -> str:
+    """Why the Codex notify entry is not the DefenseClaw notifier Setup writes, or "" (GAP-1248)."""
+    # Setup writes notify into config.toml next to the hook config (managed
+    # Windows keeps its hooks in managed_config.toml in the same directory).
+    user_config = os.path.join(os.path.dirname(config_path), "config.toml")
+    try:
+        with open(user_config, "rb") as stream:
+            document = codex_toml.loads(stream.read(1024 * 1024 + 1))
+    except (OSError, UnicodeError, ValueError):
+        return ""
+    argv = document.get("notify")
+    if not isinstance(argv, list) or not argv:
+        return f"{user_config} has no notify entry, so Codex sends no turn-complete events to DefenseClaw"
+    if len(argv) != 2 or not all(isinstance(part, str) for part in argv):
+        return f"notify in {user_config} is not the DefenseClaw notifier ({argv!r})"
+    if windows:
+        program = argv[0]
+        owned = argv[1] == "notify" and os.path.basename(program.replace("\\", "/")).lower() == "defenseclaw-hook.exe"
+    else:
+        program = argv[1]
+        bridge = os.path.join(getattr(cfg, "data_dir", "") or "", "notify-bridge.sh")
+        owned = argv[0] == "bash" and paths_same(program, bridge)
+    if not owned:
+        return f"notify in {user_config} runs {program}, not the DefenseClaw notifier"
+    if not os.path.isfile(program):
+        return f"notify in {user_config} runs {program}, which does not exist"
+    return ""
+
+
+def _check_codex_notify(cfg, config_path: str, r: _DoctorResult, *, windows: bool) -> None:
+    problem = _codex_notify_problem(cfg, config_path, windows=windows)
+    if problem:
+        _emit(
+            "warn",
+            "Codex notify",
+            problem,
+            r=r,
+            remediation="restore it: defenseclaw setup codex --yes",
         )
 
 

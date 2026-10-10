@@ -827,10 +827,12 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
 
 
 def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, imported lazily
-    """A named policy's guardrail thresholds and Cisco trust level as config
-    keys. A threshold equal to the configured rule pack's posture default is
-    left unset so that default applies; any other is written, so the preset's
-    levels hold whichever pack is selected (as the v9 migration compares)."""
+    """A named policy's guardrail mode, thresholds and Cisco trust level as
+    config keys. A threshold equal to the configured rule pack's posture
+    default is left unset so that default applies; any other is written, so the
+    preset's levels hold whichever pack is selected (as the v9 migration
+    compares). A preset's ``hilt`` is not applied: HITL is the operator's
+    setting (``defenseclaw guardrail hilt``), and activation keeps it."""
     from defenseclaw.policy_catalog import _PROFILE_RANKS, global_pack, pack_profile
 
     guardrail = data.get("guardrail") or {}
@@ -849,17 +851,6 @@ def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, 
         if mode not in {"observe", "action"}:
             raise ValueError("guardrail.mode must be observe or action")
         cfg.guardrail.mode = mode
-    if "hilt" in guardrail:
-        from defenseclaw.config import HILTConfig
-
-        raw_hilt = guardrail["hilt"]
-        if not isinstance(raw_hilt, dict):
-            raise ValueError("guardrail.hilt must be an object")
-        enabled = _policy_bool(raw_hilt.get("enabled", False), "guardrail.hilt.enabled")
-        severity = str(raw_hilt.get("min_severity", "HIGH")).upper()
-        if severity not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
-            raise ValueError("guardrail.hilt.min_severity must be LOW, MEDIUM, HIGH or CRITICAL")
-        cfg.guardrail.hilt = HILTConfig(enabled=enabled, min_severity=severity)
     if "cisco_trust_level" in guardrail:
         level = str(guardrail["cisco_trust_level"] or "")
         cfg.guardrail.cisco_trust_level = "" if level == "full" else level

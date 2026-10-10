@@ -1694,10 +1694,11 @@ func teardownWindowsGenericManagedTarget(
 	if perUser {
 		relaxed, err := relaxWindowsStandalonePerUserFootprintForSetupAsService(target, configPaths, footprint)
 		defer func() {
-			if len(relaxed) == 0 {
+			restore := windowsRelaxedPathsToRestoreAfterTeardown(target.dataDir, relaxed, teardownErr == nil)
+			if len(restore) == 0 {
 				return
 			}
-			if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, relaxed); restoreErr != nil {
+			if restoreErr := restoreWindowsRelaxedPerUserDirectories(target, restore); restoreErr != nil {
 				teardownErr = errors.Join(teardownErr, fmt.Errorf("enterprise hooks: restore the directories relaxed for teardown: %w", restoreErr))
 			}
 		}()
@@ -1722,6 +1723,27 @@ func teardownWindowsGenericManagedTarget(
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
 	}
 	return nil
+}
+
+// windowsRelaxedPathsToRestoreAfterTeardown returns the paths relaxed for a
+// per-user connector teardown that get the managed DACL back afterwards. A
+// failed teardown leaves the connector managed, so all of them do. After a
+// completed one the guardian no longer manages the agent's own folders, and
+// hardening them again left the read-only OWNER RIGHTS entry behind after an
+// uninstall: a later per-user install could not protect %APPDATA%\devin and
+// its mcp set failed (GAP-1243). Those stay owner-private; only what lies in
+// the DefenseClaw data directory is hardened again.
+func windowsRelaxedPathsToRestoreAfterTeardown(dataDir string, relaxed []string, tornDown bool) []string {
+	if !tornDown {
+		return relaxed
+	}
+	var restore []string
+	for _, path := range relaxed {
+		if sameWindowsEnterprisePath(dataDir, path) || windowsPathWithin(dataDir, path) {
+			restore = append(restore, path)
+		}
+	}
+	return restore
 }
 
 // windowsStandalonePerUserRegistrationLeft reads what of DefenseClaw's

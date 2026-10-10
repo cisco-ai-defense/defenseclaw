@@ -527,6 +527,8 @@ if [[ "${ROLLBACK}" == true ]]; then
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
         remove_connector_registrations_for_legacy
+    elif [[ -z "${current}" ]] || ! version_lt "${current}" "${back_to}"; then
+        convert_hooks_for_rollback
     fi
     swapped=0
     swap_with_previous || swapped=$?
@@ -1480,6 +1482,10 @@ reset_audit_journal_mode() {
 
 start_gateway() {
     local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
+    # Each start explains only itself: the explanation of a failed new
+    # gateway skipped the wait for the restored one, which was then
+    # reported as not running while it came up (GAP-1241).
+    START_EXPLAINED=""
     info "Starting the gateway"
     # A 0.8.x start gives up after 60 seconds and stops the gateway it
     # launched, so one restored on a large audit database is stopped before it
@@ -1739,6 +1745,18 @@ swap_with_previous() {
 # the connector OTLP tokens teardown revokes: a roll forward that minted new
 # ones left an agent exporter still holding the old token rejected, and doctor
 # warned about an unattributed OTLP credential (GAP-1925).
+# A hook entry this install wrote in a shape the older release does not
+# recognise (a Claude Code hook script path quoted for a home with a space,
+# GAP-1284) outlived that release's uninstall. This install's gateway rewrites
+# those entries in the shape the older release removes; rolling forward runs
+# setup, which writes the current shape again.
+convert_hooks_for_rollback() {
+    local gateway="${BIN_DIR}/defenseclaw-gateway"
+    [[ -x "${gateway}" ]] || return 0
+    "${gateway}" connector prepare-rollback --data-dir "${DEFENSECLAW_HOME}" 2>>"${LOG}" \
+        || warn "Could not rewrite the agent hook entries of DefenseClaw ${current:-?} in the form ${back_to} reads (see ${LOG}); after the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as ~/.claude/settings.json; remove them by hand"
+}
+
 remove_connector_registrations_for_legacy() {
     local state="${DEFENSECLAW_HOME}/active_connector.json" gateway="${BIN_DIR}/defenseclaw-gateway" saved name names
     local hooks="${DEFENSECLAW_HOME}/hooks" tokens token

@@ -5398,6 +5398,105 @@ func TestCodexTeardownRemovesHealedEditedHookPaths(t *testing.T) {
 	}
 }
 
+// GAP-1248: an edited notify entry breaks the Codex hook contract, so the
+// guard re-runs Setup; Teardown removes a renamed DefenseClaw notifier and
+// restores a notifier the operator chose after Setup.
+func TestCodexNotifyTamperIsHealedAndTornDown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath := CodexConfigPathOverride
+	CodexConfigPathOverride = path
+	t.Cleanup(func() { CodexConfigPathOverride = previousPath })
+	previousInspector := codexPolicyInspector
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{Source: "notify tamper test"}, nil
+	}
+	t.Cleanup(func() { codexPolicyInspector = previousInspector })
+	binDir := filepath.Join(dir, "bin")
+	setHookBinaryOverride(t, filepath.Join(binDir, windowsHookBinaryName))
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	tampered := []interface{}{filepath.Join(binDir, "defenseclaw-hook-TAMPERED.exe"), "notify"}
+	if runtime.GOOS != "windows" {
+		tampered = []interface{}{"bash", filepath.Join(opts.DataDir, "notify-bridge-TAMPERED.sh")}
+	}
+	setNotify := func(v interface{}) {
+		t.Helper()
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := map[string]interface{}{}
+		if err := parseCodexTOML(raw, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg["notify"] = v
+		out, err := editCodexOwnedTOML(raw, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, out, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	present := func() bool {
+		t.Helper()
+		ok, err := c.ownedHookContractPresent(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if !present() {
+		t.Fatal("contract not present after Setup")
+	}
+	setNotify(tampered)
+	if present() {
+		t.Fatal("renamed notify entry still reports the hook contract as present")
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("heal: %v", err)
+	}
+	if !present() {
+		t.Fatal("Setup did not restore the notify entry")
+	}
+
+	setNotify(tampered)
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+	if cfg := readCASTOML(t, path); cfg["notify"] != nil {
+		t.Fatalf("renamed DefenseClaw notifier survived teardown: %#v", cfg["notify"])
+	}
+
+	operator := []interface{}{filepath.Join(dir, "tools", "my-notifier"), "--turn"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	setNotify(operator)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("heal over operator notifier: %v", err)
+	}
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if got := readCASTOML(t, path)["notify"]; !codexValueMatches(got, operator) {
+		t.Fatalf("operator notifier chosen after Setup was not restored: %#v", got)
+	}
+}
+
 func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
