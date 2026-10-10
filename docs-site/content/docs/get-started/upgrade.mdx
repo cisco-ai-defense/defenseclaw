@@ -234,6 +234,22 @@ you roll forward. A 0.8.x release that you install yourself, without
 required`); [Going back to 0.8.x](/docs/reference/migrate-v9#going-back-to-08x)
 lists the manual steps.
 
+Agent hook entries live in each agent's own settings, outside
+`~/.defenseclaw`, so the swap does not restore them. Before it restores the
+older install, the rollback has the current gateway rewrite every hook entry
+the older release would not recognise into a form it does, so that release's
+`defenseclaw uninstall` still removes it. On Windows, the Claude Code entries
+that run `defenseclaw-hook.exe` through `cmd.exe` go back to the direct
+launcher form; on macOS and Linux, a Claude Code hook path quoted for a home
+folder with a space goes back to the unquoted path. The settings file from
+before the change is kept in
+`~/.defenseclaw/previous/data/backups/claudecode-settings.before-rollback.json`.
+Rolling forward runs setup, which writes the current form again. If the
+rewrite fails, the rollback still completes and warns that the uninstall may
+leave those entries; remove them from the agent's settings by hand. Every 1.x
+release keeps to this rule: a hook entry it writes is in a form every earlier
+1.x release removes, or its rollback converts the entry first.
+
 The rollback starts the restored gateway when it was running and waits for it.
 A 0.8.x gateway on a large audit database can take a few minutes to start, so
 the rollback waits up to 3 minutes for it. If the gateway does not come up,

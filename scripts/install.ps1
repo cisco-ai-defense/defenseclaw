@@ -1677,6 +1677,22 @@ Environment:
 
 # -- Main ---------------------------------------------------------------------
 
+function Convert-HooksForRollback([string]$From, [string]$BackTo) {
+    # A hook entry this install wrote in a shape the older release does not
+    # recognise (the per-user Claude Code cmd.exe launcher guard, GAP-1284)
+    # outlived that release's uninstall. This install's gateway rewrites those
+    # entries in the shape every earlier release removes; rolling forward runs
+    # setup, which writes the current shape again. A failure does not stop the
+    # rollback, but says what may be left behind.
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gateway)) { return }
+    if ((Invoke-Native $gateway @("connector", "prepare-rollback", "--data-dir", $DataDir)) -ne 0) {
+        Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
+            "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
+            "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
+    }
+}
+
 function Invoke-Rollback {
     $backTo = Read-Text (Join-Path $Previous "VERSION")
     if (-not (Test-Version $backTo)) { Write-Step "Rolling back"; Die "No previous install to roll back to ($Previous is missing)" }
@@ -1688,7 +1704,8 @@ function Invoke-Rollback {
     $current = Get-InstalledVersion
     $currentLabel = if ($current) { $current } else { "?" }
     # Run again after a rollback, this goes forward to the newer install (GAP-1497).
-    if ($current -and (Test-Version $current) -and [version]$current -lt [version]$backTo) {
+    $rollForward = $current -and (Test-Version $current) -and [version]$current -lt [version]$backTo
+    if ($rollForward) {
         Write-Step "Rolling forward to DefenseClaw $backTo"
         $question = "Replace DefenseClaw $current with DefenseClaw $backTo (the install you rolled back from)?"
     } else {
@@ -1702,6 +1719,7 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $startAfter = $wasRunning -or (Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")) -eq "true"
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
+    if (-not $rollForward) { Convert-HooksForRollback $currentLabel $backTo }
     $swapped = @(Switch-WithPrevious $current $wasRunning $startAfter)[-1]
     if ($swapped -ne 0) {
         # 1: the swap undid itself, so this install is back and may run again.
