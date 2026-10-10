@@ -175,7 +175,7 @@ func NewTCPClient(addr, clientID string) *TCPClient {
 		addr:     stripMQTTScheme(addr),
 		clientID: clientID,
 		subs:     make(map[string]func(Message)),
-		pubackCh: make(chan uint16, 16), // NEW-1 fix: buffered channel for PUBACK delivery (L-6: widened from 4 to 16)
+		pubackCh: make(chan uint16, 64), // H-5 fix: buffered channel widened from 16 to 64 to prevent PUBACK overflow under burst
 	}
 }
 

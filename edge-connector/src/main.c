@@ -267,14 +267,19 @@ int main(void) {
                             provided[h] = (uint8_t)((hv << 4) | lv);
                         }
                         if (hex_ok) {
-                            extern const uint8_t *dclaw_audit_get_key(size_t *out_len);
+                            /* H-3 fix: Use the emergency key (not audit key)
+                             * for lockdown release HMAC verification. The
+                             * emergency key is the correct trust anchor for
+                             * lockdown operations — it matches the key used
+                             * to sign ENTER_LOCKDOWN commands. */
+                            extern const uint8_t *dclaw_emergency_get_key(size_t *out_len);
                             size_t key_len = 0;
-                            const uint8_t *akey = dclaw_audit_get_key(&key_len);
-                            if (akey && key_len == 32) {
+                            const uint8_t *ekey = dclaw_emergency_get_key(&key_len);
+                            if (ekey && key_len == 32) {
                                 uint8_t expected[32];
                                 extern void dclaw_hmac_sha256(const uint8_t *key, size_t kl,
                                     const uint8_t *msg, size_t ml, uint8_t *out);
-                                dclaw_hmac_sha256(akey, key_len,
+                                dclaw_hmac_sha256(ekey, key_len,
                                     (const uint8_t *)"release_lockdown", 16, expected);
                                 volatile uint8_t diff = 0;
                                 for (int h = 0; h < 32; h++) diff |= provided[h] ^ expected[h];

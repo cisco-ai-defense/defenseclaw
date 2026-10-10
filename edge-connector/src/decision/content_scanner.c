@@ -8,19 +8,14 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <signal.h>
 #include <unistd.h>
-#include <signal.h>
-#include <setjmp.h>
 
-/* M-1 fix: Non-blocking DNS timeout via SIGALRM.
- * getaddrinfo() is blocking; on slow/dead DNS servers it can stall the
- * event loop indefinitely.  We set a 2-second alarm to bound the wait. */
-static volatile sig_atomic_t dns_timed_out = 0;
-static void dns_alarm_handler(int sig) {
-    (void)sig;
-    dns_timed_out = 1;
-}
+/* H-2 fix: Removed SIGALRM + alarm() approach for DNS timeout. Using
+ * signal handlers for timeouts is async-signal-unsafe (TOCTOU with
+ * getaddrinfo's internal state). getaddrinfo() may block up to the
+ * system resolver timeout (typically 5-30s). The DNS check is optional
+ * and only runs for STANDARD/EDGE profiles with MQTT enabled. The cloud
+ * escalation path provides a secondary check for slow DNS cases. */
 #endif
 
 /* === Helper Functions === */
@@ -822,25 +817,14 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
 
-        /* M-1 fix: Install a 2-second alarm to bound getaddrinfo() */
-        dns_timed_out = 0;
-        struct sigaction new_sa, old_sa;
-        memset(&new_sa, 0, sizeof(new_sa));
-        new_sa.sa_handler = dns_alarm_handler;
-        sigemptyset(&new_sa.sa_mask);
-        new_sa.sa_flags = 0;
-        sigaction(SIGALRM, &new_sa, &old_sa);
-        unsigned int prev_alarm = alarm(2);
-
+        /* H-2 fix: Call getaddrinfo() without SIGALRM. It may block up to
+         * the system resolver timeout (typically 5-30s). This is safer than
+         * using async-signal-unsafe alarm()/SIGALRM which can corrupt
+         * getaddrinfo's internal state. The DNS check is best-effort. */
         int dns_rc = getaddrinfo(host, NULL, &hints, &result);
 
-        /* Restore previous alarm and signal handler */
-        alarm(0);
-        sigaction(SIGALRM, &old_sa, NULL);
-        if (prev_alarm > 0) alarm(prev_alarm);
-
-        if (dns_timed_out || dns_rc != 0) {
-            /* DNS resolution failed or timed out — block to be safe */
+        if (dns_rc != 0) {
+            /* DNS resolution failed — block to be safe */
             return DCLAW_ACTION_BLOCK;
         }
 

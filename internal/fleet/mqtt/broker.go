@@ -364,6 +364,8 @@ func decodeCBORUint(data []byte) (uint64, int, error) {
 }
 
 // decodeCBORBytes decodes a CBOR byte string (major type 2).
+// M-7 fix: Byte strings are capped at 1024 bytes to prevent oversized
+// payloads from consuming excessive memory, matching the text string cap.
 func decodeCBORBytes(data []byte) ([]byte, int, error) {
 	if len(data) == 0 {
 		return nil, 0, fmt.Errorf("empty data for CBOR bytes")
@@ -378,6 +380,10 @@ func decodeCBORBytes(data []byte) ([]byte, int, error) {
 	length, hdrLen, err := decodeCBORAdditional(data, additional)
 	if err != nil {
 		return nil, 0, err
+	}
+
+	if length > 1024 {
+		return nil, 0, fmt.Errorf("CBOR byte string too long: %d bytes (max 1024)", length)
 	}
 
 	end := hdrLen + int(length)

@@ -183,6 +183,26 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                             } else if (r[0] == '\\' && r[1] == '\\') {
                                 *w++ = '\\';
                                 r += 2;
+                            /* CRT-2 fix: Decode standard JSON escape sequences
+                             * that were previously passed through literally. */
+                            } else if (r[0] == '\\' && r[1] == 'n') {
+                                *w++ = '\n';
+                                r += 2;
+                            } else if (r[0] == '\\' && r[1] == 't') {
+                                *w++ = '\t';
+                                r += 2;
+                            } else if (r[0] == '\\' && r[1] == 'r') {
+                                *w++ = '\r';
+                                r += 2;
+                            } else if (r[0] == '\\' && r[1] == 'b') {
+                                *w++ = '\b';
+                                r += 2;
+                            } else if (r[0] == '\\' && r[1] == 'f') {
+                                *w++ = '\f';
+                                r += 2;
+                            } else if (r[0] == '\\' && r[1] == '/') {
+                                *w++ = '/';
+                                r += 2;
                             } else if (r[0] == '\\' && r[1] == 'u' &&
                                        r[2] != '\0' && r[3] != '\0' &&
                                        r[4] != '\0' && r[5] != '\0') {

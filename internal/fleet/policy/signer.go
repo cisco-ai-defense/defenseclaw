@@ -65,6 +65,23 @@ func NewHMACSignerFromEnv() (*HMACSigner, error) {
 	return NewHMACSigner(key)
 }
 
+// NewEmergencySignerFromEnv creates a signer using the hex-encoded key from the
+// DCLAW_EMERGENCY_KEY environment variable. Falls back to DCLAW_OTA_KEY if
+// DCLAW_EMERGENCY_KEY is not set, so existing deployments work without change.
+// BLK-2 fix: Allows operators to rotate OTA and emergency keys independently.
+func NewEmergencySignerFromEnv() (*HMACSigner, error) {
+	keyHex := os.Getenv("DCLAW_EMERGENCY_KEY")
+	if keyHex != "" {
+		key, err := decodeHex(keyHex)
+		if err != nil {
+			return nil, fmt.Errorf("invalid DCLAW_EMERGENCY_KEY: %w", err)
+		}
+		return NewHMACSigner(key)
+	}
+	// Fall back to DCLAW_OTA_KEY when no separate emergency key is provisioned.
+	return NewHMACSignerFromEnv()
+}
+
 // Sign produces a 32-byte HMAC-SHA256 signature over the data.
 func (s *HMACSigner) Sign(data []byte) ([]byte, error) {
 	mac := hmac.New(sha256.New, s.key)

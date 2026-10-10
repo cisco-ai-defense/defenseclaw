@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -104,6 +105,11 @@ type Service struct {
 	client mqtt.Client
 	logger *log.Logger
 
+	// BLK-2 fix: Separate emergency signer so OTA and emergency keys can
+	// be rotated independently. Falls back to the OTA signer when
+	// DCLAW_EMERGENCY_KEY is not set.
+	emergencySigner Signer
+
 	// compilerPath is the path to the Python policy_compiler.py script.
 	// If empty, Compile() will return an error.
 	compilerPath string
@@ -143,6 +149,22 @@ func NewService(store PolicyStore, signer Signer, client mqtt.Client, cfg *Confi
 		if cfg.Logger != nil {
 			s.logger = cfg.Logger
 		}
+	}
+
+	// BLK-2 fix: Try loading a separate emergency signer from DCLAW_EMERGENCY_KEY.
+	// Only create a separate signer when the env var is explicitly set;
+	// otherwise use the same signer that was passed in for OTA policies.
+	if os.Getenv("DCLAW_EMERGENCY_KEY") != "" {
+		emergencySigner, err := NewEmergencySignerFromEnv()
+		if err != nil {
+			s.logger.Printf("[policy] WARNING: failed to load emergency signer: %v — using OTA signer for emergency commands", err)
+			s.emergencySigner = signer
+		} else {
+			s.emergencySigner = emergencySigner
+			s.logger.Printf("[policy] loaded separate emergency signer from DCLAW_EMERGENCY_KEY")
+		}
+	} else {
+		s.emergencySigner = signer
 	}
 
 	// P0-2 fix: Load persisted emergency sequence number from the store so
@@ -381,9 +403,10 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 
 	// Payload [10:42] and reserved [42:44] are zero-filled
 
-	// Sign the first 44 bytes (everything before the 64-byte signature field).
+	// BLK-2 fix: Sign emergency messages with the emergency signer (which
+	// uses DCLAW_EMERGENCY_KEY if set, otherwise falls back to OTA key).
 	// C side: sizeof(msg) - sizeof(msg.signature) = 108 - 64 = 44.
-	sig, err := s.signer.Sign(msg[:44])
+	sig, err := s.emergencySigner.Sign(msg[:44])
 	if err != nil {
 		return fmt.Errorf("sign emergency msg: %w", err)
 	}

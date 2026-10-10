@@ -349,9 +349,15 @@ int dclaw_verdict_register_pending(uint16_t request_id, const uint8_t *tool_hash
 /* Process a received verdict response */
 int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
                                   const uint8_t *pending_tool_hash) {
-    if (resp_len != 28) return -1;
+    if (resp_len < 28) return -1;
 
     dclaw_state_t *s = dclaw_get_state();
+
+    /* CRT-1 fix: Copy tool_hash to a local buffer before use to prevent
+     * TOCTOU — the pending ring slot could be reclaimed by another thread
+     * between the HMAC computation and the cache store. */
+    uint8_t local_hash[32];
+    memcpy(local_hash, pending_tool_hash, 32);
 
     /* Decode the 28-byte response (BLK-1: HMAC extended to 16 bytes) */
     uint16_t request_id, ttl;
@@ -392,7 +398,7 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
      * can compute the HMAC with the known zero-key fallback and forge ALLOW verdicts. */
     if (!s_device_key_provisioned) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
-                          (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8)),
+                          (uint16_t)(local_hash[0] | (local_hash[1] << 8)),
                           0);
         return -1; /* device key not provisioned */
     }
@@ -401,12 +407,12 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
     compute_verdict_hmac(device_key, key_len, session_id,
                          request_id, action, severity, ttl,
                          reason, flags, server_ts,
-                         pending_tool_hash, expected_hmac);
+                         local_hash, expected_hmac);
 
     if (!ct_compare(received_hmac, expected_hmac, 16)) {
         /* REQ-29: HMAC verification failed — leave slot pending for valid retry */
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
-                          (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8)),
+                          (uint16_t)(local_hash[0] | (local_hash[1] << 8)),
                           0);
         return -1;
     }
@@ -425,11 +431,11 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
 
     /* Handle REVOKE_PRIOR flag (bit 0) */
     if (flags & 0x01) {
-        dclaw_cache_invalidate(pending_tool_hash);
+        dclaw_cache_invalidate(local_hash);
     }
 
     /* Cache the verdict */
-    dclaw_cache_store(pending_tool_hash, (dclaw_action_t)action,
+    dclaw_cache_store(local_hash, (dclaw_action_t)action,
                       (dclaw_severity_t)severity);
 
     /* Invoke retroactive callback when cloud returns BLOCK for a
@@ -438,14 +444,14 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
     if ((dclaw_action_t)action == DCLAW_ACTION_BLOCK) {
         dclaw_retroactive_block_fn cb = dclaw_get_retroactive_callback();
         if (cb) {
-            uint16_t target_hash = (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8));
+            uint16_t target_hash = (uint16_t)(local_hash[0] | (local_hash[1] << 8));
             cb(target_hash, NULL);
         }
     }
 
     /* Audit the decision */
     dclaw_audit_write((dclaw_action_t)action, (dclaw_reason_t)reason,
-                      (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8)),
+                      (uint16_t)(local_hash[0] | (local_hash[1] << 8)),
                       0);
 
     return 0;

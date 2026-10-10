@@ -331,8 +331,10 @@ int dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms) {
         return -1;
     } else if (ret == MBEDTLS_ERR_SSL_TIMEOUT ||
                ret == MBEDTLS_ERR_SSL_WANT_READ) {
-        /* Timeout or no data yet */
-        return -1;
+        /* M-3 fix: Return -2 for timeout so callers can distinguish
+         * "no data yet / timeout" from "fatal error / connection lost".
+         * Callers should retry on -2, close on -1. */
+        return -2;
     } else {
         char errbuf[128];
         mbedtls_strerror(ret, errbuf, sizeof(errbuf));

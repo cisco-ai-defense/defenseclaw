@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/fleet/manager"
@@ -56,6 +57,15 @@ type API struct {
 	keyStore    DeviceKeyStore
 	decommStore DecommissionStore // NEW-3 fix: persists decommission tombstones
 	mux         *http.ServeMux
+
+	// BLK-1 fix: Atomic pointer for live token rotation. The authMiddleware
+	// reads from this instead of a captured closure variable, so rotateToken()
+	// can update it without re-registering routes.
+	currentToken atomic.Pointer[string]
+
+	// M-5 fix: Rate limiting for rotation endpoints — max 1 per minute.
+	lastTokenRotation     time.Time
+	lastDeviceKeyRotation time.Time
 }
 
 // NewAPI creates the fleet API with its dependencies.
@@ -161,17 +171,20 @@ func (a *API) Handler() http.Handler {
 }
 
 // authMiddleware wraps an http.HandlerFunc with Bearer token validation.
-// When token is empty, ALL requests are blocked — the fleet API must never
-// be reachable without authentication.
-func authMiddleware(token string, next http.HandlerFunc) http.HandlerFunc {
-	if token == "" {
-		return func(w http.ResponseWriter, r *http.Request) {
+// BLK-1 fix: Reads the current token from an atomic pointer so that
+// rotateToken() can update it without re-registering routes. When the
+// token pointer is nil or points to an empty string, ALL requests are
+// blocked — the fleet API must never be reachable without authentication.
+func authMiddleware(tokenPtr *atomic.Pointer[string], next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tp := tokenPtr.Load()
+		if tp == nil || *tp == "" {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{
 				"error": "fleet API authentication not configured (set DCLAW_FLEET_API_TOKEN)",
 			})
+			return
 		}
-	}
-	return func(w http.ResponseWriter, r *http.Request) {
+		token := *tp
 		auth := r.Header.Get("Authorization")
 		got := strings.TrimPrefix(auth, "Bearer ")
 		if !strings.HasPrefix(auth, "Bearer ") || subtle.ConstantTimeCompare([]byte(got), []byte(token)) != 1 {
@@ -188,8 +201,12 @@ func (a *API) registerRoutes() {
 		log.Println("WARNING: DCLAW_FLEET_API_TOKEN not set, fleet API auth disabled (development mode)")
 	}
 
+	// BLK-1 fix: Store the initial token in the atomic pointer so
+	// authMiddleware can read it, and rotateToken() can update it.
+	a.currentToken.Store(&token)
+
 	wrap := func(h http.HandlerFunc) http.HandlerFunc {
-		return authMiddleware(token, h)
+		return authMiddleware(&a.currentToken, h)
 	}
 
 	a.mux.HandleFunc("GET /devices", wrap(a.listDevices))
@@ -212,8 +229,38 @@ func (a *API) listDevices(w http.ResponseWriter, r *http.Request) {
 	devices := a.manager.ListDevices()
 	health := a.manager.GetFleetHealth()
 
+	// M-6 fix: Support ?limit=N&offset=M query params for pagination.
+	// Default: return all devices (backward compatible).
+	total := len(devices)
+	offset := 0
+	limit := total // default: no limit
+
+	if offStr := r.URL.Query().Get("offset"); offStr != "" {
+		if v, err := strconv.Atoi(offStr); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+	if limStr := r.URL.Query().Get("limit"); limStr != "" {
+		if v, err := strconv.Atoi(limStr); err == nil && v > 0 {
+			limit = v
+		}
+	}
+
+	// Clamp offset and limit to valid range.
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	paged := devices[offset:end]
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"devices": devices,
+		"devices": paged,
+		"total":   total,
+		"offset":  offset,
+		"limit":   limit,
 		"summary": map[string]any{
 			"total":    health.TotalDevices,
 			"online":   health.Online,
@@ -247,6 +294,18 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 
 	if req.DeviceID == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device_id is required"})
+		return
+	}
+
+	// M-8 fix: Reject zero tenant_id or fleet_id. A zero value in either
+	// field would produce a malformed composite device ID, colliding with
+	// other devices and breaking MQTT topic routing.
+	if req.TenantID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tenant_id must be non-zero"})
+		return
+	}
+	if req.FleetID == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "fleet_id must be non-zero"})
 		return
 	}
 
@@ -847,6 +906,14 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 // and returns the new token once (it is not retrievable later). P2-4 fix:
 // Allows operators to rotate the fleet API token without restarting the gateway.
 func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
+	// M-5 fix: Rate limit — max 1 token rotation per minute.
+	if !a.lastTokenRotation.IsZero() && time.Since(a.lastTokenRotation) < time.Minute {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": "token rotation rate limited — try again in 1 minute",
+		})
+		return
+	}
+
 	newToken := make([]byte, 32)
 	if _, err := rand.Read(newToken); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
@@ -857,12 +924,10 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 
 	newTokenHex := hex.EncodeToString(newToken)
 
-	if err := os.Setenv("DCLAW_FLEET_API_TOKEN", newTokenHex); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to update environment: " + err.Error(),
-		})
-		return
-	}
+	// BLK-1 fix: Update the atomic pointer instead of os.Setenv so the
+	// authMiddleware immediately sees the new token without re-registering.
+	a.currentToken.Store(&newTokenHex)
+	a.lastTokenRotation = time.Now()
 
 	a.emitAudit("fleet.token.rotated", "DCLAW_FLEET_API_TOKEN",
 		"Fleet API token rotated — old token is now invalid")
@@ -878,6 +943,14 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 // device key, saves it to the key store, and returns the new key once. P2-8 fix:
 // Allows operators to rotate individual device keys without re-registering.
 func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
+	// M-5 fix: Rate limit — max 1 device key rotation per minute.
+	if !a.lastDeviceKeyRotation.IsZero() && time.Since(a.lastDeviceKeyRotation) < time.Minute {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": "device key rotation rate limited — try again in 1 minute",
+		})
+		return
+	}
+
 	idStr := r.PathValue("id")
 	deviceID, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
@@ -914,6 +987,7 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.lastDeviceKeyRotation = time.Now()
 	newKeyHex := hex.EncodeToString(newKey)
 
 	a.emitAudit("fleet.device.key_rotated",

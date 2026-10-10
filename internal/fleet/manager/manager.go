@@ -477,8 +477,9 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			// H-2 fix: Retry once for security-critical status transitions.
 			// If lockdown is lost due to store failure, a compromised device
 			// escapes lockdown after gateway restart.
+			// H-4 fix: Removed 50ms sleep — it was inside the deferred mutex
+			// unlock (H-5 fix), blocking ALL fleet operations for 50ms.
 			if dev.Status == StatusLockdown || dev.Status == StatusDegraded {
-				time.Sleep(50 * time.Millisecond)
 				if retryErr := fm.store.SaveDevice(dev); retryErr != nil {
 					log.Printf("[fleet] CRITICAL: failed to persist %s status for device %d after retry: %v",
 						dev.Status, dev.DeviceID, retryErr)
@@ -641,8 +642,21 @@ func (fm *FleetManager) SetAlertHandler(h AlertHandler) {
 }
 
 // fwVersionToUint16 parses a stored firmware version string back to uint16
-// for numeric comparison. Returns 0 if the string is not a valid number.
+// for numeric comparison.
+// M-9 fix: Support semver strings like "1.2.3" by encoding as
+// major*10000 + minor*100 + patch. Falls back to plain uint16 parse
+// for bare numeric strings like "42". Returns 0 on parse failure.
 func fwVersionToUint16(s string) uint16 {
+	var major, minor, patch int
+	n, _ := fmt.Sscanf(s, "%d.%d.%d", &major, &minor, &patch)
+	if n == 3 {
+		v := major*10000 + minor*100 + patch
+		if v > 65535 {
+			v = 65535
+		}
+		return uint16(v)
+	}
+	// Fallback: plain uint16
 	var v uint16
 	fmt.Sscanf(s, "%d", &v)
 	return v

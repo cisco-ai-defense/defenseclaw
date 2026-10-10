@@ -194,12 +194,24 @@ type Bridge struct {
 	verdictRateMu  sync.Mutex
 	verdictRateMap map[uint64]*verdictRateEntry
 
+	// H-7 fix: Optional persistent decommission store. When set, the
+	// cleanup goroutine checks the store before evicting tombstones from
+	// the in-memory map, preventing premature eviction of devices that
+	// are still decommissioned in the persistent layer.
+	decommStore DecommissionChecker
+
 	// Stats for observability
 	mu                  sync.RWMutex
 	heartbeatsProcessed uint64
 	verdictsProcessed   uint64
 	decodeErrors        uint64
 	rateLimitDrops      uint64
+}
+
+// DecommissionChecker is the narrow interface for checking if a device
+// is decommissioned in the persistent store. H-7 fix.
+type DecommissionChecker interface {
+	IsDecommissioned(fullDeviceID uint64) (bool, error)
 }
 
 // verdictRateEntry tracks per-device verdict request rate for CRT-1.
@@ -292,6 +304,13 @@ func (b *Bridge) SetKeyProvider(kp DeviceKeyProvider) {
 	b.keyProvider = kp
 }
 
+// SetDecommissionStore attaches a persistent decommission store for H-7 fix.
+// When set, the cleanup goroutine checks the store before evicting stale
+// tombstones from the in-memory map.
+func (b *Bridge) SetDecommissionStore(ds DecommissionChecker) {
+	b.decommStore = ds
+}
+
 // Start connects to the MQTT broker and begins processing messages.
 // It blocks until the context is cancelled or Stop() is called.
 func (b *Bridge) Start(ctx context.Context) error {
@@ -357,10 +376,19 @@ func (b *Bridge) Start(ctx context.Context) error {
 
 				// M-6 fix: Clean decommissioned entries older than 7 days
 				// to prevent unbounded map growth from accumulated decommissions.
+				// H-7 fix: Before evicting, check the persistent store (if available)
+				// to avoid evicting devices that are still decommissioned.
 				decommCutoff := time.Now().Add(-7 * 24 * time.Hour)
 				b.decommissionedMu.Lock()
 				for id, ts := range b.decommissioned {
 					if ts.Before(decommCutoff) {
+						if b.decommStore != nil {
+							if still, err := b.decommStore.IsDecommissioned(id); err == nil && still {
+								// Still decommissioned in persistent store — refresh timestamp
+								b.decommissioned[id] = time.Now()
+								continue
+							}
+						}
 						delete(b.decommissioned, id)
 					}
 				}

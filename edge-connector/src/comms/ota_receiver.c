@@ -402,9 +402,31 @@ void dclaw_canary_record_block(void) {
 /* Rollback to previous policy partition */
 void dclaw_policy_rollback(void) {
     dclaw_state_t *s = dclaw_get_state();
-    /* Pass 0 to keep the currently persisted policy version — rollback does
-     * not change the version, only the active partition. */
-    dclaw_config_switch_policy_partition(0);
+    /* M-1 fix: Read the previous partition's policy version from flash and
+     * pass it to dclaw_config_switch_policy_partition() so the persisted
+     * version reflects the rolled-back policy. Previously passed 0, which
+     * left the version stale (pointing to the new/bad policy), defeating
+     * the anti-rollback check (REQ-36) on next OTA. */
+    uint8_t active = dclaw_config_active_policy_partition();
+    /* active=current partition (bad policy). The previous (good) policy is
+     * on the inactive partition. switch_policy_partition flips active↔inactive,
+     * so we read the version from the currently inactive partition first. */
+    uint32_t prev_offset = (active == 0) ? HAL_FLASH_POLICY_B_OFFSET
+                                         : HAL_FLASH_POLICY_A_OFFSET;
+    uint16_t prev_version = 0;
+    {
+        uint8_t hdr_buf[8];
+        if (hal_flash_read(prev_offset, hdr_buf, 8) == 0) {
+            uint16_t plen = ((uint16_t)hdr_buf[2] << 8) | hdr_buf[3];
+            if (plen > 0) {
+                prev_version = ((uint16_t)hdr_buf[0] << 8) | hdr_buf[1];
+            }
+        }
+    }
+    dclaw_config_switch_policy_partition(prev_version);
+    if (prev_version > 0) {
+        s->device.policy_version = prev_version;
+    }
     s->canary.canary_active = false;
     /* P2-19 fix: Signal the next heartbeat to include flag 0x08 so the fleet
      * manager knows a canary rollback occurred. Cleared after the heartbeat
@@ -489,6 +511,14 @@ static const uint8_t *get_emergency_ca_key(void) {
     return emergency_ca_key;
 }
 
+/* H-3 fix: Public accessor for the emergency key, used by main.c for
+ * lockdown release HMAC verification via IPC. */
+const uint8_t *dclaw_emergency_get_key(size_t *out_len) {
+    const uint8_t *key = get_emergency_ca_key();
+    *out_len = emergency_ca_key_provisioned ? ED25519_PUBKEY_LEN : 0;
+    return key;
+}
+
 static bool verify_emergency_signature(const uint8_t *message, size_t msg_len,
                                        const uint8_t *signature) {
     const uint8_t *key = get_emergency_ca_key();
@@ -563,6 +593,9 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
          * returns BLOCK for ALL requests until cleared or daemon restart. */
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
+        /* H-1 fix: Clear speculative execution slots so no stale
+         * speculatively-allowed requests linger after BLOCK_ALL. */
+        memset(s->speculative, 0, sizeof(s->speculative));
         /* CRT-5 fix: Record lockdown activation time for auto-clear timeout */
         s->emergency.lockdown_timestamp = (uint64_t)time(NULL); /* L-4: uint64_t, no truncation */
         break;
@@ -591,6 +624,8 @@ int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len) {
          * all requests. The flag persists until cleared or daemon restart. */
         dclaw_cache_flush_all();
         s->emergency.block_all_active = true;
+        /* H-1 fix: Clear speculative execution slots on lockdown. */
+        memset(s->speculative, 0, sizeof(s->speculative));
         /* CRT-5 fix: Record lockdown activation time for auto-clear timeout */
         s->emergency.lockdown_timestamp = (uint64_t)time(NULL); /* L-4: uint64_t, no truncation */
         break;
