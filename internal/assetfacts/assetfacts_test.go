@@ -86,3 +86,19 @@ func TestSkillFolderRefsIncludesNestedSkill(t *testing.T) {
 		t.Fatalf("nested skill folders = %#v", refs)
 	}
 }
+
+func TestSkillFolderRefsKeepsPathOfLargeMultiEdit(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".claude", "skills", "blocked")
+	edits := make([]any, 40)
+	for i := range edits {
+		edits[i] = map[string]any{"old_string": "a", "new_string": "b"}
+	}
+	input := map[string]any{"edits": edits, "file_path": filepath.Join(dir, "SKILL.md")}
+	for i := 0; i < 200; i++ {
+		refs := SkillFolderRefs(input, home, home)
+		if len(refs) != 1 || refs[0].Dir != dir {
+			t.Fatalf("run %d: denied skill path dropped: %#v", i, refs)
+		}
+	}
+}
