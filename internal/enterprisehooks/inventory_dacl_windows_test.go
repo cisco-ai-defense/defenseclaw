@@ -632,7 +632,7 @@ func TestGatewayPluginRootReadGrantKeepsTheGuardianDACL(t *testing.T) {
 		t.Fatalf("grant after the guardian reset = %v, %v", got, err)
 	}
 	// The uninstall revoke leaves the exact guardian DACL.
-	if err := revokeInventoryACEs(root, []*windows.SID{gateway}); err != nil {
+	if err := revokeInventoryACEs(home, rel, []*windows.SID{gateway}); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateWindowsUserPathElement(root, target, true, true, true); err != nil {

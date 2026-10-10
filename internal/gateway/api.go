@@ -1516,10 +1516,17 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {
 		body["agent_identities"] = ledger
 	}
+	// The profile warnings name configured groups and DOMAIN\user selectors,
+	// and /health needs no credential: only root on the hook socket (the
+	// Linux and macOS lifecycle) gets them here. Everyone else gets their
+	// number and reads them from the authenticated /status (GAP-1268).
+	peer, viaHookSocket := managedHookPeerFromContext(r.Context())
+	rootPeer := viaHookSocket && peer.UID == 0
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
 		if !cfg.SecureClientIntegration() {
 			if set := a.guardrailProfileSet(); set != nil {
-				body["profile_assignment_warnings"] = set.assignmentWarnings(true)
+				setHealthProfileWarnings(body, "profile_assignment_warnings", "profile_assignment_warning_count",
+					set.assignmentWarnings(true), rootPeer)
 			}
 		}
 		body["acp"] = map[string]interface{}{
@@ -1530,8 +1537,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
-			peer, viaHookSocket := managedHookPeerFromContext(r.Context())
-			if directory := directoryHealthSummary(directoryCacheHealth(), viaHookSocket && peer.UID == 0); directory != nil {
+			if directory := directoryHealthSummary(directoryCacheHealth(), rootPeer); directory != nil {
 				body["directory"] = directory
 			}
 			// An assignment group the host does not know (renamed, deleted,
@@ -1540,7 +1546,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// status and verify report it (GAP-0704). The last check is
 			// served; a stale one is refreshed in the background.
 			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
-				body["profile_warnings"] = warnings
+				setHealthProfileWarnings(body, "profile_warnings", "profile_warning_count", warnings, rootPeer)
 			}
 			// Non-secret fingerprints of the per-user credential keys that
 			// authenticate right now (a rotation's staged key included).
@@ -1550,6 +1556,18 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.writeJSON(w, http.StatusOK, body)
+}
+
+// setHealthProfileWarnings puts warnings in the /health body under key for
+// root on the hook socket, and only their number under countKey for any
+// other caller (GAP-1268).
+func setHealthProfileWarnings(body map[string]interface{}, key, countKey string, warnings []string, rootPeer bool) {
+	switch {
+	case rootPeer:
+		body[key] = warnings
+	case len(warnings) > 0:
+		body[countKey] = len(warnings)
+	}
 }
 
 func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
@@ -1677,6 +1695,14 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
 		if set := a.guardrailProfileSet(); set != nil {
 			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
+			// What /health lists only to root on the hook socket: Windows
+			// status and verify read it here with the gateway credential
+			// (GAP-1268).
+			if cfg.StandaloneEnterprise() {
+				if warnings := set.healthProfileWarnings(); len(warnings) > 0 {
+					status["profile_warnings"] = warnings
+				}
+			}
 		}
 	}
 

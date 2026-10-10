@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -74,8 +73,25 @@ func windowsUserStateRollbackFolders(home string) ([]string, error) {
 }
 
 // purgeWindowsUserStateFolder removes one DefenseClaw per-user folder of the
-// account (see PurgeWindowsUserState).
+// account (see PurgeWindowsUserState), a folder below home. No element
+// between home and the folder may be a link, junction or other reparse
+// point: the account can make its .defenseclaw a junction to another
+// account's, and the purge runs as LocalSystem, so following it removed that
+// account's ACP folder (GAP-1256). The folder is pinned by a handle whose
+// final path must be home's followed by the same names, which closes the
+// window between the check and the removal, and nothing is removed through
+// a link: the purge refuses and leaves the folder as found.
 func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) error {
+	rel, err := filepath.Rel(home, dataDir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) {
+		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not below the profile %s", dataDir, home)
+	}
+	linked := fmt.Errorf("enterprise hooks: refusing to purge %s, which is reached through a link or junction; left as found", dataDir)
+	if err := inventoryDACLRejectLinkBelow(home, rel); errors.Is(err, errInventoryDACLLink) {
+		return linked
+	} else if err != nil {
+		return err
+	}
 	info, err := os.Lstat(dataDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -89,7 +105,10 @@ func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) 
 	// The account can rename or replace its own folder. A handle that does
 	// not share delete access keeps it from doing so while the purge runs,
 	// and the root must be the folder that handle holds.
-	pin, err := openWindowsUserStatePin(dataDir)
+	pin, err := openWindowsUserStatePin(home, rel)
+	if errors.Is(err, errInventoryDACLLink) {
+		return linked
+	}
 	if err != nil {
 		return err
 	}
@@ -116,6 +135,11 @@ func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) 
 	}()
 	root.Close()
 	pin.Close()
+	// What follows works by name again: a link put on the way meanwhile
+	// stops it.
+	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+		return errors.Join(purgeErr, linked)
+	}
 	// Gone only when nothing stayed. Remove takes only an empty folder, and
 	// a link put in its place only as the link itself.
 	_ = os.Remove(dataDir)
@@ -219,27 +243,19 @@ func openWindowsUserStateDeniedChild(parent windows.Handle, name string) (window
 	)
 }
 
-// openWindowsUserStatePin opens the folder itself, not what a reparse point
-// in its place would name, without sharing delete access. It can list the
-// folder, so removeWindowsUserStateDenied can open entries relative to it.
-func openWindowsUserStatePin(path string) (*os.File, error) {
-	extended, err := winpath.Extended(path)
-	if err != nil {
-		return nil, err
-	}
-	ptr, err := windows.UTF16PtrFromString(extended)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := windows.CreateFile(
-		ptr,
+// openWindowsUserStatePin opens the folder home\rel itself, not what a
+// reparse point at it or above it below home would name
+// (openWindowsProfileChildNoFollow), without sharing delete access. It can
+// list the folder, so removeWindowsUserStateDenied can open entries relative
+// to it.
+func openWindowsUserStatePin(home, rel string) (*os.File, error) {
+	handle, err := openWindowsProfileChildNoFollow(home, rel,
 		windows.FILE_READ_ATTRIBUTES|windows.FILE_LIST_DIRECTORY|windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+	path := filepath.Join(home, rel)
+	if errors.Is(err, errInventoryDACLLink) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("enterprise hooks: open %s: %w", path, err)
 	}
@@ -277,6 +293,16 @@ func WindowsManagedACPUserCopies() ([]WindowsACPUserCopy, error) {
 		}
 		home, err := windowsProfileImagePathReader(sidText)
 		if err != nil {
+			continue
+		}
+		// A link or junction at .defenseclaw or acp names another folder,
+		// another account's included. Nothing is read through it; the
+		// profile is listed so the purge refuses it and reports it
+		// (GAP-1256).
+		if err := inventoryDACLRejectLinkBelow(home, `.defenseclaw\acp`); err != nil {
+			if errors.Is(err, errInventoryDACLLink) {
+				copies = append(copies, WindowsACPUserCopy{SID: sidText, Home: home})
+			}
 			continue
 		}
 		acpDir := filepath.Join(home, ".defenseclaw", "acp")
