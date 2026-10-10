@@ -13,7 +13,11 @@ import (
 // A hard link is compared by file identity (inode, or volume serial and file
 // index on Windows), not by its own pathname.
 func TestResolveHardLinkToAuthorizedKeys(t *testing.T) {
-	home := t.TempDir()
+	// macOS keeps the temp dir under the /var -> /private/var link.
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	keys := filepath.Join(home, ".ssh", "authorized_keys")
 	if err := os.MkdirAll(filepath.Dir(keys), 0o700); err != nil {
 		t.Fatal(err)
