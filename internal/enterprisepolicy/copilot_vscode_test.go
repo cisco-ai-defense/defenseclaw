@@ -131,6 +131,14 @@ func TestCopilotVSCodeUpgradeFromTheReleasedRender(t *testing.T) {
 				p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
 			})
 			opts.GOOS, opts.HookBinary, opts.CopilotUserHomes = goos, hookBinary, []string{home}
+			// The 1.0.0 plugin stays DefenseClaw's only beside a VS Code that
+			// reads it (GAP-1245).
+			vscode := rooted(opts, "/usr/share/code/resources/app/package.json")
+			if goos == "windows" {
+				opts.WindowsProgramFiles = t.TempDir()
+				vscode = opts.WindowsProgramFiles + `\Microsoft VS Code\resources\app\package.json`
+			}
+			writeFile(t, vscode, `{"version":"1.139.2"}`)
 			status := func() State {
 				t.Helper()
 				var state State
