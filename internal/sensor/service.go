@@ -842,7 +842,7 @@ func hasLocalInference(signals []scoring.Signal) bool {
 	return false
 }
 
-func isScriptable(name string) bool { return scriptableRuntimes[strings.ToLower(name)] }
+func isScriptable(name string) bool { return scriptableRuntimes[normalizeRuntimeName(name)] }
 
 // findingID is stable for a process episode so repeated emissions update
 // rather than accumulate.

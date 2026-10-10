@@ -1239,9 +1239,9 @@ func readMCPServersClaudeCodeAt(statePath, settingsPath, workspaceDir string) []
 		entries = append(entries, user...)
 	}
 
-	// Some Claude installations also carry a top-level user registry in
-	// settings.json. Keep it as the final user layer so the CLI state registry
-	// retains precedence while this additional source still fills missing names.
+	// DefenseClaw 0.8.x wrote `mcp set` entries into settings.json. Keep that
+	// block as the final, legacy layer: the state file Claude Code reads wins
+	// a name, and the legacy block still fills names only it has (GAP-1340).
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
 	}

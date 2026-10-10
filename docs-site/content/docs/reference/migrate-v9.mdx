@@ -649,6 +649,14 @@ connectors that the scanner refuses, in the summary and under
 - The fix points the entry at `npx` or `uvx` with its package, or at the
   server's URL. When the command is a path to `npx` or `uvx`, the fix keeps
   your arguments and uses the bare name.
+- Claude Code: 0.8.x wrote `mcp set` entries into the `mcpServers` block of
+  `~/.claude/settings.json`. 1.0 writes them to `~/.claude.json`
+  (`$CLAUDE_CONFIG_DIR/.claude.json` when that is set), the file Claude Code
+  reads. DefenseClaw still reads the old block, after `~/.claude.json`, and
+  `mcp list` names an entry that is only there. The fix command with
+  `--connector claudecode` writes the entry to `~/.claude.json` and removes the
+  copy from `settings.json`; `defenseclaw mcp unset <name> --connector claudecode`
+  removes the name from both files.
 
 ## Conflicts and migration-v9.json
 

@@ -57,7 +57,7 @@ The default sources include:
 - `~/.kiro/settings/mcp.json` and `<workspace>/.kiro/settings/mcp.json` → `mcpServers` (Kiro)
 - The MCP config of every other connector you set up with `defenseclaw setup <connector>`.
 
-Each server is scanned independently and findings are tagged with the connector that discovered them. Use `--connector <name>` on list, scan, set, unset, block, allow, and unblock commands when you want one connector's MCP source instead of the full configured roster. Without `--connector`, `mcp set` writes the server into every configured connector's MCP source, and `mcp unset` removes it from every configured connector that has it.
+Each server is scanned independently and findings are tagged with the connector that discovered them. Use `--connector <name>` on list, scan, set, unset, block, allow, and unblock commands when you want one connector's MCP source instead of the full configured roster. Without `--connector`, `mcp set` writes the server into every configured connector's MCP source, and `mcp unset` removes it from every configured connector that has it. For Claude Code, `mcp set` writes `~/.claude.json` (the file Claude Code reads) and removes a same-named entry that DefenseClaw 0.8.x left in `~/.claude/settings.json`; `mcp unset` removes the name from both.
 
 ## One-shot scans
 
