@@ -257,6 +257,41 @@ func TestProjectMCPServerIsAdmittedOnDiscovery(t *testing.T) {
 	}
 }
 
+func TestKiroMCPServerAddedWithoutAssetDirsGetsAdmissionVerdicts(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "kiro"
+	cfg.Watch.RescanEnabled = true
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "marker-blocked"}}
+	path := filepath.Join(home, ".kiro", "settings", "mcp.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var admitted []AdmissionResult
+	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
+	scans := &countingScanner{name: "mcp-scanner"}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return scans }
+	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		return cfg.ReadWatchedMCPServers([]string{"kiro"})
+	})
+	w.SetMCPDiscoveryPoll(true)
+	w.firstCycleDone.Store(true)
+	if err := os.WriteFile(path, []byte(`{"mcpServers":{"clean":{"url":"https://example.test/mcp"},"marker-blocked":{"command":"/usr/bin/true"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.discoverAddedMCPServers()
+	w.admitAddedMCPServers(context.Background())
+	verdicts := map[string]Verdict{}
+	for _, result := range admitted {
+		verdicts[result.Event.Name] = result.Verdict
+	}
+	if verdicts["clean"] != VerdictClean || verdicts["marker-blocked"] != VerdictBlocked || scans.calls != 1 {
+		t.Fatalf("Kiro admission verdicts = %v, scanner calls = %d", verdicts, scans.calls)
+	}
+}
+
 // GAP-0371: an allow pinned to the server URL (the rule mcp allow writes)
 // admits the added server without a scan; the watcher used to match the
 // rule against the name alone, which never matches a pinned rule.

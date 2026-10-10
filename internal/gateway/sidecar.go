@@ -3723,10 +3723,9 @@ func watcherStartupEnabled(cfg *config.Config) bool {
 	return WatcherWatchesDirs(cfg)
 }
 
-// WatcherWatchesDirs reports whether the watcher is enabled and may watch a
-// folder: the connector's, or explicit gateway.watcher dirs. The start
-// banner and the subsystems line report the watcher off otherwise, as
-// runWatcher idles with "no directories to watch" (GAP-0077).
+// WatcherWatchesDirs reports whether the watcher is enabled and has a
+// connector MCP source, enrolled users, or a folder to watch. The start
+// banner and subsystems line report it idle only when none applies.
 func WatcherWatchesDirs(cfg *config.Config) bool {
 	w := cfg.Gateway.Watcher
 	if !w.Enabled {
@@ -3909,16 +3908,16 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 
 	warnUnenforcedAssetPolicy(s.currentConfig(), skillDirs, pluginDirs,
 		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil)
-	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil {
+	// A per-user connector can have only MCP servers (Kiro has no asset
+	// directories). Its discovery poll still needs a running watcher.
+	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil &&
+		!(watcherUsesConnectorDirs(s.currentConfig()) && !s.currentConfig().SecureClientIntegration()) {
 		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
 			"skill_dirs":  0,
 			"plugin_dirs": 0,
 			"idle":        "no directories configured",
 		})
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: no directories to watch\n")
-		if enrolled != nil {
-			s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, nil, changed)
-		}
 		<-watchCtx.Done()
 		return false, nil
 	}
