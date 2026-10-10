@@ -287,3 +287,17 @@ func TestCopilotManagedSettingsRemovesARecordlessPluginKey(t *testing.T) {
 	}
 }
 
+// GAP-1245: the per-user plugin follows its enabledPlugins key, so a host
+// without a VS Code that reads it gets no plugin folder in each home.
+func TestCopilotVSCodeUserWantsThePluginOnlyWithAReadingVSCode(t *testing.T) {
+	opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
+		p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
+	})
+	if hookFile, plugin := CopilotVSCodeUserWant(opts); !hookFile || plugin {
+		t.Fatalf("without VS Code: hook file %t, plugin %t; want the hook file only", hookFile, plugin)
+	}
+	writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.139.2"}`)
+	if hookFile, plugin := CopilotVSCodeUserWant(opts); !hookFile || !plugin {
+		t.Fatalf("with VS Code 1.139: hook file %t, plugin %t; want both", hookFile, plugin)
+	}
+}

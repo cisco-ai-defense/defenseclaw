@@ -112,13 +112,21 @@ func copilotPluginRoute(opts Options) bool {
 
 // CopilotVSCodeUserWant is what each enrolled user's home should hold for
 // opts: the Local hook file while Copilot is governed and the Local
-// harness is not retired, and the plugin on the plugin route.
+// harness is not retired, and the plugin on the plugin route where a VS
+// Code that reads it is installed. The plugin follows the same gate as
+// its enabledPlugins key (copilotVSCodePluginStoreGate): without that key
+// nothing loads it, so on a host without such a VS Code it would only be a
+// stray folder in every enrolled home (GAP-1245).
 func CopilotVSCodeUserWant(opts Options) (hookFile, plugin bool) {
 	policy := opts.PolicyFor(copilotConnector)
 	if policy.Ownership == config.MachinePolicyOwnershipOff || opts.copilotLocalHarness() != config.CopilotLocalHarnessGovern {
 		return false, false
 	}
-	return true, copilotPluginRoute(opts)
+	if !copilotPluginRoute(opts) {
+		return true, false
+	}
+	gate, _ := copilotVSCodePluginStoreGate(opts)
+	return true, gate
 }
 
 // VSCodeInstall is one VS Code installation DefenseClaw found.
