@@ -505,11 +505,15 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 
 // CheckOfflineDevices detects devices that have gone silent.
 func (fm *FleetManager) CheckOfflineDevices() {
-	fm.mu.Lock()
-	defer fm.mu.Unlock()
+	fm.mu.RLock()
+	defer fm.mu.RUnlock()
 
 	threshold := time.Now().Add(-3 * fm.heartbeatInterval)
-	for _, dev := range fm.devices {
+	for id, dev := range fm.devices {
+		// Acquire shard lock for consistent read/write — ProcessHeartbeat
+		// mutates *dev under the shard lock, not fm.mu.
+		shard := id % 256
+		fm.deviceLocks[shard].Lock()
 		if dev.Status == StatusOnline && dev.LastHeartbeat.Before(threshold) {
 			dev.Status = StatusOffline
 			if fm.store != nil {
@@ -528,18 +532,26 @@ func (fm *FleetManager) CheckOfflineDevices() {
 				Timestamp: time.Now(),
 			})
 		}
+		fm.deviceLocks[shard].Unlock()
 	}
 }
 
 // GetDevice returns a copy of a device by composite ID.
 func (fm *FleetManager) GetDevice(fullID uint64) (Device, bool) {
 	fm.mu.RLock()
-	defer fm.mu.RUnlock()
 	dev, ok := fm.devices[fullID]
+	fm.mu.RUnlock()
 	if !ok {
 		return Device{}, false
 	}
-	return *dev, true
+	// Acquire the shard lock to get a consistent snapshot of the device.
+	// ProcessHeartbeat mutates *dev under the shard lock (not fm.mu), so
+	// we must hold the same shard lock while copying the struct.
+	shard := fullID % 256
+	fm.deviceLocks[shard].Lock()
+	copy := *dev
+	fm.deviceLocks[shard].Unlock()
+	return copy, true
 }
 
 // ListDevices returns a snapshot copy of all registered devices.
@@ -548,8 +560,13 @@ func (fm *FleetManager) ListDevices() []Device {
 	defer fm.mu.RUnlock()
 
 	result := make([]Device, 0, len(fm.devices))
-	for _, dev := range fm.devices {
+	for id, dev := range fm.devices {
+		// Acquire shard lock for a consistent copy — ProcessHeartbeat
+		// mutates *dev under the shard lock, not fm.mu.
+		shard := id % 256
+		fm.deviceLocks[shard].Lock()
 		result = append(result, *dev)
+		fm.deviceLocks[shard].Unlock()
 	}
 	return result
 }
@@ -582,7 +599,11 @@ func (fm *FleetManager) GetFleetHealth() FleetHealth {
 	health := FleetHealth{
 		PolicyVersions: make(map[uint16]int),
 	}
-	for _, dev := range fm.devices {
+	for id, dev := range fm.devices {
+		// Acquire shard lock for consistent read — ProcessHeartbeat
+		// mutates *dev under the shard lock, not fm.mu.
+		shard := id % 256
+		fm.deviceLocks[shard].Lock()
 		health.TotalDevices++
 		switch dev.Status {
 		case StatusOnline:
@@ -595,6 +616,7 @@ func (fm *FleetManager) GetFleetHealth() FleetHealth {
 			health.Lockdown++
 		}
 		health.PolicyVersions[dev.PolicyVersion]++
+		fm.deviceLocks[shard].Unlock()
 	}
 	return health
 }

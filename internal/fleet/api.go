@@ -14,6 +14,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -64,11 +65,10 @@ type API struct {
 	currentToken atomic.Pointer[string]
 
 	// M-5 fix: Rate limiting for rotation endpoints — max 1 per minute.
-	lastTokenRotation time.Time
-	// CRT-1 fix: Per-device key rotation rate limiter. The previous single
-	// lastDeviceKeyRotation time.Time allowed only 1 rotation per minute across
-	// ALL devices. Now each device has its own cooldown so rotating device A's
-	// key does not block rotating device B's key.
+	// H-5/CRT-2 fix: Protected by rotationMu since rotation handlers run
+	// concurrently with regular API requests.
+	rotationMu         sync.Mutex
+	lastTokenRotation  time.Time
 	deviceKeyRotations map[uint64]time.Time
 }
 
@@ -915,6 +915,8 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 // and returns the new token once (it is not retrievable later). P2-4 fix:
 // Allows operators to rotate the fleet API token without restarting the gateway.
 func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
+	a.rotationMu.Lock()
+	defer a.rotationMu.Unlock()
 	// M-5 fix: Rate limit — max 1 token rotation per minute.
 	if !a.lastTokenRotation.IsZero() && time.Since(a.lastTokenRotation) < time.Minute {
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
@@ -963,15 +965,17 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CRT-1 fix: Per-device rate limit — max 1 key rotation per device per minute.
+	// CRT-1/CRT-2 fix: Per-device rate limit with mutex protection.
+	a.rotationMu.Lock()
 	if lastRot, exists := a.deviceKeyRotations[deviceID]; exists && time.Since(lastRot) < time.Minute {
+		a.rotationMu.Unlock()
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{
 			"error": "device key rotation rate limited — try again in 1 minute",
 		})
 		return
 	}
+	a.rotationMu.Unlock()
 
-	// Verify the device exists
 	_, ok := a.manager.GetDevice(deviceID)
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
@@ -1000,7 +1004,9 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	a.rotationMu.Lock()
 	a.deviceKeyRotations[deviceID] = time.Now()
+	a.rotationMu.Unlock()
 	newKeyHex := hex.EncodeToString(newKey)
 
 	a.emitAudit("fleet.device.key_rotated",

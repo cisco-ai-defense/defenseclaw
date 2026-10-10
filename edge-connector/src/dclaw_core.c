@@ -66,8 +66,16 @@ int dclaw_init(const dclaw_device_info_t *info) {
     {
         int urandom_fd = open("/dev/urandom", O_RDONLY);
         if (urandom_fd >= 0) {
-            (void)read(urandom_fd, g_state.boot_nonce, sizeof(g_state.boot_nonce));
+            ssize_t n = read(urandom_fd, g_state.boot_nonce, sizeof(g_state.boot_nonce));
             close(urandom_fd);
+            if (n != (ssize_t)sizeof(g_state.boot_nonce)) {
+                fprintf(stderr, "[DCLAW] ERROR: Failed to read boot nonce from /dev/urandom "
+                        "(got %zd bytes, need %zu). Verdict replay protection degraded.\n",
+                        n, sizeof(g_state.boot_nonce));
+            }
+        } else {
+            fprintf(stderr, "[DCLAW] ERROR: Cannot open /dev/urandom — boot nonce is zero. "
+                    "Verdict replay protection unavailable.\n");
         }
     }
     g_state.initialized = true;
