@@ -592,6 +592,64 @@ func TestHookConfigGuard_IgnoresUnrelatedEdits(t *testing.T) {
 	}
 }
 
+// GAP-0906: with one of Copilot's per-event entries edited, the other entries
+// still matched, so the guard saw its hooks as present and never repaired the
+// file: no log line, mtime unchanged, the edited event unguarded until the
+// gateway restarted. The file watcher must now restore the Setup render. An
+// operator-removed connector is still not re-added.
+func TestHookConfigGuard_RepairsOneEditedEntry(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	cfgPath := filepath.Join(root, "copilot", "hooks", "defenseclaw.json")
+	prev := connector.CopilotHooksPathOverride
+	connector.CopilotHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CopilotHooksPathOverride = prev })
+	opts := connector.SetupOpts{
+		DataDir:      filepath.Join(root, ".defenseclaw"),
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+		WorkspaceDir: t.TempDir(),
+	}
+	conn := connector.NewCopilotConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("copilot Setup: %v", err)
+	}
+	pristine, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	repairs := observeRepairs(guard)
+	guard.Start(ctx, conn, opts)
+	defer guard.Stop()
+	requireOwnedHooks(t, conn, opts)
+
+	edited := strings.Replace(string(pristine), "copilot-hook.sh' --event 'agentStop'", "copilot-hookX.sh' --event 'agentStop'", 1)
+	if edited == string(pristine) {
+		t.Fatalf("fixture has no agentStop entry:\n%s", pristine)
+	}
+	if err := os.WriteFile(cfgPath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForRepair(t, repairs, conn, opts)
+	if got, err := os.ReadFile(cfgPath); err != nil || string(got) != string(pristine) {
+		t.Fatalf("repair is not the Setup render (%v):\n%s", err, got)
+	}
+
+	if _, err := connector.MarkConnectorInactive(opts.DataDir, conn.Name()); err != nil {
+		t.Fatalf("mark connector inactive: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * guardTestDebounce)
+	if present, err := connector.OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("hook guard re-added a removed connector: present=%v err=%v", present, err)
+	}
+}
+
 func TestHookConfigGuard_DisabledDoesNotHeal(t *testing.T) {
 	// Mirrors guardrail.hook_self_heal=false: the guard is never started,
 	// so a manual deletion is NOT restored.
