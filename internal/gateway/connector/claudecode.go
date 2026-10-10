@@ -2763,7 +2763,7 @@ func scriptHasMarker(path string) bool {
 // matcher groups and returns the compacted slice.
 func removeOwnedHooks(hookEventValue interface{}, hooksDir string) []interface{} {
 	return removeMatchingHookHandlers(hookEventValue, func(rawHook interface{}) bool {
-		return isOwnedHookHandler(rawHook, hooksDir)
+		return isOwnedCodexHookHandler(rawHook, hooksDir)
 	})
 }
 

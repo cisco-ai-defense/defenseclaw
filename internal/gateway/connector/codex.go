@@ -3140,9 +3140,7 @@ func mergeOwnedCodexHooks(
 		if isOwnedCodexHookHandler(rawHook, hooksDir) || (replaceCommandless && codexCommandlessHandler(rawHook)) {
 			return true
 		}
-		// A DefenseClaw handler whose script path was edited is replaced in
-		// place, not kept next to a second hook set (GAP-0907).
-		return isInferredManaged(rawHook) || editedDefenseClawHookEntry(rawHook, "codex-hook.sh")
+		return isInferredManaged(rawHook)
 	}
 	if _, err := removeCodexHookStateMatching(hooks, configPath, isManaged); err != nil {
 		return fmt.Errorf("inspect existing DefenseClaw Codex hook trust: %w", err)
@@ -3912,14 +3910,11 @@ func isOwnedCodexHookHandler(rawHook interface{}, hooksDir string) bool {
 	if !ok {
 		return false
 	}
-	// A user edit that moves our generated script to xhooks is still a
-	// DefenseClaw registration. Teardown must not strand its positional
-	// trust state after guardian repairs it (GAP-1032).
-	editedScript := filepath.ToSlash(filepath.Join(filepath.Dir(hooksDir), "xhooks", "codex-hook.sh"))
-	for _, key := range []string{"command", "commandWindows", "command_windows"} {
-		if command, ok := handler[key].(string); ok && strings.Contains(filepath.ToSlash(command), editedScript) {
-			return true
-		}
+	// A user edit of our generated script's path or name is still a
+	// DefenseClaw registration: repair replaces it in place and teardown
+	// must not strand its positional trust state (GAP-1032, GAP-0907).
+	if command, _ := handler["command"].(string); editedDefenseClawHookCommand(command, "codex-hook.sh") {
+		return true
 	}
 	for _, key := range []string{"commandWindows", "command_windows"} {
 		candidate, ok := handler[key].(string)

@@ -5642,6 +5642,7 @@ def _check_claudecode_hooks(
                 if "defenseclaw" in cmd or "claude-code-hook" in cmd:
                     dc_hooks += 1
     switched_off = _agent_hook_switch_problem(cfg, "claudecode") if dc_hooks > 0 else ""
+    edited = _edited_hook_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     if switched_off:
         _emit(
             "fail",
@@ -5650,6 +5651,8 @@ def _check_claudecode_hooks(
             r=r,
             remediation=getattr(switched_off, "repair", "") or _CLAUDECODE_HOOKS_FIX,
         )
+    elif edited:
+        _emit("fail", "Claude Code hooks", edited, r=r, remediation=edited.repair)
     elif dc_hooks > 0:
         _emit("pass", "Claude Code hooks", f"{dc_hooks} DefenseClaw hook(s) registered", r=r)
         _check_generated_hook_freshness(
@@ -8316,6 +8319,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             return
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
         return
+    if edited := _edited_hook_problem(cfg, connector):
+        _emit("fail", label, edited, r=r, remediation=edited.repair)
+        return
     for path in present:
         if _file_references_marker(path, markers):
             if connector == "cursor":
@@ -8843,6 +8849,9 @@ def _check_copilot_hooks(
             search_path=search_path,
             pathext=pathext,
         )
+        return
+    if edited := _edited_hook_problem(cfg, "copilot"):
+        _emit("fail", "Copilot hooks", edited, r=r, remediation=edited.repair)
         return
     if not workspace:
         path = os.path.join(copilot_home(), "hooks", "defenseclaw.json")
@@ -14571,12 +14580,13 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     from defenseclaw.hook_integrity import hook_command_problems, setup_command
 
     for problem in hook_command_problems(cfg, connector):
+        own_repair = getattr(problem, "repair", "")
         _emit(
             "fail",
             "Hook command",
-            f"{problem}; the agent runs its tool calls unguarded",
+            problem if own_repair else f"{problem}; the agent runs its tool calls unguarded",
             r=r,
-            remediation=f"re-register the hooks: {setup_command(connector)} --yes",
+            remediation=own_repair or f"re-register the hooks: {setup_command(connector)} --yes",
         )
 
 
@@ -16629,15 +16639,26 @@ def _fix_hook_script_modes(
     return ("pass", f"verified sealed digests and restored mode 0700 on {names}")
 
 
-def _drifted_hook_connectors(cfg) -> list[str]:
-    from defenseclaw.hook_integrity import agent_hook_switch_problems, hook_runtime_problems
+def _edited_hook_problem(cfg, connector: str):
+    """The first edited DefenseClaw hook entry of *connector*, or "" (GAP-0906, GAP-0907)."""
+    from defenseclaw.hook_integrity import edited_hook_problems
 
-    # Codex hook entries left without a command keep Codex from starting; the
-    # restart re-runs the gateway's Codex setup, which removes them (GAP-1102).
+    problems = edited_hook_problems(cfg, connector)
+    return problems[0] if problems else ""
+
+
+def _drifted_hook_connectors(cfg) -> list[str]:
+    from defenseclaw.hook_integrity import agent_hook_switch_problems, edited_hook_problems, hook_runtime_problems
+
+    # Codex hook entries left without a command keep Codex from starting, and
+    # an edited hook entry fails or runs unguarded; the restart re-runs the
+    # gateway's setup of the connector, which removes or replaces them
+    # (GAP-1102, GAP-0906, GAP-0907).
     return [
         connector
         for connector in _doctor_active_connectors(cfg)
         if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        or edited_hook_problems(cfg, connector)
         or (
             connector == "codex"
             and any("without a command" in problem for problem in agent_hook_switch_problems(cfg, connector))

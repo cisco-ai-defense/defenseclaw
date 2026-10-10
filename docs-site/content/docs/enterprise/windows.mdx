@@ -1221,7 +1221,11 @@ Or with the installed CLI:
 ```
 
 Uninstall removes DefenseClaw's hook registrations and machine-policy
-entries, the four services, the binaries, and the machine state under
+entries (for GitHub Copilot that includes the policy.d drop-in and
+`enabledPlugins["defenseclaw@defenseclaw"]` in
+`%ProgramFiles%\GitHubCopilot\managed-settings.json`, also when an earlier
+build wrote it without a record, and that file and folder once nothing else
+is in them), the four services, the binaries, and the machine state under
 `C:\ProgramData\Cisco\DefenseClaw` (config, secrets, data and service logs).
 Each user keeps `%USERPROFILE%\.defenseclaw` and the per-user binaries. To
 remove those too, add `PURGE=1` to Setup or `--purge` to the CLI. After a successful
@@ -1250,7 +1254,7 @@ the cleanup.
 Uninstall revokes every per-user enrollment first. Once it has committed,
 it removes DefenseClaw's own hook registrations and plugins (Amp,
 Antigravity, Devin, Hermes, Kiro, OpenCode, and a DefenseClaw Copilot user
-hook file) from the agent configuration of every signed-in user, running as that
+hook file and plugin folder) from the agent configuration of every signed-in user, running as that
 user. Only DefenseClaw's entries are removed; the user's own hooks and
 settings stay. Cleanups the guardian still owed to revoked users are
 included.
