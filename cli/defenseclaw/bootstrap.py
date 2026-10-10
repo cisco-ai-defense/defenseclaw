@@ -117,6 +117,7 @@ class FirstRunOptions:
     """Structured input for the guided first-run backend."""
 
     connector: str = "codex"
+    rerun_command: str = "defenseclaw init"
     # Complete ordered connector selection for this first-run transaction.
     # ``None`` preserves single-connector callers by using ``connector``.
     connector_settings: list[dict] | None = None
@@ -571,6 +572,36 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
             pass
 
     return report
+
+
+def remediate_unwritable_sidecar(report: FirstRunReport, *, command: str) -> bool:
+    """Replace failed sidecar details and stale wait advice with the file remedy."""
+    from defenseclaw.connector_failure import unwritable_config_remedy
+
+    remedy = next(
+        (
+            found
+            for step in report.setup
+            if step.name == "Sidecar" and step.status in {"warn", "fail"}
+            if (found := unwritable_config_remedy(step.detail, connector=report.connector, command=command))
+        ),
+        None,
+    )
+    if remedy is None:
+        return False
+    for step in report.setup + report.readiness:
+        if step.name == "Sidecar":
+            step.status = "fail"
+            step.detail = remedy
+            step.next_command = ""
+    report.next_commands = [remedy] + [
+        item for item in report.next_commands
+        if item != remedy
+        and item not in {"defenseclaw-gateway status", "defenseclaw-gateway start"}
+        and "in a minute" not in item.lower()
+    ]
+    report.status = _rollup_status(report.setup, report.readiness)
+    return True
 
 
 def _restore_first_run_selection_transaction(app, setup_snapshot) -> str:
@@ -1035,6 +1066,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                     "fix the failed step, then run defenseclaw init again",
                 )
             )
+    remediate_unwritable_sidecar(report, command=options.rerun_command)
     return report
 
 

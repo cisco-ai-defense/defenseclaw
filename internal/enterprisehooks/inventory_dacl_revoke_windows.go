@@ -24,11 +24,12 @@ import (
 // removal trust check there expects the exact protected DACL, so the extra
 // ACEs made it refuse to remove the registrations (GAP-1765). The service
 // SIDs are derived from the names, so this works after the services are
-// deleted. The agent folders, list-only folders and files come from the
-// table the grant uses (inventoryDACLAgentGrants), so a path the grant adds
-// is revoked too: the profile-root .claude.json kept its read ACE after an
-// exclude or an uninstall when the revoke listed folders by hand
-// (GAP-1257). The IDE plugin inventory's folders and files, and every
+// deleted. The agent folders, list-only folders and single profile files
+// (inventoryDACLProfileFiles) come from the table the grant uses
+// (inventoryDACLAgentGrants), so a path the grant adds is revoked too: the
+// profile-root .claude.json kept its read ACE after an exclude or an
+// uninstall while the revoke listed folders by hand (GAP-1257). The IDE
+// plugin inventory's folders and files, and every
 // connector skill and plugin folder (GAP-0913), are revoked on every
 // profile, whatever the profile granted. A missing path is skipped;
 // per-path failures are returned.

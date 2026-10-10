@@ -954,6 +954,27 @@ class PerConnectorToggleTests(unittest.TestCase):
                 self.assertNotIn(" enabled ", line, msg=line)
 
 
+class CursorModePostureTests(unittest.TestCase):
+    def test_action_restarts_and_normalizes_stored_fail_mode(self):
+        app = make_multi_ctx({"cursor": None, "codex": None})
+        app.cfg.guardrail.connectors["cursor"].hook_fail_mode = "open"
+        with (
+            patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=True),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+            patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True) as restart,
+        ):
+            result = CliRunner().invoke(
+                cmd_guardrail.mode_cmd, ["action", "--connector", "cursor"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "closed")
+        restart.assert_called_once()
+
+
 class PerConnectorFailModeTests(unittest.TestCase):
     """`guardrail fail-mode [open|closed] --connector X` — scoped override."""
 
