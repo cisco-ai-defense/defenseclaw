@@ -81,6 +81,8 @@ func TestStatusNamesDropInsThatChangeTheGatewayUnit(t *testing.T) {
 		"90-site-proxy.conf": "[Service]\nEnvironment=HTTPS_PROXY=http://proxy.example:3128\n",
 		"95-env.conf":        "[Service]\nEnvironment=DEFENSECLAW_CONFIG=/etc/other/config.yaml\n",
 		"96-widen.conf":      "[Service]\nProtectHome=false\nUser=root\n",
+		// GAP-1380: an empty Environment= drops the unit's managed pins.
+		"97-reset.conf": "[Service]\nEnvironment=\n",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -88,7 +90,8 @@ func TestStatusNamesDropInsThatChangeTheGatewayUnit(t *testing.T) {
 	}
 	status := h.run(Options{Action: ActionStatus})
 	got := messagesOf(status.Errors, codeVerify)
-	if !strings.Contains(got, "96-widen.conf changes "+unitGateway+" (ProtectHome, User)") || !strings.Contains(got, "95-env.conf changes "+unitGateway+" (Environment=DEFENSECLAW_CONFIG)") {
+	if !strings.Contains(got, "96-widen.conf changes "+unitGateway+" (ProtectHome, User)") || !strings.Contains(got, "95-env.conf changes "+unitGateway+" (Environment=DEFENSECLAW_CONFIG)") ||
+		!strings.Contains(got, "97-reset.conf changes "+unitGateway+" ("+dropInEnvironmentReset+")") {
 		t.Fatalf("status does not name the drop-ins: %s", got)
 	}
 	if strings.Contains(got, "90-site-proxy.conf") || !strings.Contains(messagesOf(status.Warnings, codeUnitDropIn), "90-site-proxy.conf") {

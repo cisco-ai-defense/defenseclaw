@@ -414,8 +414,10 @@ hook repair are the guardian's job.
   `verify` list such drop-ins as the warning `unit_drop_in`.
 - Any other setting in a drop-in DefenseClaw did not write (`User`,
   `ProtectHome`, `ExecStart`, `ReadWritePaths` and the rest of the sandbox),
-  and an `Environment` line that sets a `DEFENSECLAW_*` or loader variable,
-  fails `status` and `verify`, which name the file and the settings.
+  an `Environment` line that sets a `DEFENSECLAW_*` or loader variable, and
+  an empty `Environment=` line (systemd then clears every variable set before
+  it, the DefenseClaw pins included) fail `status` and `verify`, which name
+  the file and the settings.
 - The managed gateway reads `/etc/defenseclaw/config.yaml` and
   `/var/lib/defenseclaw` only. It ignores `DEFENSECLAW_CONFIG` and
   `DEFENSECLAW_HOME` from its environment and logs a line for each value it

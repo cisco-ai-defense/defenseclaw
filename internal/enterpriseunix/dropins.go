@@ -60,8 +60,15 @@ func dropInEnvironmentRefused(name string) bool {
 	return strings.HasPrefix(upper, "DEFENSECLAW_") || strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "GODEBUG")
 }
 
+// dropInEnvironmentReset names an Environment= with no assignment: systemd
+// then drops every Environment= set before it, the managed pins of the unit
+// (DEFENSECLAW_CONFIG, DEFENSECLAW_HOME, the deployment mode) included
+// (GAP-1380).
+const dropInEnvironmentReset = "an empty Environment=, which clears the unit's DEFENSECLAW_* pins"
+
 // dropInChanges returns the settings of a drop-in that change what the unit
-// is (Key, or Environment=NAME for a refused variable).
+// is (Key, Environment=NAME for a refused variable, or
+// dropInEnvironmentReset).
 func dropInChanges(data []byte) []string {
 	seen := map[string]bool{}
 	for _, line := range strings.Split(string(data), "\n") {
@@ -81,7 +88,11 @@ func dropInChanges(data []byte) []string {
 		if key != "Environment" {
 			continue
 		}
-		for _, assignment := range strings.Fields(strings.NewReplacer(`"`, " ", "'", " ").Replace(value)) {
+		assignments := strings.Fields(strings.NewReplacer(`"`, " ", "'", " ").Replace(value))
+		if len(assignments) == 0 {
+			seen[dropInEnvironmentReset] = true
+		}
+		for _, assignment := range assignments {
 			if name, _, ok := strings.Cut(assignment, "="); ok && dropInEnvironmentRefused(name) {
 				seen["Environment="+name] = true
 			}
