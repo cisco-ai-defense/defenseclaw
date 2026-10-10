@@ -22,7 +22,7 @@ import json
 import os
 import socket
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import click
 import requests as req_lib
@@ -51,7 +51,8 @@ def _load_fleet_token() -> str:
             s = line.strip()
             for prefix in (f"{_TOKEN_ENV}=", f"export {_TOKEN_ENV}="):
                 if s.startswith(prefix):
-                    return s.split("=", 1)[1].strip()
+                    return s.split("=", 1)[1].strip().strip("'\"")
+
     except OSError:
         pass
     return ""
@@ -186,9 +187,10 @@ def _compose_device_id(device_id: str, tenant_id: int, fleet_id: int) -> str:
 def device_detail(app: AppContext, device_id: str, tenant_id: int, fleet_id: int, as_json: bool) -> None:
     """Show detailed information for a single device."""
     full_id = _compose_device_id(device_id, tenant_id, fleet_id)
+    encoded_id = quote(str(full_id), safe="")
     c = _client(app)
     try:
-        resp = c.get(f"/devices/{full_id}")
+        resp = c.get(f"/devices/{encoded_id}")
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
@@ -350,9 +352,10 @@ def health(app: AppContext, as_json: bool) -> None:
 def send_command(app: AppContext, device_id: str, cmd: str, tenant_id: int, fleet_id: int, as_json: bool) -> None:
     """Send a command to a device (reboot, policy-refresh, diagnostics)."""
     full_id = _compose_device_id(device_id, tenant_id, fleet_id)
+    encoded_id = quote(str(full_id), safe="")
     c = _client(app)
     try:
-        resp = c.post(f"/devices/{full_id}/command", {"command": cmd})
+        resp = c.post(f"/devices/{encoded_id}/command", {"command": cmd})
     except req_lib.ConnectionError:
         ux.err(_CONN_ERR)
         raise SystemExit(1)
@@ -651,8 +654,9 @@ def test_fleet(
     # tenant_id + fleet_id, consistent with other commands.
     if device_id:
         full_device_id = _compose_device_id(device_id, tenant_id, fleet_id)
+        encoded_device_id = quote(str(full_device_id), safe="")
         try:
-            dr = c.get(f"/devices/{full_device_id}")
+            dr = c.get(f"/devices/{encoded_device_id}")
             if dr.status_code == 404:
                 results["device_check"] = {
                     "status": "not_found",

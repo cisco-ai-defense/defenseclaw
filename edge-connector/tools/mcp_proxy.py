@@ -587,6 +587,15 @@ async def _run_http(proxy: MCPProxy, port: int) -> None:
     app.router.add_get("/health", handle_health)
 
     bind_addr = os.environ.get("DCLAW_MCP_PROXY_BIND", "127.0.0.1")
+    if bind_addr not in ("127.0.0.1", "::1", "localhost"):
+        if not os.environ.get("DCLAW_MCP_PROXY_TOKEN"):
+            logger.error(
+                "DCLAW_MCP_PROXY_TOKEN is required when binding to non-loopback "
+                "address %s. Set DCLAW_MCP_PROXY_TOKEN or bind to 127.0.0.1.",
+                bind_addr,
+            )
+            sys.exit(1)
+        logger.warning("MCP proxy binding to %s — ensure firewall is configured", bind_addr)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, bind_addr, port)
@@ -616,15 +625,16 @@ def _setup_logging() -> None:
 
 def main() -> None:
     """CLI entry point."""
+    import argparse as _argparse
+
     _setup_logging()
 
-    # Load config
-    config_path = None
-    args = sys.argv[1:]
-    if "--config" in args:
-        idx = args.index("--config")
-        if idx + 1 < len(args):
-            config_path = args[idx + 1]
+    parser = _argparse.ArgumentParser(description="DefenseClaw MCP Proxy")
+    parser.add_argument("--config", default=None, help="Path to config YAML")
+    parser.add_argument("--http", action="store_true", help="Use HTTP transport")
+    parsed = parser.parse_args()
+
+    config_path = parsed.config
 
     if config_path:
         config = ProxyConfig.from_yaml(config_path)
@@ -636,7 +646,7 @@ def main() -> None:
     async def _run() -> None:
         await proxy.start()
         try:
-            if config.upstream_transport == "http" or "--http" in args:
+            if config.upstream_transport == "http" or parsed.http:
                 await _run_http(proxy, config.http_port)
             else:
                 await _run_stdio(proxy)

@@ -86,6 +86,13 @@ class BubbaloopAdapter:
         self.base_url = f"http://{host}:{port}"
         self.mcp_url = f"{self.base_url}{mcp_path}"
         self._auth_token = auth_token or os.environ.get("BUBBALOOP_TOKEN", "")
+        if self.mcp_url.startswith("http://") and not self.mcp_url.startswith("http://127.") and not self.mcp_url.startswith("http://localhost"):
+            import warnings
+            warnings.warn(
+                f"MCP endpoint {self.mcp_url} uses plaintext HTTP on a non-loopback address. "
+                "Auth tokens will be transmitted in cleartext. Use HTTPS in production.",
+                stacklevel=2,
+            )
         self._connector = connector or EdgeConnector(
             fail_open=False, tool_cap_map=BUBBALOOP_TOOL_CAP_MAP,
             session_id=session_id,
@@ -168,7 +175,7 @@ class BubbaloopAdapter:
         import requests
         self._request_id += 1
         r = requests.post(self.mcp_url, timeout=self.timeout,
-                          headers=self._auth_headers(), json={
+                          headers=self._auth_headers(), allow_redirects=False, json={
             "jsonrpc": "2.0", "id": self._request_id,
             "method": method, "params": params,
         })

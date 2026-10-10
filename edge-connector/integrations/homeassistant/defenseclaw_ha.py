@@ -105,6 +105,13 @@ class HomeAssistantAdapter:
             mcp_path = f"/{mcp_path}"
         self.mcp_url = f"http://{host}:{mcp_port}{mcp_path}"
         self._access_token = access_token or os.environ.get("HA_ACCESS_TOKEN", "")
+        if self.mcp_url.startswith("http://") and not self.mcp_url.startswith("http://127.") and not self.mcp_url.startswith("http://localhost"):
+            import warnings
+            warnings.warn(
+                f"MCP endpoint {self.mcp_url} uses plaintext HTTP on a non-loopback address. "
+                "Auth tokens will be transmitted in cleartext. Use HTTPS in production.",
+                stacklevel=2,
+            )
         self._connector = connector or EdgeConnector(
             fail_open=False, tool_cap_map=HAMCP_TOOL_CAP_MAP, session_id=session_id,
         )
@@ -144,7 +151,7 @@ class HomeAssistantAdapter:
         try:
             import requests
             r = requests.get(f"{self.ha_url}/api/", headers=self._auth_headers(),
-                             timeout=self.timeout)
+                             timeout=self.timeout, allow_redirects=False)
             r.raise_for_status()
             return r.json()
         except Exception as exc:
@@ -162,7 +169,7 @@ class HomeAssistantAdapter:
         import requests
         self._request_id += 1
         r = requests.post(self.mcp_url, timeout=self.timeout,
-                          headers=self._auth_headers(), json={
+                          headers=self._auth_headers(), allow_redirects=False, json={
             "jsonrpc": "2.0", "id": self._request_id,
             "method": method, "params": params,
         })

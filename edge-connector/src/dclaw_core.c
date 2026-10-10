@@ -62,22 +62,32 @@ int dclaw_init(const dclaw_device_info_t *info) {
     g_state.next_request_id = 1;
     /* H-2 fix: Generate a random boot nonce so verdict HMACs are unique
      * per boot. Even if next_request_id restarts at 1, the nonce ensures
-     * an attacker cannot replay a verdict from a previous boot session. */
+     * an attacker cannot replay a verdict from a previous boot session.
+     * B-2 fix: Use hal_random_bytes() instead of directly opening /dev/urandom
+     * (the HAL layer already provides this abstraction). */
+    if (hal_random_bytes(g_state.boot_nonce, sizeof(g_state.boot_nonce)) != 0) {
+        fprintf(stderr, "[DCLAW] ERROR: Failed to generate boot nonce. "
+                "Verdict replay protection unavailable.\n");
+        memset(g_state.boot_nonce, 0, sizeof(g_state.boot_nonce));
+    }
+
+#if !DCLAW_DEV_MODE
+    /* B-2 fix: In production mode, an all-zero boot nonce means we cannot
+     * guarantee verdict anti-replay. Refuse to start rather than silently
+     * running without replay protection. */
     {
-        int urandom_fd = open("/dev/urandom", O_RDONLY);
-        if (urandom_fd >= 0) {
-            ssize_t n = read(urandom_fd, g_state.boot_nonce, sizeof(g_state.boot_nonce));
-            close(urandom_fd);
-            if (n != (ssize_t)sizeof(g_state.boot_nonce)) {
-                fprintf(stderr, "[DCLAW] ERROR: Failed to read boot nonce from /dev/urandom "
-                        "(got %zd bytes, need %zu). Verdict replay protection degraded.\n",
-                        n, sizeof(g_state.boot_nonce));
-            }
-        } else {
-            fprintf(stderr, "[DCLAW] ERROR: Cannot open /dev/urandom — boot nonce is zero. "
-                    "Verdict replay protection unavailable.\n");
+        bool nonce_zero = true;
+        for (size_t i = 0; i < sizeof(g_state.boot_nonce); i++) {
+            if (g_state.boot_nonce[i] != 0) { nonce_zero = false; break; }
+        }
+        if (nonce_zero) {
+            fprintf(stderr, "[DCLAW] FATAL: Boot nonce is all-zero in production mode. "
+                    "Cannot guarantee verdict anti-replay. Refusing to start.\n");
+            return -1;
         }
     }
+#endif
+
     g_state.initialized = true;
     dclaw_policy_tables_init();
 

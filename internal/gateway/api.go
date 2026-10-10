@@ -61,6 +61,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
+// H-10 fix: Cache the fleet API token presence at startup so the tokenAuth
+// middleware does not re-read os.Getenv("DCLAW_FLEET_API_TOKEN") on every
+// request. The fleet API's own atomic token pointer handles live rotation;
+// this variable only controls whether the gateway exempts fleet routes from
+// its own auth middleware.
+var fleetAPITokenConfigured = os.Getenv("DCLAW_FLEET_API_TOKEN") != ""
+
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
@@ -3558,7 +3565,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		// gateway's main token check when the fleet token is actually
 		// configured — otherwise leave the gateway auth in place so the
 		// fleet surface is never unauthenticated.
-		if strings.HasPrefix(r.URL.Path, "/api/v1/fleet/") && os.Getenv("DCLAW_FLEET_API_TOKEN") != "" {
+		// H-10 fix: Use the startup-cached variable instead of re-reading
+		// os.Getenv on every request. The fleet API's own atomic token
+		// pointer handles live rotation; re-reading the env var here would
+		// miss rotations (stale) and add per-request syscall overhead.
+		if strings.HasPrefix(r.URL.Path, "/api/v1/fleet/") && fleetAPITokenConfigured {
 			next.ServeHTTP(w, r)
 			return
 		}

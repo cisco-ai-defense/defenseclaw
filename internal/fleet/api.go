@@ -74,7 +74,8 @@ type API struct {
 
 // NewAPI creates the fleet API with its dependencies.
 // The policy service is optional; if nil, policy endpoints return 501.
-func NewAPI(mgr *manager.FleetManager, cache *verdict.Cache, opts ...APIOption) *API {
+// The context controls the lifetime of background goroutines (cleanup ticker).
+func NewAPI(ctx context.Context, mgr *manager.FleetManager, cache *verdict.Cache, opts ...APIOption) *API {
 	api := &API{
 		manager:            mgr,
 		cache:              cache,
@@ -85,6 +86,27 @@ func NewAPI(mgr *manager.FleetManager, cache *verdict.Cache, opts ...APIOption) 
 		opt(api)
 	}
 	api.registerRoutes()
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				api.rotationMu.Lock()
+				now := time.Now()
+				for id, ts := range api.deviceKeyRotations {
+					if now.Sub(ts) > 2*time.Minute {
+						delete(api.deviceKeyRotations, id)
+					}
+				}
+				api.rotationMu.Unlock()
+			}
+		}
+	}()
+
 	return api
 }
 
@@ -305,6 +327,17 @@ func (a *API) registerDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device_id is required"})
 		return
 	}
+
+	// M-2 fix: Truncate and sanitize HWProfile/FWVersion to prevent log injection
+	// and excessive field sizes in audit records and the device store.
+	if len(req.HWProfile) > 128 {
+		req.HWProfile = req.HWProfile[:128]
+	}
+	if len(req.FWVersion) > 128 {
+		req.FWVersion = req.FWVersion[:128]
+	}
+	req.HWProfile = sanitizeString(req.HWProfile)
+	req.FWVersion = sanitizeString(req.FWVersion)
 
 	// M-8 fix: Reject zero tenant_id or fleet_id. A zero value in either
 	// field would produce a malformed composite device ID, colliding with
@@ -843,6 +876,11 @@ func (a *API) decommissionBatch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "devices list is required and must not be empty"})
 		return
 	}
+	// H-7 fix: Enforce a maximum batch size to prevent unbounded processing.
+	if len(req.Devices) > 1000 {
+		http.Error(w, `{"error":"batch size exceeds maximum of 1000"}`, http.StatusBadRequest)
+		return
+	}
 
 	batchID := uuid.New().String()
 	decommissioned := 0
@@ -965,7 +1003,6 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// CRT-1/CRT-2 fix: Per-device rate limit with mutex protection.
 	a.rotationMu.Lock()
 	if lastRot, exists := a.deviceKeyRotations[deviceID]; exists && time.Since(lastRot) < time.Minute {
 		a.rotationMu.Unlock()
@@ -974,15 +1011,16 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	a.rotationMu.Unlock()
 
 	_, ok := a.manager.GetDevice(deviceID)
 	if !ok {
+		a.rotationMu.Unlock()
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "device not found"})
 		return
 	}
 
 	if a.keyStore == nil {
+		a.rotationMu.Unlock()
 		writeJSON(w, http.StatusNotImplemented, map[string]string{
 			"error": "device key store not configured",
 		})
@@ -991,6 +1029,7 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 
 	newKey := make([]byte, 32)
 	if _, err := rand.Read(newKey); err != nil {
+		a.rotationMu.Unlock()
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "failed to generate device key: " + err.Error(),
 		})
@@ -998,13 +1037,13 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := a.keyStore.SaveDeviceKey(deviceID, newKey); err != nil {
+		a.rotationMu.Unlock()
 		writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error": "failed to save device key: " + err.Error(),
 		})
 		return
 	}
 
-	a.rotationMu.Lock()
 	a.deviceKeyRotations[deviceID] = time.Now()
 	a.rotationMu.Unlock()
 	newKeyHex := hex.EncodeToString(newKey)
@@ -1048,6 +1087,20 @@ func securityHeadersMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		w.Header().Set("X-Frame-Options", "DENY")
 		next(w, r)
 	}
+}
+
+// sanitizeString strips control characters (ASCII < 32 and DEL 127) from a
+// string. M-2 fix: prevents log injection and terminal escape attacks via
+// device-supplied fields like HWProfile and FWVersion.
+func sanitizeString(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r >= 32 && r != 127 {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

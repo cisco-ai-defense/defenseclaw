@@ -867,9 +867,11 @@ def sign_blob(blob: bytes, key_path: str) -> bytes:
     return sig
 
 
-def compute_size_report(c_header: str, binary_blob: bytes, profile: str) -> str:
+def compute_size_report(c_header: str, binary_blob: bytes, profile: str,
+                        profile_limits: dict | None = None) -> str:
     """Generate size validation report."""
-    limit = PROFILE_LIMITS.get(profile, 4096)
+    _limits = profile_limits if profile_limits is not None else PROFILE_LIMITS
+    limit = _limits.get(profile, 4096)
     blob_size = len(binary_blob)
 
     report_lines = [
@@ -913,8 +915,9 @@ def main():
                        help='Output size report path (optional)')
     args = parser.parse_args()
 
+    limits = dict(PROFILE_LIMITS)
     if args.target_partition_size > 0:
-        PROFILE_LIMITS[args.profile] = args.target_partition_size
+        limits[args.profile] = args.target_partition_size
 
     # Parse policy
     policy = parse_policy(Path(args.input))
@@ -938,7 +941,7 @@ def main():
     print(f"Generated binary: {args.output_binary} ({len(signed_blob)} bytes)")
 
     # Size validation (REQ-44)
-    report = compute_size_report(c_header, blob, args.profile)
+    report = compute_size_report(c_header, blob, args.profile, profile_limits=limits)
     print(f"\n{report}")
 
     if args.output_report:
@@ -946,8 +949,8 @@ def main():
             f.write(report)
 
     # Fail if oversized
-    limit = PROFILE_LIMITS[args.profile]
-    if len(blob) > limit:
+    partition_limit = limits[args.profile]
+    if len(blob) > partition_limit:
         print(f"\nFATAL: Policy blob exceeds {args.profile} partition limit!",
               file=sys.stderr)
         return 1

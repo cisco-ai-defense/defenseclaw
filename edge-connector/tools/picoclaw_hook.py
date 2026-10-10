@@ -25,11 +25,13 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import json
+import logging as _logging_mod
 import os
 import re
 import signal
 import sys
 import time
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -39,32 +41,14 @@ from typing import Any
 # assumes the local device is not network-hostile to itself.  Network-facing
 # transports (MQTT to fleet, cloud escalation) use TLS separately.
 
-import warnings as _warnings
-from urllib.parse import urlparse as _urlparse
-
-
-def _check_http_production(url: str, context: str = "adapter") -> None:
-    """M-4 fix: Warn when a non-loopback URL uses plain HTTP in production.
-
-    External endpoints MUST use HTTPS when DCLAW_PRODUCTION is set.
-    Loopback addresses (127.0.0.1, localhost, ::1) are exempt since
-    they never leave the device.
-    """
-    if not os.environ.get("DCLAW_PRODUCTION"):
-        return
-    if not url.startswith("http://"):
-        return
-    try:
-        host = _urlparse(url).hostname or ""
-    except Exception:
-        return
-    if host in ("127.0.0.1", "localhost", "::1", "[::1]"):
-        return
-    _warnings.warn(
-        f"[DefenseClaw] M-4: {context} uses plain HTTP for non-loopback "
-        f"endpoint '{url}'. Use HTTPS in production (DCLAW_PRODUCTION is set).",
-        stacklevel=2,
-    )
+try:
+    from generic_hook import check_http_production
+except ImportError:
+    def check_http_production(url: str, context: str = "adapter") -> None:  # type: ignore[misc]
+        """Fallback if generic_hook is not importable."""
+        if os.environ.get("DCLAW_PRODUCTION") == "1" and url.startswith("http://"):
+            import warnings
+            warnings.warn(f"Plaintext HTTP in production: {url}")
 
 
 LIBDCLAW_PATH = os.environ.get(
@@ -204,13 +188,13 @@ class DclawEngine:
 
     def init(self):
         info = DclawDeviceInfo(
-            tenant_id=1,
-            fleet_id=1,
-            device_id=42,  # Pi robot device
-            policy_version=1,
-            fw_version=1,
-            hw_profile=2,  # LINUX_SBC
-            capabilities=0xFF,
+            tenant_id=int(os.environ.get("DCLAW_TENANT_ID", "1")),
+            fleet_id=int(os.environ.get("DCLAW_FLEET_ID", "1")),
+            device_id=int(os.environ.get("DCLAW_DEVICE_ID", "42")),
+            policy_version=int(os.environ.get("DCLAW_POLICY_VERSION", "1")),
+            fw_version=int(os.environ.get("DCLAW_FW_VERSION", "1")),
+            hw_profile=int(os.environ.get("DCLAW_HW_PROFILE", "2")),
+            capabilities=int(os.environ.get("DCLAW_CAPABILITIES", "0xFF"), 0),
         )
         rc = self.lib.dclaw_init(ctypes.byref(info))
         if rc != 0:
@@ -276,6 +260,8 @@ class DclawEngine:
                     if verdict.action == ACTION_BLOCK:
                         return last_verdict
                     offset += step
+                if last_verdict is None:
+                    return {"action": ACTION_ALLOW, "severity": 0, "reason": "empty_content"}
                 return last_verdict
         else:
             req.content = None
@@ -300,21 +286,34 @@ class DclawEngine:
 
 # Global engine instance
 _engine: DclawEngine | None = None
-_log_fh = None
 _session_map: dict[str, int] = {}
 _next_session_id = 1
 
+_picoclaw_logger = _logging_mod.getLogger("defenseclaw.picoclaw_hook")
+_picoclaw_logger.setLevel(_logging_mod.DEBUG)
+_log_handler_initialized = False
+
+
+def _ensure_log_handler() -> None:
+    global _log_handler_initialized
+    if _log_handler_initialized:
+        return
+    _log_handler_initialized = True
+    try:
+        handler = RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=1_048_576,  # 1 MB
+            backupCount=3,
+        )
+        handler.setFormatter(_logging_mod.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
+        _picoclaw_logger.addHandler(handler)
+    except Exception:
+        pass
+
 
 def log(msg: str):
-    global _log_fh
-    if _log_fh is None:
-        try:
-            _log_fh = open(LOG_FILE, "a")
-        except Exception:
-            return
-    ts = time.strftime("%H:%M:%S")
-    _log_fh.write(f"[{ts}] {msg}\n")
-    _log_fh.flush()
+    _ensure_log_handler()
+    _picoclaw_logger.info(msg)
 
 
 def get_engine() -> DclawEngine:
@@ -481,8 +480,8 @@ INJECTION_PATTERNS = [
 
 # Sensitive data patterns for output scanning
 PII_PATTERNS = [
-    (re.compile(r'\b\d{3}-\d{2}-\d{4}\b'), "SSN"),
-    (re.compile(r'\b\d{16}\b'), "CREDIT_CARD"),
+    (re.compile(r'\b\d{3}[\s-]?\d{2}[\s-]?\d{4}\b'), "SSN"),
+    (re.compile(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'), "CREDIT_CARD"),
     (re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'), "EMAIL"),
     (re.compile(r'-----BEGIN (RSA |EC )?PRIVATE KEY-----'), "PRIVATE_KEY"),
     (re.compile(r'(password|passwd|secret|api_key|token)\s*[:=]\s*\S+', re.IGNORECASE), "CREDENTIAL"),
@@ -515,10 +514,7 @@ def handle_before_llm(params: dict[str, Any]) -> dict[str, Any]:
     # Check for injection patterns
     for pattern in INJECTION_PATTERNS:
         if pattern in input_lower:
-            log(f"INJECTION_DETECT: matched pattern '{pattern}' in user input")
-            # L-6 fix: Truncate logged user input to 50 chars and redact
-            # to prevent unredacted PII/secrets from appearing in log files.
-            log(f"  Input preview: {user_input[:50]!r} [REDACTED]")
+            log(f"INJECTION_DETECT: matched pattern '{pattern}' [input redacted]")
 
             # abort_turn stops the LLM from running entirely.
             # PicoClaw shows: "Error: hook requested turn abort"

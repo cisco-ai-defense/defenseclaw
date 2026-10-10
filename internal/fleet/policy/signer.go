@@ -30,8 +30,10 @@ type HMACSigner struct {
 // NewHMACSigner creates a signer from the given key bytes.
 // The key should be at least 32 bytes for adequate security.
 func NewHMACSigner(key []byte) (*HMACSigner, error) {
-	if len(key) == 0 {
-		return nil, errors.New("signing key must not be empty")
+	// L-8 fix: Enforce minimum key length of 32 bytes for adequate HMAC-SHA256
+	// security. A shorter key weakens the signature to brute-force attacks.
+	if len(key) < 32 {
+		return nil, fmt.Errorf("HMAC key must be at least 32 bytes, got %d", len(key))
 	}
 	keyCopy := make([]byte, len(key))
 	copy(keyCopy, key)

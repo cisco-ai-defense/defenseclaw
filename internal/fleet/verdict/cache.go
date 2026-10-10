@@ -112,12 +112,15 @@ func (c *Cache) Lookup(toolHash [32]byte) (CacheEntry, bool) {
 		return CacheEntry{}, false
 	}
 
-	// Update LastAccess on access for true LRU eviction.
-	c.mu.Lock()
-	if e, still := c.entries[toolHash]; still {
-		e.LastAccess = time.Now()
+	// Probabilistic LRU update: only take write lock ~1/8 of the time
+	// to reduce contention on cache hits under high verdict request rates.
+	if time.Since(entryCopy.LastAccess) > entryCopy.TTL/8 {
+		c.mu.Lock()
+		if e, still := c.entries[toolHash]; still {
+			e.LastAccess = time.Now()
+		}
+		c.mu.Unlock()
 	}
-	c.mu.Unlock()
 
 	c.hits.Add(1)
 	if c.onHit != nil {

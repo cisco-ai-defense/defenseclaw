@@ -243,9 +243,12 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                         p = parse_string(p, val_buf, sizeof(val_buf));
                         if (!p) return -1;
                     } else {
+                        /* H-4 fix: Add nesting depth limit to prevent stack
+                         * exhaustion from deeply nested JSON payloads. */
                         int depth = 0;
+                        int max_depth = 8;
                         do {
-                            if (*p == '{' || *p == '[') depth++;
+                            if (*p == '{' || *p == '[') { depth++; if (depth > max_depth) return -1; }
                             else if (*p == '}' || *p == ']') { if (depth == 0) break; depth--; }
                             else if (*p == '"') { p++; while (*p && *p != '"') { if (*p == '\\') p++; p++; } }
                             else if (depth == 0 && *p == ',') break;
@@ -279,9 +282,12 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                 p = parse_string(p, val_buf, sizeof(val_buf));
                 if (!p) return -1;
             } else {
+                /* H-4 fix: Add nesting depth limit to prevent stack
+                 * exhaustion from deeply nested JSON payloads. */
                 int depth = 0;
+                int max_depth = 8;
                 do {
-                    if (*p == '{' || *p == '[') depth++;
+                    if (*p == '{' || *p == '[') { depth++; if (depth > max_depth) return -1; }
                     else if (*p == '}' || *p == ']') { if (depth == 0) break; depth--; }
                     else if (*p == '"') { p++; while (*p && *p != '"') { if (*p == '\\') p++; p++; } }
                     else if (depth == 0 && *p == ',') break;

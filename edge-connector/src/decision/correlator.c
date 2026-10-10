@@ -90,7 +90,9 @@ dclaw_action_t dclaw_correlator_evaluate(uint16_t session_id, uint8_t cap_flags)
     dclaw_state_t *st = dclaw_get_state();
     dclaw_policy_table_t *rt = &st->rt_policy;
     for (size_t i = 0; i < rt->sequence_rules_count; i++) {
-        const dclaw_sequence_rule_t *rule = (const dclaw_sequence_rule_t *)&rt->sequence_rules[i];
+        dclaw_sequence_rule_t rule_buf;
+        memcpy(&rule_buf, &rt->sequence_rules[i], sizeof(rule_buf));
+        const dclaw_sequence_rule_t *rule = &rule_buf;
         if (match_sequence(sess, rule)) {
             if (rule->action > worst) {
                 worst = (dclaw_action_t)rule->action;

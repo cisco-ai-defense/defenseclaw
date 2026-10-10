@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
+#include <limits.h>
 
 /*
  * TLS engine wrapper — mbedTLS implementation.
@@ -50,6 +52,7 @@ static unsigned char *read_file_alloc(const char *path, size_t *out_len) {
     fseek(f, 0, SEEK_END);
     long fsize = ftell(f);
     if (fsize <= 0) { fclose(f); return NULL; }
+    if (fsize > 65536) { fclose(f); return NULL; }
     fseek(f, 0, SEEK_SET);
 
     /* +1 for NUL terminator (PEM parsing requires it) */
@@ -133,6 +136,7 @@ int dclaw_tls_init(void) {
             goto fail;
         }
         ret = mbedtls_x509_crt_parse(&tls_ca_cert, ca_buf, ca_len);
+        explicit_bzero(ca_buf, ca_len);
         free(ca_buf);
         if (ret != 0) {
             char errbuf[128];
@@ -172,6 +176,7 @@ int dclaw_tls_init(void) {
             goto fail;
         }
         ret = mbedtls_x509_crt_parse(&tls_device_cert, cert_buf, cert_len);
+        explicit_bzero(cert_buf, cert_len);
         free(cert_buf);
         if (ret != 0) {
             char errbuf[128];
@@ -193,6 +198,7 @@ int dclaw_tls_init(void) {
 #else
         ret = mbedtls_pk_parse_key(&tls_device_key, key_buf, key_len, NULL, 0);
 #endif
+        explicit_bzero(key_buf, key_len);
         free(key_buf);
         if (ret != 0) {
             char errbuf[128];
@@ -284,6 +290,13 @@ int dclaw_tls_connect(int tcp_fd, const char *hostname) {
     fprintf(stderr, "[DCLAW-TLS] Handshake complete (protocol: %s, cipher: %s)\n",
             mbedtls_ssl_get_version(&tls_ssl),
             mbedtls_ssl_get_ciphersuite(&tls_ssl));
+
+    /* H-5 fix: Set timeout BIO once during connect so dclaw_tls_read does not
+     * need to mutate global config on every call. Default to 30s read timeout. */
+    mbedtls_ssl_conf_read_timeout(&tls_conf, 30000);
+    mbedtls_ssl_set_bio(&tls_ssl, &tls_net,
+                        mbedtls_net_send, NULL, mbedtls_net_recv_timeout);
+
     return 0;
 }
 
@@ -306,23 +319,19 @@ int dclaw_tls_write(const uint8_t *data, size_t len) {
             return -1;
         }
     }
-    return (int)sent;
+    return (sent > INT_MAX) ? INT_MAX : (int)sent;
 }
 
 int dclaw_tls_read(uint8_t *buf, size_t len, int timeout_ms) {
     if (!tls_initialized) return -1;
 
-    mbedtls_ssl_conf_read_timeout(&tls_conf, (uint32_t)timeout_ms);
-
-    /* Switch BIO to use mbedtls_net_recv_timeout for deadline support */
-    mbedtls_ssl_set_bio(&tls_ssl, &tls_net,
-                        mbedtls_net_send, NULL, mbedtls_net_recv_timeout);
+    /* H-5 fix: Only update timeout value — BIO is already set to use
+     * mbedtls_net_recv_timeout from dclaw_tls_connect(). */
+    if (timeout_ms >= 0) {
+        mbedtls_ssl_conf_read_timeout(&tls_conf, (uint32_t)timeout_ms);
+    }
 
     int ret = mbedtls_ssl_read(&tls_ssl, buf, len);
-
-    /* Restore non-timeout BIO for subsequent writes */
-    mbedtls_ssl_set_bio(&tls_ssl, &tls_net,
-                        mbedtls_net_send, mbedtls_net_recv, NULL);
 
     if (ret > 0) {
         return ret;

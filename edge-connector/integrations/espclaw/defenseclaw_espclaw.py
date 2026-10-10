@@ -57,6 +57,13 @@ class ESPClawAdapter:
         self.host, self.port, self.timeout = host, port, timeout
         self.base_url = f"http://{host}:{port}"
         self.mcp_url = f"{self.base_url}{mcp_path}"
+        if self.mcp_url.startswith("http://") and not self.mcp_url.startswith("http://127.") and not self.mcp_url.startswith("http://localhost"):
+            import warnings
+            warnings.warn(
+                f"MCP endpoint {self.mcp_url} uses plaintext HTTP on a non-loopback address. "
+                "Auth tokens will be transmitted in cleartext. Use HTTPS in production.",
+                stacklevel=2,
+            )
         self._connector = connector or EdgeConnector(
             fail_open=False, tool_cap_map=ESPCLAW_TOOL_CAP_MAP, session_id=session_id,
         )
@@ -92,7 +99,7 @@ class ESPClawAdapter:
         """Fetch device metadata (firmware, chip, uptime)."""
         try:
             import requests
-            r = requests.get(f"{self.base_url}/api/status", timeout=self.timeout)
+            r = requests.get(f"{self.base_url}/api/status", timeout=self.timeout, allow_redirects=False)
             r.raise_for_status()
             return r.json()
         except Exception as exc:
@@ -101,7 +108,7 @@ class ESPClawAdapter:
     def _mcp_request(self, method: str, params: Dict[str, Any]) -> Any:
         import requests
         self._request_id += 1
-        r = requests.post(self.mcp_url, timeout=self.timeout, json={
+        r = requests.post(self.mcp_url, timeout=self.timeout, allow_redirects=False, json={
             "jsonrpc": "2.0", "id": self._request_id,
             "method": method, "params": params,
         })

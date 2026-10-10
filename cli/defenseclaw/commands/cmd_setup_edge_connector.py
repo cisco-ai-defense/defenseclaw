@@ -258,8 +258,13 @@ def _persist_env_var(env_path: Path, key: str, value: str) -> None:
     # Restrict permissions on the env file (secrets inside).
     try:
         env_path.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to set restrictive permissions on %s: %s. "
+            "File may be readable by other users.",
+            env_path, e,
+        )
 
 
 def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> None:
@@ -296,18 +301,25 @@ def _persist_svc_env_var(svc_env_path: Path, key: str, value: str) -> None:
         new_lines.append(f"{key}={value}")
 
     content = "\n".join(new_lines) + "\n"
-    write_cmd = (
-        "sudo mkdir -p /etc/defenseclaw && "
-        f"printf %s {shlex.quote(content)} | sudo tee {svc_env_path} > /dev/null && "
-        f"sudo chmod 600 {svc_env_path}"
-    )
-    result = subprocess.run(["sh", "-c", write_cmd], capture_output=True, text=True)
-    if result.returncode == 0:
+    target_path = svc_env_path
+    try:
+        subprocess.run(["sudo", "mkdir", "-p", "/etc/defenseclaw"], check=True)
+        subprocess.run(
+            ["sudo", "tee", str(target_path)],
+            input=content.encode(),
+            stdout=subprocess.DEVNULL,
+            check=True,
+        )
+        subprocess.run(["sudo", "chmod", "600", str(target_path)], check=True)
+        write_ok = True
+    except subprocess.CalledProcessError:
+        write_ok = False
+    if write_ok:
         ux.ok(f"Wrote {key} to {svc_env_path}")
     else:
         # P1 fix: Never print the actual key value to the terminal.
         # The value is already persisted in ~/.defenseclaw/.env.
-        redacted = value if key != "DCLAW_AUDIT_KEY" else "<generated -- see ~/.defenseclaw/.env>"
+        redacted = "<see ~/.defenseclaw/.env>"
         ux.warn(
             f"Could not write {key} to {svc_env_path} (sudo may have been denied).\n"
             f"  The systemd service needs this key in its EnvironmentFile to start.\n"

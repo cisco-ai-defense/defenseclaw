@@ -7022,7 +7022,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		// decommissioned device IDs are persisted across gateway restarts.
 		fleetOpts = append(fleetOpts, fleet.WithDecommissionStore(deviceStore))
 	}
-	api.SetFleetAPI(fleet.NewAPI(fleetMgr, fleetCache, fleetOpts...))
+	api.SetFleetAPI(fleet.NewAPI(ctx, fleetMgr, fleetCache, fleetOpts...))
 	// Load scoped tokens that connector setup or the enterprise hook guardian
 	// previously minted. Failures are non-fatal: tokenAuth still accepts the
 	// master gateway bearer for legacy/manual installs, while scoped-token

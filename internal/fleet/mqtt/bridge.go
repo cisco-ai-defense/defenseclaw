@@ -164,6 +164,7 @@ type Bridge struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	stopped     chan struct{}
+	stopOnce    sync.Once
 
 	// AllowAutoRegistration controls whether unknown devices are automatically
 	// registered when they send a heartbeat or registration message. In production
@@ -421,7 +422,7 @@ func (b *Bridge) Start(ctx context.Context) error {
 
 	_ = b.client.Disconnect()
 	b.wg.Wait()
-	close(b.stopped)
+	b.stopOnce.Do(func() { close(b.stopped) })
 	return nil
 }
 
@@ -704,11 +705,14 @@ func (b *Bridge) handleVerdictRequest(msg Message) {
 		}
 		entry.count++
 		overLimit := entry.count > verdictRateLimit
+		// M-5 fix: Capture the count before unlocking to avoid a data race
+		// where another goroutine modifies entry.count after we release the lock.
+		overLimitCount := entry.count
 		b.verdictRateMu.Unlock()
 
 		if overLimit {
 			b.logger.Printf("[mqtt-bridge] WARNING: verdict request rate-limited for device %d (%d req/s exceeds limit %d)",
-				parts.DeviceID, entry.count, verdictRateLimit)
+				parts.DeviceID, overLimitCount, verdictRateLimit)
 			b.mu.Lock()
 			b.rateLimitDrops++
 			b.mu.Unlock()

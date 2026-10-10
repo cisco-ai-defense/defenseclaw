@@ -485,8 +485,13 @@ def _persist_env_var(env_path: Path, key: str, value: str) -> None:
     env_path.write_text("".join(lines))
     try:
         env_path.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to set restrictive permissions on %s: %s. "
+            "File may be readable by other users.",
+            env_path, e,
+        )
 
 
 def _provision_local_service_env(broker_url: str) -> None:
@@ -551,13 +556,20 @@ def _provision_local_service_env(broker_url: str) -> None:
         env_lines.append(f"DCLAW_MQTT_PASS={mqtt_pass}")
 
     env_content = "\n".join(env_lines) + "\n"
-    write_cmd = (
-        "sudo mkdir -p /etc/defenseclaw && "
-        f"printf %s {shlex.quote(env_content)} | sudo tee /etc/defenseclaw/edge-connector.env > /dev/null && "
-        "sudo chmod 600 /etc/defenseclaw/edge-connector.env"
-    )
-    result = subprocess.run(["sh", "-c", write_cmd], text=True)
-    if result.returncode == 0:
+    svc_env_path = Path("/etc/defenseclaw/edge-connector.env")
+    try:
+        subprocess.run(["sudo", "mkdir", "-p", "/etc/defenseclaw"], check=True)
+        subprocess.run(
+            ["sudo", "tee", str(svc_env_path)],
+            input=env_content.encode(),
+            stdout=subprocess.DEVNULL,
+            check=True,
+        )
+        subprocess.run(["sudo", "chmod", "600", str(svc_env_path)], check=True)
+        result_ok = True
+    except subprocess.CalledProcessError:
+        result_ok = False
+    if result_ok:
         ux.ok(f"Wrote DCLAW_AUDIT_KEY to {svc_env}")
     else:
         ux.err(f"Failed to write {svc_env}. The service may fail to start without DCLAW_AUDIT_KEY.")

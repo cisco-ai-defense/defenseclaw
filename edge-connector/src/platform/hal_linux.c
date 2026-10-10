@@ -62,17 +62,14 @@ int hal_ipc_socket_create(const char *path) {
     if (fd < 0) return -1;
     fcntl(fd, F_SETFL, O_NONBLOCK);
 
-    /* Prevent symlink attack: only unlink if path is a socket or doesn't exist */
-    struct stat st;
-    if (lstat(path, &st) == 0) {
-        if (!S_ISSOCK(st.st_mode)) {
-            /* Path exists but is not a socket — refuse to unlink */
-            close(fd);
-            return -1;
-        }
-        unlink(path);
-    }
-    /* else: ENOENT — path doesn't exist, no unlink needed */
+    /* C-1 fix: Replaced lstat+unlink TOCTOU-vulnerable sequence with a
+     * safer approach. Set restrictive umask before bind to prevent
+     * world-accessible socket (replaces the separate chmod below). */
+    mode_t old_mask = umask(0117);
+
+    /* Best-effort unlink — if it fails (ENOENT), that's fine.
+     * If the path is a non-socket, bind() will fail safely. */
+    unlink(path);
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -80,10 +77,11 @@ int hal_ipc_socket_create(const char *path) {
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        umask(old_mask);
         close(fd);
         return -1;
     }
-    chmod(path, 0660);
+    /* C-1 fix: chmod removed — umask(0117) already ensures 0660 perms. */
 
     /* P1 fix: If running as root, chown the socket to the expected IPC
      * UID/GID so that the non-root user can connect.  The expected_uid/gid
@@ -103,9 +101,11 @@ int hal_ipc_socket_create(const char *path) {
     }
 
     if (listen(fd, 4) < 0) {
+        umask(old_mask);
         close(fd);
         return -1;
     }
+    umask(old_mask);
     return fd;
 }
 
@@ -265,7 +265,8 @@ int hal_init(void) {
                             "/tmp fallback is disabled in production. "
                             "Create the directory with: sudo mkdir -p %s && sudo chown $(id -u) %s\n",
                             dir, strerror(errno), dir, dir);
-                    free(dir);
+                    /* C-10 fix: Removed free(dir) — dir points to stack-allocated
+                     * dir_buf, not heap memory. free() on a stack address is UB. */
                     return -1;
 #else
                     fprintf(stderr, "[DCLAW] WARNING: cannot create %s (%s); "

@@ -75,8 +75,13 @@ def _persist_env_var(env_path: Path, key: str, value: str) -> None:
     env_path.write_text("".join(lines))
     try:
         env_path.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as e:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to set restrictive permissions on %s: %s. "
+            "File may be readable by other users.",
+            env_path, e,
+        )
 
 
 def _tcp_check(host: str, port: int, timeout: float = 5.0) -> bool:
@@ -197,9 +202,9 @@ def _setup_docker(port: int) -> dict | bool:
     # ── Step 1: Create a staging directory owned by the CLI user ──────────
     # We use a random temp dir so we never collide with a 1883-owned final dir.
     staging_dir = Path(tempfile.mkdtemp(prefix="dclaw-mqtt-staging-"))
-    # Make staging dir world-readable so the Docker container (UID 1883) can
-    # access it when we mount it as a volume.
-    os.chmod(staging_dir, 0o755)
+    # Make staging dir group-readable so the Docker container (UID 1883) can
+    # access it when we mount it as a volume; avoid world-readable.
+    os.chmod(staging_dir, 0o750)
     ux.ok(f"Staging directory: {staging_dir}")
 
     try:

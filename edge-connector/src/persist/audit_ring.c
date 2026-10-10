@@ -324,7 +324,13 @@ static bool verify_entry_hmac(const dclaw_audit_entry_t *entry,
                               const uint8_t *prev_hmac) {
     uint8_t expected[16];
     compute_hmac(entry, prev_hmac, expected);
-    return memcmp(expected, entry->hmac, 16) == 0;
+    /* M-7 fix: Use constant-time comparison to prevent timing side-channel
+     * attacks that could reveal HMAC values byte-by-byte. */
+    volatile uint8_t diff = 0;
+    for (size_t i = 0; i < 16; i++) {
+        diff |= expected[i] ^ entry->hmac[i];
+    }
+    return diff == 0;
 }
 
 /*

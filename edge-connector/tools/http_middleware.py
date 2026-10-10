@@ -172,7 +172,7 @@ class EdgeConnectorMiddleware:
                     "body": resp_body,
                 })
                 return
-        elif not self._connector._fail_open:
+        elif not self._connector.fail_open:
             # M-9 fix: When tool_name extraction fails and fail_open is False,
             # block the request instead of silently allowing it.  An attacker
             # could craft a request body that defeats name extraction to bypass
@@ -258,7 +258,7 @@ def flask_edge_connector(
         if not tool_name:
             # M-9 fix: When tool_name extraction fails and fail_open is False,
             # block instead of silently allowing.
-            if not ec._fail_open:
+            if not ec.fail_open:
                 logger.warning(
                     "Flask middleware: tool_name extraction failed for %s — blocking (fail_closed)",
                     request.path,

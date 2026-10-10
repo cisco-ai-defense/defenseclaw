@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -195,12 +196,27 @@ func (s *Service) Compile(yamlBytes []byte, profile string, version uint32) ([]b
 		return nil, errors.New("policy compiler path not configured")
 	}
 
+	// M-3 fix: Enforce a maximum size for policy YAML to prevent DoS via
+	// oversized payloads that could exhaust memory or disk during compilation.
+	if len(yamlBytes) > 65536 {
+		return nil, fmt.Errorf("policy YAML exceeds maximum size of 64KB")
+	}
+
 	// Validate profile
 	switch profile {
 	case "minimal", "standard", "edge":
 		// ok
 	default:
 		return nil, fmt.Errorf("unknown profile %q: must be minimal, standard, or edge", profile)
+	}
+
+	// CRT-3 fix: Validate compilerPath to prevent path traversal attacks.
+	absPath, err := filepath.Abs(s.compilerPath)
+	if err != nil {
+		return nil, fmt.Errorf("invalid compiler path: %w", err)
+	}
+	if strings.Contains(absPath, "..") {
+		return nil, fmt.Errorf("compiler path must not contain '..'")
 	}
 
 	// Create temp directory for compiler I/O
@@ -372,9 +388,12 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 	}
 
 	s.mu.Lock()
+	if s.emergencySeq == ^uint32(0) {
+		s.mu.Unlock()
+		return errors.New("emergency sequence counter exhausted (uint32 overflow)")
+	}
 	s.emergencySeq++
 	seq := s.emergencySeq
-	// P0-2 fix: Persist the new sequence number before releasing the lock.
 	// This ensures the sequence survives gateway restarts (REQ-31).
 	if s.store != nil {
 		if err := s.store.SetEmergencySeq(seq); err != nil {

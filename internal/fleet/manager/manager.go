@@ -119,32 +119,25 @@ type DeviceStore interface {
 // scale.  Phase 2: refactor to per-device or sharded locks so heartbeat
 // processing for device A does not block device B (tracked as "Should Fix").
 type FleetManager struct {
-	mu sync.RWMutex
-	// H-5 fix: Sharded device locks — 256 shards keyed by device ID hash.
-	// ProcessHeartbeat acquires only the shard lock for the target device,
-	// allowing up to 256 concurrent heartbeat processors. The global mu
-	// RWMutex is still used for map-level operations (register, decommission,
-	// list, health) that need a consistent view of the device map.
-	deviceLocks       [256]sync.Mutex
-	devices           map[uint64]*Device
-	alertHandler      AlertHandler
+	mu          sync.RWMutex
+	deviceLocks [256]sync.Mutex
+	devices     map[uint64]*Device
+
+	// hookMu protects all callback/hook fields from concurrent read/write.
+	hookMu           sync.Mutex
+	alertHandler     AlertHandler
+	onDeviceRegistered func()
+	onDeviceOffline    func()
+	onHeartbeat        func()
+	onStatusChange     func(oldStatus, newStatus DeviceStatus)
+	onStoreError       func()
+
 	heartbeatInterval time.Duration
 	store             DeviceStore
 
 	// AutoRegister controls whether unknown devices are automatically
-	// registered on their first heartbeat. Defaults to true.
+	// registered on their first heartbeat. Defaults to false.
 	AutoRegister bool
-
-	// Metrics hooks (set externally to avoid circular imports)
-	onDeviceRegistered func()
-	onDeviceOffline    func()
-	onHeartbeat        func()
-	// P2-19 fix: Status transition hook so metrics gauges update correctly
-	// when a device moves between states (e.g., online → lockdown).
-	onStatusChange func(oldStatus, newStatus DeviceStatus)
-
-	// M-10: Counter for store errors so they are observable via metrics.
-	onStoreError func()
 }
 
 // New creates a new FleetManager instance.
@@ -190,7 +183,10 @@ func (fm *FleetManager) LoadFromStore() (int, error) {
 }
 
 // SetMetricsHooks configures callbacks for metrics updates.
+// Must be called before processing starts (before Start/StartMonitoring).
 func (fm *FleetManager) SetMetricsHooks(onRegistered, onOffline, onHeartbeat func()) {
+	fm.hookMu.Lock()
+	defer fm.hookMu.Unlock()
 	fm.onDeviceRegistered = onRegistered
 	fm.onDeviceOffline = onOffline
 	fm.onHeartbeat = onHeartbeat
@@ -198,6 +194,8 @@ func (fm *FleetManager) SetMetricsHooks(onRegistered, onOffline, onHeartbeat fun
 
 // SetStoreErrorHook configures a callback for store write failures (M-10).
 func (fm *FleetManager) SetStoreErrorHook(hook func()) {
+	fm.hookMu.Lock()
+	defer fm.hookMu.Unlock()
 	fm.onStoreError = hook
 }
 
@@ -205,6 +203,8 @@ func (fm *FleetManager) SetStoreErrorHook(hook func()) {
 // P2-19 fix: Called whenever a heartbeat causes a device's status to change,
 // so metrics gauges can decrement the old status and increment the new one.
 func (fm *FleetManager) SetStatusChangeHook(hook func(oldStatus, newStatus DeviceStatus)) {
+	fm.hookMu.Lock()
+	defer fm.hookMu.Unlock()
 	fm.onStatusChange = hook
 }
 
@@ -272,8 +272,11 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 			log.Printf("[fleet] store error: %v", err)
 		}
 	}
-	if fm.onDeviceRegistered != nil {
-		fm.onDeviceRegistered()
+	fm.hookMu.Lock()
+	onReg := fm.onDeviceRegistered
+	fm.hookMu.Unlock()
+	if onReg != nil {
+		onReg()
 	}
 	devCopy := *dev
 	return &devCopy, nil
@@ -286,24 +289,23 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint32, hb *Heartbeat) {
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
-	// H-5 fix: Use a sharded per-device lock for heartbeat processing.
-	// This allows concurrent heartbeat processing for different devices
-	// (up to 256 parallel) while still serializing updates to the same device.
 	shard := fullID % 256
 	fm.deviceLocks[shard].Lock()
-	defer fm.deviceLocks[shard].Unlock()
 
-	// Brief read lock to look up the device in the map.
 	fm.mu.RLock()
 	dev, exists := fm.devices[fullID]
 	fm.mu.RUnlock()
 
 	if !exists {
 		if !fm.AutoRegister {
+			fm.deviceLocks[shard].Unlock()
 			return
 		}
-		// Auto-register the unknown device using heartbeat fields.
-		// Need write lock to insert into the shared map.
+		// Release shard lock before acquiring mu.Lock to maintain
+		// consistent lock ordering (mu before shard) and prevent
+		// deadlock with ListDevices/GetFleetHealth.
+		fm.deviceLocks[shard].Unlock()
+
 		dev = &Device{
 			DeviceID:      fullID,
 			TenantID:      tenantID,
@@ -317,15 +319,26 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			LastHeartbeat: time.Now(),
 		}
 		fm.mu.Lock()
-		fm.devices[fullID] = dev
+		if existing, ok := fm.devices[fullID]; ok {
+			dev = existing
+		} else {
+			fm.devices[fullID] = dev
+		}
 		fm.mu.Unlock()
+
+		// Re-acquire shard lock for the remainder of heartbeat processing.
+		fm.deviceLocks[shard].Lock()
+
 		if fm.store != nil {
 			if err := fm.store.SaveDevice(dev); err != nil {
 				log.Printf("[fleet] store error on auto-register: %v", err)
 			}
 		}
-		if fm.onDeviceRegistered != nil {
-			fm.onDeviceRegistered()
+		fm.hookMu.Lock()
+		onReg := fm.onDeviceRegistered
+		fm.hookMu.Unlock()
+		if onReg != nil {
+			onReg()
 		}
 		log.Printf("[fleet] auto-registered device %d (tenant=%d fleet=%d) from heartbeat", deviceID, tenantID, fleetID)
 		fm.fireAlert(Alert{
@@ -336,6 +349,7 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			Timestamp: time.Now(),
 		})
 	}
+	defer fm.deviceLocks[shard].Unlock()
 
 	// NEW-3 fix: Replay detection — reject heartbeats where the monotonic
 	// uptime has not advanced.
@@ -419,8 +433,11 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	dev.PrevWarned = hb.WarnedCount
 	dev.PrevEscalated = hb.EscalatedCount
 
-	if fm.onHeartbeat != nil {
-		fm.onHeartbeat()
+	fm.hookMu.Lock()
+	onHB := fm.onHeartbeat
+	fm.hookMu.Unlock()
+	if onHB != nil {
+		onHB()
 	}
 
 	// P2-19 fix: Detect canary rollback flag (bit 0x08) from heartbeat.
@@ -465,11 +482,13 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 		dev.Status = StatusOnline
 	}
 
-	// P2-19 fix: Fire status-change hook when device transitions between
-	// states so the Prometheus gauge decrements the old status and
-	// increments the new one.
-	if dev.Status != oldStatus && fm.onStatusChange != nil {
-		fm.onStatusChange(oldStatus, dev.Status)
+	if dev.Status != oldStatus {
+		fm.hookMu.Lock()
+		onSC := fm.onStatusChange
+		fm.hookMu.Unlock()
+		if onSC != nil {
+			onSC(oldStatus, dev.Status)
+		}
 	}
 
 	// Store audit HMAC for chain verification
@@ -485,8 +504,11 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	if fm.store != nil {
 		if err := fm.store.SaveDevice(dev); err != nil {
 			log.Printf("[fleet] store error: %v", err)
-			if fm.onStoreError != nil {
-				fm.onStoreError()
+			fm.hookMu.Lock()
+			onSE := fm.onStoreError
+			fm.hookMu.Unlock()
+			if onSE != nil {
+				onSE()
 			}
 			// H-2 fix: Retry once for security-critical status transitions.
 			// If lockdown is lost due to store failure, a compromised device
@@ -504,25 +526,42 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 }
 
 // CheckOfflineDevices detects devices that have gone silent.
+// H-8 fix: Two-phase approach to avoid deadlock. Phase 1 collects candidate
+// device IDs under RLock only (no shard locks). Phase 2 releases RLock, then
+// processes each candidate under only the shard lock, re-checking the condition
+// to handle races with concurrent heartbeat processing.
 func (fm *FleetManager) CheckOfflineDevices() {
+	// Phase 1: collect ALL device IDs under RLock. We only read map keys here,
+	// not device fields, to avoid racing with ProcessHeartbeat which writes
+	// device fields under only the shard lock.
 	fm.mu.RLock()
-	defer fm.mu.RUnlock()
+	candidates := make([]uint64, 0, len(fm.devices))
+	for id := range fm.devices {
+		candidates = append(candidates, id)
+	}
+	fm.mu.RUnlock()
 
 	threshold := time.Now().Add(-3 * fm.heartbeatInterval)
-	for id, dev := range fm.devices {
-		// Acquire shard lock for consistent read/write — ProcessHeartbeat
-		// mutates *dev under the shard lock, not fm.mu.
+
+	// Phase 2: check and update each device under its shard lock.
+	for _, id := range candidates {
 		shard := id % 256
 		fm.deviceLocks[shard].Lock()
-		if dev.Status == StatusOnline && dev.LastHeartbeat.Before(threshold) {
+		fm.mu.RLock()
+		dev, ok := fm.devices[id]
+		fm.mu.RUnlock()
+		if ok && dev.Status == StatusOnline && dev.LastHeartbeat.Before(threshold) {
 			dev.Status = StatusOffline
 			if fm.store != nil {
 				if err := fm.store.SaveDevice(dev); err != nil {
 					log.Printf("[fleet] store error: %v", err)
 				}
 			}
-			if fm.onDeviceOffline != nil {
-				fm.onDeviceOffline()
+			fm.hookMu.Lock()
+			onOff := fm.onDeviceOffline
+			fm.hookMu.Unlock()
+			if onOff != nil {
+				onOff()
 			}
 			fm.fireAlert(Alert{
 				Type:      AlertDeviceOffline,
@@ -555,17 +594,27 @@ func (fm *FleetManager) GetDevice(fullID uint64) (Device, bool) {
 }
 
 // ListDevices returns a snapshot copy of all registered devices.
+// Two-phase approach: collect pointers under mu.RLock (no shard locks),
+// then copy each device under its shard lock (no mu). This prevents
+// deadlock with ProcessHeartbeat's auto-register path which acquires
+// shard → mu.
 func (fm *FleetManager) ListDevices() []Device {
 	fm.mu.RLock()
-	defer fm.mu.RUnlock()
-
-	result := make([]Device, 0, len(fm.devices))
+	type devRef struct {
+		id  uint64
+		dev *Device
+	}
+	refs := make([]devRef, 0, len(fm.devices))
 	for id, dev := range fm.devices {
-		// Acquire shard lock for a consistent copy — ProcessHeartbeat
-		// mutates *dev under the shard lock, not fm.mu.
-		shard := id % 256
+		refs = append(refs, devRef{id, dev})
+	}
+	fm.mu.RUnlock()
+
+	result := make([]Device, 0, len(refs))
+	for _, ref := range refs {
+		shard := ref.id % 256
 		fm.deviceLocks[shard].Lock()
-		result = append(result, *dev)
+		result = append(result, *ref.dev)
 		fm.deviceLocks[shard].Unlock()
 	}
 	return result
@@ -592,20 +641,27 @@ func (fm *FleetManager) DecommissionDevice(tenantID, fleetID uint16, deviceID ui
 }
 
 // GetFleetHealth returns aggregate fleet statistics.
+// Two-phase: collect pointers under mu.RLock, read fields under shard locks.
 func (fm *FleetManager) GetFleetHealth() FleetHealth {
 	fm.mu.RLock()
-	defer fm.mu.RUnlock()
+	type devRef struct {
+		id  uint64
+		dev *Device
+	}
+	refs := make([]devRef, 0, len(fm.devices))
+	for id, dev := range fm.devices {
+		refs = append(refs, devRef{id, dev})
+	}
+	fm.mu.RUnlock()
 
 	health := FleetHealth{
 		PolicyVersions: make(map[uint16]int),
 	}
-	for id, dev := range fm.devices {
-		// Acquire shard lock for consistent read — ProcessHeartbeat
-		// mutates *dev under the shard lock, not fm.mu.
-		shard := id % 256
+	for _, ref := range refs {
+		shard := ref.id % 256
 		fm.deviceLocks[shard].Lock()
 		health.TotalDevices++
-		switch dev.Status {
+		switch ref.dev.Status {
 		case StatusOnline:
 			health.Online++
 		case StatusOffline:
@@ -615,7 +671,7 @@ func (fm *FleetManager) GetFleetHealth() FleetHealth {
 		case StatusLockdown:
 			health.Lockdown++
 		}
-		health.PolicyVersions[dev.PolicyVersion]++
+		health.PolicyVersions[ref.dev.PolicyVersion]++
 		fm.deviceLocks[shard].Unlock()
 	}
 	return health
@@ -660,20 +716,27 @@ func ParseHeartbeat(data []byte) (*Heartbeat, error) {
 }
 
 func (fm *FleetManager) fireAlert(alert Alert) {
-	if fm.alertHandler != nil {
-		fm.alertHandler(alert)
+	fm.hookMu.Lock()
+	h := fm.alertHandler
+	fm.hookMu.Unlock()
+	if h != nil {
+		h(alert)
 	}
 }
 
 // GetAlertHandler returns the current alert handler (may be nil).
 // P2-19 fix: Needed by WireMetrics to wrap the handler with metric counters.
 func (fm *FleetManager) GetAlertHandler() AlertHandler {
+	fm.hookMu.Lock()
+	defer fm.hookMu.Unlock()
 	return fm.alertHandler
 }
 
 // SetAlertHandler replaces the alert handler.
 // P2-19 fix: Needed by WireMetrics to wrap the handler with metric counters.
 func (fm *FleetManager) SetAlertHandler(h AlertHandler) {
+	fm.hookMu.Lock()
+	defer fm.hookMu.Unlock()
 	fm.alertHandler = h
 }
 

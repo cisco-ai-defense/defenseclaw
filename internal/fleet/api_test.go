@@ -40,7 +40,7 @@ func setupAPI() *API {
 		return verdict.ActionAllow, 0
 	})
 
-	return NewAPI(mgr, cache)
+	return NewAPI(context.Background(), mgr, cache)
 }
 
 func TestGetFleetHealth(t *testing.T) {
@@ -188,7 +188,7 @@ func TestSendCommandWithMQTT(t *testing.T) {
 	})
 
 	mc := &apiMockMQTTClient{}
-	api := NewAPI(mgr, cache, WithMQTTClient(mc))
+	api := NewAPI(context.Background(), mgr, cache, WithMQTTClient(mc))
 
 	devID := manager.ComposeID(1, 1, 42)
 	body := `{"command":"diagnostics"}`
@@ -228,7 +228,7 @@ func TestDecommissionBatch(t *testing.T) {
 		return verdict.ActionAllow, 0
 	})
 
-	api := NewAPI(mgr, cache)
+	api := NewAPI(context.Background(), mgr, cache)
 
 	body := `{"devices":[{"tenant_id":1,"fleet_id":1,"device_id":10},{"tenant_id":1,"fleet_id":1,"device_id":20},{"tenant_id":1,"fleet_id":1,"device_id":999}]}`
 	req := authedRequest("POST", "/devices/decommission-batch", strings.NewReader(body))
@@ -327,7 +327,7 @@ func setupAPIWithPolicy() *API {
 	signer, _ := policy.NewHMACSigner([]byte("test-key-for-api-tests-32bytes!!"))
 	svc := policy.NewService(store, signer, mc, nil)
 
-	return NewAPI(mgr, cache, WithPolicyService(svc))
+	return NewAPI(context.Background(), mgr, cache, WithPolicyService(svc))
 }
 
 func TestPolicyVersionsEndpoint(t *testing.T) {

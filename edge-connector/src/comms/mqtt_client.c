@@ -505,6 +505,7 @@ static int mqtt_send_subscribe(int fd, const char *topic, uint8_t qos,
     uint32_t remaining = 2 + 2 + topic_len + 1; /* packet_id + topic + qos */
 
     uint8_t pkt[256];
+    if (1 + 4 + remaining > sizeof(pkt)) return -1;
     int pos = 0;
 
     /* Fixed header: type 8, reserved bits = 0x02 (required by spec) */
@@ -554,19 +555,31 @@ static int mqtt_subscribe_topics(int fd) {
     /* Subscribe to verdict responses */
     snprintf(topic, sizeof(topic), "defenseclaw/%u/%u/%u/verdict/resp",
              s->device.tenant_id, s->device.fleet_id, s->device.device_id);
-    if (mqtt_send_subscribe(fd, topic, 1, mqtt_ctx.next_packet_id++) != 0) return -1;
+    {
+        uint16_t pid = mqtt_ctx.next_packet_id++;
+        if (mqtt_ctx.next_packet_id == 0) mqtt_ctx.next_packet_id = 1;
+        if (mqtt_send_subscribe(fd, topic, 1, pid) != 0) return -1;
+    }
     if (mqtt_read_suback(fd) != 0) return -1;
 
     /* Subscribe to OTA policy updates (fleet-wide) */
     snprintf(topic, sizeof(topic), "defenseclaw/%u/%u/ota/policy",
              s->device.tenant_id, s->device.fleet_id);
-    if (mqtt_send_subscribe(fd, topic, 1, mqtt_ctx.next_packet_id++) != 0) return -1;
+    {
+        uint16_t pid = mqtt_ctx.next_packet_id++;
+        if (mqtt_ctx.next_packet_id == 0) mqtt_ctx.next_packet_id = 1;
+        if (mqtt_send_subscribe(fd, topic, 1, pid) != 0) return -1;
+    }
     if (mqtt_read_suback(fd) != 0) return -1;
 
     /* Subscribe to emergency broadcasts (fleet-wide) */
     snprintf(topic, sizeof(topic), "defenseclaw/%u/%u/ota/emergency",
              s->device.tenant_id, s->device.fleet_id);
-    if (mqtt_send_subscribe(fd, topic, 1, mqtt_ctx.next_packet_id++) != 0) return -1;
+    {
+        uint16_t pid = mqtt_ctx.next_packet_id++;
+        if (mqtt_ctx.next_packet_id == 0) mqtt_ctx.next_packet_id = 1;
+        if (mqtt_send_subscribe(fd, topic, 1, pid) != 0) return -1;
+    }
     if (mqtt_read_suback(fd) != 0) return -1;
 
     return 0;
@@ -588,6 +601,7 @@ static void mqtt_mark_disconnected(void) {
     if (mqtt_ctx.tls_active) {
         dclaw_tls_shutdown();
         mqtt_ctx.tls_active = false;
+        mqtt_ctx.socket_fd = -1; /* fd closed by mbedtls — prevent double close */
     }
 #endif
     if (mqtt_ctx.socket_fd >= 0) {
@@ -856,31 +870,31 @@ int dclaw_mqtt_connect(void) {
     /* Step 2: Send MQTT CONNECT (over TLS or plaintext) */
     if (mqtt_send_connect(fd) != 0) {
         fprintf(stderr, "[DCLAW-MQTT] Failed to send CONNECT packet\n");
-        mqtt_ctx.socket_fd = -1;
         mqtt_mark_disconnected();
-        close(fd);
-        mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
         return -1;
     }
 
     /* Step 3: Read CONNACK */
     if (mqtt_read_connack(fd) != 0) {
         fprintf(stderr, "[DCLAW-MQTT] CONNACK handshake failed\n");
-        mqtt_ctx.socket_fd = -1;
         mqtt_mark_disconnected();
-        close(fd);
-        mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
         return -1;
     }
 
     /* Step 4: Subscribe to device topics */
     if (mqtt_subscribe_topics(fd) != 0) {
         fprintf(stderr, "[DCLAW-MQTT] Subscribe failed\n");
-        mqtt_ctx.socket_fd = -1;
         mqtt_mark_disconnected();
-        close(fd);
-        mqtt_ctx.state = MQTT_STATE_DISCONNECTED;
         return -1;
+    }
+
+    /* M-11 fix: Scrub MQTT credentials from process environment */
+    {
+        char *ev = getenv("DCLAW_MQTT_PASS");
+        if (ev && ev[0]) {
+            volatile char *p = (volatile char *)ev;
+            while (*p) { *p++ = '0'; }
+        }
     }
 
     /* Set socket back to non-blocking for the event loop */
@@ -1017,6 +1031,7 @@ int dclaw_mqtt_publish(const char *topic, const void *payload, size_t len, uint8
 
     if (qos > 0) {
         packet_id = mqtt_ctx.next_packet_id++;
+        if (mqtt_ctx.next_packet_id == 0) mqtt_ctx.next_packet_id = 1;
         remaining += 2; /* packet identifier */
     }
 

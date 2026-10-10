@@ -362,17 +362,23 @@ func (c *TCPClient) Publish(ctx context.Context, topic string, qos byte, payload
 // implementation that read directly from conn, which raced with readLoop.
 // The readLoop is now the sole goroutine reading from the connection.
 func (c *TCPClient) waitForPUBACK(_ net.Conn, packetID uint16, timeout time.Duration) error {
-	select {
-	case id := <-c.pubackCh:
-		if id == packetID {
-			return nil
+	// M-6 fix: Drain stale PUBACKs from previous publishes instead of returning
+	// an error on mismatch. A burst of QoS-1 publishes can leave earlier PUBACKs
+	// in the channel; discarding them here prevents a desync where every subsequent
+	// Publish sees the wrong packet ID and fails.
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case id := <-c.pubackCh:
+			if id == packetID {
+				return nil
+			}
+			// Stale PUBACK from a previous publish — drain and continue waiting.
+			log.Printf("[mqtt] draining stale PUBACK for packet %d while waiting for %d", id, packetID)
+		case <-timer.C:
+			return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d)", packetID)
 		}
-		// PUBACK for a different packet ID — log and treat as timeout
-		// (the expected PUBACK may arrive later but we cannot block forever).
-		log.Printf("[mqtt] received PUBACK for packet %d while waiting for %d", id, packetID)
-		return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d, got %d)", packetID, id)
-	case <-time.After(timeout):
-		return fmt.Errorf("timeout waiting for PUBACK (packet_id=%d)", packetID)
 	}
 }
 
@@ -723,6 +729,9 @@ func (c *TCPClient) doConnect(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
+	if c.cancelReader != nil {
+		c.cancelReader()
+	}
 	c.conn = conn
 	c.closed = false
 

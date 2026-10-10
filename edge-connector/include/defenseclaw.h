@@ -151,6 +151,13 @@ typedef struct {
 
 _Static_assert(sizeof(dclaw_audit_entry_t) == 32, "audit entry must be 32 bytes");
 
+/* B-5 fix: Ensure DCLAW_CONTENT_MAX fits in uint16_t content_len field */
+_Static_assert(DCLAW_CONTENT_MAX <= UINT16_MAX,
+               "DCLAW_CONTENT_MAX must fit in uint16_t content_len");
+/* M-1 fix: Ensure DCLAW_AUDIT_RAM_BUFFER_SIZE fits in uint8_t count field */
+_Static_assert(DCLAW_AUDIT_RAM_BUFFER_SIZE <= 255,
+               "DCLAW_AUDIT_RAM_BUFFER_SIZE must fit in uint8_t count");
+
 typedef struct {
     dclaw_audit_entry_t buffer[DCLAW_AUDIT_RAM_BUFFER_SIZE];
     uint8_t  count;

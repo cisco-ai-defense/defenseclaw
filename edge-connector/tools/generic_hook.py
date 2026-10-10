@@ -31,6 +31,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import socket
 import time
 from dataclasses import dataclass, field
@@ -241,9 +242,13 @@ class _FFIBackend:
         self._lib.dclaw_shutdown.restype = None
 
         info = _DclawDeviceInfo(
-            tenant_id=1, fleet_id=1, device_id=1,
-            policy_version=1, fw_version=1,
-            hw_profile=2, capabilities=0xFF,
+            tenant_id=int(os.environ.get("DCLAW_TENANT_ID", "1")),
+            fleet_id=int(os.environ.get("DCLAW_FLEET_ID", "1")),
+            device_id=int(os.environ.get("DCLAW_DEVICE_ID", "1")),
+            policy_version=int(os.environ.get("DCLAW_POLICY_VERSION", "1")),
+            fw_version=int(os.environ.get("DCLAW_FW_VERSION", "1")),
+            hw_profile=int(os.environ.get("DCLAW_HW_PROFILE", "2")),
+            capabilities=int(os.environ.get("DCLAW_CAPABILITIES", "0xFF"), 0),
         )
         rc = self._lib.dclaw_init(ctypes.byref(info))
         if rc != 0:
@@ -309,12 +314,11 @@ class _SocketBackend:
 
     def __init__(self, socket_path: str):
         self._path = socket_path
-        self._id = 0
 
     def evaluate(self, tool_name: str, cap_flags: int,
                  destination: str, session_id: int,
                  content: Optional[str], direction: int) -> Verdict:
-        self._id += 1
+        request_id = secrets.randbelow(2**31)
         # Compute a deterministic SHA-256 tool hash (64 hex chars) so the
         # daemon's ipc_json.c handler can look up the tool in its verdict
         # cache.  Callers that already carry a hash can extend this later;
@@ -322,7 +326,7 @@ class _SocketBackend:
         tool_hash = hashlib.sha256(tool_name.encode()).hexdigest()
         payload: Dict[str, Any] = {
             "jsonrpc": "2.0",
-            "id": self._id,
+            "id": request_id,
             "method": "evaluate",
             "params": {
                 "tool_name": tool_name,
@@ -336,6 +340,7 @@ class _SocketBackend:
         if content:
             payload["params"]["content"] = content
 
+        MAX_RESPONSE_SIZE = 4096
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             sock.settimeout(2.0)
@@ -346,9 +351,9 @@ class _SocketBackend:
                 chunk = sock.recv(4096)
                 if not chunk:
                     break
-                data += chunk
-                if len(data) >= 65536:
+                if len(data) + len(chunk) > MAX_RESPONSE_SIZE:
                     raise RuntimeError("IPC response too large")
+                data += chunk
         finally:
             sock.close()
 
@@ -408,6 +413,11 @@ class EdgeConnector:
 
         self._session_id = session_id
         self._backend = self._connect()
+
+    @property
+    def fail_open(self) -> bool:
+        """Public accessor for the fail-open mode setting."""
+        return self._fail_open
 
     # -- connection --------------------------------------------------------
 
@@ -596,6 +606,33 @@ class EdgeConnector:
                 content=content,
                 direction=dir_code,
             )
+        except (ConnectionError, OSError, RuntimeError) as exc:
+            # H-4 fix: TOCTOU race — the socket may have disappeared between
+            # _check_backend() and the actual evaluate() call.  Fall back to
+            # FFI inline instead of failing outright.
+            if isinstance(self._backend, _SocketBackend):
+                logger.warning(
+                    "EdgeConnector: socket evaluate failed (%s) — falling back to FFI",
+                    exc,
+                )
+                try:
+                    self._backend = _FFIBackend(self._lib_path)
+                    return self._evaluate_chunked(
+                        tool_name=tool_name,
+                        cap_flags=cap_flags,
+                        destination=dest,
+                        content=content,
+                        direction=dir_code,
+                    )
+                except (OSError, RuntimeError) as ffi_exc:
+                    logger.error("EdgeConnector: FFI fallback also failed: %s", ffi_exc)
+                    if self._fail_open:
+                        return Verdict.allow()
+                    return Verdict.error(f"ENGINE_ERROR: {ffi_exc}")
+            logger.error("EdgeConnector: evaluate failed: %s", exc)
+            if self._fail_open:
+                return Verdict.allow()
+            return Verdict.error(f"ENGINE_ERROR: {exc}")
         except Exception as exc:
             logger.error("EdgeConnector: evaluate failed: %s", exc)
             if self._fail_open:
