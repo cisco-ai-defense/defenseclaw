@@ -6,6 +6,7 @@ require (
 	github.com/NVIDIA/OpenShell/sdk/go v0.0.0-20260926030648-4ce767fc0cad
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.10
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/go-ole/go-ole v1.3.0
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/google/cel-go v0.30.0
 	github.com/google/uuid v1.6.0

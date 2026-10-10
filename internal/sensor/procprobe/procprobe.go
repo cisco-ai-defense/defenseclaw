@@ -76,6 +76,8 @@ type Process struct {
 	Cmdline string
 	// User is the owning username, when the platform supplies one cheaply.
 	User string
+	// UserSID is the stable Windows owner identity, when available.
+	UserSID string
 	// CPUTime is cumulative CPU consumed by the process. Plane A works on the
 	// delta between two polls, not this absolute value: a long-lived process
 	// has a large total and may be entirely idle now.

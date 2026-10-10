@@ -245,6 +245,9 @@ func (s *scanner) add(inst Install) {
 		inst.Partial = true
 	}
 	s.out = append(s.out, inst)
+	// The next installation starts with its own work budget. In particular,
+	// a large VS Code family must not make later JetBrains plugins vanish.
+	s.files, s.bytes, s.full = 0, 0, false
 }
 
 // charge takes one file (or directory listing) from the budget.

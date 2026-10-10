@@ -450,6 +450,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 			Process:     process.Name,
 			Cmdline:     process.Cmdline,
 			User:        process.User,
+			UserSID:     process.UserSID,
 			AgentName:   agentName,
 			Score:       score,
 			Severity:    scoring.SeverityFor(score),
