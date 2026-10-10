@@ -157,38 +157,39 @@ func TestValidateServiceCanWriteFileRequiresRotationPermission(t *testing.T) {
 }
 
 // A missing destination folder still needs the service to create it in the
-// nearest existing parent.
+// nearest existing parent, and the folders it creates must let it create the
+// rest of the path (GAP-1328).
 func TestValidateServiceCanWriteFileChecksMissingFolderParent(t *testing.T) {
 	parent := t.TempDir()
-	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	dacl, _, err := descriptor.DACL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := windows.SetNamedSecurityInfo(parent, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
-		t.Fatal(err)
+	setDACL := func(sddl string) {
+		t.Helper()
+		descriptor, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := descriptor.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(parent, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	const account = `NT SERVICE\TrustedInstaller`
 	sink := filepath.Join(parent, "new", "nested", "audit.jsonl")
+	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)")
 	if err := ValidateServiceCanWriteFile(sink, account); err == nil || !strings.Contains(err.Error(), "cannot create a folder in "+parent) {
 		t.Fatalf("missing JSONL folder under admin-only parent: %v", err)
 	}
-	descriptor, err = windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;0x1301ff;;;BU)")
-	if err != nil {
-		t.Fatal(err)
+	// A this-folder-only create-subfolder grant lets the service create new
+	// but not new\nested, which inherits only the SYSTEM and Administrators
+	// entries.
+	setDACL("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;0x20085;;;BU)")
+	if err := ValidateServiceCanWriteFile(sink, account); err == nil || !strings.Contains(err.Error(), `icacls "`+parent+`" /grant`) {
+		t.Fatalf("missing folders the service could not finish creating: %v", err)
 	}
-	dacl, _, err = descriptor.DACL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := windows.SetNamedSecurityInfo(parent, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
-		t.Fatal(err)
-	}
+	setDACL("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;0x1301ff;;;BU)")
 	if err := ValidateServiceCanWriteFile(sink, account); err != nil {
 		t.Fatalf("service may create the missing folder: %v", err)
 	}

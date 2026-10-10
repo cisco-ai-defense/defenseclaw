@@ -464,7 +464,26 @@ func TestDescribeUntrustedSourceFixRunsInPowerShell(t *testing.T) {
 	if !ok {
 		t.Fatalf("refusal %v is not described", refused)
 	}
-	_, commands, _ := strings.Cut(text, "From an elevated prompt run ")
+	runPrintedFix(t, powershell, root, text)
+	for _, path := range []string{folder, config} {
+		dacl := daclOf(path)
+		if dacl.AceCount == 0 {
+			t.Fatalf("the printed fix left %s with an empty DACL", path)
+		}
+		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
+			t.Fatalf("after the printed fix: %v", err)
+		}
+	}
+}
+
+// runPrintedFix runs, one by one in Windows PowerShell, the commands of a
+// refusal's "From an elevated prompt run ..." fix.
+func runPrintedFix(t *testing.T, powershell, root, text string) {
+	t.Helper()
+	_, commands, found := strings.Cut(text, "From an elevated prompt run ")
+	if !found {
+		t.Fatalf("no fix to run in %q", text)
+	}
 	commands, _, _ = strings.Cut(commands, ", and run it again")
 	for i, command := range strings.Split(commands, ", then ") {
 		script := filepath.Join(root, fmt.Sprintf("fix%d.ps1", i))
@@ -477,13 +496,72 @@ func TestDescribeUntrustedSourceFixRunsInPowerShell(t *testing.T) {
 			t.Fatalf("printed fix %q failed in PowerShell: %v\n%s", command, err, out)
 		}
 	}
-	for _, path := range []string{folder, config} {
-		dacl := daclOf(path)
-		if dacl.AceCount == 0 {
-			t.Fatalf("the printed fix left %s with an empty DACL", path)
+}
+
+// GAP-1326: a rule pack that Users can modify is refused with a fix that
+// grants Users Read & execute, which the gateway service reads the pack
+// through, and then removes the Users grants by name. The fix gave that read
+// grant and took it away again, so the service still could not read the pack
+// after the operator ran it.
+func TestDescribeUntrustedRulePackFixKeepsUsersRead(t *testing.T) {
+	refused := &UntrustedPrincipalError{Path: `C:\Packs\pack`, SID: "S-1-5-32-545"}
+	text, ok := DescribeUntrustedRulePack("guardrail.rule_pack_dir", `C:\Packs\pack`, refused)
+	remove := strings.Index(text, `/remove:g "*S-1-5-32-545"`)
+	if !ok || remove < 0 || !strings.Contains(text[remove:], `/grant:r "*S-1-5-32-545:(OI)(CI)RX"`) {
+		t.Fatalf("the fix does not grant Users read after removing its grants: %s", text)
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the fixed folder is writable only by SYSTEM and Administrators")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is not available")
+	}
+	root := t.TempDir()
+	pack := filepath.Join(root, "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	modify, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := modify.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(pack, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	rules := filepath.Join(pack, "rules.yaml")
+	if err := os.WriteFile(rules, []byte("rules: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused.Path = pack
+	text, ok = DescribeUntrustedRulePack("guardrail.rule_pack_dir", pack, refused)
+	if !ok {
+		t.Fatal("refusal is not described")
+	}
+	runPrintedFix(t, powershell, root, text)
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{pack, rules} {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
 		}
 		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
 			t.Fatalf("after the printed fix: %v", err)
+		}
+		if !serviceHasAccess(path, []*windows.SID{users}, serviceTreeAccess) {
+			t.Fatalf("after the printed fix Users cannot read %s", path)
 		}
 	}
 }

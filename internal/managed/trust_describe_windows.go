@@ -88,16 +88,27 @@ func DescribeUntrustedRulePack(label, pack string, err error) (string, bool) {
 //   - /inheritance:r keeps an entry that is the folder's own, and on a Windows
 //     client edition a new folder under C:\ holds Authenticated Users that
 //     way, so the principal is removed by name from the folder and its files.
+//   - /remove:g takes every grant of the principal, so a grant for that same
+//     principal (Users Read & execute on a rule pack, which the gateway
+//     service reads through) is given again after it (GAP-1326).
 func untrustedFolderFix(folder string, principal *UntrustedPrincipalError, grants ...string) []string {
 	var fix []string
 	if principal.Owner {
 		fix = append(fix, fmt.Sprintf(`icacls "%s" /setowner "*S-1-5-32-544" /T /C`, folder))
 	}
 	grant := fmt.Sprintf(`icacls "%s" /inheritance:r /grant:r`, folder)
+	regrant := ""
 	for _, entry := range grants {
 		grant += ` "` + entry + `"`
+		if sid, _, _ := strings.Cut(strings.TrimPrefix(entry, "*"), ":"); strings.EqualFold(sid, principal.SID) {
+			regrant += ` "` + entry + `"`
+		}
 	}
-	return append(fix, grant, fmt.Sprintf(`icacls "%s" /remove:g "*%s" /T /C`, folder, principal.SID))
+	fix = append(fix, grant, fmt.Sprintf(`icacls "%s" /remove:g "*%s" /T /C`, folder, principal.SID))
+	if regrant != "" {
+		fix = append(fix, fmt.Sprintf(`icacls "%s" /grant:r`, folder)+regrant)
+	}
+	return fix
 }
 
 // windowsAccountName is DOMAIN\name for a SID, or "" when it does not resolve.
