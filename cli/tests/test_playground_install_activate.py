@@ -158,8 +158,8 @@ class TestPlaygroundEndToEnd(unittest.TestCase):
             "skill_actions.critical.install was not applied",
         )
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
-        self.assertTrue(self.app.cfg.guardrail.hilt.enabled)
-        self.assertEqual(self.app.cfg.guardrail.hilt.min_severity, "MEDIUM")
+        # HITL is not part of a preset: the wizard's hilt is not applied (GAP-1304).
+        self.assertFalse(self.app.cfg.guardrail.hilt.enabled)
         # Watch.
         self.assertTrue(self.app.cfg.watch.rescan_enabled)
         self.assertEqual(self.app.cfg.watch.rescan_interval_min, 30)
@@ -193,7 +193,6 @@ class TestPlaygroundEndToEnd(unittest.TestCase):
             "https://aid.example.com",
         )
         self.assertEqual(persisted["guardrail"]["mode"], "action")
-        self.assertEqual(persisted["guardrail"]["hilt"]["min_severity"], "MEDIUM")
 
         # --- admission and guardrail -----------------------------------
         adm = self.app.cfg.admission

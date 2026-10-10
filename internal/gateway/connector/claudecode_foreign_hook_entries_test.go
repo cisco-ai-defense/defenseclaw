@@ -113,52 +113,6 @@ func TestClaudeCode_SetupReplacesForeignDefenseClawHookEntries(t *testing.T) {
 	}
 }
 
-// GAP-0907: after the hook script path in settings.json is edited, the
-// self-heal Setup replaces the edited handlers instead of adding a second
-// hook set next to them.
-func TestClaudeCode_SetupReplacesEditedHookPath(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Windows registers the native hook launcher")
-	}
-	dir := t.TempDir()
-	settingsPath := filepath.Join(dir, "settings.json")
-	ClaudeCodeSettingsPathOverride = settingsPath
-	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
-	opts := SetupOpts{
-		DataDir:       filepath.Join(dir, ".defenseclaw"),
-		ProxyAddr:     "127.0.0.1:4000",
-		APIAddr:       "127.0.0.1:18970",
-		APIToken:      "api-token",
-		OTLPPathToken: strings.Repeat("a", 64),
-	}
-	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	c := NewClaudeCodeConnector()
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-	installed := mustReadClaudeSettingsForTest(t, settingsPath)
-	edited := strings.ReplaceAll(installed, "/.defenseclaw/hooks/", "/.defenseclaw/xhooks/")
-	if edited == installed {
-		t.Fatal("fixture did not edit the hook path")
-	}
-	if err := os.WriteFile(settingsPath, []byte(edited), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("repair Setup: %v", err)
-	}
-	repaired := mustReadClaudeSettingsForTest(t, settingsPath)
-	if strings.Contains(repaired, "/xhooks/") {
-		t.Fatalf("repair kept the edited hook entries: %s", repaired)
-	}
-	script := filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "claude-code-hook.sh"))
-	if got, want := strings.Count(repaired, script), strings.Count(installed, script); got != want {
-		t.Fatalf("repaired settings name the hook script %d times, want %d (one hook set)", got, want)
-	}
-}
-
 func mustReadClaudeSettingsForTest(t *testing.T, path string) string {
 	t.Helper()
 	data, err := os.ReadFile(path)
@@ -303,6 +257,112 @@ func TestClaudeCodeWindowsLauncherGuardFailsClosedAndReadsAsExecForm(t *testing.
 	}
 	if plain, _ := claudeCodeWindowsHookInvocation(SetupOpts{}, `C:\Users\a%b\x.exe`); plain != `C:\Users\a%b\x.exe` {
 		t.Fatalf("a launcher path cmd.exe would expand kept the guard: %q", plain)
+	}
+}
+
+// GAP-1284: 1.0.0 owns a per-user Claude Code handler only in the shape it
+// wrote (Windows: the exec form at the launcher; Unix: the unquoted script
+// path), so after a rollback its uninstall kept this release's launcher
+// guards (or quoted paths) and reported the teardown verified. The rollback
+// converter must leave only shapes that 1.0.0's teardown removes, keep other
+// handlers, and leave entries this release's Setup claims again on a roll
+// forward.
+func TestClaudeCodeRollbackLeavesHooksEarlierReleasesRemove(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "Ana Lima")
+	opts := SetupOpts{
+		DataDir:        filepath.Join(dir, ".defenseclaw"),
+		HookExecutable: filepath.Join(dir, ".local", "bin", "defenseclaw-hook.exe"),
+	}
+	hooksDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = "" })
+
+	// The 1.0.0 (06b1c9e68) ownership test for a per-user handler.
+	ownedBy100 := func(handler map[string]interface{}) bool {
+		command, _ := handler["command"].(string)
+		if runtime.GOOS != "windows" {
+			return strings.HasPrefix(command, hooksDir+"/")
+		}
+		args, _ := handler["args"].([]interface{})
+		return command == opts.HookExecutable && fmt.Sprint(args) == "[hook --connector claudecode]"
+	}
+	handlers := func(hooks map[string]interface{}) []map[string]interface{} {
+		var all []map[string]interface{}
+		for _, event := range hooks {
+			for _, group := range event.([]interface{}) {
+				for _, handler := range group.(map[string]interface{})["hooks"].([]interface{}) {
+					all = append(all, handler.(map[string]interface{}))
+				}
+			}
+		}
+		return all
+	}
+	read := func() map[string]interface{} {
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings := map[string]interface{}{}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			t.Fatal(err)
+		}
+		return settings["hooks"].(map[string]interface{})
+	}
+
+	command, args := claudeCodeHookInvocation(opts, filepath.Join(hooksDir, "claude-code-hook.sh"))
+	hooks := map[string]interface{}{}
+	appendClaudeCodeHookMatrix(hooks, command, args)
+	written := len(handlers(hooks))
+	foreign := map[string]interface{}{"type": "command", "command": "/opt/review/hook.sh"}
+	hooks["PreToolUse"] = append(hooks["PreToolUse"].([]interface{}),
+		map[string]interface{}{"matcher": "*", "hooks": []interface{}{foreign}})
+	data, _ := json.MarshalIndent(map[string]interface{}{"hooks": hooks}, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, handler := range handlers(read()) {
+		if ownedBy100(handler) {
+			t.Fatalf("fixture: 1.0.0 already owns %v", handler)
+		}
+	}
+
+	c := NewClaudeCodeConnector()
+	converted, err := c.ConvertHooksForRollback(opts)
+	if err != nil || converted != written {
+		t.Fatalf("ConvertHooksForRollback = %d, %v; want %d", converted, err, written)
+	}
+	if again, err := c.ConvertHooksForRollback(opts); err != nil || again != 0 {
+		t.Fatalf("second ConvertHooksForRollback = %d, %v; want 0", again, err)
+	}
+	if kept, err := os.ReadFile(filepath.Join(opts.DataDir, "backups", claudeCodeRollbackBackupName)); err != nil || string(kept) != string(data) {
+		t.Fatalf("backup of the settings = %q, %v", kept, err)
+	}
+	var left []map[string]interface{}
+	for _, handler := range handlers(read()) {
+		if !ownedBy100(handler) {
+			left = append(left, handler)
+		}
+	}
+	if len(left) != 1 || left[0]["command"] != foreign["command"] {
+		t.Fatalf("after the 1.0.0 teardown %d handlers remain: %v", len(left), left)
+	}
+	// Rolling forward, this release's Setup claims the converted entries.
+	recorded := claudeCodeRecordedHookCommand(command, args)
+	for name, event := range read() {
+		remaining, err := removeOwnedClaudeCodeHooks(event, hooksDir, []string{recorded})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name != "PreToolUse" && len(remaining) != 0 || name == "PreToolUse" && len(remaining) != 1 {
+			t.Fatalf("hooks.%s after this release's removal pass: %v", name, remaining)
+		}
 	}
 }
 

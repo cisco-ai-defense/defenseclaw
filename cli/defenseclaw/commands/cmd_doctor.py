@@ -5642,6 +5642,7 @@ def _check_claudecode_hooks(
                 if "defenseclaw" in cmd or "claude-code-hook" in cmd:
                     dc_hooks += 1
     switched_off = _agent_hook_switch_problem(cfg, "claudecode") if dc_hooks > 0 else ""
+    edited = _edited_hook_problem(cfg, "claudecode") if dc_hooks > 0 else ""
     if switched_off:
         _emit(
             "fail",
@@ -5650,6 +5651,8 @@ def _check_claudecode_hooks(
             r=r,
             remediation=getattr(switched_off, "repair", "") or _CLAUDECODE_HOOKS_FIX,
         )
+    elif edited:
+        _emit("fail", "Claude Code hooks", edited, r=r, remediation=edited.repair)
     elif dc_hooks > 0:
         _emit("pass", "Claude Code hooks", f"{dc_hooks} DefenseClaw hook(s) registered", r=r)
         _check_generated_hook_freshness(
@@ -5716,6 +5719,7 @@ def _check_codex_hooks(
         )
         if switched_off:
             _emit("fail", "Codex hook settings", switched_off, r=r, remediation=switched_off.repair)
+        _check_codex_notify(cfg, config_path, r, windows=True)
         return
     hook_dir = os.path.join(cfg.data_dir, "hooks")
     hook_script = os.path.join(hook_dir, "codex-hook.sh")
@@ -5747,6 +5751,7 @@ def _check_codex_hooks(
             )
             return
         _emit("pass", "Codex hooks", f"hook script at {hook_script}; registered in {config_path}", r=r)
+        _check_codex_notify(cfg, config_path, r, windows=False)
         config_toml = config_path
         live, broken = _foreign_defenseclaw_codex_hook_scripts(config_toml, hook_script)
         if live or broken:
@@ -5788,6 +5793,47 @@ def _check_codex_hooks(
             f"hook script not found at {hook_script}",
             r=r,
             remediation="re-register the hooks: defenseclaw setup codex --yes",
+        )
+
+
+def _codex_notify_problem(cfg, config_path: str, *, windows: bool) -> str:
+    """Why the Codex notify entry is not the DefenseClaw notifier Setup writes, or "" (GAP-1248)."""
+    # Setup writes notify into config.toml next to the hook config (managed
+    # Windows keeps its hooks in managed_config.toml in the same directory).
+    user_config = os.path.join(os.path.dirname(config_path), "config.toml")
+    try:
+        with open(user_config, "rb") as stream:
+            document = codex_toml.loads(stream.read(1024 * 1024 + 1))
+    except (OSError, UnicodeError, ValueError):
+        return ""
+    argv = document.get("notify")
+    if not isinstance(argv, list) or not argv:
+        return f"{user_config} has no notify entry, so Codex sends no turn-complete events to DefenseClaw"
+    if len(argv) != 2 or not all(isinstance(part, str) for part in argv):
+        return f"notify in {user_config} is not the DefenseClaw notifier ({argv!r})"
+    if windows:
+        program = argv[0]
+        owned = argv[1] == "notify" and os.path.basename(program.replace("\\", "/")).lower() == "defenseclaw-hook.exe"
+    else:
+        program = argv[1]
+        bridge = os.path.join(getattr(cfg, "data_dir", "") or "", "notify-bridge.sh")
+        owned = argv[0] == "bash" and paths_same(program, bridge)
+    if not owned:
+        return f"notify in {user_config} runs {program}, not the DefenseClaw notifier"
+    if not os.path.isfile(program):
+        return f"notify in {user_config} runs {program}, which does not exist"
+    return ""
+
+
+def _check_codex_notify(cfg, config_path: str, r: _DoctorResult, *, windows: bool) -> None:
+    problem = _codex_notify_problem(cfg, config_path, windows=windows)
+    if problem:
+        _emit(
+            "warn",
+            "Codex notify",
+            problem,
+            r=r,
+            remediation="restore it: defenseclaw setup codex --yes",
         )
 
 
@@ -8273,6 +8319,9 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             return
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
         return
+    if edited := _edited_hook_problem(cfg, connector):
+        _emit("fail", label, edited, r=r, remediation=edited.repair)
+        return
     for path in present:
         if _file_references_marker(path, markers):
             if connector == "cursor":
@@ -8800,6 +8849,9 @@ def _check_copilot_hooks(
             search_path=search_path,
             pathext=pathext,
         )
+        return
+    if edited := _edited_hook_problem(cfg, "copilot"):
+        _emit("fail", "Copilot hooks", edited, r=r, remediation=edited.repair)
         return
     if not workspace:
         path = os.path.join(copilot_home(), "hooks", "defenseclaw.json")
@@ -14528,12 +14580,13 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
     from defenseclaw.hook_integrity import hook_command_problems, setup_command
 
     for problem in hook_command_problems(cfg, connector):
+        own_repair = getattr(problem, "repair", "")
         _emit(
             "fail",
             "Hook command",
-            f"{problem}; the agent runs its tool calls unguarded",
+            problem if own_repair else f"{problem}; the agent runs its tool calls unguarded",
             r=r,
-            remediation=f"re-register the hooks: {setup_command(connector)} --yes",
+            remediation=own_repair or f"re-register the hooks: {setup_command(connector)} --yes",
         )
 
 
@@ -16586,15 +16639,26 @@ def _fix_hook_script_modes(
     return ("pass", f"verified sealed digests and restored mode 0700 on {names}")
 
 
-def _drifted_hook_connectors(cfg) -> list[str]:
-    from defenseclaw.hook_integrity import agent_hook_switch_problems, hook_runtime_problems
+def _edited_hook_problem(cfg, connector: str):
+    """The first edited DefenseClaw hook entry of *connector*, or "" (GAP-0906, GAP-0907)."""
+    from defenseclaw.hook_integrity import edited_hook_problems
 
-    # Codex hook entries left without a command keep Codex from starting; the
-    # restart re-runs the gateway's Codex setup, which removes them (GAP-1102).
+    problems = edited_hook_problems(cfg, connector)
+    return problems[0] if problems else ""
+
+
+def _drifted_hook_connectors(cfg) -> list[str]:
+    from defenseclaw.hook_integrity import agent_hook_switch_problems, edited_hook_problems, hook_runtime_problems
+
+    # Codex hook entries left without a command keep Codex from starting, and
+    # an edited hook entry fails or runs unguarded; the restart re-runs the
+    # gateway's setup of the connector, which removes or replaces them
+    # (GAP-1102, GAP-0906, GAP-0907).
     return [
         connector
         for connector in _doctor_active_connectors(cfg)
         if any("changed since setup" in problem for problem in hook_runtime_problems(cfg, connector))
+        or edited_hook_problems(cfg, connector)
         or (
             connector == "codex"
             and any("without a command" in problem for problem in agent_hook_switch_problems(cfg, connector))

@@ -159,7 +159,10 @@ Rules that apply to every method:
 
 - **Only administrators may be able to change the file.** On Linux and macOS
   the file and every parent directory must be owned by root and not writable
-  by group or others (a sticky parent such as `/tmp` is accepted). On Windows
+  by group or others (a sticky parent such as `/tmp` is accepted). On macOS
+  none of them may carry an ACL entry that lets an account other than root or
+  the `admin` group write, delete or re-own it; the refusal names the entry
+  and the `chmod -N` command that removes it. On Windows
   the file must be owned by SYSTEM, Administrators or TrustedInstaller and
   grant no one else write, delete or permission rights. The wrappers refuse
   anything else with `mdm_untrusted_input`; the standalone Setup run directly

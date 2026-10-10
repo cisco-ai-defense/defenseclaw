@@ -194,7 +194,7 @@ dc_stage_parent() {
         *) dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "--staging-dir must be an absolute path" ;;
     esac
     if [ ! -d "$DC_STAGE_PARENT" ] || ! dc_trusted_path "$DC_STAGE_PARENT"; then
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT is not a root-owned directory that only root can write"
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_staging_untrusted "the staging folder $DC_STAGE_PARENT is not a root-owned directory that only root can write$DC_TRUST_ACL"
     fi
 }
 
@@ -217,12 +217,37 @@ dc_stat_mode() { # octal permission bits including setuid/setgid/sticky, e.g. 17
     if [ "$DC_SCRIPT_OS" = darwin ]; then stat -f %Mp%Lp "$1"; else stat -c %a "$1"; fi
 }
 
+# dc_acl_write_entry <path>: on macOS, print the first ACL entry of path (as
+# ls -lde shows it) that lets an account other than root or the admin group
+# change, delete or re-own it; return 1 when there is none. macOS grants such
+# an entry without changing the owner or the mode bits, so a check of those
+# alone trusts a path another account can change. An unreadable listing
+# counts as such an entry.
+dc_acl_write_entry() {
+    [ "$DC_SCRIPT_OS" = darwin ] || return 1
+    listing=$(ls -lde -- "$1" 2>/dev/null) || { printf 'unreadable ACL\n'; return 0; }
+    entry=$(printf '%s\n' "$listing" | awk '
+        /^ *[0-9]+: / {
+            sub(/^ *[0-9]+: */, "")
+            n = split(tolower($0), word, " ")
+            kind = ""; rights = ""
+            for (i = 2; i < n; i++) if (word[i] == "allow" || word[i] == "deny") { kind = word[i]; rights = word[i + 1] }
+            if (kind != "allow" || word[1] == "user:root" || word[1] == "group:wheel" || word[1] == "group:admin") next
+            split(rights, right, ",")
+            for (r in right) if (right[r] ~ /^(write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)$/) { print; exit }
+        }')
+    [ -n "$entry" ] || return 1
+    printf '%s\n' "$entry"
+}
+
 # dc_trusted_path <path>: the file and every ancestor directory are owned by
 # root, and none is writable by group or others unless it is a sticky
 # directory (such as /tmp), whose root-owned entries other accounts cannot
-# rename or delete. So no other account can swap what root reads or runs.
+# rename or delete, and (macOS) no ACL entry lets another account change
+# one of them. So no other account can swap what root reads or runs.
+# DC_TRUST_ACL names a refusing ACL entry for messages.
 dc_trusted_path() {
-    path=$1 child=""
+    path=$1 child="" DC_TRUST_ACL=""
     case "$path" in /*) ;; *) return 1 ;; esac
     [ ! -L "$path" ] || return 1
     while :; do
@@ -238,6 +263,10 @@ dc_trusted_path() {
                 case "$mode" in 1??? | 3??? | 5??? | 7???) ;; *) return 1 ;; esac
                 ;;
         esac
+        if acl=$(dc_acl_write_entry "$path"); then
+            DC_TRUST_ACL="; the macOS ACL entry '$acl' on $path lets another account change it (remove it with chmod -N $path)"
+            return 1
+        fi
         [ "$path" = / ] && return 0
         child=$path
         path=$(dirname "$path")
@@ -327,7 +356,7 @@ dc_stage_file() {
         dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "$label is not a regular file: $src"
     fi
     if [ "$require" = trusted ] && ! dc_trusted_path "$src"; then
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "$label or one of its directories is not root-owned or is writable by other accounts: $src"
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "$label or one of its directories is not root-owned or is writable by other accounts: $src$DC_TRUST_ACL"
     fi
     dc_read_bounded "$dest" "$limit" "$label" <"$src"
 }
@@ -861,7 +890,7 @@ dc_main() {
 
     if [ "$DC_ACTION" != ensure ]; then
         dc_trusted_path "$DC_GATEWAY" ||
-            dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "the managed deployment is not installed ($DC_GATEWAY is missing or not root-owned)"
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "the managed deployment is not installed ($DC_GATEWAY is missing or not root-owned)$DC_TRUST_ACL"
         status=0
         dc_run_lifecycle "$DC_GATEWAY" "$DC_ACTION" || status=$?
         dc_emit_result
@@ -894,7 +923,7 @@ dc_main() {
                 dc_fail_result "$DC_EXIT_INVALID" mdm_invalid_arguments "secret is not a regular file: $DC_SECRET_FILE"
             fi
             dc_trusted_path "$DC_SECRET_FILE" ||
-                dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "secret or one of its directories is not root-owned or is writable by other accounts: $DC_SECRET_FILE"
+                dc_fail_result "$DC_EXIT_FAILURE" mdm_untrusted_input "secret or one of its directories is not root-owned or is writable by other accounts: $DC_SECRET_FILE$DC_TRUST_ACL"
             secret_data=$(head -c "$((DC_MAX_SECRET_BYTES + 1))" <"$DC_SECRET_FILE")
         fi
         [ "$(printf '%s' "$secret_data" | wc -c | tr -d ' ')" -le "$DC_MAX_SECRET_BYTES" ] ||
@@ -915,7 +944,7 @@ dc_main() {
     if [ -n "$DC_PAYLOAD_GATEWAY" ]; then
         gateway=$DC_PAYLOAD_GATEWAY
     elif ! dc_trusted_path "$gateway"; then
-        dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "no source was given and $gateway is missing or not root-owned"
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_not_installed "no source was given and $gateway is missing or not root-owned$DC_TRUST_ACL"
     elif dc_binaries_damaged; then
         dc_fail_result "$DC_EXIT_FAILURE" mdm_binaries_damaged "a required installed DefenseClaw binary is missing, not executable, or differs from its deployment record; run this script with the package as --source, or reinstall the package"
     fi

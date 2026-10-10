@@ -47,6 +47,7 @@ type Finding struct {
 	// Cmdline is argv. It is a content-class field on the wire.
 	Cmdline string
 	User    string
+	UserSID string
 	// AgentName is the lineage-attributed agent, when one was found.
 	AgentName string
 	Score     int

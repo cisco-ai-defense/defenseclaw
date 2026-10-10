@@ -42,6 +42,12 @@ Active Directory are covered by the identity docs, not by this kit).
 | `okta-ldap-setup.py` | Okta side, through the Okta API: `check`, `posix-schema`, `assign-posix`, `bind-role`, `signon-policy`. Needs `OKTA_ORG_URL` and `OKTA_API_TOKEN`. Commands that write print a plan and change nothing until you add `--apply`. |
 | `sssd-okta.conf.tmpl` | The SSSD config that was run against Okta, with placeholders. |
 | `install-sssd-okta.sh` | Host side: renders the template, checks it, installs `sssd.conf`, selects the authselect profile, writes the sshd drop-in, restarts SSSD. `--dry-run` exits 4 when changes are planned, 0 when unchanged; successful apply ends with `changed: 0` or `changed: 1` for configuration management. Also supports `--render-only`. |
+
+For a complete `--dry-run`, provide the bind password with
+`--bind-password-file` or `OKTA_BIND_PASSWORD`. Without it, the dry run says it
+cannot judge the SSSD configuration and skips its comparison, bind test, write,
+and restart plan. It still reports changes to packages, PAM, sshd, and SSSD
+boot enablement; those changes can still make it exit 4.
 | `verify-okta-identity.sh` | Read-only check of SSSD, `getent`, `id`, the InfoPipe UPN, and the profile DefenseClaw picks for each user. |
 | `admin-config.example.yaml` | Machine config for the standalone enterprise profile with profiles by Okta group. |
 | `user-config.example.yaml` | The same idea for a per-user install. |

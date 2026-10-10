@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -39,28 +40,44 @@ func getHealthInspection(t *testing.T, api *APIServer) healthInspection {
 	return body
 }
 
-func TestHealthAndStatusShareProfileAssignmentWarnings(t *testing.T) {
+// The profile warnings name configured groups and DOMAIN\user selectors.
+// /health needs no credential, so it gives any caller but root on the hook
+// socket only their number; the authenticated /status and root on the hook
+// socket get the warnings themselves (GAP-1268).
+func TestHealthWithholdsProfileAssignmentSelectors(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
 	cfg.Enterprise.Profile = managed.ProfileStandalone
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
 	api.setGuardrailProfiles(&guardrailProfileSet{base: cfg, assignments: []config.ProfileAssignment{{
-		Profile: "strict", Match: config.ProfileMatch{Connectors: []string{"claudcode"}},
+		Profile: "strict", Match: config.ProfileMatch{Users: []string{`DCLAB\alice`}, Connectors: []string{"claudcode"}},
 	}}})
 	t.Cleanup(func() { api.setGuardrailProfiles(nil) })
-	for _, endpoint := range []struct {
-		path string
-		call func(http.ResponseWriter, *http.Request)
-	}{
-		{"/health", api.handleHealth}, {"/status", api.handleStatus},
-	} {
+	get := func(handler http.HandlerFunc, path string, ctx context.Context) string {
 		response := httptest.NewRecorder()
-		endpoint.call(response, httptest.NewRequest(http.MethodGet, endpoint.path, nil))
-		var body struct {
-			Warnings []string `json:"profile_assignment_warnings"`
+		handler(response, httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx))
+		return response.Body.String()
+	}
+	health := get(api.handleHealth, "/health", context.Background())
+	var counts struct {
+		Assignment int `json:"profile_assignment_warning_count"`
+		Profile    int `json:"profile_warning_count"`
+	}
+	if err := json.Unmarshal([]byte(health), &counts); err != nil || strings.Contains(health, "claudcode") ||
+		strings.Contains(health, "alice") || counts.Assignment == 0 || counts.Profile == 0 {
+		t.Fatalf("/health without a credential = %s (error %v)", health, err)
+	}
+	root := withManagedHookPeer(context.Background(), managedHookPeer{UID: 0})
+	for path, body := range map[string]string{
+		"/status":         get(api.handleStatus, "/status", context.Background()),
+		"/health as root": get(api.handleHealth, "/health", root),
+	} {
+		var warnings struct {
+			Assignment []string `json:"profile_assignment_warnings"`
+			Profile    []string `json:"profile_warnings"`
 		}
-		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || len(body.Warnings) != 1 ||
-			!strings.Contains(body.Warnings[0], "claudcode") {
-			t.Fatalf("%s warning = %q, error %v", endpoint.path, body.Warnings, err)
+		if err := json.Unmarshal([]byte(body), &warnings); err != nil || len(warnings.Assignment) != counts.Assignment ||
+			len(warnings.Profile) != counts.Profile || !strings.Contains(strings.Join(warnings.Assignment, "\n"), "claudcode") {
+			t.Fatalf("%s warnings = %+v, error %v", path, warnings, err)
 		}
 	}
 }

@@ -67,6 +67,10 @@ func TestRebasePreservesBuiltInRuleEdits(t *testing.T) {
 	}
 }
 
+// An edited 0.8.x pattern does not inherit the 1.0 expression, yet it blocked
+// on its own: a literal gets the expression it implies and any other pattern
+// is named alert-only, so the rule neither stops blocking nor goes unnamed
+// (GAP-1314).
 func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 	old, err := os.ReadFile(filepath.Join("legacy08", "commands.yaml"))
 	if err != nil {
@@ -77,9 +81,11 @@ func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, rule := range yamlRulesSequence(&custom).Content {
-		if yamlScalarField(rule, "id") == "CMD-RM-RF" {
+		switch yamlScalarField(rule, "id") {
+		case "CMD-RM-RF":
 			setYAMLScalarField(rule, "pattern", "operator-marker", "!!str")
-			break
+		case "CMD-SUDO":
+			setYAMLScalarField(rule, "pattern", "operator-marker-[0-9]+", "!!str")
 		}
 	}
 	var source bytes.Buffer
@@ -90,7 +96,8 @@ func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rebased, err := rebaseRuleFile(index.defaultFiles["command"], source.Bytes(), "command", &RulePackRebase{})
+	plan := &RulePackRebase{}
+	rebased, err := rebaseRuleFile(index.defaultFiles["command"], source.Bytes(), "command", plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,15 +105,24 @@ func TestRebaseEditedPatternDoesNotInheritSemanticExpression(t *testing.T) {
 	if err := yaml.Unmarshal(rebased, &result); err != nil {
 		t.Fatal(err)
 	}
+	want := map[string]string{
+		"CMD-RM-RF": "f.commands.exists(c, 'operator-marker' in c.argv)",
+		"CMD-SUDO":  "",
+	}
 	for _, rule := range result.Rules {
-		if rule.ID == "CMD-RM-RF" {
-			if rule.Pattern != "operator-marker" || rule.Expression != "" {
-				t.Fatalf("edited pattern inherited unrelated expression: %+v", rule)
+		if expression, ok := want[rule.ID]; ok {
+			if rule.Expression != expression {
+				t.Fatalf("%s expression %q, want %q", rule.ID, rule.Expression, expression)
 			}
-			return
+			delete(want, rule.ID)
 		}
 	}
-	t.Fatal("rebased rule missing")
+	if len(want) != 0 {
+		t.Fatalf("rebased rules missing: %v", want)
+	}
+	if !slices.Equal(plan.Expressed, []string{"CMD-RM-RF"}) || !slices.Equal(plan.AlertOnly, []string{"CMD-SUDO"}) {
+		t.Fatalf("expressed %v alert-only %v", plan.Expressed, plan.AlertOnly)
+	}
 }
 
 // GAP-1228: the 0.8.9 macOS upgrade shape. A full copy of the 0.8.9 default

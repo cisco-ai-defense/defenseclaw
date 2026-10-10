@@ -395,6 +395,22 @@ def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[s
     assert "codex" not in result.output
 
 
+def test_upgrade_cursor_action_does_not_report_observe_fail_open(data_dir: Path, recorded: list[str]) -> None:
+    _write_config(
+        data_dir,
+        "config_version: 8\nguardrail:\n  mode: action\n  connector: cursor\n"
+        "  hook_fail_mode: open\n  connectors:\n    cursor:\n"
+        "      mode: action\n      hook_fail_mode: open\n",
+    )
+    lock = {"connectors": {"cursor": {"hook_fail_mode": "closed"}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
+
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "cursor hooks now fail open" not in result.output
+
+
 def test_a_pre_v8_config_always_gets_the_v8_conversion(data_dir: Path, recorded: list[str]) -> None:
     # A cursor that claims 0.8.5 ran, beside a v7 config, must not skip the conversion.
     _write_config(data_dir, "config_version: 7\n")

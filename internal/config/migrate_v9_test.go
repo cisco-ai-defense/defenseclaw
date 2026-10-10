@@ -37,6 +37,36 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+func TestMigrateV9NormalizesCursorActionFailMode(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := []byte("config_version: 8\ndata_dir: " + dir +
+		"\nguardrail:\n  connector: cursor\n  mode: action\n  hook_fail_mode: open" +
+		"\n  rule_pack_dir: \"\"\n  connectors:\n    cursor:" +
+		"\n      mode: action\n      hook_fail_mode: open\nobservability: {}\n")
+	migrated, err := MigrateV8InMemory(configPath, source, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal(migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	root := v8DocumentRoot(&doc)
+	stored := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "guardrail"), "connectors"), "cursor")
+	if got := yamlScalarValue(v8YAMLMapValue(stored, "hook_fail_mode")); got != "closed" {
+		t.Fatalf("migrated Cursor hook fail mode = %q, want closed", got)
+	}
+	cfg := &Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"cursor": {Mode: "action", HookFailMode: "open"}}
+	if got := cfg.EffectiveHookFailModeForConnector("cursor"); got != "closed" {
+		t.Fatalf("effective Cursor action fail mode = %q, want closed", got)
+	}
+}
+
 // An unreadable custom scanner policy must leave the v8 source intact so an
 // upgrade can retry after access to the policy is restored.
 func TestMigrateV9RetriesUnreadableCustomScannerPolicy(t *testing.T) {
@@ -509,7 +539,8 @@ func mustJSON(t *testing.T, value any) string {
 }
 
 // A managed v8 host loaded packs from data_dir implicitly. The migrated
-// config must pin each discovered file so managed validation can apply it.
+// config must pin each discovered file so managed validation can apply it,
+// and also a pack the config already lists outside the data_dir (GAP-1287).
 func TestMigrateV9PinsManagedSignaturePack(t *testing.T) {
 	dir := t.TempDir()
 	pack := filepath.Join(dir, "signature-packs", "custom.json")
@@ -520,8 +551,13 @@ func TestMigrateV9PinsManagedSignaturePack(t *testing.T) {
 	if err := os.WriteFile(pack, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	external := filepath.Join(t.TempDir(), "vendor.json")
+	externalRaw := []byte(`{"version":1,"signatures":[{"id":"vendor"}]}`)
+	if err := os.WriteFile(external, externalRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(dir, "config.yaml")
-	source := fmt.Sprintf("config_version: 8\ndata_dir: %s\nobservability: {}\n", dir)
+	source := fmt.Sprintf("config_version: 8\ndata_dir: %s\nai_discovery:\n  signature_packs: [%s]\nobservability: {}\n", dir, external)
 	result, err := MigrateV9(context.Background(), MigrateV9Input{
 		ConfigPath: configPath, Source: []byte(source), DataDir: dir,
 		Managed: true, InMemory: true,
@@ -539,10 +575,12 @@ func TestMigrateV9PinsManagedSignaturePack(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantDigest := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
-	if !slices.Equal(doc.AIDiscovery.SignaturePacks, []string{pack}) ||
-		doc.AIDiscovery.SignatureDigests[pack] != wantDigest {
-		t.Errorf("migrated signature pack = %v, digests = %v; want %s and %s",
-			doc.AIDiscovery.SignaturePacks, doc.AIDiscovery.SignatureDigests, pack, wantDigest)
+	wantExternal := fmt.Sprintf("sha256:%x", sha256.Sum256(externalRaw))
+	if !slices.Equal(doc.AIDiscovery.SignaturePacks, []string{external, pack}) ||
+		doc.AIDiscovery.SignatureDigests[pack] != wantDigest ||
+		doc.AIDiscovery.SignatureDigests[external] != wantExternal {
+		t.Errorf("migrated signature packs = %v, digests = %v; want %s=%s and %s=%s",
+			doc.AIDiscovery.SignaturePacks, doc.AIDiscovery.SignatureDigests, pack, wantDigest, external, wantExternal)
 	}
 }
 

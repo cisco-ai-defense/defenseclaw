@@ -102,7 +102,9 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 // folder only administrators can write passed it; the gateway then could not
 // open the file and did not start, and the install failed after the
 // readiness wait and rolled back (GAP-1118). For a missing folder, the
-// nearest existing parent must permit the service to create a subfolder.
+// nearest existing parent must permit the service to create a subfolder, and
+// pass on to the folders it creates the rights to create the rest of the
+// path and the file (GAP-1328).
 func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	serviceSID, err := windowsVirtualServiceSID(serviceAccount)
 	if err != nil {
@@ -115,7 +117,7 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 		return nil
 	}
 	folder := filepath.Dir(filepath.Clean(path))
-	missingFolder := false
+	missing := 0
 	for {
 		info, statErr := os.Lstat(folder)
 		if statErr == nil {
@@ -132,15 +134,34 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 			return fmt.Errorf("JSONL destination has no existing parent folder: %s", path)
 		}
 		folder = parent
-		missingFolder = true
+		missing++
 	}
 	sids, err := serviceTokenSIDs(serviceSID)
 	if err != nil {
 		return err
 	}
-	if missingFolder {
+	if missing > 0 {
 		if !serviceHasAccess(folder, sids, serviceFolderCreateChildAccess) {
 			return fmt.Errorf("the gateway service account %s cannot create a folder in %s", serviceAccount, folder)
+		}
+		// The gateway creates the missing folders with MkdirAll, so each
+		// one has only what it inherits from folder: its container-inherit
+		// entries, with CREATOR OWNER standing for the service, which owns
+		// what it creates. Below the first new folder an entry that does
+		// not propagate is gone. A this-folder-only grant let the service
+		// create the first folder and nothing in it.
+		creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
+		if err != nil {
+			return err
+		}
+		want, skip := serviceFolderWriteAccess, uint8(0)
+		if missing > 1 {
+			want, skip = want|serviceFolderCreateChildAccess, windows.NO_PROPAGATE_INHERIT_ACE
+		}
+		if !serviceDACLGrants(folder, append(sids, creatorOwner), want, windows.CONTAINER_INHERIT_ACE, skip) {
+			return fmt.Errorf("the gateway service account %s can create a folder in %s, but the folders it creates there "+
+				"would not let it create the rest of %s; grant it Modify on %s for its subfolders too, "+
+				"for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\"", serviceAccount, folder, path, folder, folder, serviceAccount)
 		}
 		return nil
 	}

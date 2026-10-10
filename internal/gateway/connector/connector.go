@@ -956,6 +956,16 @@ type HookConfigReferenceOwner interface {
 	HookConfigReferenceNeedles(opts SetupOpts) []string
 }
 
+// HookRollbackConverter is implemented by a connector whose hook entries have
+// a shape that an earlier release's teardown does not own. The installers run
+// it through 'defenseclaw-gateway connector prepare-rollback' before a
+// rollback restores an older install, so that release's uninstall still
+// removes them. It returns how many entries it rewrote. See the hook-shape
+// compatibility rule next to the Claude Code launcher guard (GAP-1284).
+type HookRollbackConverter interface {
+	ConvertHooksForRollback(opts SetupOpts) (int, error)
+}
+
 // ScopedHookTokenRequirement is implemented by connector runtimes that depend
 // on a connector-scoped bearer credential. Such connectors must fail setup if
 // the least-privilege sidecar cannot be established; they may never fall back

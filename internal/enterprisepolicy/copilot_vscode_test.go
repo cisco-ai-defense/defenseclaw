@@ -17,12 +17,15 @@
 package enterprisepolicy
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // TestCopilotVSCodeLocalAndManagedSettings covers the per-user Local hook
@@ -94,6 +97,77 @@ func TestCopilotVSCodeLocalAndManagedSettings(t *testing.T) {
 	ensure(false, false)
 	if _, err := os.Stat(filepath.Dir(CopilotPluginDir(home))); !os.IsNotExist(err) {
 		t.Fatalf("plugin directories left behind: %v", err)
+	}
+}
+
+// A managed 1.0.0 install wrote the Local hook file and plugin without the
+// removed-deployment guard; testdata holds the bytes 1.0.0 (06b1c9e68)
+// rendered. After the upgrade both are DefenseClaw's: the guard allows the
+// user's calls, verify reports the plugin as drift the guardian rewrites,
+// and ensure replaces it instead of keeping it. A user's own hook at the
+// plugin path stays foreign, and verify names it (GAP-1232).
+func TestCopilotVSCodeUpgradeFromTheReleasedRender(t *testing.T) {
+	for goos, hookBinary := range map[string]string{"linux": testHookBinary, "windows": `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`} {
+		t.Run(goos, func(t *testing.T) {
+			released, err := os.ReadFile(filepath.Join("testdata", "copilot-vscode-1.0.0", goos+"-hooks.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if goos == "windows" {
+				// The bridge starts powershell.exe from the system directory
+				// the host reports, as 1.0.0 did on that host.
+				exe, _, _ := strings.Cut(connector.CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, "Stop"), " -NoLogo")
+				released = bytes.ReplaceAll(released, []byte(`C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`),
+					[]byte(strings.ReplaceAll(exe, `\`, `\\`)))
+			}
+			req := guardRequest(t, copilotConnector, config.ForeignHooksRemove)
+			req.GOOS, req.HookBinary = goos, hookBinary
+			home := req.Home
+			manifest, _ := renderCopilotPluginManifest()
+			writeFile(t, CopilotVSCodeLocalHookFilePath(home), string(released))
+			writeFile(t, CopilotPluginHooksPath(home), string(released))
+			writeFile(t, filepath.Join(CopilotPluginDir(home), "plugin.json"), string(manifest))
+			opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
+				p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
+			})
+			opts.GOOS, opts.HookBinary, opts.CopilotUserHomes = goos, hookBinary, []string{home}
+			// The 1.0.0 plugin stays DefenseClaw's only beside a VS Code that
+			// reads it (GAP-1245).
+			vscode := rooted(opts, "/usr/share/code/resources/app/package.json")
+			if goos == "windows" {
+				opts.WindowsProgramFiles = t.TempDir()
+				vscode = opts.WindowsProgramFiles + `\Microsoft VS Code\resources\app\package.json`
+			}
+			writeFile(t, vscode, `{"version":"1.139.2"}`)
+			status := func() State {
+				t.Helper()
+				var state State
+				copilotVSCodeStatus(opts, &state)
+				return state
+			}
+
+			if decision := EvaluateForeignHooks(req); decision.Deny || len(decision.Findings) != 0 {
+				t.Fatalf("the 1.0.0 render must not be a foreign hook: %+v", decision)
+			}
+			if state := status(); len(state.UserFileForeign) != 0 || !slices.Contains(state.UserFileDrift, CopilotPluginHooksPath(home)) {
+				t.Fatalf("verify must report the 1.0.0 plugin as drift to rewrite: %+v", state)
+			}
+			result, err := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, HookFile: true, Plugin: true})
+			if err != nil || len(result.Kept) != 0 || !result.HookFileOK || !result.PluginOK {
+				t.Fatalf("ensure must replace the 1.0.0 files: %+v %v", result, err)
+			}
+			if state := status(); len(state.UserFileDrift)+len(state.UserFileForeign) != 0 {
+				t.Fatalf("verify after ensure: %+v", state)
+			}
+
+			writeFile(t, CopilotPluginHooksPath(home), `{"hooks":{"PreToolUse":[{"type":"command","command":"user-tool"}]}}`)
+			if decision := EvaluateForeignHooks(req); !decision.Deny {
+				t.Fatalf("a user hook at the plugin path must stay foreign: %+v", decision)
+			}
+			if state := status(); !slices.Contains(state.UserFileForeign, CopilotPluginHooksPath(home)) {
+				t.Fatalf("verify must name the kept plugin file: %+v", state)
+			}
+		})
 	}
 }
 
@@ -254,5 +328,50 @@ func TestCopilotVSCodeUserFilesLeftSeesTheWindowsRender(t *testing.T) {
 	}
 	if left() {
 		t.Fatal("the user's own plugin file was counted as DefenseClaw's")
+	}
+}
+
+// GAP-1245: a build before 1.0.0 wrote the plugin key without an ownership
+// record, and the Copilot CLI then warned at every start that the
+// marketplace "defenseclaw" is not found, even after an uninstall. The
+// reconcile drops that key while no VS Code reads it, and the removal takes
+// it out with the file and its folder once empty; the administrator's keys
+// stay.
+func TestCopilotManagedSettingsRemovesARecordlessPluginKey(t *testing.T) {
+	opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
+		p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
+	})
+	settings, err := CopilotManagedSettingsPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, settings, `{"enabledPlugins":{"defenseclaw@defenseclaw":true},"model":"admin"}`)
+	if err := copilotManagedSettings(opts, &State{}, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, settings); strings.Contains(got, CopilotPluginKey) || !strings.Contains(got, `"admin"`) {
+		t.Fatalf("reconcile kept the stale plugin key or dropped the administrator's: %s", got)
+	}
+	writeFile(t, settings, `{"enabledPlugins":{"defenseclaw@defenseclaw":true}}`)
+	if err := removeCopilotManagedSettings(opts, &State{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(settings)); !os.IsNotExist(err) {
+		t.Fatalf("the emptied managed settings file or its folder stayed: %v", err)
+	}
+}
+
+// GAP-1245: the per-user plugin follows its enabledPlugins key, so a host
+// without a VS Code that reads it gets no plugin folder in each home.
+func TestCopilotVSCodeUserWantsThePluginOnlyWithAReadingVSCode(t *testing.T) {
+	opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
+		p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
+	})
+	if hookFile, plugin := CopilotVSCodeUserWant(opts); !hookFile || plugin {
+		t.Fatalf("without VS Code: hook file %t, plugin %t; want the hook file only", hookFile, plugin)
+	}
+	writeFile(t, rooted(opts, "/usr/share/code/resources/app/package.json"), `{"version":"1.139.2"}`)
+	if hookFile, plugin := CopilotVSCodeUserWant(opts); !hookFile || !plugin {
+		t.Fatalf("with VS Code 1.139: hook file %t, plugin %t; want both", hookFile, plugin)
 	}
 }

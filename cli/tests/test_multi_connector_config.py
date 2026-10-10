@@ -165,6 +165,16 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
 
+    def test_cursor_fail_mode_tracks_mode_despite_stored_open(self):
+        g = GuardrailConfig(
+            mode="observe",
+            hook_fail_mode="open",
+            connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="open")},
+        )
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
+        g.connectors["cursor"].mode = "action"
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
+
     def test_empty_block_inherits_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("empty"), "observe")

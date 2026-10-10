@@ -49,13 +49,44 @@ func TestProjectSkillIsHeldUntilItsFirstAdmission(t *testing.T) {
 	if decision, matched := call(); !matched || decision.Action != "block" {
 		t.Fatalf("unadmitted project skill = %+v, matched=%v; want refused", decision, matched)
 	}
-	if !roots.registered(skills) {
-		t.Fatalf("project skill folder %s was not registered for the watcher", skills)
+	realSkills, err := filepath.EvalSymlinks(skills)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := store.SetTargetSnapshot("skill", skill, "h", "{}", "{}", "[]", "scan-1", "fp"); err != nil {
+	if !roots.registered(realSkills) {
+		t.Fatalf("project skill folder %s was not registered for the watcher", realSkills)
+	}
+	if err := store.SetTargetSnapshot("skill", filepath.Join(realSkills, filepath.Base(skill)), "h", "{}", "{}", "[]", "scan-1", "fp"); err != nil {
 		t.Fatal(err)
 	}
 	if decision, matched := call(); matched {
 		t.Fatalf("admitted project skill = %+v, want it judged as usual", decision)
+	}
+}
+
+// GAP-1297: a link below a managed caller's home that points at another
+// user's project is not registered, so the watcher never scans that tree.
+func TestManagedProjectSkillLinkOutsideHomeIsNotRegistered(t *testing.T) {
+	root := t.TempDir()
+	home, other := filepath.Join(root, "alice"), filepath.Join(root, "bob", "proj")
+	for _, dir := range []string{home, filepath.Join(other, ".claude", "skills"), filepath.Join(other, ".git")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(home, "proj")
+	if err := os.Symlink(other, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	roots := &projectSkillRoots{}
+	roots.start(true)
+	api := &APIServer{scannerCfg: &config.Config{}, projectSkills: roots}
+	api.noteProjectSkillFolders(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1004, Home: home}), "claudecode", link)
+	realOther, err := filepath.EvalSymlinks(filepath.Join(other, ".claude", "skills"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roots.registered(filepath.Join(link, ".claude", "skills")) || roots.registered(realOther) {
+		t.Fatal("a project link below the caller's home registered another user's skill folder")
 	}
 }

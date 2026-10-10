@@ -61,6 +61,9 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	if err != nil {
 		return err
 	}
+	if verify && len(result.Kept) > 0 {
+		return fmt.Errorf("DefenseClaw's Copilot plugin under %s holds hooks DefenseClaw did not write: %s; the guardian leaves such a file in place and the foreign-hook guard denies this user's Copilot calls while it is there: move it aside, and the guardian writes DefenseClaw's plugin on its next pass", home, strings.Join(result.Kept, ", "))
+	}
 	if verify && len(result.Changed)+len(result.Removed) > 0 {
 		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
 	}

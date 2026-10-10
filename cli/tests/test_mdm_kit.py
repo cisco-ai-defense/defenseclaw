@@ -82,7 +82,7 @@ def test_copied_helpers_are_identical() -> None:
             "DC_SCRIPT_OS=darwin # linux | darwin - the only line that differs between the copies",
         )], name
     scripts = {name: _text(MDM / "linux" / name) for name in UNIX_SCRIPTS}
-    for function in ("dc_platform", "dc_stat_uid", "dc_stat_mode", "dc_trusted_path"):
+    for function in ("dc_platform", "dc_stat_uid", "dc_stat_mode", "dc_acl_write_entry", "dc_trusted_path"):
         assert len({_shell_function(text, function) for text in scripts.values()}) == 1, function
     for function in ("dc_json_escape", "dc_log", "dc_busy_output"):
         wrapper = _shell_function(scripts["defenseclaw-enterprise.sh"], function)
@@ -91,6 +91,38 @@ def test_copied_helpers_are_identical() -> None:
     drifted = [path.name for path in WINDOWS_SHARED if _shared_region(_text(path)) != canonical]
     assert not drifted, f"copy the shared region from packaging/mdm/windows/detect.ps1 into {drifted}"
 
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_macos_trusted_path_refuses_write_acl_entries(tmp_path: Path) -> None:
+    # GAP-1322: a root-owned 0600 --config-file with an ACL entry that lets a
+    # standard user write it passed the owner and mode check and was staged.
+    wrapper = _text(MDM / "macos" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in ("dc_acl_write_entry", "dc_trusted_path"))
+    target = tmp_path / "config.yaml"
+    target.write_text("guardrail: {}\n", encoding="utf-8")
+
+    def trusted(os_name: str, entry: str) -> tuple[bool, str]:
+        # ls -lde prints the path line, then one indented line per ACL entry.
+        script = (
+            f"DC_SCRIPT_OS={os_name}\n"
+            "dc_stat_uid() { echo 0; }\n"
+            "dc_stat_mode() { echo 600; }\n"
+            f"ls() {{ printf '%s\\n' \"-rw-------+ 1 root wheel 1 Oct 10 00:00 $3\"; "
+            f"[ \"$3\" != '{target}' ] || printf '%s\\n' '{entry}'; }}\n"
+            f"{functions}\n"
+            f"if dc_trusted_path '{target}'; then echo trusted; fi; printf '%s' \"$DC_TRUST_ACL\""
+        )
+        result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 0, result.stderr
+        return result.stdout.startswith("trusted"), result.stdout
+
+    write = " 0: user:dcuser inherited allow write,append"
+    ok, note = trusted("darwin", write)
+    assert not ok
+    assert "user:dcuser inherited allow write,append" in note and f"chmod -N {target}" in note
+    for entry in ("", " 0: group:admin allow write", " 0: user:dcuser deny write", " 0: user:dcuser allow read"):
+        assert trusted("darwin", entry)[0], entry
+    assert trusted("linux", write)[0]
 
 def test_intune_entrypoints_refuse_constrained_language_before_native_helpers() -> None:
     entrypoints = {

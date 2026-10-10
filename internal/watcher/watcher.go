@@ -871,12 +871,56 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
 	w.addContentWatch = func(dir string) { addSkillContentWatches(fsw, dir, watchedDirs) }
 	var deferredDirs [][2]string // {dir, kind} not created because an agent installer owns them
-	watchOnce := func(dir, kind string) bool {
+	watchKey := func(dir string) (string, string) {
 		absolute, absErr := filepath.Abs(dir)
 		if absErr != nil {
 			absolute = filepath.Clean(dir)
 		}
-		key := strings.ToLower(filepath.Clean(absolute))
+		return strings.ToLower(filepath.Clean(absolute)), absolute
+	}
+	// roots remembers the folder each skill and plugin root was when it was
+	// watched. A rename or removal of a root drops its watch and nothing
+	// watched the folder made again at that path, so a skill put there got
+	// only a rescan baseline, never an install verdict (GAP-1315). Secure
+	// Client keeps the behaviour of main.
+	roots := make(map[string]watchedRoot)
+	rememberRoot := func(key, dir, absolute, kind string) {
+		if w.secureClientActive() {
+			return
+		}
+		if info, statErr := os.Stat(dir); statErr == nil {
+			// On Windows this reads the file id now, while dir names
+			// the watched folder; it is read lazily from the path otherwise.
+			os.SameFile(info, info)
+			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info}
+		}
+	}
+	// rewatchRoot watches a root again once the folder at its path is not
+	// the watched one, and queues what it holds for install admission.
+	rewatchRoot := func(key string, root watchedRoot) {
+		info, statErr := os.Stat(root.dir)
+		if statErr != nil || !info.IsDir() {
+			return
+		}
+		_, watching := watchedDirs[key]
+		if os.SameFile(info, root.info) && (watching || root.failed) {
+			return
+		}
+		forgetDirWatches(fsw, root.absolute, watchedDirs)
+		root.info, root.failed = info, false
+		if addErr := fsw.Add(root.dir); addErr != nil {
+			root.failed = true
+			roots[key] = root
+			fmt.Fprintf(os.Stderr, "[watch] %s dir %s was replaced; watch it again: %v\n", root.kind, root.dir, addErr)
+			return
+		}
+		roots[key] = root
+		watchedDirs[key] = struct{}{}
+		fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", root.kind, root.dir)
+		w.admitReplacedRoot(ctx, fsw, root.dir, root.kind, watchedDirs)
+	}
+	watchOnce := func(dir, kind string) bool {
+		key, absolute := watchKey(dir)
 		if _, exists := watchedDirs[key]; exists {
 			return true
 		}
@@ -899,6 +943,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return false
 		}
 		watchedDirs[key] = struct{}{}
+		rememberRoot(key, dir, absolute, kind)
 		watched++
 		fmt.Printf("[watch] monitoring %s dir: %s\n", kind, dir)
 		return true
@@ -965,6 +1010,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
 				forgetDirWatches(fsw, event.Name, watchedDirs)
+			}
+			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 && len(roots) > 0 {
+				if key, _ := watchKey(event.Name); roots[key].dir != "" {
+					rewatchRoot(key, roots[key])
+				}
 			}
 			if skill, inside := w.changedSkillFolder(event.Name); inside {
 				w.skillFolderEvent(ctx, event, skill)
@@ -1038,6 +1088,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[watch] fsnotify error: %v\n", err)
 
 		case <-ticker.C:
+			for key, root := range roots {
+				rewatchRoot(key, root)
+			}
 			if len(deferredDirs) > 0 {
 				waiting := deferredDirs
 				deferredDirs = nil
@@ -1057,6 +1110,48 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			w.processPending(ctx)
 		}
+	}
+}
+
+// watchedRoot is a skill or plugin root Run watches and the folder it was
+// when the watch was added.
+type watchedRoot struct {
+	dir, absolute, kind string
+	info                os.FileInfo
+	failed              bool // the folder now there could not be watched
+}
+
+// admitReplacedRoot watches the folders of a skill or plugin root that was
+// replaced while the watcher ran and queues what it already holds for
+// install admission, as a folder created in the root is (GAP-1315).
+func (w *InstallWatcher) admitReplacedRoot(ctx context.Context, fsw *fsnotify.Watcher, root, kind string, watched map[string]struct{}) {
+	if kind == "skill" {
+		w.watchIncompleteSkillFolders(root)
+		w.watchSkillContents(root)
+		synced := filepath.Join(root, "synced")
+		if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
+			addDirWatches(fsw, synced, 1, watched)
+		}
+	} else {
+		w.watchExistingPluginFolders(root)
+		if w.connectorForPath(root) == "claudecode" &&
+			strings.EqualFold(filepath.Base(filepath.Clean(root)), "cache") {
+			addClaudeCacheWatches(fsw, root, watched)
+			w.queueExistingClaudePlugins(ctx, root, 0)
+			return
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		child := filepath.Join(root, entry.Name())
+		if !w.isDirectChildDir(child) {
+			continue
+		}
+		w.recordWatcherEvent(ctx, "create", w.classifyEvent(child).Type.String(), "")
+		w.queuePending(child)
 	}
 }
 

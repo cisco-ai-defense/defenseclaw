@@ -10,22 +10,57 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
+	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
+var managedScanWindowsLayout = managed.StandaloneWindowsLayout
+
 // managedScanGatewayEndpoint binds the scan commands to the standalone
-// managed gateway: its fixed API address and the gateway token in its data
+// managed gateway: its configured API port and the gateway token in its data
 // directory, which only an administrator can read.
 func managedScanGatewayEndpoint() (string, string, bool, error) {
 	if _, present := managedHostWindowsStandalone(); !present {
 		return "", "", false, nil
 	}
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := managedScanWindowsLayout()
 	if err != nil {
 		return "", "", true, err
+	}
+	configBody, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, 4<<20)
+	if err != nil {
+		return "", "", true, fmt.Errorf("read installed managed gateway config: %w", err)
+	}
+	var installed struct {
+		Gateway struct {
+			APIPort *int `yaml:"api_port"`
+		} `yaml:"gateway"`
+	}
+	if err := yaml.Unmarshal(trimWindowsJSONBOM(configBody), &installed); err != nil {
+		return "", "", true, fmt.Errorf("parse installed managed gateway config: %w", err)
+	}
+	host, defaultPort, err := net.SplitHostPort(layout.APIAddr)
+	if err != nil {
+		return "", "", true, fmt.Errorf("invalid managed gateway default API address: %w", err)
+	}
+	port := 0
+	if installed.Gateway.APIPort != nil {
+		port = *installed.Gateway.APIPort
+		if port < 1 || port > 65535 {
+			return "", "", true, fmt.Errorf("installed managed gateway config has invalid gateway.api_port %d", port)
+		}
+	} else {
+		port, err = strconv.Atoi(defaultPort)
+		if err != nil {
+			return "", "", true, fmt.Errorf("invalid managed gateway default API port: %w", err)
+		}
 	}
 	body, err := readWindowsEnterpriseBoundedFile(filepath.Join(layout.DataDir, ".env"), 1<<20)
 	if err != nil {
@@ -35,7 +70,7 @@ func managedScanGatewayEndpoint() (string, string, bool, error) {
 	for scanner.Scan() {
 		name, value, ok := strings.Cut(strings.TrimSpace(scanner.Text()), "=")
 		if ok && strings.TrimSpace(name) == "DEFENSECLAW_GATEWAY_TOKEN" && strings.TrimSpace(value) != "" {
-			return "http://" + layout.APIAddr, strings.Trim(strings.TrimSpace(value), `"'`), true, nil
+			return "http://" + net.JoinHostPort(host, strconv.Itoa(port)), strings.Trim(strings.TrimSpace(value), `"'`), true, nil
 		}
 	}
 	return "", "", true, errors.New("the managed gateway token is not provisioned")

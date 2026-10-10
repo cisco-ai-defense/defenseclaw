@@ -50,14 +50,41 @@ func (s *ContinuousDiscoveryService) detectClaudeProjectSkills() ([]AISignal, er
 			skipped = true
 			continue
 		}
-		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		// Check each ancestor before EvalSymlinks: a link in an otherwise
+		// readable project can resolve into a TCC-protected home folder.
+		if !s.claudeProjectExplicit(path) {
+			blocked := false
+			ancestor := home
+			for _, part := range strings.Split(rel, string(filepath.Separator)) {
+				ancestor = filepath.Join(ancestor, part)
+				if s.macOSTCCSkipped(ancestor) || s.modelLinkPrivacySkipped(ancestor) {
+					blocked = true
+					break
+				}
+			}
+			if blocked {
+				skipped = true
+				continue
+			}
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				skipped = true
+			}
 			continue
-		} else if err != nil {
+		}
+		if !s.claudeProjectExplicit(path) && s.macOSTCCSkipped(resolved) {
 			skipped = true
 			continue
 		}
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil || filepath.Clean(resolved) != path {
+		if filepath.Clean(resolved) != path {
+			skipped = true
+			continue
+		}
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
 			skipped = true
 			continue
 		}
@@ -81,4 +108,19 @@ func (s *ContinuousDiscoveryService) detectClaudeProjectSkills() ([]AISignal, er
 		return out, errors.New("Claude project skills skipped: project outside home, unreadable, linked, or over limit")
 	}
 	return out, nil
+}
+
+// An exact project root or skills directory in scan_roots is deliberate
+// consent; the default broad home root is not.
+func (s *ContinuousDiscoveryService) claudeProjectExplicit(path string) bool {
+	project := filepath.Dir(filepath.Dir(path))
+	for _, root := range s.opts.ScanRoots {
+		for _, candidate := range s.expandCandidatePath(root) {
+			candidate = filepath.Clean(candidate)
+			if candidate == project || candidate == path {
+				return true
+			}
+		}
+	}
+	return false
 }

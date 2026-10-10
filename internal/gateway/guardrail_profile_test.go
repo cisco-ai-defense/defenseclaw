@@ -175,6 +175,42 @@ func TestGuardrailProfileTelemetryFollowsReloadedSet(t *testing.T) {
 	}
 }
 
+// A request that pinned a generation keeps that generation's profile when a
+// reload publishes another set before the request decides (GAP-1295).
+func TestPinnedGenerationKeepsItsGuardrailProfile(t *testing.T) {
+	stubProfileSources(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action"}, "watch": {Mode: "observe"},
+	}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "strict", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
+	pinned := &Generation{N: 1, Config: cfg, Profiles: api.guardrailProfileSet()}
+	live := pinned
+	api.SetGenerationSource(func() *Generation { return live })
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "1001"})
+	ctx = api.withGuardrailProfileDecision(ctx, "")
+
+	next := *cfg
+	next.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "watch", Match: config.ProfileMatch{Users: []string{"1001"}}},
+	}
+	set, err := newGuardrailProfileSet(&next, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live = &Generation{N: 2, Config: &next, Profiles: set}
+	api.setGuardrailProfiles(set)
+	if got := api.decisionConfig(ctx).Guardrail.Mode; got != "action" {
+		t.Fatalf("pinned decision mode = %q, want the pinned generation's action", got)
+	}
+	if got := api.decisionConfig(context.WithValue(ctx, resolvedGuardrailProfileKey{}, nil)).Guardrail.Mode; got != "action" {
+		t.Fatalf("re-resolved pinned decision mode = %q, want action", got)
+	}
+}
+
 // TestSubjectGroupsMatchLikeEqualFold: the group index answers as the scan
 // with strings.EqualFold it replaced (GAP-0118), for names, SIDs, DOMAIN\name
 // groups, a bare name against a DOMAIN\name group, padding, and runes whose
