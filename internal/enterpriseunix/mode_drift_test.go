@@ -145,7 +145,10 @@ func TestVerifyReportsInstalledModeDriftAndRepairNamesTheRemedy(t *testing.T) {
 // ensure --from-package, so verify turned green while agents ran without
 // enforcement. Repair puts the recorded binary back from the sealed copy
 // (GAP-0680); without that copy, any run but the package's own install
-// refuses it until the package is reinstalled (GAP-0522).
+// refuses it until the package is reinstalled (GAP-0522). A hook binary
+// that only lost its execute bit (digest unchanged) left status, verify and
+// so detect.sh --require-healthy green while every agent hook failed to
+// start (GAP-1219).
 func TestRepairRefusesAPackageBinaryReplacedAfterInstall(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	bin := h.env.P(h.env.Layout.BinDir)
@@ -170,6 +173,20 @@ func TestRepairRefusesAPackageBinaryReplacedAfterInstall(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionRepair}))
 	if got, _ := os.ReadFile(hook); string(got) != string(want) {
 		t.Fatalf("repair did not put the recorded hook binary back: %q", got)
+	}
+	if err := os.Chmod(hook, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		if got := messagesOf(r.Errors, codeVerify); !strings.Contains(got, filepath.Join(h.env.Layout.BinDir, binHook)+" is not executable (mode 0644)") ||
+			!strings.Contains(got, "`"+h.env.lifecycleCommand(ActionRepair)+"`") || r.SecurityComplete {
+			t.Fatalf("%s with a 0644 hook binary: security_complete=%v errors %q", action, r.SecurityComplete, got)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionRepair}))
+	if info, err := os.Stat(hook); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("repair did not make the hook binary executable again: %v %v", info, err)
 	}
 	if err := os.WriteFile(hook, []byte("replaced\n"), 0o755); err != nil {
 		t.Fatal(err)
