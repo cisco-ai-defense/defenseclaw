@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -88,5 +89,63 @@ func TestManagedProjectSkillLinkOutsideHomeIsNotRegistered(t *testing.T) {
 	}
 	if roots.registered(filepath.Join(link, ".claude", "skills")) || roots.registered(realOther) {
 		t.Fatal("a project link below the caller's home registered another user's skill folder")
+	}
+}
+
+// GAP-1375: a skill in a registered project folder that the gateway cannot
+// stat for any reason but its absence (access denied, a sharing violation)
+// stays refused; only a skill that is gone is not held.
+func TestProjectSkillThatCannotBeCheckedStaysRefused(t *testing.T) {
+	restore := projectSkillLstat
+	t.Cleanup(func() { projectSkillLstat = restore })
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	skills := filepath.Join(t.TempDir(), "proj", ".claude", "skills")
+	roots := &projectSkillRoots{}
+	roots.start(true)
+	if !roots.add("claudecode", skills) {
+		t.Fatal("could not register the project skill folder")
+	}
+	api := &APIServer{store: store, logger: logger, projectSkills: roots}
+	skill := filepath.Join(skills, "locked-skill")
+	for _, tc := range []struct {
+		err  error
+		held bool
+	}{{fs.ErrPermission, true}, {fs.ErrNotExist, false}} {
+		projectSkillLstat = func(path string) (fs.FileInfo, error) {
+			return nil, &fs.PathError{Op: "lstat", Path: path, Err: tc.err}
+		}
+		decision, held := api.projectSkillScanPending("skill", "claudecode", "hook", []string{skill})
+		if held != tc.held || (held && decision.Action != "block") {
+			t.Fatalf("lstat %v: decision=%+v held=%v; want held=%v", tc.err, decision, held, tc.held)
+		}
+	}
+}
+
+// GAP-1377: disabling the watcher by hot reload stops project skill
+// admission, as a cold start with that config does: no folder is
+// registered and a new project skill is not held as pending.
+func TestDisabledWatcherStopsProjectSkillAdmission(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	skills := filepath.Join(t.TempDir(), "proj", ".claude", "skills")
+	skill := filepath.Join(skills, "new-skill")
+	if err := os.MkdirAll(skill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.Gateway.Watcher.Enabled = false
+	s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
+	s.projectSkills.start(true) // the watcher that ran before the reload
+	s.projectSkills.add("claudecode", skills)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.runWatcher(ctx); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{store: store, logger: logger, projectSkills: &s.projectSkills}
+	if decision, held := api.projectSkillScanPending("skill", "claudecode", "hook", []string{skill}); held {
+		t.Fatalf("new project skill after the watcher was disabled = %+v; want not held", decision)
+	}
+	if s.projectSkills.add("claudecode", filepath.Join(t.TempDir(), "other", ".claude", "skills")) {
+		t.Fatal("a project skill folder was registered with the watcher disabled")
 	}
 }

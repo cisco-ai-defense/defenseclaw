@@ -459,14 +459,21 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 			}
 			path = filepath.Join(real, filepath.Base(path))
 		}
-		if _, err := os.Lstat(path); err != nil {
+		// Only a skill that is gone is not held. Any other error (access
+		// denied, a sharing violation) means the gateway cannot see what the
+		// agent may still load, so the skill stays refused (GAP-1375).
+		name := filepath.Base(path)
+		if _, err := projectSkillLstat(path); errors.Is(err, fs.ErrNotExist) {
 			continue
+		} else if err != nil {
+			return runtimeAssetDisableBlockDecision("skill", name, connector, surface,
+				fmt.Sprintf("skill %q in %s cannot be checked - failing closed: %v", name, filepath.Dir(path), err),
+				"project-skill-pending"), true
 		}
 		row, err := a.store.GetTargetSnapshot("skill", path)
 		if err == nil && !watcher.BaselineAwaitsAdmission(row.ScannerFingerprint) {
 			continue
 		}
-		name := filepath.Base(path)
 		reason := fmt.Sprintf("skill %q in %s is not scanned yet: DefenseClaw is admitting this project's skills now; try again in a minute",
 			name, filepath.Dir(path))
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
