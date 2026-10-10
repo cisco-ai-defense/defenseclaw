@@ -311,6 +311,20 @@ class AlertFindingRowsTests(unittest.TestCase):
         self.assertNotIn("observe mode", table.output)
         # GAP-1535: a wide terminal shows the whole hook event, not "...tToolUse".
         self.assertIn("| claudecode:PostToolUse ", table.output.replace("\u2503", "|").replace("\u2502", "|"))
+        # GAP-1344: a Codex PostToolUse block held the result back after the call ran; it is not "blocked".
+        later = at + timedelta(seconds=1)
+        hook = Event(action="connector-hook", target="PostToolUse", severity="INFO", connector="codex",
+                     details="connector=codex result=ok action=block mode=action", timestamp=later)
+        finding = Event(action="scan-finding", target="", severity="CRITICAL", connector="codex",
+                        details="finding.observed", timestamp=later,
+                        structured=dict(FINDING, **{"defenseclaw.finding.target_ref": "codex:PostToolUse"}))
+        store.log_event(hook)
+        store.log_event(finding)
+        store.db.execute("UPDATE audit_events SET request_id='req-codex-post' WHERE id IN (?, ?)",
+                         (hook.id, finding.id))
+        store.db.commit()
+        table = self.runner.invoke(alerts, ["-n", "10"], obj=self.app, catch_exceptions=False)
+        self.assertNotIn("decision=blocked", table.output)
 
     # GAP-1525: a plugin finding names the plugin (target_ref) and the file.
     def test_plugin_finding_names_plugin_and_file(self):
