@@ -60,6 +60,7 @@ func snapshot() ([]Process, int, error) {
 	}
 
 	rows := make([]Process, 0, 256)
+	missingOwners := make(map[uint32]int)
 	partial := 0
 	for {
 		row := Process{
@@ -71,6 +72,9 @@ func snapshot() ([]Process, int, error) {
 			if !enrich(&row) {
 				partial++
 			}
+			if row.UserSID == "" {
+				missingOwners[uint32(row.PID)] = len(rows)
+			}
 			rows = append(rows, row)
 		}
 		entry.Size = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
@@ -79,6 +83,14 @@ func snapshot() ([]Process, int, error) {
 				break
 			}
 			return rows, partial, fmt.Errorf("Process32Next: %w", err)
+		}
+	}
+	// WMI's process provider supplies the owner SID when this service cannot
+	// open another user's token. WTS enumeration needs Administrators group
+	// membership to list another user's processes, which this service lacks.
+	if len(missingOwners) != 0 {
+		for pid, owner := range lookupWMIProcessOwners(missingOwners) {
+			rows[missingOwners[pid]].User, rows[missingOwners[pid]].UserSID = owner.name, owner.sid
 		}
 	}
 	return rows, partial, nil
@@ -106,13 +118,13 @@ func enrich(row *Process) bool {
 		defer windows.CloseHandle(process)
 		readTimes(process, row)
 		readMemory(process, row)
-		row.User = readUser(process)
+		row.User, row.UserSID = readUser(process)
 		return false
 	}
 	defer windows.CloseHandle(process)
 	readTimes(process, row)
 	readMemory(process, row)
-	row.User = readUser(process)
+	row.User, row.UserSID = readUser(process)
 	if cmdline, err := readCommandLine(process); err == nil {
 		row.Cmdline = cmdline
 	}
@@ -169,21 +181,32 @@ func readMemory(process windows.Handle, row *Process) {
 	row.RSSBytes = int64(counters.WorkingSetSize)
 }
 
-func readUser(process windows.Handle) string {
+func readUser(process windows.Handle) (string, string) {
 	var token windows.Token
 	if err := windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
-		return ""
+		return "", ""
 	}
 	defer token.Close()
 	user, err := token.GetTokenUser()
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	account, _, _, err := user.User.Sid.LookupAccount("")
+	return windowsOwner(user.User.Sid)
+}
+
+func windowsOwner(sid *windows.SID) (string, string) {
+	if sid == nil || !sid.IsValid() {
+		return "", ""
+	}
+	sidText := sid.String()
+	account, domain, _, err := sid.LookupAccount("")
 	if err != nil {
-		return ""
+		return sidText, sidText
 	}
-	return account
+	if domain != "" {
+		return domain + `\` + account, sidText
+	}
+	return account, sidText
 }
 
 // processBasicInformation mirrors PROCESS_BASIC_INFORMATION. Only PebBaseAddress

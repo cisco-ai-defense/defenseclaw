@@ -463,13 +463,22 @@ func TestWindowsEnterpriseDiscoveryQualifiedUserExcludesAmbiguousRuntimeFinding(
 		if user == `DCLAB\alice` {
 			return []string{domainSID}
 		}
+		if user == `.\alice` {
+			return []string{localSID}
+		}
 		return nil
 	}
-	stubEnterpriseDiscoveryRuntime(t, &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
+	runtimeView := &enterpriseRuntimeView{Enabled: true, Findings: []enterpriseRuntimeFinding{
 		{PID: 41, User: "alice", Process: "node"},
-		{PID: 42, User: `DCLAB\alice`, Process: "python3"},
-		{PID: 43, User: `LOCAL\alice`, Process: "codex"},
-	}}, nil)
+		{PID: 42, User: `DCLAB\alice`, UserSID: domainSID, Process: "python3"},
+		{PID: 43, User: `LOCAL\alice`, UserSID: localSID, Process: "codex"},
+	}}
+	stubEnterpriseDiscoveryRuntime(t, runtimeView, nil)
+	enterpriseDiscoveryRuntime = func() (*enterpriseRuntimeView, error) {
+		view := *runtimeView
+		view.Findings = append([]enterpriseRuntimeFinding(nil), runtimeView.Findings...)
+		return &view, nil
+	}
 
 	var out bytes.Buffer
 	if err := writeWindowsEnterpriseDiscovery(&out, `DCLAB\alice`, true); err != nil {
@@ -482,6 +491,27 @@ func TestWindowsEnterpriseDiscoveryQualifiedUserExcludesAmbiguousRuntimeFinding(
 	if len(report.Accounts) != 1 || report.Accounts[0].SID != domainSID ||
 		report.Runtime == nil || len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != 42 {
 		t.Fatalf("qualified account runtime findings: %s", out.String())
+	}
+	for _, tc := range []struct {
+		user string
+		want int
+	}{
+		{user: "alice", want: 3},
+		{user: `.\alice`, want: 43},
+		{user: localSID, want: 43},
+		{user: domainSID, want: 42},
+	} {
+		out.Reset()
+		if err := writeWindowsEnterpriseDiscovery(&out, tc.user, true); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+			t.Fatal(err)
+		}
+		if report.Runtime == nil || (tc.want == 3 && len(report.Runtime.Findings) != 3) ||
+			(tc.want != 3 && (len(report.Runtime.Findings) != 1 || report.Runtime.Findings[0].PID != tc.want)) {
+			t.Fatalf("--user %q runtime findings: %s", tc.user, out.String())
+		}
 	}
 }
 
