@@ -18,9 +18,11 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -47,9 +49,15 @@ import (
 //     plugin store DefenseClaw writes (copilotLocalLockGate);
 //   - sandbox.enabled = true for local_harness retire.
 //
-// The ownership record lists the keys DefenseClaw added; removal deletes
-// only those that still hold DefenseClaw's value. An administrator's value,
-// including a different one, is kept and reported.
+// The ownership record lists the keys DefenseClaw added and the folders it
+// created for the file; removal deletes only the keys that still hold
+// DefenseClaw's value, then the file and those folders once empty. An
+// administrator's value, including a different one, is kept and reported.
+// The plugin key names DefenseClaw's own plugin, so it is DefenseClaw's
+// whenever it holds true, recorded or not: a build before 1.0.0 wrote it
+// without a record, and that key outlived every later reconcile and
+// uninstall, leaving the Copilot CLI to warn at every start that the
+// marketplace "defenseclaw" is not found (GAP-1245).
 
 const copilotManagedSettingsRecord = "copilot-managed-settings"
 
@@ -335,7 +343,7 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 	if err != nil {
 		return err
 	}
-	owned := map[string]bool{}
+	owned := map[string]bool{copilotSettingPlugin: true}
 	if record != nil {
 		for _, key := range record.OwnedKeys {
 			owned[key] = true
@@ -379,7 +387,14 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 		for _, key := range drop {
 			copilotSettingDelete(doc, key)
 		}
-		if err := writeCopilotManagedSettings(opts, path, doc); err != nil {
+		created, err := writeCopilotManagedSettings(opts, path, doc)
+		if len(created) > 0 {
+			if record == nil {
+				record = &ownershipRecord{Connector: copilotManagedSettingsRecord}
+			}
+			record.CreatedDirs = appendUnique(record.CreatedDirs, created...)
+		}
+		if err != nil {
 			return err
 		}
 		state.Changed = true
@@ -392,6 +407,7 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 	}
 	ownedNow := append(keep, add...)
 	if len(ownedNow) == 0 {
+		removeCopilotManagedSettingsDirs(opts, path, record, record == nil && len(drop) > 0)
 		if record != nil {
 			return deleteRecord(opts, copilotManagedSettingsRecord)
 		}
@@ -405,52 +421,93 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 	return saveRecord(opts, record)
 }
 
-func writeCopilotManagedSettings(opts Options, path string, doc *object) error {
+// writeCopilotManagedSettings writes doc to path, or removes the file once
+// doc is empty. It returns the folders it created for the file.
+func writeCopilotManagedSettings(opts Options, path string, doc *object) ([]string, error) {
 	if doc.len() == 0 {
-		return removePolicyFile(opts, path)
+		return nil, removePolicyFile(opts, path)
 	}
 	rendered, err := encodeOrdered(doc)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = writePolicyFile(opts, path, rendered)
-	return err
+	return writePolicyFile(opts, path, rendered)
+}
+
+// removeCopilotManagedSettingsDirs removes, once the managed settings file
+// is gone, the folders DefenseClaw recorded creating for it, deepest first,
+// and with recordless (an older build's file DefenseClaw just emptied) the
+// file's own folder. Only an empty folder goes.
+func removeCopilotManagedSettingsDirs(opts Options, path string, record *ownershipRecord, recordless bool) {
+	if _, err := os.Lstat(platformPath(opts, path)); !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	var dirs []string
+	if record != nil {
+		dirs = append(dirs, record.CreatedDirs...)
+	}
+	if recordless {
+		dirs = appendUnique(dirs, dirFor(opts, path))
+	}
+	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		_ = removeDirIfEmpty(opts, dir)
+	}
 }
 
 // removeCopilotManagedSettings deletes the keys DefenseClaw added that
-// still hold its value.
+// still hold its value, and the plugin key whether recorded or not
+// (GAP-1245), then the file and the folders DefenseClaw created for it once
+// they are empty.
 func removeCopilotManagedSettings(opts Options, state *State) error {
 	record, err := loadRecord(opts, copilotManagedSettingsRecord)
-	if err != nil || record == nil {
+	if err != nil {
 		return err
 	}
 	path, err := CopilotManagedSettingsPath(opts)
 	if err != nil || opts.goos() == "darwin" {
+		if record == nil {
+			return nil
+		}
 		return deleteRecord(opts, copilotManagedSettingsRecord)
+	}
+	keys := []string{copilotSettingPlugin}
+	if record != nil {
+		keys = appendUnique(append([]string(nil), record.OwnedKeys...), copilotSettingPlugin)
 	}
 	data, exists, err := readPolicyFile(opts, path)
 	if err != nil {
 		return err
 	}
+	var removed []string
 	if exists && !blank(data) {
 		doc, err := decodeOrderedObject(data)
 		if err != nil {
+			if record == nil {
+				// Nothing recorded: DefenseClaw left nothing it knows of in
+				// a file it cannot read.
+				state.detail("vscode: Copilot managed settings %s is not valid JSON; left unchanged: %v", path, err)
+				return nil
+			}
 			return fmt.Errorf("copilot managed settings %s: %w", path, err)
 		}
-		var removed []string
-		for _, key := range record.OwnedKeys {
+		for _, key := range keys {
 			if value, present := copilotSettingGet(doc, key); present && value == true {
 				copilotSettingDelete(doc, key)
 				removed = append(removed, key)
 			}
 		}
 		if len(removed) > 0 {
-			if err := writeCopilotManagedSettings(opts, path, doc); err != nil {
+			if _, err := writeCopilotManagedSettings(opts, path, doc); err != nil {
 				return err
 			}
 			state.Changed = true
 			state.detail("vscode: removed %s from %s", strings.Join(removed, ", "), path)
 		}
+	}
+	removeCopilotManagedSettingsDirs(opts, path, record, record == nil && len(removed) > 0)
+	if record == nil {
+		return nil
 	}
 	return deleteRecord(opts, copilotManagedSettingsRecord)
 }

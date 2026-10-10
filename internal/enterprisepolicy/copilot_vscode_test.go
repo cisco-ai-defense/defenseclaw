@@ -256,3 +256,34 @@ func TestCopilotVSCodeUserFilesLeftSeesTheWindowsRender(t *testing.T) {
 		t.Fatal("the user's own plugin file was counted as DefenseClaw's")
 	}
 }
+
+// GAP-1245: a build before 1.0.0 wrote the plugin key without an ownership
+// record, and the Copilot CLI then warned at every start that the
+// marketplace "defenseclaw" is not found, even after an uninstall. The
+// reconcile drops that key while no VS Code reads it, and the removal takes
+// it out with the file and its folder once empty; the administrator's keys
+// stay.
+func TestCopilotManagedSettingsRemovesARecordlessPluginKey(t *testing.T) {
+	opts := withPolicy(testOptions(t), copilotConnector, func(p *config.EnterpriseConnectorPolicy) {
+		p.ManagedHooksOnly = config.ManagedHooksOnlyEnforce
+	})
+	settings, err := CopilotManagedSettingsPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, settings, `{"enabledPlugins":{"defenseclaw@defenseclaw":true},"model":"admin"}`)
+	if err := copilotManagedSettings(opts, &State{}, true); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, settings); strings.Contains(got, CopilotPluginKey) || !strings.Contains(got, `"admin"`) {
+		t.Fatalf("reconcile kept the stale plugin key or dropped the administrator's: %s", got)
+	}
+	writeFile(t, settings, `{"enabledPlugins":{"defenseclaw@defenseclaw":true}}`)
+	if err := removeCopilotManagedSettings(opts, &State{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(settings)); !os.IsNotExist(err) {
+		t.Fatalf("the emptied managed settings file or its folder stayed: %v", err)
+	}
+}
+
