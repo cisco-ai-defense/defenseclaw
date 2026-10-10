@@ -248,12 +248,21 @@ func TestRebasedEditedBuiltinRuleBlocksUnderItsOwnID(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(old, "rules", "commands.yaml"), commands, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// GAP-1358: rule IDs are unique across the pack. A rule of another file
+	// that has the ID the rename would give made the rebased copy fail to
+	// load, and the upgrade pinned the 0.8.x pack, whose edited rule no
+	// longer blocked.
+	acme := "version: 1\ncategory: acme\nrules:\n  - id: CUSTOM-CMD-RM-RF\n    pattern: 'acme[0-9]+marker'\n" +
+		"    title: \"Acme marker\"\n    severity: LOW\n    confidence: 0.5\n    tags: [acme]\n"
+	if err := os.WriteFile(filepath.Join(old, "rules", "acme.yaml"), []byte(acme), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	plan, err := guardrail.PlanRulePackRebase(old)
 	if err != nil || plan == nil {
 		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
 	}
-	if !slices.Equal(plan.Renamed, []string{"CMD-RM-RF -> CUSTOM-CMD-RM-RF", "CMD-ENV-DUMP -> CUSTOM-CMD-ENV-DUMP"}) ||
-		!slices.Equal(plan.Expressed, []string{"CUSTOM-CMD-RM-RF"}) || !slices.Equal(plan.AlertOnly, []string{"CUSTOM-CMD-ENV-DUMP"}) {
+	if !slices.Equal(plan.Renamed, []string{"CMD-RM-RF -> CUSTOM-CMD-RM-RF-2", "CMD-ENV-DUMP -> CUSTOM-CMD-ENV-DUMP"}) ||
+		!slices.Equal(plan.Expressed, []string{"CUSTOM-CMD-RM-RF-2"}) || !slices.Equal(plan.AlertOnly, []string{"CUSTOM-CMD-RM-RF", "CUSTOM-CMD-ENV-DUMP"}) {
 		t.Fatalf("renamed %v expressed %v alert-only %v", plan.Renamed, plan.Expressed, plan.AlertOnly)
 	}
 	rebased := t.TempDir()
@@ -279,7 +288,7 @@ func TestRebasedEditedBuiltinRuleBlocksUnderItsOwnID(t *testing.T) {
 		command, rule, title string
 		blocked              bool
 	}{
-		{command: "echo dccert-rmrf-marker", rule: "CUSTOM-CMD-RM-RF", title: "Operator marker", blocked: true},
+		{command: "echo dccert-rmrf-marker", rule: "CUSTOM-CMD-RM-RF-2", title: "Operator marker", blocked: true},
 		{command: "rm -rf /", rule: "CMD-RM-RF", title: "Recursive force delete from critical root path", blocked: true},
 		{command: "echo hello"},
 	} {

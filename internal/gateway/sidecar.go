@@ -4398,6 +4398,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
+	s.reportUnrebasedRulePacks(ctx)
 	conn, err := resolveActiveConnector(registry, guardrailConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
@@ -4964,6 +4965,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
+	s.reportUnrebasedRulePacks(ctx)
 
 	// configured is every connector in guardrail.connectors. names is the
 	// ENABLED subset: a connector explicitly disabled via

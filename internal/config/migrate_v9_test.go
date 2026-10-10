@@ -743,6 +743,40 @@ func TestMigrateV9NamesCustomRulesThatNoLongerBlockToolCalls(t *testing.T) {
 	}
 }
 
+func TestMigrateV9NamesACustomPackItCouldNotRebase(t *testing.T) {
+	// GAP-1358: a pack whose 1.0 copy did not load was pinned as it was with
+	// only a note, and its edited rules stopped blocking with no warning.
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath := filepath.Join(dir, "config.yaml")
+	acme := filepath.Join(dir, "policies", "guardrail", "acme")
+	source := "config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  rule_pack_dir: " + acme + "\nobservability: {}\n"
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateV9(context.Background(), MigrateV9Input{
+		ConfigPath:     configPath,
+		RulePackDigest: func(string) (string, error) { return strings.Repeat("a", 64), nil },
+		RebaseRulePack: func(string) (*RulePackRebasePlan, error) {
+			return nil, errors.New("the rebased pack does not load")
+		},
+	}); err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	failures := UnrebasedRulePacks(configPath)
+	if len(failures) != 1 || !strings.Contains(failures[0], acme+" could not be rebased") ||
+		!strings.Contains(failures[0], "no longer block a tool call") {
+		t.Fatalf("unrebased packs %q, want the pack named with its lost enforcement", failures)
+	}
+	if err := AcknowledgeMigrationV9(configPath); err != nil {
+		t.Fatal(err)
+	}
+	if failures := UnrebasedRulePacks(configPath); failures != nil {
+		t.Errorf("unrebased packs after --ack: %q", failures)
+	}
+}
+
 func TestMigrateV9MergesRuleFilesThatShareACategory(t *testing.T) {
 	// GAP-1339: 0.8.x took two rule files of one category and 1.0 refuses
 	// them, so the upgrade stopped with no way forward. The 1.0 copy merges
