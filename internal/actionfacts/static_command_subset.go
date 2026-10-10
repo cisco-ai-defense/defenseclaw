@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -188,14 +189,17 @@ func staticCommandSubset(input Input, facts Facts, unmodeled bool) (view Facts, 
 		return Facts{}, false, false
 	}
 	if unmodeled {
-		// Nothing but the commands: any other fact may rest on an operand
-		// grammar ActionFacts does not have.
+		// Nothing but the commands and the files their static redirects
+		// write: any other fact may rest on an operand grammar ActionFacts
+		// does not have, but the shell opens a redirect target whatever the
+		// program is, so `: > file` writes file (GAP-1344).
 		return Facts{
 			Tool:       facts.Tool,
 			CWD:        facts.CWD,
 			ActiveHome: facts.ActiveHome,
 			Parse:      ParseResult{Status: StatusComplete, Dialect: facts.Parse.Dialect},
 			Commands:   commands,
+			Paths:      staticRedirectPaths(commands, facts.Paths),
 		}, true, true
 	}
 
@@ -222,6 +226,23 @@ func staticCommandSubset(input Input, facts Facts, unmodeled bool) (view Facts, 
 		}
 	}
 	return view, partialArgv, true
+}
+
+// staticRedirectPaths returns the path facts of paths that are the static
+// redirect targets the view commands kept, with the redirect's access.
+func staticRedirectPaths(commands []CommandFact, paths []PathFact) []PathFact {
+	var kept []PathFact
+	for _, path := range paths {
+		for _, command := range commands {
+			if command.ID == path.CommandID && slices.ContainsFunc(command.Redirects, func(redirect RedirectFact) bool {
+				return redirect.Target == path.Value && redirect.Access == path.Access
+			}) {
+				kept = append(kept, path)
+				break
+			}
+		}
+	}
+	return kept
 }
 
 // partialArgvPOSIXProcess reports whether command is a POSIX process that is
