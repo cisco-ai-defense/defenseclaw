@@ -29,6 +29,7 @@ from types import SimpleNamespace
 import pytest
 from defenseclaw.commands.cmd_doctor import _check_hook_runtime_integrity, _DoctorResult
 from defenseclaw.hook_integrity import (
+    edited_hook_problems,
     edited_hook_script,
     hook_registration_problems,
     hook_runtime_problems,
@@ -398,6 +399,27 @@ def test_edited_hook_shape_matches_the_go_recogniser():
     # The Go repair and this doctor check read one golden, so they cannot drift.
     for case in json.loads(_EDITED_GOLDEN.read_text(encoding="utf-8")):
         assert bool(edited_hook_script(case["command"], case["script"])) is case["edited"], case
+
+
+_EDITED_ENTRIES_GOLDEN = _EDITED_GOLDEN.with_name("hook_edited_entries.json")
+
+
+@pytest.mark.parametrize(
+    "case",
+    json.loads(_EDITED_ENTRIES_GOLDEN.read_text(encoding="utf-8")),
+    ids=lambda case: case["name"],
+)
+def test_edited_hook_entries_match_the_go_hook_guard(tmp_path, case):
+    # GAP-0906: the doctor reports what the hook guard repairs, one edited
+    # entry among intact ones included (internal/gateway/connector reads the same golden).
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    config = tmp_path / case["file"]
+    config.write_text(case["document"].replace("{data_dir}", str(data_dir)), encoding="utf-8")
+    connectors = {case["connector"]: {"locations": {"hook_config_paths": [str(config)]}}}
+    (data_dir / "hook_contract_lock.json").write_text(json.dumps({"version": 2, "connectors": connectors}))
+    problems = edited_hook_problems(SimpleNamespace(data_dir=str(data_dir)), case["connector"])
+    assert bool(problems) is case["edited"], problems
 
 
 @pytest.mark.parametrize("connector", ["copilot", "hermes", "claudecode"])

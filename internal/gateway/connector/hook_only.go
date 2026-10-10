@@ -2539,11 +2539,7 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 	case "devin":
 		err = patchDevinHooks(path, hookScript, devinOwnedHookCommands(opts, hookScript)...)
 	case "copilot":
-		events := c.HookProfile(opts).SupportedEvents
-		if len(events) == 0 {
-			events = copilotCurrentHookEvents
-		}
-		err = patchCopilotHooksForOS(path, hookScript, events, runtime.GOOS)
+		err = patchCopilotHooksForOS(path, hookScript, c.copilotHookEvents(opts), runtime.GOOS)
 	case "openhands":
 		err = patchOpenHandsHooks(path, hookScript)
 	case "antigravity":
@@ -2555,6 +2551,15 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 		return err
 	}
 	return updateManagedFileBackupPostHash(opts.DataDir, c.name, logicalName, path)
+}
+
+// copilotHookEvents are the Copilot events Setup registers for opts: the
+// resolved hook profile's, or every current event.
+func (c *hookOnlyConnector) copilotHookEvents(opts SetupOpts) []string {
+	if events := c.HookProfile(opts).SupportedEvents; len(events) != 0 {
+		return events
+	}
+	return copilotCurrentHookEvents
 }
 
 func (c *hookOnlyConnector) managedBackupLogicalName() string {
@@ -4262,13 +4267,7 @@ func patchHermesHooks(path, hookScript, hookExecutable string) error {
 	hookCommand := hermesConfiguredHookCommand(hookScript, hookExecutable)
 	recognizedCommands := hermesRecognizedHookCommands(hookCommand)
 	for _, spec := range hermesRequiredHooks {
-		entry := map[string]interface{}{
-			"command": hookCommand,
-			"timeout": 30,
-		}
-		if spec.matcher != "" {
-			entry["matcher"] = spec.matcher
-		}
+		entry := hermesHookEntry(hookCommand, spec.matcher)
 		reconciled, reconcileErr := reconcileHermesHookEntries(hooks[spec.event], recognizedCommands, entry)
 		if reconcileErr != nil {
 			return fmt.Errorf("reconcile Hermes event %s: %w", spec.event, reconcileErr)
@@ -4429,6 +4428,18 @@ func preserveTrailingTopLevelYAMLTrivia(data []byte, start, end int) int {
 		end = previousStart
 	}
 	return end
+}
+
+// hermesHookEntry is the one handler Setup registers for a Hermes event.
+func hermesHookEntry(hookCommand, matcher string) map[string]interface{} {
+	entry := map[string]interface{}{
+		"command": hookCommand,
+		"timeout": 30,
+	}
+	if matcher != "" {
+		entry["matcher"] = matcher
+	}
+	return entry
 }
 
 // hermesHookScriptName is the Hermes hook script Setup generates on Unix.
@@ -5004,8 +5015,17 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 	if err != nil {
 		return err
 	}
+	for key, value := range antigravityOwnedHookKeys(goos, hookScript) {
+		cfg[key] = value
+	}
+	return writeJSONObject(path, cfg)
+}
+
+// antigravityOwnedHookKeys renders the outer keys DefenseClaw owns in
+// Antigravity's hooks.json, one per lifecycle event.
+func antigravityOwnedHookKeys(goos, hookScript string) map[string]interface{} {
+	keys := make(map[string]interface{}, len(antigravityLifecycleEvents))
 	for _, event := range antigravityLifecycleEvents {
-		key := "defenseclaw-antigravity-" + strings.ToLower(event)
 		handler := map[string]interface{}{
 			"type":    "command",
 			"command": antigravityHookInvocationCommandForEvent(goos, event, hookScript),
@@ -5020,9 +5040,9 @@ func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 		} else {
 			handlers = []interface{}{handler}
 		}
-		cfg[key] = map[string]interface{}{event: handlers}
+		keys[antigravityOwnedHookKeyPrefix+strings.ToLower(event)] = map[string]interface{}{event: handlers}
 	}
-	return writeJSONObject(path, cfg)
+	return keys
 }
 
 // antigravityOwnedHookKeyPrefix begins each outer key DefenseClaw owns in
