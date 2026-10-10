@@ -371,8 +371,13 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	}
 
 	packageDrift, packageDriftChecked := "", false
+	hookDamage := env.inspectHookBinary(record)
 	for _, path := range sortedKeys(record.Files) {
 		if inputsChanged && path == env.Layout.ConfigPath {
+			continue
+		}
+		if hookDamage != nil && path == env.installedHookPath() {
+			add("%s", env.hookBinaryProblem(record, hookDamage))
 			continue
 		}
 		got, err := sha256File(env.P(path))
@@ -403,7 +408,11 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	if packageDrift != "" {
 		add("%s", packageDrift)
 	}
-	problems = append(problems, env.installedModeProblems(record, inputsChanged)...)
+	skip := ""
+	if hookDamage != nil {
+		skip = env.installedHookPath() // named above
+	}
+	problems = append(problems, env.installedModeProblems(record, inputsChanged, skip)...)
 	loadCredential := env.GOOS == "linux" && env.Services.Version(ctx) >= loadCredentialSystemd
 	for _, dir := range env.managedDirs(Account{Name: record.ServiceUser, UID: record.ServiceUID, GID: record.ServiceGID}, loadCredential) {
 		if dir.External {
@@ -623,10 +632,10 @@ func (l *lifecycle) backFromRestart(ctx context.Context, unit Unit) bool {
 // group- or other-writable. Repair restores the modes of the files it
 // writes; it refuses to adopt a replaceable binary, so that problem names
 // the command that restores it.
-func (e *Env) installedModeProblems(record *Deployment, skipConfig bool) []string {
+func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip string) []string {
 	var problems []string
 	for _, path := range sortedKeys(record.Files) {
-		if skipConfig && path == e.Layout.ConfigPath {
+		if (skipConfig && path == e.Layout.ConfigPath) || path == skip {
 			continue
 		}
 		_, _, mode, err := statOwnerMode(e.P(path))
@@ -671,20 +680,32 @@ func (e *Env) lifecycleCommand(action string) string {
 	return filepath.Join(e.Layout.BinDir, binGateway) + " enterprise " + group + " " + action
 }
 
-// missingBinaryProblem names a recorded binary that is gone and the command
-// that puts it back. Without the hook binary no agent hook can start, and
-// the agents treat that as a non-blocking error (GAP-1217).
-func (e *Env) missingBinaryProblem(record *Deployment, path string) string {
-	if filepath.Base(path) == binHook {
-		text := path + " is missing, so no agent's DefenseClaw hook can start; Claude Code, Codex and the other agents treat that as a non-blocking error and run tool calls without DefenseClaw"
-		if e.sealedHookValid(record) {
-			return text + ". The hook guardian starts its restore within seconds; to restore it now, run `" + e.lifecycleCommand(ActionRepair) + "`, which puts it back from the copy the lifecycle sealed"
-		}
-		if record.Channel == ChannelPackage {
-			return text + "; " + e.packageReinstallStep(record.ProductVersion)
-		}
-		return text + "; run `" + e.lifecycleCommand(ActionRepair) + " --payload <staged payload directory>`"
+// hookBinaryProblem names a damaged hook binary, what it means for the
+// agents and the command that puts it back (GAP-1217, GAP-0680).
+func (e *Env) hookBinaryProblem(record *Deployment, damage *hookBinaryDamage) string {
+	text := e.installedHookPath() + " is " + damage.String() + ", so "
+	switch damage.state {
+	case hookBinaryEmpty:
+		text += "agents run their DefenseClaw hook as an empty script that allows every tool call"
+	case hookBinaryNotRootOwned:
+		text += "that account could replace the hook every agent runs"
+	case hookBinaryHashMismatch, hookBinaryNotRegular:
+		text += "agents run a hook DefenseClaw did not install"
+	default:
+		text += "no agent's DefenseClaw hook can start; Claude Code, Codex and the other agents treat that as a non-blocking error and run tool calls without DefenseClaw"
 	}
+	if e.sealedHookValid(record) {
+		return text + ". The hook guardian starts its restore within seconds; to restore it now, run `" + e.lifecycleCommand(ActionRepair) + "`, which puts it back from the copy the lifecycle sealed"
+	}
+	if record.Channel == ChannelPackage {
+		return text + "; " + e.packageReinstallStep(record.ProductVersion)
+	}
+	return text + "; run `" + e.lifecycleCommand(ActionRepair) + " --payload <staged payload directory>`"
+}
+
+// missingBinaryProblem names a recorded binary other than the hook that is
+// gone and the command that puts it back.
+func (e *Env) missingBinaryProblem(record *Deployment, path string) string {
 	if record.Channel == ChannelPackage {
 		return path + " is missing; " + e.packageReinstallStep(record.ProductVersion)
 	}

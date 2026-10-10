@@ -37,11 +37,13 @@ import (
 
 // An agent such as Claude Code treats a hook command that cannot start as a
 // non-blocking error, so while defenseclaw-hook.exe is missing (an antivirus
-// quarantine, for example) every tool call runs unchecked. The standalone
-// guardian keeps a protected copy of the recorded hook binary in its own
-// administrator-only folder and puts it back before each reconcile, which
-// fails on the missing file, and within windowsHookBinaryCheckInterval
-// between reconciles (GAP-0935).
+// quarantine, for example), empty or not the recorded release every tool
+// call runs unchecked. The standalone guardian keeps a protected copy of the
+// recorded hook binary in its own administrator-only folder and puts it back
+// before each reconcile, which fails on the missing file, and within
+// windowsHookBinaryCheckInterval between reconciles (GAP-0935, GAP-0680).
+// Setup stops the guardian before it replaces the binaries, so a newer
+// release is never taken for a damaged one.
 
 // windowsInstallFileSDDL is the InstallFile contract of the lifecycle:
 // SYSTEM and Administrators full control, Users read and execute, protected.
@@ -77,7 +79,7 @@ var (
 	windowsHookBinaryLastErr string
 )
 
-// watchWindowsStandaloneHookBinary restores a missing hook binary, and an
+// watchWindowsStandaloneHookBinary restores a damaged hook binary, and an
 // edited or deleted Claude Code drop-in, within one check interval for the
 // life of the guardian watch loop.
 func watchWindowsStandaloneHookBinary(ctx context.Context, stderr io.Writer) {
@@ -136,17 +138,14 @@ func removeWindowsReplacementCopies(dir string) []string {
 }
 
 // keepWindowsStandaloneHookBinary keeps the guardian copy of the recorded
-// hook binary and restores the binary from it when it is missing. With
-// onlyWhenMissing it does nothing while the binary is in place.
-func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenMissing bool) {
+// hook binary and restores the binary from it when it is damaged. With
+// onlyWhenDamaged it does not refresh the copy.
+func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
 	if err != nil || !strings.HasPrefix(strings.ToLower(filepath.Clean(enterpriseHookManifest)), strings.ToLower(roots.StateRoot)+`\`) {
 		return
 	}
 	target := filepath.Join(roots.InstallRoot, "bin", "defenseclaw-hook.exe")
-	if _, err := os.Lstat(target); onlyWhenMissing && !errors.Is(err, os.ErrNotExist) {
-		return
-	}
 	windowsHookBinaryMu.Lock()
 	defer windowsHookBinaryMu.Unlock()
 	want, err := windowsRecordedArtifactHash(roots.MetadataPath, "hook")
@@ -154,7 +153,7 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenMissing bool) {
 		return
 	}
 	copyPath := filepath.Join(roots.StateRoot, "hook-guardian", "payload", "defenseclaw-hook.exe")
-	restored, err := keepWindowsManagedFileCopy(target, copyPath, want)
+	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, !onlyWhenDamaged)
 	if err != nil {
 		if message := err.Error(); message != windowsHookBinaryLastErr {
 			windowsHookBinaryLastErr = message
@@ -163,8 +162,8 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenMissing bool) {
 		return
 	}
 	windowsHookBinaryLastErr = ""
-	if restored {
-		fmt.Fprintf(stderr, "[hook-guardian] restored the missing hook binary %s from the guardian's protected copy (sha256 %s)\n", target, want)
+	if damage != "" {
+		fmt.Fprintf(stderr, "[hook-guardian] tamper: restored the hook binary %s, which was %s, from the guardian's protected copy (sha256 %s)\n", target, damage, want)
 	}
 }
 
@@ -219,45 +218,58 @@ func windowsRecordedArtifactHash(metadataPath, name string) (string, error) {
 }
 
 // keepWindowsManagedFileCopy refreshes copyPath from target while target is
-// the recorded file (sha256 want), and restores a missing target from a copy
-// that still is. It reports whether it restored target.
-func keepWindowsManagedFileCopy(target, copyPath, want string) (bool, error) {
+// the recorded file (sha256 want) and refresh is set, and restores target
+// from a copy that still is when target is missing, empty or another file.
+// It reports what was wrong with the target it restored, or "".
+func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (string, error) {
+	damage := ""
 	info, err := os.Lstat(target)
-	if err == nil {
-		if !info.Mode().IsRegular() {
-			return false, nil
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		damage = "missing"
+	case err != nil || !info.Mode().IsRegular():
+		return "", nil
+	case info.Size() == 0:
+		damage = "empty (0 bytes)"
+	default:
+		sum, err := windowsFileSHA256Hex(target)
+		if err != nil {
+			return "", nil
+		}
+		if sum != want {
+			damage = "not the recorded release (hash mismatch: sha256 " + sum + ")"
+			break
+		}
+		if !refresh {
+			return "", nil
 		}
 		if sum, err := windowsFileSHA256Hex(copyPath); err == nil && sum == want {
-			return false, nil
-		}
-		if sum, err := windowsFileSHA256Hex(target); err != nil || sum != want {
-			return false, nil
+			return "", nil
 		}
 		if err := os.MkdirAll(filepath.Dir(copyPath), 0o700); err != nil {
-			return false, fmt.Errorf("keep a protected copy of %s: %w", target, err)
+			return "", fmt.Errorf("keep a protected copy of %s: %w", target, err)
 		}
-		return false, copyWindowsManagedFile(target, copyPath, "")
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return "", copyWindowsManagedFile(target, copyPath, "", true)
 	}
 	if sum, err := windowsFileSHA256Hex(copyPath); err != nil || sum != want {
-		return false, fmt.Errorf("the hook binary %s is missing and the guardian has no copy of the recorded release; agent hooks cannot start until Setup /repair restores it", target)
+		return "", fmt.Errorf("the hook binary %s is %s and the guardian has no copy of the recorded release; agents run tool calls without DefenseClaw until Setup /repair restores it", target, damage)
 	}
-	if err := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL); err != nil {
-		return false, fmt.Errorf("restore the missing hook binary %s: %w", target, err)
+	// A missing binary is put back without replacing one that appeared
+	// meanwhile; a damaged one is replaced.
+	if err := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, damage != "missing"); err != nil {
+		return "", fmt.Errorf("restore the hook binary %s, which is %s: %w", target, damage, err)
 	}
 	if sum, err := windowsFileSHA256Hex(target); err != nil || sum != want {
 		_ = os.Remove(target)
-		return false, fmt.Errorf("restore the missing hook binary %s: the restored file does not match the recorded release", target)
+		return "", fmt.Errorf("restore the hook binary %s: the restored file does not match the recorded release", target)
 	}
-	return true, nil
+	return damage, nil
 }
 
 // copyWindowsManagedFile copies source to destination through a temporary
 // sibling, with the protected access list sddl when it is not empty, and
-// renames it into place without replacing a file that appeared meanwhile.
-func copyWindowsManagedFile(source, destination, sddl string) error {
+// renames it into place, replacing a file already there only with replace.
+func copyWindowsManagedFile(source, destination, sddl string, replace bool) error {
 	body, err := os.ReadFile(source)
 	if err != nil {
 		return err
@@ -295,7 +307,7 @@ func copyWindowsManagedFile(source, destination, sddl string) error {
 		return err
 	}
 	flags := uint32(windows.MOVEFILE_WRITE_THROUGH)
-	if sddl == "" {
+	if replace {
 		flags |= windows.MOVEFILE_REPLACE_EXISTING
 	}
 	if err := windows.MoveFileEx(from, to, flags); err != nil {
@@ -306,10 +318,14 @@ func copyWindowsManagedFile(source, destination, sddl string) error {
 }
 
 func windowsFileSHA256Hex(path string) (string, error) {
-	body, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(body)
-	return hex.EncodeToString(sum[:]), nil
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
