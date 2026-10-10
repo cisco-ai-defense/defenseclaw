@@ -376,6 +376,12 @@ that one instead:
   ```text title="Upgrade output"
   ✓ rule pack /home/<you>/.defenseclaw/policies/guardrail/acme-1.0: rules/acme-extra.yaml (category "command") merged into rules/commands.yaml; 3 rule(s) kept
   ```
+- a rule file or folder that is a link is copied in its place with the files
+  it points to: 0.8.x read rule files through links, and 1.0 refuses a link in
+  a pack. A pack with links gets a 1.0 copy even when nothing else changes;
+  edit the copy from then on. A link that does not resolve, loops, or points
+  outside the pack stops the migration with an error that names it: replace
+  the link with the file it points to, and run the upgrade again.
 
 Any other rule of yours keeps only its pattern. The migration names each one,
 and the upgrade prints them on one line:
