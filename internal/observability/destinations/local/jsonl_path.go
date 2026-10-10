@@ -47,7 +47,18 @@ func JSONLPathProblem(path string, allowedWriters ...string) string {
 	folder := filepath.Dir(path)
 	info, err := os.Lstat(folder)
 	if err != nil {
-		return "" // the gateway creates a missing folder, owner-only
+		// The gateway creates a missing folder. On Windows it gets what the
+		// nearest existing folder passes on to new subfolders, and the
+		// gateway refused it at open when that lets another account write
+		// it; the check passed with the folder still missing (GAP-1381).
+		ancestor, depth := filepath.Dir(folder), 1
+		for ancestor != filepath.Dir(ancestor) {
+			if _, statErr := os.Lstat(ancestor); statErr == nil {
+				return jsonlMissingFolderProblem(folder, ancestor, depth, allowedWriters)
+			}
+			ancestor, depth = filepath.Dir(ancestor), depth+1
+		}
+		return ""
 	}
 	switch {
 	case info.Mode()&os.ModeSymlink != 0:

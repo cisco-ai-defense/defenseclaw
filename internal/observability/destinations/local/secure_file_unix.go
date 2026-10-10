@@ -213,6 +213,10 @@ func jsonlFolderProblem(folder string, info os.FileInfo, _ []string) string {
 	return ""
 }
 
+// jsonlMissingFolderProblem is JSONLPathProblem for a missing folder: the
+// gateway creates it owner-only (mode 0700).
+func jsonlMissingFolderProblem(string, string, int, []string) string { return "" }
+
 // jsonlFileProblem is JSONLPathProblem for an existing regular file, by the
 // rules validateSecureFileInfo applies at open: a mode with group or other
 // bits (a file created with umask 022 is 0644) or a second name. The
