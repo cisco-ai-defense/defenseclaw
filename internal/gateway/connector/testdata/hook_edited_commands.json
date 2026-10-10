@@ -1,0 +1,21 @@
+[
+  {"script": "copilot-hook.sh", "command": "'/home/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'", "edited": true},
+  {"script": "copilot-hook.sh", "command": "'/home/u/.defenseclaw/hooks/copilot-hookX.sh' --event 'preToolUse'", "edited": true},
+  {"script": "hermes-hook.sh", "command": "'/home/u/.defenseclaw/hooks/hermes-hookX.sh'", "edited": true},
+  {"script": "hermes-hook.sh", "command": "'/home/u/.defenseclaw/hooks/hermes-hook.sh.off'", "edited": true},
+  {"script": "claude-code-hook.sh", "command": "/home/u/.defenseclaw/xhooks/claude-code-hook.sh", "edited": true},
+  {"script": "codex-hook.sh", "command": "/home/u/.defenseclawX/hooks/codex-hook.sh --event PreToolUse --hook-contract c1", "edited": true},
+  {"script": "kiro-hook.sh", "command": "'/home/my dir/.defenseclaw/hooks/kiro-hookX.sh'", "edited": true},
+  {"script": "codex-hook.sh", "command": "/home/u/.defenseclawX/hooks/codex-hookX.sh", "edited": false},
+  {"script": "copilot-hook.sh", "command": "/home/u/bin/copilot-hookX.sh", "edited": false},
+  {"script": "copilot-hook.sh", "command": "/home/u/bin/copilot-hook.sh", "edited": false},
+  {"script": "copilot-hook.sh", "command": "/home/u/.defenseclaw/hooks/my-hook.sh", "edited": false},
+  {"script": "cursor-hook.sh", "command": "/home/u/.defenseclaw/hooks/cursor-hookX.sh --verbose", "edited": false},
+  {"script": "cursor-hook.sh", "command": "echo /home/u/.defenseclaw/hooks/cursor-hook.sh", "edited": false},
+  {"script": "devin-hook.sh", "command": "~/.defenseclaw/hooks/devin-hook.sh", "edited": false},
+  {"script": "kiro-hook.sh", "command": "/home/u/.defenseclaw/hooks/../kiro-hook.sh", "edited": false},
+  {"script": "kiro-hook.sh", "command": "/home/my dir/.defenseclaw/hooks/kiro-hook.sh", "edited": false},
+  {"script": "hermes-hook.sh", "command": "/opt/defenseclaw/hooks/hermes-hook.sh", "edited": false},
+  {"script": "claude-code-hook.sh", "command": "/home/u/.defenseclaw/hooks/codex-hookX.sh", "edited": false},
+  {"script": "hermes-hook.sh", "command": "\"C:/Program Files/DefenseClaw/defenseclaw-hook.exe\" hook --connector hermes", "edited": false}
+]
