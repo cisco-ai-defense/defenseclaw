@@ -233,6 +233,9 @@ func TestRebaseMergesRuleFilesThatShareACategory(t *testing.T) {
 			want:  map[string]string{"ACME-A": "HIGH", "ACME-A-b": "MEDIUM"}, gone: []string{"rules/b.yaml"},
 			merged: `rules/b.yaml (category "acme") merged into rules/a.yaml; 1 rule(s) kept, 1 identical one(s) were ` +
 				`already there (renamed, as rules/a.yaml has the ID: ACME-A is now ACME-A-b)`},
+		{name: "distinct categories are not merged",
+			files: map[string]string{"rules/a.yaml": file("acme", a), "rules/b.yaml": file("acme-other", b)},
+			want:  map[string]string{"ACME-A": "HIGH", "ACME-B": "LOW"}},
 		{name: "too many rules for one file",
 			files: map[string]string{"rules/a.yaml": file("acme", many...), "rules/b.yaml": file("acme", b)},
 			err:   "Categories must be unique in 1.0: move the rules of rules/b.yaml into rules/a.yaml and delete rules/b.yaml"},
@@ -278,6 +281,9 @@ func TestRebaseMergesRuleFilesThatShareACategory(t *testing.T) {
 			}
 			if err != nil || plan == nil || plan.Files == nil {
 				t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+			}
+			if tc.merged == "" && len(tc.gone) == 0 && len(plan.Merged) > 0 {
+				t.Errorf("merged %q, want no merge", plan.Merged)
 			}
 			if tc.merged != "" && !slices.Contains(plan.Merged, tc.merged) {
 				t.Errorf("merged %q, want %q", plan.Merged, tc.merged)
