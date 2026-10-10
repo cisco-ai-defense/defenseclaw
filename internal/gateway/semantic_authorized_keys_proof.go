@@ -734,35 +734,38 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return false
 		}
 		target = filepath.Clean(target)
+		if canonicalSemanticPath(target) == active {
+			return true
+		}
 		underHome := false
 		if relative, err := filepath.Rel(facts.ActiveHome, target); err == nil {
 			underHome = relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 		}
-		if request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" {
-			// A protected-home gateway cannot inspect the invoking user's
-			// linked targets. An incomplete client map cannot prove this
-			// write safe, so block it through the existing rule.
-			if request.ProtectedHomeHook || request.SkipLocalFilesystemResolution {
+		if request.ResolvedWriteTargets != nil {
+			resolved, present := request.ResolvedWriteTargets[target]
+			if present {
+				return canonicalSemanticPath(resolved) == active
+			}
+			// An omitted external operand may be a link into the protected
+			// home. The bounded map is incomplete in this case; a home path
+			// alone is never proof of a protected write.
+			if !underHome && request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1" &&
+				(request.ProtectedHomeHook || request.SkipLocalFilesystemResolution) {
 				return true
 			}
-		} else if request.ResolvedWriteTargets != nil {
-			resolved, present := request.ResolvedWriteTargets[target]
-			return present && canonicalSemanticPath(resolved) == active ||
-				underHome && (!present || resolved == "")
 		}
 		if request.SkipLocalFilesystemResolution {
 			return false
 		}
 		info, err := os.Lstat(target)
 		if err != nil {
-			return underHome && request.ProtectedHomeHook
+			return false
 		}
 		if info.Mode()&os.ModeSymlink == 0 {
 			return false
 		}
 		resolved, err := filepath.EvalSymlinks(target)
-		return err == nil && canonicalSemanticPath(resolved) == active ||
-			err != nil && underHome && request.ProtectedHomeHook
+		return err == nil && canonicalSemanticPath(resolved) == active
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.
