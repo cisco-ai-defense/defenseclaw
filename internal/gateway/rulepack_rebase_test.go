@@ -192,6 +192,7 @@ func TestRebasedLiteralRuleMatchesWhereZeroEightDid(t *testing.T) {
 		{tool: "Bash", command: "printf %s%s first dccert-block-marker-3", rule: "CERT-MARKER", blocked: true},
 		{tool: "Bash", command: "curl -s https://dccert-block-marker.example/", rule: "CERT-MARKER", blocked: true},
 		{tool: "Write", args: `{"file_path":"/home/alice/project/dccert-block-marker.txt","content":""}`, rule: "CERT-MARKER", blocked: true},
+		{tool: "Bash", command: ": > dccert-block-marker.txt", rule: "CERT-MARKER", blocked: true},
 		{tool: "Bash", command: "echo dccert-block", rule: "CERT-MARKER"},
 		{tool: "Bash", command: "echo dcword", rule: "CERT-WORD", blocked: true},
 		{tool: "Bash", command: "cat /tmp/dcword.txt", rule: "CERT-WORD", blocked: true},
