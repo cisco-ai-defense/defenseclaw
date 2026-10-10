@@ -2447,6 +2447,17 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 func (a *APIServer) agentHookSkillAssetDecision(ctx context.Context, req agentHookRequest) (config.AssetPolicyDecision, bool) {
 	toolInput := decodeAgentHookToolInput(req.ToolArgs)
 	probe := skillProbeFromFields(req.ToolName, toolInput, req.Payload)
+	// Secure Client keeps main's probe (issue #1092): the connector's own
+	// skill loader and a read of a denied skill's folder are matched only on
+	// standalone and per-user gateways.
+	if cfg := a.liveConfig(); !probe.Matched && cfg != nil && !cfg.SecureClientIntegration() {
+		if probe = nativeSkillToolProbe(req.ConnectorName, req.ToolName, toolInput); !probe.Matched {
+			// Cursor, Kiro and the others read a skill as a file: refuse
+			// a tool call that reaches into a denied skill's folder, as
+			// for Claude Code and Codex (GAP-0569, GAP-1234).
+			return a.skillFolderAccessDecision(ctx, req.ConnectorName, req.HookEventName, req.CWD, req.ToolName, toolInput)
+		}
+	}
 	return a.evaluateRuntimeSkillAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
 
