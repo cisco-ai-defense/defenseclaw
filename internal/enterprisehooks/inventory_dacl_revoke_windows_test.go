@@ -57,8 +57,9 @@ func TestRevokeGatewayInventoryReadRestoresTheProtectedDACL(t *testing.T) {
 }
 
 // GAP-1324: a user who made a parent of a component folder
-// (AppData\Local\hermes) a junction to another account's folder does not
-// take the gateway's read ACE off that account's folder when revoked.
+// (AppData\Local\hermes) a junction to another account's folder, or a
+// profile file a hard link to another account's file, does not take the
+// gateway's read ACE off that account's folder or file when revoked.
 func TestRevokeGatewayInventoryReadSkipsAJunctionBelowTheProfile(t *testing.T) {
 	gateway, err := windows.StringToSid(windowsServiceSIDString(productionGatewayServiceName))
 	if err != nil {
@@ -89,6 +90,17 @@ func TestRevokeGatewayInventoryReadSkipsAJunctionBelowTheProfile(t *testing.T) {
 	if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(userA, linked), filepath.Join(userB, linked)).CombinedOutput(); err != nil {
 		t.Fatalf("mklink /J: %v: %s", err, out)
 	}
+	// A hard link to the other account's .claude.json shares its DACL.
+	otherFile := filepath.Join(userB, ".claude.json")
+	if err := os.WriteFile(otherFile, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := ensureInventorySelfACE(otherFile, gateway); err != nil || result != inventoryDACLGranted {
+		t.Fatalf("file grant = %v, %v", result, err)
+	}
+	if err := os.Link(otherFile, filepath.Join(userA, ".claude.json")); err != nil {
+		t.Fatal(err)
+	}
 	manifest := Manifest{Targets: []ManifestTarget{{UserHome: userA, Connector: "hermes"}}}
 	if err := RevokeGatewayInventoryReadForManifest(manifest); err != nil {
 		t.Fatalf("revoke: %v", err)
@@ -99,5 +111,12 @@ func TestRevokeGatewayInventoryReadSkipsAJunctionBelowTheProfile(t *testing.T) {
 	}
 	if acl, _, err := sd.DACL(); err != nil || acl == nil || !daclHasACEFor(acl, []*windows.SID{gateway}) {
 		t.Fatalf("the other account's %s lost the gateway ACE through the junction (err %v)", rel, err)
+	}
+	sd, err = windows.GetNamedSecurityInfo(otherFile, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acl, _, err := sd.DACL(); err != nil || acl == nil || !daclHasACEFor(acl, []*windows.SID{gateway}) {
+		t.Fatalf("the other account's .claude.json lost the gateway ACE through a hard link (err %v)", err)
 	}
 }

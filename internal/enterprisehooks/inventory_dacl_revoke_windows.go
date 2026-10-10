@@ -89,8 +89,9 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 // no-follow rule of the grant (GAP-0197): a standard user who made a parent
 // of rel (AppData\Local\hermes) a junction to another account's folder
 // would otherwise have that folder lose the gateway's read ACE when the
-// user was excluded (GAP-1324). A link or other reparse point below home
-// returns errInventoryDACLLink; a missing path is a no-op.
+// user was excluded (GAP-1324). A link or other reparse point below home,
+// or a file with more than one name, returns errInventoryDACLLink; a
+// missing path is a no-op.
 func revokeInventoryACEs(home, rel string, sids []*windows.SID) error {
 	handle, err := openInventoryDACLHandle(home, rel)
 	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
@@ -100,6 +101,15 @@ func revokeInventoryACEs(home, rel string, sids []*windows.SID) error {
 		return err
 	}
 	defer windows.CloseHandle(handle)
+	// A file's DACL is shared by all its names: through a hard link in the
+	// profile the revoke would change another account's file.
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return err
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 && info.NumberOfLinks != 1 {
+		return errInventoryDACLLink
+	}
 	sd, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return fmt.Errorf("get DACL: %w", err)
