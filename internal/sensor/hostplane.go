@@ -23,6 +23,7 @@ package sensor
 
 import (
 	"context"
+	"slices"
 	"sync"
 	"time"
 
@@ -157,6 +158,7 @@ func (h *hostPlane) handle(event plane.Event) {
 		Title:      match.Title,
 		Detail:     match.Detail,
 		PID:        event.PID,
+		Path:       event.Path,
 		Confidence: match.Confidence,
 		At:         at,
 	})
@@ -166,11 +168,15 @@ func (h *hostPlane) handle(event plane.Event) {
 type hostFinding struct {
 	RootPID   int
 	AgentName string
-	Score     int
-	Signals   []scoring.Signal
-	Stages    []tactics.Tactic
-	FirstSeen time.Time
-	LastSeen  time.Time
+	// PIDs are the session's processes, root first, and ConfigPaths the
+	// agent configuration files it wrote: what attributes it to an account.
+	PIDs        []int
+	ConfigPaths []string
+	Score       int
+	Signals     []scoring.Signal
+	Stages      []tactics.Tactic
+	FirstSeen   time.Time
+	LastSeen    time.Time
 }
 
 // harvest expires stale observations and returns the sessions that currently
@@ -195,13 +201,31 @@ func (h *hostPlane) harvest(now time.Time, minRisk int) []hostFinding {
 		if score < minRisk {
 			continue
 		}
+		pids, configPaths := sessionOwnerEvidence(rootPID, session.Observations())
 		findings = append(findings, hostFinding{
 			RootPID: rootPID, AgentName: session.AgentName,
+			PIDs: pids, ConfigPaths: configPaths,
 			Score: score, Signals: signals, Stages: session.TacticsSeen(),
 			FirstSeen: session.FirstSeen, LastSeen: session.LastSeen,
 		})
 	}
 	return findings
+}
+
+// sessionOwnerEvidence lists a session's processes, root first, and the
+// agent configuration files it wrote.
+func sessionOwnerEvidence(rootPID int, observations []agentchain.Observation) ([]int, []string) {
+	pids := []int{rootPID}
+	var configPaths []string
+	for _, observation := range observations {
+		if observation.PID > 0 && !slices.Contains(pids, observation.PID) {
+			pids = append(pids, observation.PID)
+		}
+		if observation.SignalID == "agent_config_persistence" && observation.Path != "" {
+			configPaths = append(configPaths, observation.Path)
+		}
+	}
+	return pids, configPaths
 }
 
 // stats reports what the gate did, so the lineage filter is auditable.

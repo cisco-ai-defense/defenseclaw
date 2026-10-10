@@ -31,11 +31,15 @@ import (
 
 // Observation is one tactic attributed to an agent session.
 type Observation struct {
-	Tactic     tactics.Tactic
-	SignalID   string
-	Title      string
-	Detail     string
-	PID        int
+	Tactic   tactics.Tactic
+	SignalID string
+	Title    string
+	Detail   string
+	PID      int
+	// Path is the file the observation concerns, for file kinds. It names
+	// the profile an agent's configuration lives in, which can attribute
+	// the session to its account; it is not part of the dedup key.
+	Path       string
 	Confidence float64
 	At         time.Time
 }

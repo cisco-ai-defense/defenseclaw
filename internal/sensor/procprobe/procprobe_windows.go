@@ -61,12 +61,14 @@ func snapshot() ([]Process, int, error) {
 
 	rows := make([]Process, 0, 256)
 	missingOwners := make(map[uint32]int)
+	sessions := processSessions()
 	partial := 0
 	for {
 		row := Process{
-			PID:  int(entry.ProcessID),
-			PPID: int(entry.ParentProcessID),
-			Name: windows.UTF16ToString(entry.ExeFile[:]),
+			PID:       int(entry.ProcessID),
+			PPID:      int(entry.ParentProcessID),
+			Name:      windows.UTF16ToString(entry.ExeFile[:]),
+			SessionID: sessions[entry.ProcessID],
 		}
 		if row.PID > 0 {
 			if !enrich(&row) {
@@ -86,8 +88,10 @@ func snapshot() ([]Process, int, error) {
 		}
 	}
 	// WMI's process provider supplies the owner SID when this service cannot
-	// open another user's token. WTS enumeration needs Administrators group
-	// membership to list another user's processes, which this service lacks.
+	// open another user's token. WTS process enumeration needs Administrators
+	// group membership to list another user's processes, which this service
+	// lacks; each row's session comes from the kernel's process list instead,
+	// and the sensor asks who is signed in to it (SessionUser).
 	if len(missingOwners) != 0 {
 		for pid, owner := range lookupWMIProcessOwners(missingOwners) {
 			rows[missingOwners[pid]].User, rows[missingOwners[pid]].UserSID = owner.name, owner.sid
