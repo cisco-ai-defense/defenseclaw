@@ -3668,15 +3668,28 @@ func sanitizeHookCWD(cwd string) string {
 	if !filepath.IsAbs(s) {
 		return ""
 	}
-	resolved, err := filepath.EvalSymlinks(s)
+	resolved, err := resolveHookCWD(s)
 	if err != nil {
 		return ""
 	}
-	info, err := os.Stat(resolved)
-	if err != nil || !info.IsDir() {
-		return ""
-	}
 	return resolved
+}
+
+// resolveHookCWD resolves a hook working directory to the real directory
+// it names; tests stand in for a service account that may not stat it.
+var resolveHookCWD = func(cwd string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", resolved)
+	}
+	return resolved, nil
 }
 
 // validateGitCwd resolves symlinks and ensures the cwd is a real directory.

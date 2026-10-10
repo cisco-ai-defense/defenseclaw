@@ -36,10 +36,10 @@ import (
 func TestManagedWindowsProjectSkillRootFromFirstHook(t *testing.T) {
 	restoreTrust := validateManagedGuardianAuthorization
 	validateManagedGuardianAuthorization = func(string, string) error { return nil }
-	restoreHome, restoreLstat := userScopedIdentityHome, projectSkillLstat
+	restoreHome, restoreLstat, restoreCWD := userScopedIdentityHome, projectSkillLstat, resolveHookCWD
 	t.Cleanup(func() {
 		validateManagedGuardianAuthorization = restoreTrust
-		userScopedIdentityHome, projectSkillLstat = restoreHome, restoreLstat
+		userScopedIdentityHome, projectSkillLstat, resolveHookCWD = restoreHome, restoreLstat, restoreCWD
 	})
 
 	root := t.TempDir()
@@ -113,6 +113,14 @@ func TestManagedWindowsProjectSkillRootFromFirstHook(t *testing.T) {
 		}
 		return info, nil
 	}
+	// Nor can it resolve a working directory in a profile, so the hook's
+	// cwd reached the hooks empty (the root cause seen live).
+	resolveHookCWD = func(cwd string) (string, error) {
+		if _, err := projectSkillLstat(cwd); err != nil {
+			return "", err
+		}
+		return restoreCWD(cwd)
+	}
 	grants := 0
 	roots := &projectSkillRoots{}
 	roots.start(true)
@@ -138,11 +146,22 @@ func TestManagedWindowsProjectSkillRootFromFirstHook(t *testing.T) {
 	caller := func(sid string) context.Context {
 		return context.WithValue(withServiceAccountGateway(context.Background()), verifiedUserScopedIdentityContextKey{}, sid)
 	}
+	// Requests are decoded as the hook route decodes them.
+	decode := func(ctx context.Context, event, cwd, skill string) claudeCodeHookRequest {
+		body := map[string]interface{}{"hook_event_name": event, "cwd": cwd, "session_id": "s-1356"}
+		if skill != "" {
+			body["tool_name"], body["tool_input"] = "Skill", map[string]interface{}{"skill": skill}
+		}
+		raw, _ := json.Marshal(body)
+		return decodeClaudeCodeRequestForContext(ctx, raw, body)
+	}
+	sessionStart := func(sid, cwd string) {
+		ctx := caller(sid)
+		api.noteProjectSkillFolders(ctx, "claudecode", decode(ctx, "SessionStart", cwd, "").CWD)
+	}
 	useSkill := func(sid, cwd, name string) (config.AssetPolicyDecision, bool) {
-		return api.claudeCodeSkillAssetDecision(caller(sid), claudeCodeHookRequest{
-			HookEventName: "PreToolUse", ToolName: "Skill", CWD: cwd,
-			ToolInput: map[string]interface{}{"skill": name},
-		})
+		ctx := caller(sid)
+		return api.claudeCodeSkillAssetDecision(ctx, decode(ctx, "PreToolUse", cwd, name))
 	}
 	changed := roots.changeSignal()
 	signalled := func() bool {
@@ -156,15 +175,15 @@ func TestManagedWindowsProjectSkillRootFromFirstHook(t *testing.T) {
 
 	// An unresolved home, a project outside the home and another user's
 	// home register nothing and never ask the guardian.
-	api.noteProjectSkillFolders(caller("S-1-5-21-1-9999"), "claudecode", projA)
-	api.noteProjectSkillFolders(caller(aliceSID), "claudecode", filepath.Join(root, "shared", "projO"))
-	api.noteProjectSkillFolders(caller(aliceSID), "claudecode", filepath.Join(bob, "projB"))
+	sessionStart("S-1-5-21-1-9999", projA)
+	sessionStart(aliceSID, filepath.Join(root, "shared", "projO"))
+	sessionStart(aliceSID, filepath.Join(bob, "projB"))
 	if grants != 0 || signalled() || roots.registered(filepath.Join(bob, "projB", ".claude", "skills")) {
 		t.Fatalf("an unresolved, outside or other-user folder was considered (grants=%d)", grants)
 	}
 
 	// A caller whose home is not an enrolled user's is refused.
-	api.noteProjectSkillFolders(caller(carolSID), "claudecode", filepath.Join(carol, "projK"))
+	sessionStart(carolSID, filepath.Join(carol, "projK"))
 	if reason, _ := roots.refusal(filepath.Join(carol, "projK", ".claude", "skills"), time.Now()); reason == "" || grants != 0 {
 		t.Fatalf("unlisted home: reason=%q grants=%d", reason, grants)
 	}
@@ -193,7 +212,7 @@ func TestManagedWindowsProjectSkillRootFromFirstHook(t *testing.T) {
 		t.Fatalf("project folder registered=%v grants=%d", roots.registered(skillsA), grants)
 	}
 	for i := 0; i < 3; i++ {
-		api.noteProjectSkillFolders(caller(aliceSID), "claudecode", projA)
+		sessionStart(aliceSID, projA)
 	}
 	if grants != 2 || signalled() {
 		t.Fatalf("repeated hooks asked the guardian again or signalled a restart (grants=%d)", grants)
