@@ -2116,6 +2116,8 @@ func TestHermesAllowlistTamperedOwnershipRefusesAmbiguousCleanup(t *testing.T) {
 	}
 	first := drifted["approvals"].([]interface{})[0].(map[string]interface{})
 	delete(first, hermesAllowlistOwnerField)
+	// A key Hermes never writes: not the consent Hermes records (GAP-1241).
+	first["note"] = "operator"
 	drifted["operator_edit"] = true
 	body, _ := json.MarshalIndent(drifted, "", "  ")
 	if err := os.WriteFile(allowlistPath, append(body, '\n'), 0o600); err != nil {
@@ -2124,6 +2126,115 @@ func TestHermesAllowlistTamperedOwnershipRefusesAmbiguousCleanup(t *testing.T) {
 	err = conn.Teardown(context.Background(), opts)
 	if err == nil || !strings.Contains(err.Error(), "lost its DefenseClaw ownership marker") {
 		t.Fatalf("Teardown error = %v, want ambiguous ownership refusal", err)
+	}
+}
+
+// GAP-1241: DefenseClaw 0.8.x registered its Hermes hook with
+// hooks_auto_accept and left the allowlist to Hermes, so an upgraded profile
+// holds Hermes-recorded approvals without the ownership marker. Setup adopts
+// them, Teardown puts the 0.8.x bytes back, and an unmarked entry Hermes did
+// not write is refused before Setup changes anything.
+func TestHermesSetupAdoptsConsentRecordedUnder08x(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("DefenseClaw 0.8.x registered Hermes on Unix only")
+	}
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = configPath
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+	conn := NewHermesConnector()
+	opts := SetupOpts{DataDir: filepath.Join(root, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+	hookScript := filepath.Join(opts.DataDir, "hooks", "hermes-hook.sh")
+	command := shellWord(hookScript)
+	scriptBody := []byte("#!/bin/bash\n# defenseclaw-managed-hook v6\n")
+	if err := os.MkdirAll(filepath.Dir(hookScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hookScript, scriptBody, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// What 0.8.10 wrote to config.yaml and what Hermes v0.21.5 recorded in
+	// the allowlist on its first run (dc-fc-rhel-lp1).
+	hooks := map[string]interface{}{}
+	var approvals []interface{}
+	for _, event := range []string{
+		"pre_tool_call", "post_tool_call", "pre_llm_call", "post_llm_call", "on_session_start",
+		"on_session_end", "on_session_finalize", "on_session_reset", "subagent_start", "subagent_stop",
+	} {
+		entry := map[string]interface{}{"command": command, "timeout": 30}
+		if strings.HasSuffix(event, "_tool_call") {
+			entry["matcher"] = ".*"
+		}
+		hooks[event] = []interface{}{entry}
+		approvals = append(approvals, map[string]interface{}{
+			"approved_at":              "2026-10-10T05:32:18.807289Z",
+			"command":                  command,
+			"event":                    event,
+			"script_mtime_at_approval": "2026-10-10T05:30:26.604096Z",
+		})
+	}
+	configBody, err := yaml.Marshal(map[string]interface{}{"hooks": hooks, "hooks_auto_accept": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowlistBody, err := json.MarshalIndent(map[string]interface{}{"approvals": approvals}, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
+	write := func(allowlist []byte) {
+		t.Helper()
+		if err := os.WriteFile(configPath, configBody, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(allowlistPath, allowlist, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// An unmarked approval of DefenseClaw's hook with a key Hermes does not
+	// write is refused before Setup writes the hook script or any file.
+	tampered := bytes.Replace(allowlistBody, []byte(`"event": "pre_tool_call",`), []byte(`"event": "pre_tool_call", "note": "operator",`), 1)
+	write(tampered)
+	err = conn.Setup(context.Background(), opts)
+	if !errors.Is(err, ErrSetupRefusedUnchanged) || !strings.Contains(err.Error(), "lost its DefenseClaw ownership marker") {
+		t.Fatalf("Setup error = %v, want an unchanged ambiguous-entry refusal", err)
+	}
+	for path, want := range map[string][]byte{configPath: configBody, allowlistPath: tampered, hookScript: scriptBody} {
+		if got, _ := os.ReadFile(path); !bytes.Equal(got, want) {
+			t.Fatalf("%s changed after refused Setup", path)
+		}
+	}
+
+	write(allowlistBody)
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup over 0.8.10 state: %v", err)
+	}
+	if present, err := hermesOwnedApprovalsPresent(allowlistPath, command); err != nil || !present {
+		t.Fatalf("owned approvals present = %v, %v; want every required event adopted", present, err)
+	}
+	document, err := readHermesAllowlist(allowlistPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(document["approvals"].([]interface{})); got != len(hermesRequiredHooks) {
+		t.Fatalf("allowlist holds %d approvals, want one marked approval per required event (%d)", got, len(hermesRequiredHooks))
+	}
+	if present, err := conn.ownedHookContractPresent(opts); err != nil || !present {
+		t.Fatalf("owned hook contract present = %v, %v", present, err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if got, _ := os.ReadFile(allowlistPath); !bytes.Equal(got, allowlistBody) {
+		t.Fatalf("Teardown did not restore the 0.8.10 allowlist\n got %s", got)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
 	}
 }
 

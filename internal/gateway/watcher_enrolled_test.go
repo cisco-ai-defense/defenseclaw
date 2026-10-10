@@ -174,13 +174,14 @@ func TestUnreadableClaudeStateRefusesThatUsersMCPToolCalls(t *testing.T) {
 		publishClaudeStatesUnreadable(nil)
 	})
 	root := t.TempDir()
-	alice, bob, dataDir := filepath.Join(root, "alice"), filepath.Join(root, "bob"), filepath.Join(root, "data")
+	alice, bob, carol, dataDir := filepath.Join(root, "alice"), filepath.Join(root, "bob"), filepath.Join(root, "carol"), filepath.Join(root, "data")
 	record := map[string]any{
 		"version": 1, "updated_at": time.Now().UTC().Format(time.RFC3339), "ok": true,
-		"target_count": 2, "success_count": 2, "failure_count": 0,
+		"target_count": 3, "success_count": 3, "failure_count": 0,
 		"protected_targets": []map[string]any{
 			{"user": "alice", "user_home": alice, "sid": "S-1-5-21-1-1001", "connector": "claudecode", "ok": true},
 			{"user": "bob", "user_home": bob, "sid": "S-1-5-21-1-1002", "connector": "claudecode", "ok": true},
+			{"user": "carol", "user_home": carol, "sid": "S-1-5-21-1-1003", "connector": "claudecode", "ok": true},
 		},
 	}
 	raw, _ := json.Marshal(record)
@@ -204,6 +205,13 @@ func TestUnreadableClaudeStateRefusesThatUsersMCPToolCalls(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(spoolDir, "S-1-5-21-1-1001.json"), marker, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	empty, err := enterprisehooks.MarshalClaudeMCPSpoolRecord("S-1-5-21-1-1002", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(spoolDir, "S-1-5-21-1-1002.json"), empty, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	set := resolveEnrolledWatchSet(&config.Config{DataDir: dataDir}, connector.NewDefaultRegistry(),
 		config.GatewayWatcherConfig{Enabled: true}, filepath.Join(root, "service"))
 	publishClaudeStatesUnreadable(set.claudeUnreadable)
@@ -216,5 +224,11 @@ func TestUnreadableClaudeStateRefusesThatUsersMCPToolCalls(t *testing.T) {
 	}
 	if _, refused := api.claudeCodeMCPAssetDecision(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002, Home: bob}), req); refused {
 		t.Fatal("bob's Claude Code state is readable; his MCP tool call was refused")
+	}
+	// GAP-1298: carol is enrolled but has no record (its publication failed),
+	// so her servers are unknown and her MCP tool calls are refused too.
+	decision, refused = api.claudeCodeMCPAssetDecision(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1003, Home: carol}), req)
+	if !refused || decision.Action != "block" || !strings.Contains(decision.Reason, filepath.Join(spoolDir, "S-1-5-21-1-1003.json")) {
+		t.Fatalf("carol: refused=%v decision %+v; want the call refused for the missing spool record", refused, decision)
 	}
 }
