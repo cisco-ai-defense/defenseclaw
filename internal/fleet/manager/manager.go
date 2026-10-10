@@ -119,7 +119,13 @@ type DeviceStore interface {
 // scale.  Phase 2: refactor to per-device or sharded locks so heartbeat
 // processing for device A does not block device B (tracked as "Should Fix").
 type FleetManager struct {
-	mu                sync.RWMutex
+	mu sync.RWMutex
+	// H-5 fix: Sharded device locks — 256 shards keyed by device ID hash.
+	// ProcessHeartbeat acquires only the shard lock for the target device,
+	// allowing up to 256 concurrent heartbeat processors. The global mu
+	// RWMutex is still used for map-level operations (register, decommission,
+	// list, health) that need a consistent view of the device map.
+	deviceLocks       [256]sync.Mutex
 	devices           map[uint64]*Device
 	alertHandler      AlertHandler
 	heartbeatInterval time.Duration
@@ -280,21 +286,24 @@ func (fm *FleetManager) RegisterDevice(tenantID, fleetID uint16, deviceID uint32
 func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint32, hb *Heartbeat) {
 	fullID := ComposeID(tenantID, fleetID, deviceID)
 
-	fm.mu.Lock()
-	// H-5 fix: Use defer to guarantee the mutex is released even if a panic
-	// occurs during heartbeat processing. The previous manual-unlock pattern
-	// (H-6 narrowing) left the mutex held on any panic between Lock and Unlock,
-	// deadlocking all subsequent fleet operations. Correctness (no deadlock on
-	// panic) is more important than the lock-narrowing performance optimization
-	// in Phase 1. Persistence (SaveDevice) now runs inside the lock.
-	defer fm.mu.Unlock()
+	// H-5 fix: Use a sharded per-device lock for heartbeat processing.
+	// This allows concurrent heartbeat processing for different devices
+	// (up to 256 parallel) while still serializing updates to the same device.
+	shard := fullID % 256
+	fm.deviceLocks[shard].Lock()
+	defer fm.deviceLocks[shard].Unlock()
 
+	// Brief read lock to look up the device in the map.
+	fm.mu.RLock()
 	dev, exists := fm.devices[fullID]
+	fm.mu.RUnlock()
+
 	if !exists {
 		if !fm.AutoRegister {
 			return
 		}
 		// Auto-register the unknown device using heartbeat fields.
+		// Need write lock to insert into the shared map.
 		dev = &Device{
 			DeviceID:      fullID,
 			TenantID:      tenantID,
@@ -307,7 +316,9 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 			RegisteredAt:  time.Now(),
 			LastHeartbeat: time.Now(),
 		}
+		fm.mu.Lock()
 		fm.devices[fullID] = dev
+		fm.mu.Unlock()
 		if fm.store != nil {
 			if err := fm.store.SaveDevice(dev); err != nil {
 				log.Printf("[fleet] store error on auto-register: %v", err)
@@ -327,7 +338,10 @@ func (fm *FleetManager) ProcessHeartbeat(tenantID, fleetID uint16, deviceID uint
 	}
 
 	// NEW-3 fix: Replay detection — reject heartbeats where the monotonic
-	// uptime has not advanced.  A legitimate device's uptime_sec increases
+	// uptime has not advanced.
+	// H-6 note: Combined with per-device HMAC keys and BootEpoch, replay
+	// requires key compromise. The C-side boot_nonce (H-2 fix) ensures
+	// verdict HMACs are unique per boot session.  A legitimate device's uptime_sec increases
 	// on every heartbeat.  A replayed (or stale) heartbeat will have
 	// uptime <= the last seen value.
 	//
@@ -646,6 +660,10 @@ func (fm *FleetManager) SetAlertHandler(h AlertHandler) {
 // M-9 fix: Support semver strings like "1.2.3" by encoding as
 // major*10000 + minor*100 + patch. Falls back to plain uint16 parse
 // for bare numeric strings like "42". Returns 0 on parse failure.
+//
+// LOW-3: Maximum representable semver is 6.55.35 (6*10000 + 55*100 + 35 = 65535).
+// Versions beyond this saturate at uint16 max (65535). This is sufficient for
+// firmware versions in the edge-connector ecosystem.
 func fwVersionToUint16(s string) uint16 {
 	var major, minor, patch int
 	n, _ := fmt.Sscanf(s, "%d.%d.%d", &major, &minor, &patch)

@@ -458,11 +458,18 @@ func TestServiceDistributeEmergency(t *testing.T) {
 		t.Fatalf("emergency signature verification failed: %v", err)
 	}
 
-	// Verify the remaining 32 bytes of the signature field are zero-padded
+	// CRT-2 fix: The remaining 32 bytes of the signature field are now filled
+	// with HMAC(key, first_32_signature_bytes) to prevent the zero padding from
+	// being a distinguishing marker. Verify they are NOT all zeros.
+	allZero := true
 	for i := 76; i < 108; i++ {
 		if msg[i] != 0 {
-			t.Fatalf("expected zero padding at byte %d, got %02x", i, msg[i])
+			allZero = false
+			break
 		}
+	}
+	if allZero {
+		t.Fatalf("CRT-2: signature padding bytes [76:108] should not be all zeros")
 	}
 }
 

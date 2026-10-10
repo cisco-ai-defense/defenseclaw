@@ -374,25 +374,44 @@ func (b *Bridge) Start(ctx context.Context) error {
 				}
 				b.verdictRateMu.Unlock()
 
-				// M-6 fix: Clean decommissioned entries older than 7 days
-				// to prevent unbounded map growth from accumulated decommissions.
-				// H-7 fix: Before evicting, check the persistent store (if available)
-				// to avoid evicting devices that are still decommissioned.
+				// M-5 fix: Clean decommissioned entries older than 7 days.
+				// Collect candidates under lock, check store WITHOUT lock,
+				// then re-acquire lock to remove confirmed entries. This avoids
+				// holding decommissionedMu during potentially slow store I/O.
 				decommCutoff := time.Now().Add(-7 * 24 * time.Hour)
-				b.decommissionedMu.Lock()
+				var candidates []uint64
+				b.decommissionedMu.RLock()
 				for id, ts := range b.decommissioned {
 					if ts.Before(decommCutoff) {
-						if b.decommStore != nil {
-							if still, err := b.decommStore.IsDecommissioned(id); err == nil && still {
-								// Still decommissioned in persistent store — refresh timestamp
-								b.decommissioned[id] = time.Now()
-								continue
-							}
-						}
-						delete(b.decommissioned, id)
+						candidates = append(candidates, id)
 					}
 				}
-				b.decommissionedMu.Unlock()
+				b.decommissionedMu.RUnlock()
+
+				// Check store outside lock
+				var toDelete []uint64
+				var toRefresh []uint64
+				for _, id := range candidates {
+					if b.decommStore != nil {
+						if still, err := b.decommStore.IsDecommissioned(id); err == nil && still {
+							toRefresh = append(toRefresh, id)
+							continue
+						}
+					}
+					toDelete = append(toDelete, id)
+				}
+
+				// Apply changes under lock
+				if len(toDelete) > 0 || len(toRefresh) > 0 {
+					b.decommissionedMu.Lock()
+					for _, id := range toDelete {
+						delete(b.decommissioned, id)
+					}
+					for _, id := range toRefresh {
+						b.decommissioned[id] = time.Now()
+					}
+					b.decommissionedMu.Unlock()
+				}
 			}
 		}
 	}()

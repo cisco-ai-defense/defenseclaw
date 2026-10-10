@@ -23,6 +23,10 @@ const testFleetToken = "test-token-for-fleet-api"
 func authedRequest(method, target string, body io.Reader) *http.Request {
 	req := httptest.NewRequest(method, target, body)
 	req.Header.Set("Authorization", "Bearer "+testFleetToken)
+	// M-6 fix: Include X-Requested-With header on POST requests to pass CSRF check.
+	if method == "POST" {
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	}
 	return req
 }
 

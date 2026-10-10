@@ -373,9 +373,9 @@ void dclaw_canary_tick(void) {
 
         /* Check spike: blocks in previous minute vs baseline */
         uint8_t prev_min = (current_min > 0) ? current_min - 1 : 0;
-        /* H-12: widened from uint16_t to match canary_blocks[10] type */
-        uint32_t rate = s->canary.canary_blocks[prev_min];
-        uint32_t threshold = (uint32_t)s->canary.baseline_blocks_per_min * DCLAW_CANARY_SPIKE_MULT;
+        /* LOW-2: widened to uint64_t to match canary_blocks type */
+        uint64_t rate = s->canary.canary_blocks[prev_min];
+        uint64_t threshold = (uint64_t)s->canary.baseline_blocks_per_min * DCLAW_CANARY_SPIKE_MULT;
 
         if (rate > threshold && s->canary.baseline_blocks_per_min > 0) {
             s->canary.spike_streak++;
@@ -501,14 +501,28 @@ static const uint8_t *get_emergency_ca_key(void) {
         }
     }
 
-    /* Fall back to OTA key when no separate emergency key is provisioned. */
+    /* M-3 fix: In production (DEV_MODE=OFF), refuse to fall back to the OTA
+     * key for emergency verification. The OTA key and emergency key serve
+     * different purposes; sharing them means compromising the OTA key also
+     * compromises emergency broadcasts. Log a WARNING and leave the emergency
+     * key unprovisioned so verify_emergency_signature() rejects all commands. */
+#if !DCLAW_DEV_MODE
+    fprintf(stderr, "[DCLAW] WARNING: No DCLAW_EMERGENCY_KEY set in production mode — "
+            "emergency commands will be REJECTED. Set DCLAW_EMERGENCY_KEY to accept "
+            "emergency broadcasts.\n");
+    memset(emergency_ca_key, 0, sizeof(emergency_ca_key));
+    emergency_ca_key_provisioned = false;
+    return emergency_ca_key;
+#else
+    /* Dev mode: fall back to OTA key for backward compatibility. */
     const uint8_t *ota_key = get_ota_ca_key();
     memcpy(emergency_ca_key, ota_key, ED25519_PUBKEY_LEN);
     emergency_ca_key_provisioned = ota_ca_key_provisioned;
     if (emergency_ca_key_provisioned) {
-        fprintf(stderr, "[DCLAW] No DCLAW_EMERGENCY_KEY set — using DCLAW_OTA_KEY for emergency verification.\n");
+        fprintf(stderr, "[DCLAW] No DCLAW_EMERGENCY_KEY set — using DCLAW_OTA_KEY for emergency verification (dev mode).\n");
     }
     return emergency_ca_key;
+#endif
 }
 
 /* H-3 fix: Public accessor for the emergency key, used by main.c for

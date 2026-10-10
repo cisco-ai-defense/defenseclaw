@@ -64,14 +64,23 @@ type API struct {
 	currentToken atomic.Pointer[string]
 
 	// M-5 fix: Rate limiting for rotation endpoints — max 1 per minute.
-	lastTokenRotation     time.Time
-	lastDeviceKeyRotation time.Time
+	lastTokenRotation time.Time
+	// CRT-1 fix: Per-device key rotation rate limiter. The previous single
+	// lastDeviceKeyRotation time.Time allowed only 1 rotation per minute across
+	// ALL devices. Now each device has its own cooldown so rotating device A's
+	// key does not block rotating device B's key.
+	deviceKeyRotations map[uint64]time.Time
 }
 
 // NewAPI creates the fleet API with its dependencies.
 // The policy service is optional; if nil, policy endpoints return 501.
 func NewAPI(mgr *manager.FleetManager, cache *verdict.Cache, opts ...APIOption) *API {
-	api := &API{manager: mgr, cache: cache, mux: http.NewServeMux()}
+	api := &API{
+		manager:            mgr,
+		cache:              cache,
+		mux:                http.NewServeMux(),
+		deviceKeyRotations: make(map[uint64]time.Time),
+	}
 	for _, opt := range opts {
 		opt(api)
 	}
@@ -206,7 +215,7 @@ func (a *API) registerRoutes() {
 	a.currentToken.Store(&token)
 
 	wrap := func(h http.HandlerFunc) http.HandlerFunc {
-		return authMiddleware(&a.currentToken, h)
+		return securityHeadersMiddleware(csrfMiddleware(authMiddleware(&a.currentToken, h)))
 	}
 
 	a.mux.HandleFunc("GET /devices", wrap(a.listDevices))
@@ -926,6 +935,10 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 
 	// BLK-1 fix: Update the atomic pointer instead of os.Setenv so the
 	// authMiddleware immediately sees the new token without re-registering.
+	// M-4 note: The atomic pointer swap is instant — the next request uses
+	// the new token. In-flight requests that already passed authMiddleware
+	// continue normally (they are past the middleware). This is correct HTTP
+	// semantics: once auth is verified, the request proceeds to completion.
 	a.currentToken.Store(&newTokenHex)
 	a.lastTokenRotation = time.Now()
 
@@ -943,18 +956,18 @@ func (a *API) rotateToken(w http.ResponseWriter, r *http.Request) {
 // device key, saves it to the key store, and returns the new key once. P2-8 fix:
 // Allows operators to rotate individual device keys without re-registering.
 func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
-	// M-5 fix: Rate limit — max 1 device key rotation per minute.
-	if !a.lastDeviceKeyRotation.IsZero() && time.Since(a.lastDeviceKeyRotation) < time.Minute {
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{
-			"error": "device key rotation rate limited — try again in 1 minute",
-		})
-		return
-	}
-
 	idStr := r.PathValue("id")
 	deviceID, err := strconv.ParseUint(idStr, 10, 64)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid device_id"})
+		return
+	}
+
+	// CRT-1 fix: Per-device rate limit — max 1 key rotation per device per minute.
+	if lastRot, exists := a.deviceKeyRotations[deviceID]; exists && time.Since(lastRot) < time.Minute {
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": "device key rotation rate limited — try again in 1 minute",
+		})
 		return
 	}
 
@@ -987,7 +1000,7 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.lastDeviceKeyRotation = time.Now()
+	a.deviceKeyRotations[deviceID] = time.Now()
 	newKeyHex := hex.EncodeToString(newKey)
 
 	a.emitAudit("fleet.device.key_rotated",
@@ -1000,6 +1013,35 @@ func (a *API) rotateDeviceKey(w http.ResponseWriter, r *http.Request) {
 		"status":     "rotated",
 		"warning":    "This key is shown once and cannot be retrieved later. Provision it on the device.",
 	})
+}
+
+// M-6 fix: CSRF protection — require X-Requested-With header on all POST
+// requests. Browsers do not include this header in cross-origin requests
+// unless CORS pre-flight allows it, which the fleet API does not.
+func csrfMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			if r.Header.Get("X-Requested-With") == "" {
+				writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "missing X-Requested-With header (CSRF protection)",
+				})
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// M-7 fix: Security headers middleware — sets standard security headers on
+// all responses to prevent content sniffing, clickjacking, and caching of
+// sensitive fleet data.
+func securityHeadersMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Frame-Options", "DENY")
+		next(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

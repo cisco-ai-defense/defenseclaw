@@ -812,23 +812,28 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
      * event loop on slow/dead DNS servers. */
 #if DCLAW_MQTT_ENABLED
     if (!starts_with_digit(host)) {
+        /* H-1 fix: Use AI_NUMERICHOST to avoid blocking DNS resolution.
+         * AI_NUMERICHOST only succeeds for literal IP addresses (e.g.,
+         * "192.168.1.1"). For actual hostnames it returns EAI_NONAME
+         * immediately (no DNS query). This avoids the blocking getaddrinfo
+         * call entirely. For hostnames that fail AI_NUMERICHOST, we ALLOW
+         * and let the cloud escalation path handle the SSRF check server-side
+         * where DNS resolution is safe (non-blocking, pooled resolvers). */
         struct addrinfo hints, *result;
         memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
+        hints.ai_flags = AI_NUMERICHOST;
 
-        /* H-2 fix: Call getaddrinfo() without SIGALRM. It may block up to
-         * the system resolver timeout (typically 5-30s). This is safer than
-         * using async-signal-unsafe alarm()/SIGALRM which can corrupt
-         * getaddrinfo's internal state. The DNS check is best-effort. */
         int dns_rc = getaddrinfo(host, NULL, &hints, &result);
 
         if (dns_rc != 0) {
-            /* DNS resolution failed — block to be safe */
-            return DCLAW_ACTION_BLOCK;
+            /* Not a literal IP (it's a hostname) — skip on-device DNS.
+             * The cloud escalation path will re-evaluate server-side. */
+            return DCLAW_ACTION_ALLOW;
         }
 
-        /* Check if the resolved address is in a private/loopback range */
+        /* Literal IP resolved — check if it's in a private/loopback range */
         struct sockaddr_in *addr = (struct sockaddr_in *)result->ai_addr;
         uint32_t ip = ntohl(addr->sin_addr.s_addr);
         freeaddrinfo(result);

@@ -277,14 +277,16 @@ static void test_unprovisioned_key_rejects_valid_signature(void) {
     (void)rc; (void)saved_version;
     printf("  PASS: unprovisioned key rejects zero-key-signed update\n");
 
-    /* Restore the test key for subsequent tests */
+    /* Restore both test keys for subsequent tests */
     setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1);
+    setenv("DCLAW_EMERGENCY_KEY", TEST_OTA_KEY_HEX, 1);
     dclaw_ota_reset_key_state();
 }
 
 int main(void) {
-    /* Set a real (non-zero) test OTA key for signature verification */
+    /* Set test keys for both OTA and emergency signature verification */
     setenv("DCLAW_OTA_KEY", TEST_OTA_KEY_HEX, 1);
+    setenv("DCLAW_EMERGENCY_KEY", TEST_OTA_KEY_HEX, 1);
 
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};

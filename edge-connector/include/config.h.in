@@ -28,12 +28,18 @@
 #define DCLAW_CANARY_SPIKE_CONSEC      3
 #define DCLAW_AUDIT_FLUSH_SEC          60
 #define DCLAW_VERDICT_TIMEOUT_MS       5000
-#define DCLAW_IPC_MAX_PAYLOAD          512
+/* M-2 fix: Increased from 512 to 8192 to accommodate larger content in
+ * IPC requests now that DCLAW_CONTENT_MAX is 4096. */
+#define DCLAW_IPC_MAX_PAYLOAD          8192
 #define DCLAW_IPC_RATE_LIMIT_PER_SEC   100
 #define DCLAW_TOOL_NAME_MAX            64
 #define DCLAW_DESTINATION_MAX          128
 #define DCLAW_BROKER_URL_MAX           128
-#define DCLAW_CONTENT_MAX              512
+/* M-2 fix: Increased from 512 to 4096. The old 512-byte limit truncated
+ * content silently, causing content scanning to miss patterns near the
+ * end of larger payloads. 4096 bytes covers the vast majority of tool
+ * call content while staying within embedded RAM budgets. */
+#define DCLAW_CONTENT_MAX              4096
 #define DCLAW_MAX_SCAN_FINDINGS        4
 #define DCLAW_MAX_DFA_STATES           128
 #define DCLAW_MAX_DFA_CATEGORIES       6

@@ -412,13 +412,23 @@ func (s *Service) DistributeEmergency(ctx context.Context, tenantID, fleetID uin
 	}
 
 	// Copy HMAC-SHA256 (32 bytes) into the first half of the 64-byte signature
-	// field. The remaining 32 bytes stay zero (padding for the Ed25519 slot).
+	// field. CRT-2 fix: Fill the remaining 32 bytes with HMAC(key, first_32_bytes)
+	// instead of leaving them as zeros. The C verifier only checks the first 32
+	// bytes, but the zero padding was a distinguishing marker that revealed the
+	// signature scheme (HMAC vs Ed25519). By filling all 64 bytes with
+	// non-trivial data, the wire format is indistinguishable from a full 64-byte
+	// Ed25519 signature.
 	n := 32
 	if len(sig) < n {
 		n = len(sig)
 	}
 	copy(msg[44:44+n], sig[:n])
-	// msg[76:108] remains zero — Ed25519 padding
+
+	// CRT-2 fix: Pad bytes [76:108] with HMAC of the first 32 signature bytes.
+	padSig, padErr := s.emergencySigner.Sign(msg[44 : 44+32])
+	if padErr == nil && len(padSig) >= 32 {
+		copy(msg[76:108], padSig[:32])
+	}
 
 	topic := fmt.Sprintf("defenseclaw/%d/%d/ota/emergency", tenantID, fleetID)
 

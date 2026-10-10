@@ -6,6 +6,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #if DCLAW_MQTT_ENABLED
 extern int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
@@ -58,6 +60,16 @@ int dclaw_init(const dclaw_device_info_t *info) {
     memcpy(&g_state.device, info, sizeof(dclaw_device_info_t));
     g_state.clock.time_trusted = false;
     g_state.next_request_id = 1;
+    /* H-2 fix: Generate a random boot nonce so verdict HMACs are unique
+     * per boot. Even if next_request_id restarts at 1, the nonce ensures
+     * an attacker cannot replay a verdict from a previous boot session. */
+    {
+        int urandom_fd = open("/dev/urandom", O_RDONLY);
+        if (urandom_fd >= 0) {
+            (void)read(urandom_fd, g_state.boot_nonce, sizeof(g_state.boot_nonce));
+            close(urandom_fd);
+        }
+    }
     g_state.initialized = true;
     dclaw_policy_tables_init();
 

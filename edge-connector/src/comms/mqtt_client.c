@@ -153,6 +153,8 @@ extern int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                               const uint8_t *signature);
 extern int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);
 extern bool dclaw_emergency_has_gap(uint32_t cloud_current_seq);
+extern void dclaw_cache_flush_all(void);
+extern void dclaw_emergency_persist(void);
 
 /* === MQTT packet encoding helpers === */
 
@@ -230,7 +232,18 @@ static int parse_broker_url(const char *url, char *host, size_t host_size,
         if (hlen >= host_size) return -1;
         memcpy(host, p, hlen);
         host[hlen] = '\0';
-        *port = (uint16_t)strtoul(colon + 1, NULL, 10);
+        /* LOW-1 fix: Validate port range and check for strtoul errors.
+         * Port must be 1-65535; 0 is invalid for MQTT. */
+        errno = 0;
+        char *end = NULL;
+        unsigned long port_val = strtoul(colon + 1, &end, 10);
+        if (errno != 0 || end == colon + 1 || (*end != '\0' && *end != '/' && *end != '?')) {
+            return -1; /* invalid port number */
+        }
+        if (port_val == 0 || port_val > 65535) {
+            return -1; /* port out of range */
+        }
+        *port = (uint16_t)port_val;
     } else {
         size_t hlen = strlen(p);
         if (hlen >= host_size) return -1;
@@ -973,15 +986,22 @@ int dclaw_mqtt_reconnect(void) {
          * missed. If the emergency state is initialized (we've seen at least
          * one emergency message before), log a warning so operators know
          * messages may have been lost. */
+        /* H-4 fix: On reconnect, if emergency state is initialized (we've seen
+         * at least one emergency message before), activate block_all as a
+         * fail-safe until a fresh emergency status is received from the fleet.
+         * This closes the window where emergency broadcasts missed during
+         * disconnect could leave the device in a stale (non-lockdown) state.
+         * The next emergency command (including RELEASE_LOCKDOWN) will set the
+         * correct state. */
         dclaw_state_t *rs = dclaw_get_state();
         if (rs->emergency.initialized) {
-            /* We don't know the cloud's current sequence number, so we
-             * cannot call dclaw_emergency_has_gap() precisely. Log a
-             * warning unconditionally after reconnect when emergency
-             * state is active; the next emergency message will trigger
-             * gap detection via the normal sequence check. */
-            fprintf(stderr, "[DCLAW] WARNING: emergency sequence gap may exist after reconnect "
-                    "(last_seen_seq=%u)\n", rs->emergency.last_seen_seq);
+            fprintf(stderr, "[DCLAW] WARNING: activating fail-safe block_all after reconnect "
+                    "(last_seen_seq=%u). Device will block all requests until a fresh "
+                    "emergency status is received from fleet.\n", rs->emergency.last_seen_seq);
+            rs->emergency.block_all_active = true;
+            rs->emergency.replay_requested = true;
+            dclaw_cache_flush_all();
+            dclaw_emergency_persist();
         }
     }
     return rc;

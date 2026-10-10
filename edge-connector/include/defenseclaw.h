@@ -232,7 +232,7 @@ typedef struct {
 
 typedef struct {
     uint16_t baseline_blocks_per_min;
-    uint32_t canary_blocks[10];  /* H-12: widened from uint16_t to prevent silent overflow */
+    uint64_t canary_blocks[10];  /* LOW-2: widened to uint64_t to prevent overflow even at extreme block rates */
     uint8_t  canary_minute;
     uint8_t  spike_streak;
     bool     canary_active;
@@ -308,6 +308,10 @@ typedef struct {
     uint32_t eval_count;            /* total evaluations (for cache_hit_pct) */
     uint32_t eval_cache_hit_count;  /* cache hits (for cache_hit_pct) */
     uint16_t                next_request_id;
+    /* H-2 fix: Random boot nonce generated at init. Included in verdict HMAC
+     * computation so that each boot's request IDs are unique even though
+     * next_request_id restarts at 1. Prevents verdict replay across reboots. */
+    uint8_t                 boot_nonce[16];
     bool                    online;
     bool                    initialized;
     /* P2-19 fix: One-shot flag set by dclaw_policy_rollback() so the next

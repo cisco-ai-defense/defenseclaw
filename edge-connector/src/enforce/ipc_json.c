@@ -296,16 +296,13 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
     /* Default id to 1 for backward compatibility if not present */
     if (!got_id) out->request_id = 1;
 
-    /* M-5: Validate the JSON-RPC method name.  Only "evaluate" is accepted
-     * on the IPC socket.  We parsed the method field into val_buf during
-     * the top-level key scan above; re-scan to verify.  For simplicity,
-     * re-check by scanning the JSON for "method":"evaluate". */
+    /* M-1 fix: Validate that the JSON-RPC "method" field is present and set
+     * to "evaluate". Previously, a request without a "method" field was
+     * accepted as long as tool_name, hash, caps, and session were present.
+     * This allowed non-evaluate RPC calls to be processed. */
     {
-        /* Quick scan: find "method" key and check its value.
-         * The method was already skipped during parsing above; we need to
-         * walk the JSON again to validate it.  For a minimal parser this
-         * is acceptable — the JSON is small (<4KB). */
         const char *m = json;
+        bool found_method = false;
         while ((m = strstr(m, "\"method\"")) != NULL) {
             m += 8; /* skip "method" */
             while (*m == ' ' || *m == ':' || *m == '\t') m++;
@@ -320,8 +317,12 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                 if (strcmp(method_buf, "evaluate") != 0) {
                     return -1; /* reject unknown methods */
                 }
+                found_method = true;
             }
             break;
+        }
+        if (!found_method) {
+            return -1; /* M-1: reject requests without a method field */
         }
     }
 

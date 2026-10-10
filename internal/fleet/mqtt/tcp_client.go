@@ -873,9 +873,12 @@ func readRemainingLength(r io.Reader) (int, error) {
 		}
 		value += int(buf[0]&0x7F) * multiplier
 		if buf[0]&0x80 == 0 {
-			// L-readRemainingLength: enforce upper bound to prevent memory exhaustion.
-			if value > 1<<20 {
-				return 0, fmt.Errorf("packet too large: %d", value)
+			// H-3 fix: Cap at 8192 bytes (enough for any fleet message: 4224 OTA +
+			// headers). The previous 1MB cap was inherited from the MQTT spec maximum
+			// but no fleet message should exceed ~5KB. This prevents a malicious
+			// broker from causing the gateway to allocate excessive memory.
+			if value > 8192 {
+				return 0, fmt.Errorf("packet too large: %d (max 8192)", value)
 			}
 			return value, nil
 		}
