@@ -115,7 +115,10 @@ def test_claude_unset_only_changes_active_profile_and_rolls_back(tmp_path, monke
     state.write_bytes(original)
 
     def failed_state_write(*_args):
-        state.write_bytes(b'{"mcpServers":{}}')
+        # The state publish lands, then a later step fails: the rollback
+        # restores the file this command wrote.
+        with connector_paths._locked_claude_mcp_mutation(str(state)):
+            connector_paths._publish_claude_config_if_unchanged(str(state), original, b'{"mcpServers":{}}')
         raise OSError("injected state write failure")
 
     monkeypatch.setattr(connector_paths, "_unset_claudecode_mcp_server", failed_state_write)
@@ -124,6 +127,38 @@ def test_claude_unset_only_changes_active_profile_and_rolls_back(tmp_path, monke
     assert state.read_bytes() == original
     assert legacy.read_bytes() == original
     assert default.read_bytes() == original
+
+
+def test_claude_unset_rollback_keeps_concurrent_profile_edits(tmp_path, monkeypatch):
+    # GAP-1378: a refused unset rolled the 0.8.x settings.json removal back
+    # over another writer's edits, and put the stale .claude.json back too.
+    _pin_claude_home(monkeypatch, tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dc"))
+    state = tmp_path / ".claude.json"
+    legacy = tmp_path / ".claude" / "settings.json"
+    legacy.parent.mkdir()
+    set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
+    legacy.write_text(json.dumps({"hooks": {}, "mcpServers": {"demo": {"command": "inert-old"}}}), encoding="utf-8")
+    changed = {"command": "inert-changed"}
+    real_remove = connector_paths._remove_claude_legacy_mcp_server
+
+    def remove_during_claude_edits(name):
+        removed = real_remove(name)
+        legacy.write_text(json.dumps({"hooks": {}, "mcpServers": {"demo": changed}}), encoding="utf-8")
+        live = json.loads(state.read_text(encoding="utf-8"))
+        live["mcpServers"].update(demo=changed, added={"command": "inert-added"})
+        state.write_text(json.dumps(live), encoding="utf-8")
+        return removed
+
+    monkeypatch.setattr(connector_paths, "_remove_claude_legacy_mcp_server", remove_during_claude_edits)
+    with pytest.raises(connector_paths.MCPServerNotRemovedError) as refused:
+        unset_mcp_server("claudecode", "demo")
+    assert json.loads(state.read_text(encoding="utf-8"))["mcpServers"] == {
+        "demo": changed,
+        "added": {"command": "inert-added"},
+    }
+    assert json.loads(legacy.read_text(encoding="utf-8"))["mcpServers"] == {"demo": changed}
+    assert str(legacy) in str(refused.value)
 
 
 class TestOpenClawDelegation:
