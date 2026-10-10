@@ -73,9 +73,40 @@ func (s *ContinuousDiscoveryService) refreshHomeOwnerNames() {
 	for i := range s.opts.homeOwners {
 		owner := &s.opts.homeOwners[i]
 		if name := strings.TrimSpace(discoveryAccountName(owner.UserID, owner.Home)); name != "" {
+			s.homeOwnersMu.Lock()
 			owner.UserName = name
+			s.homeOwnersMu.Unlock()
 		}
 	}
+}
+
+// EnrolledAccount is one profile owner of a service-context scan.
+type EnrolledAccount struct {
+	// Name is DOMAIN\name, or COMPUTER\name for a local account; the bare
+	// name when the owner record has no domain.
+	Name string
+	SID  string
+	Home string
+}
+
+// EnrolledAccounts returns the profile owners this scan attributes signals
+// to: the enrolled-user table the runtime planes attribute their findings
+// with (GAP-1250). It is empty outside a service-context Windows scan.
+func (s *ContinuousDiscoveryService) EnrolledAccounts() []EnrolledAccount {
+	if s == nil {
+		return nil
+	}
+	s.homeOwnersMu.RLock()
+	defer s.homeOwnersMu.RUnlock()
+	accounts := make([]EnrolledAccount, 0, len(s.opts.homeOwners))
+	for _, owner := range s.opts.homeOwners {
+		name := strings.TrimSpace(owner.UserName)
+		if domain := strings.TrimSpace(owner.Domain); domain != "" && name != "" && !strings.Contains(name, `\`) {
+			name = domain + `\` + name
+		}
+		accounts = append(accounts, EnrolledAccount{Name: name, SID: owner.UserID, Home: owner.Home})
+	}
+	return accounts
 }
 
 // homeOwnerForAccount returns the one profile owner whose account is user.

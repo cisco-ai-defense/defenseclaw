@@ -39,11 +39,15 @@ import (
 // should.
 
 type wireProcess struct {
-	PID       int    `json:"pid"`
-	PPID      int    `json:"ppid,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Cmdline   string `json:"cmdline,omitempty"`
-	User      string `json:"user,omitempty"`
+	PID     int    `json:"pid"`
+	PPID    int    `json:"ppid,omitempty"`
+	Name    string `json:"name,omitempty"`
+	Cmdline string `json:"cmdline,omitempty"`
+	User    string `json:"user,omitempty"`
+	// UserSID and Session carry the Windows owner and session, so a
+	// brokered read attributes findings as a direct one does (GAP-1250).
+	UserSID   string `json:"user_sid,omitempty"`
+	Session   uint32 `json:"session,omitempty"`
 	CPUNanos  int64  `json:"cpu_ns,omitempty"`
 	RSSBytes  int64  `json:"rss,omitempty"`
 	StartedAt int64  `json:"started_unix_ns,omitempty"`
@@ -52,7 +56,8 @@ type wireProcess struct {
 func encodeProcess(row procprobe.Process) wireProcess {
 	out := wireProcess{
 		PID: row.PID, PPID: row.PPID, Name: row.Name, Cmdline: row.Cmdline,
-		User: row.User, CPUNanos: int64(row.CPUTime), RSSBytes: row.RSSBytes,
+		User: row.User, UserSID: row.UserSID, Session: row.SessionID,
+		CPUNanos: int64(row.CPUTime), RSSBytes: row.RSSBytes,
 	}
 	if !row.StartedAt.IsZero() {
 		out.StartedAt = row.StartedAt.UnixNano()
@@ -63,7 +68,8 @@ func encodeProcess(row procprobe.Process) wireProcess {
 func decodeProcess(row wireProcess) procprobe.Process {
 	out := procprobe.Process{
 		PID: row.PID, PPID: row.PPID, Name: row.Name, Cmdline: row.Cmdline,
-		User: row.User, CPUTime: time.Duration(row.CPUNanos), RSSBytes: row.RSSBytes,
+		User: row.User, UserSID: row.UserSID, SessionID: row.Session,
+		CPUTime: time.Duration(row.CPUNanos), RSSBytes: row.RSSBytes,
 	}
 	if row.StartedAt != 0 {
 		out.StartedAt = time.Unix(0, row.StartedAt)

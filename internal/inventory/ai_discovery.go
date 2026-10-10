@@ -547,9 +547,13 @@ const (
 // ContinuousDiscoveryService owns device-level AI visibility. It is deliberately
 // sidecar-scoped so CLI/TUI/API callers all see the same state and OTel fanout.
 type ContinuousDiscoveryService struct {
-	opts    AIDiscoveryOptions
-	catalog []AISignature
-	store   *AIStateStore
+	opts AIDiscoveryOptions
+	// homeOwnersMu guards opts.homeOwners against EnrolledAccounts, which
+	// the runtime planes call from their own goroutine while a scan renames
+	// the owners (refreshHomeOwnerNames).
+	homeOwnersMu sync.RWMutex
+	catalog      []AISignature
+	store        *AIStateStore
 	// lifecycleMu makes claiming Run and retiring a prepared-but-never-run
 	// service atomic. Sidecar config reload uses this to close an intermediate
 	// generation that was superseded before the restart worker could run it,

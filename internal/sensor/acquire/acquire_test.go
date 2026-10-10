@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 )
 
 // serveHelper starts a helper on a temporary socket and returns a client
@@ -280,4 +281,14 @@ func TestVersionMismatchIsDistinguishable(t *testing.T) {
 // to read is exactly the change that must not pass unnoticed.
 func requestFieldCount(request Request) int {
 	return reflect.TypeOf(request).NumField()
+}
+
+// GAP-1250: a brokered process row keeps its Windows owner SID and session,
+// so a finding read through the helper is attributed as a direct one is.
+func TestProcessRowKeepsOwnerSIDAndSessionOverTheWire(t *testing.T) {
+	row := procprobe.Process{PID: 7, Name: "uvx.exe", User: `DCLAB\alice`, UserSID: "S-1-5-21-1-2-3-1104", SessionID: 2}
+	got := decodeProcess(encodeProcess(row))
+	if got.User != row.User || got.UserSID != row.UserSID || got.SessionID != row.SessionID {
+		t.Fatalf("round trip = %+v, want %+v", got, row)
+	}
 }

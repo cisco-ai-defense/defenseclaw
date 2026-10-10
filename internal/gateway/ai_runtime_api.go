@@ -50,17 +50,22 @@ type aiRuntimeResponse struct {
 }
 
 type aiRuntimeFinding struct {
-	FindingID string              `json:"finding_id"`
-	PID       int                 `json:"pid"`
-	Process   string              `json:"process"`
-	Cmdline   string              `json:"cmdline,omitempty"`
-	User      string              `json:"user,omitempty"`
-	UserSID   string              `json:"user_sid,omitempty"`
-	AgentName string              `json:"agent_name,omitempty"`
-	Score     int                 `json:"score"`
-	Severity  string              `json:"severity"`
-	Signals   []aiRuntimeSignal   `json:"signals"`
-	Providers []aiRuntimeProvider `json:"providers,omitempty"`
+	FindingID string `json:"finding_id"`
+	PID       int    `json:"pid"`
+	Process   string `json:"process"`
+	Cmdline   string `json:"cmdline,omitempty"`
+	User      string `json:"user,omitempty"`
+	UserSID   string `json:"user_sid,omitempty"`
+	// Attribution is how the finding was tied to user ("unattributed" for a
+	// host-wide finding no lookup could tie to an account), and
+	// AttributionReason why an unattributed one is not (GAP-1250).
+	Attribution       string              `json:"attribution"`
+	AttributionReason string              `json:"attribution_reason,omitempty"`
+	AgentName         string              `json:"agent_name,omitempty"`
+	Score             int                 `json:"score"`
+	Severity          string              `json:"severity"`
+	Signals           []aiRuntimeSignal   `json:"signals"`
+	Providers         []aiRuntimeProvider `json:"providers,omitempty"`
 	// Correlation is always present, including when the inventory had nothing
 	// to say and why. Omitting it on "unobserved" would let a reader mistake
 	// blindness for agreement.
@@ -165,6 +170,7 @@ func renderAIRuntimeSnapshot(snapshot sensor.Snapshot) aiRuntimeResponse {
 		rendered := aiRuntimeFinding{
 			FindingID: finding.FindingID, PID: finding.PID, Process: finding.Process,
 			Cmdline: finding.Cmdline, User: finding.User, UserSID: finding.UserSID, AgentName: finding.AgentName,
+			Attribution: finding.Attribution, AttributionReason: finding.AttributionReason,
 			Score: finding.Score, Severity: string(finding.Severity),
 			Signals: make([]aiRuntimeSignal, 0, len(finding.Signals)),
 			Correlation: aiRuntimeCorrelation{
