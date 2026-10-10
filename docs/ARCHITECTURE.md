@@ -63,6 +63,13 @@ contracts under `internal/gateway/connector/` and
 must update both implementations, their tests, and the published compatibility
 pages.
 
+Agent-version evidence selects the exact hook contract when available, but is
+not a Unix enterprise installation prerequisite. An unversioned, unsupported,
+or incompatibly changed contract uses the reviewed best-effort event matrix in
+fail-open mode until a later reconciliation verifies a known contract. Version
+changes inside the same registered contract remain compatible. See
+[`development/unverified-hook-contract-fallback.md`](development/unverified-hook-contract-fallback.md).
+
 ### Policy
 
 OPA admission/policy-domain files under `policies/rego/` are separate from
