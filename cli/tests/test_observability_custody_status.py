@@ -344,6 +344,41 @@ def test_doctor_reports_external_invalid_drop_only_and_managed_drift() -> None:
     assert checks["Native OTLP credentials"]["status"] == "warn"
 
 
+def test_doctor_drop_only_stream_at_own_gateway_fails(tmp_path, monkeypatch) -> None:
+    # A fresh install (exporter at this gateway, custody not yet confirmed)
+    # gets the same verdict as an upgraded managed one (GAP-1229).
+    from defenseclaw import connector_paths
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:18970"}}))
+    monkeypatch.setattr(connector_paths, "claude_settings_paths", lambda: [str(settings)])
+    report = ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=(
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000001",
+                connector="claudecode",
+                custody="external",
+                profile_version="claude-v1",
+                default=True,
+                normalized_batches=4,
+                drop_only_batches=4,
+                drop_only_signals=("logs", "metrics"),
+                drop_only_reasons=("invalid_mapped_field", "unsupported_identity"),
+            ),
+        ),
+    )
+    result = _DoctorResult()
+
+    _check_connector_export_custody(report, result, gateway_addr="127.0.0.1:18970")
+
+    row = {item["label"]: item for item in result.checks}["Connector OTLP: claudecode"]
+    assert row["status"] == "fail"
+    assert "drop-only native stream (4/4 batches)" in row["detail"]
+
+
 def test_doctor_managed_exporter_drift_alone_warns_with_next_step() -> None:
     report = ConnectorCustodyReport(
         state="available",

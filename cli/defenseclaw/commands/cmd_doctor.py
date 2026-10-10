@@ -10771,12 +10771,21 @@ def _check_connector_export_custody(
             continue
         if item.custody == "external":
             if item.connector == "claudecode" and _claude_exporter_reaches_gateway(gateway_addr):
-                tag = "fail" if item.credential_state == "invalid" else "pass"
+                # Same delivery rule as custody=defenseclaw: a stream whose
+                # every batch was dropped lost data, it is no pass (GAP-1229).
+                tag = "pass"
+                remediation = _native_drop_remediation(item.connector, delivery.state)
+                if item.credential_state == "invalid":
+                    tag, remediation = "fail", "rerun defenseclaw setup claude-code"
+                elif delivery.state == "all_drop_only":
+                    tag = "fail"
+                elif delivery.state == "partial_drop_only":
+                    tag = "warn"
                 _emit(
                     tag, label,
                     "native exporter points at this gateway; " + delivery.detail,
                     r=r,
-                    remediation="rerun defenseclaw setup claude-code" if tag == "fail" else "",
+                    remediation=remediation,
                 )
                 continue
             tag = "warn"
