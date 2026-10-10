@@ -470,7 +470,21 @@ func run(args []string) error {
 	}
 	editor.detach()
 	fmt.Fprintf(os.Stderr, "defenseclaw-acp: %v\n", runErr)
-	return serveAfterSessionEnd(editor.rest(), os.Stdout, editor.initializeRequest(), runErr.Error(), func() (*exec.Cmd, bool) {
-		return relaunchCommand(*contractLock, *agentID, args)
+	return serveAfterSessionEnd(editor.rest(), os.Stdout, editor.initializeRequest(), runErr.Error(), func(frame []byte) (*exec.Cmd, bool) {
+		return relaunchCommand(*contractLock, *agentID, args, func() bool {
+			// The entry can be identical after an administrator re-enables the
+			// pair. Ask the gateway whether this new thread's binding is valid
+			// before replacing the ended guard.
+			request, err := acp.ParseMessage(frame)
+			if err != nil {
+				return false
+			}
+			_, err = evaluator.Evaluate(ctx, acp.Evaluation{
+				Profile: *profile, Mode: acp.Mode(*mode), AgentID: *agentID, ClientID: *clientID,
+				Direction: acp.ClientToAgent, Surface: acp.SurfaceProtocol,
+				Method: request.Method, Payload: frame,
+			})
+			return err == nil
+		})
 	})
 }

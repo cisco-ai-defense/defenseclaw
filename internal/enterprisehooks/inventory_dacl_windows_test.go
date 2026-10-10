@@ -304,6 +304,68 @@ func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T)
 	}
 }
 
+// GAP-1237: the standalone gateway gets read on Devin's user MCP config
+// alone; its folder, which the guardian protects, and the hook file beside it
+// get nothing, the revoke takes the grant back, and a hard link to another
+// file is refused. The Secure Client profile grants nothing there.
+func TestInventoryDACLGrantsDevinMCPConfigFileOnly(t *testing.T) {
+	sid, err := windows.StringToSid(windowsServiceSIDString(productionGatewayServiceName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	home, outside := t.TempDir(), t.TempDir()
+	devin := filepath.Join(home, "AppData", "Roaming", "devin")
+	if err := os.MkdirAll(devin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hooks, mcp, other := filepath.Join(devin, "config.json"), filepath.Join(devin, "mcp_config.json"), filepath.Join(outside, "other.json")
+	for _, path := range []string{hooks, mcp, other} {
+		if err := os.WriteFile(path, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hasACE := func(path string) bool {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		return err == nil && dacl != nil && daclHasACEFor(dacl, []*windows.SID{sid})
+	}
+	for _, g := range inventoryDACLAgentGrants(home, nil, false) {
+		if strings.HasPrefix(strings.ToLower(g.dir), `appdata\roaming\devin`) {
+			t.Fatalf("Secure Client profile grants %s", g.dir)
+		}
+	}
+	var grant *inventoryDACLGrant
+	for _, g := range inventoryDACLAgentGrants(home, nil, true) {
+		if g.dir == `AppData\Roaming\devin\mcp_config.json` {
+			grant = &g
+		}
+	}
+	if grant == nil {
+		t.Fatal("standalone profile has no Devin MCP config grant")
+	}
+	if result, err := grant.ensure(mcp, sid); err != nil || result != inventoryDACLGranted {
+		t.Fatalf("Devin MCP config grant = %v, %v; want granted", result, err)
+	}
+	if !hasACE(mcp) || hasACE(devin) || hasACE(hooks) {
+		t.Fatal("the grant did not stay on mcp_config.json alone")
+	}
+	if err := RevokeGatewayInventoryReadForManifest(Manifest{Targets: []ManifestTarget{{UserHome: home, Connector: "devin"}}}); err != nil || hasACE(mcp) {
+		t.Fatalf("revoke left the Devin MCP config grant: %v", err)
+	}
+	if err := os.Remove(mcp); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(other, mcp); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := grant.ensure(mcp, sid); !errors.Is(err, errInventoryDACLLink) || hasACE(other) {
+		t.Fatalf("grant through a hard link = %v; want refused, no ACE on the other file", err)
+	}
+}
+
 func TestInventoryDACLRejectsDirectoryReplacedAfterCheck(t *testing.T) {
 	sid, err := windows.CreateWellKnownSid(windows.WinLocalServiceSid)
 	if err != nil {

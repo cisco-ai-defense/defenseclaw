@@ -9110,6 +9110,38 @@ def _restore_setup_config_in_memory(app: AppContext, snapshot: _SetupConfigSnaps
 
 
 _ROLLBACK_RESTART_TITLE = "Restoring the previous configuration"
+_CONFIG_WRITE_REMEDY_KEY = "defenseclaw.setup.config_write_remedy"
+
+
+def _setup_rerun_command() -> str:
+    """Name the active setup command and the options needed to repeat it."""
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return "the same defenseclaw setup command"
+    command = ctx.command_path
+    params = ctx.params
+    if params.get("connector"):
+        command += f" --connector {params['connector']}"
+    if params.get("mode"):
+        command += f" --mode {params['mode']}"
+    if params.get("yes"):
+        command += " --yes"
+    return command
+
+
+def _setup_config_write_remedy(message: str) -> str | None:
+    from defenseclaw.connector_failure import unwritable_config_remedy
+
+    ctx = click.get_current_context(silent=True)
+    connector_match = re.search(r"connector ([a-z][a-z0-9_-]*) setup failed", message, re.IGNORECASE)
+    connector = (
+        connector_match.group(1).lower()
+        if connector_match
+        else connector_paths.normalize(ctx.params.get("connector") or ctx.command.name)
+        if ctx is not None
+        else ""
+    )
+    return unwritable_config_remedy(message, connector=connector, command=_setup_rerun_command())
 
 
 def _guarded_connectors(cfg: Any, names: list[str]) -> list[str]:
@@ -9168,13 +9200,20 @@ def _restart_restored_connector_runtime(
         with contextlib.redirect_stdout(captured):
             _restart_services(cfg.data_dir, cfg.gateway.host, cfg.gateway.port, **restart_kwargs)
     except Exception as exc:
-        if str(exc) != str(same_failure):
+        if _setup_config_write_remedy(str(same_failure)):
+            ux.section(_ROLLBACK_RESTART_TITLE)
+            click.echo("  Previous connector runtime could not be verified")
+        elif str(exc) != str(same_failure):
             click.echo(captured.getvalue(), nl=False)
         else:
             ux.section(_ROLLBACK_RESTART_TITLE)
             click.echo("  defenseclaw-gateway: still cannot start (same error as above)")
         raise
-    click.echo(captured.getvalue(), nl=False)
+    if _setup_config_write_remedy(str(same_failure)):
+        ux.section(_ROLLBACK_RESTART_TITLE)
+        click.echo("  Previous connector runtime restored")
+    else:
+        click.echo(captured.getvalue(), nl=False)
 
 
 def _rollback_failed_connector_application(
@@ -9186,6 +9225,7 @@ def _rollback_failed_connector_application(
     _secret_rollback_complete: bool = True,
 ) -> None:
     """Restore, reconcile, and verify every feasible rollback phase."""
+    config_write_remedy = _setup_config_write_remedy(str(cause))
 
     exact_runtime = snapshot.applied_runtime is not None
     rollback_errors: list[str] = []
@@ -9385,7 +9425,13 @@ def _rollback_failed_connector_application(
         )
     else:
         outcome = "restored the prior connector configuration and runtime"
-    if launcher_still_missing and not rollback_errors:
+    if config_write_remedy:
+        notice = (
+            " Setup rollback was incomplete; agents may not be protected."
+            if rollback_errors else " Setup restored the previous connector configuration and runtime."
+        )
+        failure = click.ClickException(config_write_remedy + notice)
+    elif launcher_still_missing and not rollback_errors:
         from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
 
         kept = "; ".join(error.rstrip(".") for error in left_changed[:_SETUP_ROLLBACK_MAX_FAILURES])
@@ -14218,6 +14264,9 @@ def _restart_services(
     ``teardown`` marks a ``guardrail disable`` restart: the closing line says
     the hooks were removed instead of announcing enforcement (GAP-1985)."""
     ux.section(title)
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        ctx.meta.pop(_CONFIG_WRITE_REMEDY_KEY, None)
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
@@ -14477,6 +14526,10 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
     launcher_missing = _take_gateway_launcher_missing()
     if not failed:
         return
+    ctx = click.get_current_context(silent=True)
+    remedy = ctx.meta.get(_CONFIG_WRITE_REMEDY_KEY) if ctx is not None else None
+    if remedy and "defenseclaw-gateway" in failed:
+        raise _GatewayRestartFailed(remedy)
     if failed == ["openclaw-gateway"]:
         # GAP-1702: defenseclaw-gateway is running; the generic advice to
         # start it named the wrong gateway.
@@ -15807,8 +15860,15 @@ def _restart_defense_gateway(
         else:
             ux.echo(" ✗")
         if err:
-            for line in err.splitlines()[:3]:
-                click.echo(f"    {line}")
+            remedy = _setup_config_write_remedy(err)
+            if remedy:
+                ctx = click.get_current_context(silent=True)
+                if ctx is not None:
+                    ctx.meta[_CONFIG_WRITE_REMEDY_KEY] = remedy
+                click.echo(f"    {remedy}")
+            else:
+                for line in err.splitlines()[:3]:
+                    click.echo(f"    {line}")
         return False
     except UnsafePathError:
         ux.echo(" ✗ (binary is not a verified executable file)")
@@ -16032,8 +16092,15 @@ def _restart_defense_gateway_native(
 
 def _echo_native_command_diagnostics(result: Any) -> None:
     detail = (getattr(result, "stderr", "") or getattr(result, "stdout", "") or "").strip()
-    for line in detail.splitlines()[:3]:
-        click.echo(f"    {line}")
+    remedy = _setup_config_write_remedy(detail)
+    if remedy:
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_CONFIG_WRITE_REMEDY_KEY] = remedy
+        click.echo(f"    {remedy}")
+    else:
+        for line in detail.splitlines()[:3]:
+            click.echo(f"    {line}")
 
 
 def _native_gateway_lifecycle_stop(runner, executable: str) -> bool:

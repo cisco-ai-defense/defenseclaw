@@ -2410,6 +2410,21 @@ def _openclaw_config_unset(path: str) -> None:
         raise click.ClickException(f"openclaw config unset failed: {detail}")
 
 
+def _connector_write_error(exc: Exception) -> str:
+    """Return one plain line for an unexpected connector config write failure.
+
+    An ``OSError`` prints as ``[Errno 13] ...: 'path'``; a single-connector
+    target used to end in a Python traceback with it (GAP-1243).
+    """
+    if not isinstance(exc, OSError):
+        return str(exc)
+    reason = exc.strerror or str(exc)
+    filename = os.fspath(exc.filename) if exc.filename else ""
+    if filename and filename not in reason:
+        return f"could not write {filename}: {reason}"
+    return reason
+
+
 def _set_mcp_via_connector(cfg, name: str, entry: dict, connector: str | None = None) -> None:
     """Dispatch ``mcp set`` to a connector's write surface.
 
@@ -2804,8 +2819,12 @@ def set_server(
             # leave a silent partial write, so it is isolated and surfaced via a
             # non-zero exit below.
             if len(connectors) == 1:
+                if isinstance(exc, OSError):
+                    raise click.ClickException(
+                        f"MCP server {name!r} was not saved for {c}: {_connector_write_error(exc)}"
+                    ) from exc
                 raise
-            click.secho(f"  failed [{c}]: {exc}", fg="red")
+            click.secho(f"  failed [{c}]: {_connector_write_error(exc)}", fg="red")
             write_failed.append((c, exc))
 
     if scan_rejected and result is not None:
@@ -2936,8 +2955,12 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
             # verbatim for a single-connector target, otherwise isolate it so a
             # writable peer is still cleaned up (surfaced via non-zero exit).
             if len(connectors) == 1:
+                if isinstance(exc, OSError):
+                    raise click.ClickException(
+                        f"MCP server {name!r} was not removed from {c}: {_connector_write_error(exc)}"
+                    ) from exc
                 raise
-            click.secho(f"  failed [{c}]: {exc}", fg="red")
+            click.secho(f"  failed [{c}]: {_connector_write_error(exc)}", fg="red")
             write_failed.append((c, exc))
 
     if not removed:

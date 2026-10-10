@@ -227,6 +227,13 @@ can fail if the LDAP endpoint is unreachable. Run the dry run as root so it can
 compare the existing root-owned config. Treat exit `1`, `2` and `3` as failures,
 not planned changes.
 
+If you omit the bind password from `--dry-run`, the installer cannot compare
+the SSSD configuration. It skips the SSSD bind test and the config write and
+restart plan, and prints how to provide `--bind-password-file` or
+`OKTA_BIND_PASSWORD` for a complete plan. It still reports independent changes
+to packages, PAM, sshd, and SSSD boot enablement. An unchanged host can exit
+`0` in this mode without confirming that its SSSD configuration matches.
+
 It:
 
 1. refuses to go on when the host is not RHEL family, when a package is missing

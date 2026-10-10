@@ -216,8 +216,14 @@ type State struct {
 	// UserFileDrift names enrolled users' DefenseClaw-owned files that are
 	// missing or not current (Copilot's VS Code Local hook file). The hook
 	// guardian rewrites them as the user; until it has, verify fails.
-	UserFileDrift  []string `json:"user_file_drift,omitempty"`
-	LiveVerifiedAt string   `json:"live_verified_at,omitempty"`
+	UserFileDrift []string `json:"user_file_drift,omitempty"`
+	// UserFileForeign names files at DefenseClaw's own per-user paths (the
+	// Copilot plugin) that hold hooks DefenseClaw did not write. The
+	// guardian leaves them in place, and the foreign-hook guard denies that
+	// user's agent calls while they are there, so verify fails on them
+	// (GAP-1232).
+	UserFileForeign []string `json:"user_file_foreign,omitempty"`
+	LiveVerifiedAt  string   `json:"live_verified_at,omitempty"`
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
 	// only).
 	VersionFloor *VersionFloorState `json:"version_floor,omitempty"`
