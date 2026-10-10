@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"go.opentelemetry.io/otel/attribute"
@@ -368,6 +369,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex hook event is not registered by protected runtime contract"})
 				return
 			}
+		}
+		if targets, ok := hookpaths.Decode(r.Header.Get(hookpaths.Header)); ok {
+			r = r.WithContext(context.WithValue(r.Context(), resolvedWritesContextKey{}, targets))
 		}
 		if registeredEvent != "" && !eventIn(registeredEvent, profile.SupportedEvents) {
 			a.recordConnectorHookRejection(r.Context(), connectorName, registeredEvent, "event_outside_contract", int64(len(b)))
@@ -2194,11 +2198,12 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			}
 		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input:              actionInput,
-			LegacyText:         string(req.ToolArgs),
-			Connector:          req.ConnectorName,
-			EnforcementCapable: enforcementCapable,
-			record:             toolChainRecorder(req.toolChain),
+			Input:                actionInput,
+			LegacyText:           string(req.ToolArgs),
+			Connector:            req.ConnectorName,
+			EnforcementCapable:   enforcementCapable,
+			ResolvedWriteTargets: resolvedWritesFromContext(ctx),
+			record:               toolChainRecorder(req.toolChain),
 		}, command, commandTool)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}

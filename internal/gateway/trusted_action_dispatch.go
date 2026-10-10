@@ -60,8 +60,15 @@ type trustedActionRequest struct {
 	DowngradeReadOnlyDataArgs bool
 	// A sandbox action may execute in a filesystem the gateway cannot see.
 	SkipLocalFilesystemResolution bool
-	record                        func(actionfacts.Facts, []RuleFinding)
-	recordTelemetry               func(trustedActionTelemetry)
+	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
+	// Its gateway cannot inspect the caller's home when ProtectHome is active.
+	ProtectedHomeHook bool
+	// ResolvedWriteTargets comes from the hook running as the real user.
+	// A present empty map means the client inspected the action and found no
+	// static write target; nil denotes missing or invalid client evidence.
+	ResolvedWriteTargets map[string]string
+	record               func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry      func(trustedActionTelemetry)
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -92,6 +99,9 @@ func dispatchTrustedAction(
 ) (findings []RuleFinding) {
 	if ManagedEnterpriseActive() {
 		return nil
+	}
+	if _, ok := managedHookPeerFromContext(parent); ok {
+		request.ProtectedHomeHook = true
 	}
 	var (
 		facts     actionfacts.Facts

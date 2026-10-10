@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -508,19 +510,13 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 		return false
 	}
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
-	if err != nil || len(file.Stmts) != 1 {
-		return false
-	}
-	sequence, ok := file.Stmts[0].Cmd.(*syntax.BinaryCmd)
-	if !ok || sequence.Op != syntax.AndStmt {
-		return false
-	}
-	link, ok := sequence.X.Cmd.(*syntax.CallExpr)
-	if !ok || len(link.Assigns) != 0 || len(link.Args) != 4 ||
-		len(sequence.X.Redirs) != 0 {
+	if err != nil {
 		return false
 	}
 	word := func(value *syntax.Word) string {
+		if value == nil {
+			return ""
+		}
 		if len(value.Parts) != 1 {
 			return ""
 		}
@@ -538,49 +534,182 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 		}
 		return ""
 	}
-	if word(link.Args[0]) != "ln" ||
-		(word(link.Args[1]) != "-s" && word(link.Args[1]) != "-sf") ||
-		!trustedAuthorizedKeysPathInText(word(link.Args[2]), input.ActiveHome) {
-		return false
+	sourceWord := func(value *syntax.Word) string {
+		if value == nil {
+			return ""
+		}
+		start, end := int(value.Pos().Offset()), int(value.End().Offset())
+		if start < 0 || end > len(input.Command) || end <= start {
+			return ""
+		}
+		return input.Command[start:end]
 	}
-	linkName := word(link.Args[3])
-	if linkName == "" || strings.ContainsAny(linkName, "*?[") {
-		return false
+	links := make(map[string]struct{})
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok {
+			return true
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) != 0 {
+			return true
+		}
+		if len(call.Args) == 4 && len(stmt.Redirs) == 0 &&
+			word(call.Args[0]) == "ln" &&
+			(word(call.Args[1]) == "-s" || word(call.Args[1]) == "-sf") &&
+			trustedAuthorizedKeysPathInText(sourceWord(call.Args[2]), input.ActiveHome) {
+			if name := word(call.Args[3]); name != "" && !strings.ContainsAny(name, "*?[") {
+				links[trustedSymlinkName(input, name)] = struct{}{}
+			}
+			return true
+		}
+		if len(links) == 0 {
+			return true
+		}
+		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+		if start < 0 || end > len(input.Command) || end <= start {
+			return true
+		}
+		var edits [][2]int
+		syntax.Walk(stmt, func(child syntax.Node) bool {
+			value, ok := child.(*syntax.Word)
+			if !ok {
+				return true
+			}
+			operand := word(value)
+			prefix := 0
+			if strings.HasPrefix(operand, "of=") {
+				operand, prefix = operand[3:], 3
+			}
+			if operand != "" {
+				if _, linked := links[trustedSymlinkName(input, operand)]; linked {
+					edits = append(edits, [2]int{int(value.Pos().Offset()) + prefix, int(value.End().Offset())})
+				}
+			}
+			return true
+		})
+		if len(edits) == 0 {
+			return true
+		}
+		// Replace only literal operands from the later statement. ActionFacts
+		// then proves that the replaced operand is actually written.
+		var rebuilt strings.Builder
+		cursor := start
+		for _, edit := range edits {
+			if edit[0] < cursor || edit[1] > end {
+				continue
+			}
+			rebuilt.WriteString(input.Command[cursor:edit[0]])
+			rebuilt.WriteString("'" + strings.TrimRight(input.ActiveHome, "/") + "/.ssh/authorized_keys'")
+			cursor = edit[1]
+		}
+		rebuilt.WriteString(input.Command[cursor:end])
+		inner := input
+		inner.Args, inner.Argv = nil, nil
+		inner.Command = rebuilt.String()
+		inner.DialectHint = actionfacts.DialectPOSIX
+		parsed := actionfacts.Analyze(inner).EnforcementProjection()
+		found = parsed.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(parsed) ||
+			trustedDDOutputAuthorizedKeysWrite(inner)
+		return !found
+	})
+	return found
+}
+
+func trustedSymlinkName(input actionfacts.Input, name string) string {
+	if strings.HasPrefix(name, "~/") || strings.HasPrefix(name, "$HOME/") {
+		name = strings.TrimRight(input.ActiveHome, "/") + name[strings.IndexByte(name, '/'):]
 	}
-	write := sequence.Y
-	if _, ok := write.Cmd.(*syntax.CallExpr); !ok || len(write.Redirs) != 1 ||
-		word(write.Redirs[0].Word) != linkName {
-		return false
+	if !filepath.IsAbs(name) && filepath.IsAbs(input.CWD) {
+		name = filepath.Join(input.CWD, name)
 	}
-	start, end := int(write.Redirs[0].Word.Pos().Offset()), int(write.Redirs[0].Word.End().Offset())
-	writeStart, writeEnd := int(write.Pos().Offset()), int(write.End().Offset())
-	if start < writeStart || end > writeEnd || writeEnd > len(input.Command) {
-		return false
-	}
-	inner := input
-	inner.Args, inner.Argv = nil, nil
-	target := word(link.Args[2])
-	if strings.HasPrefix(target, "~/") || strings.HasPrefix(target, "$HOME/") {
-		target = strings.TrimRight(input.ActiveHome, "/") + target[strings.Index(target, "/"):]
-	}
-	inner.Command = input.Command[writeStart:start] +
-		"'" + target + "'" +
-		input.Command[end:writeEnd]
-	inner.DialectHint = actionfacts.DialectPOSIX
-	parsed := actionfacts.Analyze(inner)
-	enforcement := parsed.EnforcementProjection()
-	return enforcement.EnforcementEligible() && sshAuthorizedKeysCommandPrerequisite(enforcement)
+	return filepath.Clean(name)
 }
 
 func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, facts actionfacts.Facts) bool {
-	if request.SkipLocalFilesystemResolution || facts.ActiveHome == "" ||
-		!filepath.IsAbs(facts.ActiveHome) || !filepath.IsAbs(facts.CWD) {
-		return false
-	}
-	if cwd, err := os.Stat(facts.CWD); err != nil || !cwd.IsDir() {
+	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
 	active := canonicalSemanticPath(filepath.Join(facts.ActiveHome, ".ssh", "authorized_keys"))
+	clientCWD := facts.CWD
+	if !filepath.IsAbs(clientCWD) {
+		if cwd := request.ResolvedWriteTargets[hookpaths.CWDKey]; filepath.IsAbs(cwd) {
+			clientCWD = filepath.Clean(cwd)
+		}
+	}
+	writeTarget := func(target string) bool {
+		if !filepath.IsAbs(target) {
+			return false
+		}
+		target = filepath.Clean(target)
+		underHome := false
+		if relative, err := filepath.Rel(facts.ActiveHome, target); err == nil {
+			underHome = relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+		}
+		if request.ResolvedWriteTargets != nil {
+			resolved, present := request.ResolvedWriteTargets[target]
+			return present && canonicalSemanticPath(resolved) == active ||
+				underHome && (!present || resolved == "")
+		}
+		if request.SkipLocalFilesystemResolution {
+			return false
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			return underHome && request.ProtectedHomeHook
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			return false
+		}
+		resolved, err := filepath.EvalSymlinks(target)
+		return err == nil && canonicalSemanticPath(resolved) == active ||
+			err != nil && underHome && request.ProtectedHomeHook
+	}
+	// Partial command projections can omit a redirect PathFact. The shell AST
+	// still gives an exact write operand, which the user's hook resolved.
+	input := request.Input
+	input.CWD = clientCWD
+	if input.Command == "" {
+		input.Command, _ = trustedBashCommandInput(input)
+	}
+	if input.Command == "" && trustedBashExecutionTool(input.Tool) {
+		var args struct {
+			Cmd string `json:"cmd"`
+		}
+		if json.Unmarshal(input.Args, &args) == nil {
+			input.Command = args.Cmd
+		}
+	}
+	if input.Command != "" && len(input.Command) <= 64<<10 {
+		if file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), ""); err == nil {
+			matched := false
+			syntax.Walk(file, func(node syntax.Node) bool {
+				redirect, ok := node.(*syntax.Redirect)
+				if !ok || redirect.Word == nil ||
+					(redirect.Op != syntax.RdrOut && redirect.Op != syntax.AppOut) {
+					return true
+				}
+				start, end := int(redirect.Word.Pos().Offset()), int(redirect.Word.End().Offset())
+				if start < 0 || end > len(input.Command) || end <= start {
+					return true
+				}
+				name := strings.Trim(input.Command[start:end], `"'`)
+				if name == "" || strings.ContainsAny(name, "*?[]`") ||
+					strings.Contains(name, "$") && !strings.HasPrefix(name, "$HOME/") {
+					return true
+				}
+				matched = matched || writeTarget(trustedSymlinkName(input, name))
+				return !matched
+			})
+			if matched {
+				return true
+			}
+		}
+	}
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite &&
 			candidate.Access != actionfacts.PathAccessAppend {
@@ -605,15 +734,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			integrityCommandOwnsStaticRedirect(command, candidate) {
 			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
 		}
-		if !filepath.IsAbs(target) {
-			continue
-		}
-		info, err := os.Lstat(target)
-		if err != nil || info.Mode()&os.ModeSymlink == 0 {
-			continue
-		}
-		resolved, err := filepath.EvalSymlinks(target)
-		if err == nil && canonicalSemanticPath(resolved) == active {
+		if writeTarget(target) {
 			return true
 		}
 	}

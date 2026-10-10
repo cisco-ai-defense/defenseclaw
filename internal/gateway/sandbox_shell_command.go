@@ -99,7 +99,8 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		Connector:                     action.Connector,
 		EnforcementCapable:            action.EnforcementCapable,
 		DowngradeReadOnlyDataArgs:     action.DowngradeReadOnlyDataArgs,
-		SkipLocalFilesystemResolution: true,
+		SkipLocalFilesystemResolution: action.SkipLocalFilesystemResolution,
+		ResolvedWriteTargets:          action.ResolvedWriteTargets,
 	})
 	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector), verdict, findings)
 }

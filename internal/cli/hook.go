@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -150,6 +151,17 @@ func newHookCmd() *cobra.Command {
 		return hookFailure(hookFailureContext{connector, failMode, enterpriseManaged}, err)
 	})
 	cmd.AddCommand(newHookSessionFactsCmd())
+	cmd.AddCommand(&cobra.Command{
+		Use: "resolve-writes", Hidden: true, Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			payload, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 1<<20+1))
+			if err != nil || len(payload) > 1<<20 {
+				return fmt.Errorf("invalid hook write evidence")
+			}
+			_, err = io.WriteString(cmd.OutOrStdout(), hookpaths.Resolve(payload))
+			return err
+		},
+	})
 
 	return cmd
 }

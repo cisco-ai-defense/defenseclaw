@@ -294,6 +294,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			LegacyText:                    string(toolArgs),
 			Connector:                     "codex",
 			EnforcementCapable:            true,
+			ResolvedWriteTargets:          resolvedWritesFromContext(ctx),
 			SkipLocalFilesystemResolution: isSandboxHookRequest(ctx),
 			DowngradeReadOnlyDataArgs:     mode != "action",
 			record:                        toolChainRecorderFromContext(ctx),
