@@ -14,22 +14,20 @@ package enterprisepolicy
 
 import (
 	"crypto/rand"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 )
 
 // trustedOwner reports whether uid may own machine policy files and their
@@ -351,6 +349,14 @@ func publishedFileProblem(opts Options, path string) string {
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok && os.Geteuid() == 0 && stat.Uid != 0 {
 		problems = append(problems, fmt.Sprintf("owned by uid %d", stat.Uid))
 	}
+	if opts.goos() == "linux" {
+		acl, err := publishedACLReader.Read(platformPath(opts, path), info.Mode())
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("cannot inspect POSIX ACL: %v", err))
+		} else if denied := acl.Denied(0o4); denied != "" {
+			problems = append(problems, "POSIX ACL entries without read (effective) "+denied)
+		}
+	}
 	return strings.Join(problems, ", ")
 }
 
@@ -397,31 +403,7 @@ var publishedDirACLEntries = func(path string) ([]managed.DarwinACLEntry, error)
 // linuxAccessACLXattr holds a Linux file's POSIX access ACL.
 const linuxAccessACLXattr = "system.posix_acl_access"
 
-// publishedDirLinuxACL reads a directory's POSIX access ACL; nil when it has
-// none (mode bits alone apply) or the file system has no ACLs.
-var publishedDirLinuxACL = func(path string) ([]byte, error) {
-	if runtime.GOOS != "linux" {
-		return nil, nil
-	}
-	for {
-		size, err := unix.Getxattr(path, linuxAccessACLXattr, nil)
-		if errors.Is(err, unix.ENODATA) || errors.Is(err, unix.ENOTSUP) {
-			return nil, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		data := make([]byte, size)
-		n, err := unix.Getxattr(path, linuxAccessACLXattr, data)
-		if errors.Is(err, unix.ERANGE) {
-			continue // the ACL grew between the two calls
-		}
-		if errors.Is(err, unix.ENODATA) {
-			return nil, nil
-		}
-		return data[:n], err
-	}
-}
+var publishedACLReader posixacl.Reader = posixacl.System
 
 var clearPublishedDirACL = func(path string) error {
 	if runtime.GOOS == "linux" {
@@ -433,75 +415,19 @@ var clearPublishedDirACL = func(path string) error {
 	return exec.Command("/bin/chmod", "-h", "-N", path).Run()
 }
 
-// linuxACLDenial names the named-user and named-group entries of a Linux
-// POSIX access ACL (the xattr format: a version 2 header, then 8-byte tag,
-// permission, id entries) whose effective permission, after the mask, lacks
-// want. Mode bits cover the owner, the owning group and other users; these
-// entries override "other" for the users they name (GAP-1350).
-func linuxACLDenial(data []byte, want os.FileMode) (string, error) {
-	const (
-		aclUser  = 0x02
-		aclGroup = 0x08
-		aclMask  = 0x10
-	)
-	if len(data) < 4 || (len(data)-4)%8 != 0 || binary.LittleEndian.Uint32(data) != 2 {
-		return "", fmt.Errorf("unrecognised POSIX ACL (%d bytes)", len(data))
-	}
-	type entry struct {
-		tag, perm uint16
-		id        uint32
-	}
-	mask := uint16(7)
-	var named []entry
-	for off := 4; off < len(data); off += 8 {
-		e := entry{binary.LittleEndian.Uint16(data[off:]), binary.LittleEndian.Uint16(data[off+2:]), binary.LittleEndian.Uint32(data[off+4:])}
-		switch e.tag {
-		case aclMask:
-			mask = e.perm
-		case aclUser, aclGroup:
-			named = append(named, e)
-		}
-	}
-	var denied []string
-	for _, e := range named {
-		effective := e.perm & mask
-		if os.FileMode(effective)&want == want {
-			continue
-		}
-		id := strconv.FormatUint(uint64(e.id), 10)
-		kind, name := "user", id
-		if e.tag == aclGroup {
-			kind = "group"
-			if g, err := user.LookupGroupId(id); err == nil {
-				name = g.Name
-			}
-		} else if u, err := user.LookupId(id); err == nil {
-			name = u.Username
-		}
-		denied = append(denied, fmt.Sprintf("%s:%s:%s", kind, name, rwx(effective)))
-	}
-	return strings.Join(denied, ", "), nil
-}
-
-func rwx(perm uint16) string {
-	out := []byte("---")
-	for i, c := range "rwx" {
-		if perm&(4>>i) != 0 {
-			out[i] = byte(c)
-		}
-	}
-	return string(out)
-}
-
 func publishedDirACLProblem(opts Options, dir string, index int) (string, error) {
 	if opts.goos() == "linux" {
-		data, err := publishedDirLinuxACL(dir)
-		if err != nil || data == nil {
+		info, err := os.Lstat(dir)
+		if err != nil {
 			return "", err
 		}
-		denied, err := linuxACLDenial(data, publishedDirAccess(index))
-		if err != nil || denied == "" {
+		acl, err := publishedACLReader.Read(dir, info.Mode())
+		if err != nil {
 			return "", err
+		}
+		denied := acl.Denied(uint16(publishedDirAccess(index)))
+		if denied == "" {
+			return "", nil
 		}
 		return fmt.Sprintf("%s has POSIX ACL entries without access (effective) %s", dir, denied), nil
 	}
