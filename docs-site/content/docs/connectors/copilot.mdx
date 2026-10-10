@@ -236,7 +236,8 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 <HookEventsList connector="copilot" />
 
 Copilot CLI has no hook that can stop a prompt, so a prompt rule doesn't block
-here: a matching prompt reaches the model. Tool-call rules still block
+here: a matching prompt reaches the model, in observe and action mode alike, and its
+alert reads `detected in the prompt (cannot block)`. Tool-call rules still block
 ([capability matrix](/docs/connectors/capability-matrix)).
 
 <Callout type="info">
