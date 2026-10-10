@@ -7656,6 +7656,14 @@ func restoreSingleConnectorSetupPoint(
 	transaction multiConnectorSetupTransaction,
 	cause error,
 ) error {
+	if errors.Is(cause, connector.ErrSetupRefusedUnchanged) {
+		// Setup refused before it changed anything, so the connector keeps
+		// the registration it had. Re-applying that registration needs the
+		// posture a 0.8.x lock never recorded, and re-ran the Setup that had
+		// just refused (GAP-1241). Connectors a switch removed are still put
+		// back below.
+		transaction.applied = nil
+	}
 	rollbackErr := rollbackMultiConnectorPublication(ctx, transaction)
 	if rollbackErr == nil {
 		return cause
