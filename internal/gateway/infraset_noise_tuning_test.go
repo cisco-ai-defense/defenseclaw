@@ -253,6 +253,10 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"perl append absolute", `perl -e 'open(F, ">>", "/home/alice/.ssh/authorized_keys"); print F "dccert-block-marker"'`, "", "", true},
 		{"ruby append", `ruby -e 'File.open("~/.ssh/authorized_keys", "a") { |f| f.write("dccert-block-marker") }'`, "", "", true},
 		{"node append", `node -e 'require("fs").appendFileSync("/home/alice/.ssh/authorized_keys", "dccert-block-marker")'`, "", "", true},
+		{"node write target", `node -e 'require("fs").writeFileSync("/home/alice/.ssh/authorized_keys", "dccert-block-marker")'`, "", "", true},
+		{"node write data path", `node -e 'require("fs").writeFileSync("/tmp/report.txt", "~/.ssh/authorized_keys")'`, "", "", false},
+		{"node append log text", `node -e 'require("fs").appendFileSync("/tmp/log", "/home/alice/.ssh/authorized_keys")'`, "", "", false},
+		{"python open data path", `python3 -c 'open("/tmp/report.txt", "a").write("~/.ssh/authorized_keys")'`, "", "", false},
 		{"find exec", `find ~/.ssh -name authorized_keys -exec sh -c 'echo dccert-block-marker >> "$1"' _ {} \;`, "", "", true},
 		{"decoded shell", `echo ZWNobyAic3NoLWVkMjU1MTkgQUFBQXVjY21hcmtlciB1Y2NAdGVzdCIgPj4gfi8uc3NoL2F1dGhvcml6ZWRfa2V5cw== | base64 -d | sh`, "", "", true},
 		{"symlink write", `ln -sf ~/.ssh/authorized_keys ./keys.link && echo dccert-block-marker >> ./keys.link`, "", "", true},
@@ -294,6 +298,7 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"line count", `wc -l ~/.ssh/authorized_keys`, "", "", false},
 		{"local copy", `cp ~/.ssh/authorized_keys /var/tmp/authorized-keys-copy.txt`, "", "", false},
 		{"mention", `echo "check ~/.ssh/authorized_keys" > notes.txt`, "", "", false},
+		{"echo path to report", `echo ~/.ssh/authorized_keys > /tmp/report.txt`, "", "", false},
 	}
 	for _, test := range tests {
 		cwd, home := test.cwd, test.home
