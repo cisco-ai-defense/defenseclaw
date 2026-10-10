@@ -1726,8 +1726,20 @@ func windowsClassifyPowerShell(
 	case "get-acl":
 		classifyStructuredGetACL(builder.out, command)
 	case "set-content", "out-file":
-		windowsAddOperation(command, OperationWrite)
-		windowsAddPowerShellPrimaryPath(command.ID, PathAccessWrite, args, true, builder)
+		access := PathAccessWrite
+		if name == "out-file" {
+			for _, arg := range args {
+				if strings.EqualFold(arg.value, "-append") || strings.EqualFold(arg.value, "-append:$true") {
+					access = PathAccessAppend
+				}
+			}
+		}
+		if access == PathAccessAppend {
+			windowsAddOperation(command, OperationAppend)
+		} else {
+			windowsAddOperation(command, OperationWrite)
+		}
+		windowsAddPowerShellPrimaryPath(command.ID, access, args, true, builder)
 	case "add-content":
 		windowsAddOperation(command, OperationAppend)
 		windowsAddPowerShellPrimaryPath(command.ID, PathAccessAppend, args, true, builder)
@@ -4100,12 +4112,13 @@ func windowsAddPowerShellPrimaryPath(
 		"-exclude": true, "-erroraction": true, "-warningaction": true,
 		"-name": true, "-type": true, "-itemtype": true, "-argumentlist": true,
 		"-workingdirectory": true, "-verb": true, "-credential": true,
-		"-width": true, "-wi": true,
+		"-width": true, "-wi": true, "-inputobject": true,
 	}
 	switchParams := map[string]bool{
 		"-force": true, "-recurse": true, "-raw": true, "-quiet": true,
 		"-confirm": true, "-whatif": true, "-nonewwindow": true,
 		"-wait": true, "-passthru": true, "-usenewenvironment": true,
+		"-append": true, "-append:$true": true, "-append:$false": true,
 	}
 	var positionals []windowsWord
 	found := false

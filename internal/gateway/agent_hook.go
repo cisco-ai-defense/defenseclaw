@@ -2179,15 +2179,21 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// A sandbox shell call is also judged on its command alone when its
 		// other arguments leave the parse partial.
 		command, commandTool := sandboxShellCommand(ctx, req.ConnectorName, req.HookEventName, req.ToolName, actionTool, req.ToolArgs)
+		actionInput := actionfacts.Input{
+			Tool:                     actionTool,
+			Args:                     trustedArgs,
+			CWD:                      agentHookTrustedActionCWD(ctx, req.CWD, toolCWD),
+			ActiveHome:               hookActiveHome(ctx),
+			ToolResourceIdentity:     resourceIdentity,
+			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
+		}
+		if runtime.GOOS == "windows" && req.ConnectorName == "kiro" && !isSandboxHookRequest(ctx) {
+			if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
+				actionInput.DialectHint = agentHookWindowsShellDialect(actionInput)
+			}
+		}
 		verdict = a.inspectSandboxShellToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
-			Input: actionfacts.Input{
-				Tool:                     actionTool,
-				Args:                     trustedArgs,
-				CWD:                      agentHookTrustedActionCWD(ctx, req.CWD, toolCWD),
-				ActiveHome:               hookActiveHome(ctx),
-				ToolResourceIdentity:     resourceIdentity,
-				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
-			},
+			Input:              actionInput,
 			LegacyText:         string(req.ToolArgs),
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
@@ -2278,6 +2284,18 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.laneVerdict = verdict.laneVerdict
 	return resp
+}
+
+// agentHookWindowsShellDialect reads only server-projected shell arguments.
+// A payload-supplied dialect field cannot choose the parser grammar.
+func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(input.Args, &args) != nil {
+		return ""
+	}
+	return selectWindowsShellDialect(input.Tool, args.Command, input)
 }
 
 // agentHookTrustedActionTool preserves the official connector tool label for
