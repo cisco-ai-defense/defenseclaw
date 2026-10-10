@@ -126,6 +126,9 @@ func conditionalCommitAtomicTransformExisting(
 
 	if err := renameAtomicTransformHandle(windows.Handle(file.Fd()), tombstone); err != nil {
 		_ = closeFile()
+		if configWritePermissionDenied(err) {
+			return recoverAfterAtomicTransformError(path, stateDir, configWriteError(intent.TargetPath, err))
+		}
 		if atomicTransformWindowsConflict(err) {
 			return recoverAfterAtomicTransformError(path, stateDir, errAtomicTransformConflict)
 		}
@@ -161,7 +164,7 @@ func conditionalCommitAtomicTransformExisting(
 			if errors.Is(err, errAtomicTransformConflict) {
 				return recoverAfterAtomicTransformError(path, stateDir, errAtomicTransformConflict)
 			}
-			return recoverAfterAtomicTransformError(path, stateDir, fmt.Errorf("publish staged config: %w", err))
+			return recoverAfterAtomicTransformError(path, stateDir, fmt.Errorf("publish staged config: %w", configWriteError(intent.TargetPath, err)))
 		}
 		if err := syncAtomicTransformParent(filepath.Dir(intent.TargetPath)); err != nil {
 			_ = closeFile()

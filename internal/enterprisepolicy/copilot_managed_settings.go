@@ -477,6 +477,16 @@ func copilotVSCodeStatus(opts Options, state *State) {
 		}
 		if plugin {
 			plugins++
+		} else if wantPlugin {
+			// The plugin is DefenseClaw's as well: a missing or earlier copy
+			// is rewritten on the guardian's next pass, while one holding
+			// hooks DefenseClaw did not write stays, and the foreign-hook
+			// guard denies that user's calls (GAP-1232).
+			if kept := copilotVSCodeUserKept(home, opts.goos(), opts.HookBinary); len(kept) > 0 {
+				state.UserFileForeign = append(state.UserFileForeign, kept...)
+			} else {
+				state.UserFileDrift = append(state.UserFileDrift, CopilotPluginHooksPath(home))
+			}
 		}
 	}
 	state.detail("vscode: Local hook file in place for %d of %d enrolled users (wanted: %t); plugin for %d (wanted: %t)",

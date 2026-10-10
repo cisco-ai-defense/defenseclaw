@@ -118,7 +118,8 @@ func windowsShellWordStart(source string, index int, double bool) bool {
 	}
 	previous := source[index-1]
 	if double {
-		return previous == '"' && windowsShellWordStart(source, index-1, false)
+		return previous == '"' && windowsShellWordStart(source, index-1, false) ||
+			previous == ' ' || previous == '\t' || previous == '>'
 	}
 	return previous == ' ' || previous == '\t' || previous == '>' ||
 		previous == ':' && index >= 2 && source[index-2] != ' '
