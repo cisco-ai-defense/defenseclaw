@@ -599,6 +599,34 @@ A v9 file that still holds one of them is rejected by validation. Keys that
 earlier releases already retired, such as `privacy.disable_redaction` (use the
 redaction profiles under `observability`), are not part of this migration.
 
+### MCP servers that can no longer be scanned
+
+0.8.x ran any command an MCP server entry named. The 1.0 scanner starts only
+`npx` or `uvx` (on Windows also `npx.cmd` and `uvx.exe`) with a package
+argument, or connects to a URL; it never starts a command path such as
+`/usr/bin/true`, `./srv.sh`, `bin/srv` or `C:\tools\srv.exe`, or another program.
+After the migration, `defenseclaw migrate` lists every entry of your
+connectors that the scanner refuses, in the summary and under
+`unscannable_mcp` in `migration-v9.json`:
+
+```text
+    ✓ MCP servers that can no longer be scanned (2): the scanner starts only npx or uvx with a package, or a URL
+    ✓   u33a-mcp (claudecode): command '/usr/bin/true' still runs, without a scan (configured before the upgrade); a new or changed definition fails install admission and is blocked; fix: defenseclaw mcp set u33a-mcp --command npx --args <package> --connector claudecode (or --url <url>)
+    ✓   u33a-mcp (codex): command '/usr/bin/true' still runs, without a scan (configured before the upgrade); a new or changed definition fails install admission and is blocked; fix: defenseclaw mcp set u33a-mcp --command npx --args <package> --connector codex (or --url <url>)
+```
+
+- Such a server keeps running in every connector: at its first start the
+  gateway records its baseline without install admission, and `mcp list`
+  shows it as `scan failed` with no action. It is never scanned.
+- If you change the entry, or add a server like it, install admission runs, the
+  scan cannot start and the server is blocked (only reported when
+  `gateway.watcher.mcp.take_action` is `false`).
+- A server on a block list is not listed here: it stays blocked and the summary
+  names it under `asset_policy.mcp.denied`.
+- The fix points the entry at `npx` or `uvx` with its package, or at the
+  server's URL. When the command is a path to `npx` or `uvx`, the fix keeps
+  your arguments and uses the bare name.
+
 ## Conflicts and migration-v9.json
 
 Every run that writes also writes `migration-v9.json` next to `config.yaml`
@@ -655,6 +683,7 @@ Every run that writes also writes `migration-v9.json` next to `config.yaml`
 | `removed[]` | v8 keys dropped without a v9 value because nothing read them. |
 | `actions_rows_moved`, `actions_rows_ignored` | The `audit.db` rows moved, and (managed host) left in place. |
 | `notes[]` | Behaviour changes to read, such as the threshold note above. |
+| `unscannable_mcp[]` | The MCP servers a scan refuses to start: `name`, `connector`, `command`, the scanner's `reason`, the `runtime_effect` and the `fix` command. Written by `defenseclaw migrate` after the commit. |
 | `acknowledged` | Set by `--ack`. |
 
 Read the conflicts first. Each one is a place where your v8 files disagreed and
@@ -695,7 +724,16 @@ defenseclaw config migrate --ack
 Marked the config_version 9 migration record as read.
 ```
 
-The row is gone on the next doctor run. A leftover `policies/rego/data.json`
+Doctor also warns about each server in `unscannable_mcp` that is still
+configured with the same command, with the fix as the next step; the warning
+stays after `--ack` and goes away once the entry uses `npx`, `uvx` or a URL:
+
+```text
+  [WARN] MCP server u33a-mcp (codex)  —  can no longer be scanned: command '/usr/bin/true' is a path, ...; still runs, without a scan (configured before the upgrade); ...
+      ↪ Next step: defenseclaw mcp set u33a-mcp --command npx --args <package> --connector codex (or --url <url>)
+```
+
+The migration row is gone on the next doctor run. A leftover `policies/rego/data.json`
 is reported as **Retired policy data** and ignored; review it with
 `defenseclaw config get admission`, then remove it.
 

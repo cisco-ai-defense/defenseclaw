@@ -3432,6 +3432,52 @@ def _migrate_config_v9(ctx: MigrationContext) -> None:
         })
         if blocked:
             ctx.changes.append(f"MCP servers that stay blocked (asset_policy.mcp.denied): {', '.join(blocked)}")
+        _note_unscannable_mcp(ctx, config_path, set(blocked))
+
+
+def _note_unscannable_mcp(ctx: MigrationContext, config_path: str, blocked: set[str]) -> None:
+    """Name the MCP servers the 1.0 scanner refuses to start (GAP-1340).
+
+    0.8.x ran a command path such as /usr/bin/true; 1.0 scans only npx or uvx
+    with a package, or a URL. Such a server keeps running (its baseline is
+    recorded without admission, GAP-1227) but is never scanned, so the summary,
+    migration-v9.json (``unscannable_mcp``) and doctor name it with the fix.
+    """
+    try:
+        from defenseclaw import config as config_mod
+        from defenseclaw.scanner.mcp import unscannable_mcp_servers
+
+        rows = [
+            row for row in unscannable_mcp_servers(config_mod.load(data_dir=ctx.data_dir))
+            if row["name"] not in blocked
+        ]
+    except Exception as exc:  # noqa: BLE001 - the notice is advisory; the migration already committed
+        ux.warn(f"could not list the MCP servers a scan refuses to start: {exc}", indent="    ")
+        return
+    if not rows:
+        return
+    record_path = os.path.join(os.path.dirname(config_path), "migration-v9.json")
+    try:
+        with open(record_path, encoding="utf-8") as f:
+            record = json.load(f)
+        if isinstance(record, dict):
+            record["unscannable_mcp"] = rows
+            from defenseclaw.file_permissions import atomic_write_private_bytes
+
+            atomic_write_private_bytes(record_path, (json.dumps(record, indent=2) + "\n").encode("utf-8"))
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError) as exc:
+        ux.warn(f"could not add the MCP servers a scan refuses to start to {record_path}: {exc}", indent="    ")
+    ctx.changes.append(
+        f"MCP servers that can no longer be scanned ({len(rows)}): the scanner starts only npx or uvx "
+        "with a package, or a URL"
+    )
+    for row in rows:
+        ctx.changes.append(
+            f"  {row['name']} ({row['connector']}): command {row['command']!r} {row['runtime_effect']}; "
+            f"fix: {row['fix']}"
+        )
 
 
 CONFIG_MIGRATIONS: dict[int, Callable[[MigrationContext], None]] = {8: _migrate_config_v9}

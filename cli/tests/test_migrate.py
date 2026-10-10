@@ -244,8 +244,36 @@ def test_v8_config_runs_the_go_v9_step(
         Path(config_path).write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
         moved = [{"to": "update.check"}, {"to": "asset_policy.mcp.denied", "value": "bad-mcp"}]
         record = {"moved": moved, "conflicts": [], "detection_only_rules": ["ACME-A", "ACME-B"]}
+        (data_dir / "migration-v9.json").write_text(json.dumps(record), encoding="utf-8")
         return {"migrated": True, "record": record}
 
+    # GAP-1340: the servers a scan refuses to start are named; the bare
+    # launchers with a package and URL entries are not.
+    from types import SimpleNamespace
+
+    from defenseclaw import config as config_module
+    from defenseclaw.config import MCPServerEntry
+
+    servers = {
+        "claudecode": [
+            MCPServerEntry(name="u33a-mcp", command="/usr/bin/true"),
+            MCPServerEntry(name="rel", command="./srv.sh"),
+            MCPServerEntry(name="binsrv", command="bin/srv"),
+            MCPServerEntry(name="win", command="C:\\tools\\srv.exe"),
+            MCPServerEntry(name="pathnpx", command="/opt/homebrew/bin/npx", args=["-y", "pkg"]),
+            MCPServerEntry(name="launcher", command="npx", args=["-y", "pkg"]),
+            MCPServerEntry(name="bare-uvx", command="uvx", args=["pkg"]),
+            MCPServerEntry(name="web", url="https://mcp.example.com/mcp"),
+            MCPServerEntry(name="bad-mcp", command="/usr/bin/false"),
+        ],
+        "codex": [MCPServerEntry(name="u33a-mcp", command="/usr/bin/true")],
+    }
+    cfg = SimpleNamespace(
+        active_connectors=lambda: ["claudecode", "codex"],
+        mcp_servers=lambda connector: servers[connector],
+        gateway=SimpleNamespace(watcher=SimpleNamespace(mcp=SimpleNamespace(take_action=True))),
+    )
+    monkeypatch.setattr(config_module, "load", lambda **_kwargs: cfg)
     monkeypatch.setattr(config_inspect, "migrate_config_v9", go_migrate)
     monkeypatch.setattr(migrations, "_refresh_local_observability_bundle", lambda *_args: None)
 
@@ -259,6 +287,28 @@ def test_v8_config_runs_the_go_v9_step(
     assert "2 custom rule(s) now detection-only for tool calls: ACME-A, ACME-B" in out
     # GAP-1227: the summary names the MCP servers the upgrade keeps blocked.
     assert "MCP servers that stay blocked (asset_policy.mcp.denied): bad-mcp" in out
+    expected = [
+        ("u33a-mcp", "claudecode"), ("rel", "claudecode"), ("binsrv", "claudecode"),
+        ("win", "claudecode"), ("pathnpx", "claudecode"), ("u33a-mcp", "codex"),
+    ]
+    assert "MCP servers that can no longer be scanned (6)" in out
+    named = re.findall(r"^\s*\S+ +(\S+) \((\w+)\): command ", out, re.MULTILINE)
+    assert named == expected
+    rows = json.loads((data_dir / "migration-v9.json").read_text(encoding="utf-8"))["unscannable_mcp"]
+    assert [(row["name"], row["connector"]) for row in rows] == expected
+    assert rows[0]["runtime_effect"].startswith("still runs, without a scan")
+    assert rows[0]["fix"] == (
+        "defenseclaw mcp set u33a-mcp --command npx --args <package> --connector claudecode (or --url <url>)"
+    )
+    assert rows[4]["fix"] == "defenseclaw mcp set pathnpx --command npx --args '[\"-y\", \"pkg\"]' --connector claudecode"
+
+    from defenseclaw.commands import cmd_doctor
+
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_unscannable_mcp(cfg, {"unscannable_mcp": rows}, result)
+    warned = [(c["label"], c["remediation"]) for c in result.checks if c["status"] == "warn"]
+    assert [label for label, _ in warned] == [f"MCP server {name} ({connector})" for name, connector in expected]
+    assert warned[0][1] == rows[0]["fix"]
 
 
 def test_secure_client_config_stays_on_v8_without_a_migration(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:

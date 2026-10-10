@@ -218,7 +218,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     shown_any = False
     undiscoverable: list[str] = []
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
-    failed_rows: list[tuple[str, str, str, str]] = []
+    failed_rows: list[tuple[str, str, str, MCPServerEntry | None]] = []
     not_loaded: list[tuple[str, MCPServerEntry]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
@@ -262,9 +262,9 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         )
         _print_mcp_list_table(servers, scan_map, actions_map, connector, failed_map)
         not_loaded.extend((connector, s) for s in servers if s.load_problem)
-        urls = {s.name: s.url or "" for s in servers}
+        by_name = {s.name: s for s in servers}
         failed_rows.extend(
-            (connector, name, row.get("error", ""), urls.get(name, "")) for name, row in failed_map.items()
+            (connector, name, row.get("error", ""), by_name.get(name)) for name, row in failed_map.items()
         )
         shown_any = True
 
@@ -282,8 +282,9 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
         )
         # GAP-1992: the next step follows each server's stored error; a
         # policy refusal is not fixed by "fix reachability".
-        for connector, name, error, url in failed_rows[:_FAILED_SCAN_HINT_LIMIT]:
-            ux.subhead(f"{name} ({connector}): {_failed_scan_next_step(name, connector, error, url)}")
+        for connector, name, error, entry in failed_rows[:_FAILED_SCAN_HINT_LIMIT]:
+            url = (entry.url or "") if entry is not None else ""
+            ux.subhead(f"{name} ({connector}): {_failed_scan_next_step(name, connector, error, url, entry)}")
         if len(failed_rows) > _FAILED_SCAN_HINT_LIMIT:
             ux.subhead(
                 f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
@@ -707,22 +708,26 @@ def _mcp_scan_command(name: str, connector: str = "", url: str | None = None) ->
     return cmd
 
 
-def _failed_scan_next_step(name: str, connector: str, error: str, url: str = "") -> str:
-    """Say what to do about one failed scan, based on its stored error (GAP-1992)."""
+def _failed_scan_next_step(
+    name: str, connector: str, error: str, url: str = "", entry: MCPServerEntry | None = None,
+) -> str:
+    """Say what to do about one failed scan, based on its stored error (GAP-1992).
+
+    A definition the scanner refuses to start gets the scanner's own reason
+    and the ``mcp set`` fix the upgrade notice and doctor give (GAP-1340).
+    """
+    from defenseclaw.scanner.mcp import mcp_scan_refusal, mcp_scannable_fix
+
     cmd = _mcp_scan_command(name, connector)
     err = (error or "").lower()
+    refusal = mcp_scan_refusal(entry) if entry is not None else None
+    if refusal:
+        return f"refused, {refusal}; fix: {mcp_scannable_fix(name, entry, connector)}, then: {cmd}"
     if "--allow-private" in err:
         return f"refused, the URL is a private or loopback address; to scan it anyway: {cmd} --allow-private"
-    if "allowlisted stdio launcher" in err and "is a path" in err:
-        return (
-            "refused, the scanner starts only the bare launcher names npx or uvx, never a command path; "
-            f"set the command to npx or uvx (or use a URL), then: {cmd}"
-        )
     if "allowlisted stdio launcher" in err:
-        return (
-            "refused, the command is not an npx or uvx launcher, so the scanner will not start it; "
-            f"configure it through npx/uvx or a URL, then: {cmd}"
-        )
+        # The refused definition was changed to one a scan starts.
+        return f"the definition changed since the refused scan; scan it again: {cmd}"
     if "disallowed address" in err:
         return (
             "refused, the URL resolves to an address the scanner never connects to; "

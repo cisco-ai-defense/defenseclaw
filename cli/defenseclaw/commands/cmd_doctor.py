@@ -10098,7 +10098,10 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
             record = json.load(f)
     except (OSError, ValueError):
         return
-    if not isinstance(record, dict) or record.get("acknowledged"):
+    if not isinstance(record, dict):
+        return
+    _check_unscannable_mcp(cfg, record, r)
+    if record.get("acknowledged"):
         return
     moved = len(record.get("moved") or [])
     conflicts = len(record.get("conflicts") or [])
@@ -10112,6 +10115,33 @@ def _check_policy_evidence_files(cfg, r: _DoctorResult) -> None:
         reason_code="config-migrated-v9",
         remediation="Read the record, then run `defenseclaw-gateway config migrate --ack`",
     )
+
+
+def _check_unscannable_mcp(cfg, record: dict, r: _DoctorResult) -> None:
+    """A WARN row per MCP server the upgrade kept that a scan still refuses to
+    start (migration-v9.json ``unscannable_mcp``, GAP-1340). A server whose
+    definition changed since is admitted like a new one and left out."""
+    kept = {
+        (str(row.get("name")), str(row.get("connector")), str(row.get("command")))
+        for row in record.get("unscannable_mcp") or []
+        if isinstance(row, dict)
+    }
+    if not kept:
+        return
+    from defenseclaw.scanner.mcp import unscannable_mcp_servers
+
+    for row in unscannable_mcp_servers(cfg):
+        if (row["name"], row["connector"], row["command"]) not in kept:
+            continue
+        _emit(
+            "warn",
+            f"MCP server {row['name']} ({row['connector']})",
+            f"can no longer be scanned: {row['reason']}; {row['runtime_effect']}",
+            r=r,
+            check_id="doctor.mcp.unscannable",
+            reason_code="mcp-unscannable",
+            remediation=row["fix"],
+        )
 
 
 def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:

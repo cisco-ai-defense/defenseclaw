@@ -548,6 +548,15 @@ def _bare_stdio_launcher(cmd: str) -> str:
     return lowered
 
 
+def _command_base_name(cmd: str) -> str:
+    """The lower-cased file name of a command, without .exe or .cmd."""
+    base = cmd.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    for suffix in (".exe", ".cmd"):
+        if base.endswith(suffix):
+            base = base[: -len(suffix)]
+    return base
+
+
 def _stdio_path_command_error(cmd: str) -> str:
     """Refusal text for a stdio command given as a path (GAP-2640).
 
@@ -555,10 +564,7 @@ def _stdio_path_command_error(cmd: str) -> str:
     uvx: it resolves only the bare launcher names from PATH. The text keeps
     "allowlisted stdio launcher" so callers that match on it still work.
     """
-    base = cmd.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
-    for suffix in (".exe", ".cmd"):
-        if base.endswith(suffix):
-            base = base[: -len(suffix)]
+    base = _command_base_name(cmd)
     fix = (
         f"set the command to the bare name {base!r}"
         if base in _SAFE_STDIO_LAUNCHERS
@@ -639,6 +645,78 @@ def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
       ``node_repl.exe`` after layout, real-path, owner, and DACL validation.
     """
     return _stdio_scan_command_error(command, args) is None
+
+
+def mcp_scan_refusal(entry: Any) -> str | None:
+    """Why a scan refuses to start a configured MCP server, or None.
+
+    A URL entry is scanned over the network; a local one only through the
+    launcher check above. ``mcp scan``, ``mcp list``, the upgrade notice and
+    doctor all ask this one function, so they name the same servers
+    (GAP-1340).
+    """
+    command = getattr(entry, "command", "") or ""
+    if not command or getattr(entry, "url", ""):
+        return None
+    return _stdio_scan_command_error(command, list(getattr(entry, "args", None) or []))
+
+
+def mcp_scannable_fix(name: str, entry: Any, connector: str = "") -> str:
+    """The ``mcp set`` command that gives a refused server a definition a scan
+    starts: the bare launcher when the command is a path to npx or uvx, else
+    npx with its package, or the server URL (GAP-1340)."""
+    import shlex
+
+    command = (getattr(entry, "command", "") or "").strip()
+    args = [str(a) for a in getattr(entry, "args", None) or []]
+    base = _command_base_name(command)
+    scope = f" --connector {connector}" if connector else ""
+    prefix = f"defenseclaw mcp set {shlex.quote(name)}"
+    if base in _SAFE_STDIO_LAUNCHERS and args and _stdio_scan_command_error(base, args) is None:
+        return f"{prefix} --command {base} --args {shlex.quote(json.dumps(args))}{scope}"
+    return f"{prefix} --command npx --args <package>{scope} (or --url <url>)"
+
+
+def unscannable_mcp_servers(cfg: Any) -> list[dict[str, str]]:
+    """The MCP servers of the configured connectors that a scan refuses to
+    start, with why, what the gateway does with them and the fix.
+
+    The upgrade notice (migration-v9.json ``unscannable_mcp``) and doctor
+    list these (GAP-1340). An entry the agent does not load is left out.
+    """
+    try:
+        connectors = [c for c in cfg.active_connectors() if c]
+    except Exception:  # noqa: BLE001 - no connector configured: nothing to list
+        return []
+    watcher = getattr(getattr(cfg, "gateway", None), "watcher", None)
+    take_action = getattr(getattr(watcher, "mcp", None), "take_action", True)
+    change = (
+        "a new or changed definition fails install admission and is blocked"
+        if take_action
+        else "a new or changed definition fails install admission and is reported, not blocked "
+        "(gateway.watcher.mcp.take_action is off)"
+    )
+    rows: list[dict[str, str]] = []
+    for connector in connectors:
+        try:
+            servers = cfg.mcp_servers(connector)
+        except Exception:  # noqa: BLE001 - an unreadable agent config has nothing to list
+            continue
+        for entry in servers:
+            if getattr(entry, "load_problem", "") or getattr(entry, "disabled", False):
+                continue
+            reason = mcp_scan_refusal(entry)
+            if not reason:
+                continue
+            rows.append({
+                "name": entry.name,
+                "connector": connector,
+                "command": entry.command,
+                "reason": reason,
+                "runtime_effect": f"still runs, without a scan (configured before the upgrade); {change}",
+                "fix": mcp_scannable_fix(entry.name, entry, connector),
+            })
+    return rows
 
 
 def _canonical_windows_file(path: str) -> str:
@@ -1265,9 +1343,7 @@ class MCPScannerWrapper:
         # loopback, link-local and CGNAT blocked unless the operator
         # explicitly opts in with allow_private).
         if is_local:
-            command_error = _stdio_scan_command_error(
-                server_entry.command, server_entry.args
-            )
+            command_error = mcp_scan_refusal(server_entry)
             if command_error:
                 raise ValueError(
                     f"refusing to scan local MCP server {server_entry.name!r}: "

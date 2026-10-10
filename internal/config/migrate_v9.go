@@ -174,6 +174,12 @@ type MigrationRecord struct {
 	// call on 0.8.x with their pattern and in 1.0, without an expression,
 	// only record it; the upgrade prints them (GAP-1225).
 	DetectionOnlyRules []string `json:"detection_only_rules,omitempty"`
+	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
+	// refuses to start (a command path or a program other than npx or uvx
+	// with a package). They keep running without a scan. The Python upgrade
+	// step adds them after the commit, with the scanner's own check, and
+	// prints them; doctor warns about each one still configured (GAP-1340).
+	UnscannableMCP []MigrationUnscannableMCP `json:"unscannable_mcp,omitempty"`
 	// AuditCleanup identifies only the copied operator rows. It lets a retry
 	// finish cleanup after config commit without deleting later decisions.
 	AuditCleanup *MigrationAuditCleanup `json:"audit_cleanup,omitempty"`
@@ -194,6 +200,19 @@ type MigrationAuditCleanup struct {
 type MigrationAuditCleanupRow struct {
 	ID          string `json:"id"`
 	Fingerprint string `json:"fingerprint"`
+}
+
+// MigrationUnscannableMCP is one MCP server a scan refuses to start.
+type MigrationUnscannableMCP struct {
+	Name      string `json:"name"`
+	Connector string `json:"connector"`
+	Command   string `json:"command"`
+	// Reason is the scanner's refusal.
+	Reason string `json:"reason"`
+	// RuntimeEffect says what the gateway does with the server.
+	RuntimeEffect string `json:"runtime_effect"`
+	// Fix is the defenseclaw mcp set command that makes it scannable.
+	Fix string `json:"fix"`
 }
 
 // MigrationMove is one value moved from a v8 source to a v9 key.

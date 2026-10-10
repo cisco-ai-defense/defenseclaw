@@ -154,7 +154,10 @@ installed. Every path keeps your configuration and data.
   as a command path added with `mcp set --skip-scan`, shows `scan failed` in
   `defenseclaw mcp list` and is not blocked. A server on a block list stays
   blocked, and the upgrade summary names it. A server you change or add
-  afterwards goes through install admission.
+  afterwards goes through install admission. The upgrade summary,
+  `migration-v9.json` and `defenseclaw doctor` name each server the scanner
+  cannot start, with the `mcp set` command that fixes it; see
+  [MCP servers that can no longer be scanned](/docs/reference/migrate-v9#mcp-servers-that-can-no-longer-be-scanned).
 - On Windows, the installer also removes a 0.8.x native Setup installation
   (its program folder, sign-in start entry, Add/Remove Programs entry, and
   `PATH` entry). The old program files are kept in

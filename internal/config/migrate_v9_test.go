@@ -1920,3 +1920,29 @@ func TestMigrateV9KeepsNameWideDenyBesideURLDeny(t *testing.T) {
 		t.Fatalf("migrated rules did not retain the name-wide block: %v", rules)
 	}
 }
+
+// The Python upgrade step adds unscannable_mcp to migration-v9.json after the
+// commit; marking the record read must keep it for doctor (GAP-1340).
+func TestAcknowledgeMigrationV9KeepsUnscannableMCP(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), DefaultConfigName)
+	raw := `{"schema_version":1,"from_version":8,"to_version":9,"source_sha256":"abc","moved":[],"conflicts":[],` +
+		`"unscannable_mcp":[{"name":"u33a-mcp","connector":"codex","command":"/usr/bin/true","reason":"r",` +
+		`"runtime_effect":"still runs","fix":"defenseclaw mcp set u33a-mcp --command npx --args <package>"}]}`
+	if err := os.WriteFile(MigrationRecordPath(configPath), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := AcknowledgeMigrationV9(configPath); err != nil {
+		t.Fatal(err)
+	}
+	record, ok := readMigrationRecord(configPath)
+	if !ok || !record.Acknowledged {
+		t.Fatalf("record not acknowledged: %+v", record)
+	}
+	want := []MigrationUnscannableMCP{{
+		Name: "u33a-mcp", Connector: "codex", Command: "/usr/bin/true", Reason: "r",
+		RuntimeEffect: "still runs", Fix: "defenseclaw mcp set u33a-mcp --command npx --args <package>",
+	}}
+	if !slices.Equal(record.UnscannableMCP, want) {
+		t.Fatalf("unscannable_mcp = %+v, want %+v", record.UnscannableMCP, want)
+	}
+}
