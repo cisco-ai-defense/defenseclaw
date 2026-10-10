@@ -511,6 +511,12 @@ func TestHookConnectorDeniedSkillLoadIsRefused(t *testing.T) {
 		}, true},
 		{"opencode", "tool.execute.before", "skill", map[string]interface{}{"name": "dcmain-marker-skill"}, true},
 		{"hermes", "pre_tool_call", "skill_view", map[string]interface{}{"name": "software-development:dcmain-marker-skill"}, true},
+		// Kiro CLI 2.x reads the SKILL.md; v3 loads it with disclose_context
+		// (live shapes, kiro-cli 2.26.1, GAP-1249).
+		{"kiro", "preToolUse", "read", map[string]interface{}{"operations": []interface{}{map[string]interface{}{
+			"mode": "Line", "path": filepath.Join(home, ".kiro", "skills", "dcmain-marker-skill", "SKILL.md"),
+		}}}, true},
+		{"kiro", "PreToolUse", "disclose_context", map[string]interface{}{"name": "dcmain-marker-skill"}, true},
 		{"cursor", "preToolUse", "Read", map[string]interface{}{
 			"path": filepath.Join(home, ".cursor", "skills", "dcmain-marker-skill", "SKILL.md"),
 		}, true},
