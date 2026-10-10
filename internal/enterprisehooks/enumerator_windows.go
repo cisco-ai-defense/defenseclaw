@@ -1157,7 +1157,24 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 // `guardrail.connectors.claudecode.enabled: false` emits ZERO
 // per-user rows for claudecode — the disabled map entry is
 // authoritative. See CR spec-005:PRRT_kwDORuAK-s6atyfM.
+//
+// The per-user connectors count only in a standalone process (one that
+// carries the profile pin); use EffectiveWindowsStandaloneHookConnectors
+// where the caller already knows the config is a standalone one.
 func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
+	return effectiveWindowsHookConnectors(cfg, windowsEnterpriseStandaloneProcess())
+}
+
+// EffectiveWindowsStandaloneHookConnectors is EffectiveWindowsHookConnectors
+// for a config the caller loaded from the standalone layout. A CLI or Setup
+// lifecycle process does not carry the profile pin, so without this its
+// per-user-only config (opencode, copilot, hermes) counted no connector and
+// verify failed no_connectors_enabled (GAP-1230).
+func EffectiveWindowsStandaloneHookConnectors(cfg *config.Config) []string {
+	return effectiveWindowsHookConnectors(cfg, true)
+}
+
+func effectiveWindowsHookConnectors(cfg *config.Config, standalone bool) []string {
 	seen := make(map[string]struct{})
 	// disabledNames captures every name the operator explicitly
 	// disabled in cfg.Guardrail.Connectors. The scalar-connector
@@ -1173,7 +1190,7 @@ func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
 		if trimmed == "" {
 			return
 		}
-		if !windowsEnumeratorHookConnector(trimmed) {
+		if !windowsEnumeratorHookConnector(trimmed, standalone) {
 			return
 		}
 		if explicitlyDisabled {
