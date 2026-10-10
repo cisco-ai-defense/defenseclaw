@@ -192,14 +192,14 @@ type MigrationRecord struct {
 	// WholeArgumentRules those of them that block only a command argument
 	// equal to the literal (GAP-1344). The upgrade and doctor print them.
 	RenamedRules       []string `json:"renamed_rules,omitempty"`
+	ExpressedRules     []string `json:"expressed_rules,omitempty"`
+	WholeArgumentRules []string `json:"whole_argument_rules,omitempty"`
 	// RulePackRebaseFailures names each 0.8.x custom pack whose 1.0 copy
 	// could not be made, and why. It is pinned as it is, so its rules that
 	// blocked a tool call with a pattern alone only record the match. The
 	// upgrade, doctor and an audit alert at each gateway start name it until
 	// the record is acknowledged (GAP-1358).
 	RulePackRebaseFailures []string `json:"rule_pack_rebase_failures,omitempty"`
-	ExpressedRules     []string `json:"expressed_rules,omitempty"`
-	WholeArgumentRules []string `json:"whole_argument_rules,omitempty"`
 	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
 	// refuses to start (a command path or a program other than npx or uvx
 	// with a package). They keep running without a scan. The Python upgrade
