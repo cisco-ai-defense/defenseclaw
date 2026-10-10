@@ -1398,14 +1398,11 @@ func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, tru
 	return entries
 }
 
-// ReadMCPFromCodexUserConfigTOML reads a path that the caller has already
-// resolved as a Codex user-scope config. Only this provenance-aware entry point
-// can promote an exact built-in table shape to Bundled; project and generic
-// TOML readers intentionally leave the same name/URL scan-eligible.
 // ReadUserMCPServersForHome reads the user-scope MCP registries that
 // connectorName keeps under home, for a managed gateway that watches every
 // enrolled user: Codex's config.toml, Claude Code's .claude.json and
-// settings.json. Unreadable files are skipped; each entry carries the
+// settings.json, Devin's mcp_config.json in that user's roaming AppData
+// (GAP-1237). Unreadable files are skipped; each entry carries the
 // connector. Other connectors list none.
 func ReadUserMCPServersForHome(connectorName, home string) []MCPServerEntry {
 	home = strings.TrimSpace(home)
@@ -1425,6 +1422,12 @@ func ReadUserMCPServersForHome(connectorName, home string) []MCPServerEntry {
 		if e, err := readMCPFromClaudeSettings(filepath.Join(home, ".claude", "settings.json")); err == nil {
 			entries = append(entries, e...)
 		}
+	case "devin":
+		// The service's own %APPDATA% is not the user's: resolve the
+		// enrolled profile's.
+		if e, err := ReadMCPFromDevinConfig(filepath.Join(devinConfigHomeFor(home), "mcp_config.json")); err == nil {
+			entries = append(entries, e...)
+		}
 	default:
 		return nil
 	}
@@ -1435,6 +1438,10 @@ func ReadUserMCPServersForHome(connectorName, home string) []MCPServerEntry {
 	return entries
 }
 
+// ReadMCPFromCodexUserConfigTOML reads a path that the caller has already
+// resolved as a Codex user-scope config. Only this provenance-aware entry point
+// can promote an exact built-in table shape to Bundled; project and generic
+// TOML readers intentionally leave the same name/URL scan-eligible.
 func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 	entries, err := readMCPFromCodexConfigTOML(path)
 	if err != nil {
@@ -1638,9 +1645,16 @@ func devinConfigHome() (string, error) {
 		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
 			return filepath.Join(filepath.Clean(appData), "devin"), nil
 		}
-		return filepath.Join(home, "AppData", "Roaming", "devin"), nil
 	}
-	return filepath.Join(home, ".config", "devin"), nil
+	return devinConfigHomeFor(home), nil
+}
+
+// devinConfigHomeFor is Devin's default user configuration root in home.
+func devinConfigHomeFor(home string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(home, "AppData", "Roaming", "devin")
+	}
+	return filepath.Join(home, ".config", "devin")
 }
 
 // ReadMCPFromDevinConfig reads one canonical Devin mcp_config.json file using

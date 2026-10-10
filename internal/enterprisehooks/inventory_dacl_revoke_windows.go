@@ -26,7 +26,8 @@ import (
 // removal trust check there expects the exact protected DACL, so the extra
 // ACEs made it refuse to remove the registrations (GAP-1765). The service
 // SIDs are derived from the names, so this works after the services are
-// deleted. The IDE plugin inventory's folders and files, and every
+// deleted. The single profile files (inventoryDACLProfileFiles), the IDE
+// plugin inventory's folders and files, and every
 // connector skill and plugin folder (GAP-0913), are revoked on every
 // profile, whatever the profile granted. A missing path is skipped;
 // per-path failures are returned.
@@ -43,7 +44,7 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 		}
 		sids = append(sids, sid)
 	}
-	dirs := append(append([]string(nil), inventoryDACLDotdirs...), inventoryDACLListOnlyDirs...)
+	dirs := append(append(append([]string(nil), inventoryDACLDotdirs...), inventoryDACLListOnlyDirs...), inventoryDACLProfileFiles...)
 	seen := map[string]struct{}{}
 	var failures []error
 	for _, target := range manifest.Targets {
