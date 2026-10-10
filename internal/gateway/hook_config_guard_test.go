@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -598,6 +599,9 @@ func TestHookConfigGuard_IgnoresUnrelatedEdits(t *testing.T) {
 // gateway restarted. The file watcher must now restore the Setup render. An
 // operator-removed connector is still not re-added.
 func TestHookConfigGuard_RepairsOneEditedEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher, not a hook script")
+	}
 	root := testenv.PrivateTempDir(t)
 	cfgPath := filepath.Join(root, "copilot", "hooks", "defenseclaw.json")
 	prev := connector.CopilotHooksPathOverride
