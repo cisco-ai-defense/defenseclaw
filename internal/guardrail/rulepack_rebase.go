@@ -27,9 +27,11 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp/syntax"
 	"slices"
 	"strings"
 	"sync"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 
@@ -49,13 +51,6 @@ var legacy08FileNames = map[string]string{
 	"cognitive-file": "cognitive.yaml",
 	"sensitive-path": "sensitive-paths.yaml",
 }
-
-// actionRuleCategories judge a concrete action: a command, a path, a change
-// to an agent's own files, a network destination. The engine blocks such an
-// action only with a semantic proof (the rule's expression, or a built-in
-// owner of a shipped rule's ID); a pattern alone selects candidates and
-// records a match on a tool call, but never blocks one.
-var actionRuleCategories = map[string]bool{"command": true, "sensitive-path": true, "cognitive-file": true, "c2": true}
 
 // default08RuleIDs are the action rules of the 0.8.x default pack (0.8.0 to
 // 0.8.10 shipped the same ones), none with an expression. A copy of that
@@ -77,13 +72,15 @@ var default08RuleIDs = map[string][]string{
 		"PATH-ETC-SHADOW", "PATH-ETC-SUDOERS", "PATH-PROC-ENVIRON", "PATH-HISTORY"},
 }
 
-// shippedRules indexes the action rules of the packs this build ships.
+// shippedRules indexes the rules of the packs this build ships.
 type shippedRules struct {
 	// withExpression and patternOnly map a category to the rule IDs some
 	// shipped pack gives an expression, or ships without one (those have a
-	// built-in owner and need none).
+	// built-in owner, or are content rules, and need none).
 	withExpression map[string]map[string]bool
 	patternOnly    map[string]map[string]bool
+	// builtin holds every shipped rule ID, of any category.
+	builtin map[string]bool
 	// defaultFiles is the shipped default pack's rule file per category.
 	defaultFiles map[string][]byte
 }
@@ -96,6 +93,7 @@ var shippedRuleIndex = sync.OnceValues(func() (*shippedRules, error) {
 	index := &shippedRules{
 		withExpression: map[string]map[string]bool{},
 		patternOnly:    map[string]map[string]bool{},
+		builtin:        map[string]bool{},
 		defaultFiles:   map[string][]byte{},
 	}
 	for _, file := range files {
@@ -107,10 +105,8 @@ var shippedRuleIndex = sync.OnceValues(func() (*shippedRules, error) {
 		if err := yaml.Unmarshal(file.Data, &rules); err != nil {
 			return nil, fmt.Errorf("shipped rule file %s: %w", file.Path, err)
 		}
-		if !actionRuleCategories[rules.Category] {
-			continue
-		}
 		for _, rule := range rules.Rules {
+			index.builtin[rule.ID] = true
 			set := index.patternOnly
 			if strings.TrimSpace(rule.Expression) != "" {
 				set = index.withExpression
@@ -127,23 +123,27 @@ var shippedRuleIndex = sync.OnceValues(func() (*shippedRules, error) {
 	return index, nil
 })
 
-// actionRuleGap classifies an enabled action rule without an expression: a
-// stale 0.8.x copy of a built-in rule (the shipped packs give that ID an
-// expression, or no longer ship it), or one of the operator's own, which
-// records matches and cannot block (GAP-0360).
-func (s *shippedRules) actionRuleGap(category string, rule RuleDefYAML) (stale, alertOnly bool) {
-	if !actionRuleCategories[category] || strings.TrimSpace(rule.Expression) != "" ||
-		(rule.Enabled != nil && !*rule.Enabled) || s.patternOnly[category][rule.ID] {
+// ruleGap classifies an enabled rule without an expression. The engine blocks
+// a tool call only with a semantic proof (the rule's expression, or a
+// built-in owner of a shipped rule's ID); a pattern alone records a match on
+// a tool call but never blocks one, where 0.8.x blocked it. A stale rule is a
+// 0.8.x copy of a built-in command, path, agent-file or C2 rule (the shipped
+// packs give that ID an expression, or no longer ship it) (GAP-0360); an
+// alert-only rule is one of the operator's own, in any category (GAP-1225).
+func (s *shippedRules) ruleGap(category string, rule RuleDefYAML) (stale, alertOnly bool) {
+	if strings.TrimSpace(rule.Expression) != "" || (rule.Enabled != nil && !*rule.Enabled) ||
+		s.patternOnly[category][rule.ID] {
 		return false, false
 	}
-	if s.withExpression[category][rule.ID] || slices.Contains(default08RuleIDs[category], rule.ID) {
+	if _, legacy := legacy08FileNames[category]; legacy &&
+		(s.withExpression[category][rule.ID] || slices.Contains(default08RuleIDs[category], rule.ID)) {
 		return true, false
 	}
-	return false, true
+	return false, !s.builtin[rule.ID]
 }
 
-// actionRuleGaps counts the pack's stale and alert-only action rules.
-func (rp *RulePack) actionRuleGaps() (stale, alertOnly int) {
+// ruleGaps counts the pack's stale and alert-only rules.
+func (rp *RulePack) ruleGaps() (stale, alertOnly int) {
 	index, err := shippedRuleIndex()
 	if err != nil || rp == nil {
 		return 0, 0
@@ -153,7 +153,7 @@ func (rp *RulePack) actionRuleGaps() (stale, alertOnly int) {
 			continue
 		}
 		for _, rule := range ruleFile.Rules {
-			isStale, isAlertOnly := index.actionRuleGap(ruleFile.Category, rule)
+			isStale, isAlertOnly := index.ruleGap(ruleFile.Category, rule)
 			if isStale {
 				stale++
 			}
@@ -165,26 +165,32 @@ func (rp *RulePack) actionRuleGaps() (stale, alertOnly int) {
 	return stale, alertOnly
 }
 
-// RulePackRebase is the 1.0 copy of a custom pack whose action rule files
-// are 0.8.x copies of the default pack's: in 1.0 those rules enforced
-// nothing (GAP-0360). Each such file is rebuilt on the shipped default's,
-// keeping the operator's own rules and the built-in rules they turned off.
+// RulePackRebase is the 1.0 copy of a 0.8.x custom pack. A 0.8.x rule blocked
+// a tool call with its pattern alone; in 1.0 only an expression can. An
+// action rule file that is a 0.8.x copy of the default pack's enforced
+// nothing (GAP-0360): it is rebuilt on the shipped default's, keeping the
+// operator's own rules and the built-in rules they turned off. The
+// operator's own rules in any file get an expression where one can be
+// derived; the others are named (GAP-1225).
 type RulePackRebase struct {
-	// Files holds every file of the rebased pack (slash-separated relative path).
+	// Files holds every file of the rebased pack (slash-separated relative
+	// path); nil when no file changed and the pack is pinned as it is.
 	Files map[string][]byte
 	// Digest is the FilesDigest of the rebased pack (hex).
 	Digest string
 	// Updated counts the built-in rules replaced by their 1.0 versions.
 	Updated int
-	// Carried names the operator's own rules carried into the 1.0 files,
-	// Expressed those of them given an expression (a literal pattern, as an
-	// argument of the command), AlertOnly those that still have none, and
-	// Disabled the built-in rules the copy had removed.
+	// Carried names the operator's own rules carried into rebuilt files,
+	// Expressed the operator's own rules given an expression (a literal
+	// pattern, as an argument of a command), AlertOnly the enabled ones that
+	// still have none and only record a tool call's match, and Disabled the
+	// built-in rules the copy had removed.
 	Carried, Expressed, AlertOnly, Disabled []string
 }
 
-// PlanRulePackRebase returns the rebased copy of the custom pack in dir, or
-// nil when none of its action rule files is a stale 0.8.x copy.
+// PlanRulePackRebase returns the 1.0 copy of the custom pack in dir, a plan
+// without Files when it only names rules that stay detection-only for tool
+// calls, or nil when the pack needs neither.
 func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
 	index, err := shippedRuleIndex()
 	if err != nil {
@@ -195,7 +201,7 @@ func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
 		return nil, err
 	}
 	plan := &RulePackRebase{Files: files}
-	rebased := false
+	changed := false
 	for _, rel := range slices.Sorted(maps.Keys(files)) {
 		if path.Dir(rel) != "rules" || path.Ext(rel) != ".yaml" || rel == "rules/local-patterns.yaml" {
 			continue
@@ -204,22 +210,33 @@ func PlanRulePackRebase(dir string) (*RulePackRebase, error) {
 		if yaml.Unmarshal(files[rel], &parsed) != nil {
 			continue // LoadRulePack reports it
 		}
-		shipped, ok := index.defaultFiles[parsed.Category]
-		if !ok || !slices.ContainsFunc(parsed.Rules, func(rule RuleDefYAML) bool {
-			stale, _ := index.actionRuleGap(parsed.Category, rule)
-			return stale
-		}) {
-			continue
+		has := func(stale bool) bool {
+			return slices.ContainsFunc(parsed.Rules, func(rule RuleDefYAML) bool {
+				isStale, isOwn := index.ruleGap(parsed.Category, rule)
+				return isStale && stale || isOwn && !stale
+			})
 		}
-		data, err := rebaseRuleFile(shipped, files[rel], parsed.Category, plan)
+		var data []byte
+		var err error
+		if shipped, ok := index.defaultFiles[parsed.Category]; ok && has(true) {
+			data, err = rebaseRuleFile(shipped, files[rel], parsed.Category, plan)
+		} else if has(false) {
+			data, err = expressOwnRules(files[rel], parsed.Category, index, plan)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("rebase %s: %w", rel, err)
 		}
-		files[rel] = data
-		rebased = true
+		if data != nil {
+			files[rel] = data
+			changed = true
+		}
 	}
-	if !rebased {
-		return nil, nil
+	if !changed {
+		if len(plan.AlertOnly) == 0 {
+			return nil, nil
+		}
+		plan.Files = nil
+		return plan, nil
 	}
 	staging, err := os.MkdirTemp("", "defenseclaw-rebase-")
 	if err != nil {
@@ -251,7 +268,7 @@ func RebaseLoadedRulePack(dir string, source *RulePack) (*RulePack, error) {
 	if err != nil {
 		return nil, err
 	}
-	if plan == nil {
+	if plan == nil || plan.Files == nil {
 		return source, nil
 	}
 	currentDigest, err := RulePackDigest(dir)
@@ -372,14 +389,7 @@ func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebas
 			plan.Updated++ // a 0.8.x rule 1.0 no longer ships
 		default:
 			plan.Carried = append(plan.Carried, id)
-			if strings.TrimSpace(yamlScalarField(item, "expression")) == "" {
-				if literal := literalPattern(yamlScalarField(item, "pattern")); category == "command" && literal != "" {
-					setYAMLScalarField(item, "expression", "f.commands.exists(c, '"+literal+"' in c.argv)", "!!str")
-					plan.Expressed = append(plan.Expressed, id)
-				} else if yamlScalarField(item, "enabled") != "false" {
-					plan.AlertOnly = append(plan.AlertOnly, id)
-				}
-			}
+			expressOwnRule(item, plan)
 			baseRules.Content = append(baseRules.Content, item)
 		}
 	}
@@ -389,10 +399,67 @@ func rebaseRuleFile(shipped, custom []byte, category string, plan *RulePackRebas
 			plan.Disabled = append(plan.Disabled, id)
 		}
 	}
+	return encodeRuleFile(&base)
+}
+
+// expressOwnRules gives the operator's own rules in a rule file that is not
+// a 0.8.x copy of a default one their expression (expressOwnRule). It
+// returns nil when no rule got one, so the file is kept byte for byte.
+func expressOwnRules(custom []byte, category string, index *shippedRules, plan *RulePackRebase) ([]byte, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(custom, &document); err != nil {
+		return nil, err
+	}
+	rules := yamlRulesSequence(&document)
+	if rules == nil {
+		return nil, errors.New("no rules list")
+	}
+	expressed := false
+	for _, item := range rules.Content {
+		var rule RuleDefYAML
+		if item.Decode(&rule) != nil {
+			continue // LoadRulePack reports it
+		}
+		if _, own := index.ruleGap(category, rule); own && expressOwnRule(item, plan) {
+			expressed = true
+		}
+	}
+	if !expressed {
+		return nil, nil
+	}
+	return encodeRuleFile(&document)
+}
+
+// expressOwnRule gives one of the operator's own enabled rules without an
+// expression the one its pattern implies when that pattern is a literal: a
+// command that has the literal as an argument, which blocks as the 0.8.x
+// pattern did. A rule with any other pattern keeps only its pattern and is
+// named in AlertOnly: in 1.0 it records a tool call's match and never blocks.
+func expressOwnRule(item *yaml.Node, plan *RulePackRebase) bool {
+	if strings.TrimSpace(yamlScalarField(item, "expression")) != "" || yamlRuleDisabled(item) {
+		return false
+	}
+	id := yamlScalarField(item, "id")
+	if literal := literalPattern(yamlScalarField(item, "pattern")); literal != "" {
+		setYAMLScalarField(item, "expression", "f.commands.exists(c, '"+literal+"' in c.argv)", "!!str")
+		plan.Expressed = append(plan.Expressed, id)
+		return true
+	}
+	plan.AlertOnly = append(plan.AlertOnly, id)
+	return false
+}
+
+func yamlRuleDisabled(item *yaml.Node) bool {
+	value, ok := yamlField(item, "enabled")
+	var enabled bool
+	return ok && value.Decode(&enabled) == nil && !enabled
+}
+
+func encodeRuleFile(document *yaml.Node) ([]byte, error) {
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)
 	encoder.SetIndent(2)
-	if err := encoder.Encode(&base); err != nil {
+	if err := encoder.Encode(document); err != nil {
 		return nil, err
 	}
 	if err := encoder.Close(); err != nil {
@@ -486,12 +553,30 @@ func removeYAMLField(mapping *yaml.Node, key string) {
 	}
 }
 
-// literalPattern is the text a pattern matches when it is a plain literal
-// (optionally between \b word boundaries) that a CEL string holds as is,
-// else "".
+// literalPattern is the text a pattern matches when it is a case-sensitive
+// literal (escaped metacharacters such as \. included, optionally between \b
+// word boundaries) that a CEL string holds as is, else "".
 func literalPattern(pattern string) string {
-	literal := strings.TrimSuffix(strings.TrimPrefix(pattern, `\b`), `\b`)
-	if literal == "" || len(literal) > 256 || strings.ContainsAny(literal, `.^$*+?()[]{}|\'"`+" \t\r\n") {
+	re, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return ""
+	}
+	parts := []*syntax.Regexp{re}
+	if re.Op == syntax.OpConcat {
+		parts = re.Sub
+	}
+	if len(parts) > 1 && parts[0].Op == syntax.OpWordBoundary {
+		parts = parts[1:]
+	}
+	if len(parts) > 1 && parts[len(parts)-1].Op == syntax.OpWordBoundary {
+		parts = parts[:len(parts)-1]
+	}
+	if len(parts) != 1 || parts[0].Op != syntax.OpLiteral || parts[0].Flags&syntax.FoldCase != 0 {
+		return ""
+	}
+	literal := string(parts[0].Rune)
+	if literal == "" || len(literal) > 256 || strings.ContainsAny(literal, `\'"`) ||
+		strings.ContainsFunc(literal, func(r rune) bool { return unicode.IsSpace(r) || !unicode.IsPrint(r) }) {
 		return ""
 	}
 	return literal

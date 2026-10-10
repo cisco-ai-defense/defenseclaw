@@ -110,15 +110,16 @@ type MigrateV9Input struct {
 	// a custom rule_pack_dir pass it; without it such a directory is a
 	// migration error.
 	RulePackDigest func(dir string) (string, error)
-	// RebaseRulePack plans the 1.0 copy of a custom rule-pack directory whose
-	// action rule files are 0.8.x copies of the default pack's, which enforce
-	// nothing in 1.0 (guardrail.PlanRulePackRebase); a nil plan needs none.
-	// Without it such a pack is pinned as it is (GAP-0360).
+	// RebaseRulePack plans the 1.0 copy of a 0.8.x custom rule-pack directory
+	// whose rules block a tool call with a pattern alone, which 1.0 does only
+	// with an expression (guardrail.PlanRulePackRebase); a nil plan needs
+	// none. Without it such a pack is pinned as it is (GAP-0360, GAP-1225).
 	RebaseRulePack func(dir string) (*RulePackRebasePlan, error)
 }
 
 // RulePackRebasePlan is guardrail.RulePackRebase, which this package can not
-// import: the rebased pack's files and FilesDigest, and what changed.
+// import: the rebased pack's files and FilesDigest (no Files: the pack is
+// pinned as it is), and what changed.
 type RulePackRebasePlan struct {
 	Files                                   map[string][]byte
 	Digest                                  string
@@ -169,6 +170,10 @@ type MigrationRecord struct {
 	// Notes are behaviour changes the operator should know about (for
 	// example block_at now applies on every path).
 	Notes []string `json:"notes,omitempty"`
+	// DetectionOnlyRules names the operator's own rules that blocked a tool
+	// call on 0.8.x with their pattern and in 1.0, without an expression,
+	// only record it; the upgrade prints them (GAP-1225).
+	DetectionOnlyRules []string `json:"detection_only_rules,omitempty"`
 	// AuditCleanup identifies only the copied operator rows. It lets a retry
 	// finish cleanup after config commit without deleting later decisions.
 	AuditCleanup *MigrationAuditCleanup `json:"audit_cleanup,omitempty"`
@@ -2265,11 +2270,20 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 	}
 	plan, err := m.in.RebaseRulePack(clean)
 	if err != nil {
-		m.note("%s could not be rebased on the 1.0 default pack (%v): it is pinned as it is, and any 0.8.x copy of a "+
-			"built-in command, path, agent-file or C2 rule in it only records matches; doctor names them", dir, err)
+		m.note("%s could not be rebased on the 1.0 default pack (%v): it is pinned as it is, and its rules without an "+
+			"expression only record tool-call matches; doctor counts them", dir, err)
 		return clean, "", nil
 	}
 	if plan == nil {
+		return clean, "", nil
+	}
+	if m.rebasedPacks == nil {
+		m.rebasedPacks, m.rebasedFrom, m.rebasedDigests = map[string]map[string][]byte{}, map[string]string{}, map[string]string{}
+	}
+	if plan.Files == nil {
+		// Nothing to rewrite: pinned as it is, once per folder.
+		m.rebasedFrom[clean] = clean
+		m.noteDetectionOnly(dir, plan.AlertOnly)
 		return clean, "", nil
 	}
 	target := clean + "-1.0"
@@ -2281,29 +2295,46 @@ func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
 		}
 		target = fmt.Sprintf("%s-1.0-%d", clean, suffix)
 	}
-	if m.rebasedPacks == nil {
-		m.rebasedPacks, m.rebasedFrom, m.rebasedDigests = map[string]map[string][]byte{}, map[string]string{}, map[string]string{}
-	}
 	m.rebasedPacks[target], m.rebasedFrom[clean], m.rebasedDigests[target] = plan.Files, target, plan.Digest
-	kept := fmt.Sprintf("%d built-in rules are their 1.0 versions", plan.Updated)
-	if len(plan.Disabled) > 0 {
-		kept += fmt.Sprintf(", %s stay off (the copy had removed them)", strings.Join(plan.Disabled, ", "))
-	}
-	if len(plan.Carried) > 0 {
-		kept += fmt.Sprintf("; your own rules were carried over: %s", strings.Join(plan.Carried, ", "))
-	}
+	expressed := ""
 	if len(plan.Expressed) > 0 {
-		kept += fmt.Sprintf("; these got an expression that blocks a command with their pattern as an argument "+
+		expressed = fmt.Sprintf("these got an expression that blocks a command with their pattern as an argument "+
 			"(review it): %s", strings.Join(plan.Expressed, ", "))
 	}
-	m.note("%s is a 0.8.x copy of the default pack's command, path, agent-file or C2 rules, which have no expression; "+
-		"in 1.0 such a rule blocks only with one, so the pack enforced nothing. It was rebased on the 1.0 default "+
-		"pack in %s, which is pinned instead (%s); %s is kept for a rollback to 0.8.x", dir, target, kept, dir)
-	if len(plan.AlertOnly) > 0 {
-		m.note("%s in %s have no expression, so in 1.0 they record matches but never block: give each an expression "+
-			"over the parsed command (see the CEL rule authoring guide)", strings.Join(plan.AlertOnly, ", "), target)
+	if plan.Updated > 0 {
+		kept := fmt.Sprintf("%d built-in rules are their 1.0 versions", plan.Updated)
+		if len(plan.Disabled) > 0 {
+			kept += fmt.Sprintf(", %s stay off (the copy had removed them)", strings.Join(plan.Disabled, ", "))
+		}
+		if len(plan.Carried) > 0 {
+			kept += fmt.Sprintf("; your own rules were carried over: %s", strings.Join(plan.Carried, ", "))
+		}
+		if expressed != "" {
+			kept += "; " + expressed
+		}
+		m.note("%s is a 0.8.x copy of the default pack's command, path, agent-file or C2 rules, which have no expression; "+
+			"in 1.0 such a rule blocks only with one, so the pack enforced nothing. It was rebased on the 1.0 default "+
+			"pack in %s, which is pinned instead (%s); %s is kept for a rollback to 0.8.x", dir, target, kept, dir)
+	} else {
+		// Only the operator's own rules changed (GAP-1225).
+		m.note("%s has rules of yours that blocked a tool call with their pattern alone, which 1.0 does only with an "+
+			"expression. Its 1.0 copy %s is pinned instead (%s); %s is kept for a rollback to 0.8.x",
+			dir, target, expressed, dir)
 	}
+	m.noteDetectionOnly(target, plan.AlertOnly)
 	return target, plan.Digest, nil
+}
+
+// noteDetectionOnly names the operator's own rules that blocked a tool call
+// on 0.8.x with their pattern and, with no expression, only record it in 1.0
+// (GAP-1225). The upgrade prints DetectionOnlyRules.
+func (m *v9Migrator) noteDetectionOnly(pack string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	m.record.DetectionOnlyRules = append(m.record.DetectionOnlyRules, ids...)
+	m.note("%d custom rule(s) in %s now detection-only for tool calls: %s; add an expression, see policies/rules",
+		len(ids), pack, strings.Join(ids, ", "))
 }
 
 // writeRebasedRulePack writes a rebased pack to dir, which must not exist:
