@@ -36,6 +36,12 @@ type Observation struct {
 	Title    string
 	Detail   string
 	PID      int
+	// Start is when the observed process was created and Name its image,
+	// each empty when unknown. With PID they name the process instance, so
+	// the owner of an observation is read for that process and not for a
+	// later one that reused its pid (GAP-1372).
+	Start time.Time
+	Name  string
 	// Path is the file the observation concerns, for file kinds. It names
 	// the profile an agent's configuration lives in, which can attribute
 	// the session to its account.
@@ -55,7 +61,9 @@ func (o Observation) Key() string {
 
 // Session accumulates the observations attributed to one agent root pid.
 type Session struct {
-	RootPID      int
+	RootPID int
+	// RootName is the root process's image name, empty when unknown.
+	RootName     string
 	AgentName    string
 	FirstSeen    time.Time
 	LastSeen     time.Time

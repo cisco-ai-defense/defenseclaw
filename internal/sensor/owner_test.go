@@ -18,6 +18,7 @@ package sensor
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,7 +85,8 @@ func ownerTestLookups() OwnerLookups {
 // names is unattributed, never given another account's identity.
 func TestOwnerResolverFallsBackFromTokenToSessionToEnrolledProfile(t *testing.T) {
 	t.Parallel()
-	resolver := newOwnerResolver(ownerTestLookups(), []procprobe.Process{
+	at := time.Unix(1_760_000_000, 0)
+	processes := []procprobe.Process{
 		// The token (or Win32_Process owner) was readable.
 		{PID: 10, Name: "codex.exe", User: `DCLAB\alice`, UserSID: aliceSID, SessionID: 2},
 		// Token open denied; RDS names the session's user.
@@ -95,7 +97,8 @@ func TestOwnerResolverFallsBackFromTokenToSessionToEnrolledProfile(t *testing.T)
 		{PID: 21, Name: "python.exe", User: bobSID, UserSID: bobSID},
 		// Nothing names this one.
 		{PID: 30, Name: "mcp-server-fetch.exe"},
-	})
+	}
+	resolver := resolverFor(ownerTestLookups(), processes, at)
 	for _, test := range []struct {
 		name        string
 		pids        []int
@@ -115,12 +118,77 @@ func TestOwnerResolverFallsBackFromTokenToSessionToEnrolledProfile(t *testing.T)
 			[]string{`C:\Users\alice\.codex\config.toml`, `C:\Users\bob\.claude\settings.json`}, "", "", AttributionUnattributed},
 		{"exited processes", []int{99}, nil, "", "", AttributionUnattributed},
 	} {
-		got := resolver.resolve(test.pids, test.paths)
+		got := resolver.resolve(refsFor(processes, test.pids, at), test.paths)
 		if got.User != test.user || got.SID != test.sid || got.Attribution != test.attribution {
 			t.Errorf("%s: resolve = %+v, want %s %s (%s)", test.name, got, test.user, test.sid, test.attribution)
 		}
 		if (got.Attribution == AttributionUnattributed) != (got.Reason != "") {
 			t.Errorf("%s: reason %q with attribution %s", test.name, got.Reason, got.Attribution)
+		}
+	}
+}
+
+// resolverFor is the owner resolver after one poll saw processes at at.
+func resolverFor(lookups OwnerLookups, processes []procprobe.Process, at time.Time) *ownerResolver {
+	book := newOwnerBook(lookups, time.Hour)
+	book.observe(processes, at)
+	return book.resolver()
+}
+
+// refsFor names pids as the processes rows describe them, seen at at.
+func refsFor(processes []procprobe.Process, pids []int, at time.Time) []procRef {
+	refs := make([]procRef, 0, len(pids))
+	for _, pid := range pids {
+		ref := procRef{PID: pid, At: at}
+		for _, process := range processes {
+			if process.PID == pid {
+				ref.Start, ref.Name = process.StartedAt, process.Name
+			}
+		}
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
+// GAP-1372: Windows hands an exited process's pid to the next process. A
+// finding keeps the owner of the process instance it saw, the process that
+// reused the pid never lends it its own owner, and a finding whose process
+// no poll saw alive is unattributed rather than given the new owner.
+func TestOwnerOfARecycledPIDStaysWithTheProcessTheFindingSaw(t *testing.T) {
+	t.Parallel()
+	base := time.Unix(1_760_000_000, 0)
+	book := newOwnerBook(ownerTestLookups(), time.Hour)
+	uvx := procprobe.Process{PID: 7708, Name: "uvx.exe", User: `DCLAB\alice`, UserSID: aliceSID, StartedAt: base}
+	dwm := procprobe.Process{PID: 7708, Name: "dwm.exe", User: `Window Manager\DWM-17`, UserSID: "S-1-5-90-0-17",
+		SessionID: 17, StartedAt: base.Add(4 * time.Minute)}
+	book.observe([]procprobe.Process{uvx}, base.Add(time.Minute))
+	book.observe(nil, base.Add(2*time.Minute)) // uvx.exe exited
+	book.observe([]procprobe.Process{dwm}, base.Add(5*time.Minute))
+	resolver := book.resolver()
+
+	for _, test := range []struct {
+		name        string
+		ref         procRef
+		sid         string
+		attribution string
+	}{
+		{"the instance the finding saw", procRef{PID: 7708, Start: base, Name: "uvx.exe", At: base.Add(time.Minute)},
+			aliceSID, AttributionProcessOwner},
+		{"no start: same image, started before last_seen",
+			procRef{PID: 7708, Name: "uvx.exe", At: base.Add(time.Minute)}, aliceSID, AttributionProcessOwner},
+		{"the process that reused the pid", procRef{PID: 7708, Start: dwm.StartedAt, Name: "dwm.exe",
+			At: base.Add(5 * time.Minute)}, dwm.UserSID, AttributionProcessOwner},
+		{"a process no poll saw alive", procRef{PID: 7708, Start: base.Add(3 * time.Minute), Name: "python.exe",
+			At: base.Add(3 * time.Minute)}, "", AttributionUnattributed},
+		{"no start and another image", procRef{PID: 7708, Name: "python.exe", At: base.Add(3 * time.Minute)},
+			"", AttributionUnattributed},
+	} {
+		got := resolver.resolve([]procRef{test.ref}, nil)
+		if got.SID != test.sid || got.Attribution != test.attribution {
+			t.Errorf("%s: resolve = %+v, want %q (%s)", test.name, got, test.sid, test.attribution)
+		}
+		if test.attribution == AttributionUnattributed && !strings.Contains(got.Reason, "other processes") {
+			t.Errorf("%s: reason %q does not say the pid was reused", test.name, got.Reason)
 		}
 	}
 }
@@ -142,10 +210,10 @@ func TestHostPlaneFindingsCarryTheSessionOwner(t *testing.T) {
 	drainInto(t, host, source, 2)
 
 	service := &Service{hostPlane: host}
-	owners := newOwnerResolver(ownerTestLookups(), []procprobe.Process{
+	owners := resolverFor(ownerTestLookups(), []procprobe.Process{
 		{PID: 500, Name: "claude.exe", SessionID: 2},
 		{PID: 600, Name: "claude.exe"},
-	})
+	}, base)
 	findings := service.hostPlaneFindings(base.Add(time.Minute), 1, correlate.New(correlate.Snapshot{}), owners)
 	if len(findings) != 2 {
 		t.Fatalf("got %d host-plane findings, want one per session", len(findings))

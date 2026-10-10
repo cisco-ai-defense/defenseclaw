@@ -23,12 +23,12 @@ package sensor
 
 import (
 	"context"
-	"slices"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/agentchain"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
@@ -48,8 +48,10 @@ type hostPlane struct {
 	window     time.Duration
 	minStages  int
 
-	mu       sync.Mutex
-	sessions map[int]*agentchain.Session
+	mu sync.Mutex
+	// sessions are keyed by the root process instance, not its pid: an agent
+	// that reuses an exited agent's pid starts its own session (GAP-1372).
+	sessions map[procprobe.ProcKey]*agentchain.Session
 	// gated counts observations discarded for having no agent above them. It
 	// is the denominator that makes the lineage gate auditable rather than
 	// invisible.
@@ -67,7 +69,7 @@ func newHostPlane(
 	return &hostPlane{
 		source: source, tracker: tracker, indicators: indicators,
 		window: window, minStages: minStages,
-		sessions: make(map[int]*agentchain.Session),
+		sessions: make(map[procprobe.ProcKey]*agentchain.Session),
 	}
 }
 
@@ -113,7 +115,7 @@ func (h *hostPlane) handle(event plane.Event) {
 	// attribution for the agent -> sh -> cat chain this exists to follow.
 	switch event.Kind {
 	case plane.KindExec:
-		h.tracker.ObserveExec(event.PID, event.PPID, event.ResponsiblePID, event.Name, event.Cmdline)
+		h.tracker.ObserveExec(event.PID, event.PPID, event.ResponsiblePID, event.Name, event.Cmdline, event.At)
 	case plane.KindExit:
 		h.tracker.ObserveExit(event.PID)
 		return
@@ -147,10 +149,12 @@ func (h *hostPlane) handle(event plane.Event) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.classified++
-	session, exists := h.sessions[attribution.RootPID]
+	root := procprobe.KeyOf(attribution.RootPID, attribution.RootStart)
+	session, exists := h.sessions[root]
 	if !exists {
 		session = agentchain.NewSession(attribution.RootPID, attribution.AgentName, at)
-		h.sessions[attribution.RootPID] = session
+		session.RootName = attribution.RootName
+		h.sessions[root] = session
 	}
 	session.Record(agentchain.Observation{
 		Tactic:     match.Tactic,
@@ -158,6 +162,8 @@ func (h *hostPlane) handle(event plane.Event) {
 		Title:      match.Title,
 		Detail:     match.Detail,
 		PID:        event.PID,
+		Start:      h.tracker.StartOf(event.PID),
+		Name:       event.Name,
 		Path:       event.Path,
 		Confidence: match.Confidence,
 		At:         at,
@@ -166,11 +172,14 @@ func (h *hostPlane) handle(event plane.Event) {
 
 // hostFinding is one agent session, scored.
 type hostFinding struct {
-	RootPID   int
+	RootPID int
+	// RootStart is when the root process was created, zero when unknown.
+	RootStart time.Time
 	AgentName string
-	// PIDs are the session's processes, root first, and ConfigPaths the
-	// agent configuration files it wrote: what attributes it to an account.
-	PIDs        []int
+	// Processes are the session's process instances, root first, and
+	// ConfigPaths the agent configuration files it wrote: what attributes
+	// it to an account.
+	Processes   []procRef
 	ConfigPaths []string
 	Score       int
 	Signals     []scoring.Signal
@@ -191,20 +200,20 @@ func (h *hostPlane) harvest(now time.Time, minRisk int) []hostFinding {
 	defer h.mu.Unlock()
 
 	findings := make([]hostFinding, 0, len(h.sessions))
-	for rootPID, session := range h.sessions {
+	for root, session := range h.sessions {
 		session.Expire(cutoff)
 		if len(session.Observations()) == 0 {
-			delete(h.sessions, rootPID)
+			delete(h.sessions, root)
 			continue
 		}
 		score, signals := session.Score(h.minStages)
 		if score < minRisk {
 			continue
 		}
-		pids, configPaths := sessionOwnerEvidence(rootPID, session.Observations())
+		processes, configPaths := sessionOwnerEvidence(root, session.RootName, session.LastSeen, session.Observations())
 		findings = append(findings, hostFinding{
-			RootPID: rootPID, AgentName: session.AgentName,
-			PIDs: pids, ConfigPaths: configPaths,
+			RootPID: root.PID, RootStart: root.Started(), AgentName: session.AgentName,
+			Processes: processes, ConfigPaths: configPaths,
 			Score: score, Signals: signals, Stages: session.TacticsSeen(),
 			FirstSeen: session.FirstSeen, LastSeen: session.LastSeen,
 		})
@@ -212,20 +221,32 @@ func (h *hostPlane) harvest(now time.Time, minRisk int) []hostFinding {
 	return findings
 }
 
-// sessionOwnerEvidence lists a session's processes, root first, and the
-// agent configuration files it wrote.
-func sessionOwnerEvidence(rootPID int, observations []agentchain.Observation) ([]int, []string) {
-	pids := []int{rootPID}
+// sessionOwnerEvidence lists a session's process instances, root first,
+// each with when the session last saw it, and the agent configuration files
+// it wrote.
+func sessionOwnerEvidence(
+	root procprobe.ProcKey, rootName string, lastSeen time.Time, observations []agentchain.Observation,
+) ([]procRef, []string) {
+	processes := []procRef{{PID: root.PID, Start: root.Started(), Name: rootName, At: lastSeen}}
+	seen := map[procprobe.ProcKey]int{root: 0}
 	var configPaths []string
 	for _, observation := range observations {
-		if observation.PID > 0 && !slices.Contains(pids, observation.PID) {
-			pids = append(pids, observation.PID)
+		if observation.PID > 0 {
+			key := procprobe.KeyOf(observation.PID, observation.Start)
+			if index, ok := seen[key]; !ok {
+				seen[key] = len(processes)
+				processes = append(processes, procRef{
+					PID: observation.PID, Start: observation.Start, Name: observation.Name, At: observation.At,
+				})
+			} else if observation.At.After(processes[index].At) {
+				processes[index].At = observation.At
+			}
 		}
 		if observation.SignalID == "agent_config_persistence" && observation.Path != "" {
 			configPaths = append(configPaths, observation.Path)
 		}
 	}
-	return pids, configPaths
+	return processes, configPaths
 }
 
 // stats reports what the gate did, so the lineage filter is auditable.

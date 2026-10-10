@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,7 +52,7 @@ func snapshot() ([]Process, int, error) {
 	}
 	clockTicks := clockTicksPerSecond()
 	pageSize := int64(os.Getpagesize())
-	bootTime := bootInstant()
+	bootTime := stableBootInstant()
 
 	rows := make([]Process, 0, len(entries))
 	skipped := 0
@@ -217,6 +218,24 @@ func readCmdline(path string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+var (
+	bootMu   sync.Mutex
+	bootSeen time.Time
+)
+
+// stableBootInstant is the boot instant read once for the life of the
+// process. The kernel recomputes btime from the wall clock, so NTP can move
+// it by a second between reads, and a start time that moves would stop
+// naming the same process instance from one poll to the next (GAP-1372).
+func stableBootInstant() time.Time {
+	bootMu.Lock()
+	defer bootMu.Unlock()
+	if bootSeen.IsZero() {
+		bootSeen = bootInstant()
+	}
+	return bootSeen
 }
 
 // bootInstant reads btime from /proc/stat: the wall-clock second the kernel
