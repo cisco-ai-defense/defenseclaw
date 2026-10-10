@@ -170,6 +170,15 @@ func TestStatusAndVerifyRepeatGatewayAssignmentAndDestinationWarnings(t *testing
 			t.Fatalf("%s warnings = %+v", action, result.Warnings)
 		}
 	}
+	// A /health read other than root on the hook socket gets only their
+	// number, and status says so instead of listing nothing (GAP-1268).
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"profile_assignment_warning_count":2,"profile_warning_count":2}`), nil
+	}
+	if got := messagesOf(h.run(Options{Action: ActionStatus}).Warnings, codeProfileAssignments); !strings.Contains(got,
+		"2 guardrail profile assignment warning(s) are not listed") || !strings.Contains(got, "profile-explain --user") {
+		t.Fatalf("withheld assignment warnings = %q", got)
+	}
 }
 
 // On Linux the gateway unit runs and serves its hook socket, but

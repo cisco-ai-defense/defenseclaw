@@ -69,7 +69,8 @@ func (set *guardrailProfileSet) assignmentWarningsWithWait(checkGroups bool, wai
 	return append(warnings, set.groupSIDs.warnings(set.assignments)...)
 }
 
-// healthProfileWarnings is what /health serves for status and verify: the
+// healthProfileWarnings is what /health serves to root on the hook socket,
+// and /status to the gateway credential, for status and verify: the
 // assignment warnings profile-explain lists, with the first group pass
 // waited for briefly. Without the wait, a status right after a gateway
 // restart listed no unknown group while profile-explain named it (GAP-0830).
