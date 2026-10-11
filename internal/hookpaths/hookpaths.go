@@ -7,6 +7,7 @@ package hookpaths
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -562,6 +563,13 @@ func commandLinks(command, cwd, home string) shellLinks {
 	file, parsed := parseShell(command)
 	if !parsed {
 		// Resolve already marks a command that does not parse incomplete.
+		if opaqueLink.MatchString(command) {
+			links.unknown(true)
+		}
+		return links
+	}
+	if opaqueLinkText(file, command, home) {
+		links.unknown(true)
 		return links
 	}
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
@@ -590,7 +598,7 @@ func commandLinks(command, cwd, home string) shellLinks {
 				program = programBase(words[0])
 			}
 		}
-		if opaqueProgramCall(program, args, command) {
+		if opaqueProgram(program) {
 			links.unknown(true)
 			return true
 		}
@@ -668,7 +676,64 @@ func commandLinks(command, cwd, home string) shellLinks {
 	if len(links.aliases) > 0 && (renames || cds && links.relative) {
 		links.unknown(true)
 	}
+	// Scopes are read against the starting directory; after a directory
+	// change a relative write may land in a scope under another name.
+	if cds && len(links.opaqueScopes) > 0 {
+		links.globalOpaque = true
+	}
 	return links
+}
+
+// dataPrograms only print, search or count text, so link API text in their
+// arguments or here-documents is data, not code (GAP-1536).
+var dataPrograms = []string{"echo", "printf", "grep", "egrep", "fgrep", "rg", "ag", "ack", "cat", "head", "tail",
+	"wc", "sort", "uniq", "cut", "tr", "nl", "less", "more"}
+
+// opaqueLinkText reports link API text that the command may run. Only a
+// command made of data programs alone, without substitutions, is exempt: an
+// interpreter may read the text from an argument, a here-document, a pipe or
+// a file the command writes, under any name or wrapper.
+func opaqueLinkText(file *syntax.File, command, home string) bool {
+	if !opaqueLink.MatchString(command) {
+		return false
+	}
+	for _, stmt := range file.Stmts {
+		if !dataStatement(stmt, home) {
+			return true
+		}
+	}
+	return false
+}
+
+func dataStatement(stmt *syntax.Stmt, home string) bool {
+	if stmt == nil || stmt.Background || stmt.Cmd == nil {
+		return false
+	}
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.BinaryCmd:
+		if !dataStatement(cmd.X, home) || !dataStatement(cmd.Y, home) {
+			return false
+		}
+	case *syntax.CallExpr:
+		if len(cmd.Assigns) > 0 || len(cmd.Args) == 0 {
+			return false
+		}
+		program, static := StaticWord(cmd.Args[0], home)
+		if !static || !slices.Contains(dataPrograms, programBase(program)) {
+			return false
+		}
+	default:
+		return false
+	}
+	plain := true
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		switch node.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			plain = false
+		}
+		return plain
+	})
+	return plain
 }
 
 // linearShellStatements excludes loops, subshells, and command substitutions:
@@ -899,14 +964,35 @@ func copiesDiskSymlink(args []string, static []bool, cwd string) bool {
 		if !filepath.IsAbs(source) {
 			source = filepath.Join(cwd, source)
 		}
-		if info, err := os.Lstat(source); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if info, err := os.Lstat(source); err == nil &&
+			(info.Mode()&os.ModeSymlink != 0 || info.IsDir() && treeHasSymlink(source)) {
 			return true
 		}
 	}
 	return false
 }
 
+// treeHasSymlink reports a link inside a directory a recursive copy keeps.
+// A tree that cannot be read or is larger than the bound counts as one.
+func treeHasSymlink(root string) bool {
+	seen, found := 0, false
+	err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
+		seen++
+		if err != nil || seen > 4096 || entry.Type()&fs.ModeSymlink != 0 {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found || err != nil
+}
+
+// archiveDestination is the directory an archive call writes in, or "" when
+// it can write anywhere.
 func archiveDestination(program string, args []string, static []bool, cwd string) string {
+	if program != "rsync" && !archiveCopiesLinks(program, args, static) && archiveNamesEscape(program, args, static) {
+		return ""
+	}
 	destination := cwd
 	if strings.HasSuffix(program, "tar") {
 		for i, arg := range args {
@@ -951,25 +1037,37 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 	return filepath.Clean(destination)
 }
 
-// opaqueProgramCall limits textual API checks to program words and script
-// arguments, never data passed to grep, echo, or similar programs.
-func opaqueProgramCall(program string, args []*syntax.Word, command string) bool {
+// opaqueProgram is a Windows program that creates links from operands this
+// package does not read.
+func opaqueProgram(program string) bool {
 	switch program {
 	case "mklink", "fsutil", "new-item":
 		return true
 	}
-	switch program {
-	case "python", "python3", "perl", "ruby", "node", "nodejs", "pwsh", "powershell", "sh", "bash", "zsh":
-	default:
-		return false
+	return false
+}
+
+// archiveNamesEscape reports an extraction whose member names can leave the
+// destination: cpio and pax keep absolute and parent names by default, as do
+// tar -P, unzip -: and 7z -spf; an option supplied at runtime may be one.
+func archiveNamesEscape(program string, args []string, static []bool) bool {
+	if program == "cpio" || program == "bsdcpio" || program == "pax" {
+		return true
 	}
-	for i := 1; i+1 < len(args); i++ {
-		option, ok := StaticWord(args[i], "")
-		if !ok || option != "-c" && option != "-e" && option != "-Command" && option != "--command" {
-			continue
+	tar := strings.HasSuffix(program, "tar")
+	for i, arg := range args {
+		if !static[i] {
+			return true
 		}
-		start, end := args[i+1].Pos().Offset(), args[i+1].End().Offset()
-		if int(end) <= len(command) && start < end && opaqueLink.MatchString(command[start:end]) {
+		if arg == "--" {
+			return false
+		}
+		short := strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--")
+		switch {
+		case tar && (arg == "--absolute-names" || short && strings.ContainsRune(arg, 'P') ||
+			i == 0 && !strings.HasPrefix(arg, "-") && strings.ContainsRune(arg, 'P')),
+			program == "unzip" && short && strings.ContainsRune(arg, ':'),
+			strings.HasPrefix(program, "7z") && strings.HasPrefix(arg, "-spf"):
 			return true
 		}
 	}

@@ -697,6 +697,15 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	if err := os.Symlink(keys, filepath.Join(project, "disklink")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(os.DevNull, filepath.Join(project, "devlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(project, "tree"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(keys, filepath.Join(project, "tree", "k")); err != nil {
+		t.Fatal(err)
+	}
 	blocked := []string{
 		`env ln ~/.ssh/autho""rized_keys notes.txt && echo k >> notes.txt`,
 		`sudo ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
@@ -747,6 +756,15 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`builtin cd ~/.ssh && echo k >> authorized_keys`,
 		`command cd ~/.ssh && echo k >> authorized_keys`,
 		`cd ~ && cd .ssh && echo k >> authorized_keys`,
+		`ln -sfn ~/.ssh/authorized_keys devlink && echo k >> devlink`,
+		"python3 - <<EOF\nimport os\nos.symlink(os.path.expanduser(~/.ssh/authorized_keys), notes.txt)\nEOF\necho k >> notes.txt",
+		`sudo python3 -c 'import os; os.symlink("../.ssh/authorized_keys", "notes.txt")' && echo k >> notes.txt`,
+		`cd ~/x && tar -C ~/x -xf keys.tar && echo k >> n1.txt`,
+		`cpio -id -D unpack < keys.cpio; echo k >> notes.txt`,
+		`tar -P -C unpack -xf keys.tar; echo k >> notes.txt`,
+		`cp -a tree copy && echo k >> copy/k`,
+		`cd -P ~/.ssh && echo k >> authorized_keys`,
+		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
 	}
 	allowed := []string{
 		`ln a.txt b.txt && echo k >> b.txt`,
@@ -772,6 +790,7 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`tar -C unpack -xf keys.tar; echo hi > report.txt`,
 		`7z x keys.7z -o../outside; echo hi > report.txt`,
 		`cp -a src dst && echo hi > report.txt`,
+		`grep -rn "os.symlink(" src | head -5 > hits.txt`,
 	}
 	// The managed gateway also fails closed on a program word that is not
 	// static, which this change leaves as it is.

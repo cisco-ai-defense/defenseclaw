@@ -748,15 +748,15 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return true
 		}
-		// Character devices cannot name a regular authorized-keys file.
-		if info, err := os.Stat(target); err == nil && info.Mode()&os.ModeCharDevice != 0 {
-			return false
-		}
 		// An unreadable link operation makes later writes at its destination
 		// unknown, including where the gateway resolves targets itself and
-		// the link does not exist yet (GAP-1522).
+		// the link does not exist yet (GAP-1522). A character device such as
+		// /dev/null is not a link the command can replace; a link to one is,
+		// so the device is read without following links.
 		if links.OpaqueTarget(target) && !safeRedirects[target] {
-			return true
+			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
+				return true
+			}
 		}
 		if request.ResolvedWriteTargets != nil {
 			resolved, present := request.ResolvedWriteTargets[target]
@@ -1121,7 +1121,9 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 			return false
 		}
 		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
-			return binary.Op == syntax.AndStmt && collect(binary.X) && collect(binary.Y)
+			// cd ~/.ssh || exit 1 is read as the cd taking effect.
+			return (binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt) &&
+				collect(binary.X) && collect(binary.Y)
 		}
 		if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
 			return false
@@ -1150,6 +1152,19 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 			directoryArg = 2
 		}
 		if static && (program == "cd" || program == "pushd") {
+			// cd -P, -L, -e and -- change how links in the path are read, not
+			// which directory it names.
+			for directoryArg < len(call.Args) {
+				option, ok := hookpaths.StaticWord(call.Args[directoryArg], input.ActiveHome)
+				if !ok || option != "--" && (len(option) < 2 || option[0] != '-' ||
+					strings.Trim(option[1:], "PLe@") != "") {
+					break
+				}
+				directoryArg++
+				if option == "--" {
+					break
+				}
+			}
 			if len(call.Args) > directoryArg+1 {
 				return false
 			}
@@ -1157,7 +1172,7 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 			if len(call.Args) == directoryArg+1 {
 				var ok bool
 				directory, ok = hookpaths.StaticWord(call.Args[directoryArg], input.ActiveHome)
-				if !ok {
+				if !ok || directory == "-" {
 					return false
 				}
 			}
