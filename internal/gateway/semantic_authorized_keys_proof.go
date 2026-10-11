@@ -751,6 +751,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return true
 		}
+		if physicalCWD := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+clientCWD]; filepath.IsAbs(physicalCWD) &&
+			strings.HasPrefix(target, clientCWD+string(filepath.Separator)) {
+			relative := strings.TrimPrefix(target, clientCWD+string(filepath.Separator))
+			if isProtected(hookpaths.OperandPath(relative, physicalCWD)) {
+				return true
+			}
+		}
 		// An unreadable link operation makes later writes at its destination
 		// unknown, including where the gateway resolves targets itself and
 		// the link does not exist yet (GAP-1522). A character device such as
@@ -851,6 +858,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
+		directoryOperands, directoryUnknown := hookpaths.ShellDirectoryWriteOperands(
+			input.Command, input.CWD, input.ActiveHome, request.ResolvedWriteTargets, false, cannotResolveLocally,
+		)
+		if directoryUnknown {
+			return true
+		}
+		for _, operand := range directoryOperands {
+			if writeTarget(operand.Path, operand.Safe, false) {
 				return true
 			}
 		}

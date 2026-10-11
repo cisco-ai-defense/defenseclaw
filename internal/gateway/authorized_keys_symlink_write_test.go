@@ -678,6 +678,48 @@ func encodeTargets(t *testing.T, targets map[string]string) string {
 // ordinary commands, also with a program word that is not static, stay
 // allowed (GAP-1523).
 func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
+	t.Run("physical directory facts on every host OS", func(t *testing.T) {
+		home := t.TempDir()
+		project := filepath.Join(home, "proj")
+		linked := filepath.Join(project, "dirlink")
+		ssh := filepath.Join(home, ".ssh")
+		directories := map[string]string{
+			hookpaths.DirectoryFactPrefix + project:                              project,
+			hookpaths.DirectoryFactPrefix + linked:                               ssh,
+			hookpaths.DirectoryFactPrefix + filepath.Join(project, "chain"):      filepath.Join(project, "chain"),
+			hookpaths.DirectoryFactPrefix + filepath.Join(project, "chain", "b"): ssh,
+			hookpaths.DirectoryFactPrefix + filepath.Join(project, "build"):      filepath.Join(project, "unrelated"),
+		}
+		rows := []struct {
+			command string
+			block   bool
+		}{
+			{"cd dirlink && echo k >> authorized_keys", true},
+			{"cd ~/proj/dirlink && tee -a authorized_keys", true},
+			{"cd -P dirlink && echo k >> authorized_keys", true},
+			{"pushd dirlink && echo k >> authorized_keys", true},
+			{"cd chain && cd b && echo k >> authorized_keys", true},
+			{"cd build && echo ok >> notes.txt", false},
+			{"cd dirlink && cat authorized_keys", false},
+		}
+		for _, connector := range []string{"claudecode", "codex"} {
+			for _, managed := range []bool{false, true} {
+				for _, row := range rows {
+					input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: project,
+						ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+					targets := map[string]string{hookpaths.CWDKey: project}
+					for key, value := range directories {
+						targets[key] = value
+					}
+					request := trustedActionRequest{Input: input, Connector: connector,
+						ProtectedHomeHook: managed, ResolvedWriteTargets: targets}
+					if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != row.block {
+						t.Errorf("%s managed=%v %q: blocked=%v, want %v", connector, managed, row.command, got, row.block)
+					}
+				}
+			}
+		}
+	})
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX hook paths")
 	}
@@ -733,7 +775,7 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	// before applying the ".." in l's target.
 	for _, dir := range []string{filepath.Join(project, "a"), filepath.Join(home, ".ssh", "d"),
 		filepath.Join(project, "a2"), filepath.Join(project, "unpack", "q", "r"),
-		filepath.Join(project, "build"), filepath.Join(home, "shared")} {
+		filepath.Join(project, "unrelated"), filepath.Join(project, "chain"), filepath.Join(home, "shared")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -748,6 +790,57 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	for _, link := range []struct{ name, target string }{
+		{filepath.Join(project, "build"), filepath.Join(project, "unrelated")},
+		{filepath.Join(project, "chain", "b"), filepath.Join(home, ".ssh")},
+	} {
+		if err := os.Symlink(link.target, link.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The gateway can prove the destination from the hook's physical cd fact
+	// even when ProtectHome hides the path and the operand entry is absent.
+	cdInput := actionfacts.Input{Tool: "Bash", Command: "cd dirlink && echo k >> authorized_keys",
+		CWD: project, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	cdFacts := actionfacts.Analyze(cdInput)
+	cdRequest := trustedActionRequest{Input: cdInput, ProtectedHomeHook: true, ResolvedWriteTargets: map[string]string{
+		hookpaths.CWDKey:                        project,
+		hookpaths.DirectoryFactPrefix + project: project,
+		hookpaths.DirectoryFactPrefix + filepath.Join(project, "dirlink"): filepath.Dir(keys),
+	}}
+	if !trustedExistingAuthorizedKeysSymlinkWrite(cdRequest, cdFacts) {
+		t.Fatal("physical directory fact did not prove the linked cd write")
+	}
+	cdInput.Command = "cd build && echo ok >> notes.txt"
+	cdRequest.Input = cdInput
+	cdRequest.ResolvedWriteTargets = map[string]string{
+		hookpaths.CWDKey:                        project,
+		hookpaths.DirectoryFactPrefix + project: project,
+	}
+	if !trustedExistingAuthorizedKeysSymlinkWrite(cdRequest, actionfacts.Analyze(cdInput)) {
+		t.Fatal("missing private directory fact did not fail closed for a write")
+	}
+	cdInput.Command = "cd build && cat notes.txt"
+	cdRequest.Input = cdInput
+	if trustedExistingAuthorizedKeysSymlinkWrite(cdRequest, actionfacts.Analyze(cdInput)) {
+		t.Fatal("missing directory fact blocked a read")
+	}
+	linkedCWD := filepath.Join(project, "dirlink")
+	cwdInput := actionfacts.Input{Tool: "Bash", Command: "echo k >> authorized_keys",
+		CWD: linkedCWD, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
+	cwdRequest := trustedActionRequest{Input: cwdInput, ProtectedHomeHook: true, ResolvedWriteTargets: map[string]string{
+		hookpaths.CWDKey: linkedCWD,
+		hookpaths.DirectoryFactPrefix + linkedCWD: filepath.Dir(keys),
+	}}
+	if !trustedExistingAuthorizedKeysSymlinkWrite(cwdRequest, actionfacts.Analyze(cwdInput)) {
+		t.Fatal("physical event cwd fact did not prove the relative write")
+	}
+	cdPayload := mustJSON(t, map[string]any{"tool_name": "Bash", "cwd": project,
+		"tool_input": map[string]any{"command": "cd dirlink && echo k >> authorized_keys"}})
+	cdTargets, ok := hookpaths.Decode(hookpaths.Resolve(cdPayload))
+	if !ok || cdTargets[hookpaths.DirectoryFactPrefix+filepath.Join(project, "dirlink")] != filepath.Dir(keys) {
+		t.Fatalf("hook physical directory fact = %q", cdTargets[hookpaths.DirectoryFactPrefix+filepath.Join(project, "dirlink")])
+	}
 	big := filepath.Join(project, "big")
 	if err := os.MkdirAll(big, 0o700); err != nil {
 		t.Fatal(err)
@@ -758,6 +851,21 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		}
 	}
 	blocked := []string{
+		// GAP-1567: a relative write after a logical directory link lands in its physical target.
+		`cd dirlink && echo k >> authorized_keys`,
+		`cd ~/proj/dirlink && tee -a authorized_keys < x`,
+		`cd dirlink && echo k | tee -a authorized_keys`,
+		`echo ok > first.txt; tar xf keys.tar; cd build && echo ok > notes.txt`,
+		`cd -P dirlink && echo k >> authorized_keys`,
+		`cd -L dirlink && cp x authorized_keys`,
+		`pushd dirlink && dd if=x of=authorized_keys`,
+		`cd chain && cd b && install x authorized_keys`,
+		`cd dirlink && mv x authorized_keys`,
+		`cd dirlink && sed -i s/a/b/ authorized_keys`,
+		`cd dirlink && echo k >> ../.ssh/authorized_keys`,
+		`cd dirlink && python3 -c 'open("authorized_keys","a").write("k")'`,
+		`"c""d" dirlink && echo k >> authorized_keys`,
+		`\cd dirlink && echo k >> authorized_keys`,
 		// GAP-1561: literal interpreter and in-place operands follow existing links.
 		`python3 -c 'open("disklink","a").write("k")'`,
 		`perl -e 'open F,">>","disklink"; print F "k"'`,
@@ -888,6 +996,11 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
 	}
 	allowed := []string{
+		`cd build && echo ok >> notes.txt`,
+		`cd build && echo ok > notes.txt; tar xf keys.tar`,
+		`cd dirlink && cat authorized_keys`,
+		`cd dirlink && cd .. && echo ok >> notes.txt`,
+		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
 		// Reads, unrelated targets and sed's default link replacement are safe.
 		`python3 -c 'open("disklink","r").read()'`,
 		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
@@ -946,14 +1059,18 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, managed := range []bool{true, false} {
-			post := func(t *testing.T, command string) string {
+			post := func(t *testing.T, command string, cwdOverride ...string) string {
 				t.Helper()
 				cfg := &config.Config{}
 				cfg.Guardrail.Mode = "action"
 				cfg.Guardrail.Connector = connector
 				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+				eventCWD := project
+				if len(cwdOverride) > 0 {
+					eventCWD = cwdOverride[0]
+				}
 				body := mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
-					"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}})
+					"tool_name": "Bash", "cwd": eventCWD, "tool_input": map[string]any{"command": command, "description": "d"}})
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
 				req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
 				if connector == "codex" {
@@ -968,6 +1085,9 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			}
 			name := fmt.Sprintf("%s managed=%v", connector, managed)
 			t.Run(name, func(t *testing.T) {
+				if got := post(t, "echo k >> authorized_keys", filepath.Join(project, "dirlink")); !strings.HasPrefix(got, block) {
+					t.Errorf("linked event cwd = %.300s, want block", got)
+				}
 				for _, command := range blocked {
 					got := post(t, command)
 					if !strings.HasPrefix(got, block) ||

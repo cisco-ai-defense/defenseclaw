@@ -435,8 +435,15 @@ func Resolve(payload []byte) string {
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
 	var operands, literalOperands []string
+	var directoryOperands []RedirectOccurrence
+	var directoryUnknown bool
 	links := shellLinks{known: true}
 	sourceFacts := map[string]string{}
+	if physicalCWD, ok := ResolveWriteTarget(cwd); ok {
+		sourceFacts[DirectoryFactPrefix+cwd] = physicalCWD
+	} else {
+		sourceFacts[DirectoryFactPrefix+cwd] = "?"
+	}
 	var safeRedirects []RedirectOccurrence
 	var toolArgs map[string]json.RawMessage
 	if json.Unmarshal(args, &toolArgs) == nil {
@@ -453,6 +460,8 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
+				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
 				// A link the command creates can make a later write a write
 				// to a protected file (GAP-1505). The command of an
@@ -517,6 +526,9 @@ func Resolve(payload []byte) string {
 	}
 	for _, operand := range literalOperands {
 		add(operand, true, false)
+	}
+	for _, operand := range directoryOperands {
+		add(operand.Path, true, operand.Safe)
 	}
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
@@ -594,6 +606,9 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	for key, value := range targets {
+		if strings.HasPrefix(key, DirectoryFactPrefix) && value != "?" && !filepath.IsAbs(value) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
 			return nil, false
 		}
