@@ -728,6 +728,12 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			{"env --chdir=dirlink sh -c \"echo k >> authorized_keys\"", true},
 			{"env --chdir=dirlink tee -a authorized_keys", true},
 			{"env -C build tee -a notes.txt", false},
+			{"if false; then :; else cd dirlink; fi; echo k >> authorized_keys", true},
+			{"pushd /tmp; if true; then pushd -n dirlink; fi; pushd; echo k >> authorized_keys", true},
+			{"f() { cd dirlink; }; f; echo k >> authorized_keys", true},
+			{"eval cd dirlink && echo k >> authorized_keys", true},
+			{"command -p cd dirlink && echo k >> authorized_keys", true},
+			{"f() { echo hi; }; f > out.txt", false},
 		}
 		for _, connector := range []string{"claudecode", "codex"} {
 			for _, managed := range []bool{false, true} {

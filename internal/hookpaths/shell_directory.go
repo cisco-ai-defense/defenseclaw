@@ -31,6 +31,17 @@ func (s shellDirectoryState) clone() shellDirectoryState {
 	return s
 }
 
+// merge joins the state after a branch that may or may not have run. A
+// directory or stack the branch changed is no longer known.
+func (s *shellDirectoryState) merge(branch shellDirectoryState) {
+	if branch.logical != s.logical || branch.known != s.known {
+		s.known, s.changed = false, true
+	}
+	if !slices.Equal(branch.stack, s.stack) {
+		s.stack, s.changed = nil, true
+	}
+}
+
 // ShellDirectoryWriteOperands follows shell directory changes through statement
 // bodies. A branch or subshell gets its own directory state. unknown reports a
 // write that may name authorized_keys after an unresolved directory change.
@@ -176,16 +187,30 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		operands = append(operands, writes...)
 	}
 	change := func(call *syntax.CallExpr, s *shellDirectoryState) bool {
-		if len(call.Args) == 0 {
+		program, arg, ok := shellCommandWord(call, home)
+		if !ok {
+			// A program word that is not static may be cd.
+			if len(call.Args) > 0 {
+				s.known, s.changed, s.stack = false, true, nil
+			}
 			return false
 		}
-		program, ok := StaticWord(call.Args[0], home)
-		arg := 1
-		if ok && (program == "builtin" || program == "command") && len(call.Args) > 1 {
-			program, ok = StaticWord(call.Args[1], home)
-			arg = 2
+		if program == "eval" || program == "source" || program == "." {
+			s.changed = true
+			script, static := "", program == "eval"
+			for _, word := range call.Args[arg:] {
+				value, ok := StaticWord(word, home)
+				static = static && ok
+				script += " " + value
+			}
+			if file, parsed := parseShell(script); static && parsed {
+				walkList(file.Stmts, s)
+			} else {
+				s.known, s.stack = false, nil
+			}
+			return false
 		}
-		if !ok || program != "cd" && program != "pushd" && program != "popd" {
+		if program != "cd" && program != "pushd" && program != "popd" {
 			return false
 		}
 		s.changed = true
@@ -364,34 +389,23 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			if cmd.Else != nil {
 				elseState := s.clone()
 				walk(&syntax.Stmt{Cmd: cmd.Else}, &elseState)
+				s.merge(elseState)
 			}
-			if thenState.logical != s.logical || thenState.known != s.known {
-				s.known = false
-				s.changed = true
-			}
+			s.merge(thenState)
 		case *syntax.WhileClause:
 			walkList(cmd.Cond, s)
 			body := s.clone()
 			walkList(cmd.Do, &body)
-			if body.logical != s.logical || body.known != s.known {
-				s.known = false
-				s.changed = true
-			}
+			s.merge(body)
 		case *syntax.ForClause:
 			body := s.clone()
 			walkList(cmd.Do, &body)
-			if body.logical != s.logical || body.known != s.known {
-				s.known = false
-				s.changed = true
-			}
+			s.merge(body)
 		case *syntax.CaseClause:
 			for _, item := range cmd.Items {
 				branch := s.clone()
 				walkList(item.Stmts, &branch)
-				if branch.logical != s.logical || branch.known != s.known {
-					s.known = false
-					s.changed = true
-				}
+				s.merge(branch)
 			}
 		case *syntax.TimeClause:
 			walk(cmd.Stmt, s)
@@ -417,13 +431,54 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 			write(stmt, s)
 		default:
-			// An unmodeled command may change the directory. Its redirects are
-			// still inspected using the state at this point.
+			// An unmodeled command, such as a function definition, may change
+			// the directory later. Its redirects are still inspected using the
+			// state at this point.
+			syntax.Walk(cmd, func(node syntax.Node) bool {
+				if call, ok := node.(*syntax.CallExpr); ok {
+					if program, _, static := shellCommandWord(call, home); !static ||
+						program == "cd" || program == "pushd" || program == "popd" ||
+						program == "eval" || program == "source" || program == "." {
+						s.known, s.changed, s.stack = false, true, nil
+					}
+				}
+				return true
+			})
 			write(stmt, s)
 		}
 	}
 	walkList(file.Stmts, &state)
 	return operands, unknown
+}
+
+// shellCommandWord returns the program a call runs in this shell after builtin
+// and command prefixes, and the index of its first argument. ok is false when
+// the program word is not static. command -v and -V only describe a program.
+func shellCommandWord(call *syntax.CallExpr, home string) (program string, arg int, ok bool) {
+	for arg < len(call.Args) {
+		program, ok = StaticWord(call.Args[arg], home)
+		if !ok {
+			return "", arg, false
+		}
+		arg++
+		if program == "builtin" {
+			continue
+		}
+		if program != "command" {
+			return program, arg, true
+		}
+		for arg < len(call.Args) {
+			option, static := StaticWord(call.Args[arg], home)
+			if !static || len(option) < 2 || option[0] != '-' {
+				break
+			}
+			if strings.ContainsAny(option, "vV") {
+				return "command", arg, true
+			}
+			arg++
+		}
+	}
+	return program, arg, ok
 }
 
 func shellAuthorizedKeysBase(name string) bool {
