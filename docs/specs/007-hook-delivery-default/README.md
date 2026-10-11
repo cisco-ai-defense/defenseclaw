@@ -23,6 +23,10 @@
   Record actual delivery outcomes separately from configured fail mode so
   strict/managed overrides are not mislabeled. Never include payloads or tokens;
   diagnostic writes must not change hook decisions.
+- Cursor's protected machine adapter must preserve each enrolled SID's effective
+  delivery mode. Adding, refreshing, removing or deferring one user must not
+  change another user's launcher-failure behavior. Verification must compare
+  the target's adapter mode with its authenticated runtime policy.
 
 ## Design / decision
 
@@ -36,6 +40,17 @@ mode without relaxing enrollment, peer authentication or tamper validation.
 Carry the effective mode in the authenticated Windows runtime bundle and verify
 it against protected installation state. Never accept project or environment
 overrides that weaken an explicitly closed managed runtime.
+
+Cursor embeds a canonical, token-free SID-to-mode map in the protected adapter
+and ownership state. The current Windows process SID selects launcher-error and
+timeout behavior; absent/unrecognized identity remains closed. Its machine-wide
+`failClosed` flag is conservative (closed if any enrolled SID is closed), while
+the adapter emits explicit allow/deny responses for each resolved SID. Failure
+to start the PowerShell host itself cannot select a SID and follows that shared
+flag. Legacy single-mode adapters remain valid until authorized reconciliation.
+Deferred staging uses configured policy (open when unset), applying version
+fallback without overwriting peer modes. Target revocation updates the map and
+adapter transactionally, with the existing protected rollback checks.
 
 Codex, Claude Code and Cursor shell delivery failures and the shared native
 executor emit `WARNING hook fail-open; inspection bypassed` on stderr only when
@@ -67,6 +82,16 @@ Epic HD-DEFAULT: align hook availability defaults without weakening policy.
 - HD-07 [done]: address CodeRabbit's remaining schema embedding assertion
   and Windows test-comment drift. Both must describe the existing open default;
   no runtime policy, schema acceptance or security boundary changes.
+- HD-08 [implemented; native execution pending]: repair Windows Cursor per-SID adapter policy and deferred
+  staging; align the Windows Amp contract harness with the open default while
+  retaining explicit-closed regression coverage.
+
+HD-08 review fixes preserve singleton enrollment and administrator-only rollback
+receipts, bind per-user fallback to authenticated runtime generations, and keep
+legacy v9 adapter bytes identical. Canonical partial publication is recoverable
+from the protected lifecycle journal during both fresh install and upgrade.
+The Amp connector and wizard harnesses now expect the open default; the connector
+contract independently installs and verifies closed before restoring open.
 
 CI diagnosis: both failing leaf jobs at `791af585` read LiteLLM's mutable remote
 model-cost map despite documenting a bundled, locked registry. Read the installed
@@ -113,6 +138,17 @@ corrected the managed Windows open-contract test comment. The full schemas
 suite now passes; schemas vet, Windows enterprise-hook/schema cross-compilation
 and Windows vet pass. This follow-up changes tests/comments only, not runtime
 policy or security validation. Windows-native test execution remains pending.
+
+Windows review-fix verification: focused Cursor/Windows registration, hook
+contract and Amp connector tests pass on macOS, including the legacy v9 adapter
+golden hashes. Config, native executor, enterprise-hook, CLI and schemas suites
+pass; changed packages and tests cross-compile for Windows amd64. macOS and
+Windows Go vet pass. Windows-only regressions cover mixed SID modes, missing
+launcher/timeout/valid denial behavior, deferred fallback, enrollment/generation
+mode mismatches, revocation, and canonical fresh/upgrade rollback prefixes.
+Those tests and the PowerShell contract/wizard harness require native Windows
+CI execution; they have not been executed on this macOS host. No bundle or
+installer was created or run, and CONTEXT.md remains removed.
 
 ## Top-level doc impact
 

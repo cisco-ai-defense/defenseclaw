@@ -419,16 +419,27 @@ func verifyWindowsCursorUserRuntime(
 }
 
 func verifyWindowsCursorMachineTarget(target windowsGenericManagedTarget) error {
-	targets, active, err := ReadWindowsCursorManagedPolicyTargets()
+	artifacts, err := snapshotWindowsCursorManagedArtifacts()
 	if err != nil {
 		return err
 	}
-	if !active {
+	artifacts, err = validateWindowsCursorManagedArtifacts(artifacts)
+	if err != nil {
+		return err
+	}
+	if !artifacts.active {
 		return errors.New("enterprise hooks: Cursor enterprise policy is inactive")
 	}
-	for _, current := range targets {
+	return verifyWindowsCursorMachineTargetState(artifacts.parsed, target)
+}
+
+func verifyWindowsCursorMachineTargetState(state windowsCursorManagedPolicyState, target windowsGenericManagedTarget) error {
+	for _, current := range state.Targets {
 		if strings.EqualFold(current.SID, target.sid.String()) &&
 			sameWindowsEnterprisePath(current.DataDir, target.dataDir) {
+			if cursorManagedTargetFailMode(state, current.SID) != target.setup.HookFailMode {
+				return errors.New("enterprise hooks: Cursor adapter delivery mode differs from the authenticated target runtime")
+			}
 			return nil
 		}
 	}

@@ -7,11 +7,13 @@ package enterprisehooks
 // StageWindowsEnterpriseDeferredPolicies activates the token-free protected
 // machine-policy envelope for manifest-authorized pending rows. It never
 // creates or repairs target-owned runtime; that still requires the exact
-// user's WTS token in Install.
+// user's WTS token in Install. The optional mode is the configured Cursor
+// delivery policy; omitted policy defaults open, with version fallback applied.
 func StageWindowsEnterpriseDeferredPolicies(
 	manifest Manifest,
 	pending []ManifestTarget,
 	apiAddr string,
+	hookFailMode ...string,
 ) error {
-	return stageWindowsEnterpriseDeferredPoliciesPlatform(manifest, pending, apiAddr)
+	return stageWindowsEnterpriseDeferredPoliciesPlatform(manifest, pending, apiAddr, hookFailMode...)
 }

@@ -3136,7 +3136,7 @@ function Assert-WizardHookRegistration(
             'amp.on("tool.call"',
             'amp.on("tool.result"',
             'amp.on("agent.end"',
-            'const DC_FAIL_MODE: string = "closed"',
+            'const DC_FAIL_MODE: string = "open"',
             'const DC_TIMEOUT_MS = 10000',
             'new AbortController()',
             'ctx.ui.confirm',

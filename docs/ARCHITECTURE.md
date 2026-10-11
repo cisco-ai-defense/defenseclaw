@@ -63,6 +63,11 @@ policy enforcement. Explicit closed policy, managed authorization, runtime
 integrity and strict availability remain distinct controls. See
 [spec 007](specs/007-hook-delivery-default/README.md) for platform scope.
 
+Windows Cursor's protected machine adapter binds delivery fallback to each
+enrolled process SID and verifies it against that user's authenticated runtime.
+Its shared `failClosed` flag remains conservative if any enrolled user is closed;
+launcher errors inside the running adapter use the individual user's policy.
+
 Connector names, capabilities, hook profiles, and setup behavior are executable
 contracts under `internal/gateway/connector/` and
 `cli/defenseclaw/connector_contracts.py`. A new connector or capability change

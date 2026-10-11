@@ -26,6 +26,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 	manifest Manifest,
 	pending []ManifestTarget,
 	apiAddr string,
+	hookFailMode ...string,
 ) error {
 	if len(pending) == 0 {
 		return nil
@@ -158,7 +159,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 		}
 		setup := connector.SetupOpts{
 			APIAddr:           apiAddr,
-			HookFailMode:      "closed",
+			HookFailMode:      canonicalHookFailMode(""),
 			ManagedEnterprise: true,
 			HookExecutable:    hookExecutable,
 			DataDir:           target.dataDir,
@@ -194,6 +195,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 			rollbacks = append(rollbacks, undo)
 			existingClaude[strings.ToUpper(target.sid)] = struct{}{}
 		case "cursor":
+			setup.HookFailMode = deferredWindowsCursorFailMode(target.manifest.AgentVersion, hookFailMode...)
 			if currentDataDir, alreadyStaged := existingCursor[strings.ToUpper(target.sid)]; alreadyStaged {
 				if !sameWindowsEnterprisePath(currentDataDir, target.dataDir) {
 					return rollback(errors.New("enterprise hooks: existing deferred Cursor target has a different data directory"))
@@ -237,6 +239,17 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 		}
 	}
 	return nil
+}
+
+func deferredWindowsCursorFailMode(version string, configured ...string) string {
+	mode := ""
+	if len(configured) > 0 {
+		mode = configured[0]
+	}
+	if connector.HookContractNeedsActionOverride(connector.ResolveHookContract("cursor", version)) {
+		return "open"
+	}
+	return canonicalHookFailMode(mode)
 }
 
 func windowsDeferredPolicyManifestKey(target ManifestTarget) string {

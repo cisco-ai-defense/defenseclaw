@@ -1709,6 +1709,7 @@ function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
 }
 
 function Assert-DoctorWindowsHookRegistration {
+    param([ValidateSet('open', 'closed')][string]$ExpectedFailMode = 'open')
     $label = Get-ConnectorDoctorLabel
     $configPath = Get-EffectiveConnectorConfigPath $Connector
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Doctor contract hook config is missing: $configPath" }
@@ -1740,7 +1741,7 @@ function Assert-DoctorWindowsHookRegistration {
         foreach ($marker in @(
             'DefenseClaw Amp policy bridge',
             '/api/v1/amp/hook',
-            'const DC_FAIL_MODE: string = "closed"',
+            ('const DC_FAIL_MODE: string = "' + $ExpectedFailMode + '"'),
             'const DC_TIMEOUT_MS = 10000',
             'new AbortController()',
             'ctx.ui.confirm',
@@ -2360,6 +2361,21 @@ function Invoke-ContractRun {
     Set-IsolatedGatewayPort
     Invoke-Setup observe
     Assert-DoctorHookRegistration
+    if ($Connector -eq 'amp') {
+        # Fresh installs default open; an explicit closed policy must still
+        # render and verify independently. Restore open before the corpus.
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        try {
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'closed', '--yes', '--no-restart') | Out-Null
+            Invoke-Setup observe
+            Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+        } finally {
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'open', '--yes', '--no-restart') | Out-Null
+            Invoke-Setup observe
+        }
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        Write-Result 'amp:delivery-mode-contract' pass 'default open and explicit closed plugins both rendered and verified'
+    }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
     Invoke-Hook $blockEvent (Join-Path $golden 'pre_tool_block.json') allow $true
