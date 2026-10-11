@@ -51,9 +51,11 @@ mod = _load_module()
 
 
 def test_shipped_catalog_has_no_stale_ids() -> None:
-    litellm = pytest.importorskip("litellm")
+    pytest.importorskip("litellm")
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
-    problems = mod.check_catalog(catalog, litellm.model_cost, date.today())
+    # The bundled registry, not litellm.model_cost: the latter is downloaded
+    # at import and changes under a fixed litellm pin.
+    problems = mod.check_catalog(catalog, mod.bundled_model_cost(), date.today())
     assert problems == [], "stale model ids in model_catalog.json: " + "; ".join(
         f"[{p}] {m} — {why}" for p, m, why in problems
     )

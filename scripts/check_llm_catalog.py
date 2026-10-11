@@ -40,6 +40,7 @@ Run via ``make check-llm-catalog``.
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import sys
 from datetime import date
@@ -47,6 +48,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CATALOG = ROOT / "bundles" / "llm" / "model_catalog.json"
+
+# The registry file shipped inside the pinned litellm package.
+BUNDLED_MODEL_COST = "model_prices_and_context_window_backup.json"
+
+
+def bundled_model_cost() -> dict:
+    """Return the model registry bundled with the installed litellm.
+
+    ``litellm.model_cost`` is downloaded from litellm's GitHub main branch at
+    import time unless ``LITELLM_LOCAL_MODEL_COST_MAP`` is set, so it changes
+    under a fixed ``litellm==`` pin and can fail this gate on an unchanged
+    tree. Reading the bundled file keeps the check offline and pinned.
+    """
+    resource = importlib.resources.files("litellm") / BUNDLED_MODEL_COST
+    return json.loads(resource.read_text(encoding="utf-8"))
 
 # Catalog provider name -> LiteLLM provider key (litellm.models_by_provider).
 PROVIDER_LL_MAP: dict[str, str] = {
@@ -129,11 +145,11 @@ def check_catalog(
 
 def main() -> int:
     try:
-        import litellm  # noqa: PLC0415
-    except ImportError:
+        model_cost = bundled_model_cost()
+    except (ModuleNotFoundError, FileNotFoundError):
         print(
-            "check_llm_catalog: litellm not importable — install the cli extra "
-            "(litellm is the registry this check reads).",
+            "check_llm_catalog: litellm's bundled registry is not available — "
+            "install the cli extra (litellm is the registry this check reads).",
             file=sys.stderr,
         )
         return 2
@@ -143,7 +159,7 @@ def main() -> int:
         return 2
 
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
-    problems = check_catalog(catalog, litellm.model_cost, date.today())
+    problems = check_catalog(catalog, model_cost, date.today())
 
     if problems:
         print("check_llm_catalog: stale model ids in bundles/llm/model_catalog.json", file=sys.stderr)
