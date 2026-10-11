@@ -100,6 +100,19 @@ Epic HD-DEFAULT: align hook availability defaults without weakening policy.
   observe-mode delivery override in Go and Python while retaining the open
   default and explicit override precedence. Add byte-exact Amp restoration
   regressions for open/closed, content-free timeout diagnostics, and verification.
+- HD-11 [implemented; native execution pending]: increase only the periodic Claude policy-audit test's
+  completion wait from five to ten seconds for Windows CI headroom. Preserve
+  the completion notifier and effective-contract assertion. Investigate the
+  separate native Setup/lifecycle process-roster failure without weakening
+  process identity checks or changing runtime behavior.
+
+HD-11 is test-only and continues the existing PR without a version bump.
+At `752b0c48`, Windows Go reports hooks present at timeout and subsequently
+reports completed repair. The separate native Setup job successfully installs,
+then observes three installed gateway executable PIDs where the harness expects
+the gateway/watchdog pair. Its post-cleanup artifact does not identify the extra
+PID's command or parent; a transient helper and an unwanted persistent process
+must not be treated as equivalent. CONTEXT.md remains absent.
 
 HD-10 continues the existing release/PR without a version bump. CI at
 `bb213a82` passes the initial open self-heal but fails the explicit global
@@ -213,6 +226,33 @@ scripts parse and all five isolated polling scenarios pass with simulated
 Windows lock errors; timeout diagnostics distinguish missing, transient read
 error and content mismatch without exposing plugin contents. Native Windows
 end-to-end replay remains a CI gate. No installed runtime or build was replaced.
+
+Claude CI-wait verification: the periodic audit test passes ten consecutive
+macOS runs with its ten-second completion wait. The focused Claude guard tests
+pass three repetitions. The notifier and effective-policy assertions remain
+unchanged; no runtime timeout, hook delivery policy or identity check changes.
+Native Windows validation is still required: extra headroom alone does not
+establish the cause of the delayed completion.
+
+Setup/lifecycle diagnosis at `752b0c48`: native Setup reports successful install,
+exit zero and a complete transaction. The gateway status is running and the
+watchdog reports healthy. The first Codex wizard process-roster assertion then
+finds PIDs `3016,6320,7772` instead of the owned watchdog/gateway pair
+`3016,6320`, before the repair stage. The assertion and Setup/daemon/watchdog
+startup code are unchanged by this PR. The previous run `38149424262` passes
+the same lifecycle job. Failure diagnostics are captured after cleanup and
+contain no process roster, so they cannot establish whether PID `7772` was a
+transient CLI/helper, a stale CIM observation or an unwanted persistent process.
+This is a harness/application-lifecycle assertion, not an Actions setup error;
+a repeat run is useful evidence but is not a proven fix. If it repeats, capture
+bounded, redacted process identities at failure time before cleanup rather
+than ignoring extra processes. No speculative lifecycle code fix was made.
+
+The separate public install.ps1 acceptance job fails earlier inside the pinned
+Cosign installer action: signature verification succeeds, but deleting `cosign`
+reports `Device or resource busy`. DefenseClaw acceptance does not run. This is
+an action/bootstrap file-lock failure suitable for retry; verifier and integrity
+checks must remain intact.
 
 ## Top-level doc impact
 
