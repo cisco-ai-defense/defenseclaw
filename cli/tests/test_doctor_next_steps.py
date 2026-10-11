@@ -342,6 +342,7 @@ def test_a_writable_audit_folder_names_the_folder_not_a_restore(tmp_path) -> Non
     assert f"{home} can be written by other accounts" in row["detail"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX folder modes")
 def test_a_writable_folder_names_the_folder_for_the_device_key_too(tmp_path) -> None:
     # GAP-0344: with the audit row fixed (GAP-0300), the Device identity row
     # still sent the same chmod 777 home to a restore of the key from backup.
