@@ -209,6 +209,49 @@ func TestNetcatListenerUsesExposureTaxonomy(t *testing.T) {
 	t.Fatal("CMD-NETCAT-LISTEN missing")
 }
 
+func TestAuthorizedKeysShellDirectoryResolution(t *testing.T) {
+	input := actionfacts.Input{
+		CWD: "/repo", ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX,
+	}
+	tests := []struct {
+		name, current, directory, want string
+		ok                             bool
+	}{
+		{"home", "", "~", "/home/alice", true},
+		{"home ssh", "", "~/.ssh", "/home/alice/.ssh", true},
+		{"absolute", "", "/home/alice/.ssh", "/home/alice/.ssh", true},
+		{"relative to home", "/home/alice", ".ssh", "/home/alice/.ssh", true},
+		{"relative to cwd", "", "project/../notes", "/repo/notes", true},
+		{"relative base unknown", "relative", ".ssh", "", false},
+	}
+	// On Linux, simulate native Windows path operations so this test still
+	// catches an accidental fallback to host paths for a POSIX command.
+	windowsPaths := authorizedKeysDirectoryPaths{
+		isAbs: func(value string) bool { return strings.HasPrefix(value, `C:\`) },
+		join:  func(...string) string { return `C:\unexpected` },
+		clean: func(string) string { return `C:\unexpected` },
+	}
+	resolvers := []struct {
+		name    string
+		resolve func(actionfacts.Input, string, string) (string, bool)
+	}{
+		{"host", resolveAuthorizedKeysShellDirectory},
+		{"simulated Windows host", func(input actionfacts.Input, current, directory string) (string, bool) {
+			return resolveAuthorizedKeysShellDirectoryWithNative(input, current, directory, windowsPaths)
+		}},
+	}
+	for _, resolver := range resolvers {
+		for _, test := range tests {
+			t.Run(resolver.name+"/"+test.name, func(t *testing.T) {
+				got, ok := resolver.resolve(input, test.current, test.directory)
+				if got != test.want || ok != test.ok {
+					t.Fatalf("resolved directory = %q, %t; want %q, %t", got, ok, test.want, test.ok)
+				}
+			})
+		}
+	}
+}
+
 // TestHomeSpelledAuthorizedKeysWriteBlocks pins GAP-0892/0894/0896 on the
 // default pack. A lone `echo k >> ~/.ssh/authorized_keys` lost its blocking
 // finding because the tilde rewrite gave the path fact its "~" spelling back

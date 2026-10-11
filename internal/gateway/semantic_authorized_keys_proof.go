@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -1103,6 +1104,43 @@ func trustedShellWrapperAuthorizedKeysWrite(input actionfacts.Input, facts actio
 	return false
 }
 
+type authorizedKeysDirectoryPaths struct {
+	isAbs func(string) bool
+	join  func(...string) string
+	clean func(string) string
+}
+
+// resolveAuthorizedKeysShellDirectory uses the command dialect for path
+// syntax. A POSIX shell can report /home paths to a gateway running on Windows.
+func resolveAuthorizedKeysShellDirectory(input actionfacts.Input, current, directory string) (string, bool) {
+	native := authorizedKeysDirectoryPaths{filepath.IsAbs, filepath.Join, filepath.Clean}
+	return resolveAuthorizedKeysShellDirectoryWithNative(input, current, directory, native)
+}
+
+func resolveAuthorizedKeysShellDirectoryWithNative(
+	input actionfacts.Input, current, directory string, native authorizedKeysDirectoryPaths,
+) (string, bool) {
+	paths := authorizedKeysDirectoryPaths{path.IsAbs, path.Join, path.Clean}
+	if input.DialectHint == actionfacts.DialectCMD || input.DialectHint == actionfacts.DialectPowerShell {
+		paths = native
+	}
+	if directory == "~" {
+		directory = input.ActiveHome
+	} else if strings.HasPrefix(directory, "~/") {
+		directory = paths.join(input.ActiveHome, directory[2:])
+	} else if !paths.isAbs(directory) {
+		base := current
+		if base == "" {
+			base = input.CWD
+		}
+		if !paths.isAbs(base) {
+			return "", false
+		}
+		directory = paths.join(base, directory)
+	}
+	return paths.clean(directory), true
+}
+
 // trustedHomeDirectoryAuthorizedKeysWrite checks a static directory change
 // followed by a separately parsed write. The shell parser supplies the
 // statement boundaries; the ordinary action analyzer supplies the write fact.
@@ -1176,21 +1214,11 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 					return false
 				}
 			}
-			if directory == "~" {
-				directory = input.ActiveHome
-			} else if strings.HasPrefix(directory, "~/") {
-				directory = filepath.Join(input.ActiveHome, directory[2:])
-			} else if !filepath.IsAbs(directory) {
-				base := workingDirectory
-				if base == "" {
-					base = input.CWD
-				}
-				if !filepath.IsAbs(base) {
-					return false
-				}
-				directory = filepath.Join(base, directory)
+			var ok bool
+			workingDirectory, ok = resolveAuthorizedKeysShellDirectory(input, workingDirectory, directory)
+			if !ok {
+				return false
 			}
-			workingDirectory = filepath.Clean(directory)
 			continue
 		}
 		if workingDirectory == "" {
