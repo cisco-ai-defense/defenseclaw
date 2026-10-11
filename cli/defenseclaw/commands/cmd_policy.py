@@ -746,9 +746,6 @@ def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
     return "reloaded", ""
 
 
-_RANK_NAMES = {1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}
-
-
 def _admission_triple(raw: dict) -> dict:
     """A policy action in config ``admission`` triple form. Policy YAML uses
     either runtime vocabulary (enable/disable or allow/block, F-0241)."""
@@ -841,8 +838,8 @@ def _policy_threshold_rank(key: str, raw: object) -> int:
         rank = int(raw)
     elif isinstance(raw, str):
         text = raw.strip().upper()
-        rank = int(text) if text.isdigit() else {v: k for k, v in _RANK_NAMES.items()}.get(text)
-    if rank not in _RANK_NAMES:
+        rank = int(text) if text.isdigit() else {v: k for k, v in _SEVERITY_RANK_NAMES.items()}.get(text)
+    if rank not in _SEVERITY_RANK_NAMES:
         raise ValueError(f"guardrail.{key} must be 1 (LOW), 2 (MEDIUM), 3 (HIGH) or 4 (CRITICAL), not {raw!r}")
     return rank
 
@@ -866,7 +863,7 @@ def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, 
     ):
         if key in guardrail:
             rank = _policy_threshold_rank(key, guardrail[key])
-            setattr(cfg.guardrail, attr, "" if rank == default else _RANK_NAMES[rank])
+            setattr(cfg.guardrail, attr, "" if rank == default else _SEVERITY_RANK_NAMES[rank])
     if "mode" in guardrail:
         mode = str(guardrail["mode"]).strip()
         if mode not in {"observe", "action"}:
@@ -1411,10 +1408,10 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
     if policy_name is None and not asset_lists.is_secure_client(app.cfg):
         changed = []
         if block_threshold is not None:
-            app.cfg.guardrail.block_at = _RANK_NAMES[block_threshold]
+            app.cfg.guardrail.block_at = _SEVERITY_RANK_NAMES[block_threshold]
             changed.append(f"block_at={app.cfg.guardrail.block_at}")
         if alert_threshold is not None:
-            app.cfg.guardrail.alert_at = _RANK_NAMES[alert_threshold]
+            app.cfg.guardrail.alert_at = _SEVERITY_RANK_NAMES[alert_threshold]
             changed.append(f"alert_at={app.cfg.guardrail.alert_at}")
         if cisco_trust_level is not None:
             app.cfg.guardrail.cisco_trust_level = "" if cisco_trust_level == "full" else cisco_trust_level
