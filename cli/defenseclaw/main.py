@@ -55,7 +55,7 @@ if __name__ == "__main__" and sys.argv[1:] == ["--version-json"]:
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import terminal_checkbox, ux
 from defenseclaw.commands.cmd_acp import acp_cmd
 from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
@@ -771,6 +771,7 @@ def main() -> None:
     ux.configure_console_output()
     _keep_console_width_when_piped()
     _force_utf8_io()
+    terminal_checkbox.keep_prompts_visible()
     from defenseclaw.config_writer import ConfigWriteError, ManagedConfigWriteError, plain_error
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
     from defenseclaw.observability.v8_config import V8ConfigError

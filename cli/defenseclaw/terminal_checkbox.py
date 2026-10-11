@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
@@ -34,6 +35,53 @@ def stdout_is_tty() -> bool:
         return click.get_text_stream("stdout").isatty()
     except Exception:
         return False
+
+
+def stdin_is_tty() -> bool:
+    """Return whether stdin is attached to a terminal."""
+
+    try:
+        return bool(sys.stdin.isatty())
+    except Exception:
+        return False
+
+
+def prompts_need_own_line() -> bool:
+    """Whether a person types at a terminal while stdout goes to a pipe.
+
+    PowerShell reads a native command's redirected stdout a line at a time
+    (with Start-Transcript on, for one), so text without a newline, such as
+    a prompt waiting for its answer, stays hidden until the next newline
+    (GAP-1575).
+    """
+
+    return stdin_is_tty() and not stdout_is_tty()
+
+
+def _prompt_on_own_line(read: Callable[[str], str]) -> Callable[[str], str]:
+    def prompt(text: str) -> str:
+        return read(text.rstrip(" ") + "\n")
+
+    prompt.defenseclaw_own_line = True  # type: ignore[attr-defined]
+    return prompt
+
+
+def keep_prompts_visible() -> None:
+    """End every Click prompt with a newline when stdout is redirected.
+
+    On a Windows console whose stdout PowerShell relays line by line,
+    ``defenseclaw init`` and ``setup <connector>`` showed a blank line while
+    they waited, and each prompt appeared only after Enter. The prompt now
+    ends its line, so it is shown before the answer is read; the answer is
+    typed on the next line. Hidden prompts (getpass) already write to the
+    console itself.
+    """
+
+    from click import termui
+
+    if not prompts_need_own_line() or getattr(termui.visible_prompt_func, "defenseclaw_own_line", False):
+        return
+    termui.visible_prompt_func = _prompt_on_own_line(termui.visible_prompt_func)
 
 
 def _has_ansi_terminal_hint() -> bool:
@@ -166,7 +214,9 @@ def _render_non_redraw_status(
         f"  Current {cursor + 1}/{len(options)}: [{mark}] {name}"
         f" | selected {len(selected)}"
     )
-    click.echo("\r" + status.ljust(previous_width), nl=False)
+    # Behind a line relay the carriage-return line would stay hidden until
+    # Enter (GAP-1575), so each update gets its own line there.
+    click.echo("\r" + status.ljust(previous_width), nl=prompts_need_own_line())
     return len(status)
 
 
