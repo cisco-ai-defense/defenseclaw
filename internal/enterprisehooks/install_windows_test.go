@@ -697,9 +697,8 @@ func TestInstallWindowsClaudeHonorsManagedFailModeOpen(t *testing.T) {
 		"allowManagedHooksOnly": true,
 	})
 	opts := windowsManagedInstallOptions(fixture)
-	// Observe-mode and legacy protected configurations may resolve to open.
-	// Windows enterprise native hooks must still publish and verify one
-	// authoritative fail-closed contract.
+	// Windows enterprise native hooks must publish and verify the configured
+	// open-mode contract as authoritative, including the protected lock record.
 	opts.HookFailMode = "open"
 	if _, err := Install(context.Background(), opts); err != nil {
 		t.Fatalf("Install with configured fail-open mode: %v", err)

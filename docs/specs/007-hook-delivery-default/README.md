@@ -64,6 +64,9 @@ Epic HD-DEFAULT: align hook availability defaults without weakening policy.
 - HD-06 [done]: remove the added root CONTEXT.md at the user's request;
   add content-free fail-open diagnostics and regression tests for macOS shell
   and shared native Windows execution. Keep work notes in this spec instead.
+- HD-07 [done]: address CodeRabbit's remaining schema embedding assertion
+  and Windows test-comment drift. Both must describe the existing open default;
+  no runtime policy, schema acceptance or security boundary changes.
 
 CI diagnosis: both failing leaf jobs at `791af585` read LiteLLM's mutable remote
 model-cost map despite documenting a bundled, locked registry. Read the installed
@@ -103,6 +106,13 @@ connector suite has one unrelated failure because the optional OpenClaw bundle
 is incomplete locally (`extensions/defenseclaw/dist/index.js` is missing).
 Native Windows execution remains a CI/Windows-host check. The existing macOS
 test bundle is preserved and predates this logging-only change; it was not rebuilt.
+
+CodeRabbit follow-up: reproduced the schemas package failure from the stale
+`closed` default assertion, aligned it with the canonical `open` default, and
+corrected the managed Windows open-contract test comment. The full schemas
+suite now passes; schemas vet, Windows enterprise-hook/schema cross-compilation
+and Windows vet pass. This follow-up changes tests/comments only, not runtime
+policy or security validation. Windows-native test execution remains pending.
 
 ## Top-level doc impact
 

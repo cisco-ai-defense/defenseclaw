@@ -377,8 +377,8 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		t.Errorf("llm.max_retries default = %v, want 2", got)
 	}
 	guardrailProperties := schemaMap(t, schemaMap(t, defs, "guardrail"), "properties")
-	if got := schemaMap(t, guardrailProperties, "hook_fail_mode")["default"]; got != "closed" {
-		t.Errorf("guardrail.hook_fail_mode default = %v, want closed", got)
+	if got := schemaMap(t, guardrailProperties, "hook_fail_mode")["default"]; got != "open" {
+		t.Errorf("guardrail.hook_fail_mode default = %v, want open", got)
 	}
 	aiDiscoveryProperties := schemaMap(t, schemaMap(t, defs, "aiDiscovery"), "properties")
 	modelProvenance := schemaMap(t, aiDiscoveryProperties, "lookup_model_provenance_online")
