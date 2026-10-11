@@ -74,9 +74,11 @@ func ValidateBrokerServiceIdentity(config ServerConfig) error {
 		return errors.New("query configured DefenseClaw gateway service")
 	}
 	expectedGatewayAccount := `NT SERVICE\` + config.GatewayServiceName
-	if !strings.EqualFold(gateway.startName, expectedGatewayAccount) {
+	if !gatewayServiceAccountAccepted(gateway.startName, config.GatewayServiceName) {
 		return errors.New("DefenseClaw gateway service account is unexpected")
 	}
+	// The service SID exists for the gateway whichever account it logs on as;
+	// pipe authentication binds the caller to it.
 	if _, err := managed.WindowsServiceAccountSID(expectedGatewayAccount); err != nil {
 		return errors.New("DefenseClaw gateway virtual service SID is unavailable")
 	}
@@ -88,8 +90,9 @@ func authenticatePipeClient(pipe windows.Handle, gatewayServiceName string) (uin
 	if err := windows.GetNamedPipeClientProcessId(pipe, &clientPID); err != nil || clientPID == 0 {
 		return clientPID, errors.New("CMID broker pipe client PID is unavailable")
 	}
-	// Primary authentication: match the caller's token user SID to the
-	// gateway's virtual service SID. PID is not stable across
+	// Primary authentication: prove the caller's token carries the
+	// gateway's service SID (as its user, or as a LocalSystem service
+	// group). PID is not stable across
 	// re-use; between the peer's exit and SCM's next status refresh,
 	// another process could inherit the gateway PID and pass a
 	// PID-only check. Impersonation reads the token *of the actual
@@ -179,6 +182,11 @@ func verifyPipeClientTokenSID(pipe windows.Handle, expected *windows.SID) error 
 		return fmt.Errorf("CMID broker inspect pipe-client token user: %w", err)
 	}
 	sid := tokenUser.User.Sid
+	// The gateway logs on as LocalSystem with its service SID as a token
+	// group; earlier releases logged on as the virtual account itself. Either
+	// form proves the caller is the gateway service; any other LocalSystem
+	// process lacks the gateway's service SID group.
+	runsAsGateway, identityErr := managed.WindowsTokenRunsAsService(threadToken, expected)
 	if revertErr := windows.RevertToSelf(); revertErr != nil {
 		return fmt.Errorf("CMID broker revert impersonation: %w", revertErr)
 	}
@@ -191,9 +199,12 @@ func verifyPipeClientTokenSID(pipe windows.Handle, expected *windows.SID) error 
 	if err := threadToken.Close(); err != nil {
 		return fmt.Errorf("CMID broker close pipe-client thread token: %w", err)
 	}
-	if !sid.Equals(expected) {
+	if identityErr != nil {
+		return fmt.Errorf("CMID broker inspect pipe-client service identity: %w", identityErr)
+	}
+	if !runsAsGateway {
 		return fmt.Errorf(
-			"CMID broker pipe client token SID %s does not match gateway service SID %s",
+			"CMID broker pipe client token SID %s does not carry gateway service SID %s",
 			sid, expected,
 		)
 	}

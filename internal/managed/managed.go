@@ -22,10 +22,13 @@ const (
 	DeploymentModeEnv               = "DEFENSECLAW_DEPLOYMENT_MODE"
 	HookGuardianAuthorizationDirEnv = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
 	HookGuardianAuthorizationFile   = "protected_targets.json"
-	// WindowsServiceAccountEnv identifies the exact virtual service account
-	// permitted to write the managed runtime tree. It is installed in the
-	// administrator-owned per-service registry Environment value; it never
-	// broadens config, manifest, binary, or authorization-ledger trust.
+	// WindowsServiceAccountEnv names the gateway service SID, as its
+	// `NT SERVICE\<name>` account, permitted to write the managed runtime
+	// tree. The gateway logs on as LocalSystem and carries this SID in its
+	// write-restricted token; earlier releases logged on as the account
+	// itself. It is installed in the administrator-owned per-service
+	// registry Environment value; it never broadens config, manifest,
+	// binary, or authorization-ledger trust.
 	WindowsServiceAccountEnv = "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT"
 
 	// UnixServiceAccountEnv is the optional unix counterpart to

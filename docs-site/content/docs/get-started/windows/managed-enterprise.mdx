@@ -29,7 +29,7 @@ procedure, use [Enterprise hardening and deployment](/docs/setup/enterprise-depl
 
 | Property | Managed Windows behavior |
 | --- | --- |
-| Administrator-owned runtime | `DefenseClawGateway` runs as the restricted `NT SERVICE\DefenseClawGateway` virtual account. |
+| Administrator-owned runtime | `DefenseClawGateway` runs as LocalSystem with a write-restricted token bound to its `NT SERVICE\DefenseClawGateway` service SID and only `SeChangeNotifyPrivilege`. No "Log on as a service" grant is needed. |
 | Privileged repair | `DefenseClawHookGuardian` runs as LocalSystem and repairs only administrator allow-listed users and connectors. |
 | Protected control plane | Binaries, managed config, target manifest, service definitions, runtime credentials, and the authorization ledger are protected by administrator/System ownership and DACLs. |
 | Mode pin | The SCM environment pins `managed_enterprise`; user config or environment changes cannot downgrade the installed services. |

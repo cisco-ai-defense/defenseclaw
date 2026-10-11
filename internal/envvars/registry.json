@@ -1003,7 +1003,7 @@
     {
       "name": "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT",
       "category": "runtime_path",
-      "purpose": "Identify the exact virtual Windows service account permitted to write the managed runtime tree.",
+      "purpose": "Identify the gateway service SID (as its NT SERVICE account name) permitted to write the managed runtime tree. The gateway logs on as LocalSystem and carries this SID in its write-restricted token.",
       "default": "NT SERVICE\\${DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME}",
       "accepted_values": ["NT SERVICE\\<installer-owned-service-name>"],
       "security_impact": "high",
@@ -1014,7 +1014,7 @@
         {"location": "internal/gateway/connector/hook_api_token_windows.go", "description": "Authorizes the service SID on managed hook token files"}
       ],
       "since": "0.8.0",
-      "security_note": "Managed-runtime writer identity — only the installer-pinned virtual service account may receive the corresponding write grants."
+      "security_note": "Managed-runtime writer identity — only the installer-pinned gateway service SID may receive the corresponding write grants."
     },
     {
       "name": "DEFENSECLAW_CMID_BROKER_PIPE",

@@ -40,6 +40,8 @@ const (
 
 var windowsCorrelationServiceAccountSID = managed.WindowsServiceAccountSID
 
+var windowsCorrelationTokenRunsAsService = managed.WindowsTokenRunsAsService
+
 func loadOrCreateCorrelationKeyPlatform(dataDir string, entropy keyEntropyReader, hooks keyStoreHooks) (CorrelationKey, error) {
 	if dataDir == "" {
 		return CorrelationKey{}, keyStoreError(KeyStoreErrorInvalidDataDir)
@@ -474,8 +476,20 @@ func windowsCorrelationExpectedOwnerSID() (*windows.SID, error) {
 		return current.User.Sid, nil
 	}
 	expected, err := windowsCorrelationServiceAccountSID(account)
-	if err != nil || expected == nil || !current.User.Sid.Equals(expected) {
+	if err != nil || expected == nil {
 		return nil, keyStoreError(KeyStoreErrorUnavailable)
+	}
+	// The key stays owned by the gateway's service SID whether the gateway
+	// logs on as that virtual account or as LocalSystem with the service SID
+	// in its token, so keys written by either release remain valid.
+	if !current.User.Sid.Equals(expected) {
+		runsAsService, err := windowsCorrelationTokenRunsAsService(
+			windows.GetCurrentProcessToken(),
+			expected,
+		)
+		if err != nil || !runsAsService {
+			return nil, keyStoreError(KeyStoreErrorUnavailable)
+		}
 	}
 	return expected, nil
 }

@@ -3081,6 +3081,45 @@ function Invoke-DefenseClawNative {
     }
 }
 
+# The gateway logs on as LocalSystem with a restricted service SID and a single
+# required privilege, so no "Log on as a service" grant is needed and Group
+# Policy cannot revoke its logon. Earlier releases logged it on as its own
+# virtual account; lifecycle reads accept both so those hosts upgrade, repair
+# and uninstall in place. The virtual service SID is still the gateway's ACL
+# identity either way.
+function Get-DefenseClawGatewayServiceAccount {
+    return 'LocalSystem'
+}
+
+function Get-DefenseClawLegacyGatewayServiceAccount {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    return "NT SERVICE\$GatewayServiceName"
+}
+
+function Get-DefenseClawAcceptedGatewayServiceAccounts {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    return @(
+        (Get-DefenseClawGatewayServiceAccount),
+        (Get-DefenseClawLegacyGatewayServiceAccount -GatewayServiceName $GatewayServiceName)
+    )
+}
+
+function Test-DefenseClawGatewayServiceAccount {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Account,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    foreach ($accepted in @(
+            (Get-DefenseClawAcceptedGatewayServiceAccounts -GatewayServiceName $GatewayServiceName) +
+            @('NT AUTHORITY\SYSTEM')
+        )) {
+        if ([string]::Equals($Account, $accepted, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-DefenseClawServiceSID {
     param([Parameter(Mandatory)][string]$ServiceName)
     $account = [Security.Principal.NTAccount]::new("NT SERVICE\$ServiceName")
@@ -5378,12 +5417,20 @@ function Set-DefenseClawManagedServices {
         # Enumerator existed without manufacturing new privileged services.
         # Ordinary Install/Repair/Upgrade callers never set them.
         [switch]$RestoreTransactionWithoutBroker,
-        [switch]$RestoreTransactionWithoutEnumerator
+        [switch]$RestoreTransactionWithoutEnumerator,
+        # Rollback-only: the gateway account recorded in the transaction
+        # preimage. Restored binaries from an earlier release expect the
+        # virtual account they were installed with.
+        [string]$RestoreGatewayAccount
     )
     if (($RestoreTransactionWithoutBroker -or
             $RestoreTransactionWithoutEnumerator) -and
         -not $DeferAutomaticStart) {
         throw 'legacy service topology can be restored only while transaction services remain disabled'
+    }
+    if (-not [string]::IsNullOrEmpty($RestoreGatewayAccount) -and
+        -not $DeferAutomaticStart) {
+        throw 'a recorded gateway account can be restored only while transaction services remain disabled'
     }
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
@@ -5393,7 +5440,17 @@ function Set-DefenseClawManagedServices {
     }
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawServiceName -Name $enumeratorServiceName
-    $gatewayAccount = "NT SERVICE\$GatewayServiceName"
+    $gatewayAccount = if ([string]::IsNullOrEmpty($RestoreGatewayAccount)) {
+        Get-DefenseClawGatewayServiceAccount
+    }
+    elseif (Test-DefenseClawGatewayServiceAccount `
+            -Account $RestoreGatewayAccount `
+            -GatewayServiceName $GatewayServiceName) {
+        $RestoreGatewayAccount
+    }
+    else {
+        throw "refusing to restore unsupported gateway service account $RestoreGatewayAccount"
+    }
     $gatewayImage = '"{0}"' -f $GatewayPath
     # The rollback-only restore path manufactures no broker at all, so it
     # keeps its empty image. Everything else routes through the shared
@@ -5499,6 +5556,20 @@ function Set-DefenseClawManagedServices {
     Assert-DefenseClawServiceImagePath `
         -Name $GatewayServiceName `
         -ExpectedImage $gatewayImage
+    # Readers tolerate either gateway account so older installs stay
+    # servicable; the writer proves the account it just configured.
+    $writtenGatewayAccount = [string](
+        Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$GatewayServiceName" `
+            -Name ObjectName
+    )
+    if (-not [string]::Equals(
+            $writtenGatewayAccount,
+            $gatewayAccount,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "gateway service account is $writtenGatewayAccount after configuration, want $gatewayAccount"
+    }
     if (Test-DefenseClawServiceExists -Name $GuardianServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'config', $GuardianServiceName,
@@ -5909,6 +5980,39 @@ function Set-DefenseClawServiceActivationPhase {
         $timestampProperty.Value = $timestampValue
     }
     Write-DefenseClawJsonAtomic -Value $State -Path $Path
+}
+
+function Get-DefenseClawTransactionGatewayAccount {
+    <#
+        The gateway logon account recorded in a transaction preimage. A
+        preimage written by an earlier release has no account field and its
+        gateway ran as the virtual account, so that is the restore target.
+    #>
+    param([Parameter(Mandatory)]$Snapshot)
+    $gatewayServiceName = [string]$Snapshot.gateway_service
+    $entries = @($Snapshot.services |
+        Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals(
+                [string]$_.name,
+                $gatewayServiceName,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        })
+    if ($entries.Count -ne 1) {
+        throw 'transaction has invalid prior gateway service metadata'
+    }
+    $property = $entries[0].PSObject.Properties['account']
+    if ($null -eq $property -or [string]::IsNullOrEmpty([string]$property.Value)) {
+        return Get-DefenseClawLegacyGatewayServiceAccount `
+            -GatewayServiceName $gatewayServiceName
+    }
+    $account = [string]$property.Value
+    if (-not (Test-DefenseClawGatewayServiceAccount `
+            -Account $account `
+            -GatewayServiceName $gatewayServiceName)) {
+        throw "transaction records an unsupported gateway service account $account"
+    }
+    return $account
 }
 
 function Get-DefenseClawTransactionServiceStartMode {
@@ -8330,7 +8434,7 @@ function New-DefenseClawDeploymentMetadata {
         state_root = $Layout.StateRoot
         gateway_service = $GatewayServiceName
         guardian_service = $GuardianServiceName
-        gateway_account = "NT SERVICE\$GatewayServiceName"
+        gateway_account = (Get-DefenseClawGatewayServiceAccount)
         guardian_account = 'LocalSystem'
         broker_service = $Layout.BrokerServiceName
         broker_account = 'LocalSystem'
@@ -8597,8 +8701,22 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
             )
     }
     $objectName = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ObjectName)
-    $expectedAccount = if ($Guardian -or $Enumerator) { 'LocalSystem' } else { "NT SERVICE\$Name" }
-    if (-not [string]::Equals($objectName, $expectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
+    # A gateway installed by an earlier release still logs on as its virtual
+    # account; it is this deployment's own service and must not be treated as
+    # foreign while upgrade, repair, reinstall or uninstall moves it.
+    $expectedAccount = if ($Guardian -or $Enumerator) {
+        'LocalSystem'
+    }
+    else {
+        (Get-DefenseClawAcceptedGatewayServiceAccounts -GatewayServiceName $Name) -join ' or '
+    }
+    $ownedAccount = if ($Guardian -or $Enumerator) {
+        [string]::Equals($objectName, 'LocalSystem', [StringComparison]::OrdinalIgnoreCase)
+    }
+    else {
+        Test-DefenseClawGatewayServiceAccount -Account $objectName -GatewayServiceName $Name
+    }
+    if (-not $ownedAccount) {
         if (Test-DefenseClawTrustStrictAncestors) {
             throw "refusing to replace service $Name owned by unexpected account $objectName"
         }
@@ -8769,6 +8887,18 @@ function New-DefenseClawTransaction {
         else {
             Get-DefenseClawServiceStartMode -Name $name
         }
+        # Rollback restores the logon account the preimage binaries expect.
+        # Preimages without this field predate the LocalSystem gateway.
+        $account = if ($null -eq $service) {
+            ''
+        }
+        else {
+            [string](
+                Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+                    -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$name" `
+                    -Name ObjectName
+            )
+        }
         $services.Add([ordered]@{
             name = $name
             existed = ($null -ne $service)
@@ -8778,6 +8908,7 @@ function New-DefenseClawTransaction {
                     [ServiceProcess.ServiceControllerStatus]::Running
             )
             start_mode = [int]$startMode
+            account = $account
         })
     }
     $quiescingIntentPublished = $false
@@ -10526,6 +10657,9 @@ function Restore-DefenseClawTransaction {
             ) `
             -RestoreTransactionWithoutEnumerator:(
                 -not [bool]$snapshotEnumeratorState.existed
+            ) `
+            -RestoreGatewayAccount (
+                Get-DefenseClawTransactionGatewayAccount -Snapshot $snapshot
             )
         Set-DefenseClawManagedAcls `
             -Layout $Layout `
@@ -10682,7 +10816,10 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
         -ServicingTransaction `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
-        -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage
+        -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
+        -ExpectedGatewayAccount @(
+            Get-DefenseClawTransactionGatewayAccount -Snapshot $Snapshot
+        )
     return $true
 }
 
@@ -16340,7 +16477,9 @@ function Assert-DefenseClawServiceConfiguration {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$ExpectedImage,
-        [Parameter(Mandatory)][string]$ExpectedAccount,
+        # Any listed account is accepted; the gateway accepts its current
+        # LocalSystem logon and the virtual account of earlier releases.
+        [Parameter(Mandatory)][string[]]$ExpectedAccount,
         [Parameter(Mandatory)][string]$ExpectedDisplayName,
         [Parameter(Mandatory)][int]$ExpectedSidType,
         [Parameter(Mandatory)][string[]]$ExpectedPrivileges,
@@ -16357,7 +16496,17 @@ function Assert-DefenseClawServiceConfiguration {
     if (-not [string]::Equals([string]$properties.ImagePath, $ExpectedImage, [StringComparison]::OrdinalIgnoreCase)) {
         throw "service $Name ImagePath drift: $($properties.ImagePath)"
     }
-    if (-not [string]::Equals([string]$properties.ObjectName, $ExpectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
+    $accountMatches = @(
+        $ExpectedAccount |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$properties.ObjectName,
+                    [string]$_,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($accountMatches.Count -eq 0) {
         throw "service $Name account drift: $($properties.ObjectName)"
     }
     if (-not [string]::Equals([string]$properties.DisplayName, $ExpectedDisplayName, [StringComparison]::Ordinal)) {
@@ -16447,8 +16596,15 @@ function Assert-DefenseClawManagedServiceConfigurations {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
-        [switch]$AnyStartMode
+        [switch]$AnyStartMode,
+        # Defaults to every supported gateway account so installs from earlier
+        # releases remain verifiable and removable before they are migrated.
+        [string[]]$ExpectedGatewayAccount
     )
+    if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
+        $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
+            -GatewayServiceName $GatewayServiceName
+    }
     if ($PendingTransaction -and $ServicingTransaction) {
         throw 'service configuration assertion cannot be both pending-live and servicing'
     }
@@ -16511,7 +16667,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
-        -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
+        -ExpectedAccount $ExpectedGatewayAccount `
         -ExpectedDisplayName 'DefenseClaw Enterprise Gateway' `
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
@@ -16630,8 +16786,15 @@ function Assert-DefenseClawEnterpriseDeployment {
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
         [switch]$AllowTransactionRecordedBrokerAbsence,
-        [switch]$AllowTransactionRecordedEnumeratorAbsence
+        [switch]$AllowTransactionRecordedEnumeratorAbsence,
+        # Defaults to every supported gateway account; rollback narrows it to
+        # the account recorded in the transaction preimage.
+        [string[]]$ExpectedGatewayAccount
     )
+    if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
+        $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
+            -GatewayServiceName $GatewayServiceName
+    }
     if ($PendingTransaction -and $ServicingTransaction) {
         throw 'deployment assertion cannot be both pending-live and servicing'
     }
@@ -17326,7 +17489,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
-        -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
+        -ExpectedAccount $ExpectedGatewayAccount `
         -ExpectedDisplayName 'DefenseClaw Enterprise Gateway' `
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `

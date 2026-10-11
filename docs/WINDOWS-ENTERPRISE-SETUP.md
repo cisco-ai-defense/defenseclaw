@@ -127,3 +127,44 @@ Because Secure Client nests the library under two version directories
 that move on its own upgrade schedule, runtime discovery also survives a
 Cloud Management upgrade that retires the directory a previous install
 pinned.
+
+## Service accounts
+
+Every DefenseClaw Windows service runs as LocalSystem: the gateway, the
+credential broker, the hook guardian, and the hook enumerator.
+
+The gateway still runs with its own restricted service SID
+(`NT SERVICE\DefenseClawGateway`) and only `SeChangeNotifyPrivilege`. Its
+token is write-restricted, so it can write only the runtime and log paths
+whose ACLs grant that service SID. Configuration, the target manifest, the
+authorization ledger, binaries, and service definitions stay read-only to it.
+
+Because LocalSystem holds the service logon right by design:
+
+- Install needs no "Log on as a service" grant.
+- No Group Policy change is needed. A domain policy that defines "Log on as
+  a service" cannot stop the gateway from starting.
+
+### Upgrading from a release where the gateway used its virtual account
+
+Earlier releases logged the gateway on as `NT SERVICE\DefenseClawGateway`.
+Those installs move to LocalSystem with no manual step:
+
+- `/upgrade`, `/repair`, and `/install` over an existing deployment
+  reconfigure the gateway and keep the config, the manifest and the enrolled
+  users.
+- `/uninstall`, with or without purge, works before any upgrade.
+- If an upgrade fails and rolls back, the gateway returns to the account the
+  restored binaries were installed with.
+
+If an administrator added a local "Log on as a service" grant for the old
+gateway account, or for `NT SERVICE\ALL SERVICES`, DefenseClaw leaves it in
+place. It is no longer needed and can be removed.
+
+### TLS inspection
+
+The gateway trusts the certificate authorities in the machine store
+(`LocalMachine\Root`). On networks that inspect TLS, either exempt the AI
+Defense host from inspection or deploy the inspection root CA to the machine
+store. Otherwise outbound inspection calls fail with
+`x509: certificate signed by unknown authority`.

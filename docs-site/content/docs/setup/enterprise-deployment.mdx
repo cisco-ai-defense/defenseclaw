@@ -80,7 +80,7 @@ The matrix is an ownership switch, not an auto-heal switch. Both rows repair hoo
 | AI agent or shell running as the protected user | Read/write files owned by that user; start and kill that user's processes | Cannot modify the system service, binaries, managed config, service token store, or guardian authorization. Can tamper with user-owned hook/config files until the guardian repairs them. |
 | Another unprivileged local user | Access permitted by normal UNIX permissions, macOS ACLs, or Windows DACLs | Cannot read protected runtime state or scoped service credentials; cannot repair or authorize another user's hooks. |
 | Endpoint administrator, root, MDM, or a process with equivalent privilege | Full machine administration | Can install, upgrade, disable, or remove DefenseClaw. DefenseClaw does not attempt to defend the machine from its trusted administrator. |
-| Compromised gateway process | Service identity plus the platform service boundary | Can write only its declared runtime/log paths; cannot write user homes, managed config, binaries, service definitions, or arbitrary host paths. The packaged Linux unit adds a systemd sandbox; Windows uses a dedicated virtual service account and protected DACLs. |
+| Compromised gateway process | Service identity plus the platform service boundary | Can write only its declared runtime/log paths; cannot write user homes, managed config, binaries, service definitions, or arbitrary host paths. The packaged Linux unit adds a systemd sandbox; Windows runs the gateway as LocalSystem with a write-restricted token (its restricted service SID, only `SeChangeNotifyPrivilege`) and protected DACLs. |
 | Compromised guardian process | Root on Linux/macOS or LocalSystem on Windows | Can repair declared user-home footprints and guardian state. Risk is reduced through the explicit target manifest, trusted path checks, per-target credential changes or impersonation, narrow service arguments, and platform filesystem controls. |
 
 ### Security goals and non-goals
@@ -305,7 +305,7 @@ three privilege domains:
 
 | Component | Identity | Writable scope | Purpose |
 | --- | --- | --- | --- |
-| `DefenseClawGateway` | `NT SERVICE\DefenseClawGateway` virtual service account | Managed runtime and logs only | Inspection, policy, audit, hook API, health, and least-privilege service-token access. |
+| `DefenseClawGateway` | LocalSystem, write-restricted by its `NT SERVICE\DefenseClawGateway` service SID | Managed runtime and logs only | Inspection, policy, audit, hook API, health, and least-privilege service-token access. |
 | `DefenseClawCMIDBroker` | LocalSystem with only `SeChangeNotifyPrivilege` | Broker authentication key, named pipe, broker log, and the pinned Cisco provider DLL | Isolate access to the machine credential provider behind an authenticated gateway-only IPC boundary. |
 | `DefenseClawHookGuardian` | LocalSystem | Allow-listed user hook footprints plus guardian state | Impersonate each declared interactive user, install or repair that user's files with the user's ownership, and return to LocalSystem for protected state. |
 | `DefenseClawHookEnumerator` | LocalSystem | Protected target manifest and allow-listed profile discovery | Refresh the declared connector inventory without granting the gateway broad profile traversal. |
@@ -317,7 +317,7 @@ The default managed layout is:
 | --- | --- | --- |
 | Broker, gateway/guardian/enumerator host, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
 | Managed config | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
-| Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
+| Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway service SID and LocalSystem; standard users have no read or write grant. |
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
 | Guardian manifest | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml` | Administrators/LocalSystem write; guardian reads. |
 | Trusted authorization ledger | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\protected_targets.json` | LocalSystem/Administrators only; gateway receives the narrow read access required for readiness. |
@@ -380,7 +380,7 @@ application_protection:
 Keep `application_protection.enabled: false` in the system-service config. The
 normal per-user application-protection controller is not removed from the
 product; managed mode deliberately transfers that work to the guardian so the
-gateway virtual account never scans or writes arbitrary profiles.
+gateway never scans or writes arbitrary profiles.
 
 Create an explicit `targets.yaml`. The target user must already have initialized
 the native application config:
@@ -599,8 +599,10 @@ Before SCM starts the services, the installer:
   machine-policy prerequisite. Secure creation supplies the protected DACL to
   `CreateDirectoryW`; an unsafe owner, DACL, file obstruction, or reparse point
   fails without ownership or ACL takeover;
-- creates `DefenseClawGateway` under its virtual service account and the
-  credential broker, hook guardian, and hook enumerator under LocalSystem;
+- creates `DefenseClawGateway`, the credential broker, hook guardian, and
+  hook enumerator under LocalSystem. The gateway keeps a restricted service
+  SID and only `SeChangeNotifyPrivilege`, so no "Log on as a service" grant
+  or Group Policy change is needed;
 - pins `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise`,
   `DEFENSECLAW_CONFIG`, `DEFENSECLAW_HOME`,
   `DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR`, and the service role in the

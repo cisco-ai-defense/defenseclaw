@@ -1458,6 +1458,9 @@ func acquireWindowsCodexMachineFileLock(
 }
 
 func requireWindowsCodexMachineAdministrator() error {
+	if managed.WindowsCurrentProcessIsGatewayService() {
+		return errors.New("Codex machine requirements cannot be written by the managed gateway service")
+	}
 	token := windows.GetCurrentProcessToken()
 	if token.IsElevated() {
 		return nil
