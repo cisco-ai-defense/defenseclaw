@@ -563,8 +563,10 @@ else
 fi
 
 # ---- converge ----------------------------------------------------------------
+# The apply trigger runs ensure after the admin config lands; on a slow runner it can
+# still hold the lifecycle lock, so wait for it instead of failing with lifecycle_busy.
 step "ensure again (must be a no-op)"
-lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane
+lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
 check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
     --complete
 
