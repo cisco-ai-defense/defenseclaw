@@ -161,6 +161,14 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 	return fields[0], true
 }
 
+// StaticWord expands one shell word using only the known home directory.
+func StaticWord(word *syntax.Word, home string) (string, bool) {
+	if word == nil {
+		return "", false
+	}
+	return staticShellWord(word, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")), home != "")
+}
+
 func homeParam(param *syntax.ParamExp, haveHome bool) bool {
 	return haveHome && param.Param != nil && param.Param.Value == "HOME" && !param.Excl && !param.Length &&
 		!param.Width && !param.IsSet && param.Index == nil && param.Slice == nil && param.Repl == nil &&
@@ -340,6 +348,7 @@ func Resolve(payload []byte) string {
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
 	var operands []string
 	links := shellLinks{known: true}
+	var safeRedirects map[string]bool
 	var toolArgs map[string]json.RawMessage
 	if json.Unmarshal(args, &toolArgs) == nil {
 		for _, key := range []string{"command", "cmd"} {
@@ -355,6 +364,7 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				truncated = truncated || !parsed
+				safeRedirects = SafeShellRedirects(command, cwd, home)
 				// A link the command creates can make a later write a write
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
@@ -390,6 +400,12 @@ func Resolve(payload []byte) string {
 		}
 		resolved, ok := "", false
 		if links.known {
+			resolved, ok = links.resolve(path, protected)
+		} else if safeRedirects[path] {
+			if direct, directOK := resolveWritePath(path, 0); directOK {
+				resolved, ok = protected.target(direct)
+			}
+		} else if links.opaque && !links.opaqueTarget(path) {
 			resolved, ok = links.resolve(path, protected)
 		}
 		if !ok {
@@ -472,16 +488,15 @@ func Decode(value string) (map[string]string, bool) {
 // Programs that create a link from their operands: ln and link always, cp
 // with --link or --symbolic-link. mv and rename move a link to another name;
 // cd changes what a relative link operand denotes. A multicall binary runs
-// its first operand as the program. An archive or sync tool can link files
-// that this package does not list: rsync --link-dest or -H, cpio and pax -l,
-// and tar extraction (GAP-1521).
+// its first operand as the program. Archive, copy, and sync tools can
+// preserve or extract links whose names this package cannot list.
 var (
 	linkPrograms      = []string{"ln", "gln", "link", "glink"}
 	copyPrograms      = []string{"cp", "gcp"}
 	renamePrograms    = []string{"mv", "gmv", "rename"}
 	cdPrograms        = []string{"cd", "pushd", "popd"}
 	multicallPrograms = []string{"busybox", "toybox"}
-	archivePrograms   = []string{"rsync", "cpio", "pax", "tar", "gtar", "bsdtar"}
+	archivePrograms   = []string{"rsync", "cpio", "bsdcpio", "pax", "tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr"}
 	copyLinkOption    = regexp.MustCompile(`(?:^|\s)(?:-[A-Za-z]*[ls][A-Za-z]*|--(?:link|symbolic-link))(?:[\s=]|$)`)
 	// opaqueLink is a link that an interpreter, PowerShell or a Windows tool
 	// creates from text this package does not evaluate.
@@ -493,24 +508,50 @@ var (
 // linkAlias is a name that a link created by the command gives to target.
 type linkAlias struct{ name, target string }
 
-// shellLinks are the links one shell command creates. known is false when a
-// link name or target is not a static word, when a program that may create a
-// link cannot be read, or when a program word is not static; the command's
-// write targets are then unknown. opaque records the first two only. A
-// program word that is not static may be any program, and failing closed on
-// it alone would block ordinary commands whose targets the gateway can
-// resolve itself (GAP-1523).
+// shellLinks are the links one shell command creates. known is false when
+// link names or operands are dynamic or an archive can extract links. opaque
+// identifies a possible unreadable link; a dynamic program word alone keeps
+// the older per-user behavior (GAP-1523).
 type shellLinks struct {
-	aliases  []linkAlias
-	known    bool
-	opaque   bool
-	relative bool // a link operand is relative to the working directory
+	aliases      []linkAlias
+	known        bool
+	opaque       bool
+	relative     bool // a link operand is relative to the working directory
+	globalOpaque bool
+	opaqueScopes []string
 }
 
 // unknown marks the links unknown, and opaque when a link may be created.
 func (l *shellLinks) unknown(opaque bool) {
 	l.known = false
 	l.opaque = l.opaque || opaque
+	l.globalOpaque = l.globalOpaque || opaque
+}
+
+// unknownIn confines an archive or link copy to its destination directory.
+func (l *shellLinks) unknownIn(scope string) {
+	l.known = false
+	l.opaque = true
+	if scope == "" {
+		l.globalOpaque = true
+		return
+	}
+	l.opaqueScopes = append(l.opaqueScopes, filepath.Clean(scope))
+}
+
+func (l shellLinks) opaqueTarget(path string) bool {
+	if !l.opaque {
+		return false
+	}
+	if l.globalOpaque || len(l.opaqueScopes) == 0 {
+		return true
+	}
+	for _, scope := range l.opaqueScopes {
+		if path == scope || strings.HasPrefix(path, scope+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // commandLinks lists the links that ln, link and cp --link or
@@ -518,10 +559,6 @@ func (l *shellLinks) unknown(opaque bool) {
 // only makes the result more conservative.
 func commandLinks(command, cwd, home string) shellLinks {
 	links := shellLinks{known: true}
-	if opaqueLink.MatchString(command) {
-		links.unknown(true)
-		return links
-	}
 	file, parsed := parseShell(command)
 	if !parsed {
 		// Resolve already marks a command that does not parse incomplete.
@@ -529,10 +566,11 @@ func commandLinks(command, cwd, home string) shellLinks {
 	}
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
+	var copyScopes []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
-		if !isCall || len(call.Args) == 0 || links.opaque {
-			return !links.opaque
+		if !isCall || len(call.Args) == 0 {
+			return true
 		}
 		args := call.Args
 		words := make([]string, len(args))
@@ -552,6 +590,10 @@ func commandLinks(command, cwd, home string) shellLinks {
 				program = programBase(words[0])
 			}
 		}
+		if opaqueProgramCall(program, args, command) {
+			links.unknown(true)
+			return true
+		}
 		switch {
 		case program == "":
 			// A program named by a parameter or a substitution may be ln.
@@ -562,6 +604,13 @@ func commandLinks(command, cwd, home string) shellLinks {
 			}
 		case slices.Contains(copyPrograms, program):
 			option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
+			if copyPreservesLinks(words[1:], static[1:]) {
+				destination := copyDestination(words[1:], static[1:], cwd)
+				copyScopes = append(copyScopes, destination)
+				if copiesDiskSymlink(words[1:], static[1:], cwd) {
+					links.unknownIn(destination)
+				}
+			}
 			switch {
 			case option:
 				if slices.Contains(static, false) || !links.add(program, words[1:], cwd) {
@@ -570,10 +619,22 @@ func commandLinks(command, cwd, home string) shellLinks {
 			case dynamic:
 				// A word that is not static may expand to a link option.
 				links.unknown(false)
+				copyScopes = append(copyScopes, copyDestination(words[1:], static[1:], cwd))
 			}
 		case slices.Contains(archivePrograms, program):
-			if archiveMayLink(program, staticWords(words[1:], static[1:])) {
-				links.unknown(true)
+			if slices.Contains(static[1:], false) {
+				// An option supplied at runtime may select extraction.
+				links.unknownIn(archiveDestination(program, words[1:], static[1:], cwd))
+			}
+			if archiveMayLink(program, words[1:], static[1:]) {
+				links.unknownIn(archiveDestination(program, words[1:], static[1:], cwd))
+			}
+			if archiveCopiesLinks(program, words[1:], static[1:]) {
+				destination := archiveDestination(program, words[1:], static[1:], cwd)
+				copyScopes = append(copyScopes, destination)
+				if program == "rsync" && copiesDiskSymlink(words[1:], static[1:], cwd) {
+					links.unknownIn(destination)
+				}
 			}
 		case slices.Contains(renamePrograms, program):
 			renames = true
@@ -597,12 +658,152 @@ func commandLinks(command, cwd, home string) shellLinks {
 			renames = renames || tactics.RunsProgram(text, renamePrograms...)
 			cds = cds || tactics.RunsProgram(text, cdPrograms...)
 		}
-		return !links.opaque
+		return true
 	})
+	if len(links.aliases) > 0 {
+		for _, scope := range copyScopes {
+			links.unknownIn(scope)
+		}
+	}
 	if len(links.aliases) > 0 && (renames || cds && links.relative) {
 		links.unknown(true)
 	}
 	return links
+}
+
+// linearShellStatements excludes loops, subshells, and command substitutions:
+// their execution order can differ from source order.
+func linearShellStatements(file *syntax.File) ([]*syntax.Stmt, bool) {
+	var statements []*syntax.Stmt
+	var collect func(*syntax.Stmt) bool
+	collect = func(stmt *syntax.Stmt) bool {
+		if stmt == nil || stmt.Background || stmt.Negated {
+			return false
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.BinaryCmd:
+			if cmd.Op != syntax.AndStmt && cmd.Op != syntax.OrStmt {
+				return false
+			}
+			return collect(cmd.X) && collect(cmd.Y)
+		case *syntax.CallExpr:
+			plain := true
+			syntax.Walk(cmd, func(node syntax.Node) bool {
+				switch node.(type) {
+				case *syntax.CmdSubst, *syntax.ProcSubst:
+					plain = false
+					return false
+				}
+				return true
+			})
+			if !plain {
+				return false
+			}
+			statements = append(statements, stmt)
+			return true
+		}
+		return false
+	}
+	for _, stmt := range file.Stmts {
+		if !collect(stmt) {
+			return nil, false
+		}
+	}
+	slices.SortFunc(statements, func(a, b *syntax.Stmt) int {
+		return int(a.Pos().Offset()) - int(b.Pos().Offset())
+	})
+	return statements, true
+}
+
+// SafeShellRedirects reports operands opened by the shell before any command
+// in this line can create a link. Redirects on an extracting command are
+// opened before the command starts. Repeated writes to one path are safe only
+// when every occurrence precedes link creation.
+func SafeShellRedirects(command, cwd, home string) map[string]bool {
+	result := make(map[string]bool)
+	file, ok := parseShell(command)
+	if !ok {
+		return result
+	}
+	statements, linear := linearShellStatements(file)
+	if !linear {
+		return result
+	}
+	seenLink := false
+	for _, stmt := range statements {
+		for _, redirect := range stmt.Redirs {
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			default:
+				continue
+			}
+			path, static := StaticWord(redirect.Word, home)
+			if !static || path == "" {
+				continue
+			}
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(cwd, path)
+			}
+			path = filepath.Clean(path)
+			if earlier, present := result[path]; present {
+				result[path] = earlier && !seenLink
+			} else {
+				result[path] = !seenLink
+			}
+		}
+		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+		if start < 0 || end > len(command) || start >= end {
+			seenLink = true
+			continue
+		}
+		site := commandLinks(command[start:end], cwd, home)
+		seenLink = seenLink || !site.known || len(site.aliases) > 0
+	}
+	return result
+}
+
+// ArchiveBeforeWrite reports an extraction followed by a shell redirect.
+// The redirect on the extracting statement itself opens before extraction.
+func ArchiveBeforeWrite(command, home string) bool {
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	statements, linear := linearShellStatements(file)
+	if !linear {
+		return false
+	}
+	extracted := false
+	for _, stmt := range statements {
+		if extracted {
+			for _, redirect := range stmt.Redirs {
+				switch redirect.Op {
+				case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+					return true
+				}
+			}
+		}
+		call := stmt.Cmd.(*syntax.CallExpr)
+		if len(call.Args) == 0 {
+			continue
+		}
+		words := make([]string, len(call.Args))
+		static := make([]bool, len(call.Args))
+		for i, arg := range call.Args {
+			words[i], static[i] = StaticWord(arg, home)
+		}
+		program := programBase(words[0])
+		if slices.Contains(multicallPrograms, program) && len(words) > 1 {
+			words, static = words[1:], static[1:]
+			program = programBase(words[0])
+		}
+		if slices.Contains(archivePrograms, program) && program != "rsync" &&
+			!archiveCopiesLinks(program, words[1:], static[1:]) &&
+			(slices.Contains(static[1:], false) || archiveMayLink(program, words[1:], static[1:])) {
+			extracted = true
+		}
+	}
+	return false
 }
 
 // Links are the links one shell command creates, read as Resolve reads them.
@@ -627,10 +828,16 @@ func CommandLinks(tool, command, cwd, home string) Links {
 // Opaque reports a link that the command may create but that cannot be read
 // statically: a wrapper or a multicall binary running ln, an interpreter or
 // Windows link call, an archive or sync link option, or a mv or relative cd
-// with a link. Every write target of the command is then unknown. A program
-// word that is not static alone does not count (GAP-1523).
+// with a link. OpaqueTarget narrows archive and copy operations to their
+// destination. A program word that is not static alone does not count
+// (GAP-1523).
 func (l Links) Opaque() bool {
 	return l.links.opaque
+}
+
+// OpaqueTarget reports whether an unreadable link operation can affect path.
+func (l Links) OpaqueTarget(path string) bool {
+	return l.links.opaqueTarget(path)
 }
 
 // Target maps an absolute write operand through the links the command
@@ -661,23 +868,179 @@ func copyLinkOptions(args []*syntax.Word, words []string, static []bool) (option
 	return option, dynamic
 }
 
-// staticWords keeps the words that are static.
-func staticWords(words []string, static []bool) []string {
-	kept := make([]string, 0, len(words))
-	for i, word := range words {
-		if static[i] {
-			kept = append(kept, word)
+func copyDestination(args []string, static []bool, cwd string) string {
+	for i := len(args) - 1; i >= 0; i-- {
+		if !static[i] {
+			return ""
+		}
+		if args[i] == "--" {
+			continue
+		}
+		if !strings.HasPrefix(args[i], "-") {
+			path := args[i]
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(cwd, path)
+			}
+			return filepath.Clean(path)
 		}
 	}
-	return kept
+	return ""
 }
 
-// archiveMayLink reports an archive or sync call that can link files: rsync
-// --link-dest, -H or --hard-links, cpio -l or --link (pass-through -pl), pax
-// -l (copy mode -rwl), and any tar extraction, whose archive may hold links.
-func archiveMayLink(program string, args []string) bool {
-	tar := strings.HasSuffix(program, "tar")
+func copiesDiskSymlink(args []string, static []bool, cwd string) bool {
+	operands := make([]string, 0, len(args))
 	for i, arg := range args {
+		if !static[i] || strings.HasPrefix(arg, "-") {
+			continue
+		}
+		operands = append(operands, arg)
+	}
+	for _, source := range operands[:max(0, len(operands)-1)] {
+		if !filepath.IsAbs(source) {
+			source = filepath.Join(cwd, source)
+		}
+		if info, err := os.Lstat(source); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func archiveDestination(program string, args []string, static []bool, cwd string) string {
+	destination := cwd
+	if strings.HasSuffix(program, "tar") {
+		for i, arg := range args {
+			if !static[i] {
+				continue
+			}
+			if (arg == "-C" || arg == "--directory") && i+1 < len(args) {
+				if !static[i+1] {
+					return ""
+				}
+				destination = args[i+1]
+			} else if strings.HasPrefix(arg, "--directory=") {
+				destination = strings.TrimPrefix(arg, "--directory=")
+			}
+		}
+	} else if program == "rsync" || (program == "pax" || program == "cpio" || program == "bsdcpio") && archiveCopiesLinks(program, args, static) {
+		return copyDestination(args, static, cwd)
+	} else if program == "unzip" || program == "cpio" || program == "bsdcpio" || strings.HasPrefix(program, "7z") {
+		for i, arg := range args {
+			option := ""
+			switch {
+			case program == "unzip" && arg == "-d":
+				option = "-d"
+			case (program == "cpio" || program == "bsdcpio") && (arg == "-D" || arg == "--directory"):
+				option = arg
+			case strings.HasPrefix(program, "7z") && arg == "-o":
+				option = "-o"
+			}
+			if option != "" && i+1 < len(args) {
+				if !static[i+1] {
+					return ""
+				}
+				destination = args[i+1]
+			} else if strings.HasPrefix(program, "7z") && strings.HasPrefix(arg, "-o") && len(arg) > 2 {
+				destination = arg[2:]
+			}
+		}
+	}
+	if !filepath.IsAbs(destination) {
+		destination = filepath.Join(cwd, destination)
+	}
+	return filepath.Clean(destination)
+}
+
+// opaqueProgramCall limits textual API checks to program words and script
+// arguments, never data passed to grep, echo, or similar programs.
+func opaqueProgramCall(program string, args []*syntax.Word, command string) bool {
+	switch program {
+	case "mklink", "fsutil", "new-item":
+		return true
+	}
+	switch program {
+	case "python", "python3", "perl", "ruby", "node", "nodejs", "pwsh", "powershell", "sh", "bash", "zsh":
+	default:
+		return false
+	}
+	for i := 1; i+1 < len(args); i++ {
+		option, ok := StaticWord(args[i], "")
+		if !ok || option != "-c" && option != "-e" && option != "-Command" && option != "--command" {
+			continue
+		}
+		start, end := args[i+1].Pos().Offset(), args[i+1].End().Offset()
+		if int(end) <= len(command) && start < end && opaqueLink.MatchString(command[start:end]) {
+			return true
+		}
+	}
+	return false
+}
+
+func copyPreservesLinks(args []string, static []bool) bool {
+	for i, arg := range args {
+		if !static[i] {
+			continue
+		}
+		if arg == "--" {
+			break
+		}
+		if arg == "--no-dereference" || arg == "--preserve=links" {
+			return true
+		}
+		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
+			strings.ContainsAny(arg[1:], "aPdrR") {
+			return true
+		}
+	}
+	return false
+}
+
+func archiveCopiesLinks(program string, args []string, static []bool) bool {
+	if program == "rsync" {
+		for i, arg := range args {
+			if static[i] && (arg == "--links" || arg == "--archive" ||
+				strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") && strings.ContainsAny(arg[1:], "al")) {
+				return true
+			}
+		}
+	}
+	if program == "cpio" || program == "bsdcpio" || program == "pax" {
+		for i, arg := range args {
+			if static[i] && strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
+				(program == "pax" && strings.ContainsRune(arg, 'w') || strings.ContainsRune(arg, 'p')) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// archiveMayLink reports an archive or sync call that can create links.
+func archiveMayLink(program string, args []string, static []bool) bool {
+	tar := strings.HasSuffix(program, "tar")
+	cpio := program == "cpio" || program == "bsdcpio"
+	pax := program == "pax"
+	if program == "unzip" || strings.HasPrefix(program, "7z") {
+		// Listing and test modes do not extract. 7z needs an x or e command.
+		if program == "unzip" {
+			for i, arg := range args {
+				if static[i] && (arg == "-l" || arg == "-t" || arg == "-Z") {
+					return false
+				}
+			}
+			return true
+		}
+		for i, arg := range args {
+			if static[i] && (arg == "x" || arg == "e") {
+				return true
+			}
+		}
+		return false
+	}
+	for i, arg := range args {
+		if !static[i] {
+			continue
+		}
 		if arg == "--" {
 			return false
 		}
@@ -685,7 +1048,7 @@ func archiveMayLink(program string, args []string) bool {
 			name, _, _ := strings.Cut(long, "=")
 			switch {
 			case program == "rsync" && (name == "link-dest" || name == "hard-links"),
-				program == "cpio" && name == "link",
+				cpio && (name == "link" || name == "extract"),
 				tar && (name == "get" || len(name) >= 3 && strings.HasPrefix("extract", name)):
 				return true
 			}
@@ -694,12 +1057,12 @@ func archiveMayLink(program string, args []string) bool {
 		cluster, option := strings.CutPrefix(arg, "-")
 		switch {
 		case !option:
-			// tar reads its first word as options without a dash: tar xf.
 			if i == 0 && tar && tarExtracts(arg) {
 				return true
 			}
 		case program == "rsync" && strings.ContainsRune(cluster, 'H'),
-			(program == "cpio" || program == "pax") && strings.ContainsRune(cluster, 'l'),
+			cpio && strings.ContainsAny(cluster, "il"),
+			pax && strings.ContainsAny(cluster, "rl"),
 			tar && tarExtracts(cluster):
 			return true
 		}
@@ -719,6 +1082,14 @@ func tarExtracts(cluster string) bool {
 		}
 	}
 	return false
+}
+
+func makeStatic(n int) []bool {
+	static := make([]bool, n)
+	for i := range static {
+		static[i] = true
+	}
+	return static
 }
 
 // wrappedMayLink reads the words of a wrapper's text from the first ln, cp,
@@ -741,7 +1112,7 @@ func wrappedMayLink(text string) (mayLink, copyWord bool) {
 				}
 			}
 			copyWord = true
-		case slices.Contains(archivePrograms, program) && archiveMayLink(program, rest):
+		case slices.Contains(archivePrograms, program) && archiveMayLink(program, rest, makeStatic(len(rest))):
 			return true, copyWord
 		}
 	}

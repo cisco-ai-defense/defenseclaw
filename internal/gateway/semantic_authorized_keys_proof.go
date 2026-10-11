@@ -600,25 +600,11 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 		return false
 	}
 	word := func(value *syntax.Word) string {
-		if value == nil {
+		text, ok := hookpaths.StaticWord(value, input.ActiveHome)
+		if !ok {
 			return ""
 		}
-		if len(value.Parts) != 1 {
-			return ""
-		}
-		switch part := value.Parts[0].(type) {
-		case *syntax.Lit:
-			return part.Value
-		case *syntax.SglQuoted:
-			return part.Value
-		case *syntax.DblQuoted:
-			if len(part.Parts) == 1 {
-				if literal, ok := part.Parts[0].(*syntax.Lit); ok {
-					return literal.Value
-				}
-			}
-		}
-		return ""
+		return text
 	}
 	sourceWord := func(value *syntax.Word) string {
 		if value == nil {
@@ -753,6 +739,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// The links the command creates, read as the hook reads them; set once
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
+	var safeRedirects map[string]bool
 	writeTarget := func(target string) bool {
 		if !filepath.IsAbs(target) {
 			return false
@@ -761,10 +748,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if isProtected(target) {
 			return true
 		}
-		// A link the command creates that cannot be read makes every write
-		// target unknown, also where the gateway resolves targets itself and
+		// Character devices cannot name a regular authorized-keys file.
+		if info, err := os.Stat(target); err == nil && info.Mode()&os.ModeCharDevice != 0 {
+			return false
+		}
+		// An unreadable link operation makes later writes at its destination
+		// unknown, including where the gateway resolves targets itself and
 		// the link does not exist yet (GAP-1522).
-		if links.Opaque() {
+		if links.OpaqueTarget(target) && !safeRedirects[target] {
 			return true
 		}
 		if request.ResolvedWriteTargets != nil {
@@ -831,6 +822,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 	}
 	links = hookpaths.CommandLinks(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome)
+	safeRedirects = hookpaths.SafeShellRedirects(input.Command, input.CWD, facts.ActiveHome)
 	if input.Command != "" {
 		operands, parsed, dynamic := hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
 		// A truncated client map is not complete, so a nonempty target in it
@@ -1151,49 +1143,39 @@ func trustedHomeDirectoryAuthorizedKeysWrite(input actionfacts.Input) bool {
 		if len(call.Args) == 0 {
 			return false
 		}
-		// A word that is one literal, plain or quoted. Anything else (a
-		// parameter, a substitution) is not static; it used to dereference a
-		// nil literal, and the recovered panic allowed the call (GAP-1530).
-		word := func(value *syntax.Word) (string, bool) {
-			if len(value.Parts) != 1 {
-				return "", false
-			}
-			switch part := value.Parts[0].(type) {
-			case *syntax.Lit:
-				return part.Value, true
-			case *syntax.SglQuoted:
-				return part.Value, !part.Dollar
-			case *syntax.DblQuoted:
-				if len(part.Parts) == 1 {
-					literal, ok := part.Parts[0].(*syntax.Lit)
-					if ok {
-						return literal.Value, true
-					}
-				}
-			}
-			return "", false
+		program, static := hookpaths.StaticWord(call.Args[0], input.ActiveHome)
+		directoryArg := 1
+		if static && (program == "builtin" || program == "command") && len(call.Args) > 1 {
+			program, static = hookpaths.StaticWord(call.Args[1], input.ActiveHome)
+			directoryArg = 2
 		}
-		program, static := word(call.Args[0])
 		if static && (program == "cd" || program == "pushd") {
-			if len(call.Args) > 2 {
+			if len(call.Args) > directoryArg+1 {
 				return false
 			}
-			directory := "~"
-			if len(call.Args) == 2 {
+			directory := input.ActiveHome
+			if len(call.Args) == directoryArg+1 {
 				var ok bool
-				directory, ok = word(call.Args[1])
+				directory, ok = hookpaths.StaticWord(call.Args[directoryArg], input.ActiveHome)
 				if !ok {
 					return false
 				}
 			}
-			switch directory {
-			case "~":
-				workingDirectory = input.ActiveHome
-			case "~/.ssh":
-				workingDirectory = strings.TrimRight(input.ActiveHome, "/") + "/.ssh"
-			default:
-				return false
+			if directory == "~" {
+				directory = input.ActiveHome
+			} else if strings.HasPrefix(directory, "~/") {
+				directory = filepath.Join(input.ActiveHome, directory[2:])
+			} else if !filepath.IsAbs(directory) {
+				base := workingDirectory
+				if base == "" {
+					base = input.CWD
+				}
+				if !filepath.IsAbs(base) {
+					return false
+				}
+				directory = filepath.Join(base, directory)
 			}
+			workingDirectory = filepath.Clean(directory)
 			continue
 		}
 		if workingDirectory == "" {

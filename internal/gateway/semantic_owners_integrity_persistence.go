@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const (
@@ -1511,8 +1512,12 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 					kept = append(kept, finding)
 				}
 			}
+			title := rule.Title
+			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
+				title = "Archive extraction may create a link before a later write; run the extraction and the write as separate commands"
+			}
 			return append(kept, adjustConfidence(input.Tool, RuleFinding{
-				RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
+				RuleID: rule.ID, Title: title, Severity: rule.Severity,
 				Confidence: rule.Confidence, Evidence: trustedActionInputText(input, ""),
 				Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 				enforcement: findingEnforcementAllowed,
