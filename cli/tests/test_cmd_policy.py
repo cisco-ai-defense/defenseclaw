@@ -424,6 +424,25 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", "MEDIUM"))
 
+    def test_activate_refuses_an_out_of_range_threshold(self):
+        # GAP-1330: block_threshold 9 mapped to "" and restored the pack's
+        # CRITICAL default over the operator's LOW.
+        import yaml
+
+        self.app.cfg.guardrail.block_at = "LOW"
+        created = self.invoke(["create", "bad-threshold"])
+        self.assertEqual(created.exit_code, 0, created.output)
+        path = os.path.join(self.app.cfg.policy_dir, "bad-threshold.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        data.setdefault("guardrail", {})["block_threshold"] = 9
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+        result = self.invoke(["activate", "bad-threshold", "--no-reload"])
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("block_threshold must be 1 (LOW)", result.output)
+        self.assertEqual(self.app.cfg.guardrail.block_at, "LOW")
+
 
     def test_activate_keeps_the_operators_hilt(self):
         # GAP-1304: HITL is not part of a preset; activating the default

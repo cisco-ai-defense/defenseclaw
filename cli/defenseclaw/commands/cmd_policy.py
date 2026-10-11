@@ -826,6 +826,27 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
     return adm
 
 
+def _policy_threshold_rank(key: str, raw: object) -> int:
+    """A policy's guardrail threshold as a severity rank (1 LOW .. 4 CRITICAL).
+
+    A rank outside 1-4 (block_threshold: 9) used to become an empty level,
+    which restores the rule pack's default: activating the policy silently
+    moved block_at from LOW back to CRITICAL (GAP-1330). It is refused now,
+    like any other invalid policy value, and config.yaml is left unchanged.
+    """
+    rank: int | None = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        rank = raw
+    elif isinstance(raw, float) and raw.is_integer():
+        rank = int(raw)
+    elif isinstance(raw, str):
+        text = raw.strip().upper()
+        rank = int(text) if text.isdigit() else {v: k for k, v in _RANK_NAMES.items()}.get(text)
+    if rank not in _RANK_NAMES:
+        raise ValueError(f"guardrail.{key} must be 1 (LOW), 2 (MEDIUM), 3 (HIGH) or 4 (CRITICAL), not {raw!r}")
+    return rank
+
+
 def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, imported lazily
     """A named policy's guardrail mode, thresholds and Cisco trust level as
     config keys. A threshold equal to the configured rule pack's posture
@@ -844,8 +865,8 @@ def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, 
         ("alert_threshold", "alert_at", pack_alert),
     ):
         if key in guardrail:
-            rank = int(guardrail[key])
-            setattr(cfg.guardrail, attr, "" if rank == default else _RANK_NAMES.get(rank, ""))
+            rank = _policy_threshold_rank(key, guardrail[key])
+            setattr(cfg.guardrail, attr, "" if rank == default else _RANK_NAMES[rank])
     if "mode" in guardrail:
         mode = str(guardrail["mode"]).strip()
         if mode not in {"observe", "action"}:
