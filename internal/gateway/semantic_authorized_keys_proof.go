@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -741,12 +742,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// The links the command creates, read as the hook reads them; set once
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
-	var safeRedirects map[string]bool
+	var safeRedirects []hookpaths.RedirectOccurrence
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) {
 			return false
 		}
-		target = filepath.Clean(target)
 		if isProtected(target) {
 			return true
 		}
@@ -826,11 +826,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
-	links = hookpaths.CommandLinks(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome)
-	safeRedirects = hookpaths.SafeShellRedirects(input.Command, input.CWD, facts.ActiveHome)
+	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
+	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
+	var operands []string
 	if input.Command != "" {
-		operands, parsed, dynamic := hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		var parsed, dynamic bool
+		operands, parsed, dynamic = hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
 		// A truncated client map is not complete, so a nonempty target in it
 		// proves only its own operand. When the gateway cannot list every
 		// redirect target either (the command does not parse, or a target is
@@ -840,8 +842,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
 			return true
 		}
-		for _, operand := range operands {
-			if writeTarget(operand, safeRedirects[operand], false) {
+		for i, operand := range operands {
+			safe := i < len(safeRedirects) && safeRedirects[i].Safe
+			if writeTarget(operand, safe, false) {
 				return true
 			}
 		}
@@ -876,13 +879,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			integrityCommandOwnsStaticRedirect(command, candidate) {
 			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
 		}
+		if raw, ok := hookpaths.RawDotDotOperand(candidate.Value, clientCWD); ok {
+			target = raw
+		}
 		ownCopy := (command.Program == "cp" || command.Program == "gcp") &&
 			target == hookpaths.CopyDestination(command.Argv, clientCWD)
-		safeRedirect := integrityCommandOwnsStaticRedirect(command, candidate) && safeRedirects[target]
+		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
+			continue
+		}
 		if replacedBySed[target] && !isProtected(target) {
 			continue
 		}
-		if writeTarget(target, safeRedirect, ownCopy) {
+		if writeTarget(target, false, ownCopy) {
 			return true
 		}
 	}
