@@ -1591,6 +1591,50 @@ func TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon(t *testing.T) {
 	}
 }
 
+// GAP-1576: the 0.8.10 store a rollback starts carries the orphan
+// quarantine_records index that 0.8.x concurrent writers leave, which SQLite
+// refuses on every statement. Its actions table is intact, so the upgrade
+// check (a dry run) and the migration both read and move the row.
+func TestMigrateV9MovesTheRowsOfA08xStoreWithAnOrphanIndex(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath, auditDB := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "audit.db")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", auditDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT)`,
+		`INSERT INTO actions VALUES ('1', 'skill', 'blocked-skill', '', '{"install":"block"}', 'operator', 'now', '')`,
+		`CREATE TABLE quarantine_records (id TEXT PRIMARY KEY, quarantine_path TEXT NOT NULL UNIQUE)`,
+		`PRAGMA writable_schema=ON`,
+		`UPDATE sqlite_schema SET rowid = (SELECT max(rowid) + 1 FROM sqlite_schema) WHERE name = 'quarantine_records'`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = db.Close()
+	in := MigrateV9Input{ConfigPath: configPath, AuditDBPath: auditDB}
+	for _, dryRun := range []bool{true, false} { // the upgrade check, then the migration
+		in.DryRun = dryRun
+		result, err := MigrateV9(context.Background(), in)
+		if err != nil {
+			t.Fatalf("dry run %v: %v", dryRun, err)
+		}
+		if result.Record.ActionsRowsMoved != 1 {
+			t.Fatalf("dry run %v: moved %d rows, want 1", dryRun, result.Record.ActionsRowsMoved)
+		}
+	}
+	if rows, err := readV9ActionRows(auditDB); err != nil || len(rows) != 0 {
+		t.Fatalf("rows left after the migration = %d, err = %v", len(rows), err)
+	}
+}
+
 // TestMigrateV9KeepsTheShippedPackAPreset: a v8 rule_pack_dir naming the
 // standalone layout's shipped strict pack, with policy_dir elsewhere, stays
 // the strict preset (which resolves to that pack) instead of a custom pack

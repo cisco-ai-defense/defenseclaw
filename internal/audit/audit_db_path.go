@@ -23,6 +23,9 @@ type auditDBPathHooks struct {
 	chmodPath          func(string, os.FileMode) error
 	securePlatformFile func(*os.File, bool) error
 	beforeSQLiteOpen   func(string) error
+	// schemaTolerant opens with writable_schema on (schemaTolerantPragmas):
+	// only the rebuild of a damaged 0.x store sets it.
+	schemaTolerant bool
 	// reopenSidecarForHardening reopens a pinned SQLite sidecar with the
 	// ACL-changing capability.
 	reopenSidecarForHardening func(string, *os.File) (*os.File, error)
@@ -140,7 +143,11 @@ func openHardenedAuditSQLiteWithIdentity(
 			return nil, "", nil, fmt.Errorf("audit: pre-open path check: %w", err)
 		}
 	}
-	db, err := openSQLite(prepared.path)
+	pragmas := auditPragmas
+	if hooks.schemaTolerant {
+		pragmas = schemaTolerantPragmas
+	}
+	db, err := openSQLiteWithPragmas(prepared.path, pragmas)
 	if err != nil {
 		prepared.close()
 		return nil, "", nil, err
