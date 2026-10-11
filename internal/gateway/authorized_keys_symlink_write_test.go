@@ -697,10 +697,37 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			{"cd dirlink && echo k >> authorized_keys", true},
 			{"cd ~/proj/dirlink && tee -a authorized_keys", true},
 			{"cd -P dirlink && echo k >> authorized_keys", true},
+			{"cd -L \"dirlink\" && echo k >> authorized_keys", true},
+			{"cd dir\\link && echo k >> authorized_keys", true},
+			{"builtin cd dirlink && echo k >> authorized_keys", true},
 			{"pushd dirlink && echo k >> authorized_keys", true},
+			{"pushd dirlink && popd && echo k >> authorized_keys", false},
+			{"pushd dirlink && pushd /tmp && pushd +1 && echo k >> authorized_keys", true},
 			{"cd chain && cd b && echo k >> authorized_keys", true},
 			{"cd build && echo ok >> notes.txt", false},
 			{"cd dirlink && cat authorized_keys", false},
+			{"cd \"$(mktemp -d)\" && echo hi > a.txt", false},
+			{"cd $TMPDIR && echo hi > a.txt", false},
+			{"cd \"$(git rev-parse --show-toplevel)\" && make > out.log", false},
+			{"cd $X && echo k >> authorized_keys", true},
+			{"cd \"$(mktemp -d)\" && echo hi > authorized_keys.bak", false},
+			{"(cd build && make > out.log)", false},
+			{"if cd dirlink; then ls; fi", false},
+			{"(cd dirlink && echo k >> authorized_keys)", true},
+			{"{ cd dirlink; echo k >> authorized_keys; }", true},
+			{"if cd dirlink; then echo k >> authorized_keys; fi", true},
+			{"cd dirlink && for f in authorized_keys; do echo k >> $f; done", true},
+			{"cd dirlink && echo k >> authorized_keys &", true},
+			{"cd dirlink && { echo k >> authorized_keys; }", true},
+			{"cd dirlink && (echo k >> authorized_keys)", true},
+			{"cd dirlink && ! echo k >> authorized_keys", true},
+			{"cd dirlink && time echo k >> authorized_keys", true},
+			{"pushd dirlink && pushd /tmp && pushd && echo k >> authorized_keys", true},
+			{"pushd -n dirlink && pushd && echo k >> authorized_keys", true},
+			{"env -C dirlink sh -c \"echo k >> authorized_keys\"", true},
+			{"env --chdir=dirlink sh -c \"echo k >> authorized_keys\"", true},
+			{"env --chdir=dirlink tee -a authorized_keys", true},
+			{"env -C build tee -a notes.txt", false},
 		}
 		for _, connector := range []string{"claudecode", "codex"} {
 			for _, managed := range []bool{false, true} {
@@ -817,8 +844,13 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		hookpaths.CWDKey:                        project,
 		hookpaths.DirectoryFactPrefix + project: project,
 	}
+	if trustedExistingAuthorizedKeysSymlinkWrite(cdRequest, actionfacts.Analyze(cdInput)) {
+		t.Fatal("missing private directory fact blocked a benign write")
+	}
+	cdInput.Command = "cd build && echo k >> authorized_keys"
+	cdRequest.Input = cdInput
 	if !trustedExistingAuthorizedKeysSymlinkWrite(cdRequest, actionfacts.Analyze(cdInput)) {
-		t.Fatal("missing private directory fact did not fail closed for a write")
+		t.Fatal("missing private directory fact did not fail closed for authorized_keys")
 	}
 	cdInput.Command = "cd build && cat notes.txt"
 	cdRequest.Input = cdInput

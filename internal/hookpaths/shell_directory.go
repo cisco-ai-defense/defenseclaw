@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -18,41 +19,24 @@ import (
 // for a logical shell directory. A question mark means it was not readable.
 const DirectoryFactPrefix = "\x00directory:"
 
-// ShellDirectoryWriteOperands lists writes after static shell directory changes.
-// Bash keeps a logical PWD for cd -L and cd .., while relative writes traverse
-// links in that spelling. The hook records each physical directory so a
-// sandboxed gateway can make the same decision without Lstat under home/tmp.
-// unknown is true only when an unresolved directory is followed by a write.
+type shellDirectoryState struct {
+	logical, physical string
+	known             bool
+	changed           bool
+	stack             []string // top of the directory stack is last
+}
+
+func (s shellDirectoryState) clone() shellDirectoryState {
+	s.stack = slices.Clone(s.stack)
+	return s
+}
+
+// ShellDirectoryWriteOperands follows shell directory changes through statement
+// bodies. A branch or subshell gets its own directory state. unknown reports a
+// write that may name authorized_keys after an unresolved directory change.
 func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[string]string, record, strict bool) (operands []RedirectOccurrence, unknown bool) {
 	file, parsed := parseShell(command)
 	if !parsed || !filepath.IsAbs(cwd) {
-		return nil, false
-	}
-	var statements []*syntax.Stmt
-	var collect func(*syntax.Stmt) bool
-	collect = func(stmt *syntax.Stmt) bool {
-		if stmt == nil || stmt.Background || stmt.Negated {
-			return false
-		}
-		if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
-			if binary.Op == syntax.AndStmt || binary.Op == syntax.OrStmt {
-				return collect(binary.X) && collect(binary.Y)
-			}
-			if binary.Op != syntax.Pipe && binary.Op != syntax.PipeAll {
-				return false
-			}
-		} else if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
-			return false
-		}
-		statements = append(statements, stmt)
-		return true
-	}
-	for _, stmt := range file.Stmts {
-		if !collect(stmt) {
-			return nil, false
-		}
-	}
-	if len(statements) < 2 {
 		return nil, false
 	}
 	physical := func(logical string) (string, bool) {
@@ -78,99 +62,67 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 		}
 		return value, ok
 	}
-	current := filepath.Clean(cwd)
-	physicalCurrent, cwdKnown := physical(current)
-	var stack []string
-	changed := false
+	setDirectory := func(s *shellDirectoryState, directory string, physicalMode bool) {
+		absolute := directory == "~" || strings.HasPrefix(directory, "~/") || filepath.IsAbs(directory)
+		switch {
+		case directory == "~":
+			s.logical = home
+		case strings.HasPrefix(directory, "~/"):
+			s.logical = filepath.Join(home, directory[2:])
+		case filepath.IsAbs(directory):
+			s.logical = filepath.Clean(directory)
+		default:
+			s.logical = filepath.Join(s.logical, directory)
+		}
+		wasKnown := s.known
+		s.physical, s.known = physical(s.logical)
+		s.known = s.known && (absolute || wasKnown)
+		if physicalMode && s.known {
+			s.logical = s.physical
+		}
+		s.changed = true
+	}
+	state := shellDirectoryState{logical: filepath.Clean(cwd)}
+	state.physical, state.known = physical(state.logical)
 	safety := SafeShellRedirectOccurrencesWithFacts(command, cwd, home, directoryFacts)
 	redirectIndex := 0
-	for _, stmt := range statements {
+	var walkList func([]*syntax.Stmt, *shellDirectoryState)
+	var walk func(*syntax.Stmt, *shellDirectoryState)
+	write := func(stmt *syntax.Stmt, s *shellDirectoryState) {
+		// The command substitution of a word runs in another shell. Only the
+		// statement's own redirects belong to this directory state.
 		var rendered bytes.Buffer
 		if syntax.NewPrinter().Print(&rendered, stmt) != nil {
-			return nil, true
+			unknown = true
+			return
 		}
 		statement := rendered.String()
-		redirects, _, _ := ShellWriteOperands(statement, current, home)
-		call, isCall := stmt.Cmd.(*syntax.CallExpr)
-		program, static, arg := "", false, 1
-		if isCall && len(call.Args) > 0 {
-			program, static = StaticWord(call.Args[0], home)
-			if static && (program == "builtin" || program == "command") && len(call.Args) > 1 {
-				program, static = StaticWord(call.Args[1], home)
-				arg = 2
-			}
-		}
-		if static && (program == "cd" || program == "pushd" || program == "popd") {
-			changed = true
-			if program == "popd" {
-				if len(stack) == 0 {
-					cwdKnown = false
-				} else {
-					current = stack[len(stack)-1]
-					stack = stack[:len(stack)-1]
-					physicalCurrent, cwdKnown = physical(current)
-				}
-				redirectIndex += len(redirects)
+		redirects := make([]string, 0, len(stmt.Redirs))
+		for _, redirect := range stmt.Redirs {
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			default:
 				continue
 			}
-			physicalMode := false
-			for arg < len(call.Args) {
-				option, ok := StaticWord(call.Args[arg], home)
-				if !ok || option != "--" && (len(option) < 2 || option[0] != '-' || strings.Trim(option[1:], "PLe@") != "") {
-					break
+			name, ok := StaticWord(redirect.Word, home)
+			if !ok {
+				if s.changed && (!s.known || sameShellDirectory(s.physical, filepath.Join(home, ".ssh"))) {
+					unknown = true
 				}
-				for _, flag := range option[1:] {
-					if flag == 'P' {
-						physicalMode = true
-					} else if flag == 'L' {
-						physicalMode = false
-					}
-				}
-				arg++
-				if option == "--" {
-					break
-				}
+				continue
 			}
-			directory := home
-			if arg < len(call.Args) {
-				var ok bool
-				directory, ok = StaticWord(call.Args[arg], home)
-				if !ok || directory == "-" || arg+1 != len(call.Args) {
-					cwdKnown = false
-					redirectIndex += len(redirects)
-					continue
-				}
+			if s.changed && !s.known && !filepath.IsAbs(name) &&
+				!strings.HasPrefix(name, "~/") && shellAuthorizedKeysBase(name) {
+				unknown = true
 			}
-			previous := current
-			absolute := directory == "~" || strings.HasPrefix(directory, "~/") || filepath.IsAbs(directory)
-			switch {
-			case directory == "~":
-				current = home
-			case strings.HasPrefix(directory, "~/"):
-				current = filepath.Join(home, directory[2:])
-			case filepath.IsAbs(directory):
-				current = filepath.Clean(directory)
-			default:
-				current = filepath.Join(current, directory)
-			}
-			resolved, ok := physical(current)
-			physicalCurrent = resolved
-			cwdKnown = ok && (absolute || cwdKnown)
-			if physicalMode && ok {
-				current = resolved
-			}
-			if program == "pushd" {
-				stack = append(stack, previous)
-			}
-			redirectIndex += len(redirects)
-			continue
+			redirects = append(redirects, OperandPath(name, s.logical))
 		}
-		if !changed {
+		if !s.changed {
 			redirectIndex += len(redirects)
-			continue
+			return
 		}
-		literals := LiteralWriteOperands(statement, current, home)
-		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: current, ActiveHome: home}
+		literals := LiteralWriteOperands(statement, s.logical, home)
+		inner := actionfacts.Input{Tool: "Bash", Command: statement, CWD: s.logical, ActiveHome: home}
 		facts := actionfacts.Analyze(inner)
 		writes := make([]RedirectOccurrence, 0, len(redirects)+len(literals))
 		for _, redirect := range redirects {
@@ -192,16 +144,13 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			if target == "" {
 				target = candidate.Normalized
 			}
-			if raw, ok := RawDotDotOperand(candidate.Value, current); ok {
+			if raw, ok := RawDotDotOperand(candidate.Value, s.logical); ok {
 				target = raw
 			}
-			// POSIX command facts can retain a relative operand when the
-			// event CWD uses native Windows syntax. The shell still opens it
-			// relative to that CWD.
 			if !filepath.IsAbs(target) && candidate.Value != "" &&
 				!strings.HasPrefix(candidate.Value, "/") &&
 				!strings.ContainsAny(candidate.Value, "*?[]$`~\x00\r\n") {
-				target = OperandPath(candidate.Value, current)
+				target = OperandPath(candidate.Value, s.logical)
 			}
 			if target != "" && filepath.IsAbs(target) {
 				if slices.Contains(redirects, target) && pathFactIsRedirect(candidate, facts.Commands) {
@@ -210,19 +159,341 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 				writes = append(writes, RedirectOccurrence{Path: target})
 			}
 		}
-		if cwdKnown {
-			for i, write := range writes {
-				if strings.HasPrefix(write.Path, current+string(filepath.Separator)) {
-					writes[i].Path = OperandPath(strings.TrimPrefix(write.Path, current+string(filepath.Separator)), physicalCurrent)
+		if s.known {
+			for i, item := range writes {
+				if strings.HasPrefix(item.Path, s.logical+string(filepath.Separator)) {
+					writes[i].Path = OperandPath(strings.TrimPrefix(item.Path, s.logical+string(filepath.Separator)), s.physical)
+				}
+			}
+		} else {
+			for _, item := range writes {
+				if strings.HasPrefix(item.Path, s.logical+string(filepath.Separator)) &&
+					shellAuthorizedKeysBase(item.Path) {
+					unknown = true
 				}
 			}
 		}
-		if len(writes) > 0 && !cwdKnown {
-			unknown = true
-		}
 		operands = append(operands, writes...)
 	}
+	change := func(call *syntax.CallExpr, s *shellDirectoryState) bool {
+		if len(call.Args) == 0 {
+			return false
+		}
+		program, ok := StaticWord(call.Args[0], home)
+		arg := 1
+		if ok && (program == "builtin" || program == "command") && len(call.Args) > 1 {
+			program, ok = StaticWord(call.Args[1], home)
+			arg = 2
+		}
+		if !ok || program != "cd" && program != "pushd" && program != "popd" {
+			return false
+		}
+		s.changed = true
+		unmodeled := func() { s.known = false; s.stack = nil }
+		physicalMode, noChange, endOptions := false, false, false
+		for arg < len(call.Args) {
+			option, static := StaticWord(call.Args[arg], home)
+			if !static {
+				break
+			}
+			if option == "--" {
+				arg++
+				endOptions = true
+				break
+			}
+			if program == "pushd" && option == "-n" || program == "popd" && option == "-n" {
+				noChange = true
+				arg++
+				continue
+			}
+			if program == "cd" && len(option) > 1 && option[0] == '-' && strings.Trim(option[1:], "PLe@") == "" {
+				for _, flag := range option[1:] {
+					if flag == 'P' {
+						physicalMode = true
+					} else if flag == 'L' {
+						physicalMode = false
+					}
+				}
+				arg++
+				continue
+			}
+			break
+		}
+		if program == "popd" {
+			if arg < len(call.Args) {
+				option, static := StaticWord(call.Args[arg], home)
+				index, valid := shellStackIndex(option, len(s.stack))
+				if !static || !valid || arg+1 != len(call.Args) {
+					unmodeled()
+					return true
+				}
+				if index == 0 {
+					index = 1
+				}
+				at := len(s.stack) - index
+				if at < 0 {
+					unmodeled()
+					return true
+				}
+				if !noChange && index == 1 {
+					setDirectory(s, s.stack[at], false)
+				}
+				s.stack = append(s.stack[:at], s.stack[at+1:]...)
+				return true
+			}
+			if len(s.stack) == 0 {
+				unmodeled()
+				return true
+			}
+			next := s.stack[len(s.stack)-1]
+			s.stack = s.stack[:len(s.stack)-1]
+			if !noChange {
+				setDirectory(s, next, false)
+			}
+			return true
+		}
+		if program == "pushd" && arg == len(call.Args) {
+			if len(s.stack) == 0 {
+				unmodeled()
+				return true
+			}
+			top := len(s.stack) - 1
+			next := s.stack[top]
+			s.stack[top] = s.logical
+			if !noChange {
+				setDirectory(s, next, false)
+			}
+			return true
+		}
+		if program == "cd" && arg == len(call.Args) {
+			if home == "" {
+				unmodeled()
+			} else {
+				setDirectory(s, home, physicalMode)
+			}
+			return true
+		}
+		if arg+1 != len(call.Args) {
+			unmodeled()
+			return true
+		}
+		directory, static := StaticWord(call.Args[arg], home)
+		if !static {
+			unmodeled()
+			return true
+		}
+		if !endOptions && len(directory) > 1 && directory[0] == '-' {
+			_, stackIndex := shellStackIndex(directory, len(s.stack))
+			if program != "pushd" || !stackIndex {
+				unmodeled()
+				return true
+			}
+		}
+		if program == "pushd" {
+			if index, valid := shellStackIndex(directory, len(s.stack)); valid {
+				if index == 0 {
+					return true
+				}
+				at := len(s.stack) - index
+				if at < 0 {
+					unmodeled()
+					return true
+				}
+				next := s.stack[at]
+				if !noChange {
+					s.stack = append(s.stack[:at], s.stack[at+1:]...)
+					s.stack = append(s.stack, s.logical)
+					setDirectory(s, next, false)
+				}
+				return true
+			}
+			previous, previousPhysical, previousKnown := s.logical, s.physical, s.known
+			setDirectory(s, directory, false)
+			if noChange {
+				stackEntry := s.logical
+				s.logical = previous
+				s.physical, s.known = previousPhysical, previousKnown
+				s.stack = append(s.stack, stackEntry)
+			} else {
+				s.stack = append(s.stack, previous)
+			}
+			return true
+		}
+		if directory == "-" {
+			unmodeled()
+			return true
+		}
+		setDirectory(s, directory, physicalMode)
+		return true
+	}
+	walkList = func(stmts []*syntax.Stmt, s *shellDirectoryState) {
+		for _, stmt := range stmts {
+			walk(stmt, s)
+		}
+	}
+	walk = func(stmt *syntax.Stmt, s *shellDirectoryState) {
+		if stmt == nil {
+			return
+		}
+		if stmt.Background {
+			child := s.clone()
+			copyStmt := *stmt
+			copyStmt.Background = false
+			walk(&copyStmt, &child)
+			return
+		}
+		switch cmd := stmt.Cmd.(type) {
+		case *syntax.BinaryCmd:
+			if cmd.Op == syntax.Pipe || cmd.Op == syntax.PipeAll {
+				left, right := s.clone(), s.clone()
+				walk(cmd.X, &left)
+				walk(cmd.Y, &right)
+			} else {
+				walk(cmd.X, s)
+				walk(cmd.Y, s)
+			}
+		case *syntax.Subshell:
+			child := s.clone()
+			walkList(cmd.Stmts, &child)
+		case *syntax.Block:
+			walkList(cmd.Stmts, s)
+		case *syntax.IfClause:
+			walkList(cmd.Cond, s)
+			thenState := s.clone()
+			walkList(cmd.Then, &thenState)
+			if cmd.Else != nil {
+				elseState := s.clone()
+				walk(&syntax.Stmt{Cmd: cmd.Else}, &elseState)
+			}
+			if thenState.logical != s.logical || thenState.known != s.known {
+				s.known = false
+				s.changed = true
+			}
+		case *syntax.WhileClause:
+			walkList(cmd.Cond, s)
+			body := s.clone()
+			walkList(cmd.Do, &body)
+			if body.logical != s.logical || body.known != s.known {
+				s.known = false
+				s.changed = true
+			}
+		case *syntax.ForClause:
+			body := s.clone()
+			walkList(cmd.Do, &body)
+			if body.logical != s.logical || body.known != s.known {
+				s.known = false
+				s.changed = true
+			}
+		case *syntax.CaseClause:
+			for _, item := range cmd.Items {
+				branch := s.clone()
+				walkList(item.Stmts, &branch)
+				if branch.logical != s.logical || branch.known != s.known {
+					s.known = false
+					s.changed = true
+				}
+			}
+		case *syntax.TimeClause:
+			walk(cmd.Stmt, s)
+		case *syntax.CallExpr:
+			if change(cmd, s) {
+				break
+			}
+			if directory, inner, tail, recognized := shellEnvChdir(cmd, home); recognized {
+				child := s.clone()
+				if directory == "" {
+					child.known = false
+					child.changed = true
+				} else {
+					setDirectory(&child, directory, false)
+				}
+				if inner != "" {
+					if file, ok := parseShell(inner); ok {
+						walkList(file.Stmts, &child)
+					}
+				} else if tail != nil {
+					walk(&syntax.Stmt{Cmd: tail}, &child)
+				}
+			}
+			write(stmt, s)
+		default:
+			// An unmodeled command may change the directory. Its redirects are
+			// still inspected using the state at this point.
+			write(stmt, s)
+		}
+	}
+	walkList(file.Stmts, &state)
 	return operands, unknown
+}
+
+func shellAuthorizedKeysBase(name string) bool {
+	base := filepath.Base(name)
+	if runtime.GOOS == "windows" {
+		base = strings.ToLower(base)
+	}
+	return base == "authorized_keys" || base == "authorized_keys2"
+}
+
+func sameShellDirectory(a, b string) bool { return a != "" && filepath.Clean(a) == filepath.Clean(b) }
+
+func shellStackIndex(option string, size int) (int, bool) {
+	if len(option) < 2 || option[0] != '+' && option[0] != '-' {
+		return 0, false
+	}
+	n, err := strconv.Atoi(option[1:])
+	if err != nil || n < 0 || n > size {
+		return 0, false
+	}
+	if option[0] == '-' {
+		n = size - n
+	}
+	return n, true
+}
+
+// shellEnvChdir recognizes env's directory option. The invoked command runs
+// in the child directory; redirects on env itself run in the parent's.
+func shellEnvChdir(call *syntax.CallExpr, home string) (directory, inner string, tail *syntax.CallExpr, recognized bool) {
+	if len(call.Args) < 3 {
+		return "", "", nil, false
+	}
+	program, ok := StaticWord(call.Args[0], home)
+	if !ok || program != "env" {
+		return "", "", nil, false
+	}
+	arg := 1
+	option, ok := StaticWord(call.Args[arg], home)
+	switch {
+	case ok && (option == "-C" || option == "--chdir"):
+		arg++
+		if arg >= len(call.Args) {
+			return "", "", nil, true
+		}
+		directory, _ = StaticWord(call.Args[arg], home)
+		arg++
+	case ok && strings.HasPrefix(option, "--chdir="):
+		directory = strings.TrimPrefix(option, "--chdir=")
+		arg++
+	case ok && strings.HasPrefix(option, "-C"):
+		directory = strings.TrimPrefix(option, "-C")
+		arg++
+	default:
+		return "", "", nil, false
+	}
+	if arg >= len(call.Args) {
+		return directory, "", nil, true
+	}
+	tail = &syntax.CallExpr{Args: call.Args[arg:]}
+	if arg+2 >= len(call.Args) {
+		return directory, "", tail, true
+	}
+	shell, shellOK := StaticWord(call.Args[arg], home)
+	flag, flagOK := StaticWord(call.Args[arg+1], home)
+	inner, ok = StaticWord(call.Args[arg+2], home)
+	if !shellOK || !flagOK || !ok || arg+3 != len(call.Args) ||
+		(shell != "sh" && shell != "bash") || flag != "-c" {
+		return directory, "", tail, true
+	}
+	return directory, inner, tail, true
 }
 
 func directoryFactRequired(directory, home string) bool {
