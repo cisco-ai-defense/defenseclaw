@@ -43,6 +43,7 @@ from __future__ import annotations
 import json
 import sys
 from datetime import date
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -129,8 +130,8 @@ def check_catalog(
 
 def main() -> int:
     try:
-        import litellm  # noqa: PLC0415
-    except ImportError:
+        model_cost = load_pinned_model_cost()
+    except PackageNotFoundError:
         print(
             "check_llm_catalog: litellm not importable — install the cli extra "
             "(litellm is the registry this check reads).",
@@ -143,7 +144,7 @@ def main() -> int:
         return 2
 
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
-    problems = check_catalog(catalog, litellm.model_cost, date.today())
+    problems = check_catalog(catalog, model_cost, date.today())
 
     if problems:
         print("check_llm_catalog: stale model ids in bundles/llm/model_catalog.json", file=sys.stderr)
@@ -158,6 +159,18 @@ def main() -> int:
 
     print("check_llm_catalog: all catalog model ids are current.")
     return 0
+
+
+def load_pinned_model_cost() -> dict:
+    """Read the locked wheel's registry, never LiteLLM's mutable remote map.
+
+    Importing LiteLLM fetches a GitHub registry by default. Use package metadata
+    to find its bundled JSON without importing it or depending on prior imports.
+    """
+    resource = distribution("litellm").locate_file(
+        "litellm/model_prices_and_context_window_backup.json"
+    )
+    return json.loads(resource.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -27,8 +27,6 @@ import json
 from datetime import date
 from pathlib import Path
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check_llm_catalog.py"
 CATALOG = ROOT / "bundles" / "llm" / "model_catalog.json"
@@ -51,12 +49,22 @@ mod = _load_module()
 
 
 def test_shipped_catalog_has_no_stale_ids() -> None:
-    litellm = pytest.importorskip("litellm")
     catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
-    problems = mod.check_catalog(catalog, litellm.model_cost, date.today())
+    problems = mod.check_catalog(catalog, mod.load_pinned_model_cost(), date.today())
     assert problems == [], "stale model ids in model_catalog.json: " + "; ".join(
         f"[{p}] {m} — {why}" for p, m, why in problems
     )
+
+
+def test_catalog_registry_does_not_import_litellm_or_fetch_remote_map(monkeypatch) -> None:
+    import sys
+
+    # Even a pre-imported runtime map must not change the build gate's input.
+    monkeypatch.setitem(sys.modules, "litellm", None)
+    registry = mod.load_pinned_model_cost()
+    assert isinstance(registry, dict) and registry
+    catalog = json.loads(CATALOG.read_text(encoding="utf-8"))
+    assert mod.check_catalog(catalog, registry, date.today()) == []
 
 
 def test_every_non_local_provider_is_mapped() -> None:
