@@ -741,7 +741,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
 	var safeRedirects map[string]bool
-	writeTarget := func(target string) bool {
+	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) {
 			return false
 		}
@@ -754,7 +754,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the link does not exist yet (GAP-1522). A character device such as
 		// /dev/null is not a link the command can replace; a link to one is,
 		// so the device is read without following links.
-		if links.OpaqueTarget(target) && !safeRedirects[target] {
+		if !safeRedirect && (!ownCopy && links.OpaqueTarget(target) || ownCopy && links.OpaqueTargetExceptOwnCopy(target, target)) {
 			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return true
 			}
@@ -836,7 +836,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			return true
 		}
 		for _, operand := range operands {
-			if writeTarget(operand) {
+			if writeTarget(operand, safeRedirects[operand], false) {
 				return true
 			}
 		}
@@ -849,6 +849,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		command, ok := integrityCommandByID(facts, candidate.CommandID)
 		if !ok || !integrityCommandMutatesPath(command, candidate) ||
 			!(integrityExplicitCommandMutator(command, candidate) ||
+				command.Program == "dd" && command.ArgvComplete ||
 				integrityStructuredFileMutator(facts, command)) {
 			continue
 		}
@@ -865,7 +866,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			integrityCommandOwnsStaticRedirect(command, candidate) {
 			target = filepath.Join(facts.CWD, filepath.FromSlash(candidate.Normalized))
 		}
-		if writeTarget(target) {
+		ownCopy := (command.Program == "cp" || command.Program == "gcp") &&
+			target == hookpaths.CopyDestination(command.Argv, clientCWD)
+		safeRedirect := integrityCommandOwnsStaticRedirect(command, candidate) && safeRedirects[target]
+		if writeTarget(target, safeRedirect, ownCopy) {
 			return true
 		}
 	}
@@ -879,7 +883,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		return true
 	}
 	for _, target := range patchTargets {
-		if writeTarget(target) {
+		if writeTarget(target, false, false) {
 			return true
 		}
 	}

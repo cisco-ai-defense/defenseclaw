@@ -384,7 +384,7 @@ func Resolve(payload []byte) string {
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
-	add := func(path string, literal bool) {
+	add := func(path string, literal, safeRedirect bool) {
 		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
 		}
@@ -402,11 +402,11 @@ func Resolve(payload []byte) string {
 		resolved, ok := "", false
 		if links.known {
 			resolved, ok = links.resolve(path, protected)
-		} else if safeRedirects[path] {
+		} else if safeRedirect && safeRedirects[path] {
 			if direct, directOK := resolveWritePath(path, 0); directOK {
 				resolved, ok = protected.target(direct)
 			}
-		} else if links.opaque && !links.opaqueTarget(path) {
+		} else if links.opaque && (!links.opaqueTarget(path) || !links.opaqueTargetExceptCopy(path, path) && slices.Contains(links.copyDestinations, path)) {
 			resolved, ok = links.resolve(path, protected)
 		}
 		if !ok {
@@ -420,6 +420,11 @@ func Resolve(payload []byte) string {
 		size += entry
 		targets[path] = resolved
 	}
+	// Exact shell operands take precedence over a duplicate PathFact. Their
+	// early-redirect exemption must not cover a later command writer.
+	for _, operand := range operands {
+		add(operand, true, true)
+	}
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
 			continue
@@ -428,17 +433,14 @@ func Resolve(payload []byte) string {
 		if path == "" {
 			path = candidate.Normalized
 		}
-		add(path, false)
-	}
-	for _, operand := range operands {
-		add(operand, true)
+		add(path, false, false)
 	}
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
 	truncated = truncated || !patchKnown
 	for _, target := range patchTargets {
-		add(target, true)
+		add(target, true, false)
 	}
 	if truncated {
 		targets[TruncatedKey] = "1"
@@ -514,12 +516,13 @@ type linkAlias struct{ name, target string }
 // identifies a possible unreadable link; a dynamic program word alone keeps
 // the older per-user behavior (GAP-1523).
 type shellLinks struct {
-	aliases      []linkAlias
-	known        bool
-	opaque       bool
-	relative     bool // a link operand is relative to the working directory
-	globalOpaque bool
-	opaqueScopes []string
+	aliases          []linkAlias
+	known            bool
+	opaque           bool
+	relative         bool // a link operand is relative to the working directory
+	globalOpaque     bool
+	opaqueScopes     []opaqueScope
+	copyDestinations []string
 }
 
 // unknown marks the links unknown, and opaque when a link may be created.
@@ -529,30 +532,109 @@ func (l *shellLinks) unknown(opaque bool) {
 	l.globalOpaque = l.globalOpaque || opaque
 }
 
-// unknownIn confines an archive or link copy to its destination directory.
+type opaqueScope struct {
+	path string
+	copy bool
+}
+
+// unknownIn confines an archive to its destination directory.
 func (l *shellLinks) unknownIn(scope string) {
+	l.addOpaqueScope(scope, false)
+}
+
+func (l *shellLinks) unknownCopyIn(scope string) {
+	l.addOpaqueScope(scope, true)
+}
+
+func (l *shellLinks) addOpaqueScope(scope string, copyScope bool) {
 	l.known = false
 	l.opaque = true
 	if scope == "" {
 		l.globalOpaque = true
 		return
 	}
-	l.opaqueScopes = append(l.opaqueScopes, filepath.Clean(scope))
+	l.opaqueScopes = append(l.opaqueScopes, opaqueScope{filepath.Clean(scope), copyScope})
 }
 
 func (l shellLinks) opaqueTarget(path string) bool {
+	return l.opaqueTargetExceptCopy(path, "")
+}
+
+// opaqueTargetExceptCopy excludes only the copy operation's own destination
+// scope. An archive or another operation covering that path still wins.
+func (l shellLinks) opaqueTargetExceptCopy(path, ownCopy string) bool {
+	// A second copy to the same name may follow a link created by the first.
+	// Only one copy statement can claim the own-destination exemption.
+	if ownCopy != "" {
+		count := 0
+		for _, destination := range l.copyDestinations {
+			if destination == ownCopy {
+				count++
+			}
+		}
+		if count != 1 {
+			ownCopy = ""
+		}
+	}
 	if !l.opaque {
 		return false
 	}
 	if l.globalOpaque || len(l.opaqueScopes) == 0 {
 		return true
 	}
+	forms, complete := writePathForms(path, 0)
+	if !complete {
+		return true
+	}
 	for _, scope := range l.opaqueScopes {
-		if path == scope || strings.HasPrefix(path, scope+string(filepath.Separator)) {
-			return true
+		if scope.copy && scope.path == ownCopy {
+			continue
+		}
+		for _, form := range forms {
+			if form == scope.path || strings.HasPrefix(form, scope.path+string(filepath.Separator)) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// writePathForms includes each link hop and each resolved parent form.
+// An extractor may replace a link inside its scope after this check, so
+// checking only the final target would miss a chain that enters and exits it.
+const maxOpaquePathForms = 256
+
+func writePathForms(path string, linkDepth int) ([]string, bool) {
+	if linkDepth > maxWriteTargetLinkDepth || !filepath.IsAbs(path) {
+		return nil, false
+	}
+	path = filepath.Clean(path)
+	forms := []string{path}
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		link, err := os.Readlink(path)
+		if err != nil {
+			return nil, false
+		}
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(filepath.Dir(path), link)
+		}
+		linked, ok := writePathForms(link, linkDepth+1)
+		if !ok || len(forms)+len(linked) > maxOpaquePathForms {
+			return nil, false
+		}
+		forms = append(forms, linked...)
+	}
+	parent := filepath.Dir(path)
+	if parent != path {
+		parents, ok := writePathForms(parent, linkDepth)
+		if !ok || len(forms)+len(parents) > maxOpaquePathForms {
+			return nil, false
+		}
+		for _, form := range parents {
+			forms = append(forms, filepath.Join(form, filepath.Base(path)))
+		}
+	}
+	return forms, true
 }
 
 // commandLinks lists the links that ln, link and cp --link or
@@ -611,12 +693,15 @@ func commandLinks(command, cwd, home string) shellLinks {
 				links.unknown(true)
 			}
 		case slices.Contains(copyPrograms, program):
+			destination := cpDestination(words[1:], static[1:], cwd)
+			if destination != "" {
+				links.copyDestinations = append(links.copyDestinations, destination)
+			}
 			option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
 			if copyPreservesLinks(words[1:], static[1:]) {
-				destination := copyDestination(words[1:], static[1:], cwd)
 				copyScopes = append(copyScopes, destination)
-				if copiesDiskSymlink(words[1:], static[1:], cwd) {
-					links.unknownIn(destination)
+				if cpDiskSymlink(words[1:], static[1:], cwd) {
+					links.unknownCopyIn(destination)
 				}
 			}
 			switch {
@@ -627,7 +712,7 @@ func commandLinks(command, cwd, home string) shellLinks {
 			case dynamic:
 				// A word that is not static may expand to a link option.
 				links.unknown(false)
-				copyScopes = append(copyScopes, copyDestination(words[1:], static[1:], cwd))
+				copyScopes = append(copyScopes, cpDestination(words[1:], static[1:], cwd))
 			}
 		case slices.Contains(archivePrograms, program):
 			if slices.Contains(static[1:], false) {
@@ -670,7 +755,7 @@ func commandLinks(command, cwd, home string) shellLinks {
 	})
 	if len(links.aliases) > 0 {
 		for _, scope := range copyScopes {
-			links.unknownIn(scope)
+			links.unknownCopyIn(scope)
 		}
 	}
 	if len(links.aliases) > 0 && (renames || cds && links.relative) {
@@ -890,19 +975,19 @@ func CommandLinks(tool, command, cwd, home string) Links {
 	return links
 }
 
-// Opaque reports a link that the command may create but that cannot be read
-// statically: a wrapper or a multicall binary running ln, an interpreter or
-// Windows link call, an archive or sync link option, or a mv or relative cd
-// with a link. OpaqueTarget narrows archive and copy operations to their
-// destination. A program word that is not static alone does not count
-// (GAP-1523).
-func (l Links) Opaque() bool {
-	return l.links.opaque
-}
-
 // OpaqueTarget reports whether an unreadable link operation can affect path.
+// Such operations include a wrapper or multicall binary running ln, an
+// interpreter or Windows link call, an archive or sync link option, or an mv
+// or relative cd with a link. Archive and copy scopes narrow the affected
+// paths. A program word that is not static alone does not count (GAP-1523).
 func (l Links) OpaqueTarget(path string) bool {
 	return l.links.opaqueTarget(path)
+}
+
+// OpaqueTargetExceptOwnCopy checks all scopes except the scope created by
+// this copy statement for its own destination.
+func (l Links) OpaqueTargetExceptOwnCopy(path, ownCopy string) bool {
+	return l.links.opaqueTargetExceptCopy(path, ownCopy)
 }
 
 // Target maps an absolute write operand through the links the command
@@ -952,6 +1037,135 @@ func copyDestination(args []string, static []bool, cwd string) string {
 	return ""
 }
 
+// cpOperands reads the options that can change source and destination
+// positions. Unknown or dynamic options make the destination unbounded.
+func cpOperands(args []string, static []bool) (sources []string, destination string, preserves bool, ok bool) {
+	var operands []string
+	targetDir := ""
+	options := true
+	for i := 0; i < len(args); i++ {
+		if !static[i] {
+			return nil, "", true, false
+		}
+		arg := args[i]
+		if options && arg == "--" {
+			options = false
+			continue
+		}
+		if !options || arg == "-" || !strings.HasPrefix(arg, "-") {
+			operands = append(operands, arg)
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			name, value, joined := strings.Cut(arg[2:], "=")
+			option, unique := longOption(name, cpLongOptions)
+			if !unique || option == "" {
+				return nil, "", true, false
+			}
+			switch option {
+			case "archive", "recursive", "no-dereference":
+				preserves = true
+			case "preserve":
+				if joined && (value == "links" || strings.Contains(","+value+",", ",links,")) {
+					preserves = true
+				}
+			case "target-directory", "suffix":
+				if !joined {
+					i++
+					if i >= len(args) || !static[i] {
+						return nil, "", true, false
+					}
+					value = args[i]
+				}
+				if value == "" {
+					return nil, "", true, false
+				}
+				if option == "target-directory" {
+					targetDir = value
+				}
+			case "no-preserve", "sparse", "reflink", "backup", "update", "context":
+				// These take only an optional joined value.
+			default:
+				if joined {
+					return nil, "", true, false
+				}
+			}
+			continue
+		}
+		for j := 1; j < len(arg); j++ {
+			switch arg[j] {
+			case 'a', 'P', 'd', 'r', 'R':
+				preserves = true
+			case 't', 'S':
+				value := arg[j+1:]
+				if value == "" {
+					i++
+					if i >= len(args) || !static[i] {
+						return nil, "", true, false
+					}
+					value = args[i]
+				}
+				if value == "" {
+					return nil, "", true, false
+				}
+				if arg[j] == 't' {
+					targetDir = value
+				}
+				j = len(arg)
+			case 'b', 'f', 'H', 'i', 'L', 'l', 'n', 'p', 's', 'T', 'u', 'v', 'x':
+			default:
+				return nil, "", true, false
+			}
+		}
+	}
+	if targetDir != "" {
+		if len(operands) == 0 {
+			return nil, "", preserves, false
+		}
+		return operands, targetDir, preserves, true
+	}
+	if len(operands) < 2 {
+		return nil, "", preserves, false
+	}
+	return operands[:len(operands)-1], operands[len(operands)-1], preserves, true
+}
+
+func cpDestination(args []string, static []bool, cwd string) string {
+	_, destination, _, ok := cpOperands(args, static)
+	if !ok {
+		return ""
+	}
+	if !filepath.IsAbs(destination) {
+		destination = filepath.Join(cwd, destination)
+	}
+	return filepath.Clean(destination)
+}
+
+// CopyDestination returns a statically understood cp destination.
+func CopyDestination(argv []string, cwd string) string {
+	if len(argv) < 2 || !slices.Contains(copyPrograms, programBase(argv[0])) {
+		return ""
+	}
+	return cpDestination(argv[1:], makeStatic(len(argv)-1), cwd)
+}
+
+func cpDiskSymlink(args []string, static []bool, cwd string) bool {
+	sources, _, _, ok := cpOperands(args, static)
+	if !ok {
+		return true
+	}
+	for _, source := range sources {
+		if !filepath.IsAbs(source) {
+			source = filepath.Join(cwd, source)
+		}
+		if info, err := os.Lstat(source); err == nil &&
+			(info.Mode()&os.ModeSymlink != 0 || info.IsDir() && treeHasSymlink(source)) {
+			return true
+		}
+	}
+	return false
+}
+
 func copiesDiskSymlink(args []string, static []bool, cwd string) bool {
 	operands := make([]string, 0, len(args))
 	for i, arg := range args {
@@ -995,18 +1209,10 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 	}
 	destination := cwd
 	if strings.HasSuffix(program, "tar") {
-		for i, arg := range args {
-			if !static[i] {
-				continue
-			}
-			if (arg == "-C" || arg == "--directory") && i+1 < len(args) {
-				if !static[i+1] {
-					return ""
-				}
-				destination = args[i+1]
-			} else if strings.HasPrefix(arg, "--directory=") {
-				destination = strings.TrimPrefix(arg, "--directory=")
-			}
+		var ok bool
+		destination, ok = tarDestination(args, static, cwd)
+		if !ok {
+			return ""
 		}
 	} else if program == "rsync" || (program == "pax" || program == "cpio" || program == "bsdcpio") && archiveCopiesLinks(program, args, static) {
 		return copyDestination(args, static, cwd)
@@ -1026,6 +1232,11 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 					return ""
 				}
 				destination = args[i+1]
+			} else if program == "unzip" && strings.HasPrefix(arg, "-d") && len(arg) > 2 {
+				if !static[i] {
+					return ""
+				}
+				destination = arg[2:]
 			} else if strings.HasPrefix(program, "7z") && strings.HasPrefix(arg, "-o") && len(arg) > 2 {
 				destination = arg[2:]
 			}
@@ -1035,6 +1246,102 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 		destination = filepath.Join(cwd, destination)
 	}
 	return filepath.Clean(destination)
+}
+
+// tarDestination reads destination-bearing tar options in short clusters,
+// old-style option words, and unique long-option abbreviations. Ambiguity
+// leaves the archive scope global.
+func tarDestination(args []string, static []bool, cwd string) (string, bool) {
+	destination := cwd
+	changed := false
+	consume := func(value string) bool {
+		if value == "" || changed {
+			return false
+		}
+		destination, changed = value, true
+		return true
+	}
+	options := true
+	for i := 0; i < len(args); i++ {
+		if !static[i] {
+			return "", false
+		}
+		arg := args[i]
+		if arg == "--" {
+			options = false
+			continue
+		}
+		if !options {
+			continue
+		}
+		if strings.HasPrefix(arg, "--") {
+			name, value, joined := strings.Cut(arg[2:], "=")
+			option, unique := longOption(name, []string{"directory", "dir", "cd", "one-top-level"})
+			if !unique {
+				return "", false
+			}
+			switch option {
+			case "directory", "dir", "cd":
+				if !joined {
+					i++
+					if i >= len(args) || !static[i] {
+						return "", false
+					}
+					value = args[i]
+				}
+				if !consume(value) {
+					return "", false
+				}
+			case "one-top-level":
+				if joined && !consume(value) {
+					return "", false
+				}
+			default:
+				// A future or unknown destination option cannot be scoped safely.
+				return "", false
+			}
+			continue
+		}
+		oldStyle := i == 0 && !strings.HasPrefix(arg, "-")
+		if !oldStyle && !strings.HasPrefix(arg, "-") {
+			continue
+		}
+		cluster := strings.TrimPrefix(arg, "-")
+		for j := 0; j < len(cluster); j++ {
+			switch cluster[j] {
+			case 'C':
+				value := cluster[j+1:]
+				if oldStyle || value == "" {
+					i++
+					if i >= len(args) || !static[i] {
+						return "", false
+					}
+					value = args[i]
+				}
+				if !consume(value) {
+					return "", false
+				}
+				if !oldStyle {
+					j = len(cluster)
+				}
+			case 'f':
+				if oldStyle || j+1 == len(cluster) {
+					i++
+					if i >= len(args) || !static[i] {
+						return "", false
+					}
+				}
+				if !oldStyle {
+					j = len(cluster)
+				}
+			case 'x', 'z', 'j', 'J', 'v', 'O', 't', 'c', 'P', 'p', 'h', 'k', 'm', 'w', 'U':
+			default:
+				// Unknown short options may consume a path.
+				return "", false
+			}
+		}
+	}
+	return destination, true
 }
 
 // opaqueProgram is a Windows program that creates links from operands this
@@ -1075,22 +1382,8 @@ func archiveNamesEscape(program string, args []string, static []bool) bool {
 }
 
 func copyPreservesLinks(args []string, static []bool) bool {
-	for i, arg := range args {
-		if !static[i] {
-			continue
-		}
-		if arg == "--" {
-			break
-		}
-		if arg == "--no-dereference" || arg == "--preserve=links" {
-			return true
-		}
-		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") &&
-			strings.ContainsAny(arg[1:], "aPdrR") {
-			return true
-		}
-	}
-	return false
+	_, _, preserves, _ := cpOperands(args, static)
+	return preserves
 }
 
 func archiveCopiesLinks(program string, args []string, static []bool) bool {

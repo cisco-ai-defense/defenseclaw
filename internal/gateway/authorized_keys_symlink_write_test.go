@@ -706,7 +706,62 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	if err := os.Symlink(keys, filepath.Join(project, "tree", "k")); err != nil {
 		t.Fatal(err)
 	}
+	for link, target := range map[string]string{"outlink": "unpack/n", "dlink": "unpack"} {
+		if err := os.Symlink(target, filepath.Join(project, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(project, "unpack"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../report.txt", filepath.Join(project, "unpack", "existing")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("unpack/existing", filepath.Join(project, "outlink2")); err != nil {
+		t.Fatal(err)
+	}
+	big := filepath.Join(project, "big")
+	if err := os.MkdirAll(big, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4097; i++ {
+		if err := os.WriteFile(filepath.Join(big, fmt.Sprintf("file-%04d", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	blocked := []string{
+		// GAP-1545: every archive destination spelling must cover the later write.
+		`tar -xf keys.tar -C../out && echo k >> ../out/n`,
+		`tar -xC ../out -f keys.tar && echo k >> ../out/n`,
+		`tar xfC keys.tar ../out && echo k >> ../out/n`,
+		`tar -xf keys.tar --dir=../out && echo k >> ../out/n`,
+		`tar -xf keys.tar --direc ../out && echo k >> ../out/n`,
+		`bsdtar -xf keys.tar --cd ../out && echo k >> ../out/n`,
+		`X=1 tar -xf keys.tar -C../out; echo k >> ../out/n`,
+		`tar -x -f keys.tar --one-top-level=../out; echo k >> ../out/n`,
+		`unzip keys.zip -d../out && echo k >> ../out/n`,
+		// GAP-1546: a pre-existing alias can enter an extraction scope.
+		`tar -C unpack -xf evil.tar && echo k >> outlink`,
+		`tar -C unpack -xf evil.tar && echo k >> dlink/n`,
+		`tar -C unpack -xf evil.tar && echo k >> outlink2`,
+		// GAP-1547: an early redirect does not exempt later command writers.
+		`echo a > n1.txt; tar xf evil.tar; cp payload n1.txt`,
+		`echo a > n1.txt; tar xf evil.tar; dd if=payload of=n1.txt`,
+		`echo a > n1.txt; tar xf evil.tar && tee -a n1.txt < payload`,
+		// GAP-1548: cp long options and target-directory preserve link scopes.
+		`ln -s ~/.ssh/authorized_keys s && cp --archive s notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && cp --recursive s d && echo k >> d`,
+		`ln -s ~/.ssh/authorized_keys s && cp -a -t copy s && echo k >> copy/s`,
+		`cp --archive disklink notes.txt && echo k >> notes.txt`,
+		`cp -a disklink notes.txt && cp payload notes.txt`,
+		`cp --recursive tree copy && echo k >> copy/k`,
+		`cp -a -t copy tree && echo k >> copy/tree/k`,
+		`cp --archive --target-directory=copy tree && echo k >> copy/tree/k`,
+		`cp --archive --target-directory copy tree && echo k >> copy/tree/k`,
+		`cp --arch disklink notes.txt && echo k >> notes.txt`,
+		`cp --unknown-option disklink notes.txt && echo k >> notes.txt`,
+		`cp --no-dereference disklink notes.txt && echo k >> notes.txt`,
+		`cp --preserve=links disklink notes.txt && echo k >> notes.txt`,
 		`env ln ~/.ssh/autho""rized_keys notes.txt && echo k >> notes.txt`,
 		`sudo ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
 		`sh -c "ln ~/.ssh/authorized_keys notes.txt" && echo k >> notes.txt`,
@@ -745,6 +800,7 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`tar $X keys.tar; echo k >> notes.txt`,
 		`tar -$X -f keys.tar; echo k >> notes.txt`,
 		`tar xzf node.tgz && ./configure > build.log`,
+		`tar xzf x.tgz && ./configure > build.log`,
 		`tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`,
 		`for i in 1 2; do echo k >> notes.txt; tar xf keys.tar; done`,
 		`echo "$(tar xf keys.tar)" > notes.txt`,
@@ -767,6 +823,20 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
 	}
 	allowed := []string{
+		// GAP-1549: the copy's own destination is an allowed write.
+		`cp -r big copy3`,
+		`cp -a tree copy4`,
+		`cp -r big copy6 && echo done > report.txt`,
+		`cp --archive disklink notes.txt`,
+		`cp --recursive tree copy`,
+		`cp -a -t copy tree`,
+		// Extraction alone, listing, an extractor redirect and earlier writes.
+		`tar xzf x.tgz`,
+		`tar -t -f keys.tar`,
+		`unzip -l keys.zip`,
+		`tar -xzf pkg.tgz 2>/dev/null`,
+		`echo hi > build.log; tar xzf x.tgz`,
+		`go build ./... > build.log`,
 		`ln a.txt b.txt && echo k >> b.txt`,
 		`rsync -a src/ d/ && echo k >> d/log.txt`,
 		`tar czf out.tgz src && echo k >> log.txt`,
