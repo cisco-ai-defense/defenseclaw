@@ -692,7 +692,7 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 }
 
-func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
+func TestInstallWindowsClaudeHonorsManagedFailModeOpen(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
 		"allowManagedHooksOnly": true,
 	})
@@ -708,8 +708,8 @@ func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
 		filepath.Join(fixture.home, ".defenseclaw"),
 		"claudecode",
 	)
-	if lock.HookFailMode != "closed" {
-		t.Fatalf("managed Claude lock fail mode = %q, want closed", lock.HookFailMode)
+	if lock.HookFailMode != "open" {
+		t.Fatalf("managed Claude lock fail mode = %q, want open", lock.HookFailMode)
 	}
 	if _, err := Verify(context.Background(), opts); err != nil {
 		t.Fatalf("Verify with the same configured fail-open input: %v", err)
@@ -1408,7 +1408,7 @@ func TestWindowsGenericCodexInstallVerifyAndUninstallLifecycle(t *testing.T) {
 	}
 }
 
-func TestInstallWindowsGenericRejectsEmptyAgentVersionBeforeCachedFallback(t *testing.T) {
+func TestInstallWindowsGenericUsesUnionInsteadOfUserVersionCache(t *testing.T) {
 	fixture := newWindowsGenericCodexFixture(t)
 	dataDir := filepath.Join(fixture.home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
@@ -1428,8 +1428,12 @@ func TestInstallWindowsGenericRejectsEmptyAgentVersionBeforeCachedFallback(t *te
 	opts := fixture.opts
 	opts.AgentVersion = " \t "
 	_, err := Install(context.Background(), opts)
-	if err == nil || !strings.Contains(err.Error(), "requires explicit agent_version") {
-		t.Fatalf("Install error = %v, want explicit version refusal before user cache fallback", err)
+	if err != nil {
+		t.Fatalf("Install error = %v, want unversioned union fallback", err)
+	}
+	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
+	if lock.CompatibilityStatus != connector.HookCompatibilityUnversioned || lock.HookFailMode != "open" {
+		t.Fatalf("fallback lock = %+v, want unversioned/open without user cache promotion", lock)
 	}
 }
 
@@ -2942,19 +2946,22 @@ func removeExactWindowsManagedRuntimeGenerationSnapshot(
 	}
 }
 
-func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {
+func TestWindowsEnterpriseManagedAgentVersionIsNotAnInstallPrerequisite(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		connector string
 		version   string
 		wantErr   bool
 	}{
-		{name: "codex below", connector: "codex", version: "0.130.0", wantErr: true},
+		{name: "codex below", connector: "codex", version: "0.130.0"},
 		{name: "codex minimum", connector: "codex", version: "0.131.0"},
-		{name: "codex malformed", connector: "codex", version: "not-a-version", wantErr: true},
-		{name: "claude below", connector: "claudecode", version: "2.1.151", wantErr: true},
+		{name: "codex malformed", connector: "codex", version: "not-a-version"},
+		{name: "codex missing", connector: "codex"},
+		{name: "claude missing", connector: "claudecode"},
+		{name: "cursor missing", connector: "cursor"},
+		{name: "claude below", connector: "claudecode", version: "2.1.151"},
 		{name: "claude minimum", connector: "claudecode", version: "2.1.152"},
-		{name: "cursor below", connector: "cursor", version: "1.6.9", wantErr: true},
+		{name: "cursor below", connector: "cursor", version: "1.6.9"},
 		{name: "cursor minimum", connector: "cursor", version: "1.7.0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

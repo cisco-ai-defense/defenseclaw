@@ -973,7 +973,7 @@ func prepareHookContract(mode string, conn connector.Connector, opts connector.S
 	if os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1" && !strictManagedRuntime {
 		return opts, nil
 	}
-	if !strictManagedRuntime && connector.HookContractNeedsActionOverride(resolution) {
+	if connector.HookContractNeedsActionOverride(resolution) {
 		opts.HookFailMode = "open"
 	}
 	if !strings.EqualFold(strings.TrimSpace(mode), "action") && !strictManagedRuntime {
@@ -994,12 +994,6 @@ func prepareHookContract(mode string, conn connector.Connector, opts connector.S
 		return connector.SetupOpts{}, err
 	}
 	if incompatible {
-		if strictManagedRuntime {
-			return connector.SetupOpts{}, fmt.Errorf(
-				"enterprise hooks: connector %s hook contract drift detected",
-				conn.Name(),
-			)
-		}
 		opts.HookFailMode = "open"
 	}
 	return opts, nil
@@ -1059,8 +1053,7 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 }
 
 // hookContractsIncompatible reports whether current evidence requires the
-// platform-specific drift policy: fail-open on Unix or rejection on managed
-// Windows.
+// compatibility fallback policy on both Unix and managed Windows.
 func hookContractsIncompatible(previous, current connector.HookContractLockEntry) bool {
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false
@@ -1073,10 +1066,10 @@ func hookContractsIncompatible(previous, current connector.HookContractLockEntry
 	return previousID == "" || currentID == "" || previousID != currentID
 }
 
-// canonicalHookFailMode normalizes every non-open value to the secure closed
-// default used by hook generation and lock comparison.
+// canonicalHookFailMode defaults unset policy to open. Invalid non-empty
+// policy remains closed.
 func canonicalHookFailMode(mode string) string {
-	if strings.EqualFold(strings.TrimSpace(mode), "open") {
+	if strings.TrimSpace(mode) == "" || strings.EqualFold(strings.TrimSpace(mode), "open") {
 		return "open"
 	}
 	return "closed"

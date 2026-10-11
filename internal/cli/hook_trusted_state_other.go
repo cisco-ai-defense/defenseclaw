@@ -9,6 +9,7 @@ func trustedNativeHookHome() (string, bool)         { return "", false }
 func NativeHookRuntimeNoop() bool                   { return false }
 func enterpriseManagedHookRuntimeNoop(string) bool  { return false }
 func enterpriseManagedHookRuntimeForceClosed() bool { return false }
+func enterpriseManagedHookRuntimeFailMode() string  { return "closed" }
 func enterpriseManagedHookRuntimeFailureReason() string {
 	return ""
 }

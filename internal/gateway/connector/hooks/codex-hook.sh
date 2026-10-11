@@ -68,7 +68,9 @@ defenseclaw_harden_env
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override. Set BEFORE the
 # missing-token check so defenseclaw_handle_missing_token below has a
 # stable FAIL_MODE to log against.
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Managed}}FAIL_MODE="{{.FailMode}}"
+{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{end}}
 
 # Bail early when neither the companion .token file nor the env var
 # carries a token: without one the gateway will reject every request

@@ -52,7 +52,7 @@ func installWindowsCursorManagedResult(
 			target.conn.Name(),
 		)
 	}
-	target.setup.HookFailMode = "closed"
+	// The prepared contract carries the effective delivery policy.
 	cursorPaths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return InstallResult{}, err
@@ -109,6 +109,7 @@ func installWindowsCursorManagedResult(
 				target.setup.APIAddr,
 				"cursor",
 				target.setup.HookAPIToken,
+				target.setup.HookFailMode,
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: write Cursor managed runtime: %w", err))
 			}
@@ -124,7 +125,7 @@ func installWindowsCursorManagedResult(
 					err,
 				))
 			}
-			lockEntry.HookFailMode = "closed"
+			lockEntry.HookFailMode = target.setup.HookFailMode
 			lockEntry.HookScriptDigests = nil
 			lockEntry.Locations = connector.ConnectorLocations{
 				HookConfigPaths: []string{hooksPath},
@@ -166,6 +167,7 @@ func installWindowsCursorManagedResult(
 				lockEntry.ContractID,
 				lockUpdatedAt,
 				entryUpdatedAt,
+				target.setup.HookFailMode,
 			)
 			if err != nil {
 				return fail(fmt.Errorf(
@@ -272,7 +274,7 @@ func verifyWindowsCursorManagedResult(
 	if err != nil {
 		return InstallResult{}, err
 	}
-	target.setup.HookFailMode = "closed"
+	// The prepared contract carries the effective delivery policy.
 	cursorPaths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return InstallResult{}, err
@@ -309,6 +311,7 @@ func verifyWindowsCursorManagedResult(
 		lock.ContractID,
 		lockUpdatedAt,
 		entryUpdatedAt,
+		target.setup.HookFailMode,
 	); err != nil {
 		return InstallResult{}, err
 	}
@@ -374,6 +377,7 @@ func verifyWindowsCursorUserRuntime(
 		target.dataDir,
 		target.setup.APIAddr,
 		"cursor",
+		target.setup.HookFailMode,
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: Cursor managed runtime is invalid: %w", err)
 	}
@@ -408,7 +412,7 @@ func verifyWindowsCursorUserRuntime(
 		len(lock.Locations.HookScriptPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookScriptPaths[0], adapterPath) ||
 		len(lock.HookScriptDigests) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		lock.HookFailMode != target.setup.HookFailMode {
 		return errors.New("enterprise hooks: Cursor managed hook contract does not identify only the global enterprise adapter")
 	}
 	return nil

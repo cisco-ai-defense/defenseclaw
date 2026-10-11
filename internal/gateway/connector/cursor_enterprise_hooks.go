@@ -65,16 +65,12 @@ func IsBuiltinCursorConnector(conn Connector) bool {
 
 // RenderWindowsCursorEnterpriseAdapter renders the shared, token-free adapter
 // installed in Cursor's protected machine hook directory. Managed enterprise
-// hooks are always fail closed; an explicit request for fail-open is rejected
-// rather than silently weakening the administrator-owned policy.
+// delivery policy is selected by the administrator-owned installation state.
 func RenderWindowsCursorEnterpriseAdapter(hookBinary, failMode string) ([]byte, error) {
 	if err := validateAbsoluteLocalWindowsPath("Cursor hook executable", hookBinary); err != nil {
 		return nil, err
 	}
-	if normalizeHookFailMode(failMode) != "closed" {
-		return nil, fmt.Errorf("Windows Cursor enterprise adapter must use fail mode closed")
-	}
-	return renderWindowsCursorAdapter(hookBinary, "closed", true, cursorAdapterTimeoutMS)
+	return renderWindowsCursorAdapter(hookBinary, normalizeHookFailMode(failMode), true, cursorAdapterTimeoutMS)
 }
 
 func renderWindowsCursorAdapter(hookBinary, failMode string, managed bool, timeoutMS int) ([]byte, error) {
@@ -103,16 +99,13 @@ func renderWindowsCursorAdapter(hookBinary, failMode string, managed bool, timeo
 // MergeWindowsCursorEnterpriseHooks returns a Cursor hooks.json containing
 // exactly one DefenseClaw entry for every supported event. Existing unrelated
 // top-level fields, hook events, and hook entries retain their JSON semantics
-// and order. Enterprise mode is always fail closed.
+// and order. Delivery policy controls Cursor's failClosed flag.
 func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) ([]byte, error) {
 	command, legacyCommand, err := windowsCursorEnterpriseHookCommands(adapterPath)
 	if err != nil {
 		return nil, err
 	}
 	previousEncodedCommand := previousWindowsCursorEnterpriseHookCommand(adapterPath)
-	if normalizeHookFailMode(failMode) != "closed" {
-		return nil, fmt.Errorf("Windows Cursor enterprise hooks must use fail mode closed")
-	}
 	cfg, err := decodeCursorHooksJSON(existing)
 	if err != nil {
 		return nil, err
@@ -147,7 +140,7 @@ func MergeWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode st
 		if !ok {
 			return nil, fmt.Errorf("Cursor hooks event %q must be an array", event)
 		}
-		hooks[event] = append(entries, windowsCursorEnterpriseHookEntry(command))
+		hooks[event] = append(entries, windowsCursorEnterpriseHookEntry(command, failMode))
 	}
 	return encodeCursorHooksJSON(cfg)
 }
@@ -171,9 +164,6 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 		return err
 	}
 	previousEncodedCommand := previousWindowsCursorEnterpriseHookCommand(adapterPath)
-	if normalizeHookFailMode(failMode) != "closed" {
-		return fmt.Errorf("Windows Cursor enterprise hooks must use fail mode closed")
-	}
 	cfg, err := decodeCursorHooksJSON(existing)
 	if err != nil {
 		return err
@@ -205,7 +195,7 @@ func verifyWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode s
 				continue
 			}
 			owned++
-			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand) {
+			if !isExactWindowsCursorEnterpriseHookEntry(raw, entryCommand, failMode) {
 				return fmt.Errorf("Cursor hooks event %q has a drifted DefenseClaw entry", event)
 			}
 			if selectedCommand != "" && selectedCommand != entryCommand {
@@ -623,12 +613,16 @@ func cursorHookEntryList(raw interface{}) ([]interface{}, bool) {
 	return entries, ok
 }
 
-func windowsCursorEnterpriseHookEntry(command string) map[string]interface{} {
+func windowsCursorEnterpriseHookEntry(command string, failMode ...string) map[string]interface{} {
+	mode := "closed" // legacy callers verify pre-upgrade artifacts
+	if len(failMode) > 0 {
+		mode = normalizeHookFailMode(failMode[0])
+	}
 	return map[string]interface{}{
 		"type":       "command",
 		"command":    command,
 		"timeout":    windowsCursorEnterpriseHookTimeoutSeconds,
-		"failClosed": true,
+		"failClosed": mode == "closed",
 	}
 }
 
@@ -659,19 +653,23 @@ func cursorHookCommand(raw interface{}) string {
 	return strings.TrimSpace(command)
 }
 
-func isExactWindowsCursorEnterpriseHookEntry(raw interface{}, command string) bool {
+func isExactWindowsCursorEnterpriseHookEntry(raw interface{}, command string, failMode ...string) bool {
+	mode := "closed"
+	if len(failMode) > 0 {
+		mode = normalizeHookFailMode(failMode[0])
+	}
 	entry, ok := raw.(map[string]interface{})
 	if !ok || len(entry) != 4 || cursorHookCommand(entry) != command {
 		return false
 	}
 	typeName, _ := entry["type"].(string)
-	failClosed, _ := entry["failClosed"].(bool)
+	failClosed, validFailMode := entry["failClosed"].(bool)
 	timeout, ok := entry["timeout"].(json.Number)
 	if !ok {
 		return false
 	}
 	timeoutSeconds, err := timeout.Int64()
-	return err == nil && typeName == "command" && failClosed && timeoutSeconds == windowsCursorEnterpriseHookTimeoutSeconds
+	return err == nil && typeName == "command" && validFailMode && failClosed == (mode == "closed") && timeoutSeconds == windowsCursorEnterpriseHookTimeoutSeconds
 }
 
 func cursorHookEventManaged(event string) bool {

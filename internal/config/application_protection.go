@@ -14,8 +14,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const (
@@ -343,7 +341,7 @@ func (c *Config) EffectiveRulePackDirForConnector(connector string) string {
 
 func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	if c == nil {
-		return "closed"
+		return "open"
 	}
 	configured := ""
 	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
@@ -361,17 +359,10 @@ func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured)
 }
 
-// effectiveManagedEnterpriseHookFailMode keeps the protected deployment
-// contract and every runtime consumer on the same fail-closed value. Native
-// Codex and Claude hooks are enforcement boundaries in managed enterprise
-// deployments; an observe-mode or legacy fail-open source config must not be
-// allowed to weaken their delivery/response behavior after installation.
+// effectiveManagedEnterpriseHookFailMode preserves explicit delivery policy
+// in managed deployments. Availability does not change policy verdicts.
 func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string) string {
-	name := normalizeConnectorKey(connector)
-	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode") {
-		return "closed"
-	}
-	if strings.EqualFold(strings.TrimSpace(configured), "open") {
+	if strings.TrimSpace(configured) == "" || strings.EqualFold(strings.TrimSpace(configured), "open") {
 		return "open"
 	}
 	return "closed"

@@ -46,6 +46,7 @@ type WindowsCursorManagedRuntimeTarget struct {
 }
 
 type windowsCursorManagedPolicyState struct {
+	HookFailMode       string                              `json:"hook_fail_mode,omitempty"`
 	SchemaVersion      int                                 `json:"schema_version"`
 	HookExecutable     string                              `json:"hook_executable"`
 	GatewayAddr        string                              `json:"gateway_addr"`
@@ -610,7 +611,7 @@ func validateWindowsCursorManagedPublicArtifacts(
 	if err != nil {
 		return artifacts, err
 	}
-	if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(artifacts.hooks.data, artifacts.adapter.path, "closed"); err != nil {
+	if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(artifacts.hooks.data, artifacts.adapter.path, cursorManagedPolicyFailMode(artifacts.parsed)); err != nil {
 		return artifacts, fmt.Errorf("enterprise hooks: verify Cursor enterprise hooks: %w", err)
 	}
 	artifacts.active = true
@@ -641,7 +642,7 @@ func validateWindowsCursorManagedStateIdentity(
 		}
 		return artifacts, fmt.Errorf("enterprise hooks: parse trailing Cursor ownership metadata: %w", err)
 	}
-	if state.SchemaVersion != 1 || !filepath.IsAbs(state.HookExecutable) ||
+	if (state.HookFailMode != "" && state.HookFailMode != "open" && state.HookFailMode != "closed") || state.SchemaVersion != 1 || !filepath.IsAbs(state.HookExecutable) ||
 		filepath.Clean(state.HookExecutable) != state.HookExecutable ||
 		!validWindowsCursorManagedDigest(state.ReceiptSHA256) {
 		return artifacts, errors.New("enterprise hooks: invalid Cursor managed ownership identity")
@@ -658,7 +659,7 @@ func validateWindowsCursorManagedStateIdentity(
 		return artifacts, errors.New("enterprise hooks: invalid Cursor managed target set")
 	}
 	state.Targets = targets
-	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(state.HookExecutable, "closed")
+	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(state.HookExecutable, cursorManagedPolicyFailMode(state))
 	if err != nil {
 		return artifacts, err
 	}
@@ -680,6 +681,14 @@ func validWindowsCursorManagedDigest(value string) bool {
 		}
 	}
 	return true
+}
+
+func cursorManagedPolicyFailMode(state windowsCursorManagedPolicyState) string {
+	// Pre-upgrade protected state omitted the mode and always rendered closed.
+	if state.HookFailMode == "" {
+		return "closed"
+	}
+	return canonicalHookFailMode(state.HookFailMode)
 }
 
 func validateWindowsCursorPrivateReceiptMetadata(
@@ -844,7 +853,7 @@ func installWindowsCursorManagedPolicy(
 		if err := connector.ValidateWindowsManagedGatewayServiceName(service); err != nil {
 			return err
 		}
-		adapterBody, err := connector.RenderWindowsCursorEnterpriseAdapter(opts.HookExecutable, "closed")
+		adapterBody, err := connector.RenderWindowsCursorEnterpriseAdapter(opts.HookExecutable, canonicalHookFailMode(opts.HookFailMode))
 		if err != nil {
 			return err
 		}
@@ -856,7 +865,7 @@ func installWindowsCursorManagedPolicy(
 				return fmt.Errorf("enterprise hooks: pre-existing Cursor enterprise config is not trusted: %w", err)
 			}
 		}
-		hooksBody, err := connector.MergeWindowsCursorEnterpriseHooks(baseHooks, before.adapter.path, "closed")
+		hooksBody, err := connector.MergeWindowsCursorEnterpriseHooks(baseHooks, before.adapter.path, canonicalHookFailMode(opts.HookFailMode))
 		if err != nil {
 			return err
 		}
@@ -881,6 +890,7 @@ func installWindowsCursorManagedPolicy(
 			return errors.New("enterprise hooks: Cursor machine identity differs from the active protected deployment")
 		}
 		state.SchemaVersion = 1
+		state.HookFailMode = canonicalHookFailMode(opts.HookFailMode)
 		state.HookExecutable = filepath.Clean(opts.HookExecutable)
 		state.GatewayAddr = gateway
 		state.GatewayServiceName = service
@@ -944,7 +954,7 @@ func installWindowsCursorManagedPolicy(
 						if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(
 							nowHooks.data,
 							before.adapter.path,
-							"closed",
+							cursorManagedPolicyFailMode(current.parsed),
 						); err != nil {
 							failures = append(failures, fmt.Sprintf("concurrent Cursor config invalidated the restored policy: %v", err))
 						}
@@ -1030,7 +1040,7 @@ func installWindowsCursorManagedPolicy(
 			}
 			return failMutation(err)
 		}
-		if err := connector.VerifyWindowsCursorEnterpriseHooks(installed.hooks.data, installed.adapter.path, "closed"); err != nil {
+		if err := connector.VerifyWindowsCursorEnterpriseHooks(installed.hooks.data, installed.adapter.path, cursorManagedPolicyFailMode(installed.parsed)); err != nil {
 			return failMutation(fmt.Errorf("enterprise hooks: installed Cursor hook command is not current: %w", err))
 		}
 		rollback = func() error {
@@ -1379,8 +1389,14 @@ func validateWindowsCursorLifecycleRestoreSource(
 	}
 	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(
 		allowedCurrent.HookExecutable,
-		"closed",
+		"open",
 	)
+	// A partial, administrator-owned publication may precede the state file.
+	// Accept only exact canonical bytes of either supported delivery mode;
+	// identity, ownership, journal and hook-config preimage checks still apply.
+	if err == nil && !bytes.Equal(current.adapter.data, expectedAdapter) {
+		expectedAdapter, err = connector.RenderWindowsCursorEnterpriseAdapter(allowedCurrent.HookExecutable, "closed")
+	}
 	if err != nil || !bytes.Equal(current.adapter.data, expectedAdapter) {
 		if err != nil {
 			return err
@@ -1545,7 +1561,7 @@ func validateWindowsCursorManagedTeardownSnapshot(
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return errors.New("enterprise hooks: Cursor snapshot ownership state contains trailing JSON")
 	}
-	if state.SchemaVersion != 1 || !filepath.IsAbs(state.HookExecutable) ||
+	if (state.HookFailMode != "" && state.HookFailMode != "open" && state.HookFailMode != "closed") || state.SchemaVersion != 1 || !filepath.IsAbs(state.HookExecutable) ||
 		filepath.Clean(state.HookExecutable) != state.HookExecutable ||
 		state.ReceiptSHA256 != windowsManagedPolicyDigest(snapshot.Receipt) {
 		return errors.New("enterprise hooks: Cursor snapshot has an invalid hook identity")
@@ -1562,7 +1578,7 @@ func validateWindowsCursorManagedTeardownSnapshot(
 		return errors.New("enterprise hooks: Cursor snapshot has an invalid target set")
 	}
 	state.Targets = targets
-	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(state.HookExecutable, "closed")
+	expectedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapter(state.HookExecutable, cursorManagedPolicyFailMode(state))
 	if err != nil || state.AdapterSHA256 != windowsManagedPolicyDigest(expectedAdapter) ||
 		!bytes.Equal(expectedAdapter, snapshot.Adapter) {
 		return errors.New("enterprise hooks: Cursor snapshot adapter identity is invalid")
@@ -1572,7 +1588,7 @@ func validateWindowsCursorManagedTeardownSnapshot(
 		return err
 	}
 	adapterPath := paths.Adapter
-	if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(snapshot.Hooks, adapterPath, "closed"); err != nil {
+	if err := connector.VerifyWindowsCursorEnterpriseHooksForMigration(snapshot.Hooks, adapterPath, cursorManagedPolicyFailMode(state)); err != nil {
 		return fmt.Errorf("enterprise hooks: Cursor snapshot hook contract is invalid: %w", err)
 	}
 	var receipt windowsCursorManagedPolicyReceipt

@@ -37,9 +37,6 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return InstallResult{}, err
 	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
-		return InstallResult{}, err
-	}
 	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "claudecode") {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: native Windows managed policy requires connector claudecode")
 	}
@@ -138,14 +135,8 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		); err != nil {
 			return err
 		}
-		if err := requireWindowsEnterpriseAgentVersion(setup.AgentVersion); err != nil {
-			return err
-		}
-		if setup.HookContractID == "" {
-			resolution := connector.ResolveHookContract(conn.Name(), setup.AgentVersion)
-			setup.HookContractID = resolution.Contract.ContractID
-		}
-		if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {
+		setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
+		if err != nil {
 			return err
 		}
 		policyBody, err = provider.ManagedHookPolicy(setup)
@@ -260,6 +251,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			setup.DataDir,
 			setup.APIAddr,
 			conn.Name(),
+			setup.HookFailMode,
 		); err != nil {
 			return fail(fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err))
 		}
@@ -288,6 +280,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			lockEntry.ContractID,
 			lockUpdatedAt,
 			entryUpdatedAt,
+			setup.HookFailMode,
 		)
 		if err != nil {
 			return fail(fmt.Errorf(
@@ -488,6 +481,7 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		dataDir,
 		setup.APIAddr,
 		conn.Name(),
+		setup.HookFailMode,
 	); err != nil {
 		return lock, fmt.Errorf("enterprise hooks: managed hook runtime sidecars are invalid: %w", err)
 	}

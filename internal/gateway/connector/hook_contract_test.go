@@ -1051,6 +1051,7 @@ func TestManagedHookContractLockRecoveryReproducesProtectedBytes(t *testing.T) {
 		"127.0.0.1:18970",
 		"codex",
 		"scoped-test-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}

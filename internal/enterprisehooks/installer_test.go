@@ -134,9 +134,9 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 						t.Fatalf("seed incompatible contract lock: %v", err)
 					}
 
-					err := validateHookContract(guardrailMode, conn, opts)
-					if err == nil || !strings.Contains(err.Error(), "enterprise hooks: connector claudecode hook contract drift detected") {
-						t.Fatalf("managed contract validation error = %v, want drift rejection", err)
+					managedPrepared, err := prepareHookContract(guardrailMode, conn, opts)
+					if err != nil || managedPrepared.HookFailMode != "open" {
+						t.Fatalf("managed contract preparation = %+v, err=%v, want open fallback", managedPrepared, err)
 					}
 					opts.ManagedEnterprise = false
 					prepared, err := prepareHookContract(guardrailMode, conn, opts)

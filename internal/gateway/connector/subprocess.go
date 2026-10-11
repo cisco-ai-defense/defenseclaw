@@ -64,13 +64,10 @@ type templateData struct {
 // authorization failures, and transport failures consistently. Strict
 // availability remains an unconditional force-closed override.
 //
-// "closed" is the safer default: an absent or untrustworthy verdict BLOCKS
-// rather than forwarding an uninspected action. Operators who would rather
-// accept an observability gap than a hard block during a DefenseClaw
-// outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
-// runtime, or through the per-connector setup flow (which also
-// persists to guardrail.hook_fail_mode in config.yaml).
-const defaultHookFailMode = "closed"
+// Availability defaults to open and logs delivery failures. Explicit closed
+// settings and strict availability remain supported; valid policy denials
+// still block independently of this default.
+const defaultHookFailMode = "open"
 
 // cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
 // request budget while staying inside Cursor's 30-second command-hook timeout.
@@ -79,14 +76,10 @@ const defaultHookFailMode = "closed"
 const cursorAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
-// the two values the hook scripts understand. Anything other than
-// "open" (case-sensitive — the env var contract is documented as
-// lowercase) collapses to "closed" so a typo never accidentally puts
-// the agent into fail-OPEN mode at the hook failure boundary
-// (CodeGuard rule codeguard-0-authorization-access-control: deny by
-// default).
+// the two values the hook scripts understand. Empty defaults open; malformed
+// non-empty values collapse to closed.
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "open" {
+	if strings.TrimSpace(mode) == "" || strings.TrimSpace(mode) == "open" {
 		return "open"
 	}
 	return "closed"
@@ -626,7 +619,12 @@ func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, ma
 // Other platforms retain the existing private atomic writer.
 func ReconcileManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName, token string,
+	failMode ...string,
 ) error {
+	mode := defaultHookFailMode
+	if len(failMode) > 0 {
+		mode = normalizeHookFailMode(failMode[0])
+	}
 	name := normalizeConnectorName(connectorName)
 	if name != "codex" && name != "claudecode" && name != "cursor" {
 		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
@@ -643,16 +641,17 @@ func ReconcileManagedNativeHookRuntime(
 		hookDir,
 		apiAddr,
 		name,
-		"closed",
+		mode,
 		true,
 		writeFile,
 	)
 }
 
 // ValidateManagedNativeHookRuntime requires the v2 managed marker, protected
-// endpoint agreement, connector closed mode, flat record, and scoped token.
+// endpoint agreement, canonical delivery mode, flat record, and scoped token.
 func ValidateManagedNativeHookRuntime(
 	dataDir, apiAddr, connectorName string,
+	expectedFailMode ...string,
 ) error {
 	name := normalizeConnectorName(connectorName)
 	if name != "codex" && name != "claudecode" && name != "cursor" {
@@ -685,12 +684,14 @@ func ValidateManagedNativeHookRuntime(
 			apiAddr,
 		)
 	}
-	if state.FailModes[name] != "closed" {
+	mode := state.FailModes[name]
+	if (mode != "closed" && mode != "open") ||
+		(len(expectedFailMode) > 0 && mode != normalizeHookFailMode(expectedFailMode[0])) {
 		return fmt.Errorf(
 			"managed hook connector %s fail mode %q, want %q",
 			name,
 			state.FailModes[name],
-			"closed",
+			strings.Join(expectedFailMode, ","),
 		)
 	}
 	flat, _, err := readStableHookRuntimeSidecar(
@@ -704,8 +705,8 @@ func ValidateManagedNativeHookRuntime(
 	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
 		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
 	}
-	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != "closed" {
-		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, "closed")
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != mode {
+		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, mode)
 	}
 	tokenPath, err := HookTokenFilePath(hookDir, name)
 	if err != nil {
@@ -1282,7 +1283,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("closed").
+//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("open").
 //  3. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
@@ -1324,18 +1325,6 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
 	if strings.TrimSpace(opts.HookFailMode) != "" {
 		return normalizeHookFailMode(opts.HookFailMode)
-	}
-	if c != nil {
-		switch c.Name() {
-		case "codex":
-			if opts.CodexEnforcement {
-				return "closed"
-			}
-		case "claudecode":
-			if opts.ClaudeCodeEnforcement {
-				return "closed"
-			}
-		}
 	}
 	return defaultHookFailMode
 }

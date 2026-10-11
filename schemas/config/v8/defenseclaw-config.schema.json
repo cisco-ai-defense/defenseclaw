@@ -486,7 +486,7 @@
           "type": "string",
           "enum": ["", "judge_only", "judge_and_agent"]
         },
-        "hook_fail_mode": { "type": "string", "enum": ["open", "closed"], "default": "closed" },
+        "hook_fail_mode": { "type": "string", "enum": ["open", "closed"], "default": "open" },
         "hook_self_heal": { "type": "boolean", "default": true },
         "hook_self_heal_debounce_ms": { "type": "integer", "minimum": 0, "maximum": 86400000, "default": 500 },
         "connectors": {

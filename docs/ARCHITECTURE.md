@@ -1,3 +1,4 @@
+<!-- doc-sync: last-spec=007 last-synced=2026-10-11 -->
 # Architecture
 
 This is a code-ownership map for contributors. Product concepts and operator
@@ -56,6 +57,11 @@ files. Consumer documentation is published on the
 Do not maintain a second endpoint table in repository Markdown.
 
 ### Connectors
+
+Hook availability defaults to open when unset, independently of action-mode
+policy enforcement. Explicit closed policy, managed authorization, runtime
+integrity and strict availability remain distinct controls. See
+[spec 007](specs/007-hook-delivery-default/README.md) for platform scope.
 
 Connector names, capabilities, hook profiles, and setup behavior are executable
 contracts under `internal/gateway/connector/` and
