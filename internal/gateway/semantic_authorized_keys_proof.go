@@ -778,13 +778,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// loop, a chain past the kernel limit or an unreadable
 				// component). Resolve it here, or fail closed.
 				if cannotResolveLocally {
-					return true
+					return !windowsLocationOrdinaryWriteTarget(target)
 				}
 			case truncated && cannotResolveLocally:
 				// The bounded map omits this operand, which may be a link
 				// into the protected home, in or outside the home. Its target
 				// is unknown, so fail closed.
-				return true
+				return !windowsLocationOrdinaryWriteTarget(target)
 			}
 		}
 		if request.SkipLocalFilesystemResolution {
@@ -817,7 +817,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// An existing link whose target cannot be resolved is still a
 		// possible write into the protected home. The client and gateway
 		// must both fail closed on a linked component before "..".
-		return !ok || isProtected(resolved)
+		return isProtected(resolved) || !ok && !windowsLocationOrdinaryWriteTarget(target)
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.

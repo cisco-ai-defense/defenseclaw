@@ -51,6 +51,32 @@ func trustedWindowsCMDWrapperLocationWrite(input actionfacts.Input) bool {
 	return false
 }
 
+// A managed gateway may be unable to read an ordinary target in the caller's
+// profile. The hook may also report an unresolved target. Neither situation
+// alone proves a write to authorized_keys. Keep uncertain protected spellings
+// fail closed, including 8.3 aliases and paths that can cross a link before "..".
+func windowsLocationOrdinaryWriteTarget(target string) bool {
+	if !windowsLocationAbsolute(target) {
+		return false
+	}
+	target = strings.ToLower(strings.ReplaceAll(target, `\`, "/"))
+	parts := strings.Split(target, "/")
+	for i, part := range parts {
+		name := strings.TrimRight(part, ". ")
+		if part == ".." || strings.TrimRight(part, " ") == ".." || name == ".ssh" || strings.ContainsAny(part, "*?[]$%`") ||
+			(strings.Contains(part, ":") && !(i == 0 && len(part) == 2 && part[1] == ':')) {
+			return false
+		}
+		// A short Windows name can alias a protected basename or directory.
+		if strings.Contains(part, "~") {
+			return false
+		}
+	}
+	base := strings.TrimRight(parts[len(parts)-1], ". ")
+	return base != "authorized_keys" && base != "authorized_keys2" &&
+		base != "administrators_authorized_keys" && base != ""
+}
+
 func windowsLocationAbsolute(value string) bool {
 	value = strings.ReplaceAll(value, `\`, "/")
 	return len(value) >= 3 && value[1] == ':' && value[2] == '/' ||
