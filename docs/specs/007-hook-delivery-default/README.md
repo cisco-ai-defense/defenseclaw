@@ -85,6 +85,19 @@ Epic HD-DEFAULT: align hook availability defaults without weakening policy.
 - HD-08 [implemented; native execution pending]: repair Windows Cursor per-SID adapter policy and deferred
   staging; align the Windows Amp contract harness with the open default while
   retaining explicit-closed regression coverage.
+- HD-09 [implemented; native execution pending]: fix the Amp self-heal test's read/publication race. Retry
+  only file-not-found, sharing-violation and lock-violation read errors within
+  the existing 80-attempt, 250-ms polling budget. Exact bytes and private ACL
+  verification remain mandatory; unrelated errors fail immediately. Cover
+  transient and persistent locks, wrong bytes, rejected ACLs and exception
+  classification.
+
+HD-09 is a test-only follow-up on the existing PR, with no release/version bump
+or production changes. CI at `9ed37a2a` failed when the restored Amp plugin was
+visible but still held by its protected publication handle: `ReadAllBytes`
+threw a sharing violation and aborted the poll. Production locking and
+publication validation must remain unchanged. Root CONTEXT.md stays absent
+per the user's request; this spec carries the scoped work notes.
 
 HD-08 review fixes preserve singleton enrollment and administrator-only rollback
 receipts, bind per-user fallback to authenticated runtime generations, and keep
@@ -149,6 +162,24 @@ mode mismatches, revocation, and canonical fresh/upgrade rollback prefixes.
 Those tests and the PowerShell contract/wizard harness require native Windows
 CI execution; they have not been executed on this macOS host. No bundle or
 installer was created or run, and CONTEXT.md remains removed.
+
+Amp race verification: both edited PowerShell scripts parse with PowerShell
+7.5.4. The exception classifier accepts only Win32 file-not-found/sharing/lock
+violations, including invocation wrappers, and rejects access-denied, malformed
+path and unrelated I/O errors. Five polling scenarios pass locally with
+simulated Windows sharing errors; the unchanged parent polling code fails the
+transient-lock case. macOS reports a different native sharing-error code, so
+real FileShare.None regression execution remains a Windows CI gate. Persistent
+locks, missing files and wrong bytes retain the 80-attempt budget; rejected ACLs
+cannot produce success. Runtime code and its private publication handles are
+unchanged. A portable, digest-verified PowerShell runtime was used only under
+/private/tmp; no system installation was changed.
+
+The completed `9ed37a2a` run also reveals separate Windows Go fixture failures:
+protected StateRoot/runtime and gateway-service bindings are missing in some
+enterprise-hook fixtures, while managed-contract cleanup fixtures omit delivery
+mode and still expect closed. These are not addressed by HD-09 and require a
+separate follow-up before the entire Windows gate can pass.
 
 ## Top-level doc impact
 

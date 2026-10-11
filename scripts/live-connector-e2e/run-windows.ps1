@@ -1687,6 +1687,15 @@ function Assert-AmpPluginPrivateACL([string]$PluginPath) {
     Write-Result 'amp:private-plugin' pass 'regular protected owner-and-SYSTEM-only plugin plus structured backup authority verified'
 }
 
+function Test-AmpPluginSelfHealReadRetry([Exception]$Exception) {
+    $cause = $Exception.GetBaseException()
+    # ReadAllBytes can race the protected publication handle after the name
+    # becomes visible, or a replacement between Test-Path and the read.
+    # Do not retry permission, malformed-path or unrelated I/O failures.
+    return ($cause -is [IO.IOException] -and
+        ($cause.HResult -band 0xFFFF) -in @(2, 32, 33))
+}
+
 function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
     if ($Connector -ne 'amp') { return }
     Remove-Item -LiteralPath $PluginPath -Force -ErrorAction Stop
@@ -1694,7 +1703,12 @@ function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
     for ($attempt = 0; $attempt -lt 80; $attempt++) {
         Start-Sleep -Milliseconds 250
         if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) { continue }
-        $actual = [IO.File]::ReadAllBytes($PluginPath)
+        try {
+            $actual = [IO.File]::ReadAllBytes($PluginPath)
+        } catch {
+            if (Test-AmpPluginSelfHealReadRetry $_.Exception) { continue }
+            throw
+        }
         if ([Convert]::ToBase64String($ExpectedBytes) -ceq
             [Convert]::ToBase64String($actual)) {
             $restored = $true
