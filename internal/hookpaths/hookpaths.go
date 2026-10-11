@@ -178,36 +178,93 @@ func homeParam(param *syntax.ParamExp, haveHome bool) bool {
 }
 
 // resolveWritePath follows existing links, including a link whose final file
-// does not exist yet. A shell redirect can create that final file. Resolve
-// the parent separately so links in directory components are covered too.
+// does not exist yet. The shared walk preserves components of link targets
+// until each has been checked, so a linked directory before ".." is not
+// removed lexically.
 func resolveWritePath(path string, linkDepth int) (string, bool) {
-	if linkDepth > maxWriteTargetLinkDepth || !filepath.IsAbs(path) {
-		return "", false
+	resolved, _, _, ok := walkWritePath("", path, linkDepth, false)
+	return resolved, ok
+}
+
+// walkWritePath resolves both ordinary operands and raw symlink targets. base
+// is the already-resolved directory containing a relative target. When collect
+// is true, forms includes every traversed name and link hop for opaque-scope
+// checks. A missing component is permitted at the end (redirects create
+// files), but it cannot be crossed by "..": its link status is unknown.
+func walkWritePath(base, path string, linkDepth int, collect bool) (string, []string, int, bool) {
+	if linkDepth > maxWriteTargetLinkDepth {
+		return "", nil, linkDepth, false
 	}
-	path = filepath.Clean(path)
-	info, err := os.Lstat(path)
-	if err != nil && !os.IsNotExist(err) {
-		return "", false
+	current := base
+	absolute := filepath.IsAbs(path)
+	if absolute {
+		current = filepath.VolumeName(path) + string(filepath.Separator)
+		path = strings.TrimPrefix(path, filepath.VolumeName(path))
+	} else if !filepath.IsAbs(base) {
+		return "", nil, linkDepth, false
 	}
-	if err == nil && info.Mode()&os.ModeSymlink != 0 {
-		link, err := os.Readlink(path)
-		if err != nil {
-			return "", false
+	var forms []string
+	if collect && absolute {
+		forms = append(forms, current)
+	}
+	add := func(form string) bool {
+		if collect {
+			forms = append(forms, form)
+			return len(forms) <= maxOpaquePathForms
 		}
-		if !filepath.IsAbs(link) {
-			link = filepath.Join(filepath.Dir(path), link)
+		return true
+	}
+	// The stack records the status of components added after base. A link
+	// remains marked even after its target is resolved: the following ".."
+	// would otherwise erase the evidence of that hop.
+	var crossed []bool
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			if len(crossed) > 0 {
+				if crossed[len(crossed)-1] {
+					return "", nil, linkDepth, false
+				}
+				crossed = crossed[:len(crossed)-1]
+			}
+			current = filepath.Dir(current)
+			if !add(current) {
+				return "", nil, linkDepth, false
+			}
+		default:
+			candidate := filepath.Join(current, part)
+			if !add(candidate) {
+				return "", nil, linkDepth, false
+			}
+			info, err := os.Lstat(candidate)
+			if err != nil && !os.IsNotExist(err) {
+				return "", nil, linkDepth, false
+			}
+			unknown := os.IsNotExist(err)
+			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+				link, err := os.Readlink(candidate)
+				if err != nil {
+					return "", nil, linkDepth, false
+				}
+				var extra []string
+				var nextDepth int
+				var ok bool
+				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect)
+				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
+					return "", nil, linkDepth, false
+				}
+				linkDepth = nextDepth
+				forms = append(forms, extra...)
+				crossed = append(crossed, true)
+			} else {
+				current = candidate
+				crossed = append(crossed, unknown)
+			}
 		}
-		return resolveWritePath(link, linkDepth+1)
 	}
-	parent := filepath.Dir(path)
-	if parent == path {
-		return path, true
-	}
-	resolvedParent, ok := resolveWritePath(parent, linkDepth)
-	if !ok {
-		return "", false
-	}
-	return filepath.Join(resolvedParent, filepath.Base(path)), true
+	return filepath.Clean(current), forms, linkDepth, true
 }
 
 // AuthorizedKeysFiles names the user's authorized-keys files under ~/.ssh:
@@ -599,42 +656,14 @@ func (l shellLinks) opaqueTargetExceptCopy(path, ownCopy string) bool {
 	return false
 }
 
-// writePathForms includes each link hop and each resolved parent form.
-// An extractor may replace a link inside its scope after this check, so
-// checking only the final target would miss a chain that enters and exits it.
+// writePathForms includes every traversed name and link hop. An extractor
+// may replace a link inside its scope after this check, so the intermediate
+// forms matter even when the final target is outside that scope.
 const maxOpaquePathForms = 256
 
 func writePathForms(path string, linkDepth int) ([]string, bool) {
-	if linkDepth > maxWriteTargetLinkDepth || !filepath.IsAbs(path) {
-		return nil, false
-	}
-	path = filepath.Clean(path)
-	forms := []string{path}
-	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		link, err := os.Readlink(path)
-		if err != nil {
-			return nil, false
-		}
-		if !filepath.IsAbs(link) {
-			link = filepath.Join(filepath.Dir(path), link)
-		}
-		linked, ok := writePathForms(link, linkDepth+1)
-		if !ok || len(forms)+len(linked) > maxOpaquePathForms {
-			return nil, false
-		}
-		forms = append(forms, linked...)
-	}
-	parent := filepath.Dir(path)
-	if parent != path {
-		parents, ok := writePathForms(parent, linkDepth)
-		if !ok || len(forms)+len(parents) > maxOpaquePathForms {
-			return nil, false
-		}
-		for _, form := range parents {
-			forms = append(forms, filepath.Join(form, filepath.Base(path)))
-		}
-	}
-	return forms, true
+	_, forms, _, ok := walkWritePath("", path, linkDepth, true)
+	return forms, ok
 }
 
 // commandLinks lists the links that ln, link and cp --link or
@@ -1671,12 +1700,13 @@ func (l *shellLinks) record(source, name string, literal bool, cwd string) {
 	l.relative = l.relative || !filepath.IsAbs(source) || !filepath.IsAbs(name)
 	name = absolutePath(name, cwd)
 	target := source
-	if literal && !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(name), target)
-	} else {
-		target = absolutePath(target, cwd)
+	if !filepath.IsAbs(target) {
+		base := cwd
+		if literal {
+			base = filepath.Dir(name)
+		}
+		target = base + string(filepath.Separator) + target
 	}
-	target = filepath.Clean(target)
 	l.aliases = append(l.aliases, linkAlias{name: name, target: target})
 	if dir, ok := resolveWritePath(filepath.Dir(name), 0); ok {
 		if resolved := filepath.Join(dir, filepath.Base(name)); resolved != name {
@@ -1730,7 +1760,10 @@ func (l shellLinks) resolve(path string, protected protectedFiles) (string, bool
 				if !under {
 					continue
 				}
-				next := filepath.Join(alias.target, rest)
+				next := alias.target
+				if rest != "" {
+					next += string(filepath.Separator) + rest
+				}
 				if seen[next] {
 					continue
 				}
