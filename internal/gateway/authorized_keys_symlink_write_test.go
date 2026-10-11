@@ -694,6 +694,9 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	}
 	t.Setenv("HOME", home)
 	t.Chdir(project)
+	if err := os.Symlink(keys, filepath.Join(project, "disklink")); err != nil {
+		t.Fatal(err)
+	}
 	blocked := []string{
 		`env ln ~/.ssh/autho""rized_keys notes.txt && echo k >> notes.txt`,
 		`sudo ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
@@ -710,12 +713,65 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`ls ~/.ssh/authorized_keys | cpio -pdl d; echo k >> d/notes.txt`,
 		`pax -rwl ~/.ssh d; echo k >> d/notes.txt`,
 		`"$PY" -V; ln ~/.ssh/authorized_keys notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && cp -a s notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && cp -P s notes.txt && echo k >> notes.txt`,
+		`cp -a disklink notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && cp -d s notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && cp "$FLAGS" s notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && cp -R s notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && rsync -a s notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && rsync -l s notes.txt && echo k >> notes.txt`,
+		`ln -s ~/.ssh/authorized_keys s && echo s | cpio -pd d && echo k >> d/s`,
+		`ln -s ~/.ssh/authorized_keys s && pax -rw s d && echo k >> d/s`,
+		`cpio -id < keys.cpio; echo k >> notes.txt`,
+		`pax -r -f keys.pax; echo k >> notes.txt`,
+		`pax -r < keys.pax; echo k >> notes.txt`,
+		`bsdcpio -id < keys.cpio; echo k >> notes.txt`,
+		`unzip -o keys.zip; echo k >> notes.txt`,
+		`7z x keys.7z; echo k >> notes.txt`,
+		`7z x keys.7z -o../outside; echo k >> ../outside/n`,
+		`cpio -id -D ../outside < keys.cpio; echo k >> ../outside/n`,
+		`busybox cpio -i < keys.cpio; echo k >> notes.txt`,
+		`busybox unzip keys.zip; echo k >> notes.txt`,
+		`tar $X keys.tar; echo k >> notes.txt`,
+		`tar -$X -f keys.tar; echo k >> notes.txt`,
+		`tar xzf node.tgz && ./configure > build.log`,
+		`tar -C unpack -xf keys.tar; echo k >> unpack/n1.txt`,
+		`for i in 1 2; do echo k >> notes.txt; tar xf keys.tar; done`,
+		`echo "$(tar xf keys.tar)" > notes.txt`,
+		`c"d" ~/.ssh && echo k >> authorized_keys`,
+		`"c""d" ~/.ssh && echo k >> authorized_keys`,
+		`$'cd' ~/.ssh && echo k >> authorized_keys`,
+		`\cd ~/.ssh && echo k >> authorized_keys`,
+		`"cd" "$HOME"/.ssh && echo k >> authorized_keys`,
+		`builtin cd ~/.ssh && echo k >> authorized_keys`,
+		`command cd ~/.ssh && echo k >> authorized_keys`,
+		`cd ~ && cd .ssh && echo k >> authorized_keys`,
 	}
 	allowed := []string{
 		`ln a.txt b.txt && echo k >> b.txt`,
 		`rsync -a src/ d/ && echo k >> d/log.txt`,
 		`tar czf out.tgz src && echo k >> log.txt`,
 		`busybox ls > list.txt`,
+		`tar -xzf pkg.tgz 2>/dev/null`,
+		`tar xf keys.tar; echo hi > /dev/null`,
+		`tar -xvf a.tar > files.txt`,
+		`echo hi > out.txt; tar xf a.tar`,
+		`rsync -aH src/ dst/ > rsync.log`,
+		`rsync -a --link-dest=../prev src/ cur/ 2>/dev/null`,
+		`sudo ln -s /opt/x /usr/local/bin/x > /dev/null`,
+		`grep -rn "os.symlink(" src > hits.txt`,
+		`rg mklink docs > hits.txt`,
+		`echo "use mklink /D" > notes.md`,
+		`printf "fsutil hardlink" > notes.md`,
+		`echo s | cpio -o > archive.cpio`,
+		`pax -w -f archive.pax > listing.txt`,
+		`unzip -l keys.zip > listing.txt`,
+		`7z l keys.7z > listing.txt`,
+		`tar "$o" xenial.tar > log`,
+		`tar -C unpack -xf keys.tar; echo hi > report.txt`,
+		`7z x keys.7z -o../outside; echo hi > report.txt`,
+		`cp -a src dst && echo hi > report.txt`,
 	}
 	// The managed gateway also fails closed on a program word that is not
 	// static, which this change leaves as it is.
@@ -747,9 +803,14 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			name := fmt.Sprintf("%s managed=%v", connector, managed)
 			t.Run(name, func(t *testing.T) {
 				for _, command := range blocked {
-					if got := post(t, command); !strings.HasPrefix(got, block) ||
+					got := post(t, command)
+					if !strings.HasPrefix(got, block) ||
 						!strings.Contains(got, "persistence.ssh_authorized_keys_command") {
 						t.Errorf("%s = %.300s, want block", command, got)
+					}
+					if command == `tar xzf node.tgz && ./configure > build.log` &&
+						!strings.Contains(got, "run the extraction and the write as separate commands") {
+						t.Errorf("%s = %.300s, want archive chain guidance", command, got)
 					}
 				}
 				expectAllowed := allowed
