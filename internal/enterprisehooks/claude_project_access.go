@@ -20,7 +20,7 @@ const (
 	claudeProjectUnreadable
 )
 
-// Only a project CreateFile or os.Open that returns ERROR_ACCESS_DENIED under
+// Only a project path check or open that returns ERROR_ACCESS_DENIED under
 // the validated user token may carry this marker. Token and session failures
 // must leave the whole account unreadable.
 var errClaudeProjectAccessDenied = errors.New("Claude Code project access denied")

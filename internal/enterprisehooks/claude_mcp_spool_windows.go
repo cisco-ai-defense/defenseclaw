@@ -203,7 +203,8 @@ func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]c
 		return nil
 	})
 	if err != nil {
-		return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %w", err)
+		// Token and profile failures must never look like a missing .claude.json.
+		return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %v", err)
 	}
 	if parseErr != nil {
 		return nil, statePath, parseErr
@@ -237,9 +238,15 @@ var windowsClaudeProjectRead = readWindowsClaudeProjectMCP
 func readWindowsClaudeProjectMCP(project string) (data []byte, accessErr, readErr error) {
 	project = filepath.Clean(project)
 	if _, err := winpath.ValidateFixedNTFSMountedPath(project); err != nil {
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, fmt.Errorf("%w: validate project path: %w", errClaudeProjectAccessDenied, err), nil
+		}
 		return nil, nil, err
 	}
 	if err := rejectWindowsReparseChain(project); err != nil {
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, fmt.Errorf("%w: check project path for reparse points: %w", errClaudeProjectAccessDenied, err), nil
+		}
 		return nil, nil, err
 	}
 	ptr, err := winpath.UTF16Ptr(project)

@@ -301,7 +301,7 @@ func TestWriteWindowsClaudeMCPSpoolMarksUnavailableToken(t *testing.T) {
 		t.Fatalf("initial record: servers=%v unreadable=%+v err=%v", servers, unreadable, err)
 	}
 	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, _ func() error) error {
-		return errors.New("session token unavailable")
+		return fmt.Errorf("resolve target token profile: %w", windows.ERROR_FILE_NOT_FOUND)
 	}
 	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
 		t.Fatal(err)
@@ -313,8 +313,8 @@ func TestWriteWindowsClaudeMCPSpoolMarksUnavailableToken(t *testing.T) {
 }
 
 // The real Windows directory and file DACLs are checked under the same
-// effective token used for the read. These ACLs deny the current test user
-// while allowing attribute checks in the preceding no-reparse walk.
+// effective token used for the read. A parent denial inherited by the
+// project must refuse only that project, like a denied directory or file open.
 func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
 	sid := currentWindowsTestSID(t)
 	original := windowsClaudeProjectWithUserToken
@@ -323,12 +323,22 @@ func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
 	for _, tc := range []struct {
 		name, denyMask string
 		denyDirectory  bool
+		denyParent     bool
 	}{
-		{"directory list", "0x00000001", true},
-		{"file read", "GR", false},
+		{"parent directory", "GR", false, true},
+		{"directory list", "0x00000001", true, false},
+		{"file read", "GR", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			project := t.TempDir()
+			parent := ""
+			if tc.denyParent {
+				parent = filepath.Join(project, "blocked")
+				project = filepath.Join(parent, "project")
+				if err := os.MkdirAll(project, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
 			file := filepath.Join(project, ".mcp.json")
 			if err := os.WriteFile(file, []byte(`{"mcpServers":{"private":{"command":"x"}}}`), 0o600); err != nil {
 				t.Fatal(err)
@@ -336,6 +346,9 @@ func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
 			path := file
 			if tc.denyDirectory {
 				path = project
+			}
+			if tc.denyParent {
+				path = parent
 			}
 			before, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 			if err != nil {
@@ -352,7 +365,11 @@ func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
 					t.Errorf("restore project ACL: %v", err)
 				}
 			})
-			sd, err := windows.SecurityDescriptorFromString("D:P(D;;" + tc.denyMask + ";;;" + sid.String() +
+			inherit := ""
+			if tc.denyParent {
+				inherit = "OICI"
+			}
+			sd, err := windows.SecurityDescriptorFromString("D:P(D;" + inherit + ";" + tc.denyMask + ";;;" + sid.String() +
 				")(A;;FA;;;SY)(A;;FA;;;BA)")
 			if err != nil {
 				t.Fatal(err)
@@ -366,8 +383,14 @@ func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
 				nil, nil, acl, nil); err != nil {
 				t.Fatal(err)
 			}
+			if tc.denyParent {
+				if err := rejectWindowsReparseChain(project); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+					t.Fatalf("project walk with denied parent ACL: %v; want access denied", err)
+				}
+			}
 			data, accessErr, readErr := readWindowsClaudeProjectMCP(project)
-			if len(data) != 0 || !errors.Is(accessErr, errClaudeProjectAccessDenied) || readErr != nil {
+			if len(data) != 0 || !errors.Is(accessErr, errClaudeProjectAccessDenied) ||
+				!errors.Is(accessErr, windows.ERROR_ACCESS_DENIED) || readErr != nil {
 				t.Fatalf("data=%q accessErr=%v readErr=%v; want project refused before read", data, accessErr, readErr)
 			}
 		})
