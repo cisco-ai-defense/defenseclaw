@@ -429,7 +429,7 @@ jobs:
           set -euo pipefail
           [[ "$DRY_RUN" != true ]] || { echo "::error::A dry run never signs"; exit 1; }
           cd release
-          find . -maxdepth 1 -type f ! -name '.*' | sed 's#^\./##' | sort | xargs sha256sum > checksums.txt
+          find . -maxdepth 1 -type f ! -name '.*' ! -name checksums.txt | sed 's#^\./##' | sort | xargs sha256sum > checksums.txt
           grep -Eq '  install\.sh$' checksums.txt && grep -Eq '  install\.ps1$' checksums.txt \
             && grep -Eq '  defenseclaw-upgrade\.sh$' checksums.txt
           cosign sign-blob --yes --bundle checksums.txt.bundle \
@@ -465,7 +465,7 @@ jobs:
         run: |
           set -euo pipefail
           cd release
-          find . -maxdepth 1 -type f ! -name '.*' | sed 's#^\./##' | sort | xargs sha256sum > checksums.txt
+          find . -maxdepth 1 -type f ! -name '.*' ! -name checksums.txt | sed 's#^\./##' | sort | xargs sha256sum > checksums.txt
           grep -Eq '  install\.sh$' checksums.txt && grep -Eq '  install\.ps1$' checksums.txt \
             && grep -Eq '  defenseclaw-upgrade\.sh$' checksums.txt
           {
@@ -755,7 +755,9 @@ jobs:
           for name in defenseclaw-upgrade.sh install.sh install.ps1; do
             grep -q "  $name\$" checksums.txt || { echo "::error::checksums.txt does not list $name"; exit 1; }
           done
-          sha256sum --check --ignore-missing checksums.txt
+          # The published 1.0.0 checksums.txt lists itself (a hash of the not-yet-written file), which can
+          # never verify. Drop that one line; every other line must still match.
+          grep -v '  checksums\.txt$' checksums.txt | sha256sum --check --ignore-missing -
           [[ "$(tail -n1 defenseclaw-upgrade.sh)" == "# DefenseClaw upgrade resolver complete v1" ]]
           bash -n defenseclaw-upgrade.sh
       - name: Sign and advance the stable channel
