@@ -31,13 +31,10 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
 			return
 		}
-		if !filepath.IsAbs(name) {
-			if !filepath.IsAbs(cwd) {
-				return
-			}
-			name = OperandPath(name, cwd)
+		if !filepath.IsAbs(name) && !filepath.IsAbs(cwd) {
+			return
 		}
-		operands = append(operands, name)
+		operands = append(operands, OperandPath(name, cwd))
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)

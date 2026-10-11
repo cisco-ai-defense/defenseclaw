@@ -747,6 +747,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if !filepath.IsAbs(target) {
 			return false
 		}
+		target = hookpaths.OperandPath(target, clientCWD)
 		if isProtected(target) {
 			return true
 		}

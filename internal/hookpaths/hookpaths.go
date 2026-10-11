@@ -95,10 +95,7 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		if name == "" {
 			return true
 		}
-		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
-			name = OperandPath(name, cwd)
-		}
-		operands = append(operands, name)
+		operands = append(operands, OperandPath(name, cwd))
 		return true
 	})
 	return operands, true, dynamic
@@ -480,9 +477,7 @@ func Resolve(payload []byte) string {
 		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
 		}
-		if !filepath.IsAbs(path) {
-			path = OperandPath(path, cwd)
-		}
+		path = OperandPath(path, cwd)
 		if old, present := targets[path]; present {
 			if safeRedirect {
 				return
