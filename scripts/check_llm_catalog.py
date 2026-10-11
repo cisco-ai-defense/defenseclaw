@@ -40,7 +40,7 @@ Run via ``make check-llm-catalog``.
 
 from __future__ import annotations
 
-import importlib.resources
+import importlib.util
 import json
 import sys
 from datetime import date
@@ -59,10 +59,14 @@ def bundled_model_cost() -> dict:
     ``litellm.model_cost`` is downloaded from litellm's GitHub main branch at
     import time unless ``LITELLM_LOCAL_MODEL_COST_MAP`` is set, so it changes
     under a fixed ``litellm==`` pin and can fail this gate on an unchanged
-    tree. Reading the bundled file keeps the check offline and pinned.
+    tree. The package is located without importing it, because importing it
+    starts that download.
     """
-    resource = importlib.resources.files("litellm") / BUNDLED_MODEL_COST
-    return json.loads(resource.read_text(encoding="utf-8"))
+    spec = importlib.util.find_spec("litellm")
+    if spec is None or not spec.submodule_search_locations:
+        raise ModuleNotFoundError("litellm is not installed")
+    path = Path(next(iter(spec.submodule_search_locations))) / BUNDLED_MODEL_COST
+    return json.loads(path.read_text(encoding="utf-8"))
 
 # Catalog provider name -> LiteLLM provider key (litellm.models_by_provider).
 PROVIDER_LL_MAP: dict[str, str] = {
