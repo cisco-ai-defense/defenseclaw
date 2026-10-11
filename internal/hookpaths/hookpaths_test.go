@@ -243,3 +243,22 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		})
 	}
 }
+
+// The gateway may receive ENOENT from ProtectHome even for an existing link.
+// Reported source facts must decide that case without relying on the host OS.
+func TestReportedCopySourceLinkFactSurvivesInvisibleGateway(t *testing.T) {
+	cwd, home := filepath.Join(t.TempDir(), "proj"), filepath.Join(t.TempDir(), "home")
+	path := OperandPath("disklink", cwd)
+	missing := func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	for _, row := range []struct {
+		fact string
+		want bool
+	}{
+		{"1", true}, {"0", false}, {"?", true},
+	} {
+		facts := map[string]string{SourceLinkFactPrefix + path: row.fact}
+		if got := diskSourceMayLink("disklink", cwd, home, facts, false, missing); got != row.want {
+			t.Fatalf("reported fact %q with ENOENT = %v, want %v", row.fact, got, row.want)
+		}
+	}
+}

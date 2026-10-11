@@ -32,6 +32,9 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+// SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
+const SourceLinkFactPrefix = "\x00source-link:"
+
 // maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
 // one path resolution. Every followed link counts, also in parent components,
 // so a link loop ends here and reports an unresolvable target.
@@ -92,13 +95,28 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		if name == "" {
 			return true
 		}
-		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
-			name = filepath.Join(cwd, name)
-		}
-		operands = append(operands, filepath.Clean(name))
+		operands = append(operands, OperandPath(name, cwd))
 		return true
 	})
 	return operands, true, dynamic
+}
+
+// OperandPath preserves dot-dot in the command operand until link resolution.
+// filepath.Join would erase a directory link before the following dot-dot.
+func OperandPath(name, cwd string) string {
+	// Keep the old canonical spelling for ordinary operands. Only dot-dot
+	// needs a raw spelling until the component walk has followed links.
+	if !strings.Contains(filepath.ToSlash(name), "/../") &&
+		!strings.HasSuffix(filepath.ToSlash(name), "/..") {
+		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
+			return filepath.Join(cwd, name)
+		}
+		return filepath.Clean(name)
+	}
+	if filepath.IsAbs(name) || !filepath.IsAbs(cwd) {
+		return name
+	}
+	return cwd + string(filepath.Separator) + name
 }
 
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as
@@ -418,7 +436,8 @@ func Resolve(payload []byte) string {
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
 	var operands, literalOperands []string
 	links := shellLinks{known: true}
-	var safeRedirects map[string]bool
+	sourceFacts := map[string]string{}
+	var safeRedirects []RedirectOccurrence
 	var toolArgs map[string]json.RawMessage
 	if json.Unmarshal(args, &toolArgs) == nil {
 		for _, key := range []string{"command", "cmd"} {
@@ -435,12 +454,12 @@ func Resolve(payload []byte) string {
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
 				truncated = truncated || !parsed
-				safeRedirects = SafeShellRedirects(command, cwd, home)
 				// A link the command creates can make a later write a write
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
 				if !isApplyPatchToolName(tool) {
-					links = commandLinks(command, cwd, home)
+					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
+					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
 					truncated = truncated || !links.known
 				}
 				break
@@ -458,12 +477,13 @@ func Resolve(payload []byte) string {
 		if path == "" || !literal && (strings.ContainsAny(path, "*?[]$`") || strings.HasPrefix(path, "~")) {
 			return
 		}
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(cwd, path)
-		}
-		path = filepath.Clean(path)
-		if _, present := targets[path]; present {
-			return
+		path = OperandPath(path, cwd)
+		if old, present := targets[path]; present {
+			if safeRedirect {
+				return
+			}
+			size -= len(jsonString(path)) + 1 + len(jsonString(old)) + 1
+			delete(targets, path)
 		}
 		if len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
 			truncated = true
@@ -472,7 +492,7 @@ func Resolve(payload []byte) string {
 		resolved, ok := "", false
 		if links.known {
 			resolved, ok = links.resolve(path, protected)
-		} else if safeRedirect && safeRedirects[path] {
+		} else if safeRedirect {
 			if direct, directOK := resolveWritePath(path, 0); directOK {
 				resolved, ok = protected.target(direct)
 			}
@@ -492,8 +512,8 @@ func Resolve(payload []byte) string {
 	}
 	// Exact shell operands take precedence over a duplicate PathFact. Their
 	// early-redirect exemption must not cover a later command writer.
-	for _, operand := range operands {
-		add(operand, true, true)
+	for i, operand := range operands {
+		add(operand, true, i < len(safeRedirects) && safeRedirects[i].Safe)
 	}
 	for _, operand := range literalOperands {
 		add(operand, true, false)
@@ -506,6 +526,12 @@ func Resolve(payload []byte) string {
 		if path == "" {
 			path = candidate.Normalized
 		}
+		if raw, ok := RawDotDotOperand(candidate.Value, cwd); ok {
+			path = raw
+		}
+		if slices.Contains(operands, path) && pathFactIsRedirect(candidate, facts.Commands) {
+			continue
+		}
 		add(path, false, false)
 	}
 	// An apply_patch edit names its files in the patch envelope, not in a
@@ -514,6 +540,15 @@ func Resolve(payload []byte) string {
 	truncated = truncated || !patchKnown
 	for _, target := range patchTargets {
 		add(target, true, false)
+	}
+	for key, value := range sourceFacts {
+		entry := len(jsonString(key)) + 1 + len(jsonString(value)) + 1
+		if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
+			truncated = true
+			break
+		}
+		targets[key] = value
+		size += entry
 	}
 	if truncated {
 		targets[TruncatedKey] = "1"
@@ -558,7 +593,35 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") {
 		return nil, false
 	}
+	for key, value := range targets {
+		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
+			return nil, false
+		}
+	}
 	return targets, true
+}
+
+// rawDotDotOperand keeps the shell spelling when a link can precede "..".
+func RawDotDotOperand(value, cwd string) (string, bool) {
+	if !strings.Contains(filepath.ToSlash(value), "/../") || strings.ContainsAny(value, "*?[]$`~") || !filepath.IsAbs(cwd) {
+		return "", false
+	}
+	return OperandPath(value, cwd), true
+}
+
+func pathFactIsRedirect(candidate actionfacts.PathFact, commands []actionfacts.CommandFact) bool {
+	for _, command := range commands {
+		if command.ID != candidate.CommandID {
+			continue
+		}
+		for _, redirect := range command.Redirects {
+			if redirect.Access == candidate.Access && !redirect.Expands &&
+				(redirect.Target == candidate.Value || redirect.Target == candidate.Normalized) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Programs that create a link from their operands: ln and link always, cp
@@ -686,6 +749,10 @@ func writePathForms(path string, linkDepth int) ([]string, bool) {
 // --symbolic-link create in command, in any order: a link made after a write
 // only makes the result more conservative.
 func commandLinks(command, cwd, home string) shellLinks {
+	return commandLinksWithFacts(command, cwd, home, nil, false)
+}
+
+func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
 	links := shellLinks{known: true}
 	file, parsed := parseShell(command)
 	if !parsed {
@@ -745,7 +812,7 @@ func commandLinks(command, cwd, home string) shellLinks {
 			option, dynamic := copyLinkOptions(args[1:], words[1:], static[1:])
 			if copyPreservesLinks(words[1:], static[1:]) {
 				copyScopes = append(copyScopes, destination)
-				if cpDiskSymlink(words[1:], static[1:], cwd) {
+				if cpDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
 					links.unknownCopyIn(destination)
 				}
 			}
@@ -770,7 +837,7 @@ func commandLinks(command, cwd, home string) shellLinks {
 			if archiveCopiesLinks(program, words[1:], static[1:]) {
 				destination := archiveDestination(program, words[1:], static[1:], cwd)
 				copyScopes = append(copyScopes, destination)
-				if program == "rsync" && copiesDiskSymlink(words[1:], static[1:], cwd) {
+				if copiesDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
 					links.unknownIn(destination)
 				}
 			}
@@ -910,12 +977,31 @@ func linearShellStatements(file *syntax.File) ([]*syntax.Stmt, bool) {
 	return statements, true
 }
 
-// SafeShellRedirects reports operands opened by the shell before any command
-// in this line can create a link. Redirects on an extracting command are
-// opened before the command starts. Repeated writes to one path are safe only
-// when every occurrence precedes link creation.
-func SafeShellRedirects(command, cwd, home string) map[string]bool {
-	result := make(map[string]bool)
+// RedirectOccurrence is one shell redirect in source order. The safety bit
+// belongs to that occurrence, even when a later writer names the same path.
+type RedirectOccurrence struct {
+	Path string
+	Safe bool
+}
+
+// SafeShellRedirectOccurrences reports redirects opened before any command
+// in the line can create a link. An extracting command's own redirect opens
+// before extraction begins.
+func SafeShellRedirectOccurrences(command, cwd, home string) []RedirectOccurrence {
+	return SafeShellRedirectOccurrencesWithFacts(command, cwd, home, nil)
+}
+
+// SafeShellRedirectOccurrencesWithFacts uses client source facts when the
+// gateway cannot inspect a copy source in the user home.
+func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[string]string) []RedirectOccurrence {
+	operands, parsed, _ := ShellWriteOperands(command, cwd, home)
+	if !parsed {
+		return nil
+	}
+	result := make([]RedirectOccurrence, len(operands))
+	for i, path := range operands {
+		result[i].Path = path
+	}
 	file, ok := parseShell(command)
 	if !ok {
 		return result
@@ -924,7 +1010,7 @@ func SafeShellRedirects(command, cwd, home string) map[string]bool {
 	if !linear {
 		return result
 	}
-	seenLink := false
+	seenLink, index := false, 0
 	for _, stmt := range statements {
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
@@ -936,22 +1022,18 @@ func SafeShellRedirects(command, cwd, home string) map[string]bool {
 			if !static || path == "" {
 				continue
 			}
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(cwd, path)
+			path = OperandPath(path, cwd)
+			if index < len(result) && result[index].Path == path {
+				result[index].Safe = !seenLink
 			}
-			path = filepath.Clean(path)
-			if earlier, present := result[path]; present {
-				result[path] = earlier && !seenLink
-			} else {
-				result[path] = !seenLink
-			}
+			index++
 		}
 		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
 		if start < 0 || end > len(command) || start >= end {
 			seenLink = true
 			continue
 		}
-		site := commandLinks(command[start:end], cwd, home)
+		site := commandLinksWithFacts(command[start:end], cwd, home, facts, false)
 		seenLink = seenLink || !site.known || len(site.aliases) > 0
 	}
 	return result
@@ -1010,10 +1092,15 @@ type Links struct {
 // CommandLinks reads the links that the shell command of a tool call
 // creates. The command of an apply_patch tool is a patch envelope, not shell.
 func CommandLinks(tool, command, cwd, home string) Links {
+	return CommandLinksWithFacts(tool, command, cwd, home, nil)
+}
+
+// CommandLinksWithFacts uses copy-source link evidence from the user-side hook.
+func CommandLinksWithFacts(tool, command, cwd, home string, facts map[string]string) Links {
 	if command == "" || isApplyPatchToolName(tool) {
 		return Links{links: shellLinks{known: true}}
 	}
-	links := Links{links: commandLinks(command, cwd, home)}
+	links := Links{links: commandLinksWithFacts(command, cwd, home, facts, false)}
 	if len(links.links.aliases) > 0 {
 		links.protected = newProtectedFiles(home)
 	}
@@ -1194,24 +1281,20 @@ func CopyDestination(argv []string, cwd string) string {
 	return cpDestination(argv[1:], makeStatic(len(argv)-1), cwd)
 }
 
-func cpDiskSymlink(args []string, static []bool, cwd string) bool {
+func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
 	sources, _, _, ok := cpOperands(args, static)
 	if !ok {
 		return true
 	}
 	for _, source := range sources {
-		if !filepath.IsAbs(source) {
-			source = filepath.Join(cwd, source)
-		}
-		if info, err := os.Lstat(source); err == nil &&
-			(info.Mode()&os.ModeSymlink != 0 || info.IsDir() && treeHasSymlink(source)) {
+		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
 			return true
 		}
 	}
 	return false
 }
 
-func copiesDiskSymlink(args []string, static []bool, cwd string) bool {
+func copiesDiskSymlink(args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
 	operands := make([]string, 0, len(args))
 	for i, arg := range args {
 		if !static[i] || strings.HasPrefix(arg, "-") {
@@ -1219,16 +1302,54 @@ func copiesDiskSymlink(args []string, static []bool, cwd string) bool {
 		}
 		operands = append(operands, arg)
 	}
-	for _, source := range operands[:max(0, len(operands)-1)] {
-		if !filepath.IsAbs(source) {
-			source = filepath.Join(cwd, source)
-		}
-		if info, err := os.Lstat(source); err == nil &&
-			(info.Mode()&os.ModeSymlink != 0 || info.IsDir() && treeHasSymlink(source)) {
+	if len(operands) < 2 {
+		// cpio/pax can take source names from stdin. A later write into the
+		// destination must not assume those names were regular files.
+		return true
+	}
+	for _, source := range operands[:len(operands)-1] {
+		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
 			return true
 		}
 	}
 	return false
+}
+
+func diskSourceMayLink(source, cwd, home string, facts map[string]string, record bool, lstat func(string) (os.FileInfo, error)) bool {
+	path := OperandPath(source, cwd)
+	key := SourceLinkFactPrefix + path
+	if !record && facts != nil {
+		if fact, ok := facts[key]; ok {
+			return fact != "0"
+		}
+	}
+	info, err := lstat(path)
+	if err == nil {
+		linked := info.Mode()&os.ModeSymlink != 0 || info.IsDir() && treeHasSymlink(path)
+		if record {
+			if linked {
+				facts[key] = "1"
+			} else {
+				facts[key] = "0"
+			}
+		}
+		return linked
+	}
+	if record {
+		if os.IsNotExist(err) {
+			facts[key] = "0"
+			return false
+		}
+		facts[key] = "?"
+		return true
+	}
+	// An older hook has no fact. ProtectHome and PrivateTmp turn even an
+	// existing source into ENOENT for the gateway.
+	return runtime.GOOS == "linux" &&
+		((home != "" && (path == home || strings.HasPrefix(path, home+string(filepath.Separator)))) ||
+			path == "/home" || strings.HasPrefix(path, "/home/") ||
+			path == "/tmp" || strings.HasPrefix(path, "/tmp/") ||
+			path == "/var/tmp" || strings.HasPrefix(path, "/var/tmp/"))
 }
 
 // treeHasSymlink reports a link inside a directory a recursive copy keeps.

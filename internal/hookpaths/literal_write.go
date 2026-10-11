@@ -31,13 +31,10 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
 			return
 		}
-		if !filepath.IsAbs(name) {
-			if !filepath.IsAbs(cwd) {
-				return
-			}
-			name = filepath.Join(cwd, name)
+		if !filepath.IsAbs(name) && !filepath.IsAbs(cwd) {
+			return
 		}
-		operands = append(operands, filepath.Clean(name))
+		operands = append(operands, OperandPath(name, cwd))
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, ok := node.(*syntax.CallExpr)
@@ -52,14 +49,27 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 				return true
 			}
 		}
-		switch programBase(words[0]) {
-		case "python", "python3", "perl", "ruby", "node":
-			if len(words) == 3 && (words[1] == "-c" || words[1] == "-e") {
-				for _, name := range literalInterpreterWrites(words[2]) {
-					add(name)
+		programWords := words
+		if programBase(words[0]) == "env" {
+			for i := 1; i < len(words); i++ {
+				if !strings.HasPrefix(words[i], "-") && !strings.Contains(words[i], "=") {
+					programWords = words[i:]
+					break
 				}
 			}
-		case "awk", "gawk", "mawk", "nawk":
+		}
+		program := programBase(programWords[0])
+		switch {
+		case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node":
+			for i := 1; i+1 < len(programWords); i++ {
+				if programWords[i] == "-c" || programWords[i] == "-e" {
+					for _, name := range literalInterpreterWrites(programWords[i+1]) {
+						add(name)
+					}
+					break
+				}
+			}
+		case program == "awk" || program == "gawk" || program == "mawk" || program == "nawk":
 			for _, arg := range words[1:] {
 				if strings.Contains(arg, "{") {
 					for _, match := range literalAwkRedirect.FindAllStringSubmatch(arg, -1) {
@@ -67,9 +77,9 @@ func LiteralWriteOperands(command, cwd, home string) (operands []string) {
 					}
 				}
 			}
-		case "sed", "gsed":
-			if sedFollowsInPlaceLinks(words) {
-				for _, name := range sedInPlaceFiles(words) {
+		case program == "sed" || program == "gsed":
+			for _, name := range sedInPlaceFiles(words) {
+				if sedFollowsInPlaceLinks(words) || sedParentProtected(name, cwd, home) {
 					add(name)
 				}
 			}
@@ -107,14 +117,53 @@ func SedReplacedOperands(command, cwd, home string) map[string]bool {
 					if !filepath.IsAbs(cwd) {
 						continue
 					}
-					name = filepath.Join(cwd, name)
+					name = OperandPath(name, cwd)
 				}
-				replaced[filepath.Clean(name)] = true
+				parent, ok := ResolveWriteTarget(rawParent(name))
+				if !ok {
+					continue
+				}
+				entry := filepath.Join(parent, filepath.Base(name))
+				protected := false
+				for _, path := range ProtectedAuthorizedKeysPaths(home) {
+					if samePathName(entry, path) {
+						protected = true
+						break
+					}
+				}
+				if !protected {
+					replaced[name] = true
+				}
 			}
 		}
 		return true
 	})
 	return replaced
+}
+
+func sedParentProtected(name, cwd, home string) bool {
+	parent, ok := ResolveWriteTarget(rawParent(OperandPath(name, cwd)))
+	if !ok {
+		return true
+	}
+	entry := filepath.Join(parent, filepath.Base(name))
+	for _, path := range ProtectedAuthorizedKeysPaths(home) {
+		if samePathName(entry, path) {
+			return true
+		}
+	}
+	return false
+}
+
+func rawParent(path string) string {
+	index := strings.LastIndexAny(path, `/\`)
+	if index < 0 {
+		return "."
+	}
+	if index == 0 {
+		return path[:1]
+	}
+	return path[:index]
 }
 
 func sedFollowsInPlaceLinks(words []string) bool {
@@ -174,14 +223,23 @@ func literalInterpreterWrites(code string) []string {
 			if path, ok := literalString(args[0]); ok {
 				paths = append(paths, path)
 			}
-		case name == "open" && len(args) >= 3:
+		case name == "open" && len(args) >= 3 && perlRedirectMode(args[1]):
 			if mode, ok := literalString(args[1]); ok && (mode == ">" || mode == ">>") {
 				if path, ok := literalString(args[2]); ok {
 					paths = append(paths, path)
 				}
 			}
-		case len(args) >= 2:
-			if mode, ok := literalString(args[1]); ok && literalWriteMode(mode) {
+		case len(args) >= 1:
+			modeArg := ""
+			if len(args) >= 2 {
+				modeArg = args[1]
+			}
+			for _, arg := range args[1:] {
+				if strings.HasPrefix(strings.TrimSpace(arg), "mode=") {
+					modeArg = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(arg), "mode="))
+				}
+			}
+			if mode, ok := literalString(modeArg); ok && literalWriteMode(mode) {
 				if path, ok := literalString(args[0]); ok {
 					paths = append(paths, path)
 				}
@@ -212,6 +270,11 @@ func literalInterpreterWrites(code string) []string {
 		}
 	}
 	return paths
+}
+
+func perlRedirectMode(arg string) bool {
+	mode, ok := literalString(arg)
+	return ok && (mode == ">" || mode == ">>")
 }
 
 func literalWriteMode(mode string) bool {
