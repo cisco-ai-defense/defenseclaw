@@ -1470,8 +1470,11 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
         app.cfg.gateway.token = "secret-token-123"
         try:
             with patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
-                missing = self.runner.invoke(agent, ["usage", "--sandbox", "nope"], obj=app)
-                fresh = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+                # The first two run as a Linux host: on a Windows runner the
+                # real host refuses --sandbox before any lookup.
+                with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+                    missing = self.runner.invoke(agent, ["usage", "--sandbox", "nope"], obj=app)
+                    fresh = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
                 with patch("defenseclaw.platform_support.host_os", return_value="windows"):
                     windows = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
         finally:
