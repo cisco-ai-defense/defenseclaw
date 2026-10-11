@@ -202,7 +202,8 @@ Delivery-policy consistency verification: the Go and Python regression matrices
 reproduce the old observe/global-closed downgrade. Ten real Amp plugin cases
 now preserve exact bytes after deletion and synchronous guard repair across
 observe/action, unset/open/global-closed and connector override policies. The
-focused guard/config tests and race detector pass. The Python config, setup,
+full Go config/gateway suites and focused race detector pass. Both macOS and
+Windows amd64 gateway binaries compile. The Python config, setup,
 doctor, guardrail, token rotation and runtime-drift suite has 518 passed,
 2 skipped and 32 passing subtests. The Windows runtime-drift assertion now
 recognizes an open runtime under desired global closed as drift; CLI transition
