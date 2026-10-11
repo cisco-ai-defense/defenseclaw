@@ -197,8 +197,7 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	if got := g.EffectiveMode(""); got != "observe" {
 		t.Errorf("EffectiveMode empty = %q, want observe", got)
 	}
-	// An observe-only connector with no explicit override retains the
-	// historical fail-open behavior on every platform.
+	// Unset delivery policy defaults open independently of enforcement mode.
 	if got := g.EffectiveHookFailModeFor(""); got != "open" {
 		t.Errorf("EffectiveHookFailModeFor empty = %q, want open", got)
 	}
@@ -231,8 +230,31 @@ func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
 	if got := g.EffectiveHookFailModeFor("codex"); got != "closed" {
 		t.Fatalf("explicit connector fail mode = %q, want closed", got)
 	}
-	if got := g.EffectiveHookFailModeFor("claudecode"); got != "open" {
-		t.Fatalf("unoverridden observe connector fail mode = %q, want open", got)
+	if got := g.EffectiveHookFailModeFor("claudecode"); got != "closed" {
+		t.Fatalf("inherited observe connector fail mode = %q, want closed", got)
+	}
+}
+
+func TestEffectiveHookFailMode_IndependentOfPolicyMode(t *testing.T) {
+	for _, mode := range []string{"observe", "action"} {
+		for _, tc := range []struct {
+			name, global, override, want string
+		}{
+			{"unset", "", "", "open"},
+			{"open", "open", "", "open"},
+			{"closed", "closed", "", "closed"},
+			{"override-open", "closed", "open", "open"},
+			{"override-closed", "open", "closed", "closed"},
+			{"invalid", "invalid", "", "closed"},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				g := &GuardrailConfig{Mode: mode, HookFailMode: tc.global,
+					Connectors: map[string]PerConnectorGuardrailConfig{"amp": {HookFailMode: tc.override}}}
+				if got := g.EffectiveHookFailModeFor("amp"); got != tc.want {
+					t.Fatalf("hook fail mode = %q, want %q", got, tc.want)
+				}
+			})
+		}
 	}
 }
 

@@ -6,6 +6,10 @@
   schema, setup flows and generated hook runtimes, including action mode.
 - Explicit `closed` remains supported. Invalid non-empty policy remains closed
   rather than being treated as an availability opt-in.
+- Initial setup, restart and self-heal must resolve the same effective hook
+  delivery policy. Observe mode must not turn an explicit global or connector
+  `closed` setting into `open` during repair; policy enforcement mode and hook
+  delivery mode are independent. Go and Python policy resolution must agree.
 - Managed macOS and Windows hooks honor their installer-owned delivery policy
   instead of forcing closed solely because they are managed.
 - Valid policy denials, runtime integrity, target authorization and protected
@@ -91,6 +95,19 @@ Epic HD-DEFAULT: align hook availability defaults without weakening policy.
   verification remain mandatory; unrelated errors fail immediately. Cover
   transient and persistent locks, wrong bytes, rejected ACLs and exception
   classification.
+- HD-10 [implemented; native execution pending]: fix initial-install/self-heal policy divergence using
+  the connector-aware resolver throughout the gateway. Remove the legacy
+  observe-mode delivery override in Go and Python while retaining the open
+  default and explicit override precedence. Add byte-exact Amp restoration
+  regressions for open/closed, content-free timeout diagnostics, and verification.
+
+HD-10 continues the existing release/PR without a version bump. CI at
+`bb213a82` passes the initial open self-heal but fails the explicit global
+closed case in observe mode. Gateway diagnostics report successful restoration:
+single-connector installation used the global closed value, while its current
+policy resolver selected open during repair. The spec's existing independent
+delivery-policy contract is authoritative; no installer, credentials, protected
+publication handles, enrollment or policy-denial checks are changed.
 
 HD-09 is a test-only follow-up on the existing PR, with no release/version bump
 or production changes. CI at `9ed37a2a` failed when the restored Amp plugin was
@@ -180,6 +197,21 @@ protected StateRoot/runtime and gateway-service bindings are missing in some
 enterprise-hook fixtures, while managed-contract cleanup fixtures omit delivery
 mode and still expect closed. These are not addressed by HD-09 and require a
 separate follow-up before the entire Windows gate can pass.
+
+Delivery-policy consistency verification: the Go and Python regression matrices
+reproduce the old observe/global-closed downgrade. Ten real Amp plugin cases
+now preserve exact bytes after deletion and synchronous guard repair across
+observe/action, unset/open/global-closed and connector override policies. The
+focused guard/config tests and race detector pass. The Python config, setup,
+doctor, guardrail, token rotation and runtime-drift suite has 518 passed,
+2 skipped and 32 passing subtests. The Windows runtime-drift assertion now
+recognizes an open runtime under desired global closed as drift; CLI transition
+assertions accept both Unicode and ASCII presentation without changing behavior.
+macOS/Windows vet and Windows amd64 test cross-compilation pass. PowerShell
+scripts parse and all five isolated polling scenarios pass with simulated
+Windows lock errors; timeout diagnostics distinguish missing, transient read
+error and content mismatch without exposing plugin contents. Native Windows
+end-to-end replay remains a CI gate. No installed runtime or build was replaced.
 
 ## Top-level doc impact
 

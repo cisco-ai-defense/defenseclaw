@@ -1904,18 +1904,14 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Explicit connector posture > observe compatibility > global.
+        """Explicit connector posture > global > open default.
 
-        Existing observe-only installs remain fail-open when they only carry
-        the legacy global value. A connector-scoped value is an explicit
-        runtime response-integrity choice, however, and must not be collapsed
-        back to open merely because policy findings are being observed.
+        Delivery failures and policy enforcement are independent. Observe
+        mode must not replace an explicit closed setting during hook repair.
         """
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             return _normalize_hook_fail_mode(pc.hook_fail_mode)
-        if self.effective_mode(connector).strip().lower() != "action":
-            return "open"
         return _normalize_hook_fail_mode(self.hook_fail_mode)
 
     def effective_block_message(self, connector: str = "") -> str:

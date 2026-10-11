@@ -196,7 +196,24 @@ class TestEffectiveResolvers(unittest.TestCase):
             },
         )
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
-        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
+
+    def test_hook_fail_mode_is_independent_of_policy_mode(self):
+        for mode in ("observe", "action"):
+            for name, global_mode, override, expected in (
+                ("unset", "", "", "open"),
+                ("open", "open", "", "open"),
+                ("closed", "closed", "", "closed"),
+                ("override-open", "closed", "open", "open"),
+                ("override-closed", "open", "closed", "closed"),
+                ("invalid", "invalid", "", "closed"),
+            ):
+                with self.subTest(mode=mode, policy=name):
+                    g = GuardrailConfig(
+                        mode=mode, hook_fail_mode=global_mode,
+                        connectors={"amp": PerConnectorGuardrailConfig(hook_fail_mode=override)},
+                    )
+                    self.assertEqual(g.effective_hook_fail_mode("amp"), expected)
 
     def test_empty_map_equals_absent(self):
         with_empty = GuardrailConfig(mode="action", connectors={})

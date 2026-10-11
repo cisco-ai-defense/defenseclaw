@@ -222,8 +222,14 @@ try {
                     $poll.Successes -eq 0) `
                     'Amp self-heal still rejects correct bytes with an untrusted ACL'
             } else {
+                $expectedState = switch ($scenario) {
+                    'persistent-lock' { 'transient-read-error' }
+                    'wrong-bytes' { 'content-mismatch' }
+                    'missing-file' { 'missing' }
+                }
                 Assert-True ($null -ne $failure -and
                     $failure.Exception.Message -match 'within 20 seconds' -and
+                    $failure.Exception.Message.EndsWith("(last state: $expectedState)") -and
                     $poll.Attempts -eq 80 -and $poll.ACLChecks -eq 0 -and
                     $poll.Successes -eq 0) `
                     "Amp self-heal rejects $scenario within the unchanged polling budget"

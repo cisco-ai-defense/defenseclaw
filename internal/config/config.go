@@ -1783,10 +1783,10 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 }
 
 // EffectiveHookFailModeFor returns the hook fail mode for the named
-// connector. An explicit connector override wins even in observe mode: it is
-// an operator-selected response-integrity posture, not a policy verdict.
-// Observe-only connectors without an override retain the historical fail-open
-// behavior; action mode falls through to the global value. Pass "" to resolve
+// connector. An explicit connector override wins over the global value.
+// Delivery policy is independent of observe/action enforcement: neither mode
+// may replace an explicit closed setting with open during setup or repair.
+// Unset policy defaults to open. Pass "" to resolve
 // the global connector mode/value. Pure lookup — never errors, never mutates.
 func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 	if g == nil {
@@ -1804,9 +1804,6 @@ func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 			}
 			return "closed"
 		}
-	}
-	if !strings.EqualFold(strings.TrimSpace(g.EffectiveMode(connector)), "action") {
-		return "open"
 	}
 	return g.EffectiveHookFailMode()
 }

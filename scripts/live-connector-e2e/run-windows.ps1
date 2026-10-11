@@ -1700,15 +1700,23 @@ function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
     if ($Connector -ne 'amp') { return }
     Remove-Item -LiteralPath $PluginPath -Force -ErrorAction Stop
     $restored = $false
+    $lastState = 'missing'
     for ($attempt = 0; $attempt -lt 80; $attempt++) {
         Start-Sleep -Milliseconds 250
-        if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) { continue }
+        if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) {
+            $lastState = 'missing'
+            continue
+        }
         try {
             $actual = [IO.File]::ReadAllBytes($PluginPath)
         } catch {
-            if (Test-AmpPluginSelfHealReadRetry $_.Exception) { continue }
+            if (Test-AmpPluginSelfHealReadRetry $_.Exception) {
+                $lastState = 'transient-read-error'
+                continue
+            }
             throw
         }
+        $lastState = 'content-mismatch'
         if ([Convert]::ToBase64String($ExpectedBytes) -ceq
             [Convert]::ToBase64String($actual)) {
             $restored = $true
@@ -1716,7 +1724,8 @@ function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
         }
     }
     if (-not $restored) {
-        throw 'Amp policy plugin self-heal did not restore the exact managed artifact within 20 seconds'
+        # Report only the restoration state, never plugin contents or credentials.
+        throw "Amp policy plugin self-heal did not restore the exact managed artifact within 20 seconds (last state: $lastState)"
     }
     Assert-AmpPluginPrivateACL $PluginPath
     Write-Result 'amp:self-heal' pass 'live connector guard restored the deleted plugin byte-for-byte'

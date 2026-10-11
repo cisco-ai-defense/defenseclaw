@@ -3072,41 +3072,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// SetCredentials() again with the same values (idempotent restore).
 	masterKey := deriveMasterKey(s.currentConfig().DataDir)
 	conn.SetCredentials(apiToken, masterKey)
-	setupTokens, err := connectorSetupTokensFor(s.currentConfig().DataDir, conn, apiToken, managed.IsManagedEnterprise(s.currentConfig().DeploymentMode))
+	// Initial single-connector setup shares the same effective policy and
+	// credential wiring as multi-connector setup and subsequent self-heal.
+	setupOpts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
 	if err != nil {
 		return fmt.Errorf("connector %s scoped hook token: %w", conn.Name(), err)
 	}
-
-	workspaceDir := s.currentConfig().ConnectorWorkspaceDir()
-	agentVersion := connector.LoadCachedAgentVersion(s.currentConfig().DataDir, conn.Name())
-	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
+	agentVersion := setupOpts.AgentVersion
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
-	setupOpts := connector.SetupOpts{
-		DataDir:   s.currentConfig().DataDir,
-		ProxyAddr: proxyAddr,
-		APIAddr:   apiAddr,
-		// Bake the gateway token into hook scripts so claude-code-hook.sh
-		// and codex-hook.sh can authenticate against the API server's
-		// auth middleware. ResolvedToken checks env vars first, then
-		// config — same source the proxy uses for credential wiring
-		// below, so the baked value and the value accepted by the API
-		// middleware stay in lockstep.
-		APIToken:           setupTokens.connectorToken,
-		HookAPIToken:       setupTokens.hookToken,
-		HookAPITokenScoped: setupTokens.hookTokenScoped,
-		WorkspaceDir:       workspaceDir,
-		// HookFailMode controls delivery, authentication, and invalid-response
-		// failures for generated hooks (see GuardrailConfig.HookFailMode).
-		// This single-connector path uses the persisted global value, whose
-		// secure fallback is "closed"; the multi-connector path below uses the
-		// connector-aware effective resolver.
-		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailMode(),
-		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
-		InstallCodeGuard: false,
-		AgentVersion:     agentVersion,
-		AgentExecutable:  agentExecutable,
-		HookContractID:   contractResolution.Contract.ContractID,
-	}
 	guardianManagedLifecycle := managedEnterpriseGuardianOwnsConnectorLifecycle(s.currentConfig(), conn)
 	if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: connector lifecycle for %s is owned by the enterprise hook guardian; gateway will not write user hook files\n", conn.Name())
