@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -76,10 +77,6 @@ type Options struct {
 	// KeepServiceAccount makes uninstall keep the gateway service account,
 	// which it removes otherwise.
 	KeepServiceAccount bool
-	// RemoveServiceAccount is the deprecated flag for what uninstall now
-	// does by default. It is accepted with a warning until the next minor
-	// release removes it.
-	RemoveServiceAccount bool
 	// ProductVersion, when set, must equal the payload's version.
 	ProductVersion string
 	// Reason annotates an ensure run (e.g. "path", "secret", "package").
@@ -108,6 +105,7 @@ const (
 	codePayload             = "payload_invalid"
 	codePackageOwned        = "package_owned_binaries"
 	codeConfig              = "config_invalid"
+	codeConfigRefused       = "config_refused"
 	codeAccount             = "service_account"
 	codeApply               = "apply_failed"
 	codeActivate            = "activation_failed"
@@ -115,13 +113,21 @@ const (
 	codeRollbackFailed      = "rollback_failed"
 	codeRecovered           = "recovered_interrupted_transaction"
 	codeUninstall           = "uninstall_failed"
+	codeUninstallPrecheck   = "uninstall_precheck_refused"
 	codeReconcile           = "reconcile_failed"
 	codeVerify              = "verify_failed"
 	codeState               = "state_unreadable"
 	codeLeftovers           = "unmanaged_leftovers"
 	codeWSL                 = "wsl_distribution"
-	codeDeprecatedOption    = "deprecated_option"
+	// codeConfigMetadataRestored: an unchanged config.yaml got its managed
+	// mode and owner back without a transaction (GAP-0941).
+	codeConfigMetadataRestored = "config_metadata_restored"
 )
+
+// maxMetadataRechecks bounds how often one ensure restores the config.yaml
+// owner again and re-checks for a no-op after an install of the same bytes
+// replaced it during the check.
+const maxMetadataRechecks = 3
 
 type lifecycle struct {
 	env    *Env
@@ -144,6 +150,37 @@ type lifecycle struct {
 	// packageManaged is set when the deb/rpm owns the binaries, so the
 	// uninstall leaves them to the package manager.
 	packageManaged bool
+	// serviceAccountKept is set when an uninstall could not delete the
+	// service account (macOS can deny the directory-record delete).
+	serviceAccountKept bool
+	// gatewayKeptRunning is set when the gateway applied a config change
+	// itself (hotConfigApply) and was not restarted.
+	gatewayKeptRunning bool
+	// failedInstallLeftovers is set when an uninstall removes what a failed
+	// first package install left, with no deployment committed.
+	failedInstallLeftovers bool
+	// configWrittenDuringRun holds a config.yaml another writer put in place
+	// while a transaction of this run planned its own (applyFiles kept it).
+	// A rollback restores the earlier file, so the newer one is put back
+	// after it and applied once the run ends.
+	configWrittenDuringRun []byte
+	// rollbackConfigSHA is the config.yaml a rollback left in place for the
+	// restored deployment's restart (the snapshot, or the reverted last
+	// applied config), or "" when the restore failed. A config.yaml with
+	// other bytes after the restart was written by another writer since and
+	// is never overwritten (restoreNewerConfig, GAP-1379).
+	rollbackConfigSHA string
+	// configACLWritable is set when a transaction found a macOS ACL entry
+	// that let another account write config.yaml after the plan checked it,
+	// or could not read the ACLs: bytes that changed since are not applied,
+	// also when removing the entry failed (GAP-1501, GAP-1535).
+	configACLWritable bool
+	// machinePolicyPublished is set once a transaction of this run wrote
+	// vendor machine policy for its config, which a rollback then undoes.
+	machinePolicyPublished bool
+	// machinePolicyErr is the error of the last vendor machine policy
+	// publish: a file DefenseClaw could not write its hooks into.
+	machinePolicyErr error
 }
 
 // noteChange records one change a repair or ensure made to an installed
@@ -161,6 +198,14 @@ type plannedInputs struct {
 	// config.yaml rather than --config.
 	configFromInstalled bool
 	secretsSHA          string
+	// appliedConfigSHA is the config of the deployment this transaction
+	// started from, which a rollback restores ("" on a first install).
+	appliedConfigSHA string
+	// revertedConfig is config.yaml as revertRejectedConfig left it when it
+	// put the last applied config back in place of this transaction's
+	// rejected edit, or nil. A config.yaml written after it holds a fresh
+	// push, also one of the rejected bytes (GAP-1412).
+	revertedConfig os.FileInfo
 }
 
 // Run executes one lifecycle action and returns its result; the result's
@@ -197,7 +242,7 @@ func uniqueMessages(messages []enterprisestatus.Message) []enterprisestatus.Mess
 }
 
 // run returns the specific failure exit code (0 for the generic one).
-func (l *lifecycle) run(ctx context.Context) int {
+func (l *lifecycle) run(ctx context.Context) (failure int) {
 	env, r := l.env, l.result
 	if !contains(Actions, l.opts.Action) {
 		r.AddError(codeInvalidArguments, fmt.Sprintf("unknown action %q", l.opts.Action))
@@ -225,7 +270,11 @@ func (l *lifecycle) run(ctx context.Context) int {
 	if readOnly {
 		return l.readOnly(ctx)
 	}
+	// Before the lock, which another run can hold for the readiness timeout.
+	env.closePrivateDirs(ctx)
 
+	// Keep the lock inode for the lifetime of the host. A waiter may have
+	// opened it before this run, even if this run commits no deployment.
 	if err := env.ensureDir(env.P(env.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
 		r.AddError(codeState, err.Error())
 		return 0
@@ -240,18 +289,10 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return 0
 	}
 	defer lock.release()
-	if l.opts.Action == ActionUninstall {
-		// An uninstall leaves no lifecycle directory holding only its lock
-		// (a rerun, or the package preremove after an uninstall, found
-		// nothing installed and would otherwise recreate it). A kept
-		// deployment record or retained state keeps the directory.
-		defer func() {
-			dir := env.P(env.Layout.LifecycleDir)
-			if entries, err := os.ReadDir(dir); err == nil && len(entries) == 1 && entries[0].Name() == lockFileName {
-				_ = os.Remove(filepath.Join(dir, lockFileName))
-				_ = os.Remove(dir)
-			}
-		}()
+	if l.opts.FromPackage && l.opts.Reason != "package" {
+		// Recorded before the lock goes, so a package run that waits for it
+		// writes its own result after this one.
+		defer func() { l.recordPackageResult(failure) }()
 	}
 
 	if !l.recoverInterrupted(ctx) && l.opts.Action != ActionUninstall {
@@ -329,6 +370,9 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
 			return 0
 		}
+		// The installed binaries are the payload of a repair without one: a
+		// missing hook binary refused it with payload_invalid (GAP-1217).
+		l.restoreTamperedHookBinary(ctx, record)
 		return l.settleInputChanges(ctx, l.apply(ctx, record))
 	case ActionEnsure:
 		if record == nil {
@@ -337,9 +381,32 @@ func (l *lifecycle) run(ctx context.Context) int {
 		if env.insideWSL() {
 			r.AddWarning(codeWSL, wslDeploymentWarning)
 		}
-		if noop, reason := l.ensureNoop(ctx, record); noop {
-			r.Noop = true
-			r.NoopReason = reason
+		restored := l.restoreTamperedHookBinary(ctx, record)
+		l.restoreUnchangedConfigMetadata(ctx, record)
+		restored = l.restoreTamperedMachinePolicy(record) || restored
+		if problems, _ := l.unitDropIns(ctx, record); len(problems) > 0 {
+			r.AddError(codeVerify, strings.Join(problems, "; "))
+			l.describe(ctx, record, false)
+			return 0
+		}
+		noop, reason := l.ensureNoop(ctx, record)
+		// Configuration management that installs the same config.yaml
+		// again while this run checks (two installs seconds apart) replaced
+		// the owner the restore above put back, and the run restarted the
+		// gateway for that owner alone (GAP-1030). Restore and check again
+		// while the installed bytes are still the applied config.
+		for retry := 0; !noop && retry < maxMetadataRechecks && l.restoreUnchangedConfigMetadata(ctx, record); retry++ {
+			noop, reason = l.ensureNoop(ctx, record)
+		}
+		if noop {
+			// A run that put a tampered file back changed the host.
+			r.Noop = !restored
+			if !restored {
+				r.NoopReason = reason
+			}
+			if err := env.sealHookBinary(record); err != nil {
+				r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
+			}
 			if !exists(env.committedConfigPath()) {
 				// A deployment committed before the lifecycle kept the applied
 				// config; the installed file is exactly that config.
@@ -348,7 +415,18 @@ func (l *lifecycle) run(ctx context.Context) int {
 				}
 			}
 			l.settleRejectedConfig()
+			if len(r.Errors) == 0 {
+				env.clearApplyRetries()
+			}
+			l.clearSupersededUnitFailures(ctx)
 			l.describe(ctx, record, false)
+			// The host runs this package and is healthy, so what a failed
+			// package run left (its result and the kept gateway output) is
+			// stale, as after a run that commits a deployment; the run that
+			// found it so used to keep it (GAP-0174).
+			if l.opts.FromPackage && len(r.Errors) == 0 {
+				l.clearSupersededFailures()
+			}
 			return 0
 		}
 		return l.settleInputChanges(ctx, l.apply(ctx, record))
@@ -357,6 +435,7 @@ func (l *lifecycle) run(ctx context.Context) int {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
 			return 0
 		}
+		l.restoreTamperedHookBinary(ctx, record)
 		return l.reconcile(ctx, record)
 	case ActionRotateCredentials:
 		return l.rotateCredentials(ctx, record)
@@ -364,6 +443,57 @@ func (l *lifecycle) run(ctx context.Context) int {
 		return l.uninstall(ctx, record)
 	}
 	return 0
+}
+
+// removeLifecycleStateKeepingLock clears transaction state without replacing
+// the lock inode. Waiters can have the file open before this run acquired it.
+func (e *Env) removeLifecycleStateKeepingLock() error {
+	dir := e.P(e.Layout.LifecycleDir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == lockFileName {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeInstallRootKeepingLock preserves the lock when macOS stores its
+// lifecycle directory inside the install root.
+func (e *Env) removeInstallRootKeepingLock() error {
+	if filepath.Dir(e.Layout.LifecycleDir) != e.Layout.InstallRoot {
+		return os.RemoveAll(e.P(e.Layout.InstallRoot))
+	}
+	root := e.P(e.Layout.InstallRoot)
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", root)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.Name() == filepath.Base(e.Layout.LifecycleDir) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // pauseApplyTrigger stops the Linux apply path unit while a protected-state
@@ -419,20 +549,14 @@ func (l *lifecycle) validateOptions() int {
 	if o.Purge && o.Action != ActionUninstall {
 		return bad("--purge applies only to uninstall")
 	}
-	if (o.KeepState || o.KeepServiceAccount || o.RemoveServiceAccount) && o.Action != ActionUninstall {
-		return bad("--keep-state, --keep-service-account and --remove-service-account apply only to uninstall")
+	if (o.KeepState || o.KeepServiceAccount) && o.Action != ActionUninstall {
+		return bad("--keep-state and --keep-service-account apply only to uninstall")
 	}
 	if o.KeepState && o.Purge {
 		return bad("--keep-state and --purge are mutually exclusive")
 	}
-	if o.RemoveServiceAccount && (o.KeepServiceAccount || o.KeepState) {
-		return bad("--remove-service-account contradicts --keep-service-account and --keep-state")
-	}
 	if o.ConfigFile != "" && !filepath.IsAbs(o.ConfigFile) {
 		return bad("--config must be an absolute path")
-	}
-	if o.RemoveServiceAccount {
-		r.AddWarning(codeDeprecatedOption, "--remove-service-account is deprecated and will be removed in the next minor release: uninstall deletes the gateway service account by default (keep it with --keep-service-account)")
 	}
 	return 0
 }
@@ -626,15 +750,18 @@ type plan struct {
 	config  *validatedConfig
 	// configFromInstalled is set when config came from the installed file.
 	configFromInstalled bool
-	secrets             []string
-	secretsSHA          string
-	dirs                []desiredDir
-	files               []desiredFile
-	binaries            []desiredFile
-	createdDirs         []string
-	stale               []string
-	systemd             int
-	installedAt         string
+	// configWritable says how an account other than root could write the
+	// installed config.yaml when it could (installedConfigWritable); the
+	// transaction then replaces the file before it changes anything.
+	configWritable string
+	secrets        []string
+	secretsSHA     string
+	dirs           []desiredDir
+	files          []desiredFile
+	binaries       []desiredFile
+	stale          []string
+	systemd        int
+	installedAt    string
 	// intended are the machine-policy connectors the config asks for;
 	// machinePolicy is the subset the descriptor records (all of intended
 	// unless a previous transaction with the same config could not place
@@ -645,6 +772,11 @@ type plan struct {
 	// packageUnits are the digests of the unit files the Linux package
 	// placed (package channel), keyed by canonical path.
 	packageUnits map[string]string
+	// installedConfigSHA is the installed config.yaml's digest when the plan
+	// read its inputs ("" when there was none). A different one when the
+	// transaction writes the planned config means another writer replaced
+	// the file during the run.
+	installedConfigSHA string
 }
 
 // buildPlan computes the desired state without mutating the host. account
@@ -677,6 +809,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err != nil {
 			return nil, &codedError{code: codePayload, err: env.installedPayloadError(err, ChannelPackage)}
 		}
+		if err := l.replacedPackageBinary(record, pay); err != nil {
+			return nil, &codedError{code: codePayload, err: err}
+		}
 		p.payload = pay
 	default:
 		// Repair or ensure without a payload keeps the installed binaries,
@@ -706,9 +841,18 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
+	p.installedConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	raw, fromInstalled, err := l.configBytes()
 	if err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
+	}
+	writable, err := env.installedConfigWritable(ctx)
+	if err != nil {
+		return nil, &codedError{code: codeConfig, err: fmt.Errorf("check whether the installed config is writable by another account: %w", err)}
+	}
+	if writable != "" && fromInstalled && (record == nil || sha256Bytes(raw) != record.ConfigSHA256) {
+		return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s changed while %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+			env.Layout.ConfigPath, writable, env.lifecycleCommand(ActionEnsure))}
 	}
 	validated, err := env.validateConfigSource(raw, l.opts.ConfigFile)
 	if err != nil {
@@ -725,6 +869,7 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		return nil, &codedError{code: codeConfig, err: err}
 	}
 	if migrated != nil {
+		l.warnConfigV8(migrated.Record)
 		v9, err := env.validateConfigSource(migrated.Migrated, l.opts.ConfigFile)
 		if err != nil {
 			return nil, &codedError{code: codeConfig, err: fmt.Errorf("the config_version 9 migration of the config does not validate: %w", err)}
@@ -732,12 +877,16 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		if err := env.checkRulePacksReadable(v9, account); err != nil {
 			return nil, &codedError{code: codeConfig, err: err}
 		}
-		if fromInstalled && config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
+		if fromInstalled && record != nil && record.ProductVersion == p.version &&
+			config.MigratedSource(env.P(env.Layout.ConfigPath), migrated.Record.SourceSHA256) {
 			// Configuration management put back the v8 file this host
 			// already migrated. Rewriting it again would fight that tool on
 			// every run, so its bytes stay, as for any in-place edit (the
 			// gateway migrates a v8 file in memory), and only the v9 checks
-			// apply.
+			// apply. This is only for a run that keeps the version: after a
+			// rollback the earlier release put the v8 file back and recorded
+			// its own version, so the upgrade migrates it again and replaces
+			// the stale migration record (GAP-0113).
 			v9.Raw, v9.SHA = validated.Raw, validated.SHA
 		} else {
 			v9.Migration = &configMigration{
@@ -749,7 +898,11 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		validated = v9
 	}
+	if err := env.checkCandidateAssets(validated); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
 	p.configFromInstalled = fromInstalled
+	p.configWritable = writable
 	p.config = validated
 
 	p.secrets, p.secretsSHA, err = env.listSecrets()
@@ -811,6 +964,13 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 
+	// The override a package-kept uninstall wrote over the package's
+	// tmpfiles.d entries goes with the next install.
+	if p.channel == ChannelPackage && env.GOOS == "linux" {
+		if data, err := readBounded(env.P(packageTmpfilesOverride), 4096); err == nil && strings.HasPrefix(string(data), packageTmpfilesOverrideMarker) {
+			p.stale = append(p.stale, packageTmpfilesOverride)
+		}
+	}
 	// Files the previous deployment wrote that this one no longer does.
 	if record != nil {
 		want := map[string]bool{}
@@ -819,8 +979,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 		for path := range record.Files {
 			if !want[path] {
-				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/")) {
-					continue // the package owns the binaries and units now
+				if p.channel == ChannelPackage && (strings.HasPrefix(path, env.Layout.BinDir+"/") || strings.HasPrefix(path, packageUnitDir+"/") ||
+					path == enterprisepolicy.OpenCodeManagedPluginPath(env.Layout)) {
+					continue // the package owns the binaries, units and OpenCode plugin now
 				}
 				p.stale = append(p.stale, path)
 			}
@@ -828,6 +989,68 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		sort.Strings(p.stale)
 	}
 	return p, nil
+}
+
+// replacedPackageBinary refuses installed package binaries that differ from
+// the deployment record while the package version is still the recorded one.
+// Only the package's own install run (--reason package) puts new binaries of
+// the same version in place; any other difference is a file replaced after
+// install. Recording it made verify green on a binary the package never
+// shipped: repair, ensure --from-package and the apply trigger re-recorded a
+// hook replaced by /usr/bin/true, and agents ran without enforcement
+// (GAP-0522).
+func (l *lifecycle) replacedPackageBinary(record *Deployment, pay *payload) error {
+	if record == nil || l.opts.Reason == "package" || pay.Version != record.ProductVersion {
+		return nil
+	}
+	recorded := recordBinaries(l.env, record)
+	if len(recorded) == 0 {
+		return nil
+	}
+	for _, name := range append(append([]string{}, requiredBinaries...), optionalBinaries...) {
+		if recorded[name] != pay.Digests[name] {
+			return fmt.Errorf("installed %s does not match the deployment record although the package is still version %s, so it was replaced after install; %s",
+				name, pay.Version, l.env.packageReinstallStep(pay.Version))
+		}
+	}
+	return nil
+}
+
+// packageReinstallStep is how an administrator puts back the binaries of
+// the package version.
+func (e *Env) packageReinstallStep(version string) string {
+	if e.GOOS == "darwin" {
+		return fmt.Sprintf("reinstall the package (sudo installer -pkg defenseclaw-enterprise-%s-darwin-arm64.pkg -target /) to restore it, or rerun with --payload <directory with the %s binaries>", version, version)
+	}
+	return fmt.Sprintf("reinstall the defenseclaw-enterprise %s package with your package manager to restore it, or rerun with --payload <directory with the %s binaries>", version, version)
+}
+
+// codeConfigV8 warns that the config a run read is still config_version 8.
+const codeConfigV8 = "config_version_8"
+
+// warnConfigV8 tells the administrator, on every run that reads a
+// config_version 8 file, that the file should be replaced and which values
+// the migration resolved differently. An MDM that keeps delivering the v8
+// file saw green results while two values were dropped, the first run
+// listing the migration only among its changes (GAP-0540).
+func (l *lifecycle) warnConfigV8(record config.MigrationRecord) {
+	source := l.opts.ConfigFile
+	if source == "" {
+		source = l.env.Layout.ConfigPath
+	}
+	message := fmt.Sprintf("the config this run read (%s) is config_version 8; DefenseClaw applies its config_version 9 migration. Deliver a config_version 9 file instead, for example the migrated %s",
+		source, l.env.Layout.ConfigPath)
+	var conflicts []string
+	for _, conflict := range record.Conflicts {
+		conflicts = append(conflicts, fmt.Sprintf("%s kept %s, dropped %s (%s)", conflict.To, conflict.Kept, conflict.Lost, conflict.Reason))
+	}
+	if len(conflicts) > 0 {
+		message += fmt.Sprintf("; %d value(s) conflicted and the migration resolved them: %s", len(conflicts), strings.Join(conflicts, "; "))
+	}
+	if len(record.UnenforcedRegoData) > 0 {
+		message += "; Rego rules no longer enforced: " + strings.Join(record.UnenforcedRegoData, "; ")
+	}
+	l.result.AddWarning(codeConfigV8, message)
 }
 
 func recordBinaries(env *Env, record *Deployment) map[string]string {
@@ -864,6 +1087,126 @@ func (l *lifecycle) configBytes() (data []byte, fromInstalled bool, err error) {
 	return nil, false, err
 }
 
+// installedConfigWritable says how an account other than root could write
+// the installed config.yaml: its mode, owner, a write ACL, or a folder that
+// account can write (it could put another file in its place). An edited
+// config is refused before repair removes those permissions (GAP-0524,
+// GAP-1139, GAP-1141).
+func (e *Env) installedConfigWritable(ctx context.Context) (string, error) {
+	var aclTargets []aclTarget
+	for _, canonical := range []string{e.Layout.ConfigPath, filepath.Dir(e.Layout.ConfigPath)} {
+		path := e.P(canonical)
+		_, _, mode, err := statOwnerMode(path)
+		if err != nil {
+			continue // configBytes reads or defaults the file; the transaction reports one that went away
+		}
+		uid, _, err := e.OwnerOf(path)
+		if err != nil {
+			continue
+		}
+		folder := canonical != e.Layout.ConfigPath
+		if mode.Perm()&0o022 != 0 && (!folder || mode&os.ModeSticky == 0) || (uid != 0 && uid != os.Geteuid()) {
+			return fmt.Sprintf("%s was %04o and owned by uid %d", canonical, mode.Perm(), uid), nil
+		}
+		if e.GOOS == "darwin" && (!folder || mode&os.ModeSticky == 0) {
+			aclTargets = append(aclTargets, aclTarget{path: path})
+		}
+	}
+	if len(aclTargets) > 0 {
+		findings, err := e.aclFindings(ctx, aclTargets)
+		if err != nil {
+			return "", err
+		}
+		for _, finding := range findings {
+			if finding.write {
+				return fmt.Sprintf("%s has a macOS ACL entry that lets another account write it", finding.path), nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// replaceWritableConfig puts a new file in place of an installed config.yaml
+// another account could write (p.configWritable), before the transaction
+// changes anything. Re-owning the file in place blessed what that account
+// wrote after this run read it, and a descriptor it opened while it could
+// write kept writing the live file: a standard user rewrote config.yaml a
+// moment after the mode was loosened, the run re-owned the file, and its
+// follow-up transaction applied the edit (GAP-0524). The new file holds the
+// applied config, so a later write through such a descriptor goes nowhere.
+// When config.yaml no longer holds the bytes this run read from it, that edit
+// is refused: the applied config is returned for the caller to revert to.
+// The other account loses write access to the folder and the file (its mode
+// and, on macOS, its ACL entries) before config.yaml is read and replaced.
+// Replaced while a folder ACL entry still let a standard user write there,
+// another file that user put in its place before the transaction removed
+// the entry was kept and applied by the follow-up transaction (GAP-1441).
+func (l *lifecycle) replaceWritableConfig(ctx context.Context, record *Deployment, p *plan) ([]byte, error) {
+	env := l.env
+	// A folder another account can write lets it put another file there.
+	if err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner()); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	path := env.P(env.Layout.ConfigPath)
+	var trusted []byte
+	if record != nil {
+		committed, err := readBounded(env.committedConfigPath(), maxInputBytes)
+		if err == nil && sha256Bytes(committed) == record.ConfigSHA256 {
+			trusted = committed
+		}
+	}
+	if err := l.removeConfigACLs(ctx); err != nil {
+		// A --config run has no in-place edit to revert. Give the caller
+		// verified applied bytes so it still replaces the ACL-written file.
+		if record != nil {
+			if trusted == nil {
+				current, readErr := readBounded(path, maxInputBytes)
+				if readErr == nil && sha256Bytes(current) == record.ConfigSHA256 {
+					trusted = current
+				}
+			}
+			if trusted != nil {
+				return trusted, &codedError{code: codeConfig, err: err}
+			}
+		}
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	if record == nil {
+		// No applied config to put there (an installed one was refused). A
+		// --config install writes its own bytes over whatever another
+		// account put there before it lost access.
+		p.installedConfigSHA, _ = sha256File(path)
+		return nil, nil
+	}
+	current, readErr := readBounded(path, maxInputBytes)
+	if trusted == nil && readErr == nil && sha256Bytes(current) == record.ConfigSHA256 {
+		trusted = current
+	}
+	if p.configFromInstalled && readErr == nil && sha256Bytes(current) != record.ConfigSHA256 {
+		return trusted, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied it and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+			env.Layout.ConfigPath, p.configWritable, env.lifecycleCommand(ActionEnsure))}
+	}
+	if trusted == nil {
+		p.installedConfigSHA, _ = sha256File(path)
+		return nil, nil
+	}
+	// A refused edit stays current (status and verify report it) when the
+	// new file replaces the reverted one.
+	kept, keptErr := os.Stat(env.rejectedConfigPath())
+	keep := keptErr == nil && !env.rejectionSuperseded(kept)
+	if err := env.writeFileAtomic(path, trusted, 0o640, fileOwner{UID: 0, GID: p.account.GID}); err != nil {
+		return nil, &codedError{code: codeApply, err: err}
+	}
+	// The file this run wrote is not one another writer put there during the
+	// run (applyFiles, GAP-0745), so a --config run still writes its own.
+	p.installedConfigSHA = sha256Bytes(trusted)
+	if replaced, err := os.Stat(path); keep && err == nil {
+		_ = os.Chtimes(env.rejectedConfigPath(), replaced.ModTime(), replaced.ModTime())
+	}
+	l.noteChange("replaced %s with a new file holding the applied config: %s, so another account could write it", env.Layout.ConfigPath, p.configWritable)
+	return nil, nil
+}
+
 type codedError struct {
 	code string
 	err  error
@@ -888,6 +1231,17 @@ func (l *lifecycle) apply(ctx context.Context, record *Deployment) int {
 // applyAdopting is apply that first takes over an adopted layout.
 func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopting *adoption) int {
 	env, r := l.env, l.result
+	if !l.opts.NoStart {
+		// Checked before anything changes: the API socket cannot listen
+		// while another process holds the port.
+		if held := l.apiPortPreflight(ctx, record); held != "" {
+			r.AddError(codeAPIPortHeld, held)
+			if record != nil {
+				l.describe(ctx, record, false)
+			}
+			return 0
+		}
+	}
 	serviceName := env.Layout.ServiceUser
 	account, err := env.Accounts.Ensure(ctx, serviceName)
 	if err != nil {
@@ -896,11 +1250,28 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	committedConfig := l.inPlaceConfigEdit(record)
 	p, err := l.buildPlan(ctx, record, account)
+	if err == nil && p.configWritable != "" {
+		var applied []byte
+		if applied, err = l.replaceWritableConfig(ctx, record, p); applied != nil {
+			committedConfig = applied
+		}
+	}
 	if err != nil {
 		code := errorCode(err, codeApply)
+		if committedConfig == nil && code == codeConfig {
+			// An edit written after the check above, while this run planned
+			// (a standard user writing a config.yaml whose mode was just
+			// loosened, GAP-0524), is reverted the same way.
+			committedConfig = l.inPlaceConfigEdit(record)
+		}
 		r.AddError(code, err.Error())
+		if record == nil && account.Created {
+			// Refused before any change: the service account this run
+			// created goes too (GAP-0542).
+			_ = env.Accounts.Remove(ctx, serviceName)
+		}
 		if committedConfig != nil && (code == codeConfig || code == codeMachinePolicy) {
-			l.revertRejectedConfig(record, committedConfig, nil)
+			l.revertRejectedConfig(record, committedConfig, nil, err.Error())
 		}
 		if record != nil {
 			// Refused before any change: the running deployment is untouched,
@@ -912,8 +1283,15 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	l.serviceUID = account.UID
 	l.planned = &plannedInputs{configSHA: p.config.SHA, configFromInstalled: p.configFromInstalled, secretsSHA: p.secretsSHA}
+	if record != nil {
+		l.planned.appliedConfigSHA = record.ConfigSHA256
+	}
 	l.reportChanges = record != nil && (l.opts.Action == ActionRepair || l.opts.Action == ActionEnsure)
 	changesBefore := len(r.Changes)
+	if account.Created {
+		// Configuration management removed the account (GAP-0515).
+		l.noteChange("created the service account %s (uid %d), which was missing", account.Name, account.UID)
+	}
 
 	units := env.Services.Units()
 	previouslyActive := []string{}
@@ -1015,18 +1393,43 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		var revertConfig func()
 		var newerConfig []byte
+		keepNewerConfig := func() {
+			// A --config run: a config.yaml another writer put in place after
+			// this transaction wrote its own (a push during activation) would
+			// be lost to the snapshot restore, so it is kept and put back
+			// after the restart like one applyFiles kept.
+			// Not one another account could write (GAP-1501), also through
+			// a macOS ACL entry this transaction removed (GAP-1518).
+			current, problem, err := env.readConfigChecked(env.P(env.Layout.ConfigPath))
+			if err == nil && problem == "" && !l.configACLWritable && sha256Bytes(current) != p.config.SHA && sha256Bytes(current) != p.installedConfigSHA {
+				l.configWrittenDuringRun = current
+			}
+		}
 		if committedConfig != nil {
+			keepNewerConfig = nil
 			// The snapshot of an in-place edit holds the edited bytes; the
 			// previous deployment's config is the last applied copy. It goes
 			// back before the services restart.
-			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw) }
+			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
 		}
-		restored, err := l.rollback(ctx, snap, pending, false, revertConfig)
+		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, revertConfig)
 		if newerConfig != nil {
 			l.restoreNewerConfig(record, newerConfig)
 		}
+		if restored && record != nil && l.machinePolicyPublished {
+			l.restoreMachinePolicy(record)
+		}
+		if restored && record != nil && newerConfig == nil && l.configWrittenDuringRun != nil {
+			l.restoreNewerConfig(record, l.configWrittenDuringRun)
+		} else {
+			l.configWrittenDuringRun = nil
+		}
 		if err != nil {
-			r.AddError(codeRollbackFailed, err.Error())
+			message := err.Error()
+			if refusal := l.configRefusal(ctx); refusal != "" {
+				message += "; the restored deployment's gateway refuses the configuration the same way: " + refusal
+			}
+			r.AddError(codeRollbackFailed, message)
 		} else {
 			r.AddWarning(codeRolledBack, "restored the previous deployment")
 		}
@@ -1051,7 +1454,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			return failAndRollback(codeUnmanagedLayout, err)
 		}
 	}
-	l.quiesce(ctx, units, l.keepRunningDuringChange(p))
+	keep := l.keepRunningDuringChange(p)
+	hot := l.hotConfigApply(ctx, record, p, adopting)
+	if gateway, ok := gatewayUnitOf(units); hot && ok {
+		keep[gateway.Name] = true
+		keepSensorHelperRunning(keep, units)
+	}
+	l.quiesce(ctx, units, keep)
 	pending.Phase = "apply"
 	_ = env.savePending(pending)
 
@@ -1062,9 +1471,16 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	if err := env.settleSecretModes(ctx, account); err != nil {
 		return failAndRollback(codeApply, err)
 	}
+	if err := l.settleStateModes(account); err != nil {
+		return failAndRollback(codeApply, err)
+	}
+	if err := l.removeACLs(ctx, aclFiles(env, p, record), aclConnectors(p, record)); err != nil {
+		return failAndRollback(codeApply, err)
+	}
+	l.clearStaleHookSocket(account)
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
-		return failAndRollback(codeApply, err)
+		return failAndRollback(errorCode(err, codeApply), err)
 	}
 	if record != nil {
 		// An edit made in place (the config-apply trigger) is never rewritten,
@@ -1093,7 +1509,15 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		l.revokeDeletedAccounts(ctx)
 	}
 	if env.GOOS == "linux" {
-		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
+		// The module labels the hook socket and the gateway binary;
+		// restorecon then relabels the files already in place (GAP-0772).
+		// A listening socket keeps the label systemd created it with, the
+		// domain the gateway ran in then: the hook socket is replaced so
+		// confined users reach the gateway's new domain (GAP-1143).
+		if l.ensureSELinuxModule(ctx) {
+			restartSockets[unitHookSocket] = true
+		}
+		if _, err := env.Runner.Run(ctx, "restorecon", "-R", env.P(env.Layout.InstallRoot), env.P(env.Layout.ConfigDir), env.P(env.Layout.HookSocketDir)); err != nil && !errors.Is(err, ErrCommandNotFound) {
 			r.AddWarning("selinux_relabel", err.Error())
 		}
 	}
@@ -1105,16 +1529,21 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	_ = env.savePending(pending)
 	activationStarted := env.Now()
 	if !l.opts.NoStart {
-		if err := l.activate(ctx, units, restartSockets); err != nil {
+		if err := l.activate(ctx, units, restartSockets, hot); err != nil {
 			// A readiness failure on the API port already names the holder.
 			if named := (*apiPortHeldError)(nil); !errors.As(err, &named) {
 				if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
 					err = fmt.Errorf("%w; %s", err, held)
 				}
 			}
-			if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
-				err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
-					filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
+			if gatewayFailure(err) {
+				if refusal := l.configRefusal(ctx); refusal != "" {
+					err = fmt.Errorf("%w; %s", err, env.configRefusedMessage(refusal))
+				}
+				if excerpt := l.recordActivationFailure(ctx); excerpt != "" {
+					err = fmt.Errorf("%w; gateway output (kept in %s): %s", err,
+						filepath.Join(env.Layout.LifecycleDir, activationFailureFileName), excerpt)
+				}
 			}
 			return failAndRollback(codeActivate, err)
 		}
@@ -1125,7 +1554,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			switch {
 			case !contains(previouslyActive, unit.Name):
 				l.noteChange("started %s, which was not running", unit.Name)
-			case changesApplied && unit.Kind == "gateway":
+			case changesApplied && unit.Kind == "gateway" && !l.gatewayKeptRunning:
 				l.noteChange("restarted %s to load the change", unit.Name)
 			}
 		}
@@ -1135,12 +1564,19 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 				_ = env.Services.Disable(ctx, unit)
 			}
 		}
-		r.AddWarning("not_started", "installed without starting the services (--no-start); run repair or ensure to activate")
+		r.AddWarning(codeNotStarted, "installed without starting the services (--no-start); run repair or ensure to activate")
 	}
 
+	activatedAt := ""
+	if record != nil {
+		activatedAt = record.ActivatedAt
+	}
+	if !l.opts.NoStart && record != nil && record.NoStart {
+		activatedAt = env.Now().UTC().Format(time.RFC3339Nano)
+	}
 	newRecord := &Deployment{
 		Profile: managed.ProfileStandalone, Platform: env.GOOS, ProductVersion: p.version, Channel: p.channel,
-		InstalledAt: p.installedAt, UpdatedAt: env.Now().UTC().Format(time.RFC3339), NoStart: l.opts.NoStart,
+		InstalledAt: p.installedAt, ActivatedAt: activatedAt, UpdatedAt: env.Now().UTC().Format(time.RFC3339), NoStart: l.opts.NoStart,
 		ServiceUser: account.Name, ServiceUID: account.UID, ServiceGID: account.GID,
 		ConfigSHA256: p.config.SHA, SecretsSHA256: p.secretsSHA, Files: map[string]string{},
 		MachinePolicyConnectors: append([]string{}, p.machinePolicy...),
@@ -1183,9 +1619,14 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 	_ = env.clearPending()
+	if err := env.sealHookBinary(newRecord); err != nil {
+		r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
+	}
 	// The deployment owns its state again; a kept-state record from an
 	// earlier non-purge uninstall no longer applies.
 	env.clearRetainedState()
+	l.clearSupersededFailures()
+	l.clearSupersededUnitFailures(ctx)
 	if err := env.saveCommittedConfig(p.config.Raw); err != nil {
 		r.AddWarning(codeConfigReverted, "could not keep a copy of the applied config; a rejected in-place edit cannot be reverted: "+err.Error())
 	}
@@ -1201,20 +1642,48 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 	}
 	l.describe(ctx, newRecord, false)
+	// The change that leaves the eligible users without a connector says so
+	// at once, as on Windows, not only at the next status (GAP-0266).
+	l.warnNoConnectorsEnabled(p.config)
+	l.warnUnenforcedAssetPolicy(p.config)
+	if l.opts.Action == ActionRepair && l.machinePolicyErr != nil {
+		// repair exists to put the deployment back; a vendor file it could not
+		// put the hooks into (an administrator line that does not parse) is
+		// not repaired, and the next verify fails on it again (GAP-0531).
+		r.AddError(codeMachinePolicyIncomplete, "repair could not put DefenseClaw hooks back in vendor machine policy: "+
+			l.machinePolicyErr.Error()+"; the rest of the deployment is repaired")
+	}
 	return 0
 }
 
 // quiesce stops the services in reverse activation order. Sockets stay up
 // so hooks queue during the change; they are restarted in activation only
-// when their definition changed. The units in keep stay as they are.
+// when their definition changed. The units in keep stay as they are. The
+// verify timer stays too: its run waits for the lifecycle lock, and it is
+// what notices (and recovers) a transaction a killed run left pending, which
+// otherwise left verify unloaded with the services stopped (GAP-0428).
 func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]bool) {
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	for _, unit := range ordered {
-		if unit.Kind == "socket" || unit.Name == l.env.SelfUnit || keep[unit.Name] {
+		if unit.Kind == "socket" || unit.Kind == "timer" || unit.Name == l.env.SelfUnit || keep[unit.Name] {
 			continue
 		}
 		_ = l.env.Services.Stop(ctx, unit)
+	}
+}
+
+// keepSensorHelperRunning keeps the sensor helper up through a config
+// change the gateway applies in place. Nothing the helper reads changes in
+// one (its unit, binary and arguments stay, and it watches the homes
+// manifest itself), but stopping it ended the gateway's kernel event stream
+// while the gateway kept running, and Plane C stayed down until the gateway
+// was restarted (GAP-1418).
+func keepSensorHelperRunning(keep map[string]bool, units []Unit) {
+	for _, unit := range units {
+		if unit.Kind == "sensor_helper" {
+			keep[unit.Name] = true
+		}
 	}
 }
 
@@ -1233,6 +1702,10 @@ func (l *lifecycle) keepRunningDuringChange(p *plan) map[string]bool {
 	switch env.GOOS {
 	case "linux":
 		keep[unitApplyService] = true
+		// A daily verify run waiting for the lock: stopping it killed it
+		// (status=15/TERM) and left the unit failed after a healthy package
+		// upgrade (GAP-0585). Left alone it verifies the changed deployment.
+		keep[unitVerifyService] = true
 	case "darwin":
 		unit := Unit{Name: labelApply}
 		path := env.Services.DefinitionPath(unit, p.channel)
@@ -1264,6 +1737,9 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 				continue
 			}
 			created = append(created, dir.Path)
+		}
+		if l.reportChanges && env.metadataDiffers(path, dir.Mode, dir.Owner) {
+			l.noteChange("restored the mode and owner of %s", dir.Path)
 		}
 		if err := env.ensureDir(path, dir.Mode, dir.Owner); err != nil {
 			return nil, err
@@ -1359,6 +1835,35 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 	changed := map[string]bool{}
 	for _, file := range append(append([]desiredFile{}, p.binaries...), p.files...) {
 		current, _ := sha256File(env.P(file.Path))
+		// config.yaml is checked again as it is applied: the plan checked
+		// who could write it, but a push can loosen its mode before this
+		// point, and restoring the managed owner and mode of bytes another
+		// account wrote since made the follow-up transaction trust them as
+		// administrator policy (GAP-1501).
+		var checked []byte
+		untrusted := ""
+		if file.Kind == "config" {
+			data, problem, err := env.readConfigChecked(env.P(file.Path))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			current, checked, untrusted = "", data, problem
+			if data != nil {
+				current = sha256Bytes(data)
+			}
+			if untrusted == "" && l.configACLWritable {
+				untrusted = "a macOS ACL entry let another account write it"
+			}
+		}
+		if current == file.SHA && untrusted != "" {
+			// The planned bytes: a new file holds them, so a descriptor the
+			// other account opened writes nowhere.
+			if err := env.writeFileAtomic(env.P(file.Path), checked, file.Mode, file.Owner); err != nil {
+				return nil, err
+			}
+			l.noteChange("replaced %s with a new file holding the applied config: %s, so another account could write it", file.Path, untrusted)
+			continue
+		}
 		if current == file.SHA {
 			if l.reportChanges && env.metadataDiffers(env.P(file.Path), file.Mode, file.Owner) {
 				l.noteChange("restored the mode and owner of %s", file.Path)
@@ -1368,7 +1873,19 @@ func (l *lifecycle) applyFiles(p *plan) (map[string]bool, error) {
 			}
 			continue
 		}
-		if file.KeepContent {
+		// A config.yaml written in place while this run held the lock (a
+		// --config run, say) is newer than the bytes this run planned, so it
+		// stays and a follow-up transaction applies it (input_changed). The
+		// run overwrote it with its own file and nothing warned (GAP-0745).
+		written := file.Kind == "config" && !file.KeepContent && current != p.installedConfigSHA
+		if (file.KeepContent || written) && untrusted != "" {
+			return nil, &codedError{code: codeConfig, err: fmt.Errorf("%s was written while this run applied it and %s, so an account other than root could have written the change; it is not applied. Push the administrator config again, or run `%s --config <file>`",
+				file.Path, untrusted, env.lifecycleCommand(ActionEnsure))}
+		}
+		if written {
+			l.configWrittenDuringRun = checked
+		}
+		if file.KeepContent || written {
 			// Changed since the plan read it: the newer bytes stay, and the
 			// run applies them in a follow-up transaction. A regular file
 			// still gets the managed mode and owner.
@@ -1469,18 +1986,29 @@ func socketsToRestart(env *Env, units []Unit, record *Deployment, p *plan, chang
 // gateway to report healthy. A running socket keeps its listener (queued
 // hooks survive the change) unless its definition changed; a changed one is
 // restarted in one service-manager job, so the port is unbound only for
-// the moment the listener is replaced.
-func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool) error {
+// the moment the listener is replaced. With hot, a gateway that kept running
+// is not started again: it is waited for until it has applied the config.
+func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool, hot bool) error {
 	env := l.env
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
+	for _, unit := range ordered {
+		// systemd refuses to enable or start a masked unit; the error said
+		// neither "masked" nor how to undo it (GAP-0475).
+		if unitMasked(ctx, env.Services, unit) {
+			if err := env.Services.(maskReporter).Unmask(ctx, unit); err != nil {
+				return &unitActivationError{unit: unit, err: fmt.Errorf("unmask %s: %w", unit.Name, err)}
+			}
+			l.noteChange("unmasked %s, which was masked and could not start", unit.Name)
+		}
+	}
 	for _, unit := range ordered {
 		if !unit.Activate {
 			continue
 		}
 		wasDisabled := unitDisabled(ctx, env.Services, unit)
 		if err := env.Services.Enable(ctx, unit); err != nil {
-			return fmt.Errorf("enable %s: %w", unit.Name, err)
+			return &unitActivationError{unit: unit, err: fmt.Errorf("enable %s: %w", unit.Name, err)}
 		}
 		if wasDisabled {
 			l.noteChange("re-enabled %s, which was disabled and would not start after a reboot", unit.Name)
@@ -1503,8 +2031,19 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 			}
 			continue
 		}
+		if hot && unit.Kind == "sensor_helper" && env.Services.Active(ctx, unit) {
+			// Kept running through the config change; starting it again
+			// would restart a launchd job (kickstart -k).
+			continue
+		}
+		if hot && unit.Kind == "gateway" && env.Services.Active(ctx, unit) {
+			if err := l.settleHotGateway(ctx, unit); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := env.Services.Start(ctx, unit); err != nil {
-			return fmt.Errorf("start %s: %w", unit.Name, err)
+			return &unitActivationError{unit: unit, err: fmt.Errorf("start %s: %w", unit.Name, err)}
 		}
 		if unit.Kind == "gateway" {
 			if err := l.waitGatewayReady(ctx, unit); err != nil {
@@ -1513,6 +2052,23 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		}
 	}
 	return nil
+}
+
+// unitActivationError is an activation failure of a unit that is not the
+// gateway: the gateway's output does not say why it failed.
+type unitActivationError struct {
+	unit Unit
+	err  error
+}
+
+func (e *unitActivationError) Error() string { return e.err.Error() }
+func (e *unitActivationError) Unwrap() error { return e.err }
+
+// gatewayFailure reports whether an activation error may come from the
+// gateway, so that its output and a config refusal explain it.
+func gatewayFailure(err error) bool {
+	var unitErr *unitActivationError
+	return !errors.As(err, &unitErr) || unitErr.unit.Kind == "gateway" || unitErr.unit.Kind == "socket"
 }
 
 func (l *lifecycle) waitGatewayReady(ctx context.Context, unit Unit) error {
@@ -1549,9 +2105,11 @@ const keptSnapshotAdvice = "the previous deployment could not be fully restored;
 // and enabled again. With restoreFirst the files are put back before any
 // service is touched (linking and renaming are safe while the services
 // run), and a restore that fails returns without stopping or starting
-// anything. restored is false when any file could not be put back; the
-// snapshot must then be kept for a retry.
-func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeStart func()) (restored bool, err error) {
+// anything. beforeRestore runs once the services are stopped, just before
+// the snapshot is put back, and beforeStart right after. restored is false
+// when any file could not be put back; the snapshot must then be kept for a
+// retry.
+func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeRestore, beforeStart func()) (restored bool, err error) {
 	env := l.env
 	units := env.Services.Units()
 	previouslyActive, previouslyEnabled := intent.PreviouslyActive, intent.PreviouslyEnabled
@@ -1590,9 +2148,16 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 		}
 		_ = env.Services.Stop(ctx, unit)
 	}
+	if beforeRestore != nil {
+		beforeRestore()
+	}
 	restoreErr := env.restore(snap)
 	if beforeStart != nil {
 		beforeStart()
+	}
+	l.rollbackConfigSHA = ""
+	if restoreErr == nil {
+		l.rollbackConfigSHA, _ = sha256File(env.P(env.Layout.ConfigPath))
 	}
 	if err := l.recordRestoredGeneration(ctx); err != nil {
 		l.result.AddWarning(codeRolledBack, "could not record the restored config.yaml in "+configwrite.GenerationFileName+": "+err.Error())
@@ -1689,7 +2254,7 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	// still fails (the disk is still full) then leaves the running services
 	// alone instead of stopping and restarting the gateway on every apply
 	// trigger, MDM ensure or package postinstall until it succeeds.
-	restored, err := l.rollback(ctx, snap, pending, true, nil)
+	restored, err := l.rollback(ctx, snap, pending, true, nil, nil)
 	switch {
 	case !restored:
 		r.AddError(codeRollbackFailed, fmt.Sprintf("could not roll back the interrupted %s started at %s: %v", pending.Action, pending.StartedAt, err))
@@ -1705,6 +2270,50 @@ func (l *lifecycle) recoverInterrupted(ctx context.Context) bool {
 	return true
 }
 
+// restoreUnchangedConfigMetadata puts back the managed mode and owner of an
+// installed config.yaml whose bytes are the applied config, so the run stays
+// a no-op. Configuration management that installs the same file again
+// (install -o root -g root -m 0640) changed only its group: the run restored
+// it and restarted the gateway to load a change that was none, on every run
+// (GAP-0941). A --config run brings its own bytes and is left alone. It
+// reports whether it restored them.
+func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *Deployment) bool {
+	env := l.env
+	if l.opts.ConfigFile != "" || record == nil {
+		return false
+	}
+	// A config.yaml another account could write is replaced by the
+	// transaction instead (replaceWritableConfig). Fixing its mode here, in
+	// place, made it look trusted to the plan, so a write through a
+	// descriptor that account opened while it could write was applied by
+	// the follow-up transaction (GAP-0524).
+	if writable, err := env.installedConfigWritable(ctx); err != nil || writable != "" {
+		return false
+	}
+	path := env.P(env.Layout.ConfigPath)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	raw, err := readBounded(path, maxInputBytes)
+	if err != nil || sha256Bytes(raw) != record.ConfigSHA256 {
+		return false
+	}
+	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
+	if err != nil || !ok || account.GID != record.ServiceGID {
+		return false
+	}
+	owner := fileOwner{UID: 0, GID: account.GID}
+	if !env.metadataDiffers(path, 0o640, owner) || env.fixMetadata(path, 0o640, owner) != nil {
+		return false
+	}
+	if !hasMessageCode(l.result.Warnings, codeConfigMetadataRestored) {
+		l.result.AddWarning(codeConfigMetadataRestored, fmt.Sprintf(
+			"restored the mode and owner of %s (0640, root and the service group); its content is the applied config, so nothing else changed",
+			env.Layout.ConfigPath))
+	}
+	return true
+}
+
 // ensureNoop reports whether the installed deployment already matches the
 // desired state. It never mutates the host.
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
@@ -1714,8 +2323,9 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		return false, ""
 	}
 	p, err := l.buildPlan(ctx, record, account)
-	if err != nil {
-		// apply reports the same error with rollback semantics.
+	if err != nil || p.configWritable != "" {
+		// apply reports the same error with rollback semantics, or replaces
+		// a config.yaml another account could write.
 		return false, ""
 	}
 	if p.version != record.ProductVersion || p.channel != record.Channel || p.config.SHA != record.ConfigSHA256 || p.secretsSHA != record.SecretsSHA256 || len(p.stale) > 0 {
@@ -1736,6 +2346,16 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 	}
 	if problems := l.verifyInstalled(ctx, record, false); len(problems) > 0 {
 		return false, ""
+	}
+	if !record.NoStart {
+		// A unit an administrator disabled may still run (the hook socket
+		// starts the gateway again), so verifyInstalled passes; activation
+		// re-enables it (GAP-0530).
+		for _, unit := range env.Services.Units() {
+			if unit.Activate && unitDisabled(ctx, env.Services, unit) {
+				return false, ""
+			}
+		}
 	}
 	if l.machinePolicyDrift(p) {
 		return false, ""
@@ -1795,16 +2415,29 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	env, r := l.env, l.result
 	units := env.Services.Units()
 	if record == nil && !l.opts.Purge {
-		r.Noop = true
-		r.NoopReason = "not_installed"
-		// After a failed first package install, give the same finish step
-		// as status and verify (GAP-2410).
 		failure := env.lastPackageInstallFailure()
-		env.warnPackageInstallFailed(r, failure)
-		if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
-			r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, failure != ""))
+		// A first deb or rpm install that failed and rolled back left the
+		// package machine state (the config, the state and log folders, the
+		// lifecycle result and the service account the package created):
+		// the package removal runs this uninstall, which found no deployment
+		// and kept all of it (GAP-0421). It is removed as the state of a
+		// committed deployment is. State a --keep-state uninstall kept stays.
+		// A failed first macOS pkg install records no receipt, so its
+		// binaries, the rejected config.yaml and the lifecycle result are
+		// leftovers too, which the MDM uninstall script left in place
+		// (GAP-0567).
+		l.failedInstallLeftovers = failure != "" && !l.opts.KeepState && len(env.loadRetainedState()) == 0
+		if !l.failedInstallLeftovers {
+			r.Noop = true
+			r.NoopReason = "not_installed"
+			// After a failed first package install, give the same finish
+			// step as status and verify (GAP-2410).
+			env.warnPackageInstallFailed(r, failure)
+			if leftovers := env.unmanagedLeftovers(env.Services, ChannelPayload); len(leftovers) > 0 {
+				r.AddWarning(codeLeftovers, "no committed deployment, but DefenseClaw machine state exists ("+strings.Join(leftovers, ", ")+"); "+env.leftoversNextStep(ctx, failure != ""))
+			}
+			return 0
 		}
-		return 0
 	}
 	if !l.opts.Purge {
 		// Read before the machine state, and the accounts record with it, go.
@@ -1831,6 +2464,14 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			}
 		}
 	}
+	gatewayPresent := exists(filepath.Join(env.P(env.Layout.BinDir), binGateway))
+	// Rollback of a first package install may remove config.yaml after
+	// enrollment, while leaving the manifest and hook registrations. The
+	// remove-all command has a cleanup-only config-free path for this case.
+	removePerUser := gatewayPresent && (record != nil || exists(env.P(env.Layout.ManifestPath)))
+	if removePerUser && l.refuseUnresolvedPerUserRows(ctx) {
+		return 0
+	}
 	// The guardian repairs any DefenseClaw registration that goes missing
 	// from a manifest target, the enumerator republishes the manifest, and
 	// the apply and verify triggers start lifecycle runs. All of them stop
@@ -1838,6 +2479,13 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// removed hook back within its debounce and the users are left with
 	// registrations naming a binary this uninstall deletes. The gateway and
 	// its sockets keep answering hooks until the registrations are gone.
+	// What ran and started at boot is recorded first: an uninstall that
+	// stops short of removing the deployment puts it back (GAP-1500).
+	wasActive, wasEnabled := map[string]bool{}, map[string]bool{}
+	for _, unit := range units {
+		wasActive[unit.Name] = env.Services.Active(ctx, unit)
+		wasEnabled[unit.Name] = unitEnabled(ctx, env.Services, unit)
+	}
 	for _, unit := range ordered {
 		if repairsRegistrations(unit) {
 			stopUnit(unit)
@@ -1853,23 +2501,28 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// enrollment record and the config it needs are there; otherwise it
 	// names the accounts whose per-user files stay (GAP-2632).
 	perUserLeft := false
-	gatewayPresent := exists(filepath.Join(env.P(env.Layout.BinDir), binGateway))
-	enrollmentKept := exists(env.P(env.Layout.ManifestPath)) && exists(env.P(env.Layout.ConfigPath))
 	// Without a record, the package database says whether the deb/rpm owns
 	// the binaries: a purge deleted those of an installed rpm (GAP-2632).
 	l.packageManaged = env.GOOS == "linux" && (record != nil && record.Channel == ChannelPackage ||
 		record == nil && gatewayPresent && env.packageOwned(ctx, filepath.Join(env.Layout.BinDir, binGateway)))
-	if gatewayPresent && (record != nil || enrollmentKept) {
+	if removePerUser {
+		var cacheAccounts []sessionFactsAccount
+		if l.opts.Purge {
+			cacheAccounts = env.sessionFactsAccounts()
+		}
 		perUserLeft = l.removePerUserRegistrations(ctx)
-	} else if record == nil {
+		l.purgeSessionFactsCaches(cacheAccounts)
+	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
 	}
 	// DefenseClaw's vendor machine policy entries go next, while the hook
 	// binary they name still exists; administrator entries stay byte for
 	// byte (enterprisepolicy restores the recorded preimage or edits only
 	// DefenseClaw's own entries).
+	policyLeft := false
 	if policy, err := env.MachinePolicy.RemoveAll(); err != nil {
 		errs = append(errs, fmt.Errorf("remove machine policy: %w", err))
+		policyLeft = true
 	} else {
 		for _, state := range policy.States {
 			if state.Changed {
@@ -1882,26 +2535,41 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			stopUnit(unit)
 		}
 	}
-	if perUserLeft {
-		disableKeptDefinitions()
-		// Some users' agents still name the hook binary. Removing it now
+	if perUserLeft || policyLeft {
+		// Some users' agents, or vendor machine policy that could not be
+		// withdrawn (GAP-1321), still name the hook binary. Removing it now
 		// would leave those registrations calling a program that no longer
-		// exists, with nothing left to remove them: the binaries, the
-		// deployment record and the state stay, so a rerun of this uninstall
-		// removes the rest and ensure restores the deployment.
+		// exists, so the agents run without enforcement and nothing is left
+		// to remove them: the binaries, the deployment record and the state
+		// stay, so a rerun of this uninstall removes the rest. The services
+		// the uninstall stopped start again as they were: left stopped, the
+		// gateway gave the retained hooks no decisions until an
+		// administrator ran ensure (GAP-1500).
 		if err := errors.Join(errs...); err != nil {
 			r.AddError(codeUninstall, err.Error())
 		}
-		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because the per-user hook registrations listed above still name them; fix each one and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
+		if failed := l.restoreUninstallServices(ctx, units, wasActive, wasEnabled); len(failed) > 0 {
+			r.AddError(codeUninstall, "could not start the services this uninstall stopped again ("+strings.Join(failed, "; ")+"); run `"+env.lifecycleCommand(ActionEnsure)+"` to restore the deployment")
+		}
+		var holders []string
+		if perUserLeft {
+			holders = append(holders, "the per-user hook registrations listed above")
+		}
+		if policyLeft {
+			holders = append(holders, "the vendor machine policy entries that could not be removed (a read-only or immutable policy file, for example)")
+		}
+		r.AddError(codeUninstall, "stopped before removing the DefenseClaw binaries, the deployment record and the state, because "+strings.Join(holders, " and ")+" still name them; fix the cause and rerun `"+l.uninstallCommand()+"`, or run ensure to restore the deployment")
 		return 0
 	}
-	// On Linux the deb/rpm removes its own files. A macOS pkg has no
-	// uninstaller, so the lifecycle removes the binaries and the receipt.
+	// On Linux the deb/rpm removes its own files (the binaries, units and
+	// the managed OpenCode plugin). A macOS pkg has no uninstaller, so the
+	// lifecycle removes the binaries and the receipt.
 	packageManaged := l.packageManaged
 	paths := []string{}
 	if record != nil {
 		for path := range record.Files {
-			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/")) {
+			if packageManaged && (filepath.Dir(path) == env.Layout.BinDir || strings.HasPrefix(path, "/usr/lib/") ||
+				path == enterprisepolicy.OpenCodeManagedPluginPath(env.Layout)) {
 				continue
 			}
 			paths = append(paths, path)
@@ -1922,6 +2590,12 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		}
 		if ownedParent(filepath.Dir(path)) {
 			_ = removeDirIfEmpty(env.P(filepath.Dir(path)))
+		}
+	}
+	if record == nil && env.GOOS == "linux" {
+		for _, unit := range units {
+			// The drop-in folders a rolled-back install left empty.
+			_ = removeDirIfEmpty(env.P(filepath.Join("/etc/systemd/system", unit.Name+".d")))
 		}
 	}
 	if err := env.Services.Reload(ctx); err != nil {
@@ -1957,6 +2631,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		disableKeptDefinitions()
 	}
 	_ = os.RemoveAll(env.P(env.Layout.HookSocketDir))
+	l.removeSELinuxModule(ctx)
 	// Runtime leftovers of the stopped services: the sensor helper's socket
 	// directory and the gateway's plugin cache (its TempDir is /tmp: the
 	// service manager sets no TMPDIR).
@@ -1967,7 +2642,8 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// Vendor policies are product files: they leave with the deployment,
 	// including the nested rule-pack directories.
 	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
-	// The managed OpenCode plugin left with the recorded files above.
+	// The managed OpenCode plugin left with the recorded files above, or
+	// leaves with the deb or rpm that ships it.
 	_ = removeDirIfEmpty(env.P(openCodePluginDir(env.Layout)))
 	_ = removeDirIfEmpty(env.P(filepath.Dir(env.Layout.VendorPolicyDir)))
 	if env.GOOS == "darwin" {
@@ -1996,7 +2672,7 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	// No config is running once the deployment is gone; a reinstall that
 	// keeps the retained config.yaml starts without an old rejection.
-	_ = removeFile(env.rejectedConfigPath())
+	env.removeRejectedConfig()
 	_ = os.RemoveAll(filepath.Join(env.P(env.Layout.LifecycleDir), snapshotsDirName))
 	env.removeSideStores("")
 
@@ -2008,13 +2684,16 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	// an ensure that restores the deployment.
 	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
 	if removeState {
-		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir, env.Layout.LifecycleDir} {
+		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir} {
 			if err := os.RemoveAll(env.P(dir)); err != nil {
 				errs = append(errs, err)
 			}
 		}
+		if err := env.removeLifecycleStateKeepingLock(); err != nil {
+			errs = append(errs, err)
+		}
 		if !packageManaged {
-			if err := os.RemoveAll(env.P(env.Layout.InstallRoot)); err != nil {
+			if err := env.removeInstallRootKeepingLock(); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -2023,8 +2702,28 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			_ = removeDirIfEmpty(env.P("/Library/Logs/Cisco"))
 		}
 		if !l.opts.KeepServiceAccount {
+			// By now the services, the binaries (this CLI included) and the
+			// deployment record are gone, so failing the uninstall here would
+			// leave a command that cannot be rerun. The account is a leftover
+			// to delete by hand.
 			if err := env.Accounts.Remove(ctx, env.Layout.ServiceUser); err != nil {
-				errs = append(errs, err)
+				l.serviceAccountKept = true
+				r.AddWarning(codeAccount, fmt.Sprintf("the service account %s was not removed: %v; everything else is removed. Delete the account by hand: %s",
+					env.Layout.ServiceUser, err, serviceAccountDeleteCommand(env.GOOS, env.Layout.ServiceUser)))
+			} else if packageManaged {
+				// The package stays installed, and its tmpfiles.d entries
+				// name the removed account: every boot logged ten
+				// resolution errors and recreated empty root-owned state
+				// folders (GAP-0516). An override of the same name turns
+				// them off until the next install removes it.
+				override := env.P(packageTmpfilesOverride)
+				err := mkdirParents(filepath.Dir(override))
+				if err == nil {
+					err = env.writeFileAtomic(override, []byte(packageTmpfilesOverrideText), 0o644, rootOwner())
+				}
+				if err != nil {
+					r.AddWarning(codeAccount, fmt.Sprintf("could not turn off the package's tmpfiles.d entries for the removed account: %v; the next boot logs that it cannot resolve %s", err, env.Layout.ServiceUser))
+				}
 			}
 		}
 	}
@@ -2054,6 +2753,47 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	return 0
 }
 
+// serviceAccountDeleteCommand is how an administrator deletes the service
+// account by hand after an uninstall could not.
+func serviceAccountDeleteCommand(goos, name string) string {
+	if goos == "darwin" {
+		return "`sudo dscl . -delete /Users/" + name + "` and `sudo dscl . -delete /Groups/" + name + "`"
+	}
+	return "`sudo userdel " + name + "`"
+}
+
+// restoreUninstallServices puts back the units an uninstall stopped, as
+// they were before it (wasActive, wasEnabled), in activation order, the way
+// a rollback does, and waits for the gateway. It returns what it could not
+// restore.
+func (l *lifecycle) restoreUninstallServices(ctx context.Context, units []Unit, wasActive, wasEnabled map[string]bool) []string {
+	env := l.env
+	ordered := append([]Unit{}, units...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
+	var failed []string
+	for _, unit := range ordered {
+		if wasEnabled[unit.Name] {
+			if err := env.Services.Enable(ctx, unit); err != nil {
+				failed = append(failed, fmt.Sprintf("enable %s: %v", unit.Name, err))
+			}
+		}
+		// The run itself, and a queued apply run that waits for this one.
+		if !wasActive[unit.Name] || unit.Name == env.SelfUnit || unit.Name == unitApplyService {
+			continue
+		}
+		if err := env.Services.Start(ctx, unit); err != nil {
+			failed = append(failed, fmt.Sprintf("start %s: %v", unit.Name, err))
+			continue
+		}
+		if unit.Kind == "gateway" {
+			if err := l.waitGatewayReady(ctx, unit); err != nil {
+				failed = append(failed, err.Error())
+			}
+		}
+	}
+	return failed
+}
+
 // uninstallSummary says what a completed uninstall removed and kept, like
 // the change list of ensure and repair. A bare "uninstall: done" did not
 // tell the administrator what happened to the machine state or to the
@@ -2062,7 +2802,9 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	env, r := l.env, l.result
 	layout := env.Layout
 	removed := "stopped and removed the DefenseClaw services, binaries and deployment record"
-	if l.packageManaged {
+	if l.failedInstallLeftovers {
+		removed = "no deployment was committed (the package install failed); removed what that install left"
+	} else if l.packageManaged {
 		removed = "stopped and removed the DefenseClaw services and deployment record (the package manager removes the package's files)"
 	}
 	lines := []string{removed}
@@ -2079,6 +2821,8 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		lines = append(lines, "kept for a reinstall: "+state+" and the service account "+layout.ServiceUser)
 	case l.opts.KeepServiceAccount:
 		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); kept the service account "+layout.ServiceUser)
+	case l.serviceAccountKept:
+		lines = append(lines, "removed the machine state: "+state+" and the lifecycle state ("+layout.LifecycleDir+"); the service account "+layout.ServiceUser+" stays (see the warning)")
 	default:
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}
@@ -2088,6 +2832,78 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		}
 	}
 	return lines
+}
+
+// recordPackageResult keeps the result of an `ensure --from-package` run
+// outside the package's own install script (an administrator finishing the
+// install or applying a rollback, the MDM wrapper) in
+// last-package-result.json, which the install script writes for its own
+// run. After a refused package apply the file kept ok: false for the newer
+// build while the deployment was healthy again (GAP-1116).
+func (l *lifecycle) recordPackageResult(failure int) {
+	env := l.env
+	result := *l.result
+	result.Warnings = uniqueMessages(result.Warnings)
+	result.Finish(env.GOOS, failure)
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return
+	}
+	path := filepath.Join(env.P(env.Layout.LifecycleDir), lastPackageResultFile)
+	if err := env.writeFileAtomic(path, append(data, '\n'), 0o600, rootOwner()); err != nil {
+		l.result.AddWarning(codeState, "could not record this run in "+filepath.Join(env.Layout.LifecycleDir, lastPackageResultFile)+": "+err.Error())
+	}
+}
+
+// refuseUnresolvedPerUserRows asks `enterprise hooks remove-all --check`,
+// before any service stops or policy goes, whether every manifest row can be
+// removed. A failed command or incomplete report also refuses the uninstall:
+// manifest parse and trust errors have no per-row failures to report.
+func (l *lifecycle) refuseUnresolvedPerUserRows(ctx context.Context) bool {
+	env, r := l.env, l.result
+	out, commandErr := env.runGatewayCLI(ctx, "enterprise", "hooks", "remove-all", "--manifest", env.Layout.ManifestPath, "--json", "--check")
+	var report struct {
+		OK     bool     `json:"ok"`
+		Failed []string `json:"failed"`
+	}
+	parseErr := json.Unmarshal(out.Stdout, &report)
+	refused := false
+	if parseErr == nil {
+		for _, entry := range report.Failed {
+			user, connector, reason, ok := cutPerUserEntry(entry)
+			if !ok {
+				continue
+			}
+			r.AddError(codePerUserHooks, fmt.Sprintf("the %s manifest row of user %s cannot be removed: %s; fix or remove that row in %s and rerun `%s`",
+				connector, user, reason, env.Layout.ManifestPath, l.uninstallCommand()))
+			refused = true
+		}
+	}
+	if commandErr == nil && parseErr == nil && report.OK && len(report.Failed) == 0 {
+		return false
+	}
+	if !refused {
+		reason := "the hook-removal precheck did not succeed"
+		if commandErr != nil {
+			reason = commandErr.Error()
+		} else if parseErr != nil {
+			reason = "the hook-removal precheck returned an invalid report: " + parseErr.Error()
+		}
+		r.AddError(codePerUserHooks, "cannot check per-user hook removal: "+reason)
+	}
+	r.AddError(codeUninstallPrecheck, "nothing was changed: every service is still running and the machine policy is in place; fix the hook-removal precheck and rerun `"+l.uninstallCommand()+"`")
+	return true
+}
+
+// cutPerUserEntry splits a remove-all entry "user/connector: reason". The
+// user part may be a home path, so the connector follows the last slash.
+func cutPerUserEntry(entry string) (user, connector, reason string, ok bool) {
+	label, reason, _ := strings.Cut(entry, ": ")
+	i := strings.LastIndex(label, "/")
+	if i < 0 {
+		return "", "", reason, false
+	}
+	return label[:i], label[i+1:], reason, true
 }
 
 // removePerUserRegistrations runs `enterprise hooks remove-all` (with
@@ -2102,11 +2918,11 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	if l.opts.Purge {
 		args = append(args, "--purge")
 	}
-	out, err := env.runGatewayCLI(ctx, args...)
+	out, err := env.runGatewayCLILong(ctx, removeAllTimeout, args...)
 	if err != nil && l.opts.Purge && !json.Valid(out.Stdout) {
 		// An installed binary from before remove-all took --purge: remove
 		// the registrations, which is what the binaries are kept for.
-		out, err = env.runGatewayCLI(ctx, args[:len(args)-1]...)
+		out, err = env.runGatewayCLILong(ctx, removeAllTimeout, args[:len(args)-1]...)
 	}
 	var report struct {
 		Pending     []string `json:"pending"`
@@ -2124,8 +2940,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 	rerun := "`" + l.uninstallCommand() + "`"
 	left := false
 	for _, entry := range report.Failed {
-		label, reason, _ := strings.Cut(entry, ": ")
-		user, connector, ok := strings.Cut(label, "/")
+		user, connector, reason, ok := cutPerUserEntry(entry)
 		if !ok {
 			// A check that names no registration (an unreadable eligible
 			// accounts file, say) does not hold up the uninstall.
@@ -2140,7 +2955,7 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		left = true
 	}
 	for _, entry := range report.Pending {
-		user, connector, _ := strings.Cut(entry, "/")
+		user, connector, _, _ := cutPerUserEntry(entry)
 		r.AddWarning(codePerUserHooks, fmt.Sprintf("DefenseClaw's %s hooks for user %s were not removed because that account's home is not available; once it is, remove DefenseClaw's entries from that account's %s config", connector, user, connector))
 	}
 	for _, entry := range report.StateFailed {

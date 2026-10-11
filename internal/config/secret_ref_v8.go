@@ -11,10 +11,13 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -92,6 +95,44 @@ func ObservabilityV8CredentialReference(sourceName string, raw []byte, defaultDa
 	var secretError *V8SecretReferenceError
 	if errors.As(err, &secretError) && secretError.Credential && secretError.Reference == name {
 		return secretError.Path
+	}
+	return ""
+}
+
+// InstalledCredentialReference returns where a v8 source references the
+// protected credential name, or "" when nothing does: an enabled
+// observability destination, the LLM judge and scanner key
+// (enterprise.inspection.llm.credential) or an enabled AI Defense
+// (enterprise.inspection.ai_defense.credential). Without the judge key the
+// scanners and the hook judge ran without an LLM while status and verify
+// stayed green, so removing a credential the config still names is refused
+// (GAP-0674). It reads no secret.
+func InstalledCredentialReference(sourceName string, raw []byte, defaultDataDir, name string) string {
+	if at := ObservabilityV8CredentialReference(sourceName, raw, defaultDataDir, name); at != "" {
+		return at
+	}
+	var document struct {
+		Enterprise struct {
+			Inspection struct {
+				LLM struct {
+					Credential string `yaml:"credential"`
+				} `yaml:"llm"`
+				AIDefense struct {
+					Enabled    bool   `yaml:"enabled"`
+					Credential string `yaml:"credential"`
+				} `yaml:"ai_defense"`
+			} `yaml:"inspection"`
+		} `yaml:"enterprise"`
+	}
+	if yaml.Unmarshal(bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf")), &document) != nil {
+		return ""
+	}
+	inspection := document.Enterprise.Inspection
+	switch {
+	case strings.TrimSpace(inspection.LLM.Credential) == name:
+		return "enterprise.inspection.llm.credential"
+	case inspection.AIDefense.Enabled && strings.TrimSpace(inspection.AIDefense.Credential) == name:
+		return "enterprise.inspection.ai_defense.credential"
 	}
 	return ""
 }

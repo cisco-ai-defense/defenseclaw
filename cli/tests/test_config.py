@@ -95,55 +95,6 @@ class TestHelpers(unittest.TestCase):
     def test_dedup_empty(self):
         self.assertEqual(_dedup([]), [])
 
-    def test_malformed_otel_destination_numbers_fall_back_to_defaults(self):
-        cfg = config_mod._merge_otel(
-            {
-                "destinations": [
-                    {
-                        "name": "malformed",
-                        "enabled": True,
-                        "metrics": {"enabled": True, "export_interval_s": "abc"},
-                        "batch": {
-                            "max_export_batch_size": "many",
-                            "scheduled_delay_ms": {},
-                            "max_queue_size": None,
-                        },
-                    }
-                ]
-            }
-        )
-        destination = cfg.destinations[0]
-        self.assertEqual(destination.metrics.export_interval_s, 60)
-        self.assertEqual(destination.batch.max_export_batch_size, 512)
-        self.assertEqual(destination.batch.scheduled_delay_ms, 5000)
-        self.assertEqual(destination.batch.max_queue_size, 2048)
-
-    def test_quoted_false_does_not_enable_otel_destination_or_signals(self):
-        cfg = config_mod._merge_otel(
-            {
-                "enabled": "false",
-                "logs": {"emit_individual_findings": "false"},
-                "destinations": [
-                    {
-                        "name": "quoted",
-                        "enabled": "false",
-                        "tls": {"insecure": "false"},
-                        "traces": {"enabled": "false"},
-                        "logs": {"enabled": "false"},
-                        "metrics": {"enabled": "false"},
-                    }
-                ],
-            }
-        )
-        self.assertFalse(cfg.enabled)
-        self.assertFalse(cfg.logs.emit_individual_findings)
-        destination = cfg.destinations[0]
-        self.assertFalse(destination.enabled)
-        self.assertFalse(destination.tls.insecure)
-        self.assertFalse(destination.traces.enabled)
-        self.assertFalse(destination.logs.enabled)
-        self.assertFalse(destination.metrics.enabled)
-
     def test_validate_deployment_mode_empty_allowed(self):
         self.assertEqual(config_mod._validate_deployment_mode(""), "")
 
@@ -624,8 +575,6 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertTrue(cfg.data_dir.endswith(".defenseclaw"))
         self.assertTrue(cfg.audit_db.endswith("audit.db"))
         self.assertEqual(cfg.claw.mode, "openclaw")
-        self.assertEqual(cfg.scanners.skill_scanner.binary, "skill-scanner")
-        self.assertEqual(cfg.scanners.mcp_scanner.binary, "mcp-scanner")
         self.assertEqual(cfg.gateway.port, 18789)
         self.assertEqual(cfg.gateway.api_bind, "")
         self.assertEqual(cfg.gateway.api_port, 18970)
@@ -645,8 +594,8 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertFalse(sc.use_behavioral)
         self.assertFalse(sc.enable_meta)
         self.assertFalse(sc.use_trigger)
-        self.assertFalse(sc.use_virustotal)
-        self.assertFalse(sc.use_aidefense)
+        self.assertFalse(sc.analyzers.virustotal.enabled)
+        self.assertFalse(sc.analyzers.aidefense.enabled)
         self.assertEqual(sc.llm_consensus_runs, 0)
         self.assertTrue(sc.lenient)
 
@@ -928,7 +877,8 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(raw["asset_policy"]["mode"], "action")
             self.assertTrue(raw["asset_policy"]["mcp"]["registry_required"])
             self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["name"], "github")
-            self.assertFalse(raw["asset_policy"]["skill"]["runtime_detection"]["enabled"])
+            # GAP-0060: only what differs from the defaults is written.
+            self.assertEqual(raw["asset_policy"]["skill"], {"default": "deny"})
 
             with patch("defenseclaw.config.default_data_path") as mock_dp:
                 mock_dp.return_value = Path(tmpdir)
@@ -991,6 +941,22 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(loaded.asset_policy.effective_mode("codex"), "action")
             self.assertEqual(loaded.asset_policy.effective_mode("hermes"), "observe")
 
+    def test_empty_profile_hilt_inherits_global_hilt(self):
+        guardrail = _merge_guardrail(
+            {
+                "hilt": {"enabled": True},
+                "connectors": {"cursor": {"hilt": {}}},
+                "profiles": {
+                    "baseline": {"hilt": {}, "connectors": {"codex": {"hilt": {}}}},
+                },
+            },
+            "/tmp",
+        )
+        profile = guardrail.profiles["baseline"]
+        self.assertIsNone(profile.hilt)
+        self.assertIsNone(profile.connectors["codex"].hilt)
+        self.assertFalse(guardrail.connectors["cursor"].hilt.enabled)
+
     def test_guardrail_profiles_and_ide_inventory_roundtrip(self):
         # Parity with internal/config: profiles, ordered assignments, the
         # default profile and the two ai_discovery identity keys survive a
@@ -1021,7 +987,12 @@ class TestConfigLoadSave(unittest.TestCase):
                     tmpdir,
                 ),
                 ai_discovery=config_mod._merge_ai_discovery(
-                    {"enabled": True, "ide_inventory": "ai_only", "include_user_principal": True}
+                    {
+                        "enabled": True,
+                        "ide_inventory": "ai_only",
+                        "include_user_principal": True,
+                        "trusted_ad_child_domains": ["emea.corp.example.com"],
+                    }
                 ),
             )
             cfg.save()
@@ -1039,6 +1010,7 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(raw["guardrail"]["default_profile"], "contractors")
             self.assertEqual(raw["ai_discovery"]["ide_inventory"], "ai_only")
             self.assertTrue(raw["ai_discovery"]["include_user_principal"])
+            self.assertEqual(raw["ai_discovery"]["trusted_ad_child_domains"], ["emea.corp.example.com"])
 
             with patch("defenseclaw.config.default_data_path") as mock_dp:
                 mock_dp.return_value = Path(tmpdir)
@@ -1046,12 +1018,14 @@ class TestConfigLoadSave(unittest.TestCase):
             self.assertEqual(loaded.guardrail.profiles["contractors"].connectors["codex"].mode, "observe")
             self.assertEqual(loaded.guardrail.profile_assignments[0].match.groups, ["CORP\\Contractors"])
             self.assertEqual(loaded.ai_discovery.ide_inventory, "ai_only")
+            self.assertEqual(loaded.ai_discovery.trusted_ad_child_domains, ["emea.corp.example.com"])
 
             loaded.guardrail.profiles = {}
             loaded.guardrail.profile_assignments = []
             loaded.guardrail.default_profile = ""
             loaded.ai_discovery.ide_inventory = "all"
             loaded.ai_discovery.include_user_principal = False
+            loaded.ai_discovery.trusted_ad_child_domains = []
             loaded.save()
             with open(os.path.join(tmpdir, "config.yaml")) as f:
                 raw = yaml.safe_load(f)
@@ -1059,6 +1033,22 @@ class TestConfigLoadSave(unittest.TestCase):
                 self.assertFalse(raw.get("guardrail", {}).get(key))
             self.assertNotIn("ide_inventory", raw.get("ai_discovery", {}))
             self.assertNotIn("include_user_principal", raw.get("ai_discovery", {}))
+            self.assertNotIn("trusted_ad_child_domains", raw.get("ai_discovery", {}))
+
+            # A hand-written unquoted off is the string off to the gateway
+            # (YAML 1.2); YAML 1.1 made it False, read as all, and a save then
+            # failed v8 validation.
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file, "a") as f:
+                f.write("ai_discovery:\n  enabled: true\n  ide_inventory: off\n")
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                loaded = load()
+            self.assertEqual(loaded.ai_discovery.ide_inventory, "off")
+            loaded.ai_discovery.enabled = False
+            loaded.save()
+            with open(config_file) as f:
+                self.assertEqual(config_mod.parse_config_yaml(f.read())["ai_discovery"]["ide_inventory"], "off")
 
     def test_global_only_asset_policy_omits_connectors_key(self):
         # An enabled-but-global-only config must NOT emit `connectors:` so it
@@ -1462,7 +1452,7 @@ class TestMergeMCPScannerClean(unittest.TestCase):
             "llm_provider": "openai",
             "api_key": "stale-key",
         })
-        self.assertEqual(cfg.binary, "mcp-scanner")
+        self.assertFalse(hasattr(cfg, "binary"))
         self.assertEqual(cfg.analyzers, "yara")
         self.assertFalse(hasattr(cfg, "llm_provider"))
         self.assertFalse(hasattr(cfg, "api_key"))
@@ -1482,13 +1472,27 @@ class TestSkillScannerConfigClean(unittest.TestCase):
         cfg = SkillScannerConfig(
             use_llm=True, use_behavioral=True,
             llm_consensus_runs=3, policy="strict",
-            virustotal_api_key="vt-key",
         )
         self.assertTrue(cfg.use_llm)
         self.assertTrue(cfg.use_behavioral)
         self.assertEqual(cfg.llm_consensus_runs, 3)
         self.assertEqual(cfg.policy, "strict")
-        self.assertEqual(cfg.virustotal_api_key, "vt-key")
+
+    def test_a_v8_source_folds_its_retired_scanner_keys_into_analyzers(self):
+        # GAP-0157: the models carry no v8-only fields; a version 8 source (a
+        # Secure Client document is never migrated) is read through analyzers.
+        from defenseclaw.config import _merge_skill_scanner_analyzers
+
+        folded = _merge_skill_scanner_analyzers(
+            {"use_virustotal": True, "use_aidefense": True, "virustotal_api_key_env": "VT_KEY"}
+        )
+        self.assertTrue(folded.virustotal.enabled and folded.aidefense.enabled)
+        self.assertEqual(folded.virustotal.api_key_env, "VT_KEY")
+        written = _merge_skill_scanner_analyzers(
+            {"use_virustotal": True, "analyzers": {"virustotal": {"enabled": False}}}
+        )
+        self.assertFalse(written.virustotal.enabled)
+        self.assertFalse(hasattr(SkillScannerConfig(), "use_virustotal"))
 
 
 class TestConfigTopLevelSections(unittest.TestCase):
@@ -1754,14 +1758,14 @@ class TestGuardrailHostField(unittest.TestCase):
         )
         self.assertEqual(gc.allow_private_upstreams, ["10.50.2.100", "172.16.0.5"])
 
-    def test_merge_guardrail_hilt_defaults_and_alias(self):
+    def test_merge_guardrail_hilt_defaults_and_values(self):
         default_gc = _merge_guardrail({}, "/tmp")
         self.assertFalse(default_gc.hilt.enabled)
         self.assertEqual(default_gc.hilt.min_severity, "HIGH")
 
-        aliased = _merge_guardrail({"hitl": {"enabled": True, "min_severity": "medium"}}, "/tmp")
-        self.assertTrue(aliased.hilt.enabled)
-        self.assertEqual(aliased.hilt.min_severity, "MEDIUM")
+        configured = _merge_guardrail({"hilt": {"enabled": True, "min_severity": "medium"}}, "/tmp")
+        self.assertTrue(configured.hilt.enabled)
+        self.assertEqual(configured.hilt.min_severity, "MEDIUM")
 
 
 class TestOpenShellLegacyKeys(unittest.TestCase):
@@ -1980,3 +1984,23 @@ class TestPolicyDirDefault(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(sys.platform == "win32" or os.geteuid() == 0, "POSIX permissions as a regular account")
+class UnreadableConfigTest(unittest.TestCase):
+    # GAP-0398: a root-owned (unreadable) config.yaml is not a missing one.
+    def test_load_refuses_instead_of_using_defaults(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg_file = os.path.join(data_dir, "config.yaml")
+            Path(cfg_file).write_text("config_version: 9\n")
+            os.chmod(cfg_file, 0)
+            try:
+                with patch.object(config_mod, "config_path_for_data_dir", return_value=Path(cfg_file)):
+                    with self.assertRaises(config_mod.ConfigVersionError):
+                        config_mod.load(data_dir=data_dir)
+                with patch.object(config_mod.os, "geteuid", return_value=os.getuid() + 1):
+                    message = config_mod._unreadable_config_message(cfg_file, PermissionError(13, "Permission denied"))
+                self.assertIn("sudo chown", message)
+                self.assertIn(cfg_file, message)
+            finally:
+                os.chmod(cfg_file, 0o600)

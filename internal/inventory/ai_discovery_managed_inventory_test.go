@@ -18,6 +18,8 @@ package inventory
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -203,11 +205,6 @@ func lifecycleTestSignal(fingerprint, user string) AISignal {
 func lifecycleStates(t *testing.T, report AIDiscoveryReport) map[string]string {
 	t.Helper()
 	if detail := report.Summary.DetectorErrors["state_store"]; detail != "" {
-		if runtime.GOOS == "windows" {
-			// An elevated Windows run owns its temp folder as
-			// Administrators, which the state store refuses.
-			t.Skipf("state store unavailable here: %s", detail)
-		}
 		t.Fatalf("state store: %s", detail)
 	}
 	states := map[string]string{}
@@ -287,5 +284,191 @@ func TestSignalGainingItsAccountIsReportedOnceAsNew(t *testing.T) {
 		[]AISignal{lifecycleTestSignal("fp-copilot", "dcw-std1")}, stats, next, true)
 	if report.Signals[0].State != AIStateSeen {
 		t.Fatalf("second scan state = %q", report.Signals[0].State)
+	}
+}
+
+// A managed gateway reads the profile list again at every full scan, so an
+// account created after it started is scanned without a restart (GAP-0707).
+func TestManagedDiscoveryRereadsTheProfileListEachFullScan(t *testing.T) {
+	root := t.TempDir()
+	owners := []discoveryHomeOwner{{Home: filepath.Join(root, "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return owners }
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, DataDir: filepath.Join(root, "data"),
+	}, nil)
+	cleanupPreparedDiscoveryService(t, svc)
+	owners = append(owners, discoveryHomeOwner{Home: filepath.Join(root, "bob"), UserID: "S-1-5-21-1-2-3-1002", UserName: "bob"})
+	if _, err := svc.runScan(context.Background(), true, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if homes := svc.homesToScan(); len(homes) != 2 || homes[1] != owners[1].Home {
+		t.Fatalf("homes = %v, want the profile created after the gateway started", homes)
+	}
+}
+
+func TestManagedDiscoveryRemovesDeletedLastProfileOnce(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "deleted-user")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	owners := []discoveryHomeOwner{{Home: home, UserID: "S-1-5-21-1-2-3-1125", UserName: "deleted-user"}}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return owners }
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+	}, []AISignature{{ID: "claudecode", Name: "Claude Code", SupportedConnector: "claudecode", ConfigPaths: []string{"~/.claude"}}})
+	cleanupPreparedDiscoveryService(t, svc)
+	first, err := svc.runScan(context.Background(), true, "test")
+	if err != nil || first.Summary.ActiveSignals == 0 {
+		t.Fatalf("first scan = %+v, %v", first.Summary, err)
+	}
+	owners = []discoveryHomeOwner{} // successful ProfileList read, no resolvable SID
+	second, err := svc.runScan(context.Background(), true, "test")
+	if err != nil || second.Summary.GoneSignals == 0 || second.Summary.ActiveSignals != 0 {
+		t.Fatalf("deleted account scan = %+v, %v", second.Summary, err)
+	}
+	third, err := svc.runScan(context.Background(), true, "test")
+	if err != nil || third.Summary.GoneSignals != 0 || third.Summary.ActiveSignals != 0 {
+		t.Fatalf("repeated deletion scan = %+v, %v", third.Summary, err)
+	}
+}
+
+// ai_discovery.home_dirs adds folders to a managed scan's profile list. It
+// replaced the list, so every IDE row and signal lost its owner (GAP-0969).
+func TestManagedDiscoveryHomeDirsAddToTheProfileList(t *testing.T) {
+	root := t.TempDir()
+	alice := discoveryHomeOwner{Home: filepath.Join(root, "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}
+	bob := discoveryHomeOwner{Home: filepath.Join(root, "bob"), UserID: "S-1-5-21-1-2-3-1002", UserName: "bob"}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return []discoveryHomeOwner{alice, bob} }
+	extra := filepath.Join(root, "shared")
+	opts := normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+		HomeDirs: []string{alice.Home, bob.Home, extra},
+	})
+	svc := &ContinuousDiscoveryService{opts: opts}
+	homes := svc.homesToScan()
+	if len(homes) != 3 || homes[0] != alice.Home || homes[1] != bob.Home || homes[2] != extra {
+		t.Fatalf("homes = %v, want both profiles and the extra folder", homes)
+	}
+	if owner, ok := svc.homeOwnerForPath(filepath.Join(bob.Home, ".vscode", "extensions")); !ok || owner.UserName != "bob" {
+		t.Fatalf("owner of a folder in bob's profile = %+v, %t", owner, ok)
+	}
+}
+
+// makeDiscoveryDirLink makes link a directory junction to target on Windows
+// (what a standard user can create without a privilege) and a symbolic link
+// elsewhere.
+func makeDiscoveryDirLink(t *testing.T, target, link string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		if output, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+			t.Skipf("junction creation unavailable: %v: %s", err, output)
+		}
+	} else if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+}
+
+// A standard user who makes their .codex a junction to another enrolled
+// account's .codex gets no record of that account's Codex config or MCP
+// servers, and a home_dirs folder that is a junction is not scanned
+// (GAP-1097).
+func TestManagedDiscoveryRefusesProfileJunctions(t *testing.T) {
+	root := t.TempDir()
+	owner := discoveryHomeOwner{Home: filepath.Join(root, "o4w1"), UserID: "S-1-5-21-1-2-3-1001", UserName: "o4w1"}
+	planter := discoveryHomeOwner{Home: filepath.Join(root, "o4wd"), UserID: "S-1-5-21-1-2-3-1002", UserName: "o4wd"}
+	codex := filepath.Join(owner.Home, ".codex")
+	elsewhere := filepath.Join(root, "elsewhere")
+	for _, dir := range []string{codex, planter.Home, filepath.Join(elsewhere, ".codex")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{codex, filepath.Join(elsewhere, ".codex")} {
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[mcp_servers.private]\ncommand = \"x\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	makeDiscoveryDirLink(t, codex, filepath.Join(planter.Home, ".codex"))
+	extra := filepath.Join(root, "shared")
+	makeDiscoveryDirLink(t, elsewhere, extra)
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return []discoveryHomeOwner{owner, planter} }
+	svc := &ContinuousDiscoveryService{
+		catalog: []AISignature{{ID: "codex", Name: "Codex", SupportedConnector: "codex",
+			ConfigPaths: []string{"~/.codex/config.toml"}, MCPPaths: []string{"~/.codex/config.toml"}}},
+		opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+			Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+			HomeDirs: []string{extra},
+		}),
+	}
+	svc.refreshPlatformHomes()
+	if homes := svc.homesToScan(); len(homes) != 2 || homes[0] != owner.Home || homes[1] != planter.Home {
+		t.Fatalf("homes = %v, want the two profiles without the linked home_dirs folder", homes)
+	}
+	signals := append(svc.detectConfigPaths(), svc.detectMCPPaths()...)
+	if len(signals) != 2 {
+		t.Fatalf("signals = %+v, want the owner's Codex config and MCP signals only", signals)
+	}
+	for _, sig := range signals {
+		if sig.UserID != owner.UserID {
+			t.Fatalf("signal %s/%s attributed to %q, want only %q", sig.Detector, sig.Category, sig.UserName, owner.UserName)
+		}
+	}
+}
+
+// enterprise.enrollment.exclude_users takes a profile off a managed scan:
+// its folders, a home_dirs folder inside it and its processes (GAP-1024).
+func TestManagedDiscoverySkipsExcludedAccounts(t *testing.T) {
+	root := t.TempDir()
+	alice := discoveryHomeOwner{Home: filepath.Join(root, "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}
+	bob := discoveryHomeOwner{Home: filepath.Join(root, "bob"), UserID: "S-1-5-21-1-2-3-1002", UserName: "bob", Domain: "HOST"}
+	previous := discoveryHomeOwnersLookup
+	t.Cleanup(func() { discoveryHomeOwnersLookup = previous })
+	discoveryHomeOwnersLookup = func(bool) []discoveryHomeOwner { return []discoveryHomeOwner{alice, bob} }
+	svc := &ContinuousDiscoveryService{opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+		Enabled: true, ManagedEnterprise: true, StandaloneEnterprise: true, DataDir: filepath.Join(root, "data"),
+		ExcludeUsers: []string{`host\BOB`}, HomeDirs: []string{filepath.Join(bob.Home, "work")},
+	})}
+	if homes := svc.homesToScan(); len(homes) != 1 || homes[0] != alice.Home {
+		t.Fatalf("homes = %v, want only alice's profile", homes)
+	}
+	procs := svc.withoutExcludedAccounts([]processInfo{
+		{PID: 1, Comm: "claude.exe", SessionOwnerID: alice.UserID},
+		{PID: 2, Comm: "claude.exe", SessionOwnerID: bob.UserID},
+	})
+	if len(procs) != 1 || procs[0].PID != 1 {
+		t.Fatalf("processes = %+v, want only alice's", procs)
+	}
+}
+
+// A managed Windows scan puts on each owned Claude Code or Codex signal the
+// address the enumerator published for its owner, and on no other signal
+// (GAP-1025).
+func TestManagedDiscoveryStampsThePublishedOwnerEmail(t *testing.T) {
+	alice := discoveryHomeOwner{Home: filepath.Join(t.TempDir(), "alice"), UserID: "S-1-5-21-1-2-3-1001", UserName: "alice"}
+	t.Cleanup(SetOwnerEmailLookup(func(sid, connector string) string {
+		if sid == alice.UserID && connector == "codex" {
+			return "o3a.codex@example.test"
+		}
+		return ""
+	}))
+	svc := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{IncludeUserEmail: true, homeOwners: []discoveryHomeOwner{alice}}}
+	signals := []AISignal{
+		{SignalID: "owned", SupportedConnector: "codex", UserID: alice.UserID},
+		{SignalID: "unowned", SupportedConnector: "codex"},
+		{SignalID: "other-connector", SupportedConnector: "cursor", UserID: alice.UserID},
+	}
+	svc.stampOwnerEmails(signals)
+	if signals[0].UserEmail != "o3a.codex@example.test" || signals[1].UserEmail != "" || signals[2].UserEmail != "" {
+		t.Fatalf("emails = %q %q %q", signals[0].UserEmail, signals[1].UserEmail, signals[2].UserEmail)
 	}
 }

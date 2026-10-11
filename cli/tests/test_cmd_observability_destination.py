@@ -745,6 +745,25 @@ def test_splunk_acknowledgement_requires_successful_http_status() -> None:
     assert connection.closed
 
 
+def test_splunk_probe_reports_rejected_index_without_echoing_remote_body() -> None:
+    response = _DummyHTTPResponse(400, b'{"code":7,"text":"Incorrect index"}')
+    connection = _DummyHTTPConnection(response)
+    target = destination_test._parse_target(
+        "http://8.8.8.8/ingest", "http", "", destination_test._NetworkSafety(),
+        destination_test._TLSSettings(),
+    )
+    with (
+        patch.object(destination_test.http.client, "HTTPConnection", return_value=connection),
+        pytest.raises(destination_test.DestinationTestError) as captured,
+    ):
+        destination_test._request_over_socket(
+            _DummySocket(), target, method="POST", body=b"{}", headers={}, inspect_hec=True,
+        )
+    assert captured.value.failure_class == "remote_rejected"
+    assert "index" in str(captured.value).lower()
+    assert connection.closed
+
+
 def test_splunk_acknowledgement_accepts_code_zero_with_successful_http_status() -> None:
     response = _DummyHTTPResponse(200, b'{"code":0}')
     connection = _DummyHTTPConnection(response)

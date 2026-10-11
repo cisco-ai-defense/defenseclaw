@@ -276,9 +276,8 @@ func TestCreateOnVMRefusesAnImageThatCannotStartInAMicroVM(t *testing.T) {
 		{"cannot resolve localhost", problem, "", "OpenCode cannot start in an OpenShell MicroVM (the vm driver this gateway runs)",
 			problem + ". A gateway on the docker driver (Linux), whose sandboxes get Docker's /etc/hosts, runs OpenCode; to check the image again: " + recheck},
 		{"settled nothing", "", inconclusive, unchecked,
-			"was run with a MicroVM's name resolution, which settled nothing: " + inconclusive + "; check it again: " + recheck + " (a run without --no-build checks it first, too)"},
-		{"never probed", "", "", unchecked, "was not checked with a MicroVM's name resolution (OpenShell 0.1.1 gives a MicroVM an empty /etc/hosts); " +
-			"check it: " + recheck},
+			"run " + recheck + " to check it again (a run without --no-build checks it first, too); its image "},
+		{"never probed", "", "", unchecked, "run " + recheck + " to check it; its image "},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newVMEnv(t, nil)
@@ -287,7 +286,9 @@ func TestCreateOnVMRefusesAnImageThatCannotStartInAMicroVM(t *testing.T) {
 			e.images.rec.MicroVMVerified, e.images.rec.MicroVMProblem, e.images.rec.MicroVMInconclusive = false, tc.problem, tc.inconclusive
 			_, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-no", Harness: "opencode", Copy: true})
 			apiErr := wantCode(t, err, sandboxapi.CodeImageUnavailable)
-			if apiErr.Message != tc.message || !strings.Contains(apiErr.Detail, tc.detail) || !strings.Contains(apiErr.Detail, recheck) {
+			// Unless the harness cannot start at all, the command that checks the image again comes first (GAP-0274).
+			if apiErr.Message != tc.message || !strings.Contains(apiErr.Detail, tc.detail) || !strings.Contains(apiErr.Detail, recheck) ||
+				(tc.problem == "" && !strings.HasPrefix(apiErr.Detail, "run "+recheck)) {
 				t.Fatalf("refusal = %+v", apiErr)
 			}
 			if n := e.fake.Calls(openshelltest.MethodCreateSandbox); n != 0 || len(e.images.runCalls()) != 0 {

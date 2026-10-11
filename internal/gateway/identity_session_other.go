@@ -9,6 +9,6 @@ import "github.com/defenseclaw/defenseclaw/internal/useridentity"
 
 // verifyPeerSession has no verified source outside Linux: macOS and Windows
 // sessions stay claimed.
-func verifyPeerSession(int, string, useridentity.SessionFacts) (useridentity.SessionFacts, bool) {
+func verifyPeerSession(int, int, string, useridentity.SessionFacts) (useridentity.SessionFacts, bool) {
 	return useridentity.SessionFacts{}, false
 }

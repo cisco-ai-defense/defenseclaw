@@ -117,7 +117,7 @@ def test_v8_tui_status_loader_preserves_legacy_and_bounds_invalid_source_errors(
     )
     status, error = _fetch_v8_operator_status(config, tmp_path)
     assert status is None
-    assert error.startswith("invalid v8 configuration at $")
+    assert error.startswith("invalid configuration at $")
     assert "must-not-render" not in error
     assert "user:secret" not in error
 
@@ -1041,7 +1041,6 @@ def _roster_config(active_connectors, guardrail) -> SimpleNamespace:
         llm=SimpleNamespace(provider="", model=""),
         inspect_llm=SimpleNamespace(provider="", model=""),
         cisco_ai_defense=SimpleNamespace(endpoint=""),
-        privacy=SimpleNamespace(disable_redaction=False),
         active_connectors=active_connectors,
     )
 
@@ -1134,12 +1133,30 @@ def test_overview_config_reads_per_type_admission_actions() -> None:
 
     cfg = _roster_config(lambda: ["codex"], _RosterGuardrail())
     cfg.admission = AdmissionConfig()
-    cfg.admission.mcp.actions = {"low": "block", "high": "not-an-action"}
+    # MEDIUM quarantine is the built-in mcp action, so it is not an override.
+    cfg.admission.mcp.actions = {"low": "block", "medium": "quarantine", "high": "not-an-action"}
     overview = _overview_config(cfg)
     assert ("mcp", "LOW", "install", "block") in overview.scanner_overrides
-    assert all(entry[1] != "HIGH" for entry in overview.scanner_overrides)
+    assert all(entry[1] not in ("HIGH", "MEDIUM") for entry in overview.scanner_overrides)
     assert "mcp" in OverviewPanelModel(overview, version="test").scanner_overrides_summary()
 
+
+def test_overview_and_status_include_inherited_admission_actions() -> None:
+    from defenseclaw.commands.cmd_status import _scanner_overrides_summary
+    from defenseclaw.config import AdmissionConfig
+
+    cfg = _roster_config(lambda: ["codex"], _RosterGuardrail())
+    cfg.admission = AdmissionConfig()
+    cfg.admission.defaults.actions = {"high": "allow"}
+    overview = _overview_config(cfg)
+
+    for asset_type in ("mcp", "plugin"):
+        assert (asset_type, "HIGH", "install", "none") in overview.scanner_overrides
+    summary = OverviewPanelModel(overview, version="test").scanner_overrides_summary()
+    assert "mcp: HIGH" in summary
+    assert "plugin: HIGH" in summary
+    assert "verdict=allow" in summary
+    assert _scanner_overrides_summary(cfg) == summary
 
 def test_overview_body_renders_scanner_override_summary() -> None:
     cfg = OverviewConfig(
@@ -1154,6 +1171,24 @@ def test_overview_body_renders_scanner_override_summary() -> None:
 
     assert "overrides" in body
     assert "secrets: HIGH file=block" in body
+
+
+def test_overview_scanners_card_renders_admission_overrides() -> None:
+    from rich.console import Console
+
+    overview = OverviewPanelModel(
+        OverviewConfig(
+            data_dir="/tmp/dc", claw_mode="codex",
+            scanner_overrides=(("mcp", "HIGH", "install", "block"),),
+        ), version="test"
+    )
+    app = DefenseClawTUI(overview_model=overview)
+    capture = io.StringIO()
+    console = Console(file=capture, width=80, height=100, force_terminal=False)
+    console.print(app._overview_renderable())  # noqa: SLF001 - inspect the live card renderer.
+    assert "overrides" in capture.getvalue()
+    assert "mcp: HIGH" in capture.getvalue()
+    assert "install=block" in capture.getvalue()
 
 
 def test_overview_findings_and_connector_alerts_match_the_alerts_view() -> None:

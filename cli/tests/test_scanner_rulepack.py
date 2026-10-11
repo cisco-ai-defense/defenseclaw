@@ -12,7 +12,7 @@
 """Tests for the rule-pack overlay scanner (R4).
 
 These pin the behavior that closes R4: the install-time Python scanners now
-load and apply the SAME ``guardrail.rule_pack_dir`` the Go gateway uses, so a
+load and apply the SAME ``guardrail.rule_pack`` the Go gateway uses, so a
 configured rule pack influences ``skill|mcp|plugin scan`` output — and, just as
 importantly, that scans are UNCHANGED when no rule pack is configured.
 """
@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.scanner import rulepack
 
-from tests.helpers import cleanup_app, make_app_context
+from tests.helpers import cleanup_app, make_app_context, select_pack
 
 
 def _write_pack(root: str) -> str:
@@ -92,6 +92,61 @@ def _write_pack(root: str) -> str:
     return pack
 
 
+class TestRulesLayers(unittest.TestCase):
+    """``guardrail.rules`` reaches the scan as the gateway composes it (GAP-0065)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="rp-layers-")
+        self.pack_dir = _write_pack(self.tmp)
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _rules(self, *layers):
+        return {r.rule_id: r for r in rulepack.load_rule_pack(self.pack_dir, layers).rules}
+
+    def test_enable_disable_and_severity_overrides(self):
+        rules = self._rules(
+            rulepack.RulesLayer(enable=("SEC-DISABLED",), severity_overrides=(("SEC-ANTHROPIC", "HIGH"),))
+        )
+        self.assertEqual(rules["SEC-ANTHROPIC"].severity, "HIGH")
+        self.assertIn("SEC-DISABLED", rules)
+        # A later layer (a connector's) wins over an earlier one.
+        rules = self._rules(rulepack.RulesLayer(enable=("SEC-DISABLED",)), rulepack.RulesLayer(disable=("SEC-DISABLED",)))
+        self.assertNotIn("SEC-DISABLED", rules)
+
+    def test_protection_replaces_a_rule_of_the_same_id(self):
+        root = os.path.join(self.tmp, "use-cases")
+        os.makedirs(os.path.join(root, "swap", "rules"))
+        with open(os.path.join(root, "swap", "rules", "secrets.yaml"), "w") as fh:
+            fh.write(
+                "version: 1\ncategory: secret\nrules:\n"
+                "  - id: SEC-ANTHROPIC\n    tool_call_only: true\n    pattern: 'x'\n    title: t\n"
+                "    severity: HIGH\n    confidence: 0.9\n    tags: []\n"
+            )
+        with patch("defenseclaw.policy_catalog.protection_packs_dir", return_value=root):
+            rules = self._rules(rulepack.RulesLayer(protections=("swap",)))
+        self.assertNotIn("SEC-ANTHROPIC", rules)
+
+    def test_maybe_wrap_applies_the_scope_rules_even_without_a_pack_dir(self):
+        from types import SimpleNamespace
+
+        guardrail = SimpleNamespace(
+            rules=SimpleNamespace(disable=["SEC-ANTHROPIC"], enable=[], protections=[], severity_overrides={}),
+            effective_rule_pack_dir=lambda connector="": "",
+            _connector_override=lambda connector: None,
+        )
+        cfg = SimpleNamespace(guardrail=guardrail)
+        with patch("defenseclaw.policy_catalog.preset_pack_dir", return_value=self.pack_dir):
+            wrapped = rulepack.maybe_wrap(object(), cfg, "codex")
+        self.assertIsInstance(wrapped, rulepack.RulePackOverlayScanner)
+        self.assertNotIn("SEC-ANTHROPIC", {r.rule_id for r in wrapped.pack.rules})
+        guardrail.rules = None
+        self.assertIsNot(type(rulepack.maybe_wrap(object(), cfg, "codex")), rulepack.RulePackOverlayScanner)
+
+
 class TestLoadRulePack(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="rp-test-")
@@ -132,6 +187,27 @@ class TestLoadRulePack(unittest.TestCase):
         self.assertEqual(sec[0].scanner, "rule-pack")
         self.assertEqual(sec[0].line_number, 2)
         self.assertEqual(sec[0].location, "cfg.py:2")
+
+    def test_posix_class_rule_matches_in_overlay(self):
+        rules = os.path.join(self.pack_dir, "rules", "posix.yaml")
+        with open(rules, "w") as fh:
+            fh.write(
+                "version: 1\ncategory: command\nrules:\n"
+                "  - id: POSIX-DIGIT\n"
+                "    pattern: '^dc-marker[[:digit:]]+'\n"
+                "    title: marker\n"
+                "    severity: HIGH\n"
+            )
+        pack = rulepack.load_rule_pack(self.pack_dir)
+        findings = pack.scan_text("dc-marker42\n", location="SKILL.md")
+        self.assertEqual([f.id for f in findings if f.id == "POSIX-DIGIT"], ["POSIX-DIGIT"])
+        negated = rulepack._compile(r"[[:^digit:]]+", "POSIX-NOT-DIGIT")
+        assert negated is not None
+        self.assertIsNotNone(negated.fullmatch("letters"))
+        self.assertIsNone(negated.fullmatch("3"))
+        literal = rulepack._compile(r"[:digit:]", "LITERAL")
+        assert literal is not None
+        self.assertIsNotNone(literal.fullmatch(":"))
 
     def test_scan_text_flags_injection_regex(self):
         pack = rulepack.load_rule_pack(self.pack_dir)
@@ -222,6 +298,27 @@ class TestScanPath(unittest.TestCase):
         self.assertEqual(len(hits), 1)
         self.assertTrue(hits[0].location.startswith("tool.py"))
 
+    def test_scan_path_skips_symlinked_file(self):
+        outside = os.path.join(self.tmp, "outside.py")
+        with open(os.path.join(self.pack_dir, "rules", "marker.yaml"), "w") as fh:
+            fh.write(
+                "version: 1\ncategory: test\nrules:\n"
+                "  - id: MARKER\n    pattern: linked-file-marker\n"
+                "    title: marker\n    severity: HIGH\n"
+            )
+        with open(outside, "w") as fh:
+            fh.write("linked-file-marker\n")
+        os.symlink(outside, os.path.join(self.target, "linked.py"))
+        pack = rulepack.load_rule_pack(self.pack_dir)
+        self.assertEqual(pack.scan_path(self.target), [])
+        self.assertEqual(pack.scan_path(os.path.join(self.target, "linked.py")), [])
+        # GAP-0891: a linked skill folder is scanned as the folder it names.
+        with open(os.path.join(self.target, "inner.md"), "w") as fh:
+            fh.write("linked-file-marker\n")
+        dirlink = os.path.join(self.tmp, "dirlink")
+        os.symlink(self.target, dirlink)
+        self.assertEqual([f.location for f in pack.scan_path(dirlink)], ["inner.md:1"])
+
     def test_skips_binary_and_oversize(self):
         # Binary extension is skipped even if it contains the pattern bytes.
         with open(os.path.join(self.target, "blob.bin"), "w") as fh:
@@ -239,15 +336,15 @@ class TestOverlayHonorsConfig(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_no_pack_configured_returns_empty(self):
-        # rule_pack_dir unset -> honor-when-set means no overlay (R4 scope).
-        self.assertEqual(self.app.cfg.guardrail.rule_pack_dir, "")
+        # rule_pack unset -> honor-when-set means no overlay (R4 scope).
+        self.assertEqual(self.app.cfg.guardrail.rule_pack, "")
         out = rulepack.overlay_findings(
             self.app.cfg, text="key sk-ant-abcdefghij0123456789KLM"
         )
         self.assertEqual(out, [])
 
     def test_configured_pack_overlays_text(self):
-        self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
+        select_pack(self.app.cfg, self.app.cfg.guardrail, self.pack_dir)
         out = rulepack.overlay_findings(
             self.app.cfg, text="key = sk-ant-abcdefghij0123456789KLM"
         )
@@ -257,9 +354,8 @@ class TestOverlayHonorsConfig(unittest.TestCase):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         gc = self.app.cfg.guardrail
-        gc.connectors = {
-            "openclaw": PerConnectorGuardrailConfig(rule_pack_dir=self.pack_dir)
-        }
+        gc.connectors = {"openclaw": PerConnectorGuardrailConfig()}
+        select_pack(self.app.cfg, gc.connectors["openclaw"], self.pack_dir)
         out = rulepack.overlay_findings(
             self.app.cfg, "openclaw", text="sk-ant-abcdefghij0123456789KLM"
         )
@@ -298,8 +394,18 @@ class TestMaybeWrap(unittest.TestCase):
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
         self.assertIs(wrapped, inner)
 
+    def test_a_skill_scan_acts_on_the_default_pack_when_nothing_is_selected(self):
+        # The install watcher scans a skill with the default pack on a default
+        # install, so the skill scan does too; MCP and plugin scans do not (GAP-0164).
+        inner = _FakeScanner()
+        with patch("defenseclaw.policy_catalog.preset_pack_dir", return_value=self.pack_dir):
+            self.assertIs(rulepack.maybe_wrap(inner, self.app.cfg), inner)
+            wrapped = rulepack.maybe_wrap(inner, self.app.cfg, default_pack=True)
+        self.assertIsInstance(wrapped, rulepack.RulePackOverlayScanner)
+        self.assertIn("SEC-ANTHROPIC", {r.rule_id for r in wrapped.pack.rules})
+
     def test_wrap_appends_findings_and_preserves_existing(self):
-        self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
+        select_pack(self.app.cfg, self.app.cfg.guardrail, self.pack_dir)
         inner = _FakeScanner()
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
         self.assertIsNot(wrapped, inner)
@@ -319,7 +425,7 @@ class TestMaybeWrap(unittest.TestCase):
         self.assertIn("analyzer:rule-pack", overlay.tags)
 
     def test_wrap_overlays_mcp_server_text(self):
-        self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
+        select_pack(self.app.cfg, self.app.cfg.guardrail, self.pack_dir)
         inner = _FakeScanner()
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
 
@@ -334,7 +440,7 @@ class TestMaybeWrap(unittest.TestCase):
         self.assertTrue(any(f.id == "SEC-ANTHROPIC" for f in result.findings))
 
     def test_overlay_failure_never_breaks_scan(self):
-        self.app.cfg.guardrail.rule_pack_dir = self.pack_dir
+        select_pack(self.app.cfg, self.app.cfg.guardrail, self.pack_dir)
         inner = _FakeScanner()
         wrapped = rulepack.maybe_wrap(inner, self.app.cfg)
         # Sabotage the pack so the overlay raises internally; the inner result
@@ -365,10 +471,12 @@ class TestMaybeWrap(unittest.TestCase):
                 "    tags: [custom]\n"
             )
 
-        self.app.cfg.guardrail.connectors = {
-            "codex": PerConnectorGuardrailConfig(rule_pack_dir=self.pack_dir),
-            "cursor": PerConnectorGuardrailConfig(rule_pack_dir=cursor_pack),
+        connectors = self.app.cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            "cursor": PerConnectorGuardrailConfig(),
         }
+        select_pack(self.app.cfg, connectors["codex"], self.pack_dir)
+        select_pack(self.app.cfg, connectors["cursor"], cursor_pack)
         artifact = os.path.join(self.tmp_dir, "two-pack-artifact")
         os.makedirs(artifact)
         with open(os.path.join(artifact, "payload.txt"), "w", encoding="utf-8") as fh:
@@ -401,10 +509,12 @@ class TestMaybeWrap(unittest.TestCase):
     def test_shared_connector_pack_cache_loads_once(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
-        self.app.cfg.guardrail.connectors = {
-            "codex": PerConnectorGuardrailConfig(rule_pack_dir=self.pack_dir),
-            "cursor": PerConnectorGuardrailConfig(rule_pack_dir=self.pack_dir),
+        connectors = self.app.cfg.guardrail.connectors = {
+            "codex": PerConnectorGuardrailConfig(),
+            "cursor": PerConnectorGuardrailConfig(),
         }
+        select_pack(self.app.cfg, connectors["codex"], self.pack_dir)
+        select_pack(self.app.cfg, connectors["cursor"], self.pack_dir)
         cache: dict[str, rulepack.RulePack] = {}
         with patch.object(
             rulepack,
@@ -426,7 +536,7 @@ class TestMaybeWrap(unittest.TestCase):
 
         self.assertIsInstance(codex, rulepack.RulePackOverlayScanner)
         self.assertIsInstance(cursor, rulepack.RulePackOverlayScanner)
-        load.assert_called_once_with(self.pack_dir)
+        load.assert_called_once_with(self.pack_dir, ())
 
 
 class TestTextFromMcpServer(unittest.TestCase):
@@ -448,3 +558,35 @@ class TestTextFromMcpServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWindowsRuntimeMCPScan(unittest.TestCase):
+    def test_runtime_mcp_scan_applies_the_rule_pack(self):
+        # GAP-0296: the Windows scanner runtime's mcp-scan (the gateway's MCP
+        # scan on standalone Windows) skipped the rule-pack overlay that the
+        # CLI's mcp scan lays over the server definition.
+        import contextlib
+        import io
+        import json
+        import re
+        import shutil
+
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        with open(os.path.join(root, "cmd", "defenseclaw-scanners", "main.go"), encoding="utf-8") as stream:
+            script = re.search(r"mcpScanScript = `(.*?)`", stream.read(), re.S).group(1)
+        tmp = tempfile.mkdtemp(prefix="rp-runtime-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        url = "https://mcp.example.test/mcp?key=sk-ant-abcdefghij0123456789KLM"
+        clean = ScanResult(scanner="mcp-scanner", target=url, timestamp=datetime.now(timezone.utc), findings=[])
+        pack = json.dumps({"dir": _write_pack(tmp), "rules": [{"disable": ["SEC-TOOL-ONLY"]}]})
+        out = io.StringIO()
+        payload = json.dumps({"settings": {}, "rule_pack": json.loads(pack)})
+        with (
+            patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan", return_value=clean),
+            patch.object(sys, "argv", ["mcp-scan", "--input-stdin", url]),
+            patch.object(sys, "stdin", io.StringIO(payload)),
+            contextlib.redirect_stdout(out),
+        ):
+            exec(compile(script, "mcpScanScript", "exec"), {"__name__": "__main__"})
+        findings = json.loads(out.getvalue())["findings"]
+        self.assertIn("SEC-ANTHROPIC", [finding["id"] for finding in findings])

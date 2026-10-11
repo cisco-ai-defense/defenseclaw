@@ -46,6 +46,8 @@ _SUMMARY_COUNT_FIELDS: Final = (
     "local_pattern_count",
     "suppression_count",
     "sensitive_tool_count",
+    "stale_rule_count",
+    "alert_only_rule_count",
 )
 _SUMMARY_DIGEST_FIELDS: Final = ("digest", "files_digest")
 _SUMMARY_FIELDS: Final = frozenset((*_SUMMARY_COUNT_FIELDS, *_SUMMARY_DIGEST_FIELDS))

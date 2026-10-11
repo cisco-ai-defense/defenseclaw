@@ -790,7 +790,7 @@ func TestRepairAtomicTransformV2ReplacementPreservesEmptyOldShortNameNative(t *t
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = dir.Close() })
-		oldState, err := atomicTransformBoundInspect(dir, targetName, atomicTransformMaxConfigBytes)
+		_, err = atomicTransformBoundInspect(dir, targetName, atomicTransformMaxConfigBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -809,7 +809,7 @@ func TestRepairAtomicTransformV2ReplacementPreservesEmptyOldShortNameNative(t *t
 		if err := target.Close(); err != nil {
 			t.Fatal(err)
 		}
-		oldState, err = atomicTransformBoundInspect(dir, targetName, atomicTransformMaxConfigBytes)
+		oldState, err := atomicTransformBoundInspect(dir, targetName, atomicTransformMaxConfigBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -818,11 +818,11 @@ func TestRepairAtomicTransformV2ReplacementPreservesEmptyOldShortNameNative(t *t
 			t.Fatalf("cleared Old short name = %q, %v; want empty", oldShort, err)
 		}
 		stageName := ".tmp-cas-v2-empty-short-stage-" + suffix
-		stageState, err := atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
+		_, err = atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
 		if err != nil {
 			t.Fatal(err)
 		}
-		stageState, err = atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
+		stageState, err := atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -959,12 +959,12 @@ func TestAtomicTransformV2PrePublicationHookIsPathScopedConcurrently(t *testing.
 			t.Fatal(err)
 		}
 		stageName := ".tmp-cas-v2-stage-" + suffix
-		stageState, err := atomicTransformBoundCreate(dir, stageName, []byte("new-"+suffix), 0o600)
+		_, err = atomicTransformBoundCreate(dir, stageName, []byte("new-"+suffix), 0o600)
 		if err != nil {
 			_ = dir.Close()
 			t.Fatal(err)
 		}
-		stageState, err = atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
+		stageState, err := atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
 		if err != nil {
 			_ = dir.Close()
 			t.Fatal(err)
@@ -1051,13 +1051,13 @@ func TestInvokeAtomicTransformV2ReplacementNativeSuccessStress(t *testing.T) {
 			t.Fatalf("generation %d inspect Old: %v", generation, err)
 		}
 		stageName := fmt.Sprintf(".tmp-cas-v2-ready-stress-%03d", generation)
-		stageState, err := atomicTransformBoundCreate(
+		_, err = atomicTransformBoundCreate(
 			dir, stageName, []byte(fmt.Sprintf("generation-%03d", generation)), 0o600,
 		)
 		if err != nil {
 			t.Fatalf("generation %d create Stage: %v", generation, err)
 		}
-		stageState, err = atomicTransformBoundInspectFilePrivate(
+		stageState, err := atomicTransformBoundInspectFilePrivate(
 			dir, stageName, atomicTransformMaxConfigBytes,
 		)
 		if err != nil {
@@ -1138,12 +1138,12 @@ func TestInvokeAtomicTransformV2ReplacementFreshDACLStress(t *testing.T) {
 			t.Fatal(err)
 		}
 		stageName := fmt.Sprintf(".tmp-cas-v2-fresh-stage-%03d", iteration)
-		stageState, err := atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
+		_, err = atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
 		if err != nil {
 			_ = dir.Close()
 			t.Fatal(err)
 		}
-		stageState, err = atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
+		stageState, err := atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
 		if err != nil {
 			_ = dir.Close()
 			t.Fatal(err)
@@ -1259,19 +1259,19 @@ func TestRepairAtomicTransformV2ReplacementDACLAuthenticatesExactOneWayChange(t 
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = dir.Close() })
-		oldState, err := atomicTransformBoundCreate(dir, targetName, []byte("old"), 0o600)
+		_, err = atomicTransformBoundCreate(dir, targetName, []byte("old"), 0o600)
 		if err != nil {
 			t.Fatal(err)
 		}
-		oldState, err = atomicTransformBoundInspectFilePrivate(dir, targetName, atomicTransformMaxConfigBytes)
+		oldState, err := atomicTransformBoundInspectFilePrivate(dir, targetName, atomicTransformMaxConfigBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
-		stageState, err := atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
+		_, err = atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
 		if err != nil {
 			t.Fatal(err)
 		}
-		stageState, err = atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
+		stageState, err := atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1295,7 +1295,7 @@ func TestRepairAtomicTransformV2ReplacementDACLAuthenticatesExactOneWayChange(t 
 		); err != nil {
 			t.Fatalf("native ReplaceFileW: %v", err)
 		}
-		observed, err := observeAtomicTransformV2Replacement(dir, receipt)
+		_, err = observeAtomicTransformV2Replacement(dir, receipt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1310,7 +1310,7 @@ func TestRepairAtomicTransformV2ReplacementDACLAuthenticatesExactOneWayChange(t 
 		}
 		inheritedDACL := inheritedFromOld(t, oldDACL)
 		setDACL(t, targetPath, inheritedDACL, false)
-		observed, err = observeAtomicTransformV2Replacement(dir, receipt)
+		observed, err := observeAtomicTransformV2Replacement(dir, receipt)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1411,11 +1411,11 @@ func TestInvokeAtomicTransformV2ReplacementInjectedOutcomesNative(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		stageState, err := atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
+		_, err = atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
 		if err != nil {
 			t.Fatal(err)
 		}
-		stageState, err = atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
+		stageState, err := atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1863,11 +1863,11 @@ func TestInvokeAtomicTransformV2ReplacementRejectsOwnerGroupRaceNative(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	stageState, err := atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
+	_, err = atomicTransformBoundCreate(dir, stageName, []byte("new"), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stageState, err = atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
+	stageState, err := atomicTransformBoundInspectFilePrivate(dir, stageName, atomicTransformMaxConfigBytes)
 	if err != nil {
 		t.Fatal(err)
 	}

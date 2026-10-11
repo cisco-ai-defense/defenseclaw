@@ -57,4 +57,58 @@ func TestComposeAppliesRulesLayersInOrder(t *testing.T) {
 		!strings.Contains(err.Error(), "unknown rule SEC-NOPE") {
 		t.Fatalf("unknown rule = %v", err)
 	}
+	// A disabled category remains explicit so the gateway does not restore defaults.
+	base.RuleFiles = append(base.RuleFiles, &RulesFileYAML{
+		Version: 1, Category: "pii", SourcePath: "/packs/default/rules/pii.yaml",
+		Rules: []RuleDefYAML{{ID: "PII-A", Pattern: "p+", Title: "P", Severity: "LOW", Confidence: 0.9, Tags: []string{"t"}}},
+	})
+	dropped, err := Compose(base, protections, Customization{Disable: []string{"SEC-A", "SEC-B"}})
+	if err != nil || len(dropped.RuleFiles) != 2 || dropped.findRule("PII-A") == nil ||
+		dropped.findRule("SEC-A") == nil || *dropped.findRule("SEC-A").Enabled {
+		t.Fatalf("disabled category was lost: error %v, files %+v", err, dropped.RuleFiles)
+	}
+}
+
+// A custom pack can choose any file name for a category. Protection layering
+// merges by the category that Validate treats as unique.
+func TestComposeProtectionMergesCategoryAcrossFilenames(t *testing.T) {
+	base, err := LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.RuleFiles = []*RulesFileYAML{{
+		Version: 1, Category: "enterprise-data", SourcePath: "/custom/rules/customer-data.yaml",
+		Rules: []RuleDefYAML{{ID: "DATA-LOCAL", Pattern: "local-marker", Title: "Local", Severity: "LOW", Confidence: 0.9, Tags: []string{"local"}}},
+	}}
+	protection := func(string) ([]ProtectionRuleFile, error) {
+		return []ProtectionRuleFile{{Name: "enterprise-data.yaml", Data: []byte(
+			"version: 1\ncategory: enterprise-data\nrules:\n  - id: DATA-PROTECTION\n    pattern: protection-marker\n    title: Protection\n    severity: HIGH\n    confidence: 0.9\n    tags: [protection]\n")}}, nil
+	}
+	got, err := Compose(base, protection, Customization{Protections: []string{"privacy-high-assurance"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.RuleFiles) != 1 || got.findRule("DATA-LOCAL") == nil || got.findRule("DATA-PROTECTION") == nil {
+		t.Fatalf("composition split a single category: %+v", got.RuleFiles)
+	}
+}
+
+func TestComposeManifestPostureChangesDigest(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	before := mustLoadRulePack(t, dir)
+	layer := Customization{SeverityOverrides: map[string]string{"R-1": "LOW"}}
+	composedBefore, err := Compose(before, nil, layer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRulePackFile(t, dir, PackManifestFile, `{"posture":"strict"}`)
+	after := mustLoadRulePack(t, dir)
+	composedAfter, err := Compose(after, nil, layer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if composedBefore.Summary().Digest == composedAfter.Summary().Digest {
+		t.Fatal("manifest posture edit did not change composed pack digest")
+	}
 }

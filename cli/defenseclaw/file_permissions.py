@@ -218,7 +218,9 @@ _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
         "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
         "DEFENSE" + "CLAW_DISABLE_REDACTION",
         "DEFENSECLAW_DUMP_RAW_SECRETS",
-        # The managed profile pin comes only from the service definition.
+        # The managed deployment mode and profile pins come only from the
+        # service definition.
+        "DEFENSECLAW_DEPLOYMENT_MODE",
         "DEFENSECLAW_ENTERPRISE_PROFILE",
         "DEFENSECLAW_FAIL_MODE",
         "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
@@ -1722,12 +1724,17 @@ def _protect_private_directory(path: str) -> None:
             _set_windows_owner_only_acl(path)
         except PermissionError as exc:
             # A managed install's DACL (read-only OWNER RIGHTS) denies the
-            # owner WRITE_DAC; name the folder and the way out.
+            # owner WRITE_DAC. When that DACL still admits only this account
+            # and Windows itself, the folder is already private: use it as it
+            # is instead of locking DefenseClaw out of a folder it set up
+            # (GAP-1243). Anything else names the folder and the way out.
+            if windows_acl_custody_confidentiality_error(path) is None:
+                return
             raise PermissionError(
                 exc.errno,
                 f"cannot protect private directory {path}: its access control list does not let this "
-                "account change it (a managed DefenseClaw install can leave it that way); remove the "
-                "folder, or have an administrator reset its access, then run the command again",
+                "account change it (a managed DefenseClaw install can leave it that way); have an "
+                f'administrator reset its access (icacls "{path}" /reset /t), then run the command again',
             ) from exc
         problem = windows_acl_write_error(path)
         if problem is not None:

@@ -28,8 +28,12 @@
     %USERPROFILE%\.defenseclaw are kept; the replaced install is kept in
     %USERPROFILE%\.defenseclaw\previous for -Rollback.
 
-    Permanent interface (never remove or change these; unknown arguments are
-    ignored with a warning): -Yes, -Version X.Y.Z, -Local DIR, -Rollback.
+    Permanent interface (never remove or change these): -Yes, -Version X.Y.Z,
+    -Local DIR, -Rollback. An unknown argument stops the installer with exit 2
+    before it changes anything (GAP-0361). Only the copy that `defenseclaw
+    upgrade` or `rollback` runs (from a defenseclaw-upgrade-* or
+    defenseclaw-rollback-* folder) ignores one with a warning, so an older
+    release's installer accepts the flags of a newer client.
 
     Windows PowerShell 5.1 or later. Run it as the user who uses DefenseClaw;
     it does not need administrator rights.
@@ -125,7 +129,8 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     if ($modulePath -notcontains (Join-Path $PSHOME "Modules")) { $modulePath += Join-Path $PSHOME "Modules" }
     $env:PSModulePath = $modulePath -join ";"
 }
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false }
+$RunByUpgrade = $RunAsFile -and (Split-Path -Leaf (Split-Path -Parent $PSCommandPath)) -match '^defenseclaw-(upgrade|rollback)-'
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -135,6 +140,8 @@ function Get-UtcClock { return (Get-Date).ToUniversalTime().ToString("HH:mm:ss")
 # Step headers and gateway lines carry the UTC time, so the install log can time a run (GAP-1797).
 function Write-Step([string]$Message) { Write-Host ""; Write-Host "--- $Message  [$(Get-UtcClock)]" -ForegroundColor Cyan }
 function Die([string]$Message) { throw $Message }
+# A wrong option or value: exit 2, before anything changed.
+function Stop-Usage([string]$Message) { $Run.UsageError = $true; throw "$Message; nothing was changed. Run with -Help for the options." }
 
 function Test-Version([string]$Value) {
     return $Value -match '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -303,8 +310,47 @@ function Copy-Kept([string]$Source, [string]$DestinationDir) {
     $item = Get-Item -LiteralPath $Source -Force
     $copy = if ($item.PSIsContainer) { @($Source, (Join-Path $DestinationDir $item.Name), "/E") } else { @($item.DirectoryName, $DestinationDir, $item.Name) }
     $options = @("/COPY:DATS", "/DCOPY:DAT", "/IS", "/IT", "/R:2", "/W:1", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
-    $rc = Invoke-Native (Join-Path $env:SystemRoot "System32\robocopy.exe") ($copy + $options) -Quiet
-    if ($rc -ge 8) { throw "Could not copy $Source (robocopy exit $rc)" }
+    $result = Invoke-Robocopy ($copy + $options)
+    if ($result.Code -lt 8) { return }
+    $why = if ($result.Error) { $result.Error } else { "robocopy exit $($result.Code)" }
+    if (-not $item.PSIsContainer) {
+        # robocopy refused one file, as it did for an audit.db a failed 0.8.10
+        # Setup left (GAP-1048): copy its bytes, then its access list where
+        # Windows allows it; otherwise the copy keeps the rollback folder's
+        # private permissions.
+        $target = Join-Path $DestinationDir $item.Name
+        try {
+            [IO.File]::Copy($Source, $target, $true)
+            try {
+                $from = New-Object IO.FileInfo $Source
+                $to = New-Object IO.FileInfo $target
+                $acl = if ($from.PSObject.Methods["GetAccessControl"]) { $from.GetAccessControl("Access") } else { [IO.FileSystemAclExtensions]::GetAccessControl($from, "Access") }
+                if ($to.PSObject.Methods["SetAccessControl"]) { $to.SetAccessControl($acl) } else { [IO.FileSystemAclExtensions]::SetAccessControl($to, $acl) }
+            } catch { }
+            return
+        } catch { if (-not $result.Error) { $why = $_.Exception.GetBaseException().Message } }
+    }
+    # Name what may hold it: a gateway or hook a failed Setup left running.
+    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -like "defenseclaw*" } | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" })
+    $held = if ($running.Count) { "; DefenseClaw programs still running: $($running -join ', ') (stop them with Stop-Process -Id <PID>)" } else { "" }
+    throw "Could not copy $Source ($why)$held. Check that this account can read it and that no program has it open (icacls `"$Source`"), then run the installer again"
+}
+
+function Invoke-Robocopy([string[]]$Arguments) {
+    # robocopy says why a file failed only in its output: keep the first
+    # error line and the reason on the line after it.
+    $ErrorActionPreference = "Continue"
+    $lines = @(& (Join-Path $env:SystemRoot "System32\robocopy.exe") @Arguments 2>&1 | ForEach-Object { "$_".Trim() })
+    $code = $LASTEXITCODE
+    $detail = ""
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match "(ERROR \d+ \(0x[0-9A-Fa-f]+\).*)$") {
+            $detail = $Matches[1]
+            if ($i + 1 -lt $lines.Count -and $lines[$i + 1]) { $detail += " $($lines[$i + 1])" }
+            break
+        }
+    }
+    return [pscustomobject]@{ Code = $code; Error = $detail }
 }
 
 function Invoke-Quietly([scriptblock]$Action) {
@@ -679,6 +725,89 @@ function Reset-AuditJournalMode {
     }
 }
 
+# GAP-1388: a 0.x release has no recovery for a damaged audit store, so its
+# gateway does not start on one. Before a rollback to 0.x changes anything,
+# Test-RollbackData runs SQLite's integrity check on each database the
+# rollback restores, with the same code as install.sh (ROLLBACK_DB_CHECK_PY).
+$RollbackDbCheckPy = @'
+import os, shutil, sqlite3, sys, tempfile
+from pathlib import Path
+
+
+def damaged(path):
+    logs = [suffix for suffix in ("-wal", "-journal") if os.path.exists(path + suffix)]
+    with tempfile.TemporaryDirectory() as tmp:
+        uri = Path(os.path.abspath(path)).as_uri() + "?immutable=1"
+        if logs:
+            copy = os.path.join(tmp, "check.db")
+            for suffix in ["", *logs]:
+                shutil.copyfile(path + suffix, copy + suffix)
+            uri = Path(copy).as_uri()
+        try:
+            conn = sqlite3.connect(uri, uri=True)
+            try:
+                result = conn.execute("pragma integrity_check(1)").fetchone()[0]
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError as exc:
+            result = str(exc)
+            if "malformed" not in result and "not a database" not in result:
+                return False
+    if result != "ok":
+        print(path + ": " + " ".join(result.split()), file=sys.stderr)
+    return result != "ok"
+
+
+for path in sys.argv[1:]:
+    try:
+        bad = os.path.isfile(path) and not os.path.islink(path) and damaged(path)
+    except OSError:
+        bad = False
+    if bad:
+        print(path)
+'@
+
+function Test-RollbackData([string]$BackTo) {
+    # $true when the saved audit store is damaged; other damaged databases are only named.
+    $python = Join-Path $Venv "Scripts\python.exe"
+    $data = Join-Path $Previous "data"
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return $false }
+    $stores = @(Get-ChildItem -LiteralPath $data -Filter "*.db" -File -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    if (-not $stores.Count) { return $false }
+    $check = Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-rollback-check-$PID.py"
+    $ErrorActionPreference = "Continue"
+    try {
+        [IO.File]::WriteAllText($check, $RollbackDbCheckPy)
+        $damaged = @(& $python -I $check @stores 2>$null | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    } catch {
+        return $false
+    } finally {
+        Remove-Item -LiteralPath $check -Force -ErrorAction SilentlyContinue
+    }
+    $audit = Join-Path $data "audit.db"
+    foreach ($store in $damaged) {
+        if ($store -ne $audit) { Write-Warn "The saved database $store of DefenseClaw $BackTo failed SQLite's integrity check; $BackTo may not start with it" }
+    }
+    return $damaged -contains $audit
+}
+
+function Move-DamagedAuditStore([string]$BackTo) {
+    # After the swap, move the damaged store aside under the name the 1.0
+    # gateway and doctor use (audit.db.corrupt-<UTC time>), so the restored
+    # release starts on a new one. Returns the archive's path.
+    $db = Join-Path $DataDir "audit.db"
+    if (-not (Test-Path -LiteralPath $db -PathType Leaf)) { return "" }
+    $moved = "$db.corrupt-" + (Get-Date).ToUniversalTime().ToString("yyyyMMdd'T'HHmmss'Z'")
+    if (Test-Path -LiteralPath $moved) { $moved += "-$PID" }
+    foreach ($suffix in @("-wal", "-shm", "-journal")) {
+        if (Test-Path -LiteralPath "$db$suffix") { Move-Path "$db$suffix" "$moved$suffix" }
+    }
+    Move-Path $db $moved
+    Write-Warn ("The saved $BackTo audit store failed SQLite's integrity check; it was kept as $moved and $BackTo starts on a new " +
+        "audit store (its block/allow entries are not carried over; check them with defenseclaw mcp, skill, plugin and tool list)")
+    return $moved
+}
+
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
     # connector refused admission (upgrading again would not change that).
@@ -994,9 +1123,9 @@ function Write-Shim([string]$Name, [string]$Target) {
     # `defenseclaw uninstall` recognizes the CLI shim by this exact command line.
     $path = Join-Path $BinDir "$Name.cmd"
     $text = "@echo off`r`n`"$Target`" %*`r`n"
-    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path) -ceq $text) { return }
     # cmd.exe reads batch files in the OEM code page.
     $encoding = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+    if ((Test-Path -LiteralPath $path) -and [IO.File]::ReadAllText($path, $encoding) -ceq $text) { return }
     [IO.File]::WriteAllText("$path.new", $text, $encoding)
     if (Test-Path -LiteralPath $path) { Remove-Aside $path }
     Move-Path "$path.new" $path
@@ -1200,7 +1329,7 @@ function Install-New {
     if ((Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG) {
         Write-Info "Migrating config and data"
         if ($PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0") { Repair-DataOwner }
-        $migrateArgs = @("migrate", "--yes")
+        $migrateArgs = @("migrate")
         if ($PrevVersion) { $migrateArgs += @("--from-version", $PrevVersion) }
         $env:DEFENSECLAW_GATEWAY_BIN = Join-Path $BinDir "defenseclaw-gateway.exe"
         if ((Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $migrateArgs) -ne 0) { return $false }
@@ -1550,14 +1679,27 @@ function Select-Connector {
     for ($index = 0; $index -lt $ConnectorChoices.Count; $index++) {
         Write-Host ("    {0,2}) {1}" -f ($index + 1), $ConnectorChoices[$index])
     }
-    try { $choice = Read-Host "  Choice [default 1=codex]" } catch { $choice = "" }
-    $number = 0
-    $picked = "codex"
-    if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
-        $picked = $ConnectorChoices[$number - 1]
+    # An answer that is neither a number on the list nor a name is asked
+    # again, never replaced with another agent (GAP-0333).
+    for ($try = 1; $try -le 3; $try++) {
+        # No console to answer on: the default, as before.
+        try { $choice = Read-Host "  Choice (number or name) [default 1=codex]" } catch { $choice = "" }
+        $answer = "$choice".Trim().ToLowerInvariant()
+        if (-not $answer) { $answer = "1" }
+        $number = 0
+        $picked = ""
+        if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
+            $picked = $ConnectorChoices[$number - 1]
+        } elseif ($ConnectorChoices -contains $answer) {
+            $picked = $answer
+        }
+        if ($picked) {
+            Write-Ok "Connector: $picked"
+            return $picked
+        }
+        if ($try -lt 3) { Write-Warn "'$choice' is not on the list: type a number from 1 to $($ConnectorChoices.Count) or an agent name such as claudecode" }
     }
-    Write-Ok "Connector: $picked"
-    return $picked
+    Stop-Usage "No agent picked ('$choice' is not on the list). Run the installer again and pick one, or pass -Connector NAME"
 }
 
 function Invoke-FirstInstallExtras {
@@ -1568,7 +1710,7 @@ function Invoke-FirstInstallExtras {
         if (-not $Connector -or $Connector -eq "none") {
             Write-Warn "Quickstart needs a connector; run 'defenseclaw init' when ready"
         } else {
-            $quickstartArgs = @("quickstart", "--non-interactive", "--yes", "--connector", $Connector)
+            $quickstartArgs = @("quickstart", "--connector", $Connector)
             if ($QuickstartMode) { $quickstartArgs += @("--mode", $QuickstartMode) }
             $quickstartRc = Invoke-Native (Join-Path $Venv "Scripts\defenseclaw.exe") $quickstartArgs
             if ($quickstartRc -ne 0) {
@@ -1609,6 +1751,7 @@ Options:
 
 Exit codes (run as a file):
   0  Installed        1  Not installed (a previous install is restored)
+  2  Not installed: an unknown option or value (nothing was changed)
   3  Installed; a connector needs attention before it is guarded again
   4  Installed; the first-run quickstart failed (re-run it as shown)
 
@@ -1618,6 +1761,60 @@ Environment:
 }
 
 # -- Main ---------------------------------------------------------------------
+
+function Convert-HooksForRollback([string]$From, [string]$BackTo) {
+    # A hook entry this install wrote in a shape the older release does not
+    # recognise (the per-user Claude Code cmd.exe launcher guard, GAP-1284)
+    # outlived that release's uninstall. This install's gateway rewrites those
+    # entries in the shape every earlier release removes; rolling forward runs
+    # setup, which writes the current shape again. A failure does not stop the
+    # rollback, but says what may be left behind.
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gateway)) { return }
+    if ((Invoke-Native $gateway @("connector", "prepare-rollback", "--data-dir", $DataDir)) -ne 0) {
+        Write-Warn ("Could not rewrite the agent hook entries of DefenseClaw $From in the form $BackTo reads (see above). " +
+            "After the rollback, 'defenseclaw uninstall' may leave those DefenseClaw entries in the agent settings, such as " +
+            "the cmd.exe entries that run defenseclaw-hook.exe in %USERPROFILE%\.claude\settings.json; remove them by hand")
+    }
+}
+
+function Undo-Rollback([string]$Reason, [string]$Current, [string]$BackTo, [string]$SavedWasRunning, [string]$Quarantined) {
+    # Put back the install the rollback replaced, and return 1 (GAP-1388): a
+    # restored 0.x release whose gateway is not running leaves agents
+    # unguarded, and it has no rollback command to come back with.
+    $forward = if ($Current) { $Current } else { "1.x" }
+    Write-Warn "$Reason, so the rollback is being undone"
+    [void](Stop-Gateway)
+    # The same swap the other way: previous\ holds the install just left.
+    $undone = @(Switch-WithPrevious $BackTo $false $true)[-1]
+    if ($undone -ne 0) {
+        Write-Err "DefenseClaw $BackTo is installed, but its gateway is not running, so agent hooks are not guarded"
+        if ($undone -eq 1) {
+            Write-Info "To return to $forward, run: powershell -ExecutionPolicy Bypass -File `"$Previous\installer\install.ps1`" -Rollback"
+        }
+        return 1
+    }
+    # previous\ is again the install this rollback started from, as it was.
+    foreach ($marker in @("ROLLED_BACK", "START_AFTER")) { Remove-Item -LiteralPath (Join-Path $Previous $marker) -Force -ErrorAction SilentlyContinue }
+    $state = if ($SavedWasRunning) { $SavedWasRunning } else { "false" }
+    Set-Content -LiteralPath (Join-Path $Previous "GATEWAY_WAS_RUNNING") -Value $state -Encoding Ascii
+    $audit = Join-Path $Previous "data\audit.db"
+    if ($Quarantined -and -not (Test-Path -LiteralPath $audit)) {
+        $kept = Join-Path $Previous "data\$(Split-Path -Leaf $Quarantined)"
+        foreach ($suffix in @("", "-wal", "-shm", "-journal")) {
+            if (Test-Path -LiteralPath "$kept$suffix") { Invoke-Quietly { Move-Path "$kept$suffix" "$audit$suffix" } }
+        }
+    }
+    if ((Start-Gateway) -in @(0, 3)) {
+        Write-Ok "DefenseClaw $forward is back, with its gateway and agent hooks"
+    } else {
+        Write-Warn "DefenseClaw $forward is back, but its gateway did not start; run 'defenseclaw-gateway start' and check its log"
+    }
+    # Paths in the older release's errors above now hold this install's files.
+    Write-Info "The files of DefenseClaw $BackTo are in $Previous\data again; fix them there (paths above under $DataDir named them)"
+    Write-Info "Fix the cause above, then run 'defenseclaw rollback' again (log: $($Run.Log))"
+    return 1
+}
 
 function Invoke-Rollback {
     $backTo = Read-Text (Join-Path $Previous "VERSION")
@@ -1630,7 +1827,8 @@ function Invoke-Rollback {
     $current = Get-InstalledVersion
     $currentLabel = if ($current) { $current } else { "?" }
     # Run again after a rollback, this goes forward to the newer install (GAP-1497).
-    if ($current -and (Test-Version $current) -and [version]$current -lt [version]$backTo) {
+    $rollForward = $current -and (Test-Version $current) -and [version]$current -lt [version]$backTo
+    if ($rollForward) {
         Write-Step "Rolling forward to DefenseClaw $backTo"
         $question = "Replace DefenseClaw $current with DefenseClaw $backTo (the install you rolled back from)?"
     } else {
@@ -1641,9 +1839,14 @@ function Invoke-Rollback {
         Die "Rollback cancelled; nothing was changed"
     }
     Wait-VenvFree
+    # GAP-1388: check the saved data before anything of this install changes.
+    $toLegacy = [version]$backTo -lt [version]"1.0.0"
+    $auditDamaged = $toLegacy -and (Test-RollbackData $backTo)
     $wasRunning = [bool](Get-GatewayProcess)
-    $startAfter = $wasRunning -or (Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")) -eq "true"
+    $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
+    $startAfter = $wasRunning -or $savedWasRunning -eq "true"
     if (-not (Stop-Gateway)) { Die "The gateway did not stop; nothing was changed" }
+    if (-not $rollForward) { Convert-HooksForRollback $currentLabel $backTo }
     $swapped = @(Switch-WithPrevious $current $wasRunning $startAfter)[-1]
     if ($swapped -ne 0) {
         # 1: the swap undid itself, so this install is back and may run again.
@@ -1652,10 +1855,33 @@ function Invoke-Rollback {
     }
     # Homes upgraded before the uv folder was protected (GAP-1988).
     Protect-UvDirectory
+    $quarantined = ""
+    if ($auditDamaged) {
+        try { $quarantined = Move-DamagedAuditStore $backTo } catch {
+            $why = "The damaged audit store of DefenseClaw $backTo could not be moved aside ($($_.Exception.Message))"
+            return Undo-Rollback $why $current $backTo $savedWasRunning ""
+        }
+    }
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) {
+        # A 0.x release has no rollback command: never leave it down.
+        if ($toLegacy) { return Undo-Rollback "The gateway of DefenseClaw $backTo did not start" $current $backTo $savedWasRunning $quarantined }
         Write-Warn "The gateway did not start; run 'defenseclaw-gateway start' and check its log"
     }
     $forward = if ($current) { $current } else { "1.x" }
+    # Each install shows only its own audit window, so say how to read the
+    # other one (GAP-0126). The newer build's gateway reads either log.
+    $otherAudit = Join-Path $Previous "data\audit.db"
+    if (Test-Path -LiteralPath $otherAudit) {
+        $newerGateway = if ($current -and (Test-Version $current) -and [version]$backTo -lt [version]$current) {
+            Join-Path $Previous "bin\defenseclaw-gateway.exe"
+        } else { "defenseclaw-gateway" }
+        $newerGatewayCommand = if ($newerGateway -eq "defenseclaw-gateway") {
+            $newerGateway
+        } else {
+            '& "' + $newerGateway + '"'
+        }
+        Write-Info "The other install's audit events (written while $forward ran) are kept apart: $newerGatewayCommand audit export --db `"$otherAudit`""
+    }
     if ([version]$backTo -lt [version]"1.0.0") {
         # 0.x has no `defenseclaw rollback`; the 1.x installer is parked in previous\.
         Write-Ok ("Now running DefenseClaw $backTo. To return to $forward, run: " +
@@ -1699,19 +1925,28 @@ function Wait-UninstallCleanup([int]$Seconds = 300) {
 
 function Invoke-Install {
     if ($Help) { Show-Usage; return 0 }
-    foreach ($argument in $UnknownArguments) { Write-Warn "Ignoring unknown option: $argument" }
+    foreach ($argument in $UnknownArguments) {
+        if ($argument -match '^-(Version|Local|Connector|QuickstartMode|CosignPath)=(.*)$') {
+            # -Name=value is the same option as -Name value (GAP-0361).
+            Set-Variable -Name $Matches[1] -Value $Matches[2]
+        } elseif ($RunByUpgrade) {
+            Write-Warn "Ignoring unknown option: $argument"
+        } else {
+            Stop-Usage "Unknown option: $argument"
+        }
+    }
     $Connector = $Connector.Trim().ToLowerInvariant()
     if ($Connector -and $ConnectorChoices -notcontains $Connector) {
-        Die "Invalid -Connector '$Connector'. Choices on Windows: $($ConnectorChoices -join ' ')"
+        Stop-Usage "Invalid -Connector '$Connector'. Choices on Windows: $($ConnectorChoices -join ', ')"
     }
     if ($NoOpenclaw -and -not $Connector) { $Connector = "none" }
-    if ($QuickstartMode -and $QuickstartMode -notin @("observe", "action")) { Die "invalid -QuickstartMode: $QuickstartMode" }
+    if ($QuickstartMode -and $QuickstartMode -notin @("observe", "action")) { Stop-Usage "Invalid -QuickstartMode '$QuickstartMode': use observe or action" }
     if ($QuickstartMode) { $Quickstart = $true }
     $TargetVersion = $Version -replace '^v', ''
     if ($TargetVersion -and -not (Test-Version $TargetVersion)) { Die "-Version must look like 1.2.3, got '$Version'" }
     $LocalDir = ""
     if ($Local) {
-        if (-not (Test-Path -LiteralPath $Local -PathType Container)) { Die "Directory not found: $Local" }
+        if (-not (Test-Path -LiteralPath $Local -PathType Container)) { Stop-Usage "-Local: directory not found: $Local" }
         $LocalDir = (Resolve-Path -LiteralPath $Local).ProviderPath
     }
 
@@ -2045,7 +2280,13 @@ function Invoke-Install {
             Write-Host "  Turn it back on with: defenseclaw setup guardrail" -ForegroundColor Cyan
         } else {
             Write-Warn "The gateway is not running, so agent hooks are not guarded until it is"
-            Write-Host "  Start it with: defenseclaw-gateway start" -ForegroundColor Cyan
+            # GAP-0384: when another process holds its API port, that start fails too.
+            $portProblem = (Get-NativeOutput (Join-Path $BinDir "defenseclaw-gateway.exe") @("check-api-port", "--installed")).Trim()
+            if ($LASTEXITCODE -ne 0 -and $portProblem) {
+                Write-Info ($portProblem -replace '^Error: ', '')
+            } else {
+                Write-Host "  Start it with: defenseclaw-gateway start" -ForegroundColor Cyan
+            }
         }
     }
     if ($PrevVersion -and -not $Setup -and -not $Quickstart -and -not $configured) {
@@ -2093,7 +2334,7 @@ try {
 } catch {
     Write-Err $_.Exception.Message
     if ($_.FullyQualifiedErrorId -ne $_.Exception.Message) { Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkGray }
-    $code = 1
+    $code = if ($Run.UsageError) { 2 } else { 1 }
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }

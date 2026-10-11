@@ -2719,9 +2719,9 @@ class TestClaudeUserConfigDiscovery:
         )
         assert entries == []
 
-    def test_settings_json_still_wins_on_name_collision(self, tmp_path, monkeypatch):
-        # The new sources are strictly additive: any name that resolved
-        # before the fix must resolve to the same entry after it.
+    def test_claude_json_wins_over_legacy_settings_on_name_collision(self, tmp_path, monkeypatch):
+        # Claude Code reads ~/.claude.json; the settings.json block 0.8.x wrote
+        # is a legacy source read after it (GAP-1340).
         home = tmp_path / "home"
         home.mkdir()
         (home / ".claude").mkdir()
@@ -2739,7 +2739,7 @@ class TestClaudeUserConfigDiscovery:
         entries = connector_paths.mcp_servers(
             "claudecode", workspace_dir=str(project),
         )
-        assert [e.command for e in entries] == ["from-settings"]
+        assert [e.command for e in entries] == ["from-claude-json"]
 
     def test_reads_workspace_settings_local(self, tmp_path, monkeypatch):
         # agent_discovery has probed .claude/settings.local.json for ages;

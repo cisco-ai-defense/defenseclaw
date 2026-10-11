@@ -39,6 +39,10 @@ MCP_SCANNER_DIST = "cisco-ai-mcp-scanner"
 # TODO(mcp-scanner 4.8.x): 4.8.x pins litellm==1.93.0 (CVE-2026-84377);
 # move when upstream relaxes that pin (see pyproject.toml).
 MCP_SCANNER_VERSION = "4.3.0"
+# The LiteLLM both scanners call (pyproject.toml: >=1.91.5,<1.92.0). 1.91.5 is
+# the first release with the CVE-2026-84377 fix.
+LITELLM_DIST = "litellm"
+LITELLM_MIN_VERSION = (1, 91, 5)
 
 # The recommended setup (the skill scanner's "Lowest FPR" settings): the
 # quiet policy with the LLM judge, block at HIGH, review MEDIUM and above.
@@ -61,8 +65,6 @@ VLLM_SERVE_HINT = (
     "vllm serve <weights> --served-model-name <name> "
     "--structured-outputs-config '{\"backend\": \"xgrammar\", \"disable_any_whitespace\": true}'"
 )
-
-_SEVERITY_RANK = {"INFO": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 
 # DefenseClaw provider names the scanner reaches through its
 # openai-compatible route (a base URL and the served model name).
@@ -89,16 +91,13 @@ def effective_review_queue_min(sc: Any) -> str:
 
 
 def virustotal_enabled(sc: Any) -> bool:
-    """analyzers.virustotal.enabled, or the v8 use_virustotal migration input."""
     analyzers = getattr(sc, "analyzers", None)
-    vt = getattr(analyzers, "virustotal", None)
-    return bool(getattr(vt, "enabled", False) or getattr(sc, "use_virustotal", False))
+    return bool(getattr(getattr(analyzers, "virustotal", None), "enabled", False))
 
 
 def aidefense_enabled(sc: Any) -> bool:
     analyzers = getattr(sc, "analyzers", None)
-    aid = getattr(analyzers, "aidefense", None)
-    return bool(getattr(aid, "enabled", False) or getattr(sc, "use_aidefense", False))
+    return bool(getattr(getattr(analyzers, "aidefense", None), "enabled", False))
 
 
 def osv_enabled(sc: Any) -> bool:
@@ -109,31 +108,11 @@ def osv_enabled(sc: Any) -> bool:
 def virustotal_key_env(sc: Any) -> str:
     analyzers = getattr(sc, "analyzers", None)
     vt = getattr(analyzers, "virustotal", None)
-    return (
-        (getattr(vt, "api_key_env", "") or "").strip()
-        or (getattr(sc, "virustotal_api_key_env", "") or "").strip()
-        or "VIRUSTOTAL_API_KEY"
-    )
+    return (getattr(vt, "api_key_env", "") or "").strip() or "VIRUSTOTAL_API_KEY"
 
 
-def derived_admission_actions(sc: Any) -> dict[str, str]:
-    """admission.skill.actions when unset: derived from the scanner gate.
-
-    Severities at or above fail_on_severity quarantine, the review band
-    [review_queue_min, fail_on_severity) warns, and anything below is
-    allowed. An explicit admission.skill.actions wins.
-    """
-    gate = _SEVERITY_RANK[effective_fail_on_severity(sc)]
-    review = _SEVERITY_RANK[effective_review_queue_min(sc)]
-    out: dict[str, str] = {}
-    for severity, rank in _SEVERITY_RANK.items():
-        if rank >= gate:
-            out[severity.lower()] = "quarantine"
-        elif rank >= review:
-            out[severity.lower()] = "warn"
-        else:
-            out[severity.lower()] = "allow"
-    return out
+#: The analyzers ``scanners.mcp_scanner.analyzers`` accepts (the config schema's enum).
+MCP_ANALYZERS = ("api", "yara", "llm", "behavioral", "readiness")
 
 
 def normalize_mcp_analyzers(raw: Any) -> list[str]:
@@ -191,9 +170,11 @@ def verified_asset_bytes(path: str, digest: str) -> bytes:
     return data
 
 
-def _drop_inherited(name: str) -> bool:
+def _drop_inherited(name: str, *, secure_client: bool = False) -> bool:
     upper = name.upper()
     if upper.startswith("ENABLE_") and upper.endswith("_ANALYZER"):
+        return True
+    if not secure_client and upper in {"OPENAI_BASE_URL", "OPENAI_API_BASE"}:
         return True
     return upper.startswith(_SCANNER_ENV_PREFIXES)
 
@@ -209,19 +190,19 @@ def _remember(name: str) -> None:
 
 
 @contextlib.contextmanager
-def scanner_env(values: Mapping[str, str]) -> Iterator[None]:
+def scanner_env(values: Mapping[str, str], *, secure_client: bool = False) -> Iterator[None]:
     """Run a scan with the scanner environment built from config only.
 
     Sets every non-empty value (config wins over the shell) and removes the
     inherited scanner families (``SKILL_SCANNER_*``, ``ENABLE_*_ANALYZER``,
-    ``AI_DEFENSE_*``, ``MCP_SCANNER_*``, ``VIRUSTOTAL_*``) that config did
+    ``AI_DEFENSE_*``, ``MCP_SCANNER_*``, ``VIRUSTOTAL_*`` and inherited OpenAI endpoints) that config did
     not set. The previous environment comes back when the outermost scan
     ends; concurrent scans of one batch share the same derived values.
     """
     global _env_depth
     with _env_lock:
         if _env_depth == 0:
-            for name in [n for n in os.environ if _drop_inherited(n)]:
+            for name in [n for n in os.environ if _drop_inherited(n, secure_client=secure_client)]:
                 _remember(name)
                 del os.environ[name]
         for name, value in values.items():

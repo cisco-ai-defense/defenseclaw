@@ -91,12 +91,6 @@ func readWindowsManagedRuntimeSelectorCASPlatform(
 	return WindowsManagedRuntimeSelectorCAS{}, errWindowsManagedRuntimeGenerationUnsupported
 }
 
-func verifyWindowsManagedRuntimeSelectorTargetAbsentPlatform(
-	WindowsManagedRuntimeSelectorSnapshotOptions,
-) error {
-	return errWindowsManagedRuntimeGenerationUnsupported
-}
-
 func restoreWindowsManagedRuntimeSelectorCASPlatform(
 	WindowsManagedRuntimeSelectorFullRestoreOptions,
 ) error {

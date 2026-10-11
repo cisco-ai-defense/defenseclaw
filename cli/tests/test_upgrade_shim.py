@@ -284,6 +284,15 @@ def test_an_installer_stamped_with_another_release_is_refused(
     assert execs == []
 
 
+def test_a_downloaded_installer_without_a_version_stamp_is_refused(tmp_path: Path) -> None:
+    # An older signed installer has no stamp in this format; only a local test build may lack one.
+    unstamped = tmp_path / "install.sh"
+    unstamped.write_text("#!/bin/bash\necho installing\n", encoding="utf-8")
+    with pytest.raises(upgrade_shim.ShimError, match="release unknown"):
+        upgrade_shim._check_installer_version(str(unstamped), "1.2.0")
+    upgrade_shim._check_installer_version(str(unstamped), "1.2.0", test_build=True)
+
+
 def test_explicit_version_may_reinstall_or_go_back(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

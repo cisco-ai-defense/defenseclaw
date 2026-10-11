@@ -9,6 +9,7 @@ import (
 	osuser "os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +18,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
@@ -90,18 +90,22 @@ func resolveHookAgentIdentity(ctx context.Context, req agentHookRequest) agentId
 		return agentIdentityFacts{}
 	}
 	machine, machineVerified := agentidentity.HostMachineHash()
+	account := agentIdentityAccount(user)
 	facts := agentIdentityFacts{
 		MachineHash: machine,
 		UserID:      agentidentity.NormalizeUserID(user.ID),
 		// The account as the host names it (an SSSD dcad-alice@dclab.test
 		// stays qualified), so an agent-identities row can be passed back
-		// to the other admin views. defenseclaw.user.name stays bare.
-		UserName:  user.Name,
+		// to the other admin views. defenseclaw.user.name stays bare. The
+		// account the ID is keyed on comes first: the listing tells a
+		// removed account's identity by it (GAP-0947).
+		UserName:  firstNonEmpty(account, user.Name),
 		Connector: connectorName,
 		InstallFP: agentIdentityInstallFP(connectorName, user),
 	}
 	facts.ID = agentidentity.AgentID(agentidentity.Inputs{
-		MachineHash: facts.MachineHash, UserID: facts.UserID, Connector: facts.Connector, InstallFP: facts.InstallFP,
+		MachineHash: facts.MachineHash, UserID: facts.UserID, Account: account,
+		Connector: facts.Connector, InstallFP: facts.InstallFP,
 	})
 	if facts.ID == "" {
 		return agentIdentityFacts{}
@@ -145,6 +149,27 @@ func hookAgentIdentityUser(ctx context.Context) agentIdentityUser {
 	return agentIdentityUser{ID: claimed.UserID, Name: claimed.UserName, Home: userScopedIdentityHome(claimed.UserID)}
 }
 
+// agentIdentityAccount is the account a uid's agent identity is keyed on
+// (agentidentity.Inputs.Account): the name the host's account database
+// gives the uid now, or while it cannot answer the last name it gave, so a
+// uid handed to a new account gets new agent identities and a directory
+// outage moves none (GAP-0314, GAP-0947). A per-user gateway's own account
+// is named once at start, a sandbox's host user by its binding, and a SID's
+// account is not part of its ID. A name the request claims never counts: a
+// hook could pick the identity, a removed account's included.
+func agentIdentityAccount(user agentIdentityUser) string {
+	if user.Self || agentidentity.IsSID(agentidentity.NormalizeUserID(user.ID)) {
+		return user.Name
+	}
+	if name := agentIdentityAccountName(user.ID); name != "" {
+		return name
+	}
+	if user.Sandbox != "" {
+		return user.Name
+	}
+	return ""
+}
+
 var gatewaySelf struct {
 	once sync.Once
 	user agentIdentityUser
@@ -181,19 +206,21 @@ func gatewaySelfUser() agentIdentityUser {
 }
 
 // agentIdentityInstallFP is the connector's config root for user, as the
-// gateway resolves it. A per-user gateway resolves it exactly as its
-// connector setup does, honouring the overrides in its own environment. A
-// service-account gateway joins the connector's default root to the
-// verified user's home; the service's environment says nothing about the
-// user's. A sandbox's agents live in the sandbox, so the sandbox names the
-// install.
+// gateway resolves it. Both per-user and service-account gateways use a
+// stable root under the verified user's home; the gateway startup environment
+// says nothing reliable about the connector installation. Runtime overrides
+// are recorded only as install hints. A sandbox names its own install.
 func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string {
 	if user.Sandbox != "" {
 		return "openshell-sandbox:" + user.Sandbox
 	}
 	cfg := agentIdentityConfig.Load()
 	if user.Self {
-		return filepath.Clean(cfg.ConnectorHomeDir(connectorName))
+		switch strings.ToLower(strings.TrimSpace(connectorName)) {
+		case "claudecode", "codex", "hermes", "opencode", "omnigent":
+		default:
+			return filepath.Clean(cfg.ConnectorHomeDir(connectorName))
+		}
 	}
 	if user.Home == "" {
 		return ""
@@ -206,6 +233,23 @@ func agentIdentityInstallFP(connectorName string, user agentIdentityUser) string
 // environment override, or "."+connector for a connector whose root lies
 // outside the home.
 func connectorConfigRootRelative(cfg *config.Config, connectorName string) string {
+	// These roots have runtime environment overrides in ConnectorHomeDir.
+	// They must not become part of a verified identity after a restart.
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "claudecode":
+		return ".claude"
+	case "codex":
+		return ".codex"
+	case "hermes":
+		if runtime.GOOS == "windows" {
+			return filepath.Join("AppData", "Local", "hermes")
+		}
+		return ".hermes"
+	case "opencode":
+		return filepath.Join(".config", "opencode")
+	case "omnigent":
+		return ".omnigent"
+	}
 	if cached, ok := connectorConfigRootRel.Load(connectorName); ok {
 		return cached.(string)
 	}
@@ -245,18 +289,32 @@ func claimedInstallHint(payload map[string]interface{}) string {
 			}
 		}
 	}
-	hint = strings.TrimSpace(stripLogInjectionRunes(hint))
+	hint = strings.TrimSpace(displaySafeText(hint))
 	if hint == "" || len(hint) > maxInstallHintBytes {
 		return ""
 	}
 	return hint
 }
 
+// displaySafeText replaces what makes agent-claimed text render other than
+// it reads on an admin's terminal with a space: C0 and C1 controls, and the
+// bidi overrides, isolates and marks and other invisible format characters
+// stripZeroWidth drops (GAP-0380).
+func displaySafeText(s string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 0x80 && r <= 0x9F) || (r > 0x7F && stripZeroWidth(string(r)) == "") {
+			return ' '
+		}
+		return r
+	}, stripLogInjectionRunes(s))
+}
+
 // hookSubagentID is the sub-agent a hook belongs to, or "" for the session's
 // root agent. A sub-agent that runs in a child session already has its own
 // session instance, so only a sub-agent sharing its parent's session needs
-// one derived. Claude Code reports agent_id only inside a sub-agent; other
-// connectors are treated as sub-agent hooks only when they say so.
+// one derived. Claude Code and Codex report agent_id only inside a
+// sub-agent; other connectors are treated as sub-agent hooks only when they
+// say so.
 func hookSubagentID(req agentHookRequest) string {
 	agentID := strings.TrimSpace(req.AgentID)
 	if agentID == "" || strings.TrimSpace(req.ChildSessionID) != "" {
@@ -265,8 +323,9 @@ func hookSubagentID(req agentHookRequest) string {
 	switch event := canonicalEvent(req.HookEventName); {
 	case event == "subagentstart" || event == "subagentstop":
 		return agentID
-	case req.CorrelationProfileVersion == connector.CorrelationProfileClaudeCodeV1:
-		// Claude Code reports agent_id only inside a sub-agent. Any other
+	case subagentOnlyAgentIDConnector(req.ConnectorName):
+		// These connectors report agent_id only inside a sub-agent, on every
+		// hook of it (GAP-0137), not only on its start and stop. Any other
 		// agent id is one correlation minted or restored for the main agent
 		// on a session or turn boundary; keying the instance on it moved
 		// ais- whenever a new one was minted, as on a resume after a
@@ -279,6 +338,30 @@ func hookSubagentID(req agentHookRequest) string {
 		return agentID
 	}
 	return ""
+}
+
+// subagentOnlyAgentIDConnector reports whether name's hooks carry agent_id
+// only inside a sub-agent: the main agent's hooks carry none. Claude Code
+// and Codex (0.159 and later) do. Any hook of such a connector that names an
+// agent belongs to a child of the session's main agent, whatever the event.
+func subagentOnlyAgentIDConnector(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "claudecode", "codex":
+		return true
+	}
+	return false
+}
+
+// payloadNamesSubagent reports whether a hook of source names agentID in its
+// own payload and source reports agent_id only inside a sub-agent. An agent
+// id that correlation minted or restored for the main agent is not in the
+// payload, so it never counts.
+func payloadNamesSubagent(source, agentID string, payload map[string]interface{}) bool {
+	if agentID == "" || !subagentOnlyAgentIDConnector(source) {
+		return false
+	}
+	reported, _, _ := extractAgentIdentityFromHookPayload(payload)
+	return strings.TrimSpace(reported) == agentID
 }
 
 var agentIdentityIDPattern = regexp.MustCompile(`^agt-[0-9a-f]{16}$`)
@@ -298,10 +381,13 @@ func agentIdentityV8FromContext(ctx context.Context) observability.Optional[stri
 	return agentIdentityV8(id)
 }
 
-// inventoryAgentIdentityID is the agent identity of userID's install of
-// connectorName: the ID the hook path derives for that user's hooks, so an
-// inventory record joins the agent's decisions. "" when it cannot be derived.
-func inventoryAgentIdentityID(connectorName, userID string) string {
+// inventoryAgentIdentityID is the agent identity of the install of
+// connectorName that userID, recorded as userName, owns: the ID the hook
+// path derives for that user's hooks, so an inventory record joins the
+// agent's decisions. "" when it cannot be derived, and for a record of an
+// account whose uid another account holds now: the uid's home is then the
+// new account's, not the install the record is about (GAP-0947).
+func inventoryAgentIdentityID(connectorName, userID, userName string) string {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	if ManagedEnterpriseActive() || connectorName == "" || userID == "" {
 		return ""
@@ -310,11 +396,34 @@ func inventoryAgentIdentityID(connectorName, userID string) string {
 	if self := gatewaySelfUser(); !gatewayRunsAsServiceAccount() && self.ID == userID {
 		user = self
 	}
+	account := agentIdentityAccount(user)
+	if agentidentity.UIDReassigned(userID, userName, account) {
+		return ""
+	}
 	machine, _ := agentidentity.HostMachineHash()
 	return agentidentity.AgentID(agentidentity.Inputs{
-		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID),
+		MachineHash: machine, UserID: agentidentity.NormalizeUserID(user.ID), Account: account,
 		Connector: connectorName, InstallFP: agentIdentityInstallFP(connectorName, user),
 	})
+}
+
+// withSessionAgentInstance joins a request outside the hook path (the Codex
+// notify webhook) to the agent instance its session was seen under on the hook
+// path, on the audit envelope, so its records carry the same ais- as the
+// session's hook records. Like agentIdentityIDForTraffic it is a join, not a
+// verification: it never sets the identity on the context (GAP-0203).
+func withSessionAgentInstance(ctx context.Context, sessionID string) context.Context {
+	identityID := agentIdentityIDForTraffic(ctx, AgentIdentityFromContext(ctx))
+	if identityID == "" {
+		return ctx
+	}
+	// The hook path keys a sandbox's sessions apart from the host's, so the
+	// join must use the same key or it never finds a sandboxed session.
+	instance := SharedAgentRegistry().peekAgentInstance(identityID, sandboxSessionStateKey(ctx, sessionID))
+	if instance == "" {
+		return ctx
+	}
+	return refreshAuditEnvelopeFromIdentity(ctx, "", AgentIdentity{AgentInstanceID: instance})
 }
 
 // agentIdentityIDForTraffic is the agent identity of a request outside the
@@ -323,12 +432,27 @@ func inventoryAgentIdentityID(connectorName, userID string) string {
 // link is a join, not a verification, so it never feeds
 // agentIdentityFromContext.
 func agentIdentityIDForTraffic(ctx context.Context, identity AgentIdentity) string {
+	if ctx.Value(acpUnboundAgentContextKey{}) != nil {
+		return ""
+	}
+	return agentIdentityIDForSession(ctx, identity, firstNonEmpty(SessionIDFromContext(ctx), audit.EnvelopeFromContext(ctx).SessionID))
+}
+
+// agentIdentityIDForSession is agentIdentityIDForTraffic for traffic that
+// names its session itself, as a native OTLP record does.
+func agentIdentityIDForSession(ctx context.Context, identity AgentIdentity, sessionID string) string {
 	if identity.IdentityID != "" {
 		return identity.IdentityID
+	}
+	// A session id is caller supplied. The registry has no verified owner
+	// mapping for a session-only join, so a shared gateway cannot attribute
+	// its hook identity to another request by that id alone.
+	if serviceAccountGatewayFromContext(ctx) || gatewayRunsAsServiceAccount() {
+		return ""
 	}
 	reg := SharedAgentRegistry()
 	if reg == nil {
 		return ""
 	}
-	return reg.AgentIdentityForSession(ctx, firstNonEmpty(SessionIDFromContext(ctx), audit.EnvelopeFromContext(ctx).SessionID))
+	return reg.AgentIdentityForSession(ctx, sessionID)
 }

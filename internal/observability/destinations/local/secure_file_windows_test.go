@@ -21,6 +21,43 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// A missing folder inherits what its nearest existing folder passes on to
+// new subfolders; an Authenticated Users Modify grant there made the gateway
+// refuse the folder it created while the path check passed (GAP-1381).
+func TestWindowsJSONLPathProblemChecksWhatAMissingFolderInherits(t *testing.T) {
+	directory := t.TempDir()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "new", "nested", "events.jsonl")
+	for _, test := range []struct {
+		users  string
+		unsafe bool
+	}{
+		{"(A;OICIIO;0x1301bf;;;AU)", true},
+		{"(A;OICI;0x1200a9;;;AU)", false},
+		{"(A;CINP;0x1301bf;;;AU)", false}, // reaches only the first new folder
+	} {
+		descriptor, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" +
+			user.User.Sid.String() + ")" + test.users)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := descriptor.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(directory, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+		if problem := JSONLPathProblem(path); (problem != "") != test.unsafe {
+			t.Fatalf("%s: JSONLPathProblem = %q, want unsafe %v", test.users, problem, test.unsafe)
+		}
+	}
+}
+
 // This runs on Windows CI and pins the preparation seam: validation must open
 // the parent directory, not the not-yet-created JSONL leaf path.
 func TestWindowsJSONLPreparesNewFileInTrustedParent(t *testing.T) {

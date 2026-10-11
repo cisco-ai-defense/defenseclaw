@@ -34,19 +34,29 @@ import (
 const llmBaseURLProviderName = "custom-gateway"
 
 // buildGenerationProviders is a generation's LLM provider registry: the
-// embedded providers.json, a legacy operator overlay that config has not
-// absorbed yet (configs.LoadProviders skips a derived one), then
-// llm_providers from config, then llm.base_url's host when nothing above
-// knows it.
-func buildGenerationProviders(cfg *config.Config) *generationProviders {
-	reg, err := configs.LoadProviders()
+// embedded providers.json, the legacy operator overlay for non-managed
+// profiles (configs.LoadProviders skips a derived one), then llm_providers
+// from config, then llm.base_url's host when nothing above knows it.
+// Managed v9 uses only config.yaml additions (GAP-0443).
+func buildGenerationProviders(cfg *config.Config) (*generationProviders, error) {
+	var reg *configs.ProvidersConfig
+	var err error
+	if cfg != nil && cfg.ConfigVersion == config.ConfigVersionV9 && cfg.StandaloneEnterprise() {
+		reg, err = configs.LoadEmbeddedProviders()
+	} else {
+		reg, err = configs.LoadProviders()
+	}
 	if err != nil || reg == nil {
 		reg = &configs.ProvidersConfig{}
 	}
 	if cfg != nil {
 		overlay := configs.ProvidersConfig{OllamaPorts: append([]int(nil), cfg.LLMProviders.OllamaPorts...)}
 		for _, custom := range cfg.LLMProviders.Custom {
-			overlay.Providers = append(overlay.Providers, providerFromConfig(custom))
+			provider, err := providerFromConfig(custom)
+			if err != nil {
+				return nil, err
+			}
+			overlay.Providers = append(overlay.Providers, provider)
 		}
 		configs.ApplyOverlay(reg, overlay)
 		if host := llmBaseURLHost(cfg.LLM.BaseURL); host != "" && !registryKnowsHost(reg, host) {
@@ -55,13 +65,13 @@ func buildGenerationProviders(cfg *config.Config) *generationProviders {
 			}}})
 		}
 	}
-	return &generationProviders{Providers: reg.Providers, OllamaPorts: reg.OllamaPorts}
+	return &generationProviders{Providers: reg.Providers, OllamaPorts: reg.OllamaPorts}, nil
 }
 
 // providerFromConfig converts one llm_providers.custom entry. A TLS CA file
-// is read into the inline PEM the provider adapter takes; an unreadable file
-// leaves the system roots in place and is reported.
-func providerFromConfig(in config.LLMCustomProvider) configs.Provider {
+// is read into the inline PEM the provider adapter takes. A configured CA
+// must be available before the generation can be published.
+func providerFromConfig(in config.LLMCustomProvider) (configs.Provider, error) {
 	out := configs.Provider{
 		Name:                 in.Name,
 		Domains:              append([]string(nil), in.Domains...),
@@ -81,7 +91,7 @@ func providerFromConfig(in config.LLMCustomProvider) configs.Provider {
 		if path := strings.TrimSpace(in.TLS.CACertFile); path != "" {
 			pem, err := os.ReadFile(path) // #nosec G304 -- llm_providers.custom[].tls.ca_cert_file.
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] llm_providers.custom %q: CA file unreadable: %v\n", in.Name, err)
+				return configs.Provider{}, fmt.Errorf("llm_providers.custom %q: read CA file %q: %w", in.Name, path, err)
 			} else {
 				tls.CACertPEM = string(pem)
 			}
@@ -105,7 +115,7 @@ func providerFromConfig(in config.LLMCustomProvider) configs.Provider {
 			Endpoint: a.Endpoint, APIVersion: a.APIVersion, AuthMode: a.AuthMode, DeploymentAliases: a.DeploymentAliases,
 		}
 	}
-	return out
+	return out, nil
 }
 
 // llmBaseURLHost is llm.base_url's lower-cased host, "" for an empty,

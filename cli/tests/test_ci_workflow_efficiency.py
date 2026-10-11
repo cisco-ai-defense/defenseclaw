@@ -124,6 +124,9 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "GO_PACKAGE_SHARDS: 8" in workflow
     assert "internal/(audit|gateway)" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 24' in workflow
+    # checkptr in the transpiled SQLite doubled the cost of every race shard.
+    race = "go test -race -gcflags=modernc.org/...=-d=checkptr=0 "
+    assert workflow.count("go test -race ") == workflow.count(race) == 3
     assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
@@ -153,3 +156,14 @@ def test_release_dispatch_version_is_stamped_without_a_version_only_pr() -> None
 
     macos_build = (ROOT / "scripts/build-macos-app-release.sh").read_text(encoding="utf-8")
     assert 'MARKETING_VERSION="${VERSION}"' in macos_build
+
+
+def test_windows_standalone_setup_jobs_install_uv_first() -> None:
+    # build-setup.sh builds the Python scanner runtime with uv (GAP-0132).
+    for name in ("ci.yml", "release.yaml"):
+        workflow = yaml.safe_load((ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
+        for job_id, job in workflow["jobs"].items():
+            steps = [str(step.get("uses", "")) + str(step.get("run", "")) for step in job.get("steps", [])]
+            builds = [i for i, step in enumerate(steps) if "standalone/build-setup.sh" in step]
+            uv = [i for i, step in enumerate(steps) if step.startswith("astral-sh/setup-uv@")]
+            assert not builds or (uv and uv[0] < builds[0]), f"{name}:{job_id} runs build-setup.sh without setup-uv"

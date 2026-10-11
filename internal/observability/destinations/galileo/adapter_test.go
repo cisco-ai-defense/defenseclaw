@@ -296,11 +296,16 @@ func TestAdapterExportsRichRedactedCanaryAndAcknowledgesExactTrace(t *testing.T)
 		}
 		for key, want := range map[string]string{
 			"team.owner": "runtime-security", "region.site": "east-lab",
-			"deployment.environment": "test", "deployment.mode": "gateway",
-			"defenseclaw.device.id": "device-fingerprint",
+			"deployment.environment.name": "test", "defenseclaw.deployment.mode": "gateway",
+			"defenseclaw.device.public_key_fingerprint": "device-fingerprint",
 		} {
 			if got := attrs[key].GetStringValue(); got != want {
 				t.Errorf("resource %q = %q, want %q", key, got, want)
+			}
+		}
+		for _, retired := range []string{"deployment.environment", "deployment.mode", "defenseclaw.device.id"} {
+			if _, present := attrs[retired]; present {
+				t.Errorf("resource carries the retired alias %q", retired)
 			}
 		}
 		if resource.Resource.DroppedAttributesCount != 0 {
@@ -620,47 +625,6 @@ func TestAdapterRejectsMissingOrMismatchedCanonicalEndedIdentityBeforeNetwork(t 
 			test.mutate(t, forged)
 			assertForgedProjectionRejectedBeforeNetwork(t, forged, "galileo-"+spanID)
 		})
-	}
-}
-
-func TestProjectedResourceCompatibilityAliasesRemainPolicyControlled(t *testing.T) {
-	t.Parallel()
-	const spanID = "7172737475767778"
-	result := makeResult(t, testTraceID, spanID, "chat", false, true)
-	encoded, err := result.Bytes()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wire map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.UseNumber()
-	if err := decoder.Decode(&wire); err != nil {
-		t.Fatal(err)
-	}
-	resourceAttributes := projectedResourceAttributes(t, wire)
-	for _, key := range []string{"deployment.environment", "deployment.mode", "defenseclaw.device.id"} {
-		delete(resourceAttributes, key)
-	}
-	encoded, err = json.Marshal(wire)
-	if err != nil {
-		t.Fatal(err)
-	}
-	projected, ok := decodeProjection(encoded)
-	if !ok {
-		t.Fatal("valid alias-free projection rejected")
-	}
-	resource, _, _, _, _, ok := projected.otlp("galileo")
-	if !ok {
-		t.Fatal("valid alias-free resource rejected")
-	}
-	attributes := protoAttributes(resource.Attributes)
-	for _, key := range []string{"deployment.environment", "deployment.mode", "defenseclaw.device.id"} {
-		if _, present := attributes[key]; present {
-			t.Errorf("disabled compatibility alias %q was reconstructed", key)
-		}
-	}
-	if got := attributes["team.owner"].GetStringValue(); got != "runtime-security" {
-		t.Fatalf("custom resource attribute = %q", got)
 	}
 }
 
@@ -1012,8 +976,6 @@ func makeResult(
 				"team.owner": "runtime-security", "region.site": "east-lab",
 				"defenseclaw.deployment.mode":               "gateway",
 				"defenseclaw.device.public_key_fingerprint": "device-fingerprint",
-				"deployment.environment":                    "test", "deployment.mode": "gateway",
-				"defenseclaw.device.id": "device-fingerprint",
 			}}
 		body["scope"] = map[string]any{
 			"name": "defenseclaw.telemetry", "version": "v8-test",

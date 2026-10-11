@@ -16,7 +16,22 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+// GroupNameLookupDefinitive is always true on macOS: Open Directory looks
+// groups up by name.
+func GroupNameLookupDefinitive() bool { return true }
+
+// QualifiedGroupName has nothing to offer on macOS, whose group names carry
+// no domain.
+func QualifiedGroupName(context.Context, Resolver, string) string { return "" }
+func QualifiedUserName(context.Context, Resolver, string) string  { return "" }
+
+// SameNameAccounts finds no twins on macOS: Open Directory resolves a short
+// name to one account.
+func SameNameAccounts(context.Context, Resolver, Account) []Account { return nil }
 
 const darwinDSCL = "/usr/bin/dscl"
 
@@ -28,6 +43,12 @@ func DefaultUIDRange() (int, int) { return 501, 2147483646 }
 // through Open Directory, so it is authoritative for lookups.
 func Default(ctx context.Context) Resolver {
 	return NewCachingResolver(NewOSUserResolver(ctx))
+}
+
+// DirectoryFactsFunc is nil on macOS: Open Directory answers each spelling
+// of an account with the account itself.
+func DirectoryFactsFunc(context.Context) func(uid int) (useridentity.DirectoryFacts, bool) {
+	return nil
 }
 
 // platformLocalAccounts lists the local directory node's accounts.

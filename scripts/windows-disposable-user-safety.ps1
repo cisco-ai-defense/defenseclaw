@@ -126,25 +126,19 @@ function Set-DisposableProtectedDirectoryAcl {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][Security.Principal.SecurityIdentifier]$ChildSid,
         [Parameter(Mandatory)][Security.AccessControl.FileSystemRights]$ChildRights,
-        [switch]$InheritChildRights,
-        [switch]$UseAdministratorsForCleanup
+        [switch]$InheritChildRights
     )
 
     $directory = [IO.Directory]::CreateDirectory([IO.Path]::GetFullPath($Path))
     $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
     if ($null -eq $currentSid) { throw 'runner identity has no user SID' }
-    $cleanupSid = if ($UseAdministratorsForCleanup) {
-        [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-    } else {
-        $currentSid
-    }
     $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $security = [Security.AccessControl.DirectorySecurity]::new()
     $security.SetOwner($currentSid)
     $security.SetAccessRuleProtection($true, $false)
     $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
         [Security.AccessControl.InheritanceFlags]::ObjectInherit
-    foreach ($sid in @($cleanupSid, $systemSid)) {
+    foreach ($sid in @($currentSid, $systemSid)) {
         [void]$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
             $sid,
             [Security.AccessControl.FileSystemRights]::FullControl,

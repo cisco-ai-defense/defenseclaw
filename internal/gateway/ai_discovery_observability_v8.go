@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -182,17 +183,24 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	logErr := adapter.emitSummaryLog(ctx, report.Summary)
-	for _, signal := range report.Signals {
+	ownerEmails := standaloneOwnerEmailObservations(report.Signals)
+	for i, signal := range report.Signals {
 		// Managed enterprise receives a complete endpoint snapshot on every
 		// cadence, including steady-state `seen` observations. Other modes keep
 		// the historical lifecycle-delta contract.
 		isDelta := signal.State == inventory.AIStateNew ||
 			signal.State == inventory.AIStateChanged || signal.State == inventory.AIStateGone
-		if !isDelta && !(ManagedEnterpriseActive() && signal.State == inventory.AIStateSeen) {
-			continue
+		if isDelta || (ManagedEnterpriseActive() && signal.State == inventory.AIStateSeen) {
+			if err := adapter.emitSignalLog(ctx, report.Summary, signal); err != nil && logErr == nil {
+				logErr = err
+			}
 		}
-		if err := adapter.emitSignalLog(ctx, report.Summary, signal); err != nil && logErr == nil {
-			logErr = err
+		if ownerEmails[i] {
+			observed := signal
+			observed.State = inventory.AIStateSeen
+			if err := adapter.emitSignalLog(ctx, report.Summary, observed); err != nil && logErr == nil {
+				logErr = err
+			}
 		}
 	}
 	for _, component := range components {
@@ -204,18 +212,25 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		}
 	}
 	if inv := report.IDEInventory; inv != nil && !inv.Carried {
-		for _, plugin := range inv.Plugins {
-			if plugin.State != inventory.AIStateNew && plugin.State != inventory.AIStateChanged {
-				continue
-			}
-			if err := adapter.emitIDEPluginLog(ctx, report.Summary, plugin); err != nil && logErr == nil {
+		skipped := 0
+		emitPlugin := func(plugin inventory.IDEPlugin) {
+			err := adapter.emitIDEPluginLog(ctx, report.Summary, plugin)
+			if errors.Is(err, errIDEPluginSkipped) {
+				skipped++
+			} else if err != nil && logErr == nil {
 				logErr = err
 			}
 		}
-		for _, plugin := range inv.Removed {
-			if err := adapter.emitIDEPluginLog(ctx, report.Summary, plugin); err != nil && logErr == nil {
-				logErr = err
+		for _, plugin := range inv.Plugins {
+			if plugin.State == inventory.AIStateNew || plugin.State == inventory.AIStateChanged {
+				emitPlugin(plugin)
 			}
+		}
+		for _, plugin := range inv.Removed {
+			emitPlugin(plugin)
+		}
+		if skipped > 0 {
+			fmt.Fprintf(os.Stderr, "[ai_discovery] %d ide.plugin records skipped: the plugin id or product is outside the registered syntax (the CLI and the ide_plugins gauge still count them)\n", skipped)
 		}
 	}
 	metricErr := adapter.emitMetrics(ctx, report, components)
@@ -223,6 +238,38 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		return logErr
 	}
 	return metricErr
+}
+
+// standaloneOwnerEmailObservations picks, on the standalone enterprise
+// profile, the signals whose ai_component.observed record carries their
+// owner's connector address this cycle: one per account and connector
+// (Claude Code, Codex), its supported_connector signal when it has one. The
+// standalone profile exports only lifecycle deltas, which carry no address,
+// so with ai_discovery.include_user_email on no destination ever received
+// it (GAP-0961, GAP-1099). Only a signal with an owner and an address read
+// from that owner's own profile qualifies; the strict profile drops the
+// address. The Secure Client profile already sends every observation.
+func standaloneOwnerEmailObservations(signals []inventory.AISignal) map[int]bool {
+	if ManagedEnterpriseActive() || !standaloneEnterpriseActive.Load() || !UserEmailCollectionEnabled() {
+		return nil
+	}
+	chosen := map[string]int{}
+	for i, signal := range signals {
+		if signal.State == inventory.AIStateGone || discoveryUserEmail(signal) == "" {
+			continue
+		}
+		key := strings.ToUpper(signal.UserID) + "\x00" + strings.ToLower(strings.TrimSpace(signal.SupportedConnector))
+		if prior, ok := chosen[key]; ok && (signals[prior].Category == inventory.SignalSupportedConnector ||
+			signal.Category != inventory.SignalSupportedConnector) {
+			continue
+		}
+		chosen[key] = i
+	}
+	out := make(map[int]bool, len(chosen))
+	for _, i := range chosen {
+		out[i] = true
+	}
+	return out
 }
 
 func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
@@ -285,10 +332,10 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			// lifecycle records can be split by user like the observations.
 			UserID:                aiDiscoveryV8OptionalText(signal.UserID),
 			DefenseClawUserIDKind: v8UserIDKind(discoveryUserIDKind(signal.UserID)),
-			DefenseClawUserName:   aiDiscoveryV8OptionalText(signal.UserName),
+			DefenseClawUserName:   v8UserName(signal.UserName, aiDiscoveryV8OptionalText),
 			// The agent identity of the connector install the signal belongs
 			// to, so discovery joins that agent's decisions.
-			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID)),
+			DefenseClawAgentIdentityID: agentIdentityV8(inventoryAgentIdentityID(signal.SupportedConnector, signal.UserID, signal.UserName)),
 			// A sandbox scan's signal names the OpenShell sandbox it was found in.
 			DefenseClawSandboxID:   aiDiscoveryV8Optional(signal.SandboxID),
 			DefenseClawSandboxName: aiDiscoveryV8Optional(signal.SandboxName),
@@ -350,6 +397,9 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 				DefenseClawAgentIdentityID:               base.DefenseClawAgentIdentityID,
 				DefenseClawSandboxID:                     base.DefenseClawSandboxID,
 				DefenseClawSandboxName:                   base.DefenseClawSandboxName,
+				// The owner's connector address, once per discovery cycle
+				// (redaction drops it under strict).
+				DefenseClawUserEmail: v8UserEmail(discoveryUserEmail(signal)),
 			}
 			identity.applyTo(&observed)
 			return builder.BuildLogAIComponentObserved(observed)
@@ -398,12 +448,23 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 	return nil
 }
 
+// errIDEPluginSkipped marks a plugin whose id or product does not fit the
+// registered attribute syntax; the record is dropped, never rewritten.
+var errIDEPluginSkipped = errors.New("ide plugin outside the registered attribute syntax")
+
 var (
-	ideV8PluginIDPattern = regexp.MustCompile(`^[A-Za-z0-9@][A-Za-z0-9._@/:+-]*$`)
+	// IDE inventory accepts bounded Unicode text without control characters.
+	// Keep the telemetry contract equally broad so valid plugin ids are emitted.
+	ideV8PluginIDPattern = regexp.MustCompile(`^[^\x00-\x1f\x7f-\x9f]+$`)
 	ideV8VersionPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]*$`)
 	ideV8ProductPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,63}$`)
 	ideV8UserPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
+	ideV8UserNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@-]*$`)
 )
+
+func ideV8UserName(value string) observability.Optional[string] {
+	return ideV8Optional(value, ideV8UserNamePattern, 256)
+}
 
 func ideV8Optional(value string, pattern *regexp.Regexp, limit int) observability.Optional[string] {
 	value = strings.TrimSpace(value)
@@ -417,7 +478,7 @@ func ideV8Optional(value string, pattern *regexp.Regexp, limit int) observabilit
 // plugin. Plugin ids and versions are exported as they are; paths never
 // leave the process (the row carries only their hashes, which this record
 // does not use). A plugin whose id does not fit the attribute's syntax is
-// skipped rather than rewritten.
+// skipped rather than rewritten, and reported as errIDEPluginSkipped.
 func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 	ctx context.Context,
 	summary inventory.AIDiscoverySummary,
@@ -434,9 +495,10 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 	default:
 		return nil
 	}
-	pluginID := strings.TrimSpace(plugin.PluginID)
-	if len(pluginID) > 256 || !ideV8PluginIDPattern.MatchString(pluginID) || !ideV8ProductPattern.MatchString(plugin.Product) {
-		return nil
+	pluginID := plugin.PluginID
+	if strings.TrimSpace(pluginID) == "" || len(pluginID) > 256 ||
+		!ideV8PluginIDPattern.MatchString(pluginID) || !ideV8ProductPattern.MatchString(plugin.Product) {
+		return errIDEPluginSkipped
 	}
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
@@ -471,7 +533,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawAIDiscoveryScanID: aiDiscoveryV8Optional(summary.ScanID),
 			UserID:                       ideV8Optional(plugin.UserID, ideV8UserPattern, 256),
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
-			DefenseClawUserName:          ideV8Optional(plugin.UserName, ideV8UserPattern, 256),
+			DefenseClawUserName:          v8UserName(plugin.UserName, ideV8UserName),
 		}
 		inventoryIdentity(plugin.UserID).applyTo(&base)
 		switch plugin.State {
@@ -544,6 +606,17 @@ func ideGaugePoints(inv *inventory.IDEInventory) ([]ideGaugeKey, map[ideGaugeKey
 // emitIDEPluginMetricsV8 records the defenseclaw.inventory.ide_plugins
 // gauge: the plugin count per IDE product, AI flag and enabled state.
 func emitIDEPluginMetricsV8(recorder *aiDiscoveryV8MetricRecorder, inv *inventory.IDEInventory) {
+	if inv == nil {
+		return
+	}
+	// The unlabeled sample is the current total. Product series can persist
+	// in the metric SDK after inventory is disabled, so dashboards must use
+	// this sample for the aggregate instead of summing product series.
+	recorder.record(observability.TelemetryInstrumentDefenseClawInventoryIdePlugins, func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+		return builder.BuildMetricDefenseClawInventoryIdePlugins(observability.MetricDefenseClawInventoryIdePluginsInput{
+			Envelope: envelope, Value: int64(len(inv.Plugins)),
+		})
+	})
 	keys, counts := ideGaugePoints(inv)
 	for _, k := range keys {
 		k, value := k, counts[k]

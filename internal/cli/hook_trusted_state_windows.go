@@ -418,14 +418,6 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	return "enterprise_managed_runtime_state_invalid"
 }
 
-func enterpriseManagedHookRuntimeEndpoint(
-	connectorName string,
-) (gatewayAddr, gatewayServiceName string, ok bool) {
-	gatewayAddr, gatewayServiceName, _, ok =
-		enterpriseManagedHookRuntimeConnection(connectorName)
-	return gatewayAddr, gatewayServiceName, ok
-}
-
 // enterpriseManagedHookRuntimeConnection returns endpoint identity and the
 // connector-scoped token from one already-authenticated immutable generation.
 // The returned token pointer is the explicit hookexec snapshot-mode marker;

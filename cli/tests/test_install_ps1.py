@@ -196,6 +196,36 @@ exit $LASTEXITCODE
     assert not (tmp_path / "home").exists()
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    ("argument", "message"),
+    [("-Frobnicate", "Unknown option: -Frobnicate"), ("-Connector=bogus", "Invalid -Connector 'bogus'")],
+)
+def test_an_unknown_argument_stops_with_exit_2(tmp_path: Path, argument: str, message: str) -> None:
+    # GAP-0361: an unknown argument (a typo, or the -Name=value form) was
+    # ignored with a warning and the install went on without it.
+    env = {
+        **os.environ,
+        "USERPROFILE": str(tmp_path),
+        "LOCALAPPDATA": str(tmp_path / "AppData" / "Local"),
+        "APPDATA": str(tmp_path / "AppData" / "Roaming"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home"),
+    }
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(INSTALL_PS1), argument],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        env=env,
+        check=False,
+    )
+    assert completed.returncode == 2, completed.stdout + completed.stderr
+    assert message in completed.stdout + completed.stderr
+    assert not (tmp_path / "home").exists()
+
+
 def test_hook_state_matches_what_the_hook_reads() -> None:
     # internal/cli/hook_trusted_state_windows.go accepts a PowerShell install's
     # state only with these values; anything else makes the hook fall back to
@@ -206,7 +236,7 @@ def test_hook_state_matches_what_the_hook_reads() -> None:
         assert field in body.group(1)
     for field in ("install_root = $root", "command_dir = $root", "data_root = "):
         assert field in body.group(1)
-    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text()
+    go = (ROOT / "internal" / "cli" / "hook_trusted_state_windows.go").read_text(encoding="utf-8")
     assert 'powerShellHookStateName = "defenseclaw-hook-state.json"' in go
     assert re.search(r'\$HookState = "defenseclaw-hook-state.json"', _text())
 
@@ -305,7 +335,9 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
 
 def _ps1_function(name: str) -> str:
     text = _text()
-    start = text.index(f"function {name} ")
+    match = re.search(rf"^function {re.escape(name)}[ (]", text, re.M)
+    assert match is not None, name
+    start = match.start()
     return text[start : text.index("\n}\n", start) + 3]
 
 
@@ -533,6 +565,36 @@ Restore-BinDir '{slot}'
         assert list(bin_dir.iterdir()) == []
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_a_file_robocopy_refuses_is_copied_or_named_with_a_next_step(tmp_path: Path) -> None:
+    # GAP-1048: robocopy exit 8 on the audit.db a failed 0.8.10 Setup left
+    # stopped the upgrade with no cause and no next step.
+    source = tmp_path / "data" / "audit.db"
+    source.parent.mkdir()
+    source.write_text("db", encoding="utf-8")
+    slot = tmp_path / "slot"
+    slot.mkdir()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Invoke-Robocopy([string[]]$Arguments) {{
+    [pscustomobject]@{{ Code = 8; Error = 'ERROR 5 (0x00000005) Copying NTFS Security to Destination File Access is denied.' }}
+}}
+{_ps1_function("Copy-Kept")}
+Copy-Kept '{source}' '{slot}'
+try {{ Copy-Kept '{source}' '{tmp_path / "missing"}' }} catch {{ Write-Output $_.Exception.Message }}
+"""
+    completed = subprocess.run(
+        [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert (slot / "audit.db").read_text(encoding="utf-8") == "db"
+    assert "ERROR 5" in completed.stdout and "then run the installer again" in completed.stdout, completed.stdout
+
+
 def test_a_stopped_or_undone_install_frees_the_staged_release_first() -> None:
     # GAP-1839/GAP-1841: the 873 MB .staging left no room for the restore or
     # for the old gateway's restart.
@@ -599,6 +661,8 @@ def test_the_uv_folder_is_protected_before_uv_runs_and_before_a_rollback_starts_
     uv_env = install.index('$env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\\python"')
     assert uv_env < install.index("Protect-UvDirectory -Create") < install.index("$Uv = Install-Uv")
     rollback = _ps1_function("Invoke-Rollback")
+    # GAP-1284: this install's gateway converts its hook entries before the older one is restored.
+    assert rollback.index("if (-not $rollForward) { Convert-HooksForRollback") < rollback.index("Switch-WithPrevious")
     assert (
         rollback.index("Switch-WithPrevious")
         < rollback.index("Protect-UvDirectory")
@@ -638,6 +702,54 @@ def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path
     assert sh_start.index('version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi') < sh_start.index(
         '"${BIN_DIR}/defenseclaw-gateway" start'
     )
+
+
+def test_a_rollback_to_0_x_checks_the_saved_stores_and_undoes_itself_when_0_x_stays_down(tmp_path: Path) -> None:
+    # GAP-1388: a rollback restored a damaged 0.8.10 audit.db, its gateway
+    # could not start, and the agents were left unguarded. Both installers
+    # check the saved stores with the same code, without writing beside them.
+    import sqlite3
+    import sys
+
+    ps1 = re.search(r"^\$RollbackDbCheckPy = @'\n(.*?)'@$", _text(), re.M | re.S)
+    sh_text = (ROOT / "scripts" / "install.sh").read_text(encoding="utf-8")
+    sh = re.search(r"^ROLLBACK_DB_CHECK_PY='(.*?)'$", sh_text, re.M | re.S)
+    assert ps1 and sh and ps1.group(1) == sh.group(1)
+    good, bad = tmp_path / "good.db", tmp_path / "audit.db"
+    stores = {}
+    for path in (good, bad):
+        stores[path] = sqlite3.connect(path)
+        stores[path].execute("PRAGMA journal_mode=WAL")
+        stores[path].execute("CREATE TABLE audit_events (detail TEXT)")
+        stores[path].executemany("INSERT INTO audit_events VALUES (?)", [("x" * 500,)] * 2000)
+        stores[path].commit()
+    stores[bad].close()
+    with bad.open("r+b") as handle:
+        handle.seek(4096 * 2)
+        handle.write(b"\xff" * 4096 * 3)
+    # good.db is still open, with its -wal: the check reads a copy of it.
+    before = sorted(p.name for p in tmp_path.iterdir())
+    found = subprocess.run(
+        [sys.executable, "-I", "-c", sh.group(1), str(good), str(bad), str(tmp_path / "missing.db")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    after = sorted(p.name for p in tmp_path.iterdir())
+    stores[good].close()
+    assert found.stdout.splitlines() == [str(bad)], found.stdout + found.stderr
+    assert after == before
+    rollback = _ps1_function("Invoke-Rollback")
+    assert (
+        rollback.index("Test-RollbackData $backTo")
+        < rollback.index("Stop-Gateway")
+        < rollback.index("Switch-WithPrevious")
+        < rollback.index("Move-DamagedAuditStore $backTo")
+        < rollback.index("if ($startAfter -and (Start-Gateway)")
+        < rollback.index("if ($toLegacy) { return Undo-Rollback")
+    )
+    undo = _ps1_function("Undo-Rollback")
+    assert undo.index("Switch-WithPrevious $BackTo") < undo.index("Start-Gateway") < undo.rindex("return 1")
 
 
 def test_install_folders_set_only_the_acl_part_that_changed() -> None:

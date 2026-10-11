@@ -9,9 +9,18 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 func TestCodexGenericWindowsShellStaticReaderScope(t *testing.T) {
+	for _, tool := range []string{"Bash", "exec_command", "shell_command"} {
+		command := `reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v marker /d "cmd /c rem" /f`
+		input := actionfacts.Input{Tool: tool, Args: []byte(`{"command":"reg add HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v marker /d \"cmd /c rem\" /f"}`)}
+		if got := selectWindowsShellDialect(tool, command, input); got != actionfacts.DialectPowerShell {
+			t.Errorf("%s dialect = %q, want PowerShell", tool, got)
+		}
+	}
 	repoRoot := t.TempDir()
 	fixturePath := filepath.Join(repoRoot, "tests", "fixture.ps1")
 	if err := os.MkdirAll(filepath.Dir(fixturePath), 0o755); err != nil {

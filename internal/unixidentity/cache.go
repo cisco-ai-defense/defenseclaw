@@ -98,6 +98,14 @@ func (c *CachingResolver) LookupUID(uid int) (Account, error) {
 	return account, err
 }
 
+// ForgetUID drops the cached answer for uid, so the next lookup asks the
+// directory again.
+func (c *CachingResolver) ForgetUID(uid int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.uids, uid)
+}
+
 func (c *CachingResolver) LookupGroup(name string) (Group, error) {
 	c.mu.Lock()
 	if hit, ok := c.grps[name]; ok {

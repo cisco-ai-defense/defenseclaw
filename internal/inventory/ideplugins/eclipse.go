@@ -55,7 +55,7 @@ func (s *scanner) scanEclipse() {
 		inst := Install{Family: FamilyEclipse, Product: "eclipse", Channel: "stable", Root: filepath.Dir(filepath.Dir(path))}
 		lines := bufio.NewScanner(bytes.NewReader(data))
 		lines.Buffer(make([]byte, 0, 4096), 64<<10)
-		for lines.Scan() && len(inst.Plugins) < eclipseMaxBundles {
+		for lines.Scan() {
 			line := strings.TrimSpace(lines.Text())
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
@@ -66,8 +66,15 @@ func (s *scanner) scanEclipse() {
 			}
 			p := Plugin{ID: clean(fields[0]), Version: clean(fields[1]), Scope: ScopeUser, Enabled: EnabledOn, EnabledSource: SourceBundlesInfo, Path: path}
 			if p.ID != "" {
+				if len(inst.Plugins) >= eclipseMaxBundles {
+					inst.Partial = true
+					break
+				}
 				inst.Plugins = append(inst.Plugins, p)
 			}
+		}
+		if lines.Err() != nil {
+			inst.Partial = true
 		}
 		s.add(inst)
 	}

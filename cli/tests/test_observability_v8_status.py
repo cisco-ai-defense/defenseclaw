@@ -297,6 +297,37 @@ def test_destination_health_rejects_unbounded_circuit_values() -> None:
     assert result.circuit_label == "unavailable"
 
 
+def test_secure_client_queue_label_keeps_main_counter_set() -> None:
+    health = V8DestinationHealth(name="managed", queue_items=0, dropped=0, rejected=0)
+    assert health.queue_label_for(secure_client=True) == "0 items, 0 dropped"
+    assert health.queue_label_for(secure_client=False) == "0 items, 0 dropped, 0 rejected"
+
+    from defenseclaw.commands.cmd_doctor import _check_observability_v8_status, _DoctorResult
+
+    status = V8OperatorStatus(
+        source="", data_dir="", plan_digest="", bucket_catalog_version=1,
+        retention_days=7, local_path="", judge_bodies_path="",
+        destinations=(V8DestinationStatus(
+            name="managed", kind="otlp", enabled=True, generated=True,
+            capabilities=("logs",), selected_signals=("logs",),
+            policy_form="managed", endpoint="", route_count=1,
+            buckets=(), redaction_profiles=("sensitive",),
+        ),),
+        buckets=(), warnings=(),
+    )
+    result = _DoctorResult()
+    _check_observability_v8_status(
+        status, result, secure_client=True,
+        live_health={"telemetry": {"details": {"destinations": [{
+            "name": "managed", "state": "healthy", "queue_items": 0,
+            "queue_dropped": 0, "counters": {"rejected": 0},
+        }]}}},
+    )
+    detail = next(item["detail"] for item in result.checks if item["label"] == "Destination: managed")
+    assert "queue=0 items, 0 dropped" in detail
+    assert "rejected" not in detail
+
+
 def test_destination_health_humanizes_bounded_circuit_tokens() -> None:
     result = V8DestinationHealth(
         name="collector",
@@ -758,7 +789,7 @@ def test_doctor_invalid_v8_never_falls_back_to_legacy_destination_reader(tmp_pat
     assert not hasattr(observability, "list_destinations")
     _check_observability(SimpleNamespace(data_dir=str(tmp_path)), result)
     assert result.failed == 1
-    assert result.checks[0]["label"] == "Observability v8 effective plan"
+    assert result.checks[0]["label"] == "Observability plan"
 
 
 def test_doctor_v8_renders_bounded_live_health_and_never_raw_error_text() -> None:

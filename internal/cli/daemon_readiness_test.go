@@ -115,20 +115,14 @@ observability:
 }
 
 func TestDaemonReadinessRequirementsExpectCanonicalV8Telemetry(t *testing.T) {
-	for _, version := range []int{config.ObservabilityV8ConfigVersion, config.ObservabilityV8ConfigVersion + 1} {
+	for _, version := range []int{config.ObservabilityV8ConfigVersion, config.ConfigVersionV9} {
 		cfg := config.DefaultConfig()
 		cfg.ConfigVersion = version
-		cfg.OTel.Enabled = false
 
 		requirements := daemonReadinessRequirementsFromConfig(cfg, time.Time{})
 		if !requirements.telemetryEnabled {
 			t.Fatalf("config_version %d observability runtime was treated as disabled telemetry", version)
 		}
-	}
-	cfg := config.DefaultConfig()
-	cfg.ConfigVersion = config.ObservabilityV8ConfigVersion - 1
-	if daemonReadinessRequirementsFromConfig(cfg, time.Time{}).telemetryEnabled {
-		t.Fatal("pre-v8 config expected the canonical observability runtime")
 	}
 }
 

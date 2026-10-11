@@ -5,15 +5,19 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -31,17 +35,39 @@ const agentIdentityRecorderMaxPending = 4096
 // agentIdentityRecorder buffers agent identities seen on the hook path and
 // upserts them in one batch per flush.
 type agentIdentityRecorder struct {
+	flushMu sync.Mutex // serialize API, ticker and final writes
 	mu      sync.Mutex
 	pending map[string]*inventory.AgentIdentityRecord
 	// hints keeps the latest claimed install hint per identity. Hints are not
 	// stored in inventory.db; the API reports the ones this process saw.
 	hints map[string]string
+	// subSessions are the sessions known to be a sub-agent's, per agent
+	// identity: a Codex 0.160 thread a spawn call started, or any session that
+	// names a parent session. They are not chats of the agent, so they are
+	// neither counted nor its last session. Past the bound the oldest are
+	// dropped, and one of them that hooks again counts as a session.
+	subSessions     map[string]struct{}
+	subSessionOrder []string
+	// exclusions are late child links awaiting the next inventory write.
+	// They must survive a failed write and are removed only after commit.
+	exclusions map[string]inventory.AgentIdentitySession
+
+	// persistErr is why the last write to inventory.db failed, "" after
+	// one succeeded: the ledger then runs from memory, and its counts and
+	// first-seen times reset at the next restart (GAP-0393).
+	persistMu    sync.Mutex
+	persistErr   string
+	persistSince time.Time
 
 	storeMu         sync.Mutex
 	storeGeneration uint64
 	storeSource     func() *inventory.InventoryStore
 	dataDir         func() string
+	retentionDays   func() int
 	ownStore        *inventory.InventoryStore
+	// ownSweep prunes the ledger in the store the recorder opened itself;
+	// discovery's own sweep prunes the store discovery opened.
+	ownSweep inventory.AgentLedgerSweeper
 }
 
 var sharedAgentIdentities = &agentIdentityRecorder{
@@ -50,9 +76,9 @@ var sharedAgentIdentities = &agentIdentityRecorder{
 }
 
 // observe records one hook of an agent identity. newSession is true when the
-// hook started a session the registry had not seen; the registry is in
-// memory, so the batch keeps the first session it counted for the upsert to
-// recognize a session resumed after a restart.
+// hook started a session the registry had not seen. The registry is in
+// memory, so a session resumed after a restart is new to it again; the batch
+// names the sessions it counted and the store counts each id once.
 func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID string, newSession bool) {
 	if r == nil || facts.ID == "" {
 		return
@@ -76,13 +102,14 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 		rec.UserName = facts.UserName
 	}
 	sessionID = strings.TrimSpace(sessionID)
-	if newSession && sessionID != "" && sessionID != rec.LastSessionID {
-		if rec.SessionsSeen == 0 {
-			rec.FirstSessionID = sessionID
-		}
-		rec.SessionsSeen++
+	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
+		sessionID = ""
 	}
-	if sessionID != "" {
+	if newSession && sessionID != "" {
+		// The last session is the newest one counted, not the one that
+		// hooked last: the previous chat can hook once more after a new one
+		// started, as Codex's does after /new (GAP-0395).
+		rec.NoteSession(sessionID)
 		rec.LastSessionID = sessionID
 	}
 	if facts.InstallHint != "" && (len(r.hints) < agentIdentityRecorderMaxPending || r.hints[facts.ID] != "") {
@@ -90,28 +117,74 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	}
 }
 
-// take removes and returns the buffered batch.
-func (r *agentIdentityRecorder) take() []inventory.AgentIdentityRecord {
+func subSessionKey(agentID, sessionID string) string { return agentID + "\x00" + sessionID }
+
+// markSubagentSession records that sessionID belongs to a sub-agent of
+// agentID, which may have counted it already: the link to the parent can be
+// learned after the session's first hook (GAP-0226).
+func (r *agentIdentityRecorder) markSubagentSession(agentID, sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if r == nil || agentID == "" || sessionID == "" {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if len(r.pending) == 0 {
-		return nil
+	key := subSessionKey(agentID, sessionID)
+	if _, known := r.subSessions[key]; !known {
+		if r.subSessions == nil {
+			r.subSessions = make(map[string]struct{})
+		}
+		for len(r.subSessionOrder) >= agentIdentityRecorderMaxPending {
+			delete(r.subSessions, r.subSessionOrder[0])
+			r.subSessionOrder = r.subSessionOrder[1:]
+		}
+		r.subSessions[key] = struct{}{}
+		r.subSessionOrder = append(r.subSessionOrder, key)
+		if r.exclusions == nil {
+			r.exclusions = make(map[string]inventory.AgentIdentitySession)
+		}
+		r.exclusions[key] = inventory.AgentIdentitySession{AgentID: agentID, SessionID: sessionID}
 	}
+	if rec, ok := r.pending[agentID]; ok {
+		rec.ForgetSession(sessionID)
+	}
+}
+
+// take removes and returns the buffered sightings and child exclusions.
+func (r *agentIdentityRecorder) take() ([]inventory.AgentIdentityRecord, []inventory.AgentIdentitySession) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	batch := make([]inventory.AgentIdentityRecord, 0, len(r.pending))
 	for _, rec := range r.pending {
 		batch = append(batch, *rec)
 	}
+	excluded := make([]inventory.AgentIdentitySession, 0, len(r.exclusions))
+	for _, child := range r.exclusions {
+		excluded = append(excluded, child)
+	}
 	r.pending = make(map[string]*inventory.AgentIdentityRecord)
-	return batch
+	r.exclusions = nil
+	return batch, excluded
 }
 
-// restore puts back a batch whose write failed, merging it with whatever the
-// hook path buffered since.
-func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord) {
+// restore puts back a failed write, merging it with hooks and child links
+// buffered while the write was in flight.
+func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord, excluded []inventory.AgentIdentitySession) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.exclusions == nil {
+		r.exclusions = make(map[string]inventory.AgentIdentitySession)
+	}
+	for _, child := range excluded {
+		r.exclusions[subSessionKey(child.AgentID, child.SessionID)] = child
+	}
 	for i := range batch {
 		old := batch[i]
+		for _, sessionID := range append([]string(nil), old.SessionIDs...) {
+			if _, child := r.subSessions[subSessionKey(old.AgentID, sessionID)]; child {
+				old.ForgetSession(sessionID)
+			}
+		}
 		cur, ok := r.pending[old.AgentID]
 		if !ok {
 			if len(r.pending) >= agentIdentityRecorderMaxPending {
@@ -123,10 +196,10 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord) {
 		if old.FirstSeen.Before(cur.FirstSeen) {
 			cur.FirstSeen = old.FirstSeen
 		}
-		if old.SessionsSeen > 0 {
-			cur.FirstSessionID = old.FirstSessionID
+		for _, sessionID := range old.SessionIDs {
+			cur.NoteSession(sessionID)
 		}
-		cur.SessionsSeen += old.SessionsSeen
+		cur.SessionsSeen += max(old.SessionsSeen-int64(len(old.SessionIDs)), 0)
 		if cur.UserName == "" {
 			cur.UserName = old.UserName
 		}
@@ -153,29 +226,92 @@ func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRe
 
 // flush writes the buffered batch to store.
 func (r *agentIdentityRecorder) flush(ctx context.Context, store *inventory.InventoryStore) error {
+	r.flushMu.Lock()
+	defer r.flushMu.Unlock()
 	if store == nil {
 		return nil
 	}
-	batch := r.take()
-	if len(batch) == 0 {
+	batch, excluded := r.take()
+	if len(batch) == 0 && len(excluded) == 0 {
 		return nil
 	}
-	if err := store.UpsertAgentIdentities(ctx, batch); err != nil {
-		r.restore(batch)
+	if err := store.UpsertAgentIdentitiesAndExclude(ctx, batch, excluded); err != nil {
+		r.restore(batch, excluded)
+		r.notePersist(err)
 		return err
 	}
+	r.notePersist(nil)
 	return nil
+}
+
+// flushFinal opens its own handle so AI Discovery may close its inventory
+// store first during shutdown without losing the recorder's last batch.
+func (r *agentIdentityRecorder) flushFinal(ctx context.Context) error {
+	if r.pendingCount() == 0 {
+		return nil
+	}
+	r.storeMu.Lock()
+	dataDir := r.dataDir
+	r.storeMu.Unlock()
+	if dataDir != nil {
+		if dir := strings.TrimSpace(dataDir()); dir != "" {
+			store, err := inventory.NewInventoryStoreForProfile(filepath.Join(dir, "inventory.db"), ManagedEnterpriseActive())
+			if err != nil {
+				r.notePersist(err)
+				return err
+			}
+			defer store.Close()
+			return r.flush(ctx, store)
+		}
+	}
+	return r.flush(ctx, r.store())
+}
+
+// notePersist records whether the last write of the ledger succeeded.
+func (r *agentIdentityRecorder) notePersist(err error) {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	switch {
+	case err == nil:
+		r.persistErr, r.persistSince = "", time.Time{}
+	case r.persistErr == "":
+		r.persistErr, r.persistSince = err.Error(), time.Now().UTC()
+	default:
+		r.persistErr = err.Error()
+	}
+}
+
+// persistFailure is why agent identities are not being saved, and since
+// when, or "" while they are.
+func (r *agentIdentityRecorder) persistFailure() (string, time.Time) {
+	if r == nil {
+		return "", time.Time{}
+	}
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	return r.persistErr, r.persistSince
+}
+
+// agentIdentityLedgerHealth is the /health entry of a ledger that is not
+// being saved, or nil while it is. Secure Client records no identities.
+func agentIdentityLedgerHealth() map[string]any {
+	reason, since := sharedAgentIdentities.persistFailure()
+	if reason == "" || ManagedEnterpriseActive() {
+		return nil
+	}
+	return map[string]any{"persisted": false, "error": reason, "since": since.Format(time.RFC3339)}
 }
 
 // setStoreSource wires where flushes go: source returns AI discovery's
 // inventory store when it runs, and dataDir locates inventory.db for the
-// store the recorder opens itself when discovery is off. The returned token
-// unwires it again.
-func (r *agentIdentityRecorder) setStoreSource(source func() *inventory.InventoryStore, dataDir func() string) uint64 {
+// store the recorder opens itself when discovery is off. retentionDays is
+// the window that store's ledger keeps. The returned token unwires it again.
+func (r *agentIdentityRecorder) setStoreSource(source func() *inventory.InventoryStore, dataDir func() string,
+	retentionDays func() int) uint64 {
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
 	r.storeGeneration++
-	r.storeSource, r.dataDir = source, dataDir
+	r.storeSource, r.dataDir, r.retentionDays = source, dataDir, retentionDays
 	return r.storeGeneration
 }
 
@@ -187,7 +323,7 @@ func (r *agentIdentityRecorder) clearStoreSource(token uint64) {
 	if r.storeGeneration != token {
 		return
 	}
-	r.storeSource, r.dataDir = nil, nil
+	r.storeSource, r.dataDir, r.retentionDays = nil, nil, nil
 	if r.ownStore != nil {
 		_ = r.ownStore.Close()
 		r.ownStore = nil
@@ -214,9 +350,12 @@ func (r *agentIdentityRecorder) store() *inventory.InventoryStore {
 	if dir == "" {
 		return nil
 	}
-	store, err := inventory.NewInventoryStore(filepath.Join(dir, "inventory.db"))
+	store, err := inventory.NewInventoryStoreForProfile(filepath.Join(dir, "inventory.db"), ManagedEnterpriseActive())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] agent identities not persisted: %v\n", err)
+		if r.pendingCount() > 0 {
+			r.notePersist(err)
+		}
 		return nil
 	}
 	r.ownStore = store
@@ -242,30 +381,81 @@ func (r *agentIdentityRecorder) runFlusher(ctx context.Context, interval time.Du
 		select {
 		case <-ctx.Done():
 			final, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			flush(final)
+			if !ManagedEnterpriseActive() {
+				if err := r.flushFinal(final); err != nil {
+					fmt.Fprintf(os.Stderr, "[sidecar] agent identity final flush failed: %v\n", err)
+				}
+			}
 			cancel()
 			return
 		case <-ticker.C:
 			flush(ctx)
+			if !ManagedEnterpriseActive() {
+				r.sweepOwnStore(ctx)
+			}
 		}
 	}
+}
+
+// sweepOwnStore prunes agent identities and sessions past the retention
+// window from the inventory.db the recorder opens while AI discovery is
+// off, which no discovery sweep reaches (GAP-0289). A store discovery owns
+// is left to discovery's sweep, and an inventory.db that does not exist is
+// not created for it.
+func (r *agentIdentityRecorder) sweepOwnStore(ctx context.Context) {
+	r.storeMu.Lock()
+	source, dataDir, days, own := r.storeSource, r.dataDir, r.retentionDays, r.ownStore
+	r.storeMu.Unlock()
+	if days == nil || (source != nil && source() != nil) {
+		return
+	}
+	if own == nil {
+		dir := ""
+		if dataDir != nil {
+			dir = strings.TrimSpace(dataDir())
+		}
+		if dir == "" {
+			return
+		}
+		if _, err := os.Stat(filepath.Join(dir, "inventory.db")); err != nil {
+			return
+		}
+		if own = r.store(); own == nil {
+			return
+		}
+	}
+	r.ownSweep.SweepIfDue(ctx, own, days())
 }
 
 func (r *agentIdentityRecorder) pendingCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.pending)
+	return len(r.pending) + len(r.exclusions)
 }
 
 // agentIdentityRow is one row of GET /api/v1/agents/identities.
 type agentIdentityRow struct {
 	inventory.AgentIdentityRecord
 	InstallHint string `json:"install_hint,omitempty"`
+	// Retired marks the identity of an account that no longer holds its
+	// uid or SID: the account was renamed, or removed and the uid handed to
+	// another account, which has agent identities of its own (GAP-0947),
+	// or removed and its uid or SID left to no account on a managed host
+	// (GAP-1222). The row keeps the name it was recorded with.
+	Retired bool `json:"retired,omitempty"`
 }
 
-// handleAgentIdentities serves GET /api/v1/agents/identities?user=&connector=:
-// the stored agent identities plus the ones buffered since the last flush,
-// most recently seen first.
+// agentIdentitiesPageLimit is the default and largest page of GET
+// /api/v1/agents/identities.
+const agentIdentitiesPageLimit = 1000
+
+// handleAgentIdentities serves GET
+// /api/v1/agents/identities?user=&connector=&limit=&cursor=: the stored agent
+// identities, most recently seen first, a page at a time. It writes the ones
+// buffered since the last flush first, so a new agent shows at once and the
+// store, which knows which sessions it has counted, counts each once; rows
+// that could not be written are merged in. total counts every matching row;
+// next_cursor is the cursor of the next page, empty on the last one.
 func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -275,27 +465,134 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "identities": []agentIdentityRow{}})
 		return
 	}
-	filter := inventory.AgentIdentityFilter{
-		User:      strings.TrimSpace(r.URL.Query().Get("user")),
-		Connector: strings.ToLower(strings.TrimSpace(r.URL.Query().Get("connector"))),
+	q := r.URL.Query()
+	limit := agentIdentitiesPageLimit
+	if raw := strings.TrimSpace(q.Get("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be a positive integer"})
+			return
+		}
+		limit = min(n, agentIdentitiesPageLimit)
 	}
-	var stored []inventory.AgentIdentityRecord
-	persisted := false
+	offset := 0
+	if raw := strings.TrimSpace(q.Get("cursor")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cursor"})
+			return
+		}
+		// Past every row anyway; the bound keeps offset+limit from overflowing.
+		offset = min(n, 1<<30)
+	}
+	user := strings.TrimSpace(q.Get("user"))
+	filter := inventory.AgentIdentityFilter{
+		User:           user,
+		UserIDs:        adminViewAccountIDs(user),
+		RemovedAccount: adminViewRemovedAccount(user),
+		Connector:      strings.ToLower(strings.TrimSpace(q.Get("connector"))),
+	}
+	// Write the buffered rows first, so one count of sessions serves the
+	// listing. A failed write leaves them buffered and merged below.
 	if store := sharedAgentIdentities.store(); store != nil {
-		rows, err := store.ListAgentIdentities(r.Context(), filter)
-		if err != nil {
+		if err := sharedAgentIdentities.flush(r.Context(), store); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] agent identity flush failed: %v\n", err)
+		}
+	}
+	pending, hints := sharedAgentIdentities.snapshot()
+	var stored []inventory.AgentIdentityRecord
+	start, total, persisted := 0, 0, false
+	if store := sharedAgentIdentities.store(); store != nil {
+		var err error
+		if stored, start, total, err = storedAgentIdentityWindow(r.Context(), store, filter, offset, limit, pending); err != nil {
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent identities unavailable"})
 			return
 		}
-		stored, persisted = rows, true
+		persisted = true
+	} else {
+		for _, rec := range pending {
+			if agentIdentityMatches(rec, filter) {
+				total++
+			}
+		}
 	}
-	pending, hints := sharedAgentIdentities.snapshot()
+	// rows begins at merged row start.
 	rows := mergeAgentIdentityRows(stored, pending, hints, filter)
-	a.writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "persisted": persisted, "identities": rows})
+	from := offset - start
+	page := rows[min(from, len(rows)):min(from+limit, len(rows))]
+	next := ""
+	if offset+limit < total {
+		next = strconv.Itoa(offset + limit)
+	}
+	nameAgentIdentityRows(page)
+	body := map[string]any{
+		"enabled": true, "persisted": persisted, "identities": page, "total": total, "next_cursor": next,
+	}
+	if reason, _ := sharedAgentIdentities.persistFailure(); reason != "" {
+		body["persisted"], body["persist_error"] = false, reason
+	}
+	a.writeJSON(w, http.StatusOK, body)
 }
 
-// mergeAgentIdentityRows overlays the buffered rows on the stored ones, the
-// way the next flush will write them, and names each row's account.
+// storedAgentIdentityWindow reads the stored rows that merged rows offset
+// to offset+limit come from, the merged row the first of them is, and how
+// many rows match after the merge. With nothing buffered the store pages.
+// A buffered sighting only moves an identity up, so otherwise those are the
+// first offset+limit stored rows plus the stored rows of the buffered
+// identities further down.
+func storedAgentIdentityWindow(
+	ctx context.Context,
+	store *inventory.InventoryStore,
+	filter inventory.AgentIdentityFilter,
+	offset, limit int,
+	pending map[string]inventory.AgentIdentityRecord,
+) ([]inventory.AgentIdentityRecord, int, int, error) {
+	buffered := false
+	for _, rec := range pending {
+		buffered = buffered || agentIdentityMatches(rec, filter)
+	}
+	window := filter
+	if !buffered {
+		window.Offset, window.Limit = offset, limit
+		stored, total, err := store.ListAgentIdentities(ctx, window)
+		return stored, offset, total, err
+	}
+	window.Limit = offset + limit
+	stored, total, err := store.ListAgentIdentities(ctx, window)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	inWindow := make(map[string]bool, len(stored))
+	for _, rec := range stored {
+		inWindow[rec.AgentID] = true
+	}
+	var below []string
+	for id, rec := range pending {
+		if !inWindow[id] && agentIdentityMatches(rec, filter) {
+			below = append(below, id)
+		}
+	}
+	if len(below) == 0 {
+		return stored, 0, total, nil
+	}
+	further, _, err := store.ListAgentIdentities(ctx, inventory.AgentIdentityFilter{AgentIDs: below})
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	// A buffered identity adds to the total unless its stored row already
+	// matched.
+	total += len(below)
+	for _, rec := range further {
+		if agentIdentityMatches(rec, filter) {
+			total--
+		}
+	}
+	return append(stored, further...), 0, total, nil
+}
+
+// mergeAgentIdentityRows overlays the rows still buffered on the stored ones
+// (all of them when there is no store, the unwritten ones after a failed
+// flush), most recently seen first.
 func mergeAgentIdentityRows(
 	stored []inventory.AgentIdentityRecord,
 	pending map[string]inventory.AgentIdentityRecord,
@@ -320,12 +617,7 @@ func mergeAgentIdentityRows(
 			order = append(order, id)
 			continue
 		}
-		// The way the upsert counts: a buffered session that resumes the
-		// stored last session is not a new one.
 		rec.SessionsSeen += buffered.SessionsSeen
-		if buffered.SessionsSeen > 0 && buffered.FirstSessionID != "" && buffered.FirstSessionID == rec.LastSessionID {
-			rec.SessionsSeen--
-		}
 		if buffered.LastSeen.After(rec.LastSeen) {
 			rec.LastSeen = buffered.LastSeen
 			if buffered.LastSessionID != "" {
@@ -339,23 +631,9 @@ func mergeAgentIdentityRows(
 			rec.UserName = buffered.UserName
 		}
 	}
-	// Each account is named as the host names its uid or SID now, the way a
-	// new hook call would record it, so a row an older build stored with
-	// another spelling (a bare SSSD name, DOMAIN\user) reads like the rest
-	// (GAP-0103). A row whose account no longer resolves keeps its name.
-	names := map[string]string{}
 	rows := make([]agentIdentityRow, 0, len(order))
 	for _, id := range order {
-		rec := byID[id]
-		name, ok := names[rec.UserID]
-		if !ok {
-			name = sanitizeLLMEventUser(userScopedIdentityName(rec.UserID))
-			names[rec.UserID] = name
-		}
-		if name != "" {
-			rec.UserName = name
-		}
-		rows = append(rows, agentIdentityRow{AgentIdentityRecord: *rec, InstallHint: hints[id]})
+		rows = append(rows, agentIdentityRow{AgentIdentityRecord: *byID[id], InstallHint: hints[id]})
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		if !rows[i].LastSeen.Equal(rows[j].LastSeen) {
@@ -366,8 +644,113 @@ func mergeAgentIdentityRows(
 	return rows
 }
 
+// nameAgentIdentityRows names each row's account as the host names its uid
+// or SID now, the way a new hook call would record it, so a row an older
+// build stored with another spelling (a bare SSSD name, DOMAIN\user) reads
+// like the rest (GAP-0103). A row whose account no longer resolves keeps its
+// name, and is retired when the account was removed (GAP-1222); so does a row
+// of an account whose uid another account holds now, which is retired instead
+// of being listed under that account (GAP-0947).
+func nameAgentIdentityRows(rows []agentIdentityRow) {
+	name := hostAccountNamer()
+	for i := range rows {
+		holder := name(rows[i].UserID)
+		switch {
+		case holder == "":
+			rows[i].Retired = agentIdentityAccountRemoved(rows[i].UserID)
+		case agentIdentityHeldByAnother(rows[i].AgentIdentityRecord, holder):
+			rows[i].Retired = true
+		default:
+			rows[i].UserName = holder
+		}
+	}
+}
+
+// agentIdentityAccountRemoved reports whether the account of id, a uid or
+// SID no account holds now, was removed: the guardian of the managed host
+// keeps no identity record for it. The guardian drops an account's record
+// once the account has left the enrollment, a directory account's only after
+// a pass in which the directory answered (GAP-1113, GAP-1103), and keeps the
+// records of enrolled accounts while the directory is away, so an outage
+// retires no one. A gateway without a guardian retires none: a per-user
+// gateway lists its own account.
+func agentIdentityAccountRemoved(id string) bool {
+	dir := currentIdentitySpoolDir()
+	if dir == "" || useridentity.KindForID(id) == "" {
+		return false
+	}
+	_, err := enterprisehooks.ReadIdentitySpoolRecord(dir, id, validateManagedGuardianAuthorization)
+	return errors.Is(err, os.ErrNotExist)
+}
+
+// agentIdentityHeldByAnother reports whether rec was derived for another
+// account than holder, the account that holds its uid now: holder's account
+// does not derive its ID, and the name it was recorded with is another
+// account's or missing. A SID is never handed on.
+func agentIdentityHeldByAnother(rec inventory.AgentIdentityRecord, holder string) bool {
+	if agentidentity.IsSID(agentidentity.NormalizeUserID(rec.UserID)) || agentidentity.AgentID(agentidentity.Inputs{
+		MachineHash: rec.MachineHash, UserID: rec.UserID, Account: holder, Connector: rec.Connector, InstallFP: rec.InstallFP,
+	}) == rec.AgentID {
+		return false
+	}
+	return rec.UserName == "" || agentidentity.UIDReassigned(rec.UserID, rec.UserName, holder)
+}
+
+// hostAccountNamer names accounts by uid or SID as the host's account
+// database does (an SSSD account keeps its qualified name), looking each id
+// up once. The admin views that list accounts (agent identities, IDE
+// plugins) name a user the same way (GAP-0278).
+func hostAccountNamer() func(id string) string {
+	names := map[string]string{}
+	return func(id string) string {
+		if id == "" {
+			return ""
+		}
+		name, ok := names[id]
+		if !ok {
+			name = sanitizeLLMEventUser(userScopedIdentityName(id))
+			names[id] = name
+		}
+		return name
+	}
+}
+
+// adminViewAccountIDs resolves the --user filter of the agent identity and
+// IDE plugin views. A qualified name (DOMAIN\name, .\name, user@domain)
+// names the account the OS resolves it to, as profile-explain resolves it,
+// so the views select that account by its uid or SID, not every account that
+// shares its bare name: the domain and the local twin of one name, or the
+// SSSD account whose rows carry the bare name (GAP-0366, GAP-1080). A bare
+// name, an id, or a name that resolves to no account gives none.
+var adminViewAccountIDs = func(user string) []string {
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	id, _, err := profileExplainAccount(strings.TrimSpace(user))
+	if err != nil || id == "" {
+		return nil
+	}
+	return []string{id}
+}
+
+// adminViewRemovedAccount is the RemovedAccount of an agent identity
+// listing for user: a deleted account's rows keep its last name and its uid
+// or SID, so its qualified name still lists the ones recorded with the bare
+// name (GAP-1221). An id is a removed account's when no account holds it now
+// and the domain user names could have held it (adminViewDomainCouldHold).
+// A bare name or an id needs none.
+func adminViewRemovedAccount(user string) func(id string) bool {
+	if !useridentity.QualifiedAccountName(user) {
+		return nil
+	}
+	name := hostAccountNamer()
+	return func(id string) bool {
+		return useridentity.KindForID(id) != "" && name(id) == "" && adminViewDomainCouldHold(user, id)
+	}
+}
+
 func agentIdentityMatches(rec inventory.AgentIdentityRecord, filter inventory.AgentIdentityFilter) bool {
-	if user := filter.User; user != "" && !useridentity.AccountFilterMatches(user, rec.UserID, rec.UserName) {
+	if filter.User != "" && !filter.Account().Matches(rec.UserID, rec.UserName) {
 		return false
 	}
 	return filter.Connector == "" || rec.Connector == filter.Connector

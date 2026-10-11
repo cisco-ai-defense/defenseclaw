@@ -15,9 +15,13 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os/user"
+	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
@@ -43,10 +47,82 @@ func enterpriseHookInstallTarget(ctx context.Context, opts enterprisehooks.Insta
 
 func writeEnterpriseHookStandaloneGuardianStateOrLog(io.Writer, string) {}
 
-func enterpriseHookStandaloneLookupFallback(_ string, lookupErr error) (*user.User, error) {
-	return nil, lookupErr
+// enterpriseHookStandaloneLookupFallback resolves an account os/user could
+// not. os/user also looks up the account's primary group in its domain, which
+// fails for every Entra ID account ("No mapping between account names and
+// security IDs was done"), so enterprise acp enroll, verify and revoke --user
+// refused them; the LSA names the account and ProfileList gives its home, as
+// enterprise policy show does (GAP-0242, GAP-0479). Secure Client keeps the
+// lookup of main.
+func enterpriseHookStandaloneLookupFallback(name string, lookupErr error) (*user.User, error) {
+	if cfg != nil && cfg.SecureClientIntegration() {
+		return nil, lookupErr
+	}
+	sid, _, err := enterprisePolicyAccount(name)
+	if err != nil {
+		return nil, lookupErr
+	}
+	home := enterprisePolicyProfileHome(sid)
+	if home == "" {
+		return nil, fmt.Errorf("%s has no profile on this computer yet (it has not signed in here)", sid)
+	}
+	return &user.User{Uid: sid, Username: name, HomeDir: home}, nil
 }
 
-func enterpriseHookStandaloneConfigFingerprint() string { return "" }
+// The Windows guardian takes a changed managed config in place, before a
+// reconcile, so an edit of who is enrolled or which connectors are applies
+// without a service stop (GAP-0716). The Unix guardian exits instead and its
+// service manager restarts it; on Windows that exit is a service failure,
+// whose restarts back off to a minute. Secure Client keeps its behaviour.
+
+// enterpriseHookWindowsLoadedConfig is the sha256 of the config cfg was
+// loaded from; empty off the standalone profile.
+var enterpriseHookWindowsLoadedConfig string
+
+// enterpriseHookWindowsConfigLoader loads a changed config as the guardian
+// does at start; a seam for tests.
+var enterpriseHookWindowsConfigLoader = func(path string) (*config.Config, error) {
+	next, _, err := loadGatewayConfigV8(path)
+	return next, err
+}
+
+func enterpriseHookWindowsConfigDigest() string {
+	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() || strings.TrimSpace(cfg.ConfigFilePath) == "" {
+		return ""
+	}
+	raw, err := readWindowsEnterpriseBoundedFile(cfg.ConfigFilePath, 8<<20)
+	if err != nil {
+		return ""
+	}
+	return configwrite.SHA256Hex(raw)
+}
+
+// enterpriseHookStandaloneConfigFingerprint records the config the guardian
+// started with. It returns "": the exit-on-change check is Unix only.
+func enterpriseHookStandaloneConfigFingerprint() string {
+	enterpriseHookWindowsLoadedConfig = enterpriseHookWindowsConfigDigest()
+	return ""
+}
 
 func enterpriseHookStandaloneConfigChanged(string, io.Writer) bool { return false }
+
+// enterpriseHookStandaloneConfigRefresh loads a changed config.yaml into cfg
+// before a reconcile. A config that does not load is logged and the running
+// one kept, so a bad edit cannot stop repair.
+func enterpriseHookStandaloneConfigRefresh(w io.Writer) {
+	if enterpriseHookWindowsLoadedConfig == "" {
+		return
+	}
+	current := enterpriseHookWindowsConfigDigest()
+	if current == "" || current == enterpriseHookWindowsLoadedConfig {
+		return
+	}
+	next, err := enterpriseHookWindowsConfigLoader(cfg.ConfigFilePath)
+	if err != nil || next == nil || !next.StandaloneEnterprise() || next.SecureClientIntegration() {
+		fmt.Fprintf(w, "[hook-guardian] managed config changed but does not load; keeping the running config: %v\n", err)
+		return
+	}
+	cfg = next
+	enterpriseHookWindowsLoadedConfig = current
+	fmt.Fprintf(w, "[hook-guardian] managed config changed; reconciling with it\n")
+}

@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -56,6 +57,16 @@ class ToolCommandTestBase(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestToolBlock(ToolCommandTestBase):
+    def test_managed_device_refuses_before_the_connector_is_checked(self):
+        # GAP-0168: a connector that is not configured must not be the answer
+        # on a managed device (it sent users to "defenseclaw setup").
+        self.app.cfg.deployment_mode = "managed_enterprise"
+        with unittest.mock.patch.dict(os.environ, {"DEFENSECLAW_ENTERPRISE_PROFILE": "standalone"}):
+            result = self.runner.invoke(tool, ["block", "x", "--connector", "nosuch"], obj=self.app)
+        self.assertEqual(result.exit_code, 3, result.output)
+        self.assertIn("This device is managed", result.output)
+        self.assertNotIn("setup", result.output)
+
     def test_block_adds_to_block_list(self):
         result = self.invoke(["block", "delete_file", "--reason", "destructive"])
 
@@ -94,6 +105,16 @@ class TestToolAllow(ToolCommandTestBase):
         self.assertIn("connector=codex", result.output)
         self.assertIn("connector=hermes", result.output)
         self.assertTrue(self.pe().is_allowed_for_connector("tool", "search", ""))
+
+    def test_source_allow_is_refused_and_unblock_says_nothing_is_stored(self):
+        # GAP-0310: a source allow never applies, so it is refused, not reported as added.
+        result = self.invoke(["allow", "write_file", "--source", "fs", "--reason", "ok"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Nothing was changed", result.output)
+        self.assertEqual(self.pe().list_by_type("tool"), [])
+        result = self.invoke(["unblock", "write_file", "--source", "fs"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("has no block/allow state to clear", result.output)
 
     def test_allow_logs_audit_event(self):
         self.invoke(["allow", "read_file", "--reason", "read-only ok"])
@@ -178,6 +199,8 @@ class TestToolList(ToolCommandTestBase):
             for row in group.get("tools", [])
         ]
         self.assertIn("shell_exec", names)
+        # config.yaml stores no time for a rule: none is invented (GAP-0309).
+        self.assertEqual({row["updated_at"] for group in data for row in group.get("tools", [])}, {None})
 
 # ---------------------------------------------------------------------------
 # status
@@ -322,6 +345,18 @@ class TestToolConnectorScoping(ToolCommandTestBase):
         self.assertIn("connector=hermes", result.output)
         self.assertFalse(self.pe().is_blocked_for_connector("tool", "delete_file", ""))
         self.assertFalse(asset_lists.has_entry(self.app.cfg, self.app.store, "tool", "delete_file", "hermes", "block"))
+
+    def test_at_connector_name_is_the_connector_scope(self):
+        # tool list shows a connector rule as @C/T; the gateway matches only
+        # a tool name plus a connector, never a split name.
+        result = self.invoke(["block", "@codex/shell"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(asset_lists.tool_decision(self.app.cfg.asset_policy, "shell", "codex")[0], asset_lists.LIST_DENY)
+        self.assertEqual(asset_lists.tool_decision(self.app.cfg.asset_policy, "shell", "hermes")[0], "")
+
+        result = self.invoke(["unblock", "@codex/shell"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(asset_lists.tool_decision(self.app.cfg.asset_policy, "shell", "codex")[0], "")
 
     def test_connector_normalized(self):
         """A connector value is canonicalized (e.g. 'Hermes' → 'hermes') so the

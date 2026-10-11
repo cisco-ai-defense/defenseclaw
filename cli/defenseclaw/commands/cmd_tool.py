@@ -46,6 +46,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.commands._audit_notice import saved_change_audit
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.enforce import asset_lists
 
 # Canonical write-tool names — mirrors internal/gateway/inspect.go
 # isWriteToolName. Used only to annotate `status`: an allowed WRITE tool still
@@ -118,6 +119,28 @@ def _reject_connector_with_source(connector: str, source: str) -> None:
             "(@<connector>/<tool>) and source scoping (<source>/<tool>) are "
             "separate, mutually exclusive encodings."
         )
+
+
+def _resolve_name_scope(app: AppContext, name: str, connector: str, source: str) -> tuple[str, str]:
+    """Validate the scope options and return ``(tool, connector)``.
+
+    An ``@<connector>/<tool>`` NAME, the form ``tool list`` shows a connector
+    rule in, is ``<tool> --connector <connector>``: a rule is a tool name plus
+    a connector, and the gateway never splits a name, so a rule named
+    ``@codex/shell`` would block nothing.
+    """
+    _reject_connector_with_source(connector, source)
+    if not (name.startswith("@") and "/" in name):
+        return name, _resolve_connector_scope(app, connector)
+    scoped, _, tool_name = name[1:].partition("/")
+    if not scoped or not tool_name:
+        raise click.UsageError(f"{name!r}: give the tool as @<connector>/<tool> or <tool> --connector <connector>")
+    if source:
+        raise click.UsageError(f"--source cannot be combined with {name!r}, which is scoped to connector {scoped!r}")
+    scoped = _resolve_connector_scope(app, scoped)
+    if connector and _resolve_connector_scope(app, connector) != scoped:
+        raise click.UsageError(f"{name!r} is scoped to connector {scoped!r}, but --connector is {connector!r}")
+    return tool_name, scoped
 
 
 def _connector_target(name: str, connector: str) -> str:
@@ -237,16 +260,17 @@ def tool() -> None:
 @click.option("--source", default="", help="Audit scope to a skill/MCP server (block fail-closes to unscoped)")
 @click.option("--reason", default="", help="Reason for blocking")
 @pass_ctx
+@asset_lists.refuse_on_managed_device("tool", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, connector: str, source: str, reason: str) -> None:
     """Add a tool to the block list.
 
     \b
     Scope:
-      --connector C   blocks the tool for connector C only (writes @C/<tool>);
-                      the runtime enforces it per connector.
+      --connector C   blocks the tool for connector C only (shown as @C/<tool>;
+                      NAME may be given in that form); enforced per connector.
       --source S      audit only: the runtime payload carries no source, so a
-                      scoped block fail-closes to an unscoped block and a scoped
-                      audit row is kept for operator visibility.
+                      scoped block fail-closes to an unscoped block; the source
+                      is kept in the audit log.
       (neither)       block every configured connector through the fallback row.
 
     \b
@@ -257,8 +281,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
     """
     from defenseclaw.enforce import PolicyEngine
 
-    _reject_connector_with_source(connector, source)
-    connector = _resolve_connector_scope(app, connector)
+    name, connector = _resolve_name_scope(app, name, connector, source)
     if not reason:
         reason = "manual block via CLI"
 
@@ -278,6 +301,12 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
         # and the source stays in the audit record only. Use --connector for
         # runtime-scoped blocks.
         pe.block("tool", name, reason)
+        if asset_lists.is_secure_client(app.cfg):
+            # Secure Client keeps the scoped audit row main writes (#1092).
+            pe.block(
+                "tool", _target_name(name, source),
+                f"{reason} (scoped audit; runtime enforces as unscoped fallback)",
+            )
         log_scope = _target_name(name, source)
         ux.echo(
             f"{ux._style('[tool]', fg='red', bold=True)} {name!r} "
@@ -314,6 +343,7 @@ def block(app: AppContext, name: str, connector: str, source: str, reason: str) 
 @click.option("--source", default="", help="Audit scope to a skill/MCP server (not runtime-enforced)")
 @click.option("--reason", default="", help="Reason for allowing")
 @pass_ctx
+@asset_lists.refuse_on_managed_device("tool", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, connector: str, source: str, reason: str) -> None:
     """Add a tool to the allow list (skip the scan gate).
 
@@ -323,10 +353,11 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
 
     \b
     Scope:
-      --connector C   allows the tool for connector C only (writes @C/<tool>);
-                      runtime-enforceable.
-      --source S      audit only — a source allow is recorded but never read at
-                      runtime (the payload carries no source). Use --connector.
+      --connector C   allows the tool for connector C only (shown as @C/<tool>;
+                      NAME may be given in that form); runtime-enforceable.
+      --source S      refused: the runtime payload carries no source, so a
+                      source allow would never apply (Secure Client keeps an
+                      audit-only row). Use --connector.
       (neither)       allow every configured connector through the fallback row.
 
     \b
@@ -336,8 +367,13 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
     """
     from defenseclaw.enforce import PolicyEngine
 
-    _reject_connector_with_source(connector, source)
-    connector = _resolve_connector_scope(app, connector)
+    name, connector = _resolve_name_scope(app, name, connector, source)
+    if source and not asset_lists.is_secure_client(app.cfg):
+        raise click.ClickException(
+            f"a --source allow is not stored: a tool call carries no source, so it would never apply. "
+            f"Use --connector C to allow {name!r} for one connector, or neither to allow it everywhere. "
+            "Nothing was changed."
+        )
     if not reason:
         reason = "manual allow via CLI"
 
@@ -348,12 +384,13 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
         target = _connector_target(name, connector)
         scope_note = f" (connector {connector!r})"
     else:
-        # Global, or source-scoped audit row (never read at runtime).
+        # Global, or (Secure Client only) a source-scoped audit row that the
+        # runtime never reads.
         target = _target_name(name, source)
         cleared_connectors = []
         if not source:
             cleared_connectors = _clear_tool_connector_install_overrides(pe, name)
-            pe.allow("tool", target, reason)
+        pe.allow("tool", target, reason)
         if source:
             scope_note = f" (source {source!r}; audit-only — not runtime-enforced)"
         else:
@@ -379,6 +416,7 @@ def allow(app: AppContext, name: str, connector: str, source: str, reason: str) 
 @click.option("--connector", default="", help="Remove the connector-scoped entry (@<connector>/<tool>)")
 @click.option("--source", default="", help="Remove the source-scoped entry (<source>/<tool>)")
 @pass_ctx
+@asset_lists.refuse_on_managed_device("tool", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
     """Remove a tool from the block/allow list.
 
@@ -394,8 +432,7 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    _reject_connector_with_source(connector, source)
-    connector = _resolve_connector_scope(app, connector)
+    name, connector = _resolve_name_scope(app, name, connector, source)
 
     if connector:
         target = _connector_target(name, connector)
@@ -428,6 +465,15 @@ def unblock(app: AppContext, name: str, connector: str, source: str) -> None:
         )
         _echo_cleared_connector_overrides(cleared_connectors)
         return
+    elif not asset_lists.is_secure_client(app.cfg):
+        # Nothing is stored per source: a --source block is the unscoped block.
+        click.echo(
+            f"{ux.dim('[tool]')} {name!r}{scope_note} has no block/allow state to clear: "
+            f"a source-scoped rule is not stored (run 'defenseclaw tool unblock {name}' for the unscoped one)"
+        )
+        return
+    else:
+        pe.unblock("tool", target)
 
     if app.logger:
         saved_change_audit(app.logger).log_action("tool-unblock", target, "removed from block/allow list")
@@ -690,8 +736,7 @@ def status(app: AppContext, name: str, connector: str, source: str, as_json: boo
     from defenseclaw.commands import resolve_list_connectors
     from defenseclaw.enforce import PolicyEngine
 
-    _reject_connector_with_source(connector, source)
-    connector = _resolve_connector_scope(app, connector)
+    name, connector = _resolve_name_scope(app, name, connector, source)
     connectors = [connector] if connector else resolve_list_connectors(app, "")
 
     pe = PolicyEngine(app.store, app.cfg)

@@ -89,6 +89,7 @@ WIZARD_EMIT_FIXTURE: dict = {
         },
     ],
     "guardrail": {
+        "mode": "action",
         "block_threshold": 4,
         "alert_threshold": 2,
         "cisco_trust_level": "advisory",
@@ -156,6 +157,9 @@ class TestPlaygroundEndToEnd(unittest.TestCase):
             "block",
             "skill_actions.critical.install was not applied",
         )
+        self.assertEqual(self.app.cfg.guardrail.mode, "action")
+        # HITL is not part of a preset: the wizard's hilt is not applied (GAP-1304).
+        self.assertFalse(self.app.cfg.guardrail.hilt.enabled)
         # Watch.
         self.assertTrue(self.app.cfg.watch.rescan_enabled)
         self.assertEqual(self.app.cfg.watch.rescan_interval_min, 30)
@@ -188,6 +192,7 @@ class TestPlaygroundEndToEnd(unittest.TestCase):
             persisted["cisco_ai_defense"]["endpoint"],
             "https://aid.example.com",
         )
+        self.assertEqual(persisted["guardrail"]["mode"], "action")
 
         # --- admission and guardrail -----------------------------------
         adm = self.app.cfg.admission

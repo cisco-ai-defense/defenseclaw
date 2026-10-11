@@ -37,7 +37,7 @@ func prepareSecureParent(path string) error {
 	return validateSecureDirectory(parent, info)
 }
 
-func securePathMatches(path string, file *os.File, identity os.FileInfo) (bool, error) {
+func securePathMatches(path string, file *os.File, identity os.FileInfo, checkReadACL bool) (bool, error) {
 	if file == nil || identity == nil {
 		return false, ioFailure()
 	}
@@ -48,7 +48,7 @@ func securePathMatches(path string, file *os.File, identity os.FileInfo) (bool, 
 	if !os.SameFile(opened, identity) {
 		return false, unsafeFailure()
 	}
-	if err := validateSecureOpenFile(file); err != nil {
+	if err := validateSecureOpenFile(file, checkReadACL); err != nil {
 		return false, err
 	}
 	pathInfo, err := os.Lstat(path)

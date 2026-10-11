@@ -77,10 +77,8 @@ def _validate_from_version(_ctx, _param, value):
 @click.option("--openclaw-home", default=None, type=click.Path(file_okay=False), help="OpenClaw home directory.")
 @click.option("--gateway-binary", default=None, type=click.Path(dir_okay=False), help="Gateway used by --check.")
 @click.option("--json", "as_json", is_flag=True, help="Print the result as JSON.")
-@click.option("--yes", "-y", is_flag=True, hidden=True, help="Accepted for installer compatibility.")
-def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json, yes) -> None:
+def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as_json) -> None:
     """Bring config and data to this version's schema."""
-    del yes
     from defenseclaw.migrations import ConfigTooNewError, MigrationError, display_step_name, migrate
 
     # A --from-version newer than this release is warned about where it is
@@ -139,6 +137,21 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
         ux.ok(f"Migrated to config_version {result.to_config_version} ({len(result.applied)} step(s)).")
     if not check and not as_json and _upgraded_from_0x(result):
         _report_hook_fail_mode_changes(data_dir or _default_data_dir())
+        _report_ignored_dotenv_keys(data_dir or _default_data_dir())
+
+
+def _report_ignored_dotenv_keys(data_dir: str) -> None:
+    """Name each 0.x .env control key this release no longer reads (GAP-0387)."""
+    from defenseclaw.config import ignored_dotenv_control_keys
+
+    keys = ignored_dotenv_control_keys(data_dir)
+    if not keys:
+        return
+    env_path = os.path.join(data_dir, ".env")
+    ux.warn(f"{env_path} sets {len(keys)} variable(s) DefenseClaw no longer reads from .env:")
+    for entry in keys:
+        ux.subhead(entry, indent="    ")
+    ux.subhead(f"Then remove those lines from {env_path}; 'defenseclaw doctor' lists them until then.", indent="    ")
 
 
 # The first config_version a 1.x release wrote: below it is a 0.x config,
@@ -178,7 +191,11 @@ def _report_hook_fail_mode_changes(data_dir: str) -> None:
         return
     for name, entry in sorted(connectors.items()):
         sealed = str(entry.get("hook_fail_mode", "")).strip().lower() if isinstance(entry, dict) else ""
-        if sealed != "closed" or guardrail.effective_hook_fail_mode(name) != "open":
+        if (
+            sealed != "closed"
+            or guardrail.effective_mode(name).strip().lower() != "observe"
+            or guardrail.effective_hook_fail_mode(name) != "open"
+        ):
             continue
         ux.warn(
             f"{name} hooks now fail open: in observe mode they let a call through when "

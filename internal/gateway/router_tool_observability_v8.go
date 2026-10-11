@@ -195,7 +195,7 @@ func (r *EventRouter) emitEventRouterToolTerminalV8(observation generatedToolV8O
 		correlationContext = correlated.ctx
 	}
 	outcome, _, _, _ := generatedToolV8Result(observation)
-	logKind := eventRouterToolLogCompleted
+	var logKind eventRouterToolLogKind
 	switch outcome {
 	case observability.OutcomeBlocked:
 		logKind = eventRouterToolLogBlocked

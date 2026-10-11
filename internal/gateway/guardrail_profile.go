@@ -5,16 +5,24 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -50,16 +58,32 @@ type profileSubject struct {
 	UserName  string
 	Principal string
 	UPN       string
+	// Directory and Domain say where the account lives (explain's short-name
+	// note); an empty Domain is an account the host knows by a bare name.
+	Directory     useridentity.Directory
+	Domain        string
+	AccountDomain string
 	// Groups are verified directory group names and SIDs.
 	Groups []string
+	// GroupsUnknown means the Windows enumerator has no current desktop
+	// token for group matching; other verified identity fields remain usable.
+	GroupsUnknown bool
 	// LookupFailed is set when the directory lookup for this subject failed
-	// and no cached facts within their TTL exist. The subject then selects
-	// like an unverified one, and the default reason is
-	// default_lookup_failed.
+	// and no cached facts within their TTL exist. Directory-dependent
+	// assignments then select default_lookup_failed; a verified ID can match.
 	LookupFailed bool
+	// LookupError is why the lookup failed, when `explain` knows (the live
+	// path only records default_lookup_failed).
+	LookupError string
 	// viaProcessOwner marks a subject verified as the per-user gateway's own
 	// account, so explain and telemetry report it as process_owner.
 	viaProcessOwner bool
+	// nameUnconfirmed marks a UserName that kept a domain the directory facts
+	// do not confirm (profileUserName): no users entry matches it by name.
+	nameUnconfirmed bool
+	// cachedFactsAge is set when explain serves an account the directory
+	// cannot name now from the facts its hooks still apply (GAP-0899).
+	cachedFactsAge time.Duration
 }
 
 // The verified subject comes from S1's VerifiedSubject
@@ -73,7 +97,7 @@ type profileSubject struct {
 // S1 already verified as the process owner never takes that fallback.
 // `guardrail profile explain --user` resolves the named account's facts the
 // same way (lookupDirectoryProfileSubject), falling back to the OS account
-// database (lookupLocalProfileSubject).
+// database on Linux and macOS (profileExplainUnresolved).
 var (
 	// profileSubjectSource returns the kernel- or credential-verified
 	// subject of a request.
@@ -86,7 +110,7 @@ var (
 	}
 	// profileAgentSource returns the request's verified agent identity
 	// (defenseclaw.agent.identity.id, agt-...).
-	profileAgentSource = agentIdentityFromContext
+	profileAgentSource = requestAgentIdentity
 	// profileExplainSubjectLookup resolves the subject an administrator
 	// names to `guardrail profile explain --user`.
 	profileExplainSubjectLookup = lookupDirectoryProfileSubject
@@ -118,6 +142,9 @@ type profileDecision struct {
 	Match         string
 	MatchedGroup  string
 	SubjectSource string
+	// Assignment is the 1-based index of the assignment that matched, 0 for
+	// the default.
+	Assignment int
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -126,11 +153,24 @@ type guardrailProfileSet struct {
 	profiles       map[string]config.DerivedGuardrailProfile
 	assignments    []config.ProfileAssignment
 	defaultProfile string
+	// groupCheck is the last look at whether the assignments' groups exist.
+	groupCheck profileGroupCheck
 	// rules holds the compiled rule pack of every scope a derived profile
 	// can resolve to, keyed by effectiveRulePackKey (directory plus rules).
 	rules map[string]*compiledRulePackCategories
 	// packs are the composed packs behind rules, by the same key.
 	packs map[string]*guardrail.RulePack
+	// missing holds the rule packs that did not load when the set was built
+	// at start, keyed like rules; requests retry them (GAP-0333).
+	missing map[string]*profileRulePackRetry
+	// lazy holds the scopes a request resolved that the start-time preload
+	// did not list (*profileLazyScope by key); they load on first use.
+	lazy sync.Map
+	// matches memoises match for repeated subjects.
+	matches *profileMatchCache
+	// groupSIDs holds the SIDs of the assignment group names on standalone
+	// Windows, where groups match on SIDs only (GAP-0860); nil elsewhere.
+	groupSIDs *profileGroupSIDs
 }
 
 // newGuardrailProfileSet derives every profile of cfg and preloads their rule
@@ -139,7 +179,7 @@ type guardrailProfileSet struct {
 // pack that fails to load an error (reload); otherwise the profile scans with
 // the base rule set for that directory and the failure is logged (boot,
 // where the base configuration already loaded).
-func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailProfileSet, error) {
+func newGuardrailProfileSet(cfg *config.Config, cache *guardrail.RulePackCache, strictRules bool) (*guardrailProfileSet, error) {
 	if cfg == nil || cfg.SecureClientIntegration() || !cfg.Guardrail.HasProfiles() {
 		return nil, nil
 	}
@@ -154,15 +194,25 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 		defaultProfile: strings.TrimSpace(cfg.Guardrail.DefaultProfile),
 		rules:          make(map[string]*compiledRulePackCategories),
 		packs:          make(map[string]*guardrail.RulePack),
+		matches:        newProfileMatchCache(),
 	}
-	cache := guardrail.NewRulePackCache()
+	if runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && profileGroupSIDLookup != nil {
+		set.groupSIDs = newProfileGroupSIDs(set.assignments, profileGroupSIDLookup, profileGroupSIDWait)
+	}
+	if cache == nil {
+		cache = guardrail.NewRulePackCache()
+	}
 	names := make([]string, 0, len(derived))
 	for name := range derived {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	tuned := profileConnectorNames(cfg)
+	// Scopes that resolve to the same loaded pack share its compiled rules:
+	// compiling it once per scope key cost a share of every start (GAP-0276).
+	compiledPacks := make(map[*guardrail.RulePack]*compiledRulePackCategories)
 	for _, name := range names {
-		for _, scope := range profileRulePackScopes(derived[name].Config) {
+		for _, scope := range profileRulePackScopes(derived[name].Config, tuned) {
 			key := scope.key()
 			if _, done := set.rules[key]; done {
 				continue
@@ -170,14 +220,25 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 			rp, loadErr := loadScopedRulePack(cache, derived[name].Config, scope, "guardrail profile "+name)
 			var compiled *compiledRulePackCategories
 			if loadErr == nil {
-				compiled, loadErr = compileRulePackCategories(rp)
+				if compiled = compiledPacks[rp]; compiled == nil {
+					compiled, loadErr = compileRulePackCategories(rp)
+					if loadErr == nil {
+						compiledPacks[rp] = compiled
+					}
+				}
 			}
 			if loadErr != nil {
 				if strictRules {
 					return nil, loadErr
 				}
-				fmt.Fprintf(os.Stderr, "[guardrail] profile %s: %v; it scans with the base rule set\n", name, loadErr)
+				fmt.Fprintf(os.Stderr, "[guardrail] profile %s: %v; it scans with the base rule set until the pack loads (retried every %s)\n",
+					name, loadErr, profileRulePackRetryInterval)
 				set.rules[key] = nil
+				if set.missing == nil {
+					set.missing = make(map[string]*profileRulePackRetry)
+				}
+				set.missing[key] = &profileRulePackRetry{profile: name, cfg: derived[name].Config, scope: scope,
+					lastErr: loadErr.Error(), nextTry: time.Now().Add(profileRulePackRetryInterval)}
 				continue
 			}
 			set.rules[key] = compiled
@@ -187,9 +248,92 @@ func newGuardrailProfileSet(cfg *config.Config, strictRules bool) (*guardrailPro
 	return set, nil
 }
 
+// A profile rule pack that did not load at start.
+//
+// The gateway starts before an administrator, or the MDM that delivers the
+// files, has created a profile's rule-pack directory: on a fresh managed
+// install the package starts the services, and the pack is copied a moment
+// later. Such a profile scanned with the base rule set until the next
+// restart, while ensure and status reported a complete deployment (GAP-0333).
+// The request path now retries the pack at most every
+// profileRulePackRetryInterval and uses it from the first retry that loads
+// it; explain says when a profile still waits for its pack. A reload keeps
+// refusing a pack that does not load (strictRules).
+
+const profileRulePackRetryInterval = 30 * time.Second
+
+type profileRulePackRetry struct {
+	profile string
+	cfg     *config.Config
+	scope   rulePackScope
+	loaded  atomic.Pointer[compiledRulePackCategories]
+	pack    atomic.Pointer[guardrail.RulePack]
+
+	mu      sync.Mutex
+	lastErr string
+	nextTry time.Time
+}
+
+// rules returns the pack once it has loaded, retrying the load when the
+// interval has passed. A request never waits for another request's retry.
+func (r *profileRulePackRetry) rules(now time.Time) *compiledRulePackCategories {
+	if loaded := r.loaded.Load(); loaded != nil {
+		return loaded
+	}
+	if !r.mu.TryLock() {
+		return nil
+	}
+	defer r.mu.Unlock()
+	if loaded := r.loaded.Load(); loaded != nil || now.Before(r.nextTry) {
+		return loaded
+	}
+	r.nextTry = now.Add(profileRulePackRetryInterval)
+	rp, err := loadScopedRulePack(guardrail.NewRulePackCache(), r.cfg, r.scope, "guardrail profile "+r.profile)
+	var compiled *compiledRulePackCategories
+	if err == nil {
+		compiled, err = compileRulePackCategories(rp)
+	}
+	if err != nil {
+		r.lastErr = err.Error()
+		return nil
+	}
+	r.pack.Store(rp)
+	r.loaded.Store(compiled)
+	fmt.Fprintf(os.Stderr, "[guardrail] profile %s: rule pack %s loaded; it did not load when the gateway started\n", r.profile, r.scope.key())
+	return compiled
+}
+
+// rulePack returns the composed pack behind the rules the retry published.
+func (r *profileRulePackRetry) rulePack(now time.Time) *guardrail.RulePack {
+	if r.rules(now) == nil {
+		return nil
+	}
+	return r.pack.Load()
+}
+
+// pendingRulePackNote is the explain warning for a profile whose rule pack
+// for connectorName has not loaded yet, or "".
+func (set *guardrailProfileSet) pendingRulePackNote(profile string, cfg *config.Config, connectorName string) string {
+	if set == nil || cfg == nil || len(set.missing) == 0 {
+		return ""
+	}
+	retry := set.missing[effectiveRulePackKey(cfg, connectorName)]
+	if retry == nil || retry.rules(time.Now()) != nil {
+		return ""
+	}
+	retry.mu.Lock()
+	reason := retry.lastErr
+	retry.mu.Unlock()
+	return fmt.Sprintf("profile %s: its rule pack did not load (%s), so its requests scan with the base rule set; "+
+		"the gateway retries the pack every %s and uses it once it loads", firstNonEmpty(profile, "default"), reason, profileRulePackRetryInterval)
+}
+
 // profileRulePackScopes lists every rule-pack scope a derived configuration
-// can resolve for some connector, one per composed-pack key.
-func profileRulePackScopes(cfg *config.Config) []rulePackScope {
+// can resolve for some connector, one per composed-pack key, including the
+// connectors some profile tunes (tuned, from profileConnectorNames: computed
+// once for all profiles, as walking every profile for each derived
+// configuration was quadratic).
+func profileRulePackScopes(cfg *config.Config, tuned []string) []rulePackScope {
 	if cfg == nil {
 		return nil
 	}
@@ -209,18 +353,37 @@ func profileRulePackScopes(cfg *config.Config) []rulePackScope {
 	for name := range cfg.Guardrail.Connectors {
 		add(connectorRulePackScope(cfg, name))
 	}
-	for _, name := range profileConnectorNames(cfg) {
+	for _, name := range tuned {
 		add(connectorRulePackScope(cfg, name))
 	}
-	if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
-		add(overlay)
-	}
-	for name := range cfg.ApplicationProtection.Connectors {
-		add(connectorRulePackScope(cfg, name))
+	if cfg.ApplicationProtection.Enabled {
+		// Disabled application protection selects no rule pack (GAP-0975).
+		// A connector it protects automatically scans with its connector
+		// scope: the overlay pack with application_protection.guardrail.rules
+		// layered in. The overlay scope listed here before carried no
+		// connector, so it lacked those rules and matched no request, and an
+		// auto-protected Claude Code or Codex request scanned with the base
+		// rule set (GAP-1508). List the scope of every connector it can
+		// protect, keyed as the request is (effectiveRulePackKey).
+		for _, name := range profileAutoProtectableConnectors() {
+			add(connectorRulePackScope(cfg, name))
+		}
+		for _, name := range cfg.ApplicationProtection.IncludeConnectors {
+			add(connectorRulePackScope(cfg, name))
+		}
+		for name := range cfg.ApplicationProtection.Connectors {
+			add(connectorRulePackScope(cfg, name))
+		}
 	}
 	sort.Slice(scopes, func(i, j int) bool { return scopes[i].key() < scopes[j].key() })
 	return scopes
 }
+
+// profileAutoProtectableConnectors are the built-in connectors, each of which
+// application protection can pick up without a manual connector entry.
+var profileAutoProtectableConnectors = sync.OnceValue(func() []string {
+	return connector.NewDefaultRegistry().Names()
+})
 
 // profileConnectorNames returns every connector some profile tunes, so the
 // rule packs their connectors[c] entries select are preloaded too.
@@ -231,7 +394,8 @@ func profileConnectorNames(cfg *config.Config) []string {
 			names = append(names, config.NormalizeConnectorName(name))
 		}
 	}
-	return names
+	sort.Strings(names)
+	return slices.Compact(names)
 }
 
 func profileRulePackKey(dir string) string {
@@ -271,7 +435,7 @@ func (a *APIServer) guardrailProfileSet() *guardrailProfileSet {
 
 // initGuardrailProfiles derives the profiles of the start-time config.
 func (a *APIServer) initGuardrailProfiles(cfg *config.Config) {
-	set, err := newGuardrailProfileSet(cfg, false)
+	set, err := newGuardrailProfileSet(cfg, nil, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail profiles unavailable: %v\n", err)
 		return
@@ -296,41 +460,64 @@ type profileRouteConnectorKey struct{}
 // after authentication, and stores it on ctx. routeConnector is the
 // connector the server-side route serves (never a payload value). It is a
 // no-op when no profiles are configured.
+// It also pins the API server's published generation on ctx, so the rules,
+// judge, profiles and policy stamp of the request come from one generation
+// (GAP-0455).
 func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConnector string) context.Context {
-	set := a.guardrailProfileSet()
+	if g := a.generation(); g.published() {
+		ctx = withPinnedGeneration(ctx, g)
+	}
+	return withGuardrailProfile(ctx, a.requestProfileSet(ctx), routeConnector)
+}
+
+// requestProfileSet is the profile set decisions for ctx read: the set of
+// the generation pinned on ctx, else this API server's live set. A reload
+// publishes the next generation before the live set changes, so reading the
+// live set could pair one generation's rules with another's mode and
+// thresholds (GAP-1295).
+func (a *APIServer) requestProfileSet(ctx context.Context) *guardrailProfileSet {
+	if g := pinnedGeneration(ctx); g.published() {
+		return g.Profiles
+	}
+	return a.guardrailProfileSet()
+}
+
+// withGuardrailProfile is withGuardrailProfileDecision for set. The LLM
+// proxy, which has no APIServer, calls it with the live set and the
+// connector it serves (GuardrailProxy.withProxyAgent).
+func withGuardrailProfile(ctx context.Context, set *guardrailProfileSet, routeConnector string) context.Context {
 	if set == nil {
 		return ctx
 	}
 	if routeConnector = config.NormalizeConnectorName(routeConnector); routeConnector != "" {
 		ctx = context.WithValue(ctx, profileRouteConnectorKey{}, routeConnector)
 	}
-	resolved := resolveGuardrailProfileFor(ctx, set)
-	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolved)
+	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolveGuardrailProfileFor(ctx, set))
 }
 
-// refreshGuardrailProfileForAgent re-resolves the request's profile once the
-// hook path has put the verified agent identity on ctx
-// (enrichAgentHookContext). withGuardrailProfileDecision runs before that
-// identity exists, so an agents assignment could never match it.
-func refreshGuardrailProfileForAgent(ctx context.Context) context.Context {
-	resolved := resolvedGuardrailProfileFrom(ctx)
-	if resolved == nil {
-		return ctx
+// requestAgentIdentity is the agent identity an agents assignment matches
+// for ctx: the one the hook path, ACP or the LLM proxy put on ctx, else the
+// one the hook path derives for the connector the request authenticated for
+// or reached (profileRequestConnector) and its verified user. The derivation
+// covers the inspect endpoints, which carry no agent identity, and the
+// resolution at authentication, before the hook path has derived one.
+func requestAgentIdentity(ctx context.Context) (id string, verified bool) {
+	if id, verified = agentIdentityFromContext(ctx); id != "" {
+		return id, verified
 	}
-	if _, verified := profileAgentSource(ctx); !verified {
-		return ctx
+	connectorName := profileRequestConnector(ctx)
+	if connectorName == "" {
+		return "", false
 	}
-	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, resolveGuardrailProfileFor(ctx, resolved.set))
+	facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName})
+	return facts.ID, facts.Verified
 }
 
 // guardrailProfileInspectMiddleware resolves the profile for the inspect
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if a.guardrailProfileSet() != nil {
-			r = r.WithContext(a.withGuardrailProfileDecision(r.Context(), ""))
-		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
 	})
 }
 
@@ -351,7 +538,7 @@ func (a *APIServer) resolveProfile(ctx context.Context) profileDecision {
 }
 
 func (a *APIServer) resolvedProfile(ctx context.Context) *resolvedGuardrailProfile {
-	set := a.guardrailProfileSet()
+	set := a.requestProfileSet(ctx)
 	if set == nil {
 		return nil
 	}
@@ -368,7 +555,7 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	}
 	subject, source := profileRequestSubject(ctx)
 	agent := ""
-	if source != "" && !subject.LookupFailed {
+	if source != "" && subject != nil {
 		if id, ok := profileAgentSource(ctx); ok {
 			agent = strings.TrimSpace(id)
 		}
@@ -386,6 +573,12 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 // profileRequestSubject returns the verified subject of ctx and where it
 // came from, or ("", "") when the request has none.
 func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
+	// A sandbox bearer names a host user for attribution, but it does not
+	// authenticate the process calling the loopback ingress. Never inherit
+	// the gateway owner's verified subject for these requests.
+	if isSandboxHookRequest(ctx) {
+		return nil, ""
+	}
 	if subject, ok := profileSubjectSource(ctx); ok {
 		if subject.viaProcessOwner {
 			return &subject, profileSubjectProcessOwner
@@ -428,7 +621,28 @@ func profileProcessOwnerSubject() (profileSubject, bool) {
 	return processOwnerProfileSubject()
 }
 
-var processOwnerProfileSubject = sync.OnceValues(func() (profileSubject, bool) {
+// processOwnerProfileSubject is the process owner's subject; tests replace
+// it. It carries the directory facts the verified paths use (NSS and SSSD on
+// Linux and macOS, the identity store on Windows, cached and refreshed). The
+// OS account database read by processOwnerAccountSubject lists only the groups
+// /etc/group names when the binary has no cgo, so an AD account's group
+// assignments never selected a profile through this fallback (GAP-0174).
+var processOwnerProfileSubject = func() (profileSubject, bool) {
+	if identityFactsEnabled.Load() {
+		if id, name := localProcessUser(); id != "" {
+			facts, _ := verifiedIdentityDirectory(id, identityLookupBlocking.Load())
+			return profileSubjectFromVerified(VerifiedSubject{
+				UserID: id, IDKind: useridentity.KindForID(id), UserName: name,
+				Directory: facts, Source: subjectSourceProcessOwner,
+			}, identityLookupBlocking.Load()), true
+		}
+	}
+	return processOwnerAccountSubject()
+}
+
+// processOwnerAccountSubject is the process owner as the OS account database
+// lists it, for a gateway that does not collect identity facts.
+var processOwnerAccountSubject = sync.OnceValues(func() (profileSubject, bool) {
 	current, err := osuser.Current()
 	if err != nil || current == nil {
 		return profileSubject{}, false
@@ -440,43 +654,90 @@ var processOwnerProfileSubject = sync.OnceValues(func() (profileSubject, bool) {
 // view. lookupAttempted says the directory lookup was waited on (a group or
 // user assignment is configured); a subject whose facts then never resolved
 // (Directory.ResolvedAt is zero: the lookup failed or ran over its budget)
-// has unknown groups, not empty ones, and selects like an unverified one.
+// has unknown groups, not empty ones. A verified ID remains usable.
+//
+// The account name is the bare one (alice for Unix alice@corp.example.com
+// and CORP\alice) here; a Windows SID keeps a literal @ in its LSA account
+// name. For every caller, a request and `explain --user` both
+// build their subject through this function, so a users entry cannot match
+// one and not the other (GAP-0182). A name whose domain the directory facts
+// do not confirm keeps its domain (profileUserName). The account domain a
+// DOMAIN\user entry matches is the one the directory confirmed (winbind,
+// SSSD by the SID, the LSA, Open Directory); only on Windows, where the LSA
+// names every account DOMAIN\name, does the name itself give it (GAP-0814).
 func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profileSubject {
+	userName, nameUnconfirmed := profileUserName(s.UserName, s.Directory)
+	if s.IDKind == useridentity.KindWindowsSID {
+		userName, nameUnconfirmed = verifiedAccountName(s.UserID, s.UserName), false
+	}
+	accountDomain := s.Directory.AccountDomain
+	if accountDomain == "" && runtime.GOOS == "windows" {
+		if domain, _, qualified := strings.Cut(s.UserName, `\`); qualified {
+			accountDomain = domain
+		}
+	}
 	return profileSubject{
-		UserID:          s.UserID,
-		IDKind:          s.IDKind,
-		UserName:        s.UserName,
-		Principal:       s.Directory.Principal,
-		UPN:             s.Directory.UPN,
-		Groups:          s.Directory.Groups,
-		LookupFailed:    lookupAttempted && s.Directory.ResolvedAt.IsZero(),
+		UserID:        s.UserID,
+		IDKind:        s.IDKind,
+		UserName:      userName,
+		Principal:     s.Directory.Principal,
+		UPN:           s.Directory.UPN,
+		Directory:     s.Directory.Directory,
+		Domain:        s.Directory.Domain,
+		AccountDomain: accountDomain,
+		Groups:        s.Directory.Groups,
+		GroupsUnknown: lookupAttempted && s.Directory.GroupsPartial,
+		LookupFailed: lookupAttempted && (s.Directory.ResolvedAt.IsZero() ||
+			(s.Directory.Source == useridentity.SourceWindowsLSA ||
+				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory) && !s.Directory.GroupsPartial),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
+		nameUnconfirmed: nameUnconfirmed,
 	}
 }
 
 // lookupDirectoryProfileSubject resolves the account an administrator names
 // to `guardrail profile explain --user` with the directory facts a request
 // from that account would carry. An account the directory lookup cannot
-// name falls back to the OS account database.
+// name falls back to the OS account database on Linux and macOS; on Windows
+// both are the LSA, and the LSA's reason is reported.
 func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return profileSubject{}, fmt.Errorf("no user named")
 	}
-	id, userName, ok := profileExplainAccount(name)
-	if !ok {
-		return lookupLocalProfileSubject(name)
+	id, userName, err := profileExplainAccount(name)
+	var ambiguous *useridentity.AmbiguousAccountError
+	if errors.As(err, &ambiguous) {
+		return profileSubject{UserName: name}, err
+	}
+	if err != nil {
+		return profileExplainUnresolved(name, err)
 	}
 	facts, err := profileExplainDirectoryFacts(id)
-	if err != nil || facts.ResolvedAt.IsZero() {
+	if err != nil {
+		// A required lookup failure leaves directory-dependent assignments unresolved. With
+		// agent- or connector-only assignments, live requests can still match
+		// without directory facts. Keep the error for explain (GAP-0124).
+		return profileSubject{
+			UserID: id, IDKind: useridentity.KindForID(id), UserName: userName,
+			LookupFailed: identityLookupBlocking.Load(), LookupError: err.Error(),
+		}, nil
+	}
+	if facts.ResolvedAt.IsZero() {
 		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
+			if !identityLookupBlocking.Load() {
+				local.LookupFailed = false
+			}
 			return local, nil
 		}
-		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: true}, nil
+		// The account is named, so explain shows it with the reason, not a
+		// bare default_lookup_failed.
+		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: identityLookupBlocking.Load()},
+			fmt.Errorf("the operating system returned no directory facts for %s", id)
 	}
 	return profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
-	}, true), nil
+	}, identityLookupBlocking.Load()), nil
 }
 
 // lookupLocalProfileSubject resolves an account name or uid/SID through the
@@ -506,20 +767,29 @@ func localProfileSubject(account *osuser.User) profileSubject {
 	if strings.ContainsAny(account.Username, `\@`) {
 		subject.Principal = account.Username
 	}
-	subject.Groups = localAccountGroups(account)
+	groups, err := accountGroups(account)
+	subject.Groups = groups
+	if err != nil {
+		// Groups that could not be listed are unknown, not empty: the subject
+		// selects as a failed lookup does for a request (default_lookup_failed)
+		// and explain names the reason.
+		subject.LookupFailed, subject.LookupError = true, err.Error()
+	}
 	return subject
 }
 
-// localAccountGroups lists an OS account's groups from the OS account
-// database. On Linux and macOS each group is its name, or its gid when no
-// group answers for it, one entry per group as the NSS directory facts list
-// them (unixidentity), so counts and matching agree with a hook's verified
+// accountGroups lists an OS account's groups from the OS account database.
+// On Linux and macOS each group is its name, or its gid when no group answers
+// for it, one entry per group as the NSS directory facts list them
+// (unixidentity), so counts and matching agree with a hook's verified
 // subject. On Windows each group is its SID followed by its name, as the
-// Windows directory facts list them; identityGroupCount counts the SIDs.
-func localAccountGroups(account *osuser.User) []string {
-	gids, err := account.GroupIds()
+// Windows directory facts list them; identityGroupCount counts the SIDs. The
+// error says the database could not list the account's groups: facts a lookup
+// resolves for the hook path must not be cached as resolved without them.
+func accountGroups(account *osuser.User) ([]string, error) {
+	gids, err := accountGroupIDs(account)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var groups []string
 	for _, gid := range gids {
@@ -532,31 +802,148 @@ func localAccountGroups(account *osuser.User) []string {
 			groups = append(groups, group.Name)
 		}
 	}
-	return groups
+	return groups, nil
 }
 
 // match runs the ordered assignments: the first match wins; within one
 // assignment the set keys AND together and the values of a key OR together.
-// Identity keys (users, groups, agents) match only a verified subject whose
-// directory lookup did not fail; a connector-only assignment matches any
-// request authenticated for that connector.
+// Identity keys (users, groups, agents) match only a verified subject; a
+// connector-only assignment matches any other request authenticated for that
+// connector. A failed directory lookup leaves groups and names unknown, so
+// their assignments select default_lookup_failed (GAP-0312). An assignment
+// naming the kernel-verified UID or SID, or a verified agent, can still
+// select its profile.
 func (set *guardrailProfileSet) match(subject *profileSubject, source, connectorName, agent string) profileDecision {
-	verified := subject != nil && source != "" && !subject.LookupFailed
-	for _, assignment := range set.assignments {
-		reason, group, ok := assignmentMatches(assignment.Match, subject, verified, connectorName, agent)
+	if set.matches == nil {
+		return set.matchUncached(subject, source, connectorName, agent)
+	}
+	key := profileMatchKey(subject, source, connectorName, agent)
+	if set.groupSIDs != nil {
+		waitForGroup := subject != nil && source != "" && !subject.LookupFailed && len(subject.Groups) > 0
+		set.groupSIDs.refresh(time.Now(), waitForGroup)
+		key = set.groupSIDs.matchKey(key)
+	}
+	if decision, ok := set.matches.get(key); ok {
+		return decision
+	}
+	decision := set.matchUncached(subject, source, connectorName, agent)
+	set.matches.put(key, decision)
+	return decision
+}
+
+func (set *guardrailProfileSet) matchUncached(subject *profileSubject, source, connectorName, agent string) profileDecision {
+	if subject != nil && subject.LookupFailed {
+		return set.matchWithFailedLookup(subject, source, connectorName, agent)
+	}
+	if subject != nil && subject.GroupsUnknown {
+		return set.matchWithUnknownGroups(subject, source, connectorName, agent)
+	}
+	verified := subject != nil && source != ""
+	groups := &subjectGroups{sids: set.groupSIDs}
+	if verified {
+		groups.list = subject.Groups
+	}
+	for i, assignment := range set.assignments {
+		reason, group, ok := assignmentMatches(assignment.Match, subject, groups, verified, connectorName, agent)
 		if !ok {
 			continue
 		}
-		return set.decision(assignment.Profile, reason, group, source)
+		decision := set.decision(assignment.Profile, reason, group, source)
+		decision.Assignment = i + 1
+		return decision
 	}
 	reason := profileMatchDefault
-	switch {
-	case subject != nil && subject.LookupFailed:
-		reason = profileMatchDefaultLookupFailed
-	case !verified:
+	if !verified {
 		reason = profileMatchDefaultUnverified
 	}
 	return set.decision(set.defaultProfile, reason, "", source)
+}
+
+// matchWithUnknownGroups preserves verified user and agent assignments in
+// order. An earlier group assignment whose other conditions match could
+// preempt them, so use the default until a current desktop token supplies
+// its membership.
+func (set *guardrailProfileSet) matchWithUnknownGroups(subject *profileSubject, source, connectorName, agent string) profileDecision {
+	fallback := func() profileDecision {
+		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+	}
+	if source == "" || subject.UserID == "" {
+		return fallback()
+	}
+	for i, assignment := range set.assignments {
+		m := assignment.Match
+		if m.Empty() {
+			continue
+		}
+		known := m
+		known.Groups = nil
+		if known.Empty() {
+			return fallback()
+		}
+		reason, group, ok := assignmentMatches(known, subject, &subjectGroups{}, true, connectorName, agent)
+		if !ok {
+			continue
+		}
+		if len(m.Groups) > 0 {
+			return fallback()
+		}
+		decision := set.decision(assignment.Profile, reason, group, source)
+		decision.Assignment = i + 1
+		return decision
+	}
+	return fallback()
+}
+
+// matchWithFailedLookup can use a kernel-verified UID or SID or a
+// verified agent even when directory names and groups are unknown. Preserve
+// assignment order: an earlier assignment that could depend on missing facts
+// still selects the
+// outage default rather than letting a later assignment shadow it.
+func (set *guardrailProfileSet) matchWithFailedLookup(subject *profileSubject, source, connectorName, agent string) profileDecision {
+	fallback := func() profileDecision {
+		return set.decision(set.defaultProfile, profileMatchDefaultLookupFailed, "", source)
+	}
+	if source == "" || subject.UserID == "" {
+		return fallback()
+	}
+	idOnly := &profileSubject{UserID: subject.UserID, IDKind: subject.IDKind}
+	for i, assignment := range set.assignments {
+		m := assignment.Match
+		if len(m.Connectors) > 0 && !anyMatches(m.Connectors, func(v string) bool {
+			return config.NormalizeConnectorName(v) == connectorName && connectorName != ""
+		}) {
+			continue
+		}
+		if len(m.Agents) > 0 && !anyMatches(m.Agents, func(v string) bool {
+			return strings.EqualFold(strings.TrimSpace(v), agent) && agent != ""
+		}) {
+			continue
+		}
+		uidMatches := anyMatches(m.Users, func(v string) bool {
+			return useridentity.EqualFold(strings.TrimSpace(v), subject.UserID)
+		})
+		if len(m.Users) > 0 && !uidMatches {
+			// A list of other IDs is known not to match, regardless of
+			// its group condition. A name or principal could still
+			// name this account, so fail closed.
+			for _, entry := range m.Users {
+				if useridentity.KindForID(entry) == "" {
+					return fallback()
+				}
+			}
+			continue
+		}
+		if len(m.Groups) > 0 || (len(m.Users) == 0 && len(m.Agents) == 0) {
+			return fallback()
+		}
+		reason, group, ok := assignmentMatches(m, idOnly, &subjectGroups{}, true, connectorName, agent)
+		if ok {
+			decision := set.decision(assignment.Profile, reason, group, source)
+			decision.Assignment = i + 1
+			return decision
+		}
+	}
+	return fallback()
 }
 
 func (set *guardrailProfileSet) decision(name, reason, group, source string) profileDecision {
@@ -569,7 +956,7 @@ func (set *guardrailProfileSet) decision(name, reason, group, source string) pro
 	return decision
 }
 
-func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified bool, connectorName, agent string) (reason, group string, ok bool) {
+func assignmentMatches(m config.ProfileMatch, subject *profileSubject, groups *subjectGroups, verified bool, connectorName, agent string) (reason, group string, ok bool) {
 	if m.Empty() {
 		return "", "", false
 	}
@@ -587,7 +974,7 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 	if len(m.Groups) > 0 {
 		matched := ""
 		for _, want := range m.Groups {
-			if profileGroupMatches(subject.Groups, want) {
+			if groups.has(want) {
 				matched = strings.TrimSpace(want)
 				break
 			}
@@ -598,11 +985,7 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 		reason, group = profileMatchGroup, matched
 	}
 	if len(m.Users) > 0 {
-		candidates := []string{subject.UserID, subject.UserName}
-		if !anyMatches(m.Users, func(v string) bool {
-			return anyEqualFold(candidates, v) ||
-				useridentity.PrincipalsEqual(subject.Principal, v) || useridentity.PrincipalsEqual(subject.UPN, v)
-		}) {
+		if !anyMatches(m.Users, func(v string) bool { return userEntryMatches(subject, v) }) {
 			return "", "", false
 		}
 		reason, group = profileMatchUser, ""
@@ -616,24 +999,152 @@ func assignmentMatches(m config.ProfileMatch, subject *profileSubject, verified 
 	return reason, group, true
 }
 
-// profileGroupMatches reports whether one of a subject's groups is want,
-// compared without regard to case. Windows subjects carry each group as its
-// SID and DOMAIN\name, so a bare group name in an assignment also matches
-// the name part of a DOMAIN\name group.
-func profileGroupMatches(groups []string, want string) bool {
-	if anyEqualFold(groups, want) {
+// profileUserName is the name users entries match: the bare account, or,
+// unconfirmed, the whole name when it carries a DNS domain (user@domain) that
+// the directory facts do not give the account. With short SSSD names a plain
+// LDAP domain may name an account by an e-mail address in the joined domain
+// (dcad-bob@dclab.test, GAP-0596): its bare part is the name of another
+// account, the AD dcad-bob, so no users entry selects it by name. A
+// DOMAIN\name outside Windows is unconfirmed the same way unless the facts
+// confirm its domain: nslcd and a plain LDAP domain of SSSD may name an
+// account DCLAB\dcad-bob, which is then selected by its uid only (GAP-0814).
+func profileUserName(name string, facts useridentity.DirectoryFacts) (string, bool) {
+	bare, domain := useridentity.SplitQualifiedName(name)
+	if !identityFactsEnabled.Load() {
+		return bare, false
+	}
+	if strings.Contains(name, `\`) {
+		if runtime.GOOS != "windows" && domain != "" && !useridentity.EqualFold(domain, facts.AccountDomain) &&
+			!useridentity.EqualFold(domain, facts.Domain) {
+			return strings.TrimSpace(name), true
+		}
+		return bare, false
+	}
+	if strings.Contains(domain, ".") && !strings.EqualFold(domain, facts.Domain) {
+		return strings.TrimSpace(name), true
+	}
+	return bare, false
+}
+
+// userEntryMatches reports whether a users entry names the subject: its uid
+// or SID, its account name without the domain, its principal or UPN, or its
+// account in DOMAIN\user form, the name winbind and Windows report. The
+// subject's name is bare and its principal is a UPN or user@REALM, so that
+// form matched none of them (GAP-0316).
+func userEntryMatches(subject *profileSubject, entry string) bool {
+	// A name that kept its unconfirmed domain (profileUserName) is matched
+	// by no entry: an entry with an @ is a principal or a UPN.
+	userName := subject.UserName
+	if subject.nameUnconfirmed {
+		userName = ""
+	}
+	if anyEqualFold([]string{subject.UserID, userName}, entry) ||
+		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry) {
 		return true
 	}
+	domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
+	return qualified && account != "" && useridentity.EqualFold(account, userName) && subjectInDomain(subject, domain)
+}
+
+// subjectInDomain compares only verified account namespaces. Guessing a
+// NetBIOS name from a DNS first label can select a different trusted domain.
+// ".\user", the form Windows tools use for an account of this computer,
+// names a local account whose verified namespace is the computer
+// (GAP-0636).
+func subjectInDomain(subject *profileSubject, domain string) bool {
+	domain = strings.TrimSpace(domain)
+	if domain == "." {
+		return subject.Directory == useridentity.DirectoryLocal && subject.AccountDomain != ""
+	}
+	return domain != "" && (useridentity.EqualFold(domain, subject.AccountDomain) ||
+		useridentity.EqualFold(domain, subject.Domain))
+}
+
+// subjectGroups answers whether one of a subject's groups is the group an
+// assignment names, compared without regard to case. Windows subjects carry
+// each group as its SID and DOMAIN\name, so a bare group name in an
+// assignment also matches the name part of a DOMAIN\name group.
+//
+// It indexes the groups on first use. A request is matched against every
+// assignment in order, and scanning the whole group list for each one made
+// a request cost assignments x groups comparisons (11 ms at 2,000
+// assignments and 400 groups, 50 ms at 10,000, on each hook call, twice).
+type subjectGroups struct {
+	list  []string
+	built bool
+	// sids, on standalone Windows, gives each group name an assignment
+	// writes its SID: the name matches the SID of the group and nothing
+	// else (GAP-0860).
+	sids *profileGroupSIDs
+	// exact holds every group, tails the name part after the last
+	// backslash of those that have one, both folded.
+	exact, tails map[string]struct{}
+}
+
+func (g *subjectGroups) has(want string) bool {
 	want = strings.TrimSpace(want)
-	if want == "" || strings.Contains(want, `\`) {
+	if want == "" || len(g.list) == 0 {
 		return false
 	}
-	for _, group := range groups {
-		if i := strings.LastIndexByte(group, '\\'); i >= 0 && strings.EqualFold(strings.TrimSpace(group[i+1:]), want) {
-			return true
+	if !g.built {
+		g.build()
+	}
+	if g.sids != nil {
+		if profileGroupNeedsSID(want) {
+			sid, ok := g.sids.sid(want)
+			if !ok {
+				return false
+			}
+			_, ok = g.exact[foldKey(sid)]
+			return ok
+		}
+		// A SID names only that group, never another group's SID-shaped name.
+		_, ok := g.exact[foldKey(want)]
+		return ok
+	}
+	key := foldKey(want)
+	if _, ok := g.exact[key]; ok {
+		return true
+	}
+	if strings.Contains(want, `\`) {
+		return false
+	}
+	_, ok := g.tails[key]
+	return ok
+}
+
+func (g *subjectGroups) build() {
+	g.built = true
+	g.exact = make(map[string]struct{}, len(g.list))
+	for _, group := range g.list {
+		group = strings.TrimSpace(group)
+		if group == "" {
+			continue
+		}
+		g.exact[foldKey(group)] = struct{}{}
+		if i := strings.LastIndexByte(group, '\\'); i >= 0 {
+			if g.tails == nil {
+				g.tails = map[string]struct{}{}
+			}
+			g.tails[foldKey(strings.TrimSpace(group[i+1:]))] = struct{}{}
 		}
 	}
-	return false
+}
+
+// foldKey maps every rune to the smallest rune of its case-folding orbit,
+// so two strings have the same key exactly when strings.EqualFold says
+// they are equal, after both are put in Unicode normalization form C: an
+// assignment typed or pasted with a combining accent (e plus U+0301) names
+// the group the directory holds precomposed (U+00E9), and must match it
+// (GAP-0154).
+func foldKey(s string) string {
+	return strings.Map(func(r rune) rune {
+		smallest := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			smallest = min(smallest, f)
+		}
+		return smallest
+	}, norm.NFC.String(s))
 }
 
 func anyMatches(values []string, pred func(string) bool) bool {
@@ -651,7 +1162,7 @@ func anyEqualFold(have []string, want string) bool {
 		return false
 	}
 	for _, value := range have {
-		if value = strings.TrimSpace(value); value != "" && strings.EqualFold(value, want) {
+		if value = strings.TrimSpace(value); value != "" && useridentity.EqualFold(value, want) {
 			return true
 		}
 	}
@@ -659,17 +1170,27 @@ func anyEqualFold(have []string, want string) bool {
 }
 
 // decisionConfig returns the configuration a decision for ctx reads: the
-// derived configuration of the request's profile, or the live generation's
+// derived configuration of the requests profile, or the live generations
 // configuration (a.scannerCfg for an API server without a generation).
 func (a *APIServer) decisionConfig(ctx context.Context) *config.Config {
 	if a == nil {
 		return nil
 	}
-	base := a.scannerCfg
-	if g := a.generation(); g != nil && g.Config != nil {
-		base = g.Config
+	// Secure Client keeps the pre-profile startup policy path (issue #1092).
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		return a.scannerCfg
 	}
-	return a.decisionConfigFrom(ctx, base)
+	return a.decisionConfigFrom(ctx, a.liveBaseConfig(ctx))
+}
+
+// liveBaseConfig is the configuration decisions start from before a profile
+// applies: the request's pinned generation, else the live one, else the
+// start-time configuration.
+func (a *APIServer) liveBaseConfig(ctx context.Context) *config.Config {
+	if g := a.decisionGeneration(ctx); g != nil && g.Config != nil {
+		return g.Config
+	}
+	return a.scannerCfg
 }
 
 // decisionConfigFrom is decisionConfig for a caller that already holds a
@@ -686,19 +1207,25 @@ func (a *APIServer) decisionConfigFrom(ctx context.Context, base *config.Config)
 
 // snapshotRulePackGenerationFor is snapshotRulePackGeneration for a request:
 // when the request's profile resolves connector to another rule pack than
-// the base configuration does, it returns that pack's compiled rules.
+// the base configuration does, it returns that pack's compiled rules. A
+// request with no stored resolution resolves it as decisionConfig does, so
+// its thresholds and its rule pack come from the same profile (GAP-0311).
 func snapshotRulePackGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
-	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.derived != nil {
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if set := pinnedProfileSet(ctx); set != nil && (resolved == nil || resolved.set != set) {
+		resolved = resolveGuardrailProfileFor(ctx, set)
+	}
+	if resolved != nil && resolved.derived != nil {
 		if generation := resolved.ruleGeneration(connectorName); generation != nil {
 			return generation
 		}
 	}
-	return snapshotRulePackGeneration(connectorName)
+	return pinnedRuleGeneration(ctx, connectorName)
 }
 
 // scanAllRulesFor is ScanAllRules with the request's profile rule pack.
 func scanAllRulesFor(ctx context.Context, text, toolName string) []RuleFinding {
-	return scanAllRulesForConnectorFor(ctx, "", text, toolName)
+	return scanAllRulesForConnectorFor(ctx, profileRequestConnector(ctx), text, toolName)
 }
 
 // scanAllRulesForConnectorFor is ScanAllRulesForConnector with the request's
@@ -727,27 +1254,113 @@ func (r *resolvedGuardrailProfile) ruleGeneration(connectorName string) *compile
 	if key == "" || key == effectiveRulePackKey(r.set.base, connectorName) {
 		return nil
 	}
-	return r.set.rules[key]
+	if rules, listed := r.set.rules[key]; listed {
+		if rules != nil {
+			return rules
+		}
+		if retry := r.set.missing[key]; retry != nil {
+			return retry.rules(time.Now())
+		}
+		return nil
+	}
+	return r.set.lazyRules(r.decision.Name, r.derived, connectorName, key)
 }
 
-// profileProxyOverride returns the mode and block message the guardrail
-// proxy applies for ctx. It applies only to a request with a verified
-// user-scoped identity; without one the proxy keeps its own settings.
-func profileProxyOverride(ctx context.Context, connectorName string) (mode, blockMessage string, ok bool) {
-	set := liveGuardrailProfiles.Load()
+// profileLazyScope is a profile rule-pack scope loaded on its first request.
+type profileLazyScope struct {
+	once  sync.Once
+	rules *compiledRulePackCategories
+	retry *profileRulePackRetry
+}
+
+// lazyRules loads a scope the start-time preload did not list (a plugin
+// connector under application protection, say) on its first request instead
+// of scanning that request with the base rule set (GAP-1508). Concurrent
+// first requests wait for the one load. A pack that does not load is retried
+// like one that did not load at start (GAP-0333).
+func (set *guardrailProfileSet) lazyRules(profile string, cfg *config.Config, connectorName, key string) *compiledRulePackCategories {
+	value, _ := set.lazy.LoadOrStore(key, &profileLazyScope{})
+	entry := value.(*profileLazyScope)
+	entry.once.Do(func() {
+		scope := connectorRulePackScope(cfg, connectorName)
+		rp, err := loadScopedRulePack(guardrail.NewRulePackCache(), cfg, scope, "guardrail profile "+profile)
+		var compiled *compiledRulePackCategories
+		if err == nil {
+			compiled, err = compileRulePackCategories(rp)
+		}
+		if err == nil {
+			entry.rules = compiled
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] profile %s: %v; it scans with the base rule set until the pack loads (retried every %s)\n",
+			profile, err, profileRulePackRetryInterval)
+		entry.retry = &profileRulePackRetry{profile: profile, cfg: cfg, scope: scope,
+			lastErr: err.Error(), nextTry: time.Now().Add(profileRulePackRetryInterval)}
+	})
+	if entry.rules != nil {
+		return entry.rules
+	}
+	return entry.retry.rules(time.Now())
+}
+
+// proxyProfileFor returns the profile resolution the guardrail proxy applies
+// to ctx, whose profile withProxyAgent resolved for the proxy's connector and
+// agent. It applies only to a request with a verified user-scoped identity;
+// without one (nil) the proxy keeps its own settings.
+func proxyProfileFor(ctx context.Context) *resolvedGuardrailProfile {
+	if ctx != nil && ctx.Value(unverifiedProxyCallerKey{}) == true {
+		return nil
+	}
+	set := pinnedProfileSet(ctx)
 	if set == nil {
-		return "", "", false
+		return nil
 	}
 	resolved := resolvedGuardrailProfileFrom(ctx)
 	if resolved == nil || resolved.set != set {
 		resolved = resolveGuardrailProfileFor(ctx, set)
 	}
 	if resolved == nil || resolved.derived == nil || resolved.decision.SubjectSource == "" {
+		return nil
+	}
+	return resolved
+}
+
+// profileProxyOverride returns the mode and block message the guardrail
+// proxy applies for ctx (proxyProfileFor).
+func profileProxyOverride(ctx context.Context, connectorName string) (mode, blockMessage string, ok bool) {
+	resolved := proxyProfileFor(ctx)
+	if resolved == nil {
 		return "", "", false
 	}
 	connectorName = config.NormalizeConnectorName(connectorName)
 	return resolved.derived.Guardrail.EffectiveMode(connectorName),
 		resolved.derived.Guardrail.EffectiveBlockMessage(connectorName), true
+}
+
+// proxyRuleGeneration is the rule pack the guardrail proxy scans ctx's
+// content with: the one its profile selects (proxyProfileFor) when that is
+// another pack than the base configuration's, else the process-global one.
+// The proxy scanned every request with the global pack, so a profile's
+// rule_pack_dir never reached OpenClaw or ZeptoClaw traffic (GAP-0313).
+func proxyRuleGeneration(ctx context.Context) *compiledRulePackCategories {
+	connectorName := profileRequestConnector(ctx)
+	if resolved := proxyProfileFor(ctx); resolved != nil {
+		if generation := resolved.ruleGeneration(connectorName); generation != nil {
+			return generation
+		}
+	}
+	return pinnedRuleGeneration(ctx, connectorName)
+}
+
+// proxyGuardrailProfileTelemetryFor describes only a profile actually used
+// by proxyProfileFor. An unverified shared-gateway request uses the proxy's
+// base settings, even when a connector assignment resolves on the context.
+func proxyGuardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry {
+	resolved := proxyProfileFor(ctx)
+	if resolved == nil {
+		return guardrailProfileTelemetry{}
+	}
+	return guardrailProfileTelemetryFromDecision(resolved.decision)
 }
 
 // guardrailProfileTelemetry carries the correlation.guardrail.profile
@@ -760,27 +1373,46 @@ type guardrailProfileTelemetry struct {
 // emitted under ctx. All are absent when no profiles are configured, so
 // records stay unchanged for every deployment without them.
 func guardrailProfileTelemetryFor(ctx context.Context) guardrailProfileTelemetry {
-	set := liveGuardrailProfiles.Load()
+	set := pinnedProfileSet(ctx)
 	resolved := resolvedGuardrailProfileFrom(ctx)
-	if resolved == nil {
-		if set == nil {
+	if set == nil {
+		if resolved == nil || resolved.set != nil {
 			return guardrailProfileTelemetry{}
 		}
+		// A supplied decision without a profile set is used by callers that
+		// construct a standalone decision record.
+		return guardrailProfileTelemetryFromDecision(resolved.decision)
+	}
+	if resolved == nil || resolved.set != set {
 		resolved = resolveGuardrailProfileFor(ctx, set)
 	}
-	if resolved == nil {
-		return guardrailProfileTelemetry{}
-	}
-	d := resolved.decision
+	return guardrailProfileTelemetryFromDecision(resolved.decision)
+}
+
+func guardrailProfileTelemetryFromDecision(d profileDecision) guardrailProfileTelemetry {
 	out := guardrailProfileTelemetry{Match: observability.Present(d.Match)}
 	if d.Name != "" {
 		out.Name = observability.Present(d.Name)
 		out.Digest = observability.Present(d.Digest)
 	}
-	if d.Match == profileMatchGroup && d.MatchedGroup != "" {
+	if d.Match == profileMatchGroup && profileTelemetryGroupFits(d.MatchedGroup) {
 		out.MatchedGroup = observability.Present(d.MatchedGroup)
 	}
 	return out
+}
+
+// maxProfileMatchedGroupBytes is the registry bound of
+// defenseclaw.guardrail.profile.matched_group.
+const maxProfileMatchedGroupBytes = 256
+
+// profileTelemetryGroupFits reports whether a matched group fits the
+// attribute. An assignment may name a longer group (the config allows 512
+// characters), and a value out of range fails the whole record, which every
+// producer then dropped (GAP-0319). Such a group is left out; the profile and
+// the match still say what selected it, and explain names the group.
+func profileTelemetryGroupFits(group string) bool {
+	return group != "" && len(group) <= maxProfileMatchedGroupBytes && utf8.ValidString(group) &&
+		!strings.ContainsFunc(group, func(r rune) bool { return r < 0x20 || r == 0x7f })
 }
 
 // guardrailProfileDigests maps each profile of set to its digest.
@@ -820,6 +1452,22 @@ func diffGuardrailProfileDigests(oldSet, newSet *guardrailProfileSet) []guardrai
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Name < changes[j].Name })
 	return changes
+}
+
+// refreshDirectoryFactsOnProfileChange has the next request of every
+// account refresh its cached directory facts when a reload changes the
+// guardrail profiles or their assignments, so a pushed group assignment
+// applies at the next decision (GAP-1036).
+func refreshDirectoryFactsOnProfileChange(oldCfg, newCfg *config.Config) {
+	if oldCfg == nil || newCfg == nil {
+		return
+	}
+	before, after := oldCfg.Guardrail, newCfg.Guardrail
+	if reflect.DeepEqual(before.Profiles, after.Profiles) && reflect.DeepEqual(before.ProfileAssignments, after.ProfileAssignments) &&
+		before.DefaultProfile == after.DefaultProfile {
+		return
+	}
+	peerDirectoryCache().invalidate()
 }
 
 // auditGuardrailProfileChanges records one config.change.applied per profile
@@ -880,6 +1528,10 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		return
 	}
 	base := a.runtimeConfigSnapshot()
+	// Explain the base that decisions use: the published generation.
+	if g := a.generation(); g != nil && g.Config != nil && (base == nil || !base.SecureClientIntegration()) {
+		base = g.Config
+	}
 	if base != nil && base.SecureClientIntegration() {
 		a.writeJSON(w, http.StatusNotFound, map[string]string{"error": "guardrail profiles are not supported with the Secure Client integration"})
 		return
@@ -890,26 +1542,51 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	agent := strings.TrimSpace(query.Get("agent"))
 
 	set := a.guardrailProfileSet()
+	if connectorName != "" && !connector.IsKnownBuiltinConnector(connectorName) &&
+		(set == nil || !set.knownConnector(connectorName)) {
+		known := connector.NewDefaultRegistry().Names()
+		if base != nil {
+			for name := range base.Guardrail.Connectors {
+				known = append(known, config.NormalizeConnectorName(name))
+			}
+		}
+		sort.Strings(known)
+		known = slices.Compact(known)
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("unknown connector %q; valid connectors: %s", connectorName, strings.Join(known, ", "))})
+		return
+	}
 	out := map[string]any{
 		"profiles_configured": set != nil,
 		"user":                user,
 		"connector":           connectorName,
 		"agent":               agent,
 	}
-	if set == nil {
-		out["profile"] = ""
-		out["match"] = ""
-		out["effective"] = profileEffectiveView(a.scannerCfg, connectorName)
-		a.writeJSON(w, http.StatusOK, out)
-		return
-	}
+	// The subject is resolved with or without profiles, so the identity check
+	// (`profile explain --user U --json | jq .subject`) answers on every
+	// install (GAP-0280).
 	var subject *profileSubject
 	source := ""
 	if user != "" {
 		found, err := profileExplainSubjectLookup(user)
-		if err != nil {
-			found = profileSubject{UserName: user, LookupFailed: true}
+		var ambiguous *useridentity.AmbiguousAccountError
+		if errors.As(err, &ambiguous) {
+			// A bare name two accounts share is explained as neither: the
+			// answer names both, and the administrator names one (GAP-1087).
 			out["lookup_error"] = err.Error()
+			out["accounts"] = ambiguous.Accounts
+			out["profile"], out["match"] = "", ""
+			out["effective"] = profileEffectiveView(base, connectorName)
+			a.writeJSON(w, http.StatusOK, out)
+			return
+		}
+		if err != nil {
+			if found.UserID == "" {
+				found = profileSubject{UserName: user}
+			}
+			found.LookupFailed = identityLookupBlocking.Load()
+			out["lookup_error"] = err.Error()
+		} else if found.LookupError != "" {
+			out["lookup_error"] = found.LookupError
 		}
 		subject, source = &found, profileSubjectLookup
 		out["subject"] = map[string]any{
@@ -917,6 +1594,16 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			"principal": found.Principal, "upn": found.UPN, "groups": found.Groups,
 			"group_count": identityGroupCount(found.Groups),
 		}
+	}
+	if set == nil {
+		out["profile"] = ""
+		out["match"] = ""
+		out["effective"] = profileEffectiveView(base, connectorName)
+		if note := inertHILTWarning(base, connectorName); note != "" {
+			out["warnings"] = []string{note}
+		}
+		a.writeJSON(w, http.StatusOK, out)
+		return
 	}
 	if source == "" {
 		agent = ""
@@ -927,9 +1614,37 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["match"] = decision.Match
 	out["matched_group"] = decision.MatchedGroup
 	out["subject_source"] = decision.SubjectSource
+	out["assignment"] = decision.Assignment
+	warnings := profileExplainWarnings(set, decision, subject)
+	if agent != "" {
+		warnings = append(warnings, fmt.Sprintf("agent %q is not verified against a host identity record by profile-explain; confirm it with agent identities before relying on this answer", agent))
+	}
+	if source == profileSubjectLookup {
+		if view, warning := explainCacheView(set, subject, decision, connectorName, agent, time.Now()); view != nil {
+			out["cache"] = view
+			if warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
+		if subject != nil && !subject.LookupFailed && slices.ContainsFunc(set.assignments, func(a config.ProfileAssignment) bool { return len(a.Match.Groups) > 0 }) {
+			warnings = append(warnings, "after a group membership change, hooks can use the previous profile for up to 15 minutes while the gateway refreshes cached identity facts; restart the gateway to refresh sooner")
+		}
+	}
+	if view, _ := directoryHealthView(directoryCacheHealth(), time.Now()); view != nil {
+		out["directory"] = view
+	}
 	effective := set.base
 	if derived, ok := set.profiles[decision.Name]; ok {
 		effective = derived.Config
+	}
+	if note := set.pendingRulePackNote(decision.Name, effective, connectorName); note != "" {
+		warnings = append(warnings, note)
+	}
+	if note := inertHILTWarning(effective, connectorName); note != "" {
+		warnings = append(warnings, note)
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
 	}
 	out["effective"] = profileEffectiveView(effective, connectorName)
 	digests := guardrailProfileDigests(set)
@@ -944,11 +1659,15 @@ func profileEffectiveView(cfg *config.Config, connectorName string) map[string]a
 		return map[string]any{}
 	}
 	hilt := cfg.EffectiveHILTForConnector(connectorName)
-	return map[string]any{
+	view := map[string]any{
 		"mode":          hookModeForConfig(cfg, connectorName),
 		"block_at":      cfg.Guardrail.EffectiveBlockAt(connectorName),
 		"alert_at":      cfg.Guardrail.EffectiveAlertAt(connectorName),
 		"rule_pack_dir": cfg.EffectiveRulePackDirForConnector(connectorName),
 		"hilt":          map[string]any{"enabled": hilt.Enabled, "min_severity": hilt.MinSeverity},
 	}
+	if !cfg.SecureClientIntegration() {
+		view["resolved_block_at"] = resolveThresholds(cfg, connectorName).Block
+	}
+	return view
 }

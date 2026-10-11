@@ -26,6 +26,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
+	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -150,6 +152,9 @@ func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
 // installed config.yaml; source, when set, is the file the administrator
 // supplied (--config), and errors name it instead of the installed path.
 func (e *Env) validateConfigSource(raw []byte, source string) (*validatedConfig, error) {
+	if plain, ok := e.managedEnvReferenceProblem(raw, source); ok {
+		return nil, &plainConfigError{msg: plain, err: errManagedEnvReference}
+	}
 	validated, err := e.checkConfig(raw)
 	if err != nil {
 		if plain, ok := e.plainConfigProblem(err, source, raw); ok {
@@ -181,17 +186,17 @@ func (e *Env) explainConfigError(err error, source string) error {
 		fixed := *yamlErr
 		switch yamlErr.Code {
 		case config.V8YAMLErrorVersionRequired, config.V8YAMLErrorVersionInvalid:
-			fixed.Action = "add `config_version: 8` as the first line of the file"
+			fixed.Action = "add `config_version: 9` as the first line of the file"
 		case config.V8YAMLErrorVersionUpgrade:
-			fixed.Action = "write the file in the current (v8) format and set `config_version: 8`"
+			fixed.Action = "write the file in the current (v9) format and set `config_version: 9`"
 		case config.V8YAMLErrorVersionUnsupported:
-			fixed.Action = "install the DefenseClaw enterprise package that matches this config, or set `config_version: 8`"
+			fixed.Action = "install the DefenseClaw enterprise package that matches this config, or set `config_version: 9`"
 		}
 		message = strings.Replace(message, yamlErr.Error(), fixed.Error(), 1)
 	}
 	if strings.Contains(message, "defenseclaw migrate") {
-		message = strings.ReplaceAll(message, "run `defenseclaw migrate` to create a current source", "set `config_version: 8`")
-		message = strings.ReplaceAll(message, "run `defenseclaw migrate`", "write the file in the current (v8) format and set `config_version: 8`")
+		message = strings.ReplaceAll(message, "run `defenseclaw migrate` to create a current source", "set `config_version: 9`")
+		message = strings.ReplaceAll(message, "run `defenseclaw migrate`", "write the file in the current (v9) format and set `config_version: 9`")
 	}
 	if source != "" && source != e.Layout.ConfigPath {
 		message = strings.ReplaceAll(message, e.Layout.ConfigPath, source)
@@ -267,6 +272,9 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	if err := e.checkRulePackDirs(cfg); err != nil {
 		return nil, err
 	}
+	if err := e.checkJSONLDestinations(compiled.Plan); err != nil {
+		return nil, err
+	}
 	v := &validatedConfig{
 		Raw:                    append([]byte(nil), raw...),
 		SHA:                    sha256Bytes(raw),
@@ -284,9 +292,16 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 			v.RulePacks[label] = filepath.Clean(dir)
 		}
 	}
+	// The singular guardrail.connector (the shape the per-user CLI writes)
+	// enrols its connector too unless guardrail.connectors disables it, as
+	// in the enumerator (GAP-0263).
+	names := []string{cfg.Guardrail.Connector}
 	for name := range cfg.Guardrail.Connectors {
+		names = append(names, name)
+	}
+	for _, name := range names {
 		connector := strings.ToLower(strings.TrimSpace(name))
-		if connector == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+		if connector == "" || contains(v.Connectors, connector) || !cfg.Guardrail.EffectiveEnabled(name) {
 			continue
 		}
 		v.Connectors = append(v.Connectors, connector)
@@ -298,6 +313,174 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	return v, nil
 }
 
+// checkJSONLDestinations refuses, before anything changes, a jsonl
+// destination the gateway cannot write: on Linux a path outside the
+// folders its sandbox may write, and a path that is a directory, a link or
+// a device, or in a folder other accounts can write. The gateway refused
+// them only at start, with runtime_unavailable, and ensure rolled back
+// (GAP-0890).
+func (e *Env) checkJSONLDestinations(plan *config.ObservabilityV8Plan) error {
+	if plan == nil {
+		return nil
+	}
+	for _, destination := range plan.Destinations() {
+		if destination.Kind != config.ObservabilityV8DestinationJSONL || !destination.Enabled || destination.Generated {
+			continue
+		}
+		path := filepath.Clean(destination.Transport.Path)
+		if e.GOOS == "linux" && !pathWithin(path, e.Layout.DataDir) && !pathWithin(path, e.Layout.LogDir) {
+			return fmt.Errorf("observability destination %q writes %s, outside the folders the gateway service may write (%s and %s); use a path in one of them",
+				destination.Name, path, e.Layout.DataDir, e.Layout.LogDir)
+		}
+		if problem := local.JSONLPathProblem(e.P(path)); problem != "" {
+			return fmt.Errorf("observability destination %q writes %s, which %s; a jsonl destination writes a file only the gateway account can read and write (mode 0600, or a missing file it creates) in a folder only root and the gateway account can write",
+				destination.Name, path, problem)
+		}
+		if problem, err := e.jsonlACLProblem(context.Background(), path); err != nil {
+			return fmt.Errorf("inspect macOS ACL of observability destination %q at %s: %w", destination.Name, path, err)
+		} else if problem != "" {
+			return fmt.Errorf("observability destination %q writes %s, which %s", destination.Name, path, problem)
+		}
+		// The gateway opens the file as its service account, so it must pass
+		// through every folder above it, whether or not the file exists yet
+		// (GAP-1484).
+		if problem := e.jsonlParentTraversalProblem(path); problem != "" {
+			return fmt.Errorf("observability destination %q writes %s, which %s; give the %s gateway service account search (x) access to every folder above the file",
+				destination.Name, path, problem, e.Layout.ServiceUser)
+		}
+		if _, err := os.Lstat(e.P(path)); errors.Is(err, os.ErrNotExist) {
+			if problem := e.jsonlMissingParentProblem(path); problem != "" {
+				return fmt.Errorf("observability destination %q writes %s, which %s; choose a directory the %s gateway service account can create and write",
+					destination.Name, path, problem, e.Layout.ServiceUser)
+			}
+		}
+		// A safe parent does not make an existing file writable. The gateway
+		// opens it as the service account with O_APPEND and never changes its
+		// owner or mode. A fresh install may not have that account yet.
+		if info, err := os.Lstat(e.P(path)); err == nil && info.Mode().IsRegular() {
+			account, ok, err := e.Accounts.Lookup(context.Background(), e.Layout.ServiceUser)
+			if err != nil {
+				return fmt.Errorf("look up gateway service account for observability destination %q: %w", destination.Name, err)
+			}
+			owner, _, err := e.OwnerOf(e.P(path))
+			if err != nil {
+				return fmt.Errorf("check owner of observability destination %q: %w", destination.Name, err)
+			}
+			if !ok || owner != account.UID || info.Mode().Perm()&0o200 == 0 || info.Mode().Perm()&0o077 != 0 {
+				return fmt.Errorf("observability destination %q writes %s, which the %s gateway service account cannot append to; make the existing file owned by %s with mode 0600, or remove it so the gateway can create it",
+					destination.Name, path, e.Layout.ServiceUser, e.Layout.ServiceUser)
+			}
+		}
+	}
+	return nil
+}
+
+var jsonlACLReader posixacl.Reader = posixacl.System
+
+// jsonlParentTraversalProblem reports an existing folder above path that the
+// gateway service account cannot pass through. Folders the lifecycle owns
+// get their owner and mode at apply and are skipped; an account that does
+// not exist yet passes only where other users may.
+func (e *Env) jsonlParentTraversalProblem(path string) string {
+	account, ok, err := e.Accounts.Lookup(context.Background(), e.Layout.ServiceUser)
+	if err != nil {
+		return fmt.Sprintf("cannot be checked: looking up the %s gateway service account failed: %v", e.Layout.ServiceUser, err)
+	}
+	if !ok {
+		account = Account{UID: -1, GID: -1}
+	}
+	owned := map[string]bool{}
+	for _, dir := range e.managedDirs(account, false) {
+		if !dir.External {
+			owned[filepath.Clean(dir.Path)] = true
+		}
+	}
+	for dir := filepath.Dir(path); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		if owned[dir] {
+			continue
+		}
+		info, err := os.Lstat(e.P(dir))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Sprintf("is below %s, which cannot be inspected: %v", dir, err)
+		}
+		if !info.IsDir() {
+			// A link or file in the path is refused by the path checks.
+			continue
+		}
+		uid, gid, err := e.OwnerOf(e.P(dir))
+		if err != nil {
+			return fmt.Sprintf("is below %s, whose owner cannot be inspected: %v", dir, err)
+		}
+		allowed := accountMayAccess(uid, gid, info.Mode(), account, 0o1)
+		if e.GOOS == "linux" {
+			acl, err := jsonlACLReader.Read(e.P(dir), info.Mode())
+			if err != nil {
+				return fmt.Sprintf("is below %s, whose ACL cannot be inspected: %v", dir, err)
+			}
+			allowed = acl.Allows(uid, gid, info.Mode(), account.UID, account.GID, 0o1)
+		}
+		if !allowed {
+			return fmt.Sprintf("is below %s (mode %04o, owner uid %d), which the %s gateway service account cannot pass through", dir, info.Mode().Perm(), uid, e.Layout.ServiceUser)
+		}
+	}
+	return ""
+}
+
+// jsonlMissingParentProblem checks the first existing parent or ancestor.
+// The gateway creates missing subdirectories as its service account;
+// lifecycle-created service directories are available after apply.
+func (e *Env) jsonlMissingParentProblem(path string) string {
+	parent := filepath.Dir(path)
+	for dir := parent; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
+		// These roots are created for the gateway during a fresh install.
+		if dir == e.Layout.DataDir ||
+			(e.GOOS == "linux" && dir == e.Layout.LogDir) ||
+			(e.GOOS == "darwin" && dir == filepath.Join(e.Layout.LogDir, "gateway")) {
+			if _, err := os.Lstat(e.P(dir)); errors.Is(err, os.ErrNotExist) {
+				return ""
+			}
+		}
+		info, err := os.Lstat(e.P(dir))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Sprintf("cannot inspect the existing ancestor %s: %v", dir, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Sprintf("cannot create its missing directory below %s, which is not a regular directory", dir)
+		}
+		account, ok, err := e.Accounts.Lookup(context.Background(), e.Layout.ServiceUser)
+		if err != nil || !ok {
+			return fmt.Sprintf("cannot confirm the %s gateway service account can create its missing directory below %s", e.Layout.ServiceUser, dir)
+		}
+		uid, gid, err := e.OwnerOf(e.P(dir))
+		if err != nil {
+			return fmt.Sprintf("cannot inspect the owner of %s: %v", dir, err)
+		}
+		allowed := accountMayAccess(uid, gid, info.Mode(), account, 0o3)
+		if e.GOOS == "linux" {
+			acl, err := jsonlACLReader.Read(e.P(dir), info.Mode())
+			if err != nil {
+				return fmt.Sprintf("cannot inspect the ACL of %s: %v", dir, err)
+			}
+			allowed = acl.Allows(uid, gid, info.Mode(), account.UID, account.GID, 0o3)
+		}
+		if !allowed {
+			return fmt.Sprintf("cannot create its missing directory below %s as the %s gateway service account", dir, e.Layout.ServiceUser)
+		}
+		return ""
+	}
+	return ""
+}
+
+func pathWithin(path, dir string) bool {
+	return path == dir || strings.HasPrefix(path, strings.TrimRight(dir, "/")+"/")
+}
+
 // checkRulePackDirs refuses rule packs the gateway cannot load or could
 // rewrite itself: every effective rule pack must be outside data_dir and
 // either ship with the vendor policies or already exist.
@@ -307,7 +490,7 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("embedded vendor policies: %w", err)
 	}
-	for _, label := range rulePackCheckOrder(dirs) {
+	for _, label := range config.RulePackCheckOrder(dirs) {
 		dir := strings.TrimSpace(dirs[label])
 		if dir == "" {
 			continue
@@ -329,6 +512,27 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 			shipped := filepath.Join(e.Layout.VendorPolicyDir, "guardrail", "default")
 			return fmt.Errorf("config %s %q does not exist; create the pack there before you apply the config, starting from a copy of policies/guardrail/default in the DefenseClaw source release (installed hosts also have it at %s), or set it to %s, which the deployment installs", label, dir, shipped, shipped)
 		}
+		// The gateway loads every pack, profile packs included, only from an
+		// administrator-controlled directory and refuses to start otherwise.
+		// Refuse here, before anything is activated, instead of failing the
+		// activation and rolling back (GAP-0301).
+		if err := e.Trust(e.P(clean), TrustRuntimeDir); err != nil {
+			return fmt.Errorf("config %s %q is not administrator-controlled, so the gateway would refuse to start with it: %w; make the directory and its parents owned by root and not writable by group or others, then retry", label, dir, err)
+		}
+	}
+	return nil
+}
+
+// checkCandidateAssets builds the rule packs the config selects, with its
+// guardrail.rules layers, the way the gateway does when it starts, and checks
+// its webhook URLs. A layer the gateway would refuse (a duplicate suppression
+// id, an unknown rule id, a missing protection pack) or a webhook it would
+// drop is refused here, with its reason, before anything changes, instead of
+// keeping the gateway from starting or going unnoticed. The check is
+// registered by the gateway package; a build without it skips this.
+func (e *Env) checkCandidateAssets(v *validatedConfig) error {
+	if err := config.CheckCandidateAssets(v.Loaded); err != nil {
+		return fmt.Errorf("config does not build: %w", err)
 	}
 	return nil
 }
@@ -339,10 +543,20 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 // failed only when the gateway started; an unset rule_pack_dir resolves to
 // the same <policy_dir>/guardrail/default folder, so the rollback failed too.
 func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error {
-	for _, label := range rulePackCheckOrder(v.RulePacks) {
+	for _, label := range config.RulePackCheckOrder(v.RulePacks) {
 		dir := v.RulePacks[label]
-		if dir == e.Layout.VendorPolicyDir || strings.HasPrefix(dir, e.Layout.VendorPolicyDir+"/") {
-			continue
+		// Shipped packs are absent before the first install. Once present,
+		// their files are subject to the same trust and readability checks.
+		if pathWithin(dir, e.Layout.VendorPolicyDir) {
+			if _, err := os.Lstat(e.P(dir)); errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+		}
+		// The gateway refuses an untrusted pack only when it starts, so
+		// ensure restarted it into a failed start and rolled back with a
+		// cause-less activation_failed (GAP-0546).
+		if err := e.Trust(e.P(dir), TrustRulePack); err != nil {
+			return fmt.Errorf("config %s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
 		}
 		if err := e.rulePackReadable(dir, account); err != nil {
 			return fmt.Errorf("config %s %q: %w", label, dir, err)
@@ -413,35 +627,6 @@ func accountMayAccess(uid, gid int, mode os.FileMode, account Account, need os.F
 		perm >>= 3
 	}
 	return perm&need == need
-}
-
-// rulePackCheckOrder orders the rule-pack settings for a check:
-// guardrail.rule_pack_dir first, then each connector setting whose pack
-// differs from it. A connector that only inherits the global pack is not
-// checked again, so a refusal names the key the administrator wrote: it
-// named guardrail.connectors.amp.rule_pack_dir, which sorts first, for a
-// config that set only guardrail.rule_pack_dir (GAP-1193).
-func rulePackCheckOrder(dirs map[string]string) []string {
-	global := "guardrail.rule_pack_dir"
-	if _, ok := dirs["guardrail.rule_pack"]; ok {
-		global = "guardrail.rule_pack"
-	}
-	globalDir, hasGlobal := dirs[global]
-	globalDir = strings.TrimSpace(globalDir)
-	order := []string{}
-	if hasGlobal {
-		order = append(order, global)
-	}
-	for _, label := range sortedKeys(dirs) {
-		if label == global {
-			continue
-		}
-		if dir := strings.TrimSpace(dirs[label]); hasGlobal && globalDir != "" && filepath.Clean(dir) == filepath.Clean(globalDir) {
-			continue
-		}
-		order = append(order, label)
-	}
-	return order
 }
 
 func vendorPolicyDirExists(files []policyassets.File, rel string) bool {

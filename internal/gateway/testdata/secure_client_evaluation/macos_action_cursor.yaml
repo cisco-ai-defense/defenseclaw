@@ -1,0 +1,39 @@
+config_version: 8
+deployment_mode: managed_enterprise
+
+data_dir: "/opt/cisco/secureclient/defenseclaw/runtime"
+
+observability:
+  local:
+    path: "/opt/cisco/secureclient/defenseclaw/runtime/audit.db"
+    judge_bodies_path: "/opt/cisco/secureclient/defenseclaw/runtime/judge_bodies.db"
+  defaults:
+    redaction_profile: sensitive
+
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+  device_key_file: "/opt/cisco/secureclient/defenseclaw/runtime/device.key"
+  watcher:
+    enabled: false
+
+guardrail:
+  enabled: true
+  mode: action
+  scanner_mode: both
+  detection_strategy: regex_only
+  judge:
+    enabled: false
+  connector: cursor
+
+cisco_ai_defense:
+  endpoint: "https://us.api.inspect.aidefense.security.cisco.com"
+
+ai_discovery:
+  enabled: true
+
+asset_policy:
+  enabled: false
+
+application_protection:
+  enabled: false

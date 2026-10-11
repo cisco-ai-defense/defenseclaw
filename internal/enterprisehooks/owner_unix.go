@@ -186,6 +186,16 @@ func withOwnerCredentials(uid, gid int, fn func() error) (err error) {
 	return fn()
 }
 
+// RunAsAccount runs fn with the effective uid and gid of one service
+// account, from root, and restores root afterwards. A caller that is not root
+// must already be that account.
+func RunAsAccount(uid, gid int, fn func() error) error {
+	if uid <= 0 || gid < 0 {
+		return fmt.Errorf("enterprise hooks: refusing to run as uid=%d gid=%d", uid, gid)
+	}
+	return withOwnerCredentials(uid, gid, fn)
+}
+
 func runAsTarget(target TargetCredentials, fn func() error) error {
 	home, err := validateUserHome(target.UserHome)
 	if err != nil {
@@ -210,8 +220,43 @@ func chmodOwnedPath(path string, mode os.FileMode) error {
 	if info.Mode()&relevantMode == mode&relevantMode {
 		return nil
 	}
-	if err := os.Chmod(path, mode); err != nil {
+	// Through a descriptor opened without following links, so a path swapped
+	// for a symlink after the Lstat above cannot redirect the chmod.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: open %s for chmod: %w", path, err)
+	}
+	defer f.Close()
+	if err := f.Chmod(mode); err != nil {
 		return fmt.Errorf("enterprise hooks: chmod %s: %w", path, err)
+	}
+	return nil
+}
+
+// tightenLooseUserHookConfig removes group and other write from a hook
+// config that is a regular file the target account owns. An agent writes its
+// config under the account's umask, so on a host with user-private groups
+// (umask 0002, the Ubuntu default) Hermes left config.yaml 0664; the guardian
+// refused it on every pass and repair found nothing to repair (GAP-0681).
+// Dropping write bits from a file the account owns only removes access. The
+// chmod goes through a descriptor opened without following links, and the
+// owner and type come from that descriptor. Anything else (a symlink, a
+// file another account owns) is left to the checks that follow.
+func tightenLooseUserHookConfig(path string, uid int) error {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 == 0 {
+		return nil
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != uid {
+		return nil
+	}
+	if err := f.Chmod(info.Mode().Perm() &^ 0o022); err != nil {
+		return fmt.Errorf("enterprise hooks: hook config %s is group/other writable and could not be tightened (%v); as that account, run: chmod go-w %s", path, err, path)
 	}
 	return nil
 }

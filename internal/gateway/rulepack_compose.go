@@ -17,12 +17,17 @@
 package gateway
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
@@ -77,15 +82,19 @@ func connectorRulePackScope(cfg *config.Config, connector string) rulePackScope 
 	return rulePackScope{ref: ref, dir: cfg.ResolveRulePackDir(ref), layers: cfg.EffectiveRulesForConnector(connector)}
 }
 
-// key identifies the composed pack of a scope: the directory plus the rules
-// layers, so scopes sharing both share one composed pack.
+// key identifies the composed pack of a scope. Include the named reference:
+// two names can resolve to one directory but carry different digest pins.
 func (s rulePackScope) key() string {
-	if len(s.layers) == 0 {
-		return profileRulePackKey(s.dir)
+	if s.dir == "" && s.ref.Name == "" && len(s.layers) == 0 {
+		return ""
 	}
-	raw, _ := json.Marshal(s.layers)
+	raw, _ := json.Marshal(struct {
+		Dir    string                        `json:"dir"`
+		Ref    string                        `json:"ref"`
+		Layers []config.GuardrailRulesConfig `json:"layers,omitempty"`
+	}{profileRulePackKey(s.dir), s.ref.Key(), s.layers})
 	sum := sha256.Sum256(raw)
-	return profileRulePackKey(s.dir) + "#rules=" + hex.EncodeToString(sum[:8])
+	return "scope:" + hex.EncodeToString(sum[:])
 }
 
 // effectiveRulePackKey is the composed-pack key of connector's scope in cfg.
@@ -107,7 +116,7 @@ func loadConnectorRulePack(cache *guardrail.RulePackCache, cfg *config.Config, c
 }
 
 func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s rulePackScope, scope string) (*guardrail.RulePack, error) {
-	if s.ref.Name != "" && s.dir == "" {
+	if s.ref.Name != "" && s.dir == "" && !cfg.EmbeddedRulePack(s.ref) {
 		if config.IsBuiltinRulePack(s.ref.Name) {
 			return nil, fmt.Errorf("%s rule pack %q: policy_dir is not set", scope, s.ref.Name)
 		}
@@ -115,6 +124,12 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 			scope, s.ref.Name, strings.Join(config.BuiltinRulePacks, ", "))
 	}
 	base, err := loadValidatedRulePack(cache, s.dir, scope)
+	var packErr *guardrail.RulePackError
+	if err != nil && cfg.SecureClientIntegration() &&
+		errors.As(err, &packErr) && packErr.Code == "invalid_manifest" {
+		// Secure Client ignored malformed optional manifests before v9.
+		base, err = guardrail.LoadRulePackForSecureClient(s.dir)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -127,14 +142,27 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 			if cfg.EnterpriseProfile() == "" {
 				// The per-user fix, for any scope that selects the pack
 				// (GAP-0128); a managed admin config is edited by its owner.
-				hint = fmt.Sprintf(" (the pack's files changed after it was pinned; if that was intended, pin the new digest: defenseclaw config set guardrail.custom_packs.%s.digest %s)",
-					s.ref.Name, got)
+				hint = fmt.Sprintf("; on this install: defenseclaw config set guardrail.custom_packs.%s.digest %s", s.ref.Name, got)
 			}
-			return nil, fmt.Errorf("%s rule pack %q: digest %s does not match guardrail.custom_packs.%s.digest%s",
+			return nil, fmt.Errorf("%s rule pack %q: digest %s does not match guardrail.custom_packs.%s.digest; "+
+				"review the pack, then pin the digest above in that key (`defenseclaw-gateway rulepack validate --dir <pack dir>` "+
+				"prints it as files_digest; a pin computed by a release before the digest covered only the pack's own files "+
+				"needs this one-time re-pin)%s",
 				scope, s.ref.Name, got, s.ref.Name, hint)
 		}
 	}
-	rememberPackPosture(s.dir, guardrail.ReadPackPosture(s.dir))
+	// A read-only v8 load pins the original custom pack, then runs the same
+	// rebase as a committed migration in this generation. Keep the disk pin
+	// check above: an edited source pack still refuses the load.
+	if cfg.RuntimeV8RulePackRebase && s.ref.Name != "" {
+		if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; custom {
+			base, err = guardrail.RebaseLoadedRulePack(s.dir, base)
+			if err != nil {
+				return nil, fmt.Errorf("%s rule pack %q: rebase the 0.8.x pack in memory: %w", scope, s.dir, err)
+			}
+		}
+	}
+	notePackPosture(s.dir, guardrail.ReadPackPosture(s.dir))
 	if len(s.layers) == 0 {
 		return base, nil
 	}
@@ -143,6 +171,22 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		return nil, fmt.Errorf("%s rule pack %q: %w", scope, s.dir, err)
 	}
 	return composed, nil
+}
+
+// reportUnrebasedRulePacks raises an alert for each 0.8.x custom pack the
+// upgrade pinned without its 1.0 copy (config.UnrebasedRulePacks): its rules
+// that blocked a tool call with a pattern alone now only record the match
+// (GAP-1358). It repeats at each start until the record is acknowledged.
+func (s *Sidecar) reportUnrebasedRulePacks(ctx context.Context) {
+	cfg := s.currentConfig()
+	if cfg == nil || s.logger == nil || strings.TrimSpace(cfg.DataDir) == "" {
+		return
+	}
+	for _, failure := range config.UnrebasedRulePacks(filepath.Join(cfg.DataDir, config.DefaultConfigName)) {
+		fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+failure)
+		_ = s.logger.LogActionCtxSeverity(ctx, string(audit.ActionUpgrade), "rule-pack",
+			"rule_pack_rebase=failed "+failure, "HIGH")
+	}
 }
 
 func guardrailCustomizations(layers []config.GuardrailRulesConfig) []guardrail.Customization {
@@ -173,6 +217,33 @@ func guardrailCustomizations(layers []config.GuardrailRulesConfig) []guardrail.C
 		out = append(out, c)
 	}
 	return out
+}
+
+// installScanRulePack is the composed pack the install-time scan of a
+// connector's skills applies on top of the skill scanner, the gateway's side
+// of the rule-pack overlay of `defenseclaw skill scan`. It is nil when the
+// connector's scope selects no pack and no guardrail.rules, so a default
+// install scans as before. The pack comes from the live generation, which
+// composed it with every guardrail.rules layer.
+func installScanRulePack(connector string) *guardrail.RulePack {
+	g := currentGeneration()
+	// Secure Client: Cisco AI Defense decides and local regex detection is off.
+	if g == nil || g.Config == nil || ManagedEnterpriseActive() {
+		return nil
+	}
+	selects := func(connector string) bool {
+		ref := g.Config.EffectiveRulePackRefForConnector(connector)
+		return ref.Name != "" || ref.Dir != "" || len(g.Config.EffectiveRulesForConnector(connector)) > 0
+	}
+	if connector = canonicalConnectorRulePackKey(connector); connector != "" && selects(connector) {
+		if pack := g.RulePacks["conn:"+connector]; pack != nil {
+			return pack
+		}
+	}
+	if selects("") {
+		return g.RulePacks["global"]
+	}
+	return nil
 }
 
 // applicationProtectionRulePackScope is the global application_protection

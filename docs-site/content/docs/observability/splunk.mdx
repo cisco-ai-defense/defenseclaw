@@ -156,6 +156,11 @@ defenseclaw setup splunk --enterprise --non-interactive \
   --sourcetype _json
 ```
 
+For a collector on localhost or a private network, use
+`defenseclaw setup observability add splunk-enterprise --endpoint <url> --allow-private-networks`
+with the same token and index options. The dedicated `setup splunk --enterprise`
+alias does not have this opt-in flag.
+
 The token comes from the environment, because a `--hec-token` value on the
 command line is visible to other local users in `ps`.
 
@@ -277,6 +282,12 @@ of the Splunk projection.
   </Accordion>
   <Accordion title="Setup stops: the splunk container keeps restarting">
     The container exits during its own setup, so Splunk never gets ready, and setup shows the container's last log lines. Fix what they name; `docker logs defenseclaw-splunk-local-splunk-1` shows all of them. Setup makes the files it mounts into the container (`~/.defenseclaw/splunk-bridge/splunk/`) readable to the container's own users on every run, whatever your umask; `defenseclaw setup splunk --logs` again repairs a folder an earlier build left private (`Permission denied: '/tmp/defaults/default.yml'` in the log).
+  </Accordion>
+  <Accordion title="HEC rejects an index">
+    Run `defenseclaw observability destination test <name> --write-probe` after
+    setup. A handshake can pass even when HEC rejects events. A code 7 response
+    means the configured index is missing or unavailable to the token; create
+    the index or correct `--index`, then retry the write probe.
   </Accordion>
   <Accordion title="Enterprise HEC returns 403">
     Token is wrong or HEC isn't enabled on that Splunk endpoint. Test with curl: `curl -k $HEC_ENDPOINT -H "Authorization: Splunk $TOKEN" -d '{"event":"test"}'`. The CLI's `--skip-test` skips this same probe.

@@ -147,7 +147,7 @@ class InstallSmokeMatrixTests(unittest.TestCase):
 
             with open(cfg_path) as fh:
                 cfg_doc = yaml.safe_load(fh)
-            self.assertEqual(cfg_doc.get("config_version"), 8)
+            self.assertEqual(cfg_doc.get("config_version"), 9)
             self.assertIsInstance(cfg_doc.get("observability"), dict)
             for removed in ("audit_sinks", "otel", "privacy", "splunk"):
                 self.assertNotIn(removed, cfg_doc)

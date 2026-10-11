@@ -1284,18 +1284,6 @@ func loadAtomicTransformIntentWithStates(path, stateDir string) (atomicTransform
 	return matched, nil
 }
 
-func loadAtomicTransformIntent(path string) (atomicTransformIntent, string, atomicTransformArtifactState, bool, error) {
-	logical, canonicalErr := canonicalAtomicTransformPath(path)
-	if canonicalErr != nil {
-		return atomicTransformIntent{}, "", atomicTransformArtifactState{}, false, canonicalErr
-	}
-	loaded, err := loadAtomicTransformIntentWithStates(
-		path,
-		filepath.Join(filepath.Dir(logical), ".defenseclaw-cas-state"),
-	)
-	return loaded.intent, loaded.path, loaded.preparedState, loaded.exists, err
-}
-
 func inspectAtomicTransformArtifact(path string) (atomicTransformArtifactState, error) {
 	return inspectAtomicTransformArtifactBounded(path, atomicTransformMaxConfigBytes)
 }

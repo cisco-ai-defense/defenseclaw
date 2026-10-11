@@ -38,6 +38,40 @@ from defenseclaw.file_permissions import make_private_directory
 # vendor-managed; a user-created `.system` directory elsewhere is untrusted.
 BUNDLED_SKILL_CONTAINER = ".system"
 
+_EXTENDED_PREFIX = "\\\\?\\"
+
+
+# Windows path normalization drops a final dot or space of a name, in
+# os.path.abspath even on an extended path, so the skill the watcher journaled
+# as \\?\C:\...\skills\tdot. was hashed and restored as ...\skills\tdot, another
+# folder (GAP-1007). An extended path is already absolute: keep it exact.
+def _exact_abspath(path: str) -> str:
+    if os.name == "nt" and path.startswith(_EXTENDED_PREFIX):
+        return path
+    return os.path.abspath(path)
+
+
+# path without the extended-length prefix, for containment checks against the
+# ordinary skill roots only; None for an extended path that a normalization
+# would change (its "." or ".." elements are not resolved on Windows).
+def _containment_path(path: str) -> str | None:
+    if os.name != "nt" or not path.startswith(_EXTENDED_PREFIX):
+        return path
+    rest = path[len(_EXTENDED_PREFIX):]
+    form = "\\\\" + rest[4:] if rest[:4].upper() == "UNC\\" else rest
+    return form if os.path.normpath(form) == form else None
+
+
+
+# The slash-separated path of a path os.walk produced below root, taken
+# lexically like filepath.Rel in internal/enforce: os.path.relpath normalizes
+# root, and on Windows it dropped the final space of an extended root but kept
+# it in the paths below, so the hash of a skill named "tsp " changed (GAP-1007).
+def _walk_relative(path: str, root: str) -> str:
+    if path == root:
+        return "."
+    return path[len(root):].lstrip("\\/").replace(os.sep, "/")
+
 
 class BundledSkillRefusedError(Exception):
     """Raised by SkillEnforcer.quarantine when the target is bundled.
@@ -118,10 +152,28 @@ class SkillEnforcer:
         return safe
 
     @staticmethod
+    def _exact_windows_name(value: str, path: str) -> str | None:
+        # A final space survives only in an extended Windows path (GAP-1007),
+        # like safeQuarantineAssetName in internal/enforce.
+        if (
+            isinstance(value, str)
+            and os.name == "nt"
+            and path.startswith(_EXTENDED_PREFIX)
+            and value.endswith(" ")
+            and value.strip()
+            and not any(char in value for char in ("/", "\\", "\x00"))
+        ):
+            return value
+        return None
+
+    @staticmethod
     def _contained(path: str, root: str, *, allow_equal: bool = False) -> bool:
+        path_form, root_form = _containment_path(path), _containment_path(root)
+        if path_form is None or root_form is None:
+            return False
         try:
-            path_abs = os.path.abspath(path)
-            root_abs = os.path.abspath(root)
+            path_abs = os.path.abspath(path_form)
+            root_abs = os.path.abspath(root_form)
             common = os.path.commonpath((path_abs, root_abs))
         except (OSError, ValueError):
             return False
@@ -131,12 +183,16 @@ class SkillEnforcer:
 
     @classmethod
     def _existing_path_is_safe(cls, path: str, stop_at: str | None = None) -> bool:
-        current = os.path.abspath(path)
+        current = _exact_abspath(path)
         stop = os.path.abspath(stop_at) if stop_at else os.path.splitdrive(current)[0] + os.sep
+        stop_form = _containment_path(stop)
         while True:
             if os.path.lexists(current) and cls._is_link_or_reparse(current):
                 return False
-            if os.path.normcase(current) == os.path.normcase(stop):
+            current_form = _containment_path(current)
+            if current_form is None or stop_form is None:
+                return False
+            if os.path.normcase(current_form) == os.path.normcase(stop_form):
                 return True
             parent = os.path.dirname(current)
             if parent == current:
@@ -180,7 +236,7 @@ class SkillEnforcer:
         """Return a deterministic SHA-256 tree identity for a safe asset."""
         if not cls._validate_tree(path):
             return None
-        root = os.path.abspath(path)
+        root = _exact_abspath(path)
         digest = hashlib.sha256()
         try:
             root_info = os.lstat(root)
@@ -194,7 +250,7 @@ class SkillEnforcer:
             for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
                 dirs.sort()
                 files.sort()
-                rel_dir = os.path.relpath(current, root).replace(os.sep, "/")
+                rel_dir = _walk_relative(current, root)
                 info = os.lstat(current)
                 digest.update(b"D\0")
                 digest.update(rel_dir.encode("utf-8", errors="surrogateescape"))
@@ -203,7 +259,7 @@ class SkillEnforcer:
                 for name in files:
                     candidate = os.path.join(current, name)
                     info = os.lstat(candidate)
-                    rel = os.path.relpath(candidate, root).replace(os.sep, "/")
+                    rel = _walk_relative(candidate, root)
                     digest.update(b"F\0")
                     digest.update(rel.encode("utf-8", errors="surrogateescape"))
                     digest.update(b"\0")
@@ -349,12 +405,12 @@ class SkillEnforcer:
         quarantine_path: str = "",
     ) -> bool:
         """Restore via a verified staging copy while retaining quarantine."""
-        src = os.path.abspath(quarantine_path) if quarantine_path else self._quarantine_path(
+        src = _exact_abspath(quarantine_path) if quarantine_path else self._quarantine_path(
             skill_name, connector,
         )
         if src is None:
             return False
-        safe_name = self._safe_segment(skill_name)
+        safe_name = self._safe_segment(skill_name) or self._exact_windows_name(skill_name, src)
         if (
             safe_name is None
             or os.path.basename(src) != safe_name
@@ -365,7 +421,7 @@ class SkillEnforcer:
         source_hash = self.content_hash(src)
         if source_hash is None or (expected_hash and source_hash != expected_hash):
             return False
-        destination = os.path.abspath(restore_path)
+        destination = _exact_abspath(restore_path)
         real_dest = os.path.realpath(destination)
         if allowed_roots:
             matched_root = next(

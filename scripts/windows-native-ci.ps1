@@ -2202,6 +2202,37 @@ function Get-WatchdogIdentity([string]$DataDir) {
     return Get-ManagedProcessIdentity $DataDir 'watchdog.pid'
 }
 
+function Set-ContentWithSharingRetry {
+    # Every packaged DefenseClaw process opens installer\install-state.json
+    # with FILE_SHARE_READ only while it validates it (nativeinstallstate), and
+    # endpoint scanners briefly open fresh files. The product writers retry
+    # such sharing violations (safefile.ReplaceFile); this in-place harness
+    # edit of the same file must tolerate them too (GAP-1511).
+    param(
+        [Parameter(Mandatory)][string]$LiteralPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value,
+        [ValidateRange(1, 100)][int]$MaxAttempts = 40
+    )
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            Set-Content -LiteralPath $LiteralPath -Value $Value -Encoding UTF8 -ErrorAction Stop
+            return
+        } catch {
+            $exception = $_.Exception
+            while ($null -ne $exception -and $exception -isnot [IO.IOException]) {
+                $exception = $exception.InnerException
+            }
+            # 0x80070020 ERROR_SHARING_VIOLATION, 0x80070021 ERROR_LOCK_VIOLATION
+            $transient = $null -ne $exception -and
+                ($exception.HResult -eq -2147024864 -or $exception.HResult -eq -2147024863)
+            if (-not $transient -or $attempt -ge $MaxAttempts) {
+                throw
+            }
+            Start-Sleep -Milliseconds ([Math]::Min(1000, 50 * $attempt))
+        }
+    }
+}
+
 function Test-GatewayIdentityChanged([object]$Before, [object]$After) {
     return $Before.ProcessId -ne $After.ProcessId -or
         $Before.StartIdentity -ne $After.StartIdentity
@@ -4685,13 +4716,12 @@ function Assert-NoGatewayAutoStart {
 # started with Process.Start, which keeps the handle CreateProcess returned so
 # a launcher that exits at once still returns its status, and with the call
 # operator piped to Out-Host in Constrained Language mode. It returns the
-# launcher, its arguments and the call-operator invocation, or $null when the
-# script is not exactly that bridge with the same launcher and arguments in
-# both branches.
+# launcher and its arguments, or $null when the script is not exactly that
+# bridge with the same launcher and arguments in both branches.
 function Get-AwaitedHookBridge([string]$Script) {
     $pattern = '^\$ErrorActionPreference=''Stop''; \$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
         'if \(\$ExecutionContext\.SessionState\.LanguageMode -ne ''FullLanguage''\) \{ \$ErrorActionPreference=''Continue''; ' +
-        '(?<invocation>& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+)) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
+        '& (?<file>''(?:''''|[^''])+'')(?<quoted>(?: ''[^'' ]+'')+) \| Microsoft\.PowerShell\.Core\\Out-Host; exit \$LASTEXITCODE \}; ' +
         '\$hookStart=\[System\.Diagnostics\.ProcessStartInfo\]::new\(\k<file>,''(?<arguments>[^'' ]+(?: [^'' ]+)*)''\); ' +
         '\$hookStart\.UseShellExecute=\$false; \$hookStart\.RedirectStandardError=\$true; ' +
         '\$hookProcess=\[System\.Diagnostics\.Process\]::Start\(\$hookStart\); ' +
@@ -4707,8 +4737,54 @@ function Get-AwaitedHookBridge([string]$Script) {
     return [pscustomobject]@{
         File = $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
         Arguments = $arguments
-        Invocation = $match.Groups['invocation'].Value
     }
+}
+
+# Per-user Windows Claude Code Setup registers its launcher through the system
+# cmd.exe so a missing launcher blocks with exit 2 instead of failing open
+# (GAP-1091). Keep this argv identical to
+# internal/gateway/connector/claudecode_launcher_guard.go: an exact generated
+# guard reads as the launcher and hook argv it runs; an edited guard or any
+# other cmd.exe handler is returned unchanged.
+function Get-ClaudeCodeLauncherGuardExecView([object]$Handler) {
+    if ($null -eq $Handler) { return $Handler }
+    $commandProperty = $Handler.PSObject.Properties['command']
+    $argsProperty = $Handler.PSObject.Properties['args']
+    if ($null -eq $commandProperty -or $null -eq $argsProperty -or
+        $commandProperty.Value -isnot [string] -or $argsProperty.Value -isnot [array]) {
+        return $Handler
+    }
+    $guardArgs = @($argsProperty.Value)
+    if ($guardArgs.Count -lt 8 -or @($guardArgs | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+        return $Handler
+    }
+    $systemRoot = [string]$env:SystemRoot
+    if ([string]::IsNullOrWhiteSpace($systemRoot) -or -not [IO.Path]::IsPathRooted($systemRoot)) {
+        $systemRoot = 'C:\Windows'
+    }
+    try {
+        $command = [IO.Path]::GetFullPath([string]$commandProperty.Value)
+        $processor = [IO.Path]::GetFullPath([IO.Path]::Combine($systemRoot.Trim(), 'System32', 'cmd.exe'))
+    } catch {
+        return $Handler
+    }
+    if (-not [string]::Equals($command, $processor, [StringComparison]::OrdinalIgnoreCase)) { return $Handler }
+    $end = -1
+    for ($i = 7; $i + 1 -lt $guardArgs.Count; $i++) {
+        if ($guardArgs[$i] -ceq ')' -and $guardArgs[$i + 1] -ceq 'else') { $end = $i; break }
+    }
+    if ($end -lt 0) { return $Handler }
+    $launcher = [string]$guardArgs[4]
+    $hookArgs = @(if ($end -gt 7) { $guardArgs[7..($end - 1)] })
+    $words = @(('DefenseClaw blocked this: its Claude Code hook launcher is missing. ' +
+        'Run the DefenseClaw installer again to repair it.') -split ' ')
+    $expected = @('/d', '/c', 'if', 'exist', $launcher, '(', $launcher) + $hookArgs +
+        @(')', 'else', '(', 'echo') + $words + @('1>&2', '&', 'exit', '/b', '2', ')')
+    if ($expected.Count -ne $guardArgs.Count) { return $Handler }
+    for ($i = 0; $i -lt $expected.Count; $i++) {
+        if ($expected[$i] -cne $guardArgs[$i]) { return $Handler }
+    }
+    return [pscustomobject]@{ command = $launcher; args = $hookArgs }
 }
 
 function Assert-WizardHookRegistration(
@@ -4856,8 +4932,9 @@ function Assert-WizardHookRegistration(
         foreach ($eventProperty in @($settings.hooks.PSObject.Properties)) {
             foreach ($group in @($eventProperty.Value)) {
                 foreach ($handler in @($group.hooks)) {
-                    $hookArgs = @($handler.args | ForEach-Object { [string]$_ })
-                    if ([IO.Path]::GetFileName([string]$handler.command) -ieq 'defenseclaw-hook.exe' -and
+                    $execView = Get-ClaudeCodeLauncherGuardExecView $handler
+                    $hookArgs = @($execView.args | ForEach-Object { [string]$_ })
+                    if ([IO.Path]::GetFileName([string]$execView.command) -ieq 'defenseclaw-hook.exe' -and
                         ($hookArgs -join "`0") -ceq (@('hook', '--connector', 'claudecode') -join "`0")) {
                         $nativeHookFound = $true
                     }
@@ -5117,8 +5194,11 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
         (@($bridge.Arguments)[0..2] -join ' ') -cne 'hook --connector codex') {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }
+    # The form 0.8.x released: one non-waiting call of the launcher with no event.
+    # Setup repair must still replace it and Doctor must still refuse it.
+    $legacyFile = "'" + $bridge.File.Replace("'", "''") + "'"
     $legacyScript = "`$ErrorActionPreference='Stop'; `$env:NoDefaultCurrentDirectoryInExePath='1'; " +
-        $bridge.Invocation + '; exit $LASTEXITCODE'
+        "& $legacyFile hook --connector codex; exit `$LASTEXITCODE"
     if ($legacyScript -ceq $script) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
     }
@@ -5779,7 +5859,7 @@ function Invoke-SetupAcceptance {
         }
         $targetVersion = [string]$installedState.version
         $installedState.version = '99.0.0'
-        $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Set-ContentWithSharingRetry -LiteralPath $statePath -Value ($installedState | ConvertTo-Json -Depth 8)
         Invoke-WindowsSetupStandardUserProcess $setup @('/upgrade', '/quiet', 'INSTALLSCOPE=user') `
             -AllowedExitCodes @(1) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-downgrade-rejected.log') | Out-Null
         # Model the exact native 0.8.0 -> current-candidate observability-v8
@@ -5787,7 +5867,7 @@ function Invoke-SetupAcceptance {
         # preflight this configuration with the staged target runtime before
         # it stops these owned services or publishes either managed tree.
         $installedState.version = '0.8.0'
-        $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
+        Set-ContentWithSharingRetry -LiteralPath $statePath -Value ($installedState | ConvertTo-Json -Depth 8)
         $configPath = Join-Path $dataRoot 'config.yaml'
         $setupGatewayApiPort = Get-PackagedGatewayApiPort $python $dataRoot
         [IO.Directory]::CreateDirectory((Join-Path $dataRoot 'state')) | Out-Null
@@ -5907,7 +5987,7 @@ with open(os.path.join(sys.argv[1], ".migration_state.json"), "w", encoding="utf
 import sys
 import yaml
 document = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
-assert document.get("config_version") == 8
+assert document.get("config_version") == 9
 observability = document.get("observability") or {}
 assert (observability.get("metric_policy") or {}).get("temporality") == "delta"
 otlp = next(
@@ -5926,8 +6006,8 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
 '@
         Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath, $setupOtlpPort) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
-        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*8\s*$') {
-            throw 'seeded setup upgrade did not activate configuration schema v8'
+        if ((Get-Content -LiteralPath $configPath -Raw -Encoding UTF8) -notmatch '(?m)^config_version:\s*9\s*$') {
+            throw 'seeded setup upgrade did not activate configuration schema v9'
         }
         $gatewayAfterSeededUpgrade = Get-GatewayIdentity $dataRoot
         $watchdogAfterSeededUpgrade = Get-WatchdogIdentity $dataRoot

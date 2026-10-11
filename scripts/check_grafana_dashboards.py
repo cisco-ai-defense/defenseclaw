@@ -50,7 +50,7 @@ _GRAFANA_AUTHORIZATION: str | None = None
 # label. Resource labels are shared across all application metrics and remain
 # legal selectors in addition to the instrument-specific labels below.
 COMMON_PROMETHEUS_RESOURCE_LABELS = {
-    "deployment_environment",
+    "deployment_environment_name",
     "host_arch",
     "host_name",
     "job",
@@ -73,7 +73,11 @@ PROMETHEUS_METRIC_LABELS = {
         "severity",
         "would_block",
     },
-    "defenseclaw_inventory_ide_plugins": {"ai", "enabled", "ide"},
+    "defenseclaw_inventory_ide_plugins": {
+        "defenseclaw_ide_plugin_ai",
+        "defenseclaw_ide_plugin_enabled",
+        "defenseclaw_ide_product",
+    },
     "defenseclaw_guardrail_evaluations_total": {
         "guardrail_action_taken",
         "guardrail_connector",
@@ -85,8 +89,10 @@ PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},
 }
 PROMETHEUS_EXACT_LABEL_VALUES = {
-    ("defenseclaw_inventory_ide_plugins", "ai"): {"false", "true"},
-    ("defenseclaw_inventory_ide_plugins", "enabled"): {"client_side_unknown", "disabled", "enabled", "unknown"},
+    ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_ai"): {"false", "true"},
+    ("defenseclaw_inventory_ide_plugins", "defenseclaw_ide_plugin_enabled"): {
+        "client_side_unknown", "disabled", "enabled", "unknown",
+    },
     ("defenseclaw_approval_lifecycle_total", "surface"): {"chat", "exec", "native"},
     ("defenseclaw_approval_lifecycle_total", "result"): {
         "approved",

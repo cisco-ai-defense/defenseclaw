@@ -107,6 +107,29 @@ func TestGatewayV8LoaderStrictParsesBeforeCanonicalActivation(t *testing.T) {
 	}
 }
 
+// A config_version 8 file that still holds a key the migration moves
+// (skill_actions, written by 1.0.x `policy activate`) loads as its in-memory
+// migration instead of failing the strict parse of the raw file.
+func TestGatewayV8LoaderMigratesRetiredKeysInMemory(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yaml")
+	raw := "config_version: 8\ndata_dir: " + directory + "\nobservability: {}\n" +
+		"skill_actions:\n  medium:\n    install: block\n    file: quarantine\n    runtime: disable\n"
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, startup, err := loadGatewayConfigV8(configPath)
+	if err != nil {
+		t.Fatalf("a config_version 8 file with skill_actions was refused: %v", err)
+	}
+	if loaded.ConfigVersion != config.ConfigVersionV9 || startup == nil {
+		t.Fatalf("loaded version %d, startup %v", loaded.ConfigVersion, startup)
+	}
+	if got, _ := os.ReadFile(configPath); string(got) != raw {
+		t.Fatal("the load rewrote config.yaml")
+	}
+}
+
 func TestGatewayV8LoaderRebasesOmittedPathsOnCompilerDefaultDataDir(t *testing.T) {
 	defaultDataDir := filepath.Join(t.TempDir(), "runtime-state")
 	t.Setenv("DEFENSECLAW_HOME", defaultDataDir)
@@ -143,7 +166,7 @@ func TestGatewayV8LoaderRejectsV7AtStrictEntryPoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded, startup, err := loadGatewayConfigV8(configPath)
-	if err == nil || !strings.Contains(err.Error(), "upgrade") {
+	if err == nil || !strings.Contains(err.Error(), "defenseclaw migrate") {
 		t.Fatalf("v7 strict startup error = %v", err)
 	}
 	if loaded != nil || startup != nil {
@@ -182,7 +205,7 @@ func TestBootstrapConfiguredObservabilityRuntimeRejectsV7(t *testing.T) {
 		nil,
 		recorder,
 	)
-	if err == nil || !strings.Contains(err.Error(), "upgrade") {
+	if err == nil || !strings.Contains(err.Error(), "defenseclaw migrate") {
 		t.Fatalf("v7 bootstrap error = %v", err)
 	}
 	if recorder.called {

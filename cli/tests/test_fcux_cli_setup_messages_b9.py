@@ -57,9 +57,11 @@ def test_enable_reports_only_the_connectors_it_set_up(monkeypatch: pytest.Monkey
     cfg.guardrail.enabled = False
     cfg.guardrail.connectors["codex"].enabled = False
     app = _app(cfg)
+    # Windows verifies the Claude Code executable first; the runner has none.
     with (
         patch.object(cmd_guardrail, "_resolve_active_connector", return_value="claudecode"),
         patch.object(cmd_setup, "_restart_services") as restart,
+        patch.object(cmd_setup, "_record_windows_setup_agent_selections", return_value=None),
     ):
         result = CliRunner().invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
     assert result.exit_code == 0, result.output

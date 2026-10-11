@@ -6,6 +6,7 @@ package ideplugins
 import (
 	"bytes"
 	"encoding/xml"
+	"io"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -25,8 +26,25 @@ var visualStudioInstanceDir = regexp.MustCompile(`^(\d+)\.(\d+)_[0-9A-Za-z]+$`)
 // instance (from its privateregistry.bin hive), and false when the hive
 // could not be read (it is locked while Visual Studio runs). Replaced on
 // Windows.
-var visualStudioEnabledLookup = func(instanceDir, instanceName string) (map[string]bool, bool) {
+var visualStudioEnabledLookup = func(_ *scanner, instanceDir, instanceName string) (map[string]bool, bool) {
 	return nil, false
+}
+
+// visualStudioEnabledNames accepts io.EOF from ReadValueNames when fewer
+// than the requested maximum are present.
+func visualStudioEnabledNames(read func(int) ([]string, error)) (map[string]bool, bool) {
+	names, err := read(visualStudioMaxExtensions)
+	if err != nil && err != io.EOF || len(names) > visualStudioMaxExtensions {
+		return nil, false
+	}
+	out := make(map[string]bool, len(names))
+	for _, name := range names {
+		id, _, _ := strings.Cut(name, ",")
+		if id = strings.ToLower(strings.TrimSpace(id)); id != "" {
+			out[id] = true
+		}
+	}
+	return out, true
 }
 
 func (s *scanner) scanVisualStudio() {
@@ -44,12 +62,16 @@ func (s *scanner) scanVisualStudio() {
 		if !s.isDir(extDir) {
 			continue
 		}
-		enabled, known := visualStudioEnabledLookup(instance, name)
+		enabled, known := visualStudioEnabledLookup(s, instance, name)
 		inst := Install{Family: FamilyVisualStudio, Product: "visual-studio", Channel: "stable", Version: m[1] + "." + m[2], Root: extDir}
 		if strings.HasSuffix(name, "Exp") {
 			inst.Channel = "experimental"
 		}
-		for _, p := range s.readVSIXManifests(extDir, ScopeUser, false) {
+		plugins := s.readVSIXManifests(extDir, ScopeUser, false)
+		if len(plugins) >= visualStudioMaxExtensions {
+			inst.Partial = true
+		}
+		for _, p := range plugins {
 			switch {
 			case !known:
 				p.Enabled, p.EnabledSource = EnabledUnknown, SourceUnknown
@@ -83,7 +105,11 @@ func (s *scanner) scanVisualStudioMachine() {
 					continue
 				}
 				inst := Install{Family: FamilyVisualStudio, Product: "visual-studio", Channel: strings.ToLower(clean(edition)), Version: clean(year), Root: extDir}
-				for _, p := range s.readVSIXManifests(extDir, ScopeMachine, true) {
+				plugins := s.readVSIXManifests(extDir, ScopeMachine, true)
+				if len(plugins) >= visualStudioMaxExtensions {
+					inst.Partial = true
+				}
+				for _, p := range plugins {
 					p.Enabled, p.EnabledSource = EnabledUnknown, SourceUnknown
 					inst.Plugins = append(inst.Plugins, p)
 				}

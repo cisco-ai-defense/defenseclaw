@@ -25,10 +25,10 @@ import (
 )
 
 // keepConfigDACL captures the protected DACL Setup put on config.yaml. The
-// writer replaces the file (MoveFileExW), so the replacement and the files
-// written next to it get the directory's inherited ACL; apply puts the
-// captured DACL back on each of them, so the gateway service keeps reading
-// exactly what it could read before.
+// writer replaces the file (MoveFileExW), so the replacement and config
+// metadata written next to it may get the directory's inherited ACL; apply
+// puts the captured DACL back on the caller's config-owned paths. Secret
+// files such as .env retain their own DACL.
 func keepConfigDACL(path string) (apply func(paths ...string) error, err error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {

@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -36,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -50,6 +52,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -68,6 +71,15 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+
+	// projectSkills are the project skill folders the install watcher
+	// watches; nil when no watcher shares them (GAP-1063).
+	projectSkills *projectSkillRoots
+
+	// exemptAuditAt is when each exempt account and connector last got an
+	// enterprise-exempt-user audit row (auditEnterpriseExemptUser).
+	exemptAuditMu sync.Mutex
+	exemptAuditAt map[string]time.Time
 	// foreignHookSessionLocks serializes foreign-hook session exchanges per
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
@@ -78,9 +90,14 @@ type APIServer struct {
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
+	// managedRefusalLimits bounds the managed refusal rows per account.
+	managedRefusalLimits managedRefusalLimiter
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe
+	// hermesTasks gives a Hermes hook that names only its task the session
+	// of that task.
+	hermesTasks hermesTaskSessions
 
 	// shutdownRequester cancels the owning Sidecar run context after an
 	// authenticated, loopback-only management request has proven the expected
@@ -123,6 +140,7 @@ type APIServer struct {
 	acpReadinessCheckedAt time.Time
 	acpReadinessKey       string
 	acpReadinessValue     bool
+	acpReadinessWindow    time.Duration
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
@@ -253,8 +271,6 @@ type APIServer struct {
 	llmPromptBySourceSessionTurnOrder []string
 	hookLLMSpanPrompts                map[string]hookLLMSpanPrompt
 	hookLLMSpanPromptOrder            []string
-	hookLLMSpanCompleted              map[string]struct{}
-	hookLLMSpanCompletedOrder         []string
 	hookLLMSpanUsage                  map[string]hookLLMSpanUsage
 	hookLLMSpanUsageOrder             []string
 	hookLifecycleTransitions          map[string]struct{}
@@ -266,6 +282,10 @@ type APIServer struct {
 	hookSpawnLineageMu                sync.Mutex
 	hookSpawnIntents                  map[string]hookSpawnIntent
 	hookSpawnIntentOrder              []string
+	hookChildThreads                  map[string]hookChildThread
+	hookChildThreadOrder              []string
+	copilotSubagents                  []copilotPendingSubagent
+	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	hookPhaseStates                   map[string]hookPhaseState
@@ -311,13 +331,14 @@ type APIServer struct {
 	// nil unless guardrail.judge.enabled; wired by the sidecar at
 	// boot via SetHookJudge. Per-connector gating happens in
 	// hookJudgeInspect via guardrail.judge.hook_connectors.
-	hookJudge *LLMJudge
+	hookJudge atomic.Pointer[LLMJudge]
 	// hookJudgeSem bounds concurrent hook-lane judge executions,
 	// mirroring EventRouter.judgeSem on the proxy lane. At capacity
 	// the judge is skipped (fail-open to the regex/AID verdict)
 	// rather than queued — a queued hook would stall the agent past
 	// the hook scripts' curl --max-time budget.
-	hookJudgeSem chan struct{}
+	hookJudgeSem     chan struct{}
+	hookJudgeSemOnce sync.Once
 
 	// sandboxIngress is the OpenShell sandbox hook listener configured by
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
@@ -347,16 +368,22 @@ func (a *APIServer) SetCiscoInspector(c Inspector) {
 	a.ciscoInspector = c
 }
 
+// judgeFor is the hook-lane judge of the generation ctx pinned, else the
+// server's own (an API server outside a gateway).
+func (a *APIServer) judgeFor(ctx context.Context) *LLMJudge {
+	if a == nil {
+		return nil
+	}
+	return judgeOf(pinnedGeneration(ctx), a.hookJudge.Load())
+}
+
 // SetHookJudge wires the LLM judge onto the API server so the hook
 // content lane (inspectMessageContent) can adjudicate prompts and
 // tool results for connectors listed in
 // guardrail.judge.hook_connectors. Pass nil to disable (the default
 // when guardrail.judge is off).
 func (a *APIServer) SetHookJudge(j *LLMJudge) {
-	a.hookJudge = j
-	if j != nil && a.hookJudgeSem == nil {
-		a.hookJudgeSem = make(chan struct{}, maxConcurrentHookJudges)
-	}
+	a.hookJudge.Store(j)
 }
 
 // otlpPathTokenEntry holds only the last securely loaded value. Once the
@@ -724,9 +751,10 @@ func (a *APIServer) SetWebhookSource(source func() *WebhookDispatcher) {
 // cooldown filters. The redacted reason alone did not say which rule fired
 // (GAP-1351), so the details also carry rule=<ids> and the generic payload
 // names the rules the way the agent message does ("rule ID: Title", titles
-// only from the compiled-in catalog or a loaded rule pack). A managed
-// deployment keeps the historical payload.
-func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
+// only from the compiled-in catalog or a loaded rule pack). The payload also
+// names the account, agent identity and profile of the request (GAP-0144). A
+// managed deployment keeps the historical payload.
+func (a *APIServer) dispatchHookBlockWebhook(ctx context.Context, connectorName, toolName, hookEvent, severity, reason string, ruleIDs []string) {
 	if a == nil || a.webhookSource == nil {
 		return
 	}
@@ -751,8 +779,9 @@ func (a *APIServer) dispatchHookBlockWebhook(connectorName, toolName, hookEvent,
 		if ids := webhookRuleIDs(ruleIDs); ids != "" {
 			event.Details = fmt.Sprintf("connector=%s event=%s rule=%s reason=%s", connectorName, hookEvent, ids, reason)
 		}
+		event.Structured = map[string]any{webhookAttributionKey: webhookAttributionFor(ctx)}
 		if rules := agentMatchedRules(reason); rules != "" {
-			event.Structured = map[string]any{webhookRuleKey: rules}
+			event.Structured[webhookRuleKey] = rules
 		}
 	}
 	webhooks.Dispatch(event)
@@ -807,11 +836,29 @@ func (a *APIServer) generation() *Generation {
 // generation's, or for an API server without one, queries prepared once
 // from its start-time policy_dir.
 func (a *APIServer) preparedPolicy(ctx context.Context) (*policy.Prepared, error) {
+	return a.preparedPolicyForGeneration(ctx, a.decisionGeneration(ctx))
+}
+
+// pinRequestGeneration pins the API server's published generation on r for
+// a request no profile resolution pinned (GAP-0455).
+func (a *APIServer) pinRequestGeneration(r *http.Request) *http.Request {
+	if g := a.generation(); g.published() {
+		return r.WithContext(withPinnedGeneration(r.Context(), g))
+	}
+	return r
+}
+
+func (a *APIServer) preparedPolicyForGeneration(ctx context.Context, g *Generation) (*policy.Prepared, error) {
 	if a.generationSource != nil {
-		g := a.generation()
-		if g == nil || g.OPA == nil {
-			if g != nil && g.opaError != "" {
+		if g == nil {
+			return nil, errors.New("policy is not loaded")
+		}
+		if g.OPA == nil {
+			if g.opaError != "" {
 				return nil, errors.New(g.opaError)
+			}
+			if a.scannerCfg != nil && !a.scannerCfg.SecureClientIntegration() {
+				return nil, policy.ErrNoModules
 			}
 			return nil, errors.New("policy is not loaded")
 		}
@@ -916,6 +963,17 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 
 // NewAPIServer creates the REST API server bound to the given address.
 func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
+	s := newAPIServer(addr, health, client, store, logger, cfg...)
+	if s.scannerCfg != nil {
+		s.initGuardrailProfiles(s.scannerCfg)
+	}
+	return s
+}
+
+// newAPIServer is NewAPIServer without the guardrail profile set: the sidecar
+// hands the API the set of its current generation instead of deriving every
+// profile a second time (GAP-0276).
+func newAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
 	s := &APIServer{
 		addr:   addr,
 		health: health,
@@ -925,7 +983,6 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	}
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
-		s.initGuardrailProfiles(s.scannerCfg)
 	}
 	return s
 }
@@ -966,8 +1023,8 @@ func (a *APIServer) runtimeConfigSnapshot() *config.Config {
 // the OpenClaw gateway RPCs (/skill/*, /plugin/*, /skills, /mcps,
 // /tools/catalog): only when openclaw is an active connector, and never on a
 // standalone enterprise deployment, which does not run OpenClaw. The Secure
-// Client path keeps its route set unchanged. A connector change restarts the
-// gateway, so the route set is fixed for the process.
+// Client path keeps its route set unchanged. An OpenClaw connector change restarts the
+// API listener so its route set follows the active config.
 func (a *APIServer) servesOpenClawRoutes() bool {
 	cfg := a.runtimeConfigSnapshot()
 	switch {
@@ -1056,6 +1113,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 		mux.HandleFunc("/skill/enable", a.handleSkillEnable)
 		mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
 		mux.HandleFunc("/plugin/enable", a.handlePluginEnable)
+		// Secure Client keeps the config.patch bridge (issue #1092).
+		if a.managedAIDOnly() {
+			mux.HandleFunc("/config/patch", a.handleConfigPatch)
+		}
 		mux.HandleFunc("/skills", a.handleSkills)
 		mux.HandleFunc("/mcps", a.handleMCPs)
 		mux.HandleFunc("/tools/catalog", a.handleToolsCatalog)
@@ -1076,7 +1137,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
-	mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
+	// Secure Client serves none of the identity routes (issue #1092).
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
+	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
 	mux.HandleFunc("/v1/acp/catalog", a.handleACPCatalog)
@@ -1117,12 +1181,16 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
 	mux.HandleFunc("/otlp/", a.handleOTLPPathToken)
 	mux.HandleFunc("/api/v1/agents/discovery", a.handleAgentDiscovery)
-	mux.HandleFunc("/api/v1/agents/identities", a.handleAgentIdentities)
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/agents/identities", a.handleAgentIdentities)
+	}
 	mux.HandleFunc("/api/v1/ai-usage", a.handleAIUsage)
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
-	mux.HandleFunc("/api/v1/ai-usage/ide-plugins", a.handleAIUsageIDEPlugins)
+	if !a.managedAIDOnly() {
+		mux.HandleFunc("/api/v1/ai-usage/ide-plugins", a.handleAIUsageIDEPlugins)
+	}
 	// Runtime planes. Registered under the ai-usage prefix so the whole of AI
 	// discovery -- presence and behaviour -- reads as one surface.
 	mux.HandleFunc("/api/v1/ai-usage/runtime", a.handleAIRuntime)
@@ -1192,6 +1260,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 		BaseContext: func(_ net.Listener) context.Context {
 			return baseCtx
 		},
+		ConnContext: acpPeerConnContext,
 	}
 
 	// Bind with a short retry instead of a bare ListenAndServe. During
@@ -1230,6 +1299,13 @@ func (a *APIServer) Run(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[sidecar-api] standalone hook socket unavailable: %v\n", hookErr)
 		apiDetails["hook_socket_error"] = hookErr.Error()
 	}
+
+	// The Windows standalone hook reports the calls it refuses for an
+	// unenrolled account here (GAP-1242); a no-op on every other profile.
+	// It stops with this run of the API server.
+	refusalCtx, stopRefusals := context.WithCancel(ctx)
+	defer stopRefusals()
+	go a.serveUnenrolledRefusals(refusalCtx)
 
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
@@ -1420,10 +1496,33 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["provenance"] = version.Current()
+	if cfg := a.runtimeConfigSnapshot(); (cfg == nil || !cfg.SecureClientIntegration()) && a.store.DatabaseFileReplaced() {
+		// Present only when it happened, so the usual body is unchanged;
+		// Secure Client keeps its health body (issue #1092).
+		body["audit_store"] = map[string]interface{}{
+			"state":  "replaced",
+			"detail": "audit.db was deleted or replaced after the gateway opened it, so new audit records are lost; restart the gateway: defenseclaw-gateway restart",
+		}
+	}
 	if policy, ok := CurrentPolicyHealth(); ok {
 		body["policy"] = policy
 	}
+	if ledger := agentIdentityLedgerHealth(); ledger != nil {
+		body["agent_identities"] = ledger
+	}
+	// The profile warnings name configured groups and DOMAIN\user selectors,
+	// and /health needs no credential: only root on the hook socket (the
+	// Linux and macOS lifecycle) gets them here. Everyone else gets their
+	// number and reads them from the authenticated /status (GAP-1268).
+	peer, viaHookSocket := managedHookPeerFromContext(r.Context())
+	rootPeer := viaHookSocket && peer.UID == 0
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		if !cfg.SecureClientIntegration() {
+			if set := a.guardrailProfileSet(); set != nil {
+				setHealthProfileWarnings(body, "profile_assignment_warnings", "profile_assignment_warning_count",
+					set.assignmentWarnings(true), rootPeer)
+			}
+		}
 		body["acp"] = map[string]interface{}{
 			"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
 			"schema_version": acp.SchemaVersion, "schema_sha256": acp.SchemaSHA256,
@@ -1432,6 +1531,17 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg.StandaloneEnterprise() {
 			body["inspection"] = standaloneInspectionPosture(cfg, snap.Guardrail)
+			if directory := directoryHealthSummary(directoryCacheHealth(), rootPeer); directory != nil {
+				body["directory"] = directory
+			}
+			// An assignment group the host does not know (renamed, deleted,
+			// or spelled another way after an SSSD naming switch) selects
+			// nobody, and the whole team falls to the default profile:
+			// status and verify report it (GAP-0704). The last check is
+			// served; a stale one is refreshed in the background.
+			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
+				setHealthProfileWarnings(body, "profile_warnings", "profile_warning_count", warnings, rootPeer)
+			}
 			// Non-secret fingerprints of the per-user credential keys that
 			// authenticate right now (a rotation's staged key included).
 			body["user_scoped_credentials"] = map[string]interface{}{
@@ -1440,6 +1550,18 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.writeJSON(w, http.StatusOK, body)
+}
+
+// setHealthProfileWarnings puts warnings in the /health body under key for
+// root on the hook socket, and only their number under countKey for any
+// other caller (GAP-1268).
+func setHealthProfileWarnings(body map[string]interface{}, key, countKey string, warnings []string, rootPeer bool) {
+	switch {
+	case rootPeer:
+		body[key] = warnings
+	case len(warnings) > 0:
+		body[countKey] = len(warnings)
+	}
 }
 
 func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
@@ -1563,6 +1685,19 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// enforcement/observability posture, not just the primary's.
 		"connector_mode":  a.connectorModeSummary(r.Context()),
 		"connector_modes": a.connectorModesSummary(r.Context()),
+	}
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
+		if set := a.guardrailProfileSet(); set != nil {
+			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
+			// What /health lists only to root on the hook socket: Windows
+			// status and verify read it here with the gateway credential
+			// (GAP-1268).
+			if cfg.StandaloneEnterprise() {
+				if warnings := set.healthProfileWarnings(); len(warnings) > 0 {
+					status["profile_warnings"] = warnings
+				}
+			}
+		}
 	}
 
 	if policy, ok := CurrentPolicyHealth(); ok {
@@ -2028,9 +2163,12 @@ type policyEvaluateRequest struct {
 }
 
 type policyEvaluateInput struct {
-	TargetType string                    `json:"target_type"`
-	TargetName string                    `json:"target_name"`
-	Path       string                    `json:"path"`
+	TargetType string `json:"target_type"`
+	TargetName string `json:"target_name"`
+	Path       string `json:"path"`
+	// Connector is the connector asking (the OpenClaw plugin sends
+	// "openclaw"); asset_policy rules scoped to a connector match only it.
+	Connector  string                    `json:"connector,omitempty"`
 	ScanResult *policyEvaluateScanResult `json:"scan_result,omitempty"`
 }
 
@@ -2045,6 +2183,47 @@ type policyEvaluateScanResult struct {
 	// would yield. Mirrors policy.ScanResultInput.
 	ExitCode  int    `json:"exit_code,omitempty"`
 	ScanError string `json:"scan_error,omitempty"`
+}
+
+type configPatchRequest struct {
+	Path  string      `json:"path"`
+	Value interface{} `json:"value"`
+}
+
+// handleConfigPatch is POST /config/patch, served on Secure Client only.
+func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req configPatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Path == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+		return
+	}
+
+	if a.client == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway not connected"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	if err := a.client.PatchConfig(ctx, req.Path, req.Value); err != nil {
+		a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if a.logger != nil {
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIConfigPatch), req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
+	}
+	a.writeJSON(w, http.StatusOK, map[string]string{"status": "patched", "path": req.Path})
 }
 
 func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {
@@ -2116,14 +2295,24 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete && a.store != nil {
-		// The watcher's own install block is journal state; an operator
-		// unblock clears it too, so a restore no longer keeps it (GAP-1971).
-		_ = a.store.ClearActionField(req.TargetType, req.TargetName, "install")
+		// Older watcher blocks and OpenClaw use the global journal row.
+		// Other watchers also use a connector row, which must be cleared
+		// for an unblock to release a restored asset on the next scan.
+		scopes := []string{""}
+		if scope := config.NormalizeConnectorName(req.Connector); scope != "" && scope != "openclaw" {
+			scopes = append(scopes, scope)
+		}
+		for _, scope := range scopes {
+			if err := a.store.ClearActionFieldForConnector(req.TargetType, req.TargetName, scope, "install"); err != nil {
+				a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+		}
 	}
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(action), req.TargetName, details)
 	}
-	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse(status, result.Generation))
+	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse(status, result))
 }
 
 func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
@@ -2144,60 +2333,32 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		reason = "allowed via REST API"
 	}
 
-	pe := enforce.NewPolicyEngine(a.store)
+	legacy := a.legacyEnforcementRows()
+	actionConnector := ""
+	if !legacy {
+		req.Connector = config.NormalizeConnectorName(req.Connector)
+		actionConnector = req.Connector
+	}
 	policyName := req.TargetName
 	runtimeName := req.TargetName
 	if req.TargetType == "plugin" {
 		policyName = normalizePluginPolicyName(req.TargetName)
-		runtimeName = resolvePluginRuntimeActionName(pe, req.TargetName, policyName)
+		runtimeName = resolvePluginRuntimeActionName(a.store, req.TargetName, policyName, actionConnector)
 	}
-
-	if a.store != nil {
-		entry, err := pe.GetAction(req.TargetType, runtimeName)
-		if err != nil {
-			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	var result assetListResult
+	if legacy {
+		// Secure Client keeps its pre-1.0 mutation order and response bytes.
+		if status, err := a.enableAllowedRuntime(r.Context(), req, runtimeName, policyName, ""); err != nil {
+			a.writeJSON(w, status, map[string]string{"error": err.Error()})
 			return
 		}
-		if entry != nil && entry.Actions.Runtime == "disable" {
-			if a.client == nil {
-				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "gateway client not configured"})
-				return
-			}
-			ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
-			defer cancel()
-			switch req.TargetType {
-			case "skill":
-				if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
-					return a.client.EnableSkill(callCtx, req.TargetName)
-				}); err != nil {
-					a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-					return
-				}
-			case "plugin":
-				if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
-					return a.client.EnablePlugin(callCtx, runtimeName)
-				}); err != nil {
-					a.writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
-					return
-				}
-				if runtimeName != policyName {
-					if err := pe.Enable("plugin", runtimeName); err != nil {
-						a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-						return
-					}
-				}
-			}
-		}
-	}
-
-	var generation uint64
-	if a.legacyEnforcementRows() {
 		if err := a.legacyAllow(req.TargetType, policyName, reason); err != nil {
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
 	} else {
-		result, err := a.applyAssetListEdit(r.Context(), assetListEdit{
+		var err error
+		result, err = a.applyAssetListEdit(r.Context(), assetListEdit{
 			Op: assetListOpAllow, TargetType: req.TargetType, Name: policyName,
 			Connector: req.Connector, Reason: reason, SourcePath: req.SourcePath,
 		}, apiConfigActor(r.Context()))
@@ -2205,22 +2366,71 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 			a.writeAssetListError(w, r, audit.ActionAPIEnforceAllow, err)
 			return
 		}
-		generation = result.Generation
-		// An operator allow lifts the automatic quarantine/disable journal
-		// state, as it always did.
-		if a.store != nil {
-			_ = a.store.ClearActionField(req.TargetType, policyName, "file")
-			_ = a.store.ClearActionField(req.TargetType, policyName, "runtime")
+		if result.reloadErr == nil {
+			// Only activate an asset after the allow rule is committed and applied.
+			if status, err := a.enableAllowedRuntime(r.Context(), req, runtimeName, policyName, req.Connector); err != nil {
+				a.writeJSON(w, status, map[string]any{
+					"error": err.Error(), "policy_written": true, "generation": result.Generation,
+				})
+				return
+			}
+			// An operator allow lifts the automatic quarantine/disable journal
+			// state, as it always did.
+			if a.store != nil {
+				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "file")
+				_ = a.store.ClearActionFieldForConnector(req.TargetType, policyName, req.Connector, "runtime")
+			}
 		}
 	}
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceAllow), policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 	}
-	if a.legacyEnforcementRows() {
+	if legacy {
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 		return
 	}
-	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse("allowed", generation))
+	a.writeJSON(w, http.StatusOK, a.enforceWriteResponse("allowed", result))
+}
+
+// enableAllowedRuntime restores a disabled skill or plugin in OpenClaw. The
+// caller chooses the mutation order: Secure Client retains the legacy flow;
+// config-driven policy commits before this is called.
+func (a *APIServer) enableAllowedRuntime(ctx context.Context, req enforcementRequest, runtimeName, policyName, actionConnector string) (int, error) {
+	if a.store == nil {
+		return 0, nil
+	}
+	entry, err := a.store.GetActionForConnector(req.TargetType, runtimeName, actionConnector)
+	if err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if entry == nil || entry.Actions.Runtime != "disable" {
+		return 0, nil
+	}
+	if a.client == nil {
+		return http.StatusServiceUnavailable, fmt.Errorf("gateway client not configured")
+	}
+	callCtx, cancel := context.WithTimeout(ctx, pluginGatewayMutationTimeout)
+	defer cancel()
+	switch req.TargetType {
+	case "skill":
+		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
+			return a.client.EnableSkill(ctx, req.TargetName)
+		}); err != nil {
+			return http.StatusBadGateway, err
+		}
+	case "plugin":
+		if err := a.retryGatewayMutation(callCtx, func(ctx context.Context) error {
+			return a.client.EnablePlugin(ctx, runtimeName)
+		}); err != nil {
+			return http.StatusBadGateway, err
+		}
+		if runtimeName != policyName {
+			if err := a.store.ClearActionFieldForConnector("plugin", runtimeName, actionConnector, "runtime"); err != nil {
+				return http.StatusInternalServerError, err
+			}
+		}
+	}
+	return 0, nil
 }
 
 // decodeEnforcementRequest reads and validates an /enforce/* body.
@@ -2312,7 +2522,10 @@ func normalizePluginPolicyName(name string) string {
 	return base
 }
 
-func resolvePluginRuntimeActionName(pe *enforce.PolicyEngine, rawName, policyName string) string {
+func resolvePluginRuntimeActionName(store *audit.Store, rawName, policyName, actionConnector string) string {
+	if store == nil {
+		return policyName
+	}
 	candidates := []string{policyName}
 	for _, suffix := range []string{"-plugin", "-provider"} {
 		if strings.HasSuffix(policyName, suffix) {
@@ -2326,7 +2539,7 @@ func resolvePluginRuntimeActionName(pe *enforce.PolicyEngine, rawName, policyNam
 		if candidate == "" {
 			continue
 		}
-		entry, err := pe.GetAction("plugin", candidate)
+		entry, err := store.GetActionForConnector("plugin", candidate, actionConnector)
 		if err == nil && entry != nil && entry.Actions.Runtime == "disable" {
 			return candidate
 		}
@@ -2440,6 +2653,7 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r = a.pinRequestGeneration(r)
 
 	var req policyEvaluateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2477,7 +2691,7 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	out, err := a.evaluateAdmissionPolicy(ctx, input)
+	out, err := a.evaluateAdmissionPolicy(ctx, input, config.NormalizeConnectorName(req.Input.Connector))
 	if err != nil {
 		_ = observation.complete("error", "", "", err)
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
@@ -2579,6 +2793,29 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 	}
 }
 
+// withScannerSettings adds the scanner settings a scan ran with (policy,
+// analyzers and judge model, never a key) so `defenseclaw scan skill|mcp`
+// reports them as the per-user `skill scan` does. The Secure Client
+// integration keeps its response unchanged.
+func withScannerSettings(cfg *config.Config, kind string, envelope map[string]interface{}) map[string]interface{} {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return envelope
+	}
+	settings := map[string]interface{}{}
+	switch kind {
+	case "skill":
+		settings["policy"] = cfg.Scanners.SkillScanner.EffectivePolicy()
+		if cfg.Scanners.SkillScanner.UseLLM {
+			settings["judge_model"] = cfg.ResolveLLM("scanners.skill").Model
+		}
+	case "mcp":
+		settings["analyzers"] = cfg.Scanners.MCPScanner.AnalyzersArg()
+		settings["judge_model"] = cfg.ResolveLLM("scanners.mcp").Model
+	}
+	envelope["scanner_settings"] = settings
+	return envelope
+}
+
 // ---------------------------------------------------------------------------
 // POST /v1/skill/scan — run skill scanner on a local path (Option 2: remote scan)
 // ---------------------------------------------------------------------------
@@ -2610,13 +2847,8 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify target exists on this host.
-	// If the path doesn't exist locally, the scanner will fail with a clear
-	// error — we still attempt the scan so that when the sidecar runs on the
-	// same host as OpenClaw (the intended remote deployment), it works.
-	if info, err := os.Stat(req.Target); err != nil || !info.IsDir() {
-		// Log a warning but proceed — the scanner will produce the definitive error.
-		fmt.Fprintf(os.Stderr, "[api] warning: target directory not found locally: %s\n", req.Target)
+	if a.rejectUnreadableScanTarget(w, "target directory", req.Target, "SKILL.md") {
+		return
 	}
 
 	if a.scannerCfg == nil {
@@ -2630,16 +2862,23 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	// only for tests that still pass ``InspectLLMConfig``.
 	// The live config: scanner and llm edits reload hot.
 	cfg := a.liveConfig()
-	ss := scanner.NewSkillScannerFromLLM(
+	// The rule pack an install-time scan applies to a skill (none under the
+	// Secure Client integration), so a scan reports what admission sees.
+	skillScanner := scanner.NewSkillScannerFromLLM(
 		cfg.Scanners.SkillScanner,
 		cfg.ResolveLLM("scanners.skill"),
 		cfg.CiscoAIDefense,
 	)
+	skillScanner.SecureClient = cfg.SecureClientIntegration()
+	ss := guardrail.NewArtifactOverlay(skillScanner, installScanRulePack(""))
 
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), componentScanTimeout(cfg, "skill"))
 	defer cancel()
 
 	result, err := ss.Scan(ctx, req.Target)
+	if err == nil && !cfg.SecureClientIntegration() {
+		err = scanner.JudgeFailure(result)
+	}
 	if err != nil {
 		a.recordAPIScanErrorV8(r.Context(), "skill-scanner", "skill", classifyScanError(err))
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -2651,7 +2890,55 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "skill", scanAPIResponseEnvelope(result)))
+}
+
+// rejectUnreadableScanTarget answers with one plain line when the folder to
+// scan is not there (404) or the account the gateway runs as is not allowed to
+// read it, or a file the scanner must read in it (403): the scanner subprocess
+// would otherwise die on the same error and the caller would get its process
+// name, its exit code or its Python traceback (GAP-0229, GAP-0256). A path that
+// exists but is not a directory is only logged: the scanner reports it.
+func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
+	info, err := os.Stat(target)
+	// Secure Client keeps the scan of main, which the scanner fails on
+	// (issue #1092): nothing below applies to it.
+	if a.managedAIDOnly() {
+		if err != nil || !info.IsDir() {
+			fmt.Fprintf(os.Stderr, "[api] warning: %s not found locally: %s\n", what, target)
+		}
+		return false
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": fmt.Sprintf("the gateway's service account cannot read %s: copy the folder somewhere it can read, or grant that account read access", target),
+		})
+		return true
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		a.writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": fmt.Sprintf("the folder does not exist: %s", target),
+		})
+		return true
+	}
+	if err != nil || !info.IsDir() {
+		fmt.Fprintf(os.Stderr, "[api] warning: %s not found locally: %s\n", what, target)
+		return false
+	}
+	for _, name := range mustRead {
+		file := filepath.Join(target, name)
+		handle, openErr := os.Open(file)
+		if errors.Is(openErr, fs.ErrPermission) {
+			a.writeJSON(w, http.StatusForbidden, map[string]string{
+				"error": fmt.Sprintf("the gateway's service account cannot read %s: grant that account read access to the file", file),
+			})
+			return true
+		}
+		if openErr == nil {
+			_ = handle.Close()
+		}
+	}
+	return false
 }
 
 func (a *APIServer) isBundledMCPScanRequest(req mcpScanRequest) bool {
@@ -2738,16 +3025,18 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if info, err := os.Stat(req.Target); err != nil || !info.IsDir() {
-		fmt.Fprintf(os.Stderr, "[api] warning: plugin target directory not found locally: %s\n", req.Target)
+	if a.rejectUnreadableScanTarget(w, "plugin target directory", req.Target) {
+		return
 	}
 
-	if a.scannerCfg == nil {
+	cfg := a.liveConfig()
+	if cfg == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
 		return
 	}
 
-	ps := scanner.NewPluginScanner(a.scannerCfg.Scanners.PluginScanner)
+	ps := scanner.NewPluginScanner(cfg.Scanners.PluginScanner)
+	ps.LLM = cfg.ResolveLLM("scanners.plugin")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -2810,6 +3099,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		cfg.ResolveLLM("scanners.mcp"),
 		cfg.CiscoAIDefense,
 	)
+	ms.RulePack = scanner.MCPRulePackFor(cfg, "")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
 	defer cancel()
@@ -2826,7 +3116,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	a.writeJSON(w, http.StatusOK, scanAPIResponseEnvelope(result))
+	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
 }
 
 // ---------------------------------------------------------------------------
@@ -3065,6 +3355,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	r = a.pinRequestGeneration(r)
 
 	var req guardrailEvaluateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -3180,6 +3471,11 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	default:
+		if r.Method == http.MethodPatch && a.managedAIDOnly() {
+			// Secure Client keeps the managed refusal of main (issue #1092).
+			a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "managed_enterprise config changes require operating-system administrator privileges; edit the managed config file or use the enterprise guardian"})
+			return
+		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -3196,36 +3492,56 @@ func configFilePathForSnapshot(cfg *config.Config) string {
 	return config.ConfigPath()
 }
 
+// policyConfigSnapshot keeps Secure Client on its start-time policy, while
+// standalone and per-user requests follow the published generation.
+func (a *APIServer) policyConfigSnapshot(g *Generation) *config.Config {
+	if a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration() {
+		return a.scannerCfg
+	}
+	if g != nil && g.Config != nil {
+		return g.Config
+	}
+	return a.runtimeConfigSnapshot()
+}
+
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
+	generation := a.decisionGeneration(ctx)
+	policyCfg := a.policyConfigSnapshot(generation)
 	// Avarice F-3288: when a policy bundle is configured but
 	// either the engine constructor or evaluation fails, the
 	// previous code silently fell back to a built-in
 	// severity-derived decision that allows clean/missing scanner
 	// results and downgrades MEDIUM/HIGH to alert. That converted
 	// every policy outage into a quiet enforcement bypass for
-	// action-mode prompts. We now fail closed: any configured
-	// policy directory whose engine/eval fails returns block in
-	// action mode (and an explicit alert in observe mode for
-	// audit visibility).
-	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
-		prepared, err := a.preparedPolicy(ctx)
-		if err != nil {
+	// action-mode prompts. Load and evaluation failures still
+	// fail closed. An empty Rego directory is config-only mode,
+	// matching generation loading, so it uses the fallback below.
+	if policyCfg != nil && policyCfg.PolicyDir != "" {
+		if policyCfg.SecureClientIntegration() {
+			// Secure Client keeps the engine load error of main (issue #1092).
+			if err := policy.SecureClientPolicyLoadError(policyCfg.PolicyDir); err != nil {
+				return policyOutageVerdict(input,
+					fmt.Sprintf("policy engine load failed: %v", err)), nil
+			}
+		}
+		prepared, err := a.preparedPolicyForGeneration(ctx, generation)
+		if err == nil {
+			out, evalErr := prepared.EvaluateGuardrail(ctx, input)
+			if evalErr != nil {
+				return policyOutageVerdict(input,
+					fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
+			}
+			return out, nil
+		}
+		if policyCfg.SecureClientIntegration() || !errors.Is(err, policy.ErrNoModules) {
 			return policyOutageVerdict(input,
 				fmt.Sprintf("policy engine load failed: %v", err)), nil
 		}
-		out, evalErr := prepared.EvaluateGuardrail(ctx, input)
-		if evalErr != nil {
-			return policyOutageVerdict(input,
-				fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
-		}
-		return out, nil
+		// No Rego is config-only mode, as it is during generation loading.
 	}
 
-	// No policy directory configured at all — keep the legacy
-	// severity-derived fallback. Operators that want strict
-	// fail-closed behavior on missing policy must configure a
-	// PolicyDir; the absence of one is treated as "no policy"
-	// rather than "policy outage".
+	// No Rego modules (or no policy directory): use the config-driven
+	// severity fallback. Other load and evaluation errors fail closed.
 	sev := "NONE"
 	var sources []string
 	for _, res := range []*policy.GuardrailScanResult{input.LocalResult, input.CiscoResult} {
@@ -3242,6 +3558,20 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	}
 
 	action := guardrailFallbackActionForSeverity(sev)
+	if thresholds := input.Thresholds; thresholds != nil && policyCfg != nil && !policyCfg.SecureClientIntegration() {
+		// The request carries the resolved thresholds (config levels, pack
+		// posture, Cisco trust level, HILT): apply them as the inspector
+		// fallback does, so both no-OPA paths decide alike. Secure Client
+		// keeps the default-posture answer of main (issue #1092).
+		var local, cisco *ScanVerdict
+		if input.LocalResult != nil {
+			local = &ScanVerdict{Severity: input.LocalResult.Severity}
+		}
+		if input.CiscoResult != nil {
+			cisco = &ScanVerdict{Severity: input.CiscoResult.Severity}
+		}
+		action = fallbackGuardrailVerdictForThresholds(local, cisco, *thresholds, input.Mode, input.HILT).Action
+	}
 	if input.Mode == "observe" && action == "block" {
 		action = "alert"
 	}
@@ -3369,11 +3699,27 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
-				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				a.emitHTTPAuthFailure(a.withRevokedACPCredential(a.withACPCallerAccount(ctx, r), r), r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}
-			authenticated = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+			if reason := a.acpCallerAccountRefusal(authenticated); reason != "" {
+				a.emitHTTPAuthFailure(a.withACPCallerAccount(ctx, r), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason)
+				if reason == acpCallerAccountMismatchReason {
+					// The caller holds the credential, so the refusal can be
+					// signed and the guard can tell the borrower whose it is
+					// instead of "revoked" (GAP-0690).
+					writeACPSignedOtherAccountRefusal(w, r, token, nonce)
+					return
+				}
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			// The ACP credential that signed the request names who sent it:
+			// the principal it was enrolled for on a managed gateway, the
+			// gateway's own account on a per-user one. Identity headers the
+			// caller sent stay claims.
+			authenticated = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 			serveACPSignedResponse(w, authenticated, next, token, nonce)
 			return
 		}
@@ -3501,7 +3847,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
 			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -3824,6 +4170,18 @@ func (a *APIServer) writeJSON(w http.ResponseWriter, status int, v interface{}) 
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// componentScanTimeout bounds one REST or hook scan of component. A skill
+// scan follows scanners.skill_scanner.timeouts.scan_s, as the install watcher
+// does, so a judge-on scan of a large skill is not cut at two minutes while
+// the watcher waits for it (GAP-0301). Plugin and MCP scans keep two minutes,
+// and so does a Secure Client host, as on main (issue #1092).
+func componentScanTimeout(cfg *config.Config, component string) time.Duration {
+	if component == "skill" && cfg != nil && !cfg.SecureClientIntegration() {
+		return time.Duration(cfg.Scanners.SkillScanner.ScanTimeoutSeconds()) * time.Second
+	}
+	return 120 * time.Second
+}
+
 func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 	out := make([]enforcementEntry, 0, len(entries))
 	for _, entry := range entries {
@@ -3842,14 +4200,23 @@ func toEnforcementEntries(entries []audit.ActionEntry) []enforcementEntry {
 // live config: the compiled admission: and the asset_policy lists. The
 // built-in Go twin runs only when OPA fails. OPA is the live generation's
 // prepared query (prepared once for an API server without a generation).
-func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput) (*policy.AdmissionOutput, error) {
+func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.AdmissionInput, connector string) (*policy.AdmissionOutput, error) {
 	cfg := a.liveConfig()
 	input.BlockList, input.AllowList = policy.AssetPolicyListsFor(cfg, config.AssetPolicyInput{
-		TargetType: input.TargetType, Name: input.TargetName, SourcePath: input.Path,
+		TargetType: input.TargetType, Name: input.TargetName, Connector: connector, SourcePath: input.Path,
 	})
 	input.Admission = policy.AdmissionFor(policy.CompileAdmission(cfg), input.TargetType)
-	if cfg != nil && cfg.SecureClientIntegration() {
+	secureClient := cfg != nil && cfg.SecureClientIntegration()
+	if !secureClient {
+		input.VerifyFirstParty()
+	}
+	if secureClient {
 		input.BlockList, input.AllowList = a.legacyPolicyListEntries(true), a.legacyPolicyListEntries(false)
+		// The engine of main needed data.json: without it, main answered from
+		// its fallback even when policy_dir held Rego modules (issue #1092).
+		if policy.SecureClientPolicyLoadError(a.startPolicyDir()) != nil {
+			return policy.EvaluateSecureClientAdmission(input, a.startPolicyDir()), nil
+		}
 	}
 	if a.generationSource != nil || (a.scannerCfg != nil && a.scannerCfg.PolicyDir != "") {
 		if prepared, err := a.preparedPolicy(ctx); err == nil {
@@ -3858,7 +4225,19 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 			}
 		}
 	}
+	if secureClient {
+		// Secure Client keeps the admission fallback of main (issue #1092).
+		return policy.EvaluateSecureClientAdmission(input, a.startPolicyDir()), nil
+	}
 	return policy.EvaluateAdmissionFallback(input), nil
+}
+
+// startPolicyDir is the policy_dir of the start-time configuration.
+func (a *APIServer) startPolicyDir() string {
+	if a.scannerCfg == nil {
+		return ""
+	}
+	return a.scannerCfg.PolicyDir
 }
 
 // legacyPolicyListEntries is the Secure Client block/allow list read from
@@ -3915,7 +4294,8 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if a.scannerCfg == nil || a.scannerCfg.PolicyDir == "" {
+	policyCfg := a.policyConfigSnapshot(a.generation())
+	if policyCfg == nil || policyCfg.PolicyDir == "" {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy_dir not configured"})
 		return
 	}
@@ -3926,6 +4306,19 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	recordFailure := func(reason string) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
+	}
+
+	// Secure Client keeps the reload check of main (issue #1092): it fails
+	// while the policy directory has no data.json.
+	if policyCfg.SecureClientIntegration() {
+		if err := policy.SecureClientPolicyLoadError(policyCfg.PolicyDir); err != nil {
+			recordFailure(err.Error())
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{
+				"error":  "reload failed: " + err.Error(),
+				"status": "failed",
+			})
+			return
+		}
 	}
 
 	// Rebuild the configuration generation now: Rego modules and rule packs
@@ -3948,7 +4341,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	// the fresh rulepack. Safe no-op when the cache is unset.
 	InvalidateJudgeVerdictCache()
 
-	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), a.scannerCfg.PolicyDir, "OPA policy reloaded via API"); err != nil {
+	if err := a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), policyCfg.PolicyDir, "OPA policy reloaded via API"); err != nil {
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy reloaded but compliance logging failed"})
 		return
 	}
@@ -3957,10 +4350,16 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a.writeJSON(w, http.StatusOK, map[string]string{
+	reloaded := map[string]any{
 		"status":     "reloaded",
-		"policy_dir": a.scannerCfg.PolicyDir,
-	})
+		"policy_dir": policyCfg.PolicyDir,
+	}
+	// The live generation after the rebuild, so a caller can say which policy is enforcing now.
+	if g := livePolicyGeneration(); g != nil {
+		reloaded["generation"] = g.N
+		reloaded["digest"] = g.Digest
+	}
+	a.writeJSON(w, http.StatusOK, reloaded)
 }
 
 // codeScanRequest is the payload for POST /api/v1/scan/code.

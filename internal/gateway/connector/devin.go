@@ -314,13 +314,18 @@ func replaceManagedDevinHooks(raw interface{}, ownedHookScripts []string, entry 
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
 	for _, item := range list {
-		if devinHookGroupReferences(item, ownedHookScripts...) {
+		// A group whose DefenseClaw handler path or script name was edited is
+		// replaced too, not kept next to a second hook set (GAP-0907).
+		if devinHookGroupReferences(item, ownedHookScripts...) || editedDefenseClawHookEntry(item, devinHookScriptName) {
 			continue
 		}
 		out = append(out, item)
 	}
 	return append(out, entry)
 }
+
+// devinHookScriptName is the Devin hook script Setup generates on Unix.
+const devinHookScriptName = "devin-hook.sh"
 
 func devinHookGroupReferences(raw interface{}, hookScripts ...string) bool {
 	group, ok := raw.(map[string]interface{})
@@ -355,7 +360,7 @@ func removeDevinHookReferences(path string, hookScripts ...string) error {
 		list, _ := hooks[event].([]interface{})
 		out := make([]interface{}, 0, len(list))
 		for _, item := range list {
-			if devinHookGroupReferences(item, hookScripts...) {
+			if devinHookGroupReferences(item, hookScripts...) || editedDefenseClawHookEntry(item, devinHookScriptName) {
 				changed = true
 				continue
 			}
@@ -414,9 +419,6 @@ func devinOwnedHookCommandsForOS(goos string, opts SetupOpts, hookScript string)
 	for _, hookBinary := range nativeHookBinaryOwnershipCandidates() {
 		commands = append(commands,
 			windowsDevinBashHookCommand(hookBinary),
-			legacyWindowsDevinEncodedPowerShellHookCommandForBinary(hookBinary),
-			legacyWindowsDevinUnquotedPowerShellHookCommandForBinary(hookBinary),
-			legacyWindowsDevinPowerShellHookCommandForBinary(hookBinary),
 		)
 	}
 	return uniqueNonEmptyStrings(commands)

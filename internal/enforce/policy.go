@@ -87,6 +87,62 @@ func (e *PolicyEngine) IsBlockedForConnector(targetType, name, connector string)
 	return verdict == config.AssetListDeny, nil
 }
 
+// IsMCPBlockedForConnector checks the server name and its configured definition.
+// A CLI block by URL is stored under that URL, while a tool hook supplies the
+// server name. Resolve pinned URL, command, arguments and transport facts first.
+func (e *PolicyEngine) IsMCPBlockedForConnector(server, connector string) (bool, error) {
+	if e.legacyOperatorRows() {
+		return e.IsBlockedForConnector("mcp", server, connector)
+	}
+	cfg := e.config()
+	if cfg == nil {
+		return false, nil
+	}
+	in := config.AssetPolicyInput{TargetType: "mcp", Name: server, Connector: connector}
+	// Most calls have name-only rules. Avoid reading connector registries
+	// unless a rule pins facts from the server definition.
+	needsDefinition := false
+	for _, rules := range [][]config.AssetPolicyRule{cfg.AssetPolicy.MCP.Denied, cfg.AssetPolicy.MCP.Allowed} {
+		for _, rule := range rules {
+			if rule.URL != "" || rule.Command != "" || len(rule.ArgsPrefix) > 0 || rule.Transport != "" ||
+				strings.HasPrefix(rule.Name, "https://") || strings.HasPrefix(rule.Name, "http://") {
+				needsDefinition = true
+				break
+			}
+		}
+	}
+	if !needsDefinition {
+		verdict, _ := cfg.AssetListDecision(in)
+		return verdict == config.AssetListDeny, nil
+	}
+	entry, ok := cfg.LookupMCPServerForConnector(connector, "", server)
+	if ok {
+		in.URL = strings.TrimSpace(entry.URL)
+		in.Command, in.Args, in.Transport = entry.Command, entry.Args, entry.Transport
+	}
+	nameVerdict, nameRule := cfg.AssetListDecision(in)
+	if in.URL == "" {
+		return nameVerdict == config.AssetListDeny, nil
+	}
+	in.Name = in.URL // CLI URL entries from 0.8.x are stored as rule names.
+	urlVerdict, urlRule := cfg.AssetListDecision(in)
+	if urlVerdict == "" {
+		return nameVerdict == config.AssetListDeny, nil
+	}
+	if nameVerdict == "" {
+		return urlVerdict == config.AssetListDeny, nil
+	}
+	nameScoped := strings.TrimSpace(nameRule.Connector) != ""
+	urlScoped := strings.TrimSpace(urlRule.Connector) != ""
+	if nameScoped != urlScoped {
+		if urlScoped {
+			return urlVerdict == config.AssetListDeny, nil
+		}
+		return nameVerdict == config.AssetListDeny, nil
+	}
+	return nameVerdict == config.AssetListDeny || urlVerdict == config.AssetListDeny, nil
+}
+
 // IsAllowedForConnector reports whether asset_policy.<targetType>.allowed
 // allows name for connector. Callers check IsBlockedForConnector first.
 func (e *PolicyEngine) IsAllowedForConnector(targetType, name, connector string) (bool, error) {
@@ -205,6 +261,32 @@ func (e *PolicyEngine) GetAction(targetType, name string) (*audit.ActionEntry, e
 		return nil, nil
 	}
 	return e.store.GetAction(targetType, name)
+}
+
+// SecureClient reports whether the config is a Secure Client integration,
+// whose callers keep the operator rows and messages of main (issue #1092).
+func (e *PolicyEngine) SecureClient() bool { return e.legacyOperatorRows() }
+
+// RuntimeDisableReason is IsDisabledForConnector with the reason the journal
+// entry that decides records.
+func (e *PolicyEngine) RuntimeDisableReason(targetType, name, connector string) (string, bool, error) {
+	if e.store == nil {
+		return "", false, nil
+	}
+	if connector != "" {
+		entry, err := e.store.GetActionForConnector(targetType, name, connector)
+		if err != nil {
+			return "", false, err
+		}
+		if entry != nil && entry.Actions.Runtime != "" {
+			return entry.Reason, entry.Actions.Runtime == "disable", nil
+		}
+	}
+	entry, err := e.store.GetActionForConnector(targetType, name, "")
+	if err != nil || entry == nil || entry.Actions.Runtime != "disable" {
+		return "", false, err
+	}
+	return entry.Reason, true, nil
 }
 
 // IsDisabledForConnector reports whether name is runtime-disabled for

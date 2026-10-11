@@ -2264,7 +2264,13 @@ groups:
   - correlation.guardrail.profile
   - correlation.policy.effective
   - security.guardrail
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.evaluation.id
     requirement_level: required
@@ -2320,7 +2326,9 @@ groups:
   - correlation.guardrail.profile
   - correlation.policy.effective
   - correlation.sandbox
-  attributes: []
+  attributes:
+  - ref: defenseclaw.user.enrollment
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.hook.event
     requirement_level: required
@@ -2367,6 +2375,7 @@ groups:
   - correlation.tool.identity
   - correlation.security
   - security.approval
+  - correlation.policy.effective
   - correlation.sandbox
   attributes:
   - ref: defenseclaw.sandbox.approval.kind
@@ -2389,6 +2398,7 @@ groups:
   - correlation.tool.identity
   - correlation.security
   - security.approval
+  - correlation.policy.effective
   - correlation.sandbox
   attributes:
   - ref: defenseclaw.sandbox.approval.kind
@@ -2479,6 +2489,7 @@ groups:
   - correlation.agent
   - correlation.tool.identity
   - security.network.egress
+  - correlation.policy.effective
   - correlation.sandbox
   attributes: []
   body_fields:

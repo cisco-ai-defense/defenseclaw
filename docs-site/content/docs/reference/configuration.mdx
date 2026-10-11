@@ -25,14 +25,15 @@ model behind this page: what is configuration, what is derived from it, and
 what only records what happened.
 
 The current contract is `config_version: 9`. A version 8 file, which is what
-DefenseClaw 1.0.x writes, still loads: the gateway migrates it in memory.
+DefenseClaw 0.8.5 to 0.8.10 write, still loads: the gateway migrates it in memory.
 `defenseclaw upgrade` or `defenseclaw migrate` rewrites it as version 9 and
 keeps the old file as `config.yaml.v8.bak`. See
 [Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9) for what moved
 and how to check it, and [Upgrade DefenseClaw](/docs/get-started/upgrade) for
-the upgrade and rollback flow. Version 7 files are converted by the 1.0
-upgrade. The gateway never rewrites a legacy file at startup and does not run
-the v7 and v8 observability formats in parallel.
+the upgrade and rollback flow. A file from a released 0.8.x install that is
+older than version 8 is converted once, by `defenseclaw upgrade` or
+`defenseclaw migrate`, with the original kept as a backup; any command that
+meets such a file stops with that instruction instead of reading it.
 
 <Callout title="Native Windows uses the packaged layout">
 The file tree below describes a source or POSIX installation. The native
@@ -101,9 +102,6 @@ before locating or editing Windows state.
       <Folder name="rego">
         <File name="admission.rego" />
         <File name="guardrail.rego" />
-        <File name="firewall.rego" />
-        <File name="audit.rego" />
-        <File name="data-sandbox.json" />
         <File name="data.json.migrated-v9 (after the v9 migration)" />
       </Folder>
     </Folder>
@@ -318,7 +316,7 @@ llm:
   provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
   model: claude-sonnet-4-6
   api_key_env: DEFENSECLAW_LLM_KEY
-  base_url: ""                 # optional override; LiteLLM picks a default per provider
+  base_url: ""                 # optional override; LiteLLM picks a default per provider. For an OpenAI-style provider (openai, openai-compatible, vllm, lm_studio) a bare host such as https://host gets /v1 added, so the judge, doctor and the scanners all call https://host/v1/chat/completions; a URL with a path is used as written
   role: unified                # unified | agent | judge
   instance_name: ""            # binds to an llm_providers.custom entry; required with provider: custom
   region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence
@@ -409,7 +407,7 @@ guardrail:
       digest: sha256:<64 hex digits>
   rules:                       # layered on the selected pack in memory; no files are written
     protections: []            # built-in use-case packs, for example database-destruction-protection
-    enable: []                 # rule IDs, upper case
+    enable: []                 # rule IDs, as the pack spells them (SEC-AWS-KEY, exec.remote_ip_download_execute_same_artifact)
     disable: []
     severity_overrides: {}     # RULE-ID: CRITICAL | HIGH | MEDIUM | LOW | INFO
     suppressions: []           # {id, finding_pattern, entity_pattern, reason}
@@ -420,6 +418,9 @@ guardrail:
   port: 4000                   # guardrail proxy port
   block_message: ""            # custom; empty -> default
   detection_strategy: regex_judge  # default; regex_only | regex_judge | judge_first
+  detection_strategy_prompt: ""      # per-lane override; empty -> detection_strategy
+  detection_strategy_completion: regex_only  # default for tool results and completions; regex_judge also sends them to the judge
+  detection_strategy_tool_call: ""   # per-lane override; empty -> detection_strategy
 
   cisco:
     endpoint: ""
@@ -482,6 +483,7 @@ ai_discovery:
   ide_inventory: all           # all | ai_only | off
   include_user_principal: false
   signature_packs: []          # pack files to load; only listed packs load (see the table below)
+  trusted_ad_child_domains: []   # child AD domains whose users are verified on Linux
 
 # What happens to a skill, MCP server or plugin by scan severity. Unset
 # actions derive from the scanner gate (scanners.skill_scanner.*). See
@@ -539,12 +541,13 @@ The `openshell:` block for the NVIDIA OpenShell sandbox is described in
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `guardrail.profiles.<name>` | none | A named set of guardrail overrides. `<name>` is lower case, at most 64 characters. Allowed keys: `description`, `mode`, `block_at`, `alert_at`, `hilt`, `rule_pack`, `block_message` and `connectors`. Each `connectors.<connector>` entry allows `mode`, `hilt`, `block_message`, `rule_pack`, `block_at` and `alert_at`. `enabled` and `hook_fail_mode` are rejected at both levels. |
-| `guardrail.profile_assignments` | `[]` | Ordered list of `{profile, match}`. `match` takes `groups`, `users`, `connectors` and `agents`; at least one is required. Keys combine with AND, values of one key with OR, and the first matching assignment wins. `agents` entries are `agt-` followed by 16 hex digits. |
+| `guardrail.profile_assignments` | `[]` | Ordered list of `{profile, match}`. `match` takes `groups`, `users`, `connectors` and `agents`; at least one is required. Keys combine with AND, values of one key with OR, and the first matching assignment wins. `agents` entries are `agt-` followed by 16 hex digits. At most 4,096 assignments fit the schema; the whole config also has a 65,536 YAML node limit. |
 | `guardrail.default_profile` | `""` | The profile for subjects no assignment matches. Empty keeps the `guardrail.*` settings. |
 | `ai_discovery.ide_inventory` | `all` | IDE extension and plugin inventory scope: `all`, `ai_only` or `off`. See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). |
 | `ai_discovery.include_user_principal` | `false` | Send the user's directory principal and Kerberos principal on every record that carries identity (hook decisions, tool activity, agent, model and tool spans, `identity.observed`). Off, records keep the domain, directory, assurance, session kind and client address but no principal. |
-| `ai_discovery.signature_packs` | `[]` | Signature pack files to load. Since `config_version: 9` only listed packs load; the migration lists the packs it finds in `<data_dir>/signature-packs/`. |
-| `ai_discovery.signature_pack_digests` | `{}` | The sha256 of each pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load. |
+| `ai_discovery.signature_packs` | `[]` | Signature pack files to load. Since `config_version: 9` only listed packs load; the migration lists and pins the packs it finds in `<data_dir>/signature-packs/`. |
+| `ai_discovery.signature_pack_digests` | `{}` | The sha256 of each pack file, keyed by its path. A pack with a digest loads only when it matches; on a managed standalone device a pack without one does not load, and an apply (`ensure`) refuses a config whose pack file does not match its digest or has none. |
+| `ai_discovery.trusted_ad_child_domains` | `[]` | Child domains of the joined Active Directory realm whose SSSD accounts are verified on Linux (`emea.corp.example.com`). An account of a child domain that is not listed gets no domain, realm, directory or principal, so no `users` assignment matches it. Empty trusts the joined domain only. See [Child domains of the joined realm](/docs/enterprise/identity-sources#child-domains-of-the-joined-realm). |
 
 Within a profile, the precedence for one connector is the profile's
 `connectors.<connector>` entry, then the profile field, then
@@ -573,7 +576,7 @@ concept pages explain how they combine: [Rules](/docs/policies/rules) and
 | `guardrail.rule_pack` | `default` | The rule pack: `default`, `strict`, `permissive`, or a name from `guardrail.custom_packs`. Lower case letters, digits, `_` and `-`, up to 64 characters. `defenseclaw guardrail use-pack NAME` writes it. |
 | `guardrail.custom_packs.<name>` | none | A rule-pack directory pinned by digest: `path` and `digest` (`sha256:` plus 64 hex digits, printed by `defenseclaw guardrail validate-pack`). If the directory no longer hashes to the digest, the change does not build into a generation and the previous policy keeps running. At most 64 packs. |
 | `guardrail.rules.protections` | `[]` | Built-in use-case packs layered on the selected pack, such as `database-destruction-protection`. `defenseclaw guardrail protection list` shows them. |
-| `guardrail.rules.enable`, `guardrail.rules.disable` | `[]` | Rule IDs (upper case) to switch on or off. An unknown ID fails validation. |
+| `guardrail.rules.enable`, `guardrail.rules.disable` | `[]` | Rule IDs to switch on or off, spelled and cased exactly as the pack has them (`SEC-AWS-KEY`, `exec.remote_ip_download_execute_same_artifact`). An unknown ID fails validation. |
 | `guardrail.rules.severity_overrides` | `{}` | Rule ID to `CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `INFO`. |
 | `guardrail.rules.suppressions` | `[]` | `{id, finding_pattern, entity_pattern, reason}` entries appended to the pack's suppressions. IDs are unique across the pack and the config. |
 | `guardrail.rules.sensitive_tools` | `[]` | `{name, result_inspection, judge_result, min_entities_for_alert}` entries merged into the pack's sensitive tools by name. |
@@ -665,19 +668,19 @@ which combination to recommend.
 | `scanners.skill_scanner.use_llm` | `true` | The LLM analyzer. |
 | `scanners.skill_scanner.use_behavioral`, `enable_meta`, `use_trigger` | `false` | The behavioral, meta and trigger analyzers. |
 | `scanners.skill_scanner.lenient` | `true` | Tolerate malformed skills instead of failing them. |
-| `scanners.skill_scanner.llm_consensus_runs` | `0` | Run the LLM analysis this many times and combine the results; `0` turns it off (up to 1000). |
+| `scanners.skill_scanner.llm_consensus_runs` | `0` | Run the LLM analysis this many times and combine the results (up to 1000). `0` leaves the SDK default of one run in place; `use_llm: false` disables LLM analysis. |
 | `scanners.skill_scanner.judge_source` | `inherit` | `inherit` uses the top-level `llm:` block. `override` uses the scanner's own `llm:` block, which then needs `llm.model`. An unset value with a populated `llm:` block counts as `override`. |
 | `scanners.skill_scanner.fail_on_severity` | `HIGH` | The blocking gate DefenseClaw applies to the scanner's findings (`CRITICAL`, `HIGH`, `MEDIUM`, `LOW` or `INFO`). It is never passed to the scanner itself. Skill admission actions derive from it. |
 | `scanners.skill_scanner.review_queue_min` | `MEDIUM` | The review (warn) band starts here. It must not be above `fail_on_severity`. |
 | `scanners.skill_scanner.analyzers.virustotal` | off | `{enabled, api_key_env, upload_files}`. The key is read from the variable `api_key_env` names (`VIRUSTOTAL_API_KEY` when empty), never from `config.yaml`. |
 | `scanners.skill_scanner.analyzers.aidefense.enabled`, `analyzers.osv.enabled` | `false` | Cisco AI Defense and OSV dependency checks. |
-| `scanners.skill_scanner.timeouts.scan_s`, `timeouts.llm_s` | `300`, `60` | Seconds. `0` uses the default. |
+| `scanners.skill_scanner.timeouts.scan_s` | `300` | Seconds one skill scan the gateway starts may run: the install watcher and its rescans, the REST scan endpoint and the scans an agent hook starts. `0` uses the default. `defenseclaw skill scan --remote` uses the gateway REST endpoint and this timeout; `defenseclaw skill scan` without `--remote` has no scan time limit. |
 | `scanners.mcp_scanner.analyzers` | `[]` | A list of `api`, `yara`, `llm`, `behavioral` and `readiness`. `[]` is automatic: YARA, plus the LLM analyzer when its model and key are ready. |
 | `scanners.mcp_scanner.scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan prompts, resources or server instructions. |
 | `scanners.mcp_scanner.judge_source`, `llm` | `inherit` | As for the skill scanner. |
-| `scanners.mcp_scanner.api` | inherits | `{endpoint, api_key_env}`. Empty values inherit `cisco_ai_defense.endpoint` and `api_key_env`. |
-| `scanners.mcp_scanner.yara` | bundled rules | `include_bundled` (default `true`) and `extra_rules`, a list of `{path, digest}` files pinned by digest. |
-| `scanners.mcp_scanner.timeouts.stdio_s`, `remote_s`, `llm_s` | `60`, `120`, `30` | Seconds. `0` uses the default. |
+| `scanners.mcp_scanner.yara` | bundled rules | `include_bundled` (default `true`) and `extra_rules`, a list of `{path, digest}` files pinned by digest. A scan loads a file only when it matches its digest; a config whose pin does not match is refused when it is applied, and the gateway rejects a reload while a file does not match. |
+
+The MCP scanner's `api` and `timeouts` blocks and the skill scanner's `timeouts.llm_s` were removed: no scan read them. The `api` analyzer uses `cisco_ai_defense`. A file that still holds them loads with them ignored, and `config set` refuses them.
 
 `defenseclaw setup skill-scanner` and `defenseclaw setup` write these keys.
 Because a scanner policy file and extra YARA rules are pinned by digest, a
@@ -711,7 +714,7 @@ writes the replacement.
 | `scanners.skill_scanner.virustotal_api_key` (inline), `virustotal_api_key_env` | `scanners.skill_scanner.analyzers.virustotal.api_key_env`, with the key in `.env` |
 | `update_check` | `update.check` |
 | Operator block and allow rows in the `audit.db` `actions` table | `asset_policy` |
-| `custom-providers.json` as an input | `llm_providers.custom` (the file is now derived) |
+| Ordinary `custom-providers.json` provider entries | `llm_providers.custom` after v9 migration; a legacy overlay with `request_overrides` remains a live input |
 | `DEFENSECLAW_JUDGE_TRACE`, `DEFENSECLAW_REPO` as the setting | `guardrail.judge.trace`, `update.source` |
 
 ### OpenClaw fleet link
@@ -822,13 +825,17 @@ change:
 | `hot` | Default. Reload, validate, diff, and reconcile in the running gateway. Simple guardrail settings are hot-applied; affected in-process loops are restarted only when needed. |
 | `restart` | Validate first, then use a fresh gateway process only for edits that cross a restart boundary, such as listener, topology, or storage changes. Fields that are explicitly hot-reloadable—including observability destinations—still reconcile in process so active agent sessions are not interrupted. Built-in daemon mode launches the normal `defenseclaw-gateway restart` path when one is required; service-supervised foreground runs exit cleanly for the supervisor to restart. Changing only this mode arms the behavior and does not immediately restart. |
 
-In `hot` mode, a change to a key that needs a restart (`data_dir`, the audit
-and judge-bodies database paths, the gateway listener and credentials, and the
-rest of the list under [Reload without restart](#reload-without-restart)) is
-not rejected: the gateway keeps that key's running value, logs
+In `hot` mode, a change to a key that needs a restart (the gateway listener
+and credentials, the resource identity, and the rest of the list under
+[Reload without restart](#reload-without-restart)) is not rejected: the gateway
+keeps that key's running value, logs
 `[config] restart the gateway to apply <key>; the rest of the change applies now`,
-and applies everything else. Changing `gateway.config_reload.mode` itself needs
-a restart to take effect.
+and applies everything else. The storage paths (`data_dir`,
+`observability.local.path`, `observability.local.judge_bodies_path`) and
+`deployment_mode` can not be kept that way: the gateway refuses the reload, and
+every later one, until it restarts. `/health` shows `last_reload_error`, and an
+`/enforce` write answers `applied: false` with the error. Changing
+`gateway.config_reload.mode` itself needs a restart to take effect.
 
 The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/guardrail/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
 
@@ -1192,10 +1199,11 @@ and examples, see the [enterprise settings reference](/docs/enterprise/configura
 | `enterprise.profile` | `secure_client` \| `standalone` (Windows and macOS: `secure_client`; Linux: `standalone`) | all | Linux accepts only `standalone` |
 | `enterprise.inspection.ai_defense.enabled` | bool (`false`) | all | Adds Cisco AI Defense to the local engine |
 | `enterprise.inspection.ai_defense.credential` | credential name | all | Lowercase letters, digits, and dashes; must be valid when AI Defense is enabled. Store the value with `enterprise secret set`. An inline `cisco_ai_defense.api_key` is rejected |
+| `enterprise.inspection.llm.credential` | credential name | standalone | Names the stored API key of the `llm:` block for the judge and the scanners. Store the value with `enterprise secret set`; `llm.api_key_env` and `.env` are not read when it is set. Refused under the Secure Client profile |
 | `enterprise.enrollment.mode` | `auto` \| `manifest` (`auto`) | all | With `manifest` you publish `targets.yaml` and the enumerator does nothing. On Windows the first install then needs `--manifest` (Setup: `MANIFEST=`) |
 | `enterprise.enrollment.include_users` | list | all | Linux and macOS: also enrolls these accounts, bypassing the uid range and the login-shell check. Windows: accepted, but every profile is already a candidate, so it changes nothing |
 | `enterprise.enrollment.exclude_users` | list | all | Never enrolled; wins over every include. Linux and macOS also match a numeric uid |
-| `enterprise.enrollment.include_groups`, `exclude_groups` | list | all | Linux and macOS: group names or numeric IDs. Windows: local, Active Directory and Microsoft Entra ID groups by name or SID, decided from session tokens (cached for signed-out users) and the local account database |
+| `enterprise.enrollment.include_groups`, `exclude_groups` | list | all | Linux and macOS: group names or numeric IDs. Windows: local and Active Directory groups by name or SID, and the Microsoft Entra ID groups that a built-in local group lists, by SID ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)); decided from session tokens (cached for signed-out users) and the local account database |
 | `enterprise.enrollment.exempt_users` | list | all | Linux and macOS: inspected but not enrolled. Windows: machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows |
 | `enterprise.enrollment.unenrolled_users` | `inspect` \| `deny` (`inspect`) | Linux, macOS | How machine-policy connectors treat users who are not enrolled. On Windows an unenrolled user always fails closed |
 | `enterprise.enrollment.root` | `inspect` \| `deny` \| `exempt` (`inspect`) | Linux, macOS | root is never enrolled. `deny` refuses root's hook calls. `exempt` currently behaves like `inspect` |
@@ -1263,7 +1271,7 @@ An entry carries only the sub-block (`bedrock`, `vertex` or `azure`) matching it
 
 The `domains` array drives the gateway's URL → instance lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this entry's TLS, `base_url` and sub-block posture. An entry that declares `base_url` should also list the matching host in `domains`.
 
-`~/.defenseclaw/custom-providers.json` is **derived** from this section on every config write, for tools that read the file, and carries a `_derived_from` hash. Do not edit it: a hand edit is never read back, and `defenseclaw doctor` fails the **Custom-provider overlay** row (`was edited by hand; the gateway ignores those edits`). `defenseclaw doctor --fix` rewrites it from `llm_providers`. A hand-written `custom-providers.json` from 1.0.x, which has no `_derived_from` hash, is still merged until the next `setup provider add` or `remove` moves its entries into `llm_providers`. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
+A `custom-providers.json` marked `_derived_from` is rendered from this section on config writes. Do not edit that derived file: the gateway does not read its edits back, `defenseclaw doctor` reports drift in the **Custom-provider overlay** row, and `defenseclaw doctor --fix` regenerates it. During the v9 migration, an ordinary 0.8.x overlay is imported into `llm_providers` and retired. An overlay with `request_overrides` cannot be imported; migration reports it and leaves the unmarked file as a **live input** that the gateway still merges after config changes. Preserve and review it until the overrides are no longer needed. For the walkthrough, see [Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints).
 
 ## Environment variables
 
@@ -1378,9 +1386,9 @@ touches one prints the command, and the gateway keeps that key's running value
 until you restart it:
 
 ```text
-Set guardrail.hook_fail_mode (config generation 5, sha256 b0eecf44591d).
+Set guardrail.hook_self_heal (config generation 5, sha256 b0eecf44591d).
 Effective policy digest: sha256:4254f65d36b3d7af4e4704a12570e2a4a1e0e5a4063a58d27a18953f5376a8f2
-Restart the gateway to apply guardrail.hook_fail_mode: defenseclaw-gateway restart
+Restart the gateway to apply guardrail.hook_self_heal: defenseclaw-gateway restart
 ```
 
 | Restart-required key | Why |
@@ -1388,14 +1396,14 @@ Restart the gateway to apply guardrail.hook_fail_mode: defenseclaw-gateway resta
 | `data_dir`, `observability.local.path`, `observability.local.judge_bodies_path` | Storage identity: the files the process opened at start |
 | `gateway` (the listener, API port and credentials; except `gateway.watcher.*` and the `gateway.config_reload` keys other than `mode`) | The listeners and credentials the process owns |
 | `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` | The guardrail listener, whether it runs, and start-up settings |
-| `guardrail.hook_fail_mode`, `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms`, `guardrail.connectors.<connector>.enabled`, `guardrail.connectors.<connector>.hook_fail_mode` | Hook settings that setup bakes into the installed hooks |
-| `claw`, `agent`, `routing` | Paths, identity and the model router, captured at start |
+| `guardrail.hook_self_heal`, `guardrail.hook_self_heal_debounce_ms` | The hook guard |
+| `claw`, `agent`, `routing`, `plugin_dir` | Paths, identity, the model router and the connector plugins, captured at start |
 | `deployment_mode`, `enterprise.profile`, `enterprise.network` | The deployment boundary |
 | `environment`, `tenant_id`, `workspace_id`, `discovery_source` | Identity stamped on every record from start |
 
-Every other key is hot, including `guardrail.mode`, thresholds, rule packs and
-rules, `admission`, `asset_policy`, `scanners`, `llm_providers`,
-`observability.destinations` and `update`. The effective policy digest, which
+Every other key is hot, including `guardrail.mode`, `guardrail.hook_fail_mode`, thresholds, rule packs and
+rules, `admission`, `asset_policy`, `scanners`, `llm_providers`, `policy_dir`,
+`quarantine_dir`, `observability.destinations` and `update`. The effective policy digest, which
 is the sha256 of the migrated config (secrets dropped) plus the digests of the
 assets it names, is stamped on `/health`, `/status` and every decision event,
 so you can tell which version of the policy decided something:

@@ -33,6 +33,11 @@ Restart=always
 RestartSec=5s
 RuntimeDirectory=defenseclaw-sensor
 RuntimeDirectoryMode=0750
+# Kept across stops: systemd recreates a removed runtime directory as
+# root:root, and until the helper re-owns it to the gateway's group the
+# gateway's dial failed with "permission denied" (GAP-1418). The helper
+# replaces its socket on start; uninstall removes the directory.
+RuntimeDirectoryPreserve=yes
 WorkingDirectory=/
 UMask=0007
 

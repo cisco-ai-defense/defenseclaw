@@ -30,6 +30,12 @@ type sidecarRuntimeEmitter interface {
 	) (pipeline.LocalLogOutcome, error)
 }
 
+// sidecarRuntimeAtomicBatchEmitter persists a group of related records with
+// one commit.
+type sidecarRuntimeAtomicBatchEmitter interface {
+	EmitAtomicBatch(context.Context, []observabilityruntime.LogBatchItem) ([]pipeline.LocalLogOutcome, error)
+}
+
 type sidecarRuntimeLocalOnlyEmitter interface {
 	EmitLocalOnly(
 		context.Context,
@@ -185,15 +191,6 @@ func (a *APIServer) bindTelemetryCanaryRuntime(emitter sidecarRuntimeCanaryEmitt
 	}
 	a.observabilityV8Mu.Lock()
 	a.observabilityV8Canary = emitter
-	a.observabilityV8Mu.Unlock()
-}
-
-func (a *APIServer) bindLocalOnlyObservabilityRuntime(emitter sidecarRuntimeLocalOnlyEmitter) {
-	if a == nil {
-		return
-	}
-	a.observabilityV8Mu.Lock()
-	a.observabilityV8LocalOnly = emitter
 	a.observabilityV8Mu.Unlock()
 }
 

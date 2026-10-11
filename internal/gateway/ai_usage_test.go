@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,7 +29,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -47,6 +50,31 @@ func TestHandleAIUsageDisabled(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"lookup_model_provenance_online":false`) {
 		t.Fatalf("disabled response missing online provenance state: %s", w.Body.String())
+	}
+}
+
+// A standalone managed computer whose config leaves AI discovery off answers
+// the IDE plugin view with the reason and the administrator config key, not
+// the per-user command it does not have; a per-user gateway keeps the command
+// hint (GAP-0611).
+func TestIDEPluginsWithDiscoveryOffSayWhyOnAManagedComputer(t *testing.T) {
+	previous := standaloneEnterpriseActive.Load()
+	t.Cleanup(func() { setStandaloneEnterpriseActive(previous) })
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
+	for _, standalone := range []bool{true, false} {
+		setStandaloneEnterpriseActive(standalone)
+		w := httptest.NewRecorder()
+		api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins", nil))
+		var body struct {
+			Enabled bool   `json:"enabled"`
+			Reason  string `json:"reason"`
+		}
+		err := json.Unmarshal(w.Body.Bytes(), &body)
+		if err != nil || body.Enabled || strings.Contains(body.Reason, "ai_discovery.enabled: true") != standalone ||
+			strings.Contains(body.Reason, "agent discovery enable") == standalone {
+			t.Fatalf("standalone=%t answer = %s (%v), want enabled false with the %s hint", standalone, w.Body.String(), err,
+				map[bool]string{true: "managed config", false: "per-user command"}[standalone])
+		}
 	}
 }
 
@@ -204,6 +232,7 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 		inventory.AIDiscoveryOptions{
 			Enabled:                 true,
 			Mode:                    "enhanced",
+			ProcessInterval:         50 * time.Millisecond,
 			DataDir:                 filepath.Join(tmp, "data"),
 			HomeDir:                 home,
 			ScanRoots:               []string{home},
@@ -234,10 +263,21 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanNow: %v", err)
 	}
+	// The process tick replaces the general snapshot while keeping the
+	// full scan's IDE inventory. The endpoint must name the latter.
+	deadline := time.Now().Add(10 * time.Second)
+	for svc.Snapshot().Summary.ScanID == report.Summary.ScanID && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if svc.Snapshot().Summary.ScanID == report.Summary.ScanID {
+		t.Fatal("process tick did not replace the general snapshot")
+	}
 	cancel()
+	// A hang guard too: Run returns once the in-flight process tick ends,
+	// and on a loaded Windows runner that tick outlasted a 1s budget.
 	select {
 	case <-done:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("discovery service did not stop")
 	}
 	var sawRaw bool
@@ -273,6 +313,7 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	w = httptest.NewRecorder()
 	api.handleAIUsageIDEPlugins(w, httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage/ide-plugins?limit=1", nil))
 	var page struct {
+		ScanID        string                       `json:"scan_id"`
 		Total         int                          `json:"total"`
 		NextCursor    string                       `json:"next_cursor"`
 		Counts        inventory.IDEInventoryCounts `json:"counts"`
@@ -282,7 +323,7 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || w.Code != http.StatusOK {
 		t.Fatalf("ide-plugins = %d %s", w.Code, w.Body.String())
 	}
-	if page.Total != 3 || page.Counts.Total != 3 || page.Counts.Installations != 2 || len(page.Installations) != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
+	if page.ScanID != report.Summary.ScanID || page.Total != 3 || page.Counts.Total != 3 || page.Counts.Installations != 2 || len(page.Installations) != 2 || page.NextCursor != "1" || len(page.Plugins) != 1 || strings.Contains(w.Body.String(), home) {
 		t.Fatalf("ide-plugins page = %s", w.Body.String())
 	}
 	w = httptest.NewRecorder()
@@ -301,14 +342,45 @@ func TestIDEPluginFiltersAndInstallHintKeepWindowsSpelling(t *testing.T) {
 		!ideFilterMatches("jetbrains", "jetbrains", "pycharm") {
 		t.Fatal("ide filter must match products, and families only when the family is not a product")
 	}
-	if !useridentity.AccountFilterMatches("dcad-alice", "S-1-5-21-1", `DCLAB\dcad-alice`) || useridentity.AccountFilterMatches("bob", "S-1-5-21-1", `DCLAB\dcad-alice`) {
+	if !useridentity.NewAccountFilter("dcad-alice").Matches("S-1-5-21-1", `DCLAB\dcad-alice`) || useridentity.NewAccountFilter("bob").Matches("S-1-5-21-1", `DCLAB\dcad-alice`) {
 		t.Fatal("user filter must accept the account name without its domain")
 	}
-	if !useridentity.AccountFilterMatches(`DCLAB\dcad-alice`, "S-1-5-21-1", "dcad-alice") || useridentity.AccountFilterMatches("bob", "S-1-5-21-1", "dcad-alice") {
-		t.Fatal("user filter must accept the account name with its domain")
+	// GAP-1080, GAP-0366: a qualified filter selects the account the OS
+	// resolves it to by its id, so rows that carry the bare name match it and
+	// the twin of the same bare name does not.
+	restore := profileExplainAccount
+	t.Cleanup(func() { profileExplainAccount = restore })
+	profileExplainAccount = func(name string) (string, string, error) {
+		if strings.EqualFold(name, "dcad-o4u1@dclab.test") {
+			return "94403992", "dcad-o4u1@dclab.test", nil
+		}
+		return "", "", errors.New("no such account")
+	}
+	for _, spelling := range []string{"dcad-o4u1@dclab.test", "DCAD-O4U1@DCLAB.TEST"} {
+		filter := useridentity.NewAccountFilter(spelling, adminViewAccountIDs(spelling)...)
+		if !filter.Matches("94403992", "dcad-o4u1") || filter.Matches("1008", "dcad-o4u1") {
+			t.Fatalf("user filter %q must select the account it names by its uid only", spelling)
+		}
 	}
 	hint := claimedInstallHint(map[string]interface{}{"transcript_path": `C:\Users\dcad-alice\altcfg\projects\p\s.jsonl`})
 	if hint != `C:\Users\dcad-alice\altcfg` {
 		t.Fatalf("install hint = %q", hint)
+	}
+}
+
+func TestSecureClientDiscoveryRejectsIDEInventoryMember(t *testing.T) {
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	service := inventory.NewContinuousDiscoveryServiceWithOptions(
+		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir(), SecureClient: true}, nil)
+	t.Cleanup(func() { _, _ = service.CloseIfNeverStarted() })
+	api.SetAIDiscoveryService(service)
+	body := `{"summary":{"scan_id":"scan-1"},"signals":[],"ide_inventory":{"scope":"all","installations":[],"plugins":[]}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/ai-usage/discovery", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	api.handleAIUsageDiscovery(w, req)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid JSON body") {
+		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
 	}
 }

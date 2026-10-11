@@ -1472,5 +1472,40 @@ class TestRegistryEditPromptShortCircuit(RegistryCommandTestBase):
         self.assertEqual(src.url, "https://catalog.example.com/skills.yaml")
 
 
+class TestManagedDeviceRefusal(RegistryCommandTestBase):
+    def test_sync_refuses_before_fetch_or_cache_write(self):
+        with (
+            patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=True),
+            patch("defenseclaw.commands.cmd_registry.sync_all") as fetch,
+        ):
+            result = self.invoke(["sync", "--all", "--no-promote", "--no-scan"])
+        self.assertEqual(result.exit_code, 3, result.output)
+        fetch.assert_not_called()
+
+    def test_every_config_writer_refuses_with_exit_3_before_it_touches_anything(self):
+        # GAP-0052: approve, require and remove answered late, as exit 1 or wrapped in
+        # "previous configuration restored"; a managed device refuses first, with exit 3.
+        self.invoke([
+            "add", "corp-skills", "--kind", "http_yaml", "--content", "skill",
+            "--url", "https://catalog.example.com/skills.yaml", "--non-interactive",
+        ])
+        before = open(self.app.cfg.config_path, "rb").read()
+        with patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=True):
+            for args in (
+                ["approve", "corp-skills", "demo"],
+                ["reject", "corp-skills", "demo"],
+                ["require", "--type", "skill", "--enabled"],
+                ["remove", "corp-skills", "--yes"],
+                ["edit", "corp-skills", "--disabled"],
+                ["add", "other", "--kind", "http_yaml", "--content", "skill",
+                 "--url", "https://catalog.example.com/o.yaml", "--non-interactive"],
+            ):
+                result = self.invoke(args)
+                self.assertEqual(result.exit_code, 3, msg=f"{args}: {result.output}")
+                self.assertIn("This device is managed", result.output)
+                self.assertNotIn("previous configuration restored", result.output)
+        self.assertEqual(open(self.app.cfg.config_path, "rb").read(), before)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -92,6 +92,25 @@ func (r *doctorRun) addCommand() serviceCommand {
 	return serviceCommand{r.CLI, []string{"gateway", "add", endpoint, "--local", "--name", DefaultGatewayName}}
 }
 
+// registerEnv is the environment a registration of the local gateway
+// takes: under a Homebrew of your own the OpenShell CLI finds the
+// gateway's client certificates only where EnvLocalTLSDir says (GAP-0110).
+func (r *doctorRun) registerEnv() []string {
+	if dir := brewTLSDir(r.brewPrefix()); dir != "" {
+		return []string{EnvLocalTLSDir + "=" + dir}
+	}
+	return nil
+}
+
+// addCommandLine is addCommand as a shell line, with registerEnv.
+func (r *doctorRun) addCommandLine() string {
+	line := r.addCommand().String()
+	if dir := brewTLSDir(r.brewPrefix()); dir != "" {
+		line = EnvLocalTLSDir + "=" + shellQuote(dir) + " " + line
+	}
+	return line
+}
+
 // registerLocal registers the package gateway once it has written its
 // client certificates (canRegisterLocal), after its service started.
 func (r *doctorRun) registerLocal(ctx context.Context) error {
@@ -110,7 +129,7 @@ func (r *doctorRun) registerLocal(ctx context.Context) error {
 		}
 	}
 	add := r.addCommand()
-	if out, err := r.Runner.Output(ctx, Command{Name: add.name, Args: add.args, Timeout: time.Minute}); err != nil {
+	if out, err := r.Runner.Output(ctx, Command{Name: add.name, Args: add.args, Env: r.registerEnv(), Timeout: time.Minute}); err != nil {
 		return fmt.Errorf("register the gateway: %s: %v: %s", add, err, strings.TrimSpace(string(out)))
 	}
 	return nil

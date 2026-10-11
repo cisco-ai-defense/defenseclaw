@@ -165,7 +165,10 @@ func TestClaudeCodeAgentToolReplayLabelsSubagentCalls(t *testing.T) {
 	api, path, events := replayClaudeCodeAgentToolFixture(t)
 	rows := readClaudeCodeReplayRows(t, path)
 	sessionID := fmt.Sprint(events[0]["session_id"])
-	mainAgent := stableLLMEventID("agent", "claudecode", sessionID, "root")
+	// The handler derives the agent ids under the agent identity of the
+	// account it runs as (GAP-0232).
+	identity := resolveHookAgentIdentity(t.Context(), agentHookRequest{ConnectorName: "claudecode"}).ID
+	mainAgent := agentNodeID(identity, "claudecode", sessionID, "root")
 
 	decisions := 0
 	decisionAgents := map[string]bool{}

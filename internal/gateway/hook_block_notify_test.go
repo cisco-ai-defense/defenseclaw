@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -52,14 +53,24 @@ func TestHookBlockDispatchesWebhook(t *testing.T) {
 	api.SetWebhookSource(func() *WebhookDispatcher { return d })
 
 	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"}
-	api.dispatchClaudeCodeHookNotification(req, "allow", "block", "CRITICAL", "matched: X", true, hookEvaluationContext{})
-	api.dispatchClaudeCodeHookNotification(req, "block", "block", "CRITICAL", "matched: X", false, hookEvaluationContext{})
+	api.dispatchClaudeCodeHookNotification(context.Background(), req, "allow", "block", "CRITICAL", "matched: X", true, hookEvaluationContext{})
+	// GAP-0144: the alert names the account, the agent identity and the host.
+	identified := ContextWithAgentIdentity(context.Background(), AgentIdentity{
+		UserID: "1001", UserName: "alice", IdentityID: "agt-0123456789abcdef",
+	})
+	api.dispatchClaudeCodeHookNotification(identified, req, "block", "block", "CRITICAL", "matched: X", false, hookEvaluationContext{})
 	d.Close()
 
 	mu.Lock()
 	defer mu.Unlock()
 	if len(payloads) != 1 {
 		t.Fatalf("want 1 webhook delivery for the enforced block, got %d", len(payloads))
+	}
+	event, _ := payloads[0]["event"].(map[string]interface{})
+	for key, want := range map[string]string{"user_id": "1001", "user_name": "alice", "agent_identity_id": "agt-0123456789abcdef", "host": webhookHostname()} {
+		if got, _ := event[key].(string); got != want || want == "" {
+			t.Errorf("webhook event %s = %q, want %q", key, got, want)
+		}
 	}
 	body, _ := json.Marshal(payloads[0])
 	for _, want := range []string{"Bash", "claudecode", "CRITICAL"} {
@@ -89,7 +100,7 @@ func TestHookBlockWebhookNamesRule(t *testing.T) {
 	api := &APIServer{}
 	api.SetWebhookSource(func() *WebhookDispatcher { return d })
 	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"}
-	api.dispatchClaudeCodeHookNotification(req, "block", "block", "CRITICAL",
+	api.dispatchClaudeCodeHookNotification(context.Background(), req, "block", "block", "CRITICAL",
 		"matched: VB2-MARKER-BLOCK:Verify batch 2 marker command (block)", false,
 		hookEvaluationContext{RuleIDs: []string{"VB2-MARKER-BLOCK", "not a rule id"}})
 	d.Close()

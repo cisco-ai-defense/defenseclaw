@@ -15,6 +15,7 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -23,32 +24,33 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
-// On macOS the root enumerator reads the account's Open Directory record,
-// the AD binding and the device Platform SSO configuration
-// (useridentity.ParseMacOSDirectoryFacts). The per-user Platform SSO login
-// UPN is not recorded: it stays claimed until a root-readable source for it
-// is confirmed on a live host.
+// On macOS the root enumerator reads the account's Open Directory record
+// (with the Platform SSO login UPN of AltSecurityIdentities), the AD binding
+// and the device Platform SSO configuration
+// (useridentity.ParseMacOSDirectoryFacts).
 
 const macOSIdentityToolTimeout = 10 * time.Second
 
-func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, _ []RealmEntry, now time.Time) (IdentitySpoolRecord, error) {
+func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
 	name := strings.TrimSpace(account.User)
 	if name == "" || strings.ContainsAny(name, "/\x00\n") || strings.HasPrefix(name, "-") {
 		return IdentitySpoolRecord{}, errors.New("account has no usable name")
 	}
 	in := useridentity.MacOSDirectoryInputs{
-		DSCL:       runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "AuthenticationAuthority", "OriginalNodeName"),
+		DSCL:       runMacOSIdentityTool(ctx, "/usr/bin/dscl", "/Search", "-read", "/Users/"+name, "AuthenticationAuthority", "OriginalNodeName", "AltSecurityIdentities"),
 		DSConfigAD: runMacOSIdentityTool(ctx, "/usr/sbin/dsconfigad", "-show"),
 		AppSSO:     runMacOSIdentityTool(ctx, "/usr/bin/app-sso", "platform", "-s"),
 	}
 	if in.DSCL == "" {
 		return IdentitySpoolRecord{}, errors.New("dscl returned no record")
 	}
+	facts := useridentity.ParseMacOSDirectoryFacts(in, now)
 	return IdentitySpoolRecord{
-		Key:       strconv.Itoa(account.UID),
-		User:      name,
-		UpdatedAt: now,
-		Facts:     useridentity.ParseMacOSDirectoryFacts(in, now),
+		Key:           strconv.Itoa(account.UID),
+		User:          name,
+		UpdatedAt:     now,
+		AccountDomain: facts.AccountDomain,
+		Facts:         facts,
 	}, nil
 }
 
@@ -67,4 +69,23 @@ func runMacOSIdentityTool(ctx context.Context, tool string, args ...string) stri
 	return boundedOutput(out)
 }
 
-func readRealmList(context.Context) []RealmEntry { return nil }
+// trustedIdentityTool returns the first root-owned, non-writable candidate.
+func trustedIdentityTool(candidates ...string) string {
+	for _, candidate := range candidates {
+		info, err := os.Lstat(candidate)
+		if err != nil || !info.Mode().IsRegular() || !rootOwnedChain(candidate) {
+			continue
+		}
+		return candidate
+	}
+	return ""
+}
+
+// boundedOutput trims command output to a sane size.
+func boundedOutput(data []byte) string {
+	const limit = 64 << 10
+	if len(data) > limit {
+		data = data[:limit]
+	}
+	return strings.ToValidUTF8(string(data), "")
+}

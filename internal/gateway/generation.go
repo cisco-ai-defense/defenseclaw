@@ -65,8 +65,28 @@ type Generation struct {
 	// active is the pack the shared scanners and the judge use: the single
 	// enabled connector's, else the global one.
 	active *guardrail.RulePack
+	// The enforcement inputs built with active: its compiled content rules
+	// and local patterns, the compiled rules of each connector the
+	// configuration manages (canonical names; nil at boot, where connector
+	// setup registers them) and the LLM judge with the active pack's
+	// prompts. A request reads them from the generation it pinned, with the
+	// digest its records carry (pinnedGeneration, GAP-0455).
+	activeRules    *compiledRulePackCategories
+	activePatterns *localPatternsActivation
+	connectorRules map[string]*compiledRulePackCategories
+	judge          *LLMJudge
+	// registeredRules are the compiled rules registered for connectors
+	// outside the configuration (connector setup, a sandbox harness) while
+	// g is live: the process-wide set when g was published plus the
+	// registrations made since. A request pinned to g reads them here, not
+	// from the process-wide map the next generation rewrites (GAP-1466).
+	// Guarded by ruleCategoriesMu; nil for a generation never published.
+	registeredRules map[string]*compiledRulePackCategories
 	// opaError is why a non-strict build has no OPA ("" when it has one).
 	opaError string
+	// scannerPinError is why a non-strict build found a pinned scanner file
+	// that does not match its digest ("" when every one matches).
+	scannerPinError string
 	// assetDirs are the directories the config watcher follows for this
 	// generation (rule packs and Rego modules).
 	assetDirs []string
@@ -112,11 +132,19 @@ type generationProviders struct {
 // PolicyHealth is the "policy" object of /health and /status. It is omitted
 // under SecureClientIntegration().
 type PolicyHealth struct {
-	EffectiveDigest          string            `json:"effective_digest"`
-	Generation               uint64            `json:"generation"`
-	ConfigGeneration         uint64            `json:"config_generation"`
-	ConfigGenerationRecorded bool              `json:"config_generation_recorded"`
-	BuiltAt                  string            `json:"built_at"`
-	LastReloadError          string            `json:"last_reload_error,omitempty"`
-	Components               map[string]string `json:"components,omitempty"`
+	EffectiveDigest          string `json:"effective_digest"`
+	Generation               uint64 `json:"generation"`
+	ConfigGeneration         uint64 `json:"config_generation"`
+	ConfigGenerationRecorded bool   `json:"config_generation_recorded"`
+	BuiltAt                  string `json:"built_at"`
+	LastReloadError          string `json:"last_reload_error,omitempty"`
+	// OPAUnavailable says why the live generation runs without Rego, so the
+	// config-driven admission and thresholds apply. The generation was built
+	// and applied: a LastReloadError of "opa: " + OPAUnavailable is this
+	// fallback, not a rejected change (GAP-1033).
+	OPAUnavailable string `json:"opa_unavailable,omitempty"`
+	// PendingRestart lists the changed config keys that apply only after a
+	// gateway restart.
+	PendingRestart []string `json:"pending_restart,omitempty"`
+	ComponentCount int      `json:"component_count"`
 }

@@ -25,3 +25,8 @@ func configureCapturedCommand(_ *exec.Cmd) {}
 func combinedOutputTree(cmd *exec.Cmd, _ bool) ([]byte, error) {
 	return cmd.CombinedOutput()
 }
+
+func runTree(cmd *exec.Cmd, _ bool) error {
+	exitWithParent(cmd)
+	return cmd.Run()
+}

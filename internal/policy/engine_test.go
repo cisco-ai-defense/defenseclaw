@@ -116,6 +116,54 @@ func TestAdmissionRegoAndFallbackAgree(t *testing.T) {
 	}
 }
 
+// TestAdmissionQuarantineOnlyRejects ensures a configured file action reaches
+// the watcher even when install and runtime actions allow the asset.
+func TestAdmissionQuarantineOnlyRejects(t *testing.T) {
+	eng := repoEngine(t)
+	in := AdmissionInput{
+		TargetType: "skill",
+		TargetName: "s",
+		ScanResult: &ScanResultInput{MaxSeverity: "HIGH", TotalFindings: 1, ScannerName: "skill-scanner"},
+		Admission: &CompiledAdmission{
+			Actions: map[string]CompiledAction{
+				"HIGH": {Install: "none", File: "quarantine", Runtime: "allow"},
+			},
+		},
+	}
+	opa, err := eng.Evaluate(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Evaluate: %v", err)
+	}
+	if opa.Verdict != "rejected" || opa.FileAction != "quarantine" || opa.InstallAction != "none" || opa.RuntimeAction != "allow" {
+		t.Fatalf("rego output = %+v, want rejected quarantine with install none and runtime allow", opa)
+	}
+	if fallback := EvaluateAdmissionFallback(in); !reflect.DeepEqual(fallback, opa) {
+		t.Fatalf("fallback = %+v, rego = %+v", fallback, opa)
+	}
+}
+
+// TestFirstPartyConfiguredReason keeps the v9 reason in both admission paths.
+func TestFirstPartyConfiguredReason(t *testing.T) {
+	cfg := &config.Config{Admission: config.AdmissionConfig{
+		Skill: config.AdmissionAssetType{FirstPartyAllowList: []config.AdmissionFirstParty{{
+			Name: "team-skill", SourcePathContains: []string{"team/skills"}, Reason: "approved by security",
+		}}},
+	}}
+	in := AdmissionInput{TargetType: "skill", TargetName: "team-skill", Path: "/opt/team/skills/team-skill"}
+	in.Admission = AdmissionFor(CompileAdmission(cfg), in.TargetType)
+	eng := repoEngine(t)
+	rego, err := eng.Evaluate(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := EvaluateAdmissionFallback(in)
+	for name, out := range map[string]*AdmissionOutput{"rego": rego, "fallback": fallback} {
+		if out.Verdict != "allowed" || out.Reason != "approved by security" {
+			t.Errorf("%s: verdict=%q reason=%q", name, out.Verdict, out.Reason)
+		}
+	}
+}
+
 // TestCompileAdmissionLayers pins the resolution order: the type's own
 // value, then (skill) the scanner gate, then admission.defaults, then the
 // built-in default; and an empty first_party_allow_list clears the list.
@@ -176,29 +224,62 @@ func TestEvaluateGuardrailThresholdsAndHILT(t *testing.T) {
 	}
 }
 
-func TestEvaluateFirewallExact(t *testing.T) {
-	out, err := EvaluateFirewallExact(context.Background(), repoRegoDir(t), FirewallInput{Destination: "169.254.169.254", Port: 80, Protocol: "tcp"})
-	if err != nil {
-		t.Fatalf("EvaluateFirewallExact: %v", err)
-	}
-	if out.Action != "deny" {
-		t.Fatalf("metadata endpoint action = %q, want deny", out.Action)
-	}
-}
-
 func boolPtr(v bool) *bool { return &v }
 
 // TestPrepareRefusesPre9Modules: a 1.0 admission or guardrail module reads
 // data.json documents that no longer exist and would fail open, so the load
 // fails and the gateway uses the config-driven fallback.
 func TestPrepareRefusesPre9Modules(t *testing.T) {
+	for _, read := range []string{"data.guardrail.block_threshold", "data[key].block_threshold"} {
+		dir := t.TempDir()
+		stale := "package defenseclaw.guardrail\n\nimport rego.v1\n\nkey := \"guardrail\"\n\naction := \"block\" if input.severity_rank >= " + read + "\n"
+		if err := os.WriteFile(filepath.Join(dir, "guardrail.rego"), []byte(stale), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Prepare(context.Background(), dir); err == nil {
+			t.Fatalf("Prepare accepted a module that reads %s", read)
+		}
+	}
+}
+
+// A helper can hide a removed data.json read from the admission module. The
+// whole bundle must fail to load so the gateway uses the config-driven fallback.
+func TestPrepareRefusesLegacyDataInAdmissionHelper(t *testing.T) {
 	dir := t.TempDir()
-	stale := "package defenseclaw.guardrail\n\nimport rego.v1\n\naction := \"block\" if input.severity_rank >= data.guardrail.block_threshold\n"
-	if err := os.WriteFile(filepath.Join(dir, "guardrail.rego"), []byte(stale), 0o600); err != nil {
-		t.Fatal(err)
+	modules := map[string]string{
+		"admission.rego": `package defenseclaw.admission
+
+import rego.v1
+
+verdict := "allowed" if {
+	not data.defenseclaw.helper.block_high
+}
+`,
+		"helper.rego": `package defenseclaw.helper
+
+import rego.v1
+
+block_high if {
+	input.scan_result.max_severity == "HIGH"
+	data.actions.HIGH.install == "block"
+}
+`,
+	}
+	for name, source := range modules {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := Prepare(context.Background(), dir); err == nil {
-		t.Fatal("Prepare accepted a module that reads data.guardrail")
+		t.Fatal("Prepare accepted a helper that reads removed data.actions")
+	}
+	in := AdmissionInput{
+		TargetType: "skill", TargetName: "custom",
+		ScanResult: &ScanResultInput{MaxSeverity: "HIGH", TotalFindings: 1, ScannerName: "skill-scanner"},
+		Admission:  AdmissionFor(CompileAdmission(config.DefaultConfig()), "skill"),
+	}
+	if got := EvaluateAdmissionFallback(in).Verdict; got != "rejected" {
+		t.Fatalf("config-driven fallback verdict = %q, want rejected", got)
 	}
 }
 

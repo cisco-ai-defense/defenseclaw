@@ -70,3 +70,15 @@ func TestUnixEligibleAccountsRoundTripAndTrust(t *testing.T) {
 		}
 	}
 }
+
+func TestManifestEnrolledAccountsHomeOnlyTarget(t *testing.T) {
+	accounts := []UnixEligibleAccount{
+		{User: "alice", UID: 1001, Home: "/home/alice"},
+		{User: "bob", UID: 1002, Home: "/home/bob"},
+	}
+	manifest := Manifest{Targets: []ManifestTarget{{UserHome: "/home/alice/.", Connector: "copilot"}}}
+	got := ManifestEnrolledAccounts(accounts, manifest)
+	if len(got) != 1 || got[0].UID != 1001 {
+		t.Fatalf("home-only target enrolled accounts = %+v, want alice", got)
+	}
+}

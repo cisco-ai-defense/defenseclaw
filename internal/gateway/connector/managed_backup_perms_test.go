@@ -11,9 +11,12 @@
 package connector
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -39,6 +42,55 @@ func TestWriteManagedFileBackup_DirIs0o700(t *testing.T) {
 
 	dir := filepath.Join(tmp, "connector_backups", "claudecode")
 	testenv.AssertPrivateDirectory(t, dir)
+}
+
+func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	oldRoot := filepath.Join(home, ".codex")
+	newRoot := filepath.Join(home, "dotfiles", "codex")
+	dataDir := filepath.Join(home, ".defenseclaw")
+	t.Setenv("CODEX_HOME", oldRoot)
+	c := NewCodexConnector()
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", newRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", newRoot)
+	if notes := PinConnectorConfigRootsToSetup(dataDir); len(notes) != 0 {
+		t.Fatalf("explicit setup was pinned to the old root: %q", notes)
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	// Windows registers the native hook launcher through an encoded
+	// PowerShell command instead of hooks/codex-hook.sh.
+	hookMarker := []byte("codex-hook")
+	if runtime.GOOS == "windows" {
+		hookMarker = []byte("-EncodedCommand")
+	}
+	for _, root := range []struct {
+		path     string
+		wantHook bool
+	}{{oldRoot, false}, {newRoot, true}} {
+		raw, err := os.ReadFile(filepath.Join(root.path, "config.toml"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if got := bytes.Contains(raw, hookMarker); got != root.wantHook {
+			t.Fatalf("%s hook presence = %t, want %t", root.path, got, root.wantHook)
+		}
+	}
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", "")
+	t.Setenv("CODEX_HOME", oldRoot)
+	if notes := PinConnectorConfigRootsToSetup(dataDir); len(notes) != 1 || !strings.Contains(notes[0], "To move them") {
+		t.Fatalf("gateway root note = %q", notes)
+	}
+	if got := codexHomeDir(); got != newRoot {
+		t.Fatalf("gateway root = %q, want %q", got, newRoot)
+	}
 }
 
 func TestEnsureManagedBackupDirRestricted_TightensExistingDir(t *testing.T) {
@@ -158,5 +210,94 @@ func TestRestoreFailureNamesTheTargetAndCauseOnce(t *testing.T) {
 	_, err := restoreManagedFileBackupIfUnchanged(dataDir, "openhands", "config", target)
 	if got, want := restoreBackupFailure(err), "could not restore "+target+": permission denied"; got != want {
 		t.Fatalf("restore failure = %q, want %q", got, want)
+	}
+}
+
+// GAP-0543: after the account home moved (usermod -l -d -m), the record names
+// the old home. Setup must rebind it to the same file under the new home
+// instead of stopping at "managed backup target mismatch", and teardown must
+// then restore the file under the new home.
+func TestManagedBackupFollowsAMovedHome(t *testing.T) {
+	root := t.TempDir()
+	oldHome := filepath.Join(root, "old-home")
+	newHome := filepath.Join(root, "new-home")
+	for _, dir := range []string{filepath.Join(oldHome, ".claude"), filepath.Join(oldHome, ".defenseclaw")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", oldHome)
+	t.Setenv("USERPROFILE", oldHome)
+	oldTarget := filepath.Join(oldHome, ".claude", "settings.json")
+	if err := os.WriteFile(oldTarget, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := captureManagedFileBackup(filepath.Join(oldHome, ".defenseclaw"), "claudecode", "settings.json", oldTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(oldHome, newHome); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", newHome)
+	t.Setenv("USERPROFILE", newHome)
+	dataDir := filepath.Join(newHome, ".defenseclaw")
+	newTarget := filepath.Join(newHome, ".claude", "settings.json")
+
+	if err := captureManagedFileBackup(dataDir, "claudecode", "settings.json", newTarget); err != nil {
+		t.Fatalf("setup after a home move: %v", err)
+	}
+	restored, err := restoreManagedFileBackupIfUnchanged(dataDir, "claudecode", "settings.json", newTarget)
+	if err != nil || !restored {
+		t.Fatalf("teardown after a home move: restored=%v err=%v", restored, err)
+	}
+}
+
+// GAP-0433: a gateway started with CLAUDE_CONFIG_DIR pointing elsewhere keeps
+// the config root setup bound, so connector setup does not stop at "managed
+// backup target mismatch".
+func TestPinConnectorConfigRootsToSetup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	target := filepath.Join(home, ".claude", "settings.json")
+	for _, dir := range []string{filepath.Dir(target), dataDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := captureManagedFileBackup(dataDir, "claudecode", "settings.json", target); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "alt"))
+	if notes := PinConnectorConfigRootsToSetup(dataDir); len(notes) != 1 {
+		t.Fatalf("notes = %q, want one", notes)
+	}
+	if got := claudeCodeSettingsPath(); got != target {
+		t.Fatalf("settings path after the pin = %q, want %q", got, target)
+	}
+	if err := captureManagedFileBackup(dataDir, "claudecode", "settings.json", claudeCodeSettingsPath()); err != nil {
+		t.Fatalf("setup after the pin: %v", err)
+	}
+}
+
+func TestPinCodexConfigRootToSetup(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	target := filepath.Join(home, "codex-alt", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := captureManagedFileBackup(dataDir, "codex", "config.toml", target); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if notes := PinConnectorConfigRootsToSetup(dataDir); len(notes) != 1 {
+		t.Fatalf("Codex home pin notes = %q, want one", notes)
+	}
+	if got := codexConfigPath(); got != target {
+		t.Fatalf("Codex config after pin = %q, want %q", got, target)
 	}
 }

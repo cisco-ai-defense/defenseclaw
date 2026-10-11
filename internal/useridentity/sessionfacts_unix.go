@@ -7,13 +7,16 @@ package useridentity
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -25,9 +28,36 @@ const (
 	kcmCallTimeout = 2 * time.Second
 	krb5ConfPath   = "/etc/krb5.conf"
 	maxKrb5Conf    = 256 << 10
+	// macOS's own Heimdal klist reads the API: cache; it answers in about
+	// 15 ms and gets the same bound as a KCM call.
+	macOSKlistPath = "/usr/bin/klist"
+	klistTimeout   = kcmCallTimeout
+	maxKlistOutput = 64 << 10
+	klistWaitDelay = 100 * time.Millisecond
+	// sessionFactsDeadline bounds the whole read; the KCM call and klist
+	// finish well inside it.
+	sessionFactsDeadline = kcmCallTimeout + time.Second
 )
 
+// currentSessionFactsHeader gives up after sessionFactsDeadline and sends the
+// session variables alone. A credential cache, or the home holding the facts
+// cache, on a network or FUSE mount that stopped answering blocks in the
+// kernel, where nothing can interrupt it; that read is left to finish on its
+// own, so the hook still answers inside the agent's deadline.
 func currentSessionFactsHeader(now time.Time) string {
+	done := make(chan string, 1)
+	go func() { done <- readSessionFactsHeader(now) }()
+	timer := time.NewTimer(sessionFactsDeadline)
+	defer timer.Stop()
+	select {
+	case header := <-done:
+		return header
+	case <-timer.C:
+		return EncodeSessionFactsHeader(ClaimedSessionHeader{Session: SessionFromSSHEnv(os.Getenv)})
+	}
+}
+
+func readSessionFactsHeader(now time.Time) string {
 	ccname, platformDefault := ccacheNameFromEnv(os.Getenv)
 	kind, residual := SplitCCacheName(ccname)
 	mtime := ccacheModTime(kind, residual)
@@ -44,7 +74,7 @@ func currentSessionFactsHeader(now time.Time) string {
 	}
 	facts := SessionFromSSHEnv(os.Getenv)
 	principal, ccType, settled := readDefaultPrincipal(kind, residual)
-	if principal == "" && ((ccType != CCacheKeyring && ccType != CCacheAPI) || platformDefault) {
+	if principal == "" && (ccType != CCacheKeyring || platformDefault) {
 		// No readable cache: report no type rather than the default name's.
 		ccType = ""
 	}
@@ -56,8 +86,9 @@ func currentSessionFactsHeader(now time.Time) string {
 	if cachePath != "" {
 		written := now
 		if !settled {
-			// A KCM read that failed in transit is not the session's
-			// answer: it is reused for sessionFactsRetryAfter, not the TTL.
+			// A KCM read that failed in transit, or a klist that timed out,
+			// is not the session's answer: it is reused for
+			// sessionFactsRetryAfter, not the TTL.
 			written = now.Add(sessionFactsRetryAfter - SessionFactsCacheTTL)
 		}
 		_ = writeSessionFactsCache(cachePath, key, envKey, header, written)
@@ -67,9 +98,9 @@ func currentSessionFactsHeader(now time.Time) string {
 
 // ccacheNameFromEnv is KRB5CCNAME, else the krb5.conf default_ccache_name,
 // else the platform default (API: on macOS, FILE:/tmp/krb5cc_<uid>
-// elsewhere); platformDefault reports the last case. KEYRING: and API:
-// caches cannot be read, so their type is reported only when the user or
-// the administrator named them.
+// elsewhere); platformDefault reports the last case. A KEYRING: cache
+// cannot be read, so its type is reported only when the user or the
+// administrator named it.
 func ccacheNameFromEnv(getenv func(string) string) (name string, platformDefault bool) {
 	if name := strings.TrimSpace(getenv("KRB5CCNAME")); name != "" {
 		return name, false
@@ -183,7 +214,8 @@ func ccacheModTime(kind, residual string) string {
 
 // readDefaultPrincipal reads the default principal of the named cache. It
 // returns the cache type even when the principal cannot be read; settled is
-// false when a KCM read failed in transit and may answer on a retry.
+// false when a KCM read failed in transit or klist timed out, and may answer
+// on a retry.
 func readDefaultPrincipal(kind, residual string) (principal, ccType string, settled bool) {
 	switch kind {
 	case CCacheFile:
@@ -196,23 +228,91 @@ func readDefaultPrincipal(kind, residual string) (principal, ccType string, sett
 	case CCacheKeyring:
 		return "", CCacheKeyring, true
 	case CCacheAPI:
-		return "", CCacheAPI, true
+		principal, settled = readAPIPrincipal(residual)
+		return principal, CCacheAPI, settled
 	}
 	return "", "", true
+}
+
+// readAPIPrincipal asks macOS's klist for the default principal of the API:
+// cache, or of the named one. It runs as the hook's user with a bare
+// environment, so it reads only that user's caches; a missing cache, no
+// ticket or an older klist without --json settles on no principal, and only
+// a timeout does not. Other systems have no API: cache.
+func readAPIPrincipal(cacheName string) (principal string, settled bool) {
+	if runtime.GOOS != "darwin" {
+		return "", true
+	}
+	args := []string{"--json"}
+	if cacheName != "" {
+		args = append(args, "--cache="+CCacheAPI+":"+cacheName)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), klistTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, macOSKlistPath, args...)
+	env := []string{"PATH=/usr/bin:/bin", "LC_ALL=C"}
+	if home, err := os.UserHomeDir(); err == nil {
+		env = append(env, "HOME="+home)
+	}
+	cmd.Env = env
+	out := &cappedBuffer{limit: maxKlistOutput}
+	cmd.Stdout = out
+	cmd.WaitDelay = klistWaitDelay
+	err := cmd.Run()
+	if ctx.Err() != nil {
+		return "", false
+	}
+	if err != nil {
+		return "", true
+	}
+	return parseKlistJSONPrincipal(out.data), true
+}
+
+// cappedBuffer keeps the first limit bytes written to it and drops the rest,
+// so a cache with many tickets cannot make the hook buffer without bound.
+// It has no ReadFrom, so io.Copy goes through Write.
+type cappedBuffer struct {
+	data  []byte
+	limit int
+}
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	if room := c.limit - len(c.data); room > 0 {
+		c.data = append(c.data, p[:min(len(p), room)]...)
+	}
+	return len(p), nil
+}
+
+// openRegularFile opens path for reading only if it is a regular file
+// owned by the effective user, or returns nil. The path comes from
+// KRB5CCNAME; opening without blocking avoids waiting on a FIFO. File
+// type and owner are checked on the descriptor after opening.
+func openRegularFile(path string) *os.File {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil
+	}
+	if info, err := file.Stat(); err != nil || !regularFileOwnedByUID(info, os.Geteuid()) {
+		_ = file.Close()
+		return nil
+	}
+	return file
+}
+
+func regularFileOwnedByUID(info os.FileInfo, uid int) bool {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return info.Mode().IsRegular() && ok && stat.Uid == uint32(uid)
 }
 
 func readFileCCachePrincipal(path string) string {
 	if path == "" || !filepath.IsAbs(path) {
 		return ""
 	}
-	file, err := os.Open(path)
-	if err != nil {
+	file := openRegularFile(path)
+	if file == nil {
 		return ""
 	}
 	defer file.Close()
-	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() {
-		return ""
-	}
 	principal, err := ParseFileCCachePrincipal(file)
 	if err != nil {
 		return ""
@@ -226,7 +326,12 @@ func readDirCCachePrincipal(residual string) string {
 	if strings.HasPrefix(residual, ":") {
 		return readFileCCachePrincipal(strings.TrimPrefix(residual, ":"))
 	}
-	data, err := os.ReadFile(filepath.Join(residual, "primary"))
+	file := openRegularFile(filepath.Join(residual, "primary"))
+	if file == nil {
+		return ""
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 257))
+	_ = file.Close()
 	if err != nil || len(data) > 256 {
 		return ""
 	}

@@ -27,11 +27,11 @@
 #      and the config and the deployment record stay the previous release's
 #   b. ensure --from-package upgrades to this package: verify passes, the
 #      result reports the applied policy from a newer config generation,
-#      migration-v9.json and config.yaml.v8.bak are written, and the secrets
-#      and the guardian ledger are unchanged
+#      migration-v9.json and config.yaml.v8.bak are written for v8 sources,
+#      and the secrets and guardian ledger are unchanged
 #
-# and then runs steps 3-6 on the upgraded deployment. It keeps the v8 config,
-# the upgraded config and the migration record in --results for
+# and then runs steps 3-6 on the upgraded deployment. It keeps the source
+# config, upgraded config and (for v8 sources) migration record in --results for
 # scripts/check_enterprise_upgrade_config.py.
 #
 # Every lifecycle result is saved under --results and checked with
@@ -132,7 +132,7 @@ if [ "$platform" = linux ]; then
     config_dir=/etc/defenseclaw
     data_dir=/var/lib/defenseclaw
     lifecycle_dir=/var/lib/defenseclaw-enterprise
-    purged_dirs=(/etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian /var/lib/defenseclaw-enterprise /var/log/defenseclaw /opt/defenseclaw)
+    purged_dirs=(/etc/defenseclaw /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian /var/log/defenseclaw /opt/defenseclaw /usr/share/doc/defenseclaw-enterprise)
     policy_dirs=(/etc/claude-code /etc/codex)
     services=(defenseclaw-gateway-api.socket defenseclaw-gateway-hook.socket defenseclaw-gateway.service
         defenseclaw-hook-guardian.service defenseclaw-hook-enumerator.service defenseclaw-sensor-helper.service)
@@ -143,7 +143,7 @@ else
     config_dir=$install_root/etc
     data_dir=$install_root/runtime
     lifecycle_dir=$install_root/lifecycle
-    purged_dirs=("$install_root" /Library/Logs/Cisco/DefenseClaw)
+    purged_dirs=("$install_root/bin" "$install_root/etc" "$install_root/runtime" "$install_root/share" /Library/Logs/Cisco/DefenseClaw)
     policy_dirs=("/Library/Application Support/ClaudeCode" /private/etc/codex)
     services=(com.cisco.defenseclaw.gateway com.cisco.defenseclaw.hook-guardian
         com.cisco.defenseclaw.hook-enumerator com.cisco.defenseclaw.sensor-helper)
@@ -378,9 +378,28 @@ print("" if node is None else node)
 PY
 }
 
+# ledger_targets: the guardian ledger without its updated_at, which the
+# guardian rewrites on every reconcile and at each start ("absent" when there
+# is no ledger).
+ledger_targets() {
+    [ -f "$guardian_ledger" ] || { echo absent; return; }
+    "$python" - "$guardian_ledger" <<PY
+import json, sys
+ledger = json.load(open(sys.argv[1], encoding="utf-8-sig"))
+if isinstance(ledger, dict):
+    ledger.pop("updated_at", None)
+print(json.dumps(ledger, sort_keys=True))
+PY
+}
+
 write_admin_config() {
+    local config_version=9 rule_pack='  rule_pack: default'
+    if [ -n "$upgrade_from" ] && [[ "$previous_version" =~ ^v?0[.] ]]; then
+        config_version=8
+        rule_pack='  rule_pack_dir: ""'
+    fi
     cat >"$stage/config.yaml" <<EOF
-config_version: 9
+config_version: $config_version
 deployment_mode: managed_enterprise
 data_dir: $data_dir
 policy_dir: $vendor_policy_dir
@@ -392,7 +411,7 @@ gateway:
 guardrail:
   enabled: true
   mode: observe
-  rule_pack: default
+$rule_pack
   connectors:
     claudecode: {enabled: true}
     codex: {enabled: true}
@@ -415,29 +434,32 @@ echo "version: $version"
 
 # ---- upgrade lane: previous release ------------------------------------------
 upgrade_lane() {
-    local previous_config_sha previous_secrets_sha previous_ledger_sha previous_generation recorded
+    local previous_config_sha previous_secrets_sha previous_ledger previous_generation generation_floor recorded
     step "install the previous release's $kind ($previous_version)"
     install_rc=0
     install_package "$upgrade_from" || install_rc=$?
     [ -f "$lifecycle_dir/last-package-result.json" ] || die "the previous postinstall left no lifecycle result (package manager exited $install_rc)"
     cp "$lifecycle_dir/last-package-result.json" "$results/01-previous-install.json"
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc installing $previous_version"
+    # A bare install of a 1.x package enables no connector, like the fresh
+    # install below; the next step applies the administrator config.
     "$python" "$checker" "$results/01-previous-install.json" --label previous-install --platform "$platform" \
-        --action ensure --installed --version "$previous_version"
+        --action ensure --installed --version "$previous_version" --allow-warning no_connectors_enabled
 
-    step "apply the v8 administrator config on the previous release"
+    step "apply the administrator config on the previous release"
     write_admin_config
+    config_version=$(sed -n 's/^config_version: //p' "$stage/config.yaml")
     lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
-    cp "$stage/config.yaml" "$results/config-v8.yaml"
+    cp "$stage/config.yaml" "$results/config-before.yaml"
     lifecycle 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces
     lifecycle 04-previous-status status
     previous_config_sha=$(sha256_of "$config")
     previous_secrets_sha=$(tree_sha "$secrets_dir")
-    previous_ledger_sha=$([ -f "$guardian_ledger" ] && sha256_of "$guardian_ledger" || echo absent)
+    previous_ledger=$(ledger_targets)
     previous_generation=$(json_field "$results/04-previous-status.json" policy config_generation)
     previous_generation=${previous_generation:-0}
     echo "previous release: config $previous_config_sha, config generation $previous_generation"
@@ -452,9 +474,19 @@ upgrade_lane() {
     rm -f "$test_fault"
     [ -f "$lifecycle_dir/last-package-result.json" ] || die "the postinstall left no lifecycle result (package manager exited $install_rc)"
     cp "$lifecycle_dir/last-package-result.json" "$results/05-upgrade-fault.json"
+    # The Linux preinstall holds the config-apply trigger for the transaction
+    # (GAP-0268): the rollback restores it stopped, and the postinstall starts
+    # it after it saved this result.
+    held=()
+    [ "$platform" != linux ] || held=(--held-service defenseclaw-enterprise-apply.path)
     "$python" "$checker" "$results/05-upgrade-fault.json" --label upgrade-fault --platform "$platform" \
-        --action ensure --expect-error lifecycle_test_fault \
+        --action ensure --expect-error lifecycle_test_fault --ready ${held[@]+"${held[@]}"} \
         --allow-warning lifecycle_test_fault --allow-warning rolled_back --allow-warning unprivileged_user_namespaces
+    services_running
+    if [ "$platform" = linux ]; then
+        systemctl is-active --quiet defenseclaw-enterprise-apply.path ||
+            die "the postinstall left defenseclaw-enterprise-apply.path $(systemctl is-active defenseclaw-enterprise-apply.path 2>/dev/null || true)"
+    fi
     [ "$(sha256_of "$config")" = "$previous_config_sha" ] || die "the rolled-back upgrade changed $config"
     recorded=$(json_field "$lifecycle_dir/deployment.json" product_version)
     [ "$recorded" = "$previous_version" ] || die "the rolled-back upgrade left the deployment record at '$recorded', want '$previous_version'"
@@ -462,16 +494,22 @@ upgrade_lane() {
 
     step "upgrade to $version (ensure --from-package)"
     lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
+    # A v8 config is migrated, so the upgrade applies a new config generation;
+    # a v9 one keeps its bytes and its generation.
+    generation_floor=$previous_generation
+    [ "$config_version" = 8 ] || generation_floor=$((previous_generation - 1))
     check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready --complete \
-        "${policy_checks[@]}" --policy-applied --config-generation-above "$previous_generation"
-    [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
-    [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
-    [ "$(sha256_of "$config.v8.bak")" = "$previous_config_sha" ] || die "$config.v8.bak is not the previous config"
+        "${policy_checks[@]}" --policy-applied --config-generation-above "$generation_floor"
+    if [ "$config_version" = 8 ]; then
+        [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
+        [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
+        [ "$(sha256_of "$config.v8.bak")" = "$previous_config_sha" ] || die "$config.v8.bak is not the previous config"
+        cp "$config_dir/migration-v9.json" "$results/migration-v9.json"
+    fi
     cp "$config" "$results/config-upgraded.yaml"
-    cp "$config_dir/migration-v9.json" "$results/migration-v9.json"
     [ "$(tree_sha "$secrets_dir")" = "$previous_secrets_sha" ] || die "the upgrade changed the secrets under $secrets_dir"
-    [ "$([ -f "$guardian_ledger" ] && sha256_of "$guardian_ledger" || echo absent)" = "$previous_ledger_sha" ] ||
-        die "the upgrade changed the guardian ledger $guardian_ledger"
+    [ "$(ledger_targets)" = "$previous_ledger" ] ||
+        die "the upgrade changed the protected targets in the guardian ledger $guardian_ledger"
     services_running
 }
 
@@ -491,8 +529,11 @@ else
     esac
     [ -f "$lifecycle_dir/last-package-result.json" ] || die "the postinstall left no lifecycle result (package manager exited $install_rc)"
     cp "$lifecycle_dir/last-package-result.json" "$results/01-package-install.json"
+    # Without an administrator config the package enables no connector, so a
+    # host with eligible users is honestly security-incomplete (GAP-0266); the
+    # step after this one applies the config and requires --complete.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-        --complete
+        --coverage-complete --allow-warning no_connectors_enabled
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
     [ -x "$gateway" ] || die "$gateway was not installed"
     [ -f "$config" ] || die "the lifecycle did not write $config"
@@ -522,8 +563,10 @@ else
 fi
 
 # ---- converge ----------------------------------------------------------------
+# The apply trigger runs ensure after the admin config lands; on a slow runner it can
+# still hold the lifecycle lock, so wait for it instead of failing with lifecycle_busy.
 step "ensure again (must be a no-op)"
-lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane
+lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
 check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
     --complete
 
@@ -595,6 +638,11 @@ esac
 for dir in "${purged_dirs[@]}"; do
     [ ! -e "$dir" ] || die "$dir remains after purge"
 done
+[ -f "$lifecycle_dir/lifecycle.lock" ] || die "the persistent lifecycle lock is missing after purge"
+[ "$(find "$lifecycle_dir" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || die "lifecycle state remains after purge"
+if [ "$platform" = darwin ]; then
+    [ "$(find "$install_root" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] || die "install files remain after purge"
+fi
 [ "$kind" != deb ] || ! dpkg-query -W "$linux_package_name" >/dev/null 2>&1 || die "dpkg still knows $linux_package_name after purge"
 services_gone
 

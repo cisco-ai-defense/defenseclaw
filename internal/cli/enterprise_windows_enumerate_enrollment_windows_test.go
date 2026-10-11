@@ -9,6 +9,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -72,7 +74,7 @@ func runStandaloneWindowsEnumerateCycleForTest(t *testing.T, cfg *config.Config)
 	}
 	stderr := new(bytes.Buffer)
 	manifest := filepath.Join(t.TempDir(), "targets.yaml")
-	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest, true); err != nil {
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	return stderr.String(), calls
@@ -96,6 +98,70 @@ func TestEnterpriseWindowsEnumerateIdlesInManifestMode(t *testing.T) {
 	))
 	if calls != 2 {
 		t.Fatalf("auto mode must enumerate and publish (%d calls)", calls)
+	}
+}
+
+func TestEnterpriseWindowsManifestCyclePublishesCurrentUsersGroupFacts(t *testing.T) {
+	const alice = "S-1-5-21-111-222-333-1001"
+	const bob = "S-1-5-21-111-222-333-1002"
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{Mode: config.EnterpriseEnrollmentManifest})
+	cfg.DataDir = t.TempDir()
+	manifestPath := filepath.Join(t.TempDir(), "targets.yaml")
+	home := t.TempDir()
+	data := fmt.Sprintf("version: 1\ntargets:\n  - sid: %s\n    user_home: %s\n    connector: codex\n    agent_version: 0.200.0\n", alice, home)
+	if err := os.WriteFile(manifestPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousConfig := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousLoader := enterpriseWindowsEnumerateGroupCacheLoader
+	previousCacheWriter := enterpriseWindowsEnumerateGroupCacheWriter
+	previousRefresher := enterpriseWindowsManifestGroupCacheRefresher
+	previousSpoolWriter := enterpriseWindowsIdentitySpoolWriter
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfig
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsEnumerateGroupCacheLoader = previousLoader
+		enterpriseWindowsEnumerateGroupCacheWriter = previousCacheWriter
+		enterpriseWindowsManifestGroupCacheRefresher = previousRefresher
+		enterpriseWindowsIdentitySpoolWriter = previousSpoolWriter
+	})
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		t.Fatal("manifest mode walked user profiles")
+		return enterprisehooks.Manifest{}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) {
+		t.Fatal("manifest mode rewrote administrator targets")
+		return false, nil
+	}
+	enterpriseWindowsEnumerateGroupCacheLoader = func(string) (*enterprisehooks.WindowsEnrollmentGroupCache, error) {
+		cache := enterprisehooks.NewWindowsEnrollmentGroupCache()
+		cache.Users[bob] = []string{"S-1-5-32-545"}
+		return cache, nil
+	}
+	refreshed := false
+	enterpriseWindowsManifestGroupCacheRefresher = func(manifest enterprisehooks.Manifest, cache *enterprisehooks.WindowsEnrollmentGroupCache) (*enterprisehooks.WindowsEnrollmentGroupCache, error) {
+		if len(manifest.Targets) != 1 || manifest.Targets[0].SID != alice || len(cache.Users[bob]) != 1 {
+			t.Fatalf("manifest/cache = %+v / %+v", manifest, cache)
+		}
+		refreshed = true
+		cache.Users = map[string][]string{alice: {"S-1-5-32-544"}}
+		return cache, nil
+	}
+	enterpriseWindowsEnumerateGroupCacheWriter = func(string, *enterprisehooks.WindowsEnrollmentGroupCache) (bool, error) { return true, nil }
+	var published *enterprisehooks.WindowsEnrollmentGroupCache
+	enterpriseWindowsIdentitySpoolWriter = func(_ string, cache *enterprisehooks.WindowsEnrollmentGroupCache, _ map[string]map[string]string, _ func(string) error, _ func(string, ...any)) error {
+		published = cache
+		return nil
+	}
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifestPath); err != nil {
+		t.Fatal(err)
+	}
+	if !refreshed || published == nil || len(published.Users) != 1 || len(published.Users[alice]) != 1 {
+		t.Fatalf("manifest identity facts were not published: refreshed=%t cache=%+v", refreshed, published)
 	}
 }
 
@@ -154,7 +220,7 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 		return true, nil
 	}
 	stderr := new(bytes.Buffer)
-	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest, true); err != nil {
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), stderr, manifest); err != nil {
 		t.Fatalf("cycle: %v", err)
 	}
 	if strings.Join(seen.IncludeGroups, ",") != "Developers" || strings.Join(seen.ExcludeGroups, ",") != "Administrators" {
@@ -176,10 +242,98 @@ func TestEnterpriseWindowsEnumerateAppliesGroupFiltersAndPublishesUnprotectedAge
 	secureClient.Enterprise.Enrollment = cfg.Enterprise.Enrollment
 	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return secureClient, nil }
 	published, savedCache, seen = nil, nil, enterprisehooks.EnumerateOptions{}
-	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest, true); err != nil {
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
 		t.Fatalf("Secure Client cycle: %v", err)
 	}
 	if len(seen.IncludeGroups)+len(seen.ExcludeGroups) != 0 || seen.GroupCache != nil || seen.ReportUnprotected != nil || savedCache != nil || published != nil {
 		t.Fatalf("Secure Client enumeration changed: %+v", seen)
+	}
+}
+
+// A profile the last cycle enrolled and this one does not (its account was
+// added to exclude_users) loses the gateway's inventory read access at this
+// cycle, so its rows go at the next scan (GAP-0717). The profiles still
+// enrolled keep theirs.
+func TestEnterpriseWindowsEnumerateRevokesInventoryReadOfDroppedProfiles(t *testing.T) {
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{ExcludeUsers: []string{"bob"}})
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	alice := enterprisehooks.ManifestTarget{User: "alice", UserHome: `C:\Users\alice`, SID: "S-1-5-21-1004336348-1177238915-682003330-1001", Connector: "claudecode", AgentVersion: "2.1.187"}
+	// The last cycle's targets.yaml enrolled alice and bob.
+	last := "version: 1\ntargets:\n" +
+		"  - {user: alice, user_home: 'C:\\Users\\alice', sid: S-1-5-21-1004336348-1177238915-682003330-1001, connector: claudecode, agent_version: 2.1.187}\n" +
+		"  - {user: bob, user_home: 'C:\\Users\\bob', sid: S-1-5-21-1004336348-1177238915-682003330-1002, connector: claudecode, agent_version: 2.1.187}\n"
+	if err := os.WriteFile(manifest, []byte(last), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousConfig := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousRevoker := enterpriseWindowsInventoryReadRevoker
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfig
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsInventoryReadRevoker = previousRevoker
+	})
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(context.Context, *config.Config, enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{alice}}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return true, nil }
+	var revoked []string
+	enterpriseWindowsInventoryReadRevoker = func(dropped enterprisehooks.Manifest) error {
+		for _, target := range dropped.Targets {
+			revoked = append(revoked, target.User)
+		}
+		return nil
+	}
+	if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if strings.Join(revoked, ",") != "bob" {
+		t.Fatalf("revoked = %v, want only the profile the cycle dropped", revoked)
+	}
+}
+
+// A profile the enrollment excludes loses the gateway's inventory read
+// access even when no manifest ever listed it (an earlier install on a
+// cloned image granted it), once while it stays excluded (GAP-1024).
+func TestEnterpriseWindowsEnumerateRevokesInventoryReadOfExcludedProfilesOnce(t *testing.T) {
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{ExcludeUsers: []string{"carol"}})
+	manifest := filepath.Join(t.TempDir(), "targets.yaml")
+	carol := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1004336348-1177238915-682003330-1003", UserHome: `C:\Users\carol`}
+	previousConfig := enterpriseWindowsEnumerateConfigLoader
+	previousEnumerator := enterpriseWindowsEnumerateProfileEnumerator
+	previousWriter := enterpriseWindowsEnumerateManifestWriter
+	previousRevoker := enterpriseWindowsInventoryReadRevoker
+	t.Cleanup(func() {
+		enterpriseWindowsEnumerateConfigLoader = previousConfig
+		enterpriseWindowsEnumerateProfileEnumerator = previousEnumerator
+		enterpriseWindowsEnumerateManifestWriter = previousWriter
+		enterpriseWindowsInventoryReadRevoker = previousRevoker
+		enterpriseWindowsExcludedRevoked.sids = map[string]bool{}
+	})
+	enterpriseWindowsExcludedRevoked.sids = map[string]bool{}
+	enterpriseWindowsEnumerateConfigLoader = func() (*config.Config, error) { return cfg, nil }
+	enterpriseWindowsEnumerateProfileEnumerator = func(_ context.Context, _ *config.Config, opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		opts.ReportExcluded(carol)
+		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
+	}
+	enterpriseWindowsEnumerateManifestWriter = func(string, enterprisehooks.Manifest) (bool, error) { return false, nil }
+	revoked := 0
+	enterpriseWindowsInventoryReadRevoker = func(excluded enterprisehooks.Manifest) error {
+		if len(excluded.Targets) != 1 || excluded.Targets[0].SID != carol.SID {
+			t.Fatalf("revoked %+v, want carol", excluded.Targets)
+		}
+		revoked++
+		return nil
+	}
+	for cycle := 0; cycle < 2; cycle++ {
+		if err := runEnterpriseWindowsEnumerateSingleCycle(context.Background(), new(bytes.Buffer), manifest); err != nil {
+			t.Fatalf("cycle %d: %v", cycle, err)
+		}
+	}
+	if revoked != 1 {
+		t.Fatalf("revoked %d times over two cycles, want once", revoked)
 	}
 }

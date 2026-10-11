@@ -74,6 +74,29 @@ func clawModeDefaultConfig() *config.Config {
 	}
 }
 
+// TestGatewayShouldConnect_ZeptoClawNotInstalled pins GAP-0185: a ZeptoClaw
+// connector on a machine where discovery found no ZeptoClaw does not dial the
+// loopback fleet address, and a remote host still does.
+func TestGatewayShouldConnect_ZeptoClawNotInstalled(t *testing.T) {
+	cfg := clawModeDefaultConfig()
+	cfg.Claw.Mode = "zeptoclaw"
+	cfg.DataDir = t.TempDir()
+	if !gatewayShouldConnectForConfiguredConnector(cfg) {
+		t.Fatal("without a discovery result the ZeptoClaw connector keeps dialing")
+	}
+	discovery := `{"agents":{"zeptoclaw":{"installed":false,"binary_path":""}}}`
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "agent_discovery.json"), []byte(discovery), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if gatewayShouldConnectForConfiguredConnector(cfg) {
+		t.Fatal("a loopback fleet address with no ZeptoClaw on this machine must not dial")
+	}
+	cfg.Gateway.Host = "10.0.0.5"
+	if !gatewayShouldConnectForConfiguredConnector(cfg) {
+		t.Fatal("a remote fleet host still dials")
+	}
+}
+
 // TestGatewayShouldConnect_OpenClawNotInstalled pins #958: the claw.mode
 // default without OpenClaw on the machine no longer dials, while every other
 // OpenClaw shape keeps dialing. The watchdog (RequiresFleetGateway) and the

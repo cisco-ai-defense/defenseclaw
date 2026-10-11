@@ -18,13 +18,6 @@ import (
 	"unicode"
 )
 
-// windowsCommandFindings recognizes Windows-native command forms that cannot
-// be represented safely by a flat substring regexp. It performs lexical
-// normalization only: input is never decoded, expanded, or executed.
-func windowsCommandFindings(text, toolName string) []RuleFinding {
-	return windowsCommandFindingsWithOptions(text, toolName, ruleScanOptions{})
-}
-
 func windowsCommandFindingsWithOptions(
 	text string,
 	toolName string,
@@ -593,15 +586,6 @@ func windowsCommandCanReadSensitivePath(name string) bool {
 	default:
 		return false
 	}
-}
-
-func windowsSensitivePathFindings(text, toolName string, commandContext bool) []RuleFinding {
-	return windowsSensitivePathFindingsWithOptions(
-		text,
-		toolName,
-		commandContext,
-		ruleScanOptions{},
-	)
 }
 
 func windowsSensitivePathFindingsWithOptions(

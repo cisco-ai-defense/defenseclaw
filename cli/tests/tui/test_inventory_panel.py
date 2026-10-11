@@ -585,6 +585,13 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
         ("bob", "vscode", "ms-python.python", "1.0.0", "no", ""),
     )
     assert dict(panel.summary_table_rows())["IDE plugins"] == "2 (1 AI, 1 disabled, 2 users)"
+    versioned = InventoryPanelModel()
+    versioned.apply_json(json.dumps({"ide_plugins": [ide("alice", "com.tabnine", ide_version="2025.2")]}))
+    versioned.set_active_subtab("ide_plugins")
+    assert versioned.data_table_rows()[0][0] == "vscode 2025.2"
+    versioned.set_cursor(0)
+    assert dict(versioned.detail_info().fields)["IDE version"] == "2025.2"
+
 
     # At 80 columns long cells give way while Enabled and AI stay whole, a
     # remote install is marked (GAP-0055), and the detail leads with what the
@@ -622,10 +629,71 @@ def test_inventory_ide_plugins_users_and_agent_identities() -> None:
     assert panel.data_table_columns() == ("Connector", "User", "ID", "Source", "Model", "Workspace", "Default")
     assert len(panel.data_table_rows()) == 3
     assert panel.data_table_rows()[1] == ("codex", "bob", "agt-0123456789abcdef", "agent identity", "", "", "")
+    long_user = "A" * 300
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": [
+        identity("agt-long", long_user), identity("agt-short", "bob"),
+    ]}))
+    assert any(row[1] == "A" * 29 + "..." for row in panel.data_table_rows())
+
     panel.set_cursor(1)
     assert dict(panel.detail_info().fields)["Sessions"] == "3"
+    # GAP-0152: a list cut at its bound says so on the sub-tab.
+    panel.apply_agent_identities(json.dumps({"enabled": True, "total": 9, "next_cursor": "3", "identities": [
+        identity("agt-0123456789abcdef", "bob"),
+    ]}))
+    assert next(info for info in panel.subtab_info() if info.subtab == "agents").display_label == "Agents (2+)"
+    assert "newest 1 of 9" in panel.handle_key("h").hint + panel.handle_key("l").hint
 
     # A missing or failing `agent identities` command leaves only inventory rows.
     panel.apply_agent_identities("Error: No such command 'identities'.")
     assert len(panel.filtered_agents()) == 1
     assert "User" not in panel.data_table_columns()
+
+
+def test_inventory_long_agent_list_jumps_and_does_not_rescan_users_per_row() -> None:
+    """GAP-0184: page/end jumps work, and building the rows reads the items once."""
+
+    panel = InventoryPanelModel(connector="codex")
+    panel.apply_loaded(_inventory())
+    rows = [
+        {"agent_id": f"agt-{index:016x}", "user_id": str(1000 + index % 2), "user_name": f"user{index % 2}",
+         "connector": "codex", "first_seen": "2026-10-01T00:00:00Z", "last_seen": "2026-10-05T00:00:00Z",
+         "sessions_seen": 1}
+        for index in range(1300)
+    ]
+    panel.apply_agent_identities(json.dumps({"enabled": True, "identities": rows}))
+    panel.set_active_subtab("agents")
+    panel.set_size(80, 24)
+
+    calls = 0
+    original = InventoryPanelModel._multi_user
+
+    def counted(items):  # noqa: ANN001 - wraps the staticmethod for the test
+        nonlocal calls
+        calls += 1
+        return original(items)
+
+    InventoryPanelModel._multi_user = staticmethod(counted)  # type: ignore[method-assign]
+    try:
+        assert len(panel.data_table_rows()) == len(panel.filtered_agents())
+    finally:
+        InventoryPanelModel._multi_user = staticmethod(original)  # type: ignore[method-assign]
+    assert calls <= 2, f"the user column was recomputed {calls} times for one table"
+
+    total = panel.current_list_len()
+    assert panel.handle_key("end").handled and panel.cursor == total - 1
+    assert panel.handle_key("home").handled and panel.cursor == 0
+    assert panel.handle_key("pagedown").handled and panel.cursor == 16
+    assert panel.handle_key("pageup").handled and panel.cursor == 0
+    assert panel.handle_key("G").handled and panel.cursor == total - 1
+
+
+def test_ide_table_fits_wide_unicode_cells() -> None:
+    from defenseclaw.tui.services.inventory_state import _fit_cells
+    from rich.cells import cell_len
+
+    columns = ("User", "IDE", "Plugin", "Version", "Enabled", "AI")
+    row = ("alice", "vim", "漢" * 40, "1", "yes", "yes")
+    fitted, = _fit_cells(columns, (row,), 80, keep=("Enabled", "AI"))
+    assert sum(cell_len(cell) for cell in fitted) <= 80 - 8 - 2 * len(columns)
+    assert fitted[4:] == ("yes", "yes")

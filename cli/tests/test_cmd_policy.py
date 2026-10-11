@@ -324,6 +324,40 @@ class TestPolicyDelete(PolicyCommandTestBase):
         # A second delete has nothing left to revert.
         self.assertNotEqual(self.invoke(["delete", "strict"]).exit_code, 0)
 
+    def test_secure_client_active_builtin_reactivates_bundled_copy(self):
+        from unittest.mock import patch
+
+        edited = os.path.join(self.app.cfg.policy_dir, "strict.yaml")
+        with open(edited, "w") as f:
+            f.write("name: strict\n")
+        with (
+            patch("defenseclaw.commands.cmd_policy.asset_lists.is_secure_client", return_value=True),
+            patch("defenseclaw.commands.cmd_policy._get_active_policy_name", return_value="strict"),
+            patch("defenseclaw.commands.cmd_policy._reactivate_after_delete") as reactivate,
+        ):
+            result = self.invoke(["delete", "strict", "--yes"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(os.path.exists(edited))
+        reactivate.assert_called_once_with(self.app, "strict")
+
+    def test_secure_client_active_custom_requires_force_and_reactivates_default(self):
+        from unittest.mock import patch
+
+        self.invoke(["create", "active-custom"])
+        path = os.path.join(self.app.cfg.policy_dir, "active-custom.yaml")
+        with (
+            patch("defenseclaw.commands.cmd_policy.asset_lists.is_secure_client", return_value=True),
+            patch("defenseclaw.commands.cmd_policy._get_active_policy_name", return_value="active-custom"),
+            patch("defenseclaw.commands.cmd_policy._reactivate_after_delete") as reactivate,
+        ):
+            refused = self.invoke(["delete", "active-custom", "--yes"])
+            self.assertEqual(refused.exit_code, 1, refused.output)
+            self.assertTrue(os.path.isfile(path))
+            forced = self.invoke(["delete", "active-custom", "--force", "--yes"])
+        self.assertEqual(forced.exit_code, 0, forced.output)
+        self.assertFalse(os.path.exists(path))
+        reactivate.assert_called_once_with(self.app, "default")
+
     def test_delete_asks_on_a_terminal_and_accepts_yes(self):
         # GAP-1887: a user-authored policy is removed for good, so confirm first.
         from unittest.mock import patch
@@ -363,6 +397,25 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", ""))
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.policy_dir, "rego", "data.json")))
 
+    def test_activate_explicit_empty_first_party_list_clears_builtin_exemptions(self):
+        import yaml
+        from defenseclaw.enforce.admission import compile_admission
+
+        created = self.invoke(["create", "scan-all"])
+        self.assertEqual(created.exit_code, 0, created.output)
+        path = os.path.join(self.app.cfg.policy_dir, "scan-all.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        data["first_party_allow_list"] = []
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+
+        result = self.invoke(["activate", "scan-all", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        for target_type in ("skill", "mcp", "plugin"):
+            self.assertEqual(getattr(self.app.cfg.admission, target_type).first_party_allow_list, [])
+            self.assertEqual(compile_admission(self.app.cfg, target_type).first_party_allow, {})
+
     def test_activate_compares_thresholds_with_the_selected_pack(self):
         # The permissive pack alerts at HIGH; the default preset alerts at
         # MEDIUM, so activating it must write alert_at (block CRITICAL matches).
@@ -370,6 +423,39 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         result = self.invoke(["activate", "default", "--no-reload"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual((self.app.cfg.guardrail.block_at, self.app.cfg.guardrail.alert_at), ("", "MEDIUM"))
+
+
+    def test_activate_keeps_the_operators_hilt(self):
+        # GAP-1304: HITL is not part of a preset; activating the default
+        # preset or a custom one that carries a hilt section keeps it.
+        import yaml
+        from defenseclaw.config import HILTConfig
+
+        self.app.cfg.guardrail.hilt = HILTConfig(enabled=True, min_severity="CRITICAL")
+        created = self.invoke(["create", "carries-hilt"])
+        self.assertEqual(created.exit_code, 0, created.output)
+        path = os.path.join(self.app.cfg.policy_dir, "carries-hilt.yaml")
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        data.setdefault("guardrail", {})["hilt"] = {"enabled": False, "min_severity": "LOW"}
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f)
+        for name in ("default", "carries-hilt"):
+            result = self.invoke(["activate", name, "--no-reload"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(self.app.cfg.guardrail.hilt, HILTConfig(enabled=True, min_severity="CRITICAL"))
+
+
+class TestPolicyActivateNamesLevelChanges(PolicyCommandTestBase):
+    def test_activate_default_names_the_block_level_it_clears(self):
+        # A hand-set block_at HIGH is cleared by the default preset (pack
+        # level CRITICAL); the output names the key, both levels and the way back (GAP-1020).
+        self.app.cfg.guardrail.block_at = "HIGH"
+        result = self.invoke(["activate", "default", "--no-reload"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.guardrail.block_at, "")
+        self.assertIn("guardrail.block_at: HIGH -> CRITICAL", result.output)
+        self.assertIn("defenseclaw guardrail block-at HIGH", result.output)
 
 
 class TestPolicyLifecycle(PolicyCommandTestBase):

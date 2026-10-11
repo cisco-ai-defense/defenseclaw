@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -102,7 +103,33 @@ func hookCWDForContext(ctx context.Context, cwd string) string {
 	if view, ok := sandboxHookView(ctx); ok {
 		return sandboxHookCWD(view, cwd)
 	}
-	return sanitizeHookCWD(cwd)
+	if resolved := sanitizeHookCWD(cwd); resolved != "" {
+		return resolved
+	}
+	return serviceAccountCallerCWD(ctx, cwd)
+}
+
+// serviceAccountCallerCWD is the working directory of a caller of a managed
+// Windows gateway that the gateway service may not resolve. The service has
+// no access to an enrolled user's profile, so sanitizeHookCWD returned ""
+// for every project there and the hooks lost the project: its skill folders
+// were never registered for install admission (GAP-1356). The caller's own
+// directory is kept, lexically and unresolved, when it lies in that caller's
+// verified home; whatever reads below it still meets the profile's access
+// list, and project skill folders are verified by the hook guardian.
+func serviceAccountCallerCWD(ctx context.Context, cwd string) string {
+	if runtime.GOOS != "windows" || !serviceAccountGatewayFromContext(ctx) {
+		return ""
+	}
+	home := trustedActiveHome(ctx)
+	if home == "" || home == unresolvedCallerHome {
+		return ""
+	}
+	if !insideHome(home, cwd) && !(filepath.IsAbs(strings.TrimSpace(cwd)) && !hasParentElement(cwd) &&
+		projectRootKey(strings.TrimSpace(cwd)) == projectRootKey(home)) {
+		return ""
+	}
+	return filepath.Clean(strings.TrimSpace(cwd))
 }
 
 // hookActiveHome is the directory "~" names in a request's tool calls: the

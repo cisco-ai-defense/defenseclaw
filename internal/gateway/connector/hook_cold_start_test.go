@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // A per-user Linux or macOS gateway has no service unit, so after a reboot
@@ -44,7 +45,11 @@ if [ "$n" = 1 ]; then exit "${DC_COLD_FIRST_RC:-7}"; fi
 printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
 `
 
+// The stub records only starts: the hook also asks the binary for session
+// facts (on macOS always, elsewhere when a credential cache can exist), and
+// that read never starts a gateway.
 const coldStartGatewayStub = `#!/bin/sh
+[ "$1" = hook ] && exit 0
 printf '%s|%s|%s|%s|%s\n' "$HOME" "$*" "$(ulimit -S -t)" "$(ulimit -H -t)" "${DEFENSECLAW_GATEWAY_TOKEN+inherited}" >> "$DC_COLD_CAP/gateway.log"
 exit 0
 `
@@ -244,8 +249,8 @@ func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 	if got := strings.TrimSpace(run.stderr); got != want {
 		t.Fatalf("stderr = %q\nwant %q", got, want)
 	}
-	if code := exitCodeOf(run.err); code != 2 {
-		t.Fatalf("exit code = %d, want 2 (fail closed)", code)
+	if reason := failClosedDenyReason(t, run); !strings.Contains(reason, "the gateway is running but did not answer") {
+		t.Fatalf("deny reason = %q, want the hung-gateway step", reason)
 	}
 	if log := readColdStartCapture(t, run.capDir, "gateway.log"); log != "" {
 		t.Fatalf("a timed-out request started the gateway: %q", log)
@@ -256,6 +261,75 @@ func TestShellHookNamesTheNextStepForAHungGateway(t *testing.T) {
 	if !strings.Contains(open.stdout, "the gateway is running but did not answer. Run `defenseclaw-gateway restart`") {
 		t.Errorf("fail-open stdout = %q, want the restart notice", open.stdout)
 	}
+}
+
+// GAP-0409: when the last start failed because config.yaml does not load, a
+// fail-closed hook says so instead of "run defenseclaw-gateway start".
+func TestShellHookNamesAConfigThatDoesNotLoad(t *testing.T) {
+	broken := func(dataDir string) {
+		past := time.Now().Add(-time.Hour)
+		_ = os.Chtimes(filepath.Join(dataDir, "config.yaml"), past, past)
+		_ = os.WriteFile(filepath.Join(dataDir, "gateway.cold-start-failed"), []byte("2026-10-07T00:00:00Z\nconfig-invalid\n"), 0o600)
+	}
+	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, broken,
+		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+	if !strings.Contains(run.stderr, "config.yaml does not load; run `defenseclaw config validate`") {
+		t.Fatalf("stderr = %q, want the config.yaml cause", run.stderr)
+	}
+	if reason := failClosedDenyReason(t, run); !strings.Contains(reason, "config.yaml does not load") {
+		t.Fatalf("deny reason = %q, want the config.yaml cause", reason)
+	}
+}
+
+// GAP-1074: for an exit-2 block Claude Code prints the whole hook command
+// line, guard clause included, in front of the reason. A fail-closed tool
+// call is denied with Claude's JSON decision instead: one plain sentence,
+// no shell syntax, no DefenseClaw file paths, and no claim about who stopped
+// the gateway (an upgrade stops it too).
+func TestClaudeShellHookFailClosedDenyIsOnePlainSentence(t *testing.T) {
+	stopped := func(dataDir string) {
+		_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
+	}
+	run := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
+		"DEFENSECLAW_FAIL_MODE=closed")
+	reason := failClosedDenyReason(t, run)
+	want := "DefenseClaw blocked this because its gateway is stopped. Run defenseclaw-gateway start to resume protection."
+	if reason != want {
+		t.Fatalf("deny reason = %q\nwant %q", reason, want)
+	}
+
+	managed := runHookForColdStart(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, stopped,
+		"DEFENSECLAW_FAIL_MODE=closed", "DEFENSECLAW_MANAGED_HOOK=1")
+	if code := exitCodeOf(managed.err); code != 2 || strings.TrimSpace(managed.stdout) != "" {
+		t.Fatalf("managed hook: exit %d stdout %q, want its exit-2 contract unchanged", code, managed.stdout)
+	}
+}
+
+// failClosedDenyReason returns the reason of the PreToolUse deny decision a
+// fail-closed per-user Claude Code hook prints, and fails unless the hook
+// exited 0 with exactly that decision.
+func failClosedDenyReason(t *testing.T, run coldStartHookRun) string {
+	t.Helper()
+	if code := exitCodeOf(run.err); code != 0 {
+		t.Fatalf("exit code = %d, want 0 with a JSON deny decision; stderr=%q", code, run.stderr)
+	}
+	var decision struct {
+		HookSpecificOutput struct {
+			HookEventName      string `json:"hookEventName"`
+			PermissionDecision string `json:"permissionDecision"`
+			Reason             string `json:"permissionDecisionReason"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(run.stdout)), &decision); err != nil ||
+		decision.HookSpecificOutput.HookEventName != "PreToolUse" ||
+		decision.HookSpecificOutput.PermissionDecision != "deny" {
+		t.Fatalf("stdout = %q, want one PreToolUse deny decision", run.stdout)
+	}
+	reason := decision.HookSpecificOutput.Reason
+	if strings.ContainsAny(reason, "`{}|") || strings.Contains(reason, ".defenseclaw/") {
+		t.Fatalf("deny reason %q shows shell syntax or an internal path", reason)
+	}
+	return reason
 }
 
 func exitCodeOf(err error) int {

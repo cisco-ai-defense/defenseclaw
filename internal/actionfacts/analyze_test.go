@@ -104,7 +104,7 @@ func TestAnalyzeTrustedHomeRetainsExactTildeCatRead(t *testing.T) {
 		resolved = resolved || path.Access == PathAccessRead &&
 			path.Resolved == "/home/fixture/.ssh/id_ed25519"
 	}
-	if facts.Authoritative() || facts.Parse.Status != StatusPartial ||
+	if !facts.Authoritative() || facts.Parse.Status != StatusComplete ||
 		!resolved {
 		t.Fatalf("facts=%+v", facts)
 	}

@@ -1946,6 +1946,20 @@ def _scan_installed_plugin_for_connector(
         connector=connector,
     )
 
+    if post_decision.verdict == "blocked" and not asset_lists.is_secure_client(app.cfg):
+        if rollback:
+            rollback()
+        else:
+            _rollback_plugin_install_paths([plugin_path])
+        ux.echo(f"error: plugin {plugin_name!r} blocked for connector={connector}: "
+                f"{post_decision.reason}", err=True)
+        if app.logger:
+            saved_change_audit(app.logger).log_action(
+                "install-rejected", plugin_name,
+                f"connector={connector} source={post_decision.source} reason={post_decision.reason}",
+            )
+        raise SystemExit(1)
+
     if post_decision.verdict == "allowed" and post_decision.source == "scan-allowed":
         # The admission action for the findings' severity is allow; nothing
         # is on an allow list, so this is installed like a clean plugin.
@@ -2060,7 +2074,7 @@ def _scan_installed_plugin_for_connector(
 
     if action_cfg.install == "block":
         pe.record_scan_block("plugin", plugin_name, connector, enforcement_reason)
-        applied_actions.append("added to block list")
+        applied_actions.append("install blocked by this scan")
 
     pe.set_source_path("plugin", plugin_name, plugin_path, connector)
 
@@ -2547,21 +2561,6 @@ def _plugin_list_json_items(
         item["verdict"] = verdict_label
         items.append(item)
     return items
-
-
-def _print_plugin_list_json(
-    plugins: list[dict[str, Any]],
-    scan_map: dict[str, dict[str, Any]],
-    actions_map: dict[str, Any],
-    connector: str = "",
-) -> None:
-    click.echo(
-        json.dumps(
-            _plugin_list_json_items(plugins, scan_map, actions_map, connector=connector),
-            indent=2,
-            default=str,
-        )
-    )
 
 
 def _print_plugin_list_table(
@@ -3415,17 +3414,6 @@ def _parse_plugin_list_json(text: str) -> list[dict[str, Any]]:
     return [p for p in plugins if isinstance(p, dict)]
 
 
-def _parse_plugin_list_text(text: str) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        if not line or line.lower().startswith(("name", "plugin")):
-            continue
-        name = line.split()[0]
-        out.append({"id": name, "name": name})
-    return out
-
-
 def _list_openclaw_plugins(connector: str = "") -> list[dict]:
     """Query plugins from the requested connector.
 
@@ -3903,6 +3891,7 @@ def _plugin_copies_disabled(app: AppContext, plugin_name: str, connector: str) -
 @click.option("--reason", default="", help="Reason for blocking")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_BLOCK)
 def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install block list.
 
@@ -3915,6 +3904,7 @@ def block(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
+    name = asset_lists.policy_rule_name("plugin", name)
     connector = _resolve_connector_scope(app, connector_flag)
     _refuse_managed_bridge_action(
         app,
@@ -4034,6 +4024,7 @@ def _plugin_unblock_followup(plugin_name: str, connector: str, all_only_allow: b
     ),
 )
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_UNBLOCK)
 def unblock(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove plugin enforcement state without adding an allow entry."""
     from defenseclaw.enforce import PolicyEngine
@@ -4133,6 +4124,7 @@ def unblock(app: AppContext, name: str, connector_flag: str) -> None:
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option("--connector", "connector_flag", default="", help=_CONNECTOR_SCOPE_HELP)
 @pass_ctx
+@asset_lists.refuse_on_managed_device("plugin", asset_lists.OP_ALLOW)
 def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """Add a plugin to the install allow list.
 
@@ -4144,6 +4136,7 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
+    name = asset_lists.policy_rule_name("plugin", name)
     # P-A connector-scoped allow: write the narrowed entry and clear residual
     # file/runtime state for that peer. The gateway runtime-enable dance below
     # is for the unscoped/OpenClaw runtime lane and stays on the bare path.
@@ -4151,6 +4144,26 @@ def allow(app: AppContext, name: str, reason: str, connector_flag: str) -> None:
     plugin_name, hermes_path = _policy_plugin_target(app, name, connector_scope)
     runtime_name = plugin_name
     pe = PolicyEngine(app.store, app.cfg)
+
+    # A quarantined copy is absent from installed directories. Allowing it now
+    # would create a name-only rule and clear the journal needed by restore.
+    from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
+
+    quarantines = PluginEnforcer(app.cfg.quarantine_dir)
+    scopes = [connector_scope] if connector_scope else _active_plugin_connectors(app)
+    scopes = [*scopes, ""]  # Legacy/global quarantine slot.
+    journal_quarantine = any(
+        entry.target_name == plugin_name
+        and entry.actions.file == "quarantine"
+        and (not connector_scope or entry.connector in ("", connector_scope))
+        for entry in pe.list_by_type("plugin")
+    )
+    if not asset_lists.is_secure_client(app.cfg) and (
+        journal_quarantine or any(quarantines.is_quarantined(plugin_name, scope) for scope in scopes)
+    ):
+        raise click.ClickException(
+            f"{plugin_name!r} is quarantined; restore it before allowing the installed copy"
+        )
 
     if not reason:
         reason = "manual allow via CLI"

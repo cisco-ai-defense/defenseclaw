@@ -89,6 +89,54 @@ func TestPlaneARecognisesALocalModelRuntimeRegardlessOfLoad(t *testing.T) {
 	}
 }
 
+func TestRuntimeNamesFromWindowsProbe(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		scriptable bool
+		model      bool
+	}{
+		{"node", true, false},
+		{"node.exe", true, false},
+		{"NODE.EXE", true, false},
+		{"python3.exe", true, false},
+		{"python.exe", true, false},
+		{"uv.exe", true, false},
+		{"uvx.exe", true, false},
+		{"mcp-server-fetch.exe", false, false},
+		{"ollama", false, true},
+		{"ollama.exe", false, true},
+		{"lemonadeserver", false, true},
+		{"lemonadeserver.exe", false, true},
+		{"chrome.exe", false, false},
+		{"notepad.exe", false, false},
+		{`C:\Program Files\nodejs\node.exe`, true, false},
+		{"node.cmd", true, false},
+		{"python.bat", true, false},
+		{"ollama.com", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isScriptable(tc.name); got != tc.scriptable {
+				t.Errorf("isScriptable(%q) = %v, want %v", tc.name, got, tc.scriptable)
+			}
+			if got := isKnownModelRuntime(tc.name); got != tc.model {
+				t.Errorf("isKnownModelRuntime(%q) = %v, want %v", tc.name, got, tc.model)
+			}
+			signals := planeA(procprobe.Process{Name: tc.name, RSSBytes: modelResidentBytes},
+				20*time.Second, 30*time.Second)
+			if got := hasSignal(signals, "inference_heartbeat"); got != (tc.scriptable || tc.model) {
+				t.Errorf("planeA(%q) heartbeat = %v, signals = %v", tc.name, got, signalIDs(signals))
+			}
+			if got := hasSignal(signals, "local_model_runtime"); got != tc.model {
+				t.Errorf("planeA(%q) local model = %v, signals = %v", tc.name, got, signalIDs(signals))
+			}
+			if got := hasSignal(signals, "model_resident_memory"); got != (tc.scriptable || tc.model) {
+				t.Errorf("planeA(%q) memory = %v, signals = %v", tc.name, got, signalIDs(signals))
+			}
+		})
+	}
+}
+
 func testCatalog() *catalog.Catalog {
 	return catalog.FromSignatures([]inventory.AISignature{
 		{ID: "anthropic", Name: "Anthropic", Vendor: "Anthropic", DomainPatterns: []string{"anthropic.com"}},

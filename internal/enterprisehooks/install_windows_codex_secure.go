@@ -536,7 +536,6 @@ func defaultWindowsCodexRequirementsOptions(
 		GatewayAddr:                     gatewayAddr,
 		GatewayServiceName:              gatewayServiceName,
 		AgentApplicationControlEnforced: applicationControl,
-		EnterpriseTargetEnabled:         true,
 		CodexTargetEnabled:              true,
 		HookContractID:                  connector.WindowsCodexStandaloneHookContract(hookExecutable),
 	}

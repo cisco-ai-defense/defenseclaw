@@ -37,7 +37,7 @@ def app(tmp_path, monkeypatch):
     cfg.guardrail.enabled = True
     cfg.guardrail.mode = "action"
     cfg.guardrail.port = 4321
-    cfg.guardrail.rule_pack_dir = "/packs/default"
+    cfg.guardrail.rule_pack = "default"
     cfg.save = MagicMock()
     ctx = AppContext()
     ctx.cfg = cfg
@@ -60,14 +60,13 @@ def _run(app, command, *args):
 
 def _multi(app) -> None:
     app.cfg.guardrail.connectors = {
-        "codex": PerConnectorGuardrailConfig(rule_pack_dir=STRICT),
+        "codex": PerConnectorGuardrailConfig(rule_pack="strict"),
         "claudecode": PerConnectorGuardrailConfig(),
     }
 
 
 def test_global_block_at_sets_only_guardrail_block_at(app) -> None:
-    # --no-restart is accepted from older scripts and does nothing.
-    result, payload = _run(app, "block-at", "high", "--json", "--no-restart")
+    result, payload = _run(app, "block-at", "high", "--json")
     assert result.exit_code == 0, result.output
     assert payload == {
         "version": 1,
@@ -84,7 +83,7 @@ def test_global_block_at_sets_only_guardrail_block_at(app) -> None:
     }
     gc = app.cfg.guardrail
     assert (gc.block_at, gc.alert_at, gc.connectors) == ("HIGH", "", {})
-    assert (gc.enabled, gc.mode, gc.port, gc.rule_pack_dir) == (True, "action", 4321, "/packs/default")
+    assert (gc.enabled, gc.mode, gc.port, gc.rule_pack) == (True, "action", 4321, "default")
     app.cfg.save.assert_called_once()
     assert app.logger.log_config_change.call_args.args[0] == "guardrail-block-at"  # a config-update mutation
 

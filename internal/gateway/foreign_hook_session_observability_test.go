@@ -74,6 +74,11 @@ func TestForeignHookSessionDenialExportsAConnectorHookBlock(t *testing.T) {
 	if wire.Body["defenseclaw.user.name"] != "dcw-std1" || wire.Body["defenseclaw.guardrail.effective_action"] != "block" {
 		t.Fatalf("hook decision record body=%v", wire.Body)
 	}
+	// GAP-1039: it names the agent identity too, which needs no session.
+	if want := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: "cursor"}).ID; want == "" ||
+		wire.Body["defenseclaw.agent.identity.id"] != want {
+		t.Fatalf("hook decision record agent identity = %v, want %q", wire.Body["defenseclaw.agent.identity.id"], want)
+	}
 }
 
 // GAP-2142: a denied tool call is a blocked tool span (the decision on the

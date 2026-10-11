@@ -128,6 +128,7 @@ type secureClientDataJSON struct {
 	FirstPartyAllowList []struct {
 		TargetType         string   `json:"target_type"`
 		TargetName         string   `json:"target_name"`
+		Reason             string   `json:"reason"`
 		SourcePathContains []string `json:"source_path_contains"`
 	} `json:"first_party_allow_list"`
 	Guardrail struct {
@@ -290,7 +291,7 @@ func firstParty(lists ...[]config.AdmissionFirstParty) []CompiledFirstParty {
 		}
 		out := make([]CompiledFirstParty, 0, len(list))
 		for _, entry := range list {
-			out = append(out, CompiledFirstParty{Name: entry.Name, SourcePathContains: append([]string(nil), entry.SourcePathContains...)})
+			out = append(out, CompiledFirstParty{Name: entry.Name, SourcePathContains: append([]string(nil), entry.SourcePathContains...), Reason: entry.Reason})
 		}
 		return out
 	}

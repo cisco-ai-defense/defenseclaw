@@ -337,17 +337,6 @@ export const SINK_CARDS: SinkCard[] = [
       'Write structured JSON events to stdout. Useful for container deployments where journald or a log shipper picks them up.',
   },
   {
-    id: 'splunk',
-    title: 'Splunk HEC',
-    description:
-      'Forward block/alert events to Splunk\u2019s HTTP Event Collector. Token is read from the env var you provide \u2014 never hardcoded.',
-    type: 'generic',
-    configFields: [
-      { key: 'url', label: 'HEC URL', placeholder: 'https://splunk.example.com:8088/services/collector/event' },
-      { key: 'secret_env', label: 'Token env var', placeholder: 'SPLUNK_HEC_TOKEN' },
-    ],
-  },
-  {
     id: 'slack',
     title: 'Slack webhook',
     description:

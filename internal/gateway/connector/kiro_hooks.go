@@ -69,8 +69,7 @@ const kiroV2HookTimeoutMillis = 30000
 // prompts as prompt injection). The 2.x engine cannot veto a prompt
 // (KiroBlockEventsForSurface), so the hook only audited it; tool calls are
 // still checked by preToolUse, and the v3 engine checks prompts through
-// .kiro/hooks. Setup removes the entry an earlier build wrote
-// (kiroV2RetiredEvents).
+// .kiro/hooks.
 var kiroV2HookSpecs = []struct {
 	event       string
 	description string
@@ -81,36 +80,6 @@ var kiroV2HookSpecs = []struct {
 	// kiro-cli 2.22's agent schema accepts `stop` only. `agentStop` is
 	// documented as an alias but fails validation, so /hooks stays empty.
 	{"stop", "DefenseClaw session stop", kiroV2MatchAllTools},
-}
-
-const kiroV2StopAlias = "agentStop"
-
-// kiroV2RetiredEvents are CLI 2.x events earlier builds registered and this
-// one no longer does. Setup drops DefenseClaw's entries there, and an agent
-// that still holds one is not current, so the guardian re-renders it.
-var kiroV2RetiredEvents = []string{"userPromptSubmit"}
-
-func kiroV2EventRetired(event string) bool {
-	for _, retired := range kiroV2RetiredEvents {
-		if event == retired {
-			return true
-		}
-	}
-	return false
-}
-
-// kiroV2RetiredEntryOwned reports whether an event-keyed agent still holds a
-// DefenseClaw entry under a retired event.
-func kiroV2RetiredEntryOwned(hooks map[string]interface{}, hookScript string) bool {
-	for _, event := range kiroV2RetiredEvents {
-		list, _ := hooks[event].([]interface{})
-		for _, item := range list {
-			if kiroV2EntryOwned(item, hookScript) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func patchKiroV3Hooks(path, hookScript string) error {
@@ -189,17 +158,6 @@ func patchKiroV2AgentHooks(path, hookScript string) error {
 		return writeJSONObject(path, cfg)
 	}
 	hooks := ensureJSONObject(cfg, "hooks")
-	migrateKiroV2StopAlias(hooks, hookScript)
-	for _, event := range kiroV2RetiredEvents {
-		if _, ok := hooks[event]; !ok {
-			continue
-		}
-		if remaining := removeKiroOwnedV2Hooks(hooks[event], hookScript); len(remaining) == 0 {
-			delete(hooks, event)
-		} else {
-			hooks[event] = remaining
-		}
-	}
 	for _, spec := range kiroV2HookSpecs {
 		entry := map[string]interface{}{
 			"command":     hookScript,
@@ -277,11 +235,13 @@ func reconcileKiroUniversalHooks(list []interface{}, hookScript string) []interf
 	return kept
 }
 
-// removeKiroOwnedUniversalHooks drops DefenseClaw's universal-form entries.
+// removeKiroOwnedUniversalHooks drops DefenseClaw's universal-form entries,
+// including one whose script path or name was edited (GAP-0907).
 func removeKiroOwnedUniversalHooks(list []interface{}, hookScript string) []interface{} {
 	kept := make([]interface{}, 0, len(list)+len(kiroV2HookSpecs))
+	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
-		if !kiroUniversalEntryOwned(item, hookScript) {
+		if !kiroUniversalEntryOwned(item, hookScript) && !editedDefenseClawHookEntry(item, edited) {
 			kept = append(kept, item)
 		}
 	}
@@ -292,12 +252,6 @@ func removeKiroOwnedUniversalHooks(list []interface{}, hookScript string) []inte
 // DefenseClaw's entry for every kiroV2HookSpecs event with the matcher and
 // timeout this build writes.
 func kiroUniversalHooksCurrent(list []interface{}, hookScript string) bool {
-	for _, item := range list {
-		obj, _ := item.(map[string]interface{})
-		if trigger, _ := obj["trigger"].(string); kiroV2EventRetired(trigger) && kiroUniversalEntryOwned(item, hookScript) {
-			return false
-		}
-	}
 	for _, spec := range kiroV2HookSpecs {
 		current := false
 		for _, item := range list {
@@ -341,7 +295,6 @@ func removeKiroV2AgentHooks(path, hookScript string) error {
 	if hooks == nil {
 		return nil
 	}
-	migrateKiroV2StopAlias(hooks, hookScript)
 	for event, raw := range hooks {
 		remaining := removeKiroOwnedV2Hooks(raw, hookScript)
 		if len(remaining) == 0 {
@@ -445,9 +398,6 @@ func kiroV2AgentReferencesHook(path, hookScript string) (bool, error) {
 		return kiroUniversalHooksCurrent(list, hookScript), nil
 	}
 	hooks, _ := cfg["hooks"].(map[string]interface{})
-	if kiroV2RetiredEntryOwned(hooks, hookScript) {
-		return false, nil
-	}
 	for _, spec := range kiroV2HookSpecs {
 		list, _ := hooks[spec.event].([]interface{})
 		current := false
@@ -480,7 +430,7 @@ func kiroOwnedV3Hook(item interface{}, hookScript string) bool {
 		return false
 	}
 	command := strings.TrimSpace(fmt.Sprint(action["command"]))
-	return kiroCommandOwned(command, hookScript)
+	return kiroCommandOwned(command, hookScript) || editedDefenseClawHookCommand(command, kiroHookScriptName)
 }
 
 func kiroFileIsDefenseClawOwned(cfg map[string]interface{}, hookScript string) bool {
@@ -555,30 +505,8 @@ func kiroV2AgentAllowsSeed(cfg map[string]interface{}) bool {
 	return true
 }
 
-func migrateKiroV2StopAlias(hooks map[string]interface{}, hookScript string) {
-	raw, ok := hooks[kiroV2StopAlias]
-	if !ok {
-		return
-	}
-	delete(hooks, kiroV2StopAlias)
-	remaining := removeKiroOwnedV2Hooks(raw, hookScript)
-	if len(remaining) == 0 {
-		return
-	}
-	current, _ := hooks["stop"].([]interface{})
-	hooks["stop"] = append(append([]interface{}{}, current...), remaining...)
-}
-
 func reconcileKiroV2Hooks(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
-	list, _ := raw.([]interface{})
-	kept := make([]interface{}, 0, len(list)+1)
-	for _, item := range list {
-		if kiroV2EntryOwned(item, hookScript) {
-			continue
-		}
-		kept = append(kept, item)
-	}
-	return append(kept, entry)
+	return append(removeKiroOwnedV2Hooks(raw, hookScript), entry)
 }
 
 // kiroV2EntryOwned reports whether a CLI 2.x agent hook entry is
@@ -595,12 +523,14 @@ func kiroV2EntryOwned(item interface{}, hookScript string) bool {
 }
 
 // removeKiroOwnedV2Hooks drops DefenseClaw's entries (kiroV2EntryOwned) from
-// one event's hook list.
+// one event's hook list, including one whose script path or name was edited
+// (GAP-0907).
 func removeKiroOwnedV2Hooks(raw interface{}, hookScript string) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list))
+	edited := hookScriptBaseName(hookScript)
 	for _, item := range list {
-		if kiroV2EntryOwned(item, hookScript) {
+		if kiroV2EntryOwned(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
 			continue
 		}
 		out = append(out, item)

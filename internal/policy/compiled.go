@@ -57,6 +57,7 @@ type CompiledAction struct {
 type CompiledFirstParty struct {
 	Name               string   `json:"name"`
 	SourcePathContains []string `json:"source_path_contains"`
+	Reason             string   `json:"reason,omitempty"`
 }
 
 // ThresholdsInput is input.thresholds for guardrail.rego: the resolved

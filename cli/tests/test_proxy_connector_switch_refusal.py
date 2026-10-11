@@ -85,7 +85,7 @@ class GuardedOpenClawSwitchTests(unittest.TestCase):
         with patch("defenseclaw.bootstrap.run_first_run", side_effect=forbidden) as first_run:
             result = CliRunner().invoke(
                 quickstart_cmd,
-                ["--connector", "codex", "--non-interactive", "--yes", "--skip-gateway"],
+                ["--connector", "codex", "--skip-gateway"],
                 env={"DEFENSECLAW_HOME": self.tmp_dir},
             )
         self._assert_refused(result)

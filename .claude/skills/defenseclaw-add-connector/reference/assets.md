@@ -57,7 +57,7 @@ The scanners themselves (`internal/scanner/*`, `internal/enforce/*`, `cli/defens
 
 5. **Signature catalogs** (discovery-observability.md §1.B). Add one entry to both `internal/inventory/ai_signatures.json` and `cli/defenseclaw/inventory/ai_signatures.json`, byte-identical, with `supported_connector` and non-empty `mcp_paths` (plus skill, plugin and rule paths where they apply). `internal/inventory/connector_parity_test.go` requires at least one surface, and MCP unless the connector is in `mcpExempt`.
 
-6. **Python paths** (`cli/defenseclaw/connector_paths.py`). Add the name to `KNOWN_CONNECTORS` and, if it is hook-based, to `HOOK_ONLY_CONNECTORS`. Then add an explicit branch to each function below. Unknown names fall through to OpenClaw unless the table says otherwise.
+6. **Python paths** (`cli/defenseclaw/connector_paths.py`). Add the name to `KNOWN_CONNECTORS`. Then add an explicit branch to each function below. Unknown names fall through to OpenClaw unless the table says otherwise.
 
 | Function | Notes |
 |---|---|

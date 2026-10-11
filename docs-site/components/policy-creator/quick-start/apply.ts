@@ -129,6 +129,7 @@ export function applyAnswers(answers: Answers): Policy {
   // --- Q4: response posture ----------------------------------------------
 
   const resp = RESPONSES.find((r) => r.id === answers.response) ?? RESPONSES[1];
+  policy.guardrail.mode = resp.id === 'ask' || resp.id === 'block' ? 'action' : 'observe';
   policy.guardrail.block_threshold = resp.block_threshold;
   policy.guardrail.alert_threshold = resp.alert_threshold;
   policy.guardrail.hilt = {

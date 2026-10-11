@@ -77,6 +77,10 @@ def test_guardrail_mode_names_connector_overrides() -> None:
     checks = build_readiness_checks(cfg, None, None, ())
     assert any(check.detail == "enabled in action (opencode observe) mode" for check in checks)
     assert guardrail_mode_label({"guardrail": {"mode": "action"}}) == "action"
+    # GAP-0166: the only connector's own mode is the mode, not "observe, 1 action".
+    solo = {"guardrail": {"enabled": True, "mode": "observe", "connectors": {"claudecode": {"mode": "action"}}}}
+    assert guardrail_mode_label(solo) == "action"
+    assert task_status(SetupWizard.GUARDRAIL, solo).label.endswith("on · action")
 
 
 def test_overview_paths_show_home_as_tilde(monkeypatch, tmp_path) -> None:

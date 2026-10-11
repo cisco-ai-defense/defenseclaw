@@ -79,8 +79,11 @@ class TestF0241RuntimeVocabulary(unittest.TestCase):
         # as runtime disable, never as an allow.
         for runtime in ("block", "disable", "  BLOCK "):
             self.assertEqual(_admission_triple({"runtime": runtime})["runtime"], "disable")
-        for runtime in ("enable", "allow", "something-else"):
+        for runtime in ("enable", "allow"):
             self.assertEqual(_admission_triple({"runtime": runtime})["runtime"], "enable")
+        # An unknown spelling is an error, never a silent allow.
+        with self.assertRaises(ValueError):
+            _admission_triple({"runtime": "something-else"})
 
 
 class TestF0543ProvenanceComponentMatch(unittest.TestCase):
@@ -410,12 +413,19 @@ class TestF0742UserSourceNotFirstParty(unittest.TestCase):
         self.assertNotEqual(inv["skills"][0]["policy_verdict"], "allowed")
 
     def test_bundled_codeguard_still_first_party_allowed(self):
+        # GAP-0419: first-party trust needs the shipped CodeGuard content.
+        from defenseclaw.paths import bundled_codeguard_dir
+
+        home = tempfile.mkdtemp(prefix="dclaw-f0742-")
+        self.addCleanup(shutil.rmtree, home, True)
+        path = os.path.join(home, ".openclaw", "skills", "codeguard")
+        shutil.copytree(bundled_codeguard_dir(), path, ignore=shutil.ignore_patterns("__pycache__"))
         inv = {
             "skills": [
                 {
                     "id": "codeguard",
                     "source": "bundled",
-                    "path": "/home/u/.openclaw/skills/codeguard",
+                    "path": path,
                 }
             ],
             "summary": {"skills": {"count": 1}},

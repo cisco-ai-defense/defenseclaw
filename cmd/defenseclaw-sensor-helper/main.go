@@ -88,7 +88,8 @@ func run() error {
 		serviceAccount = flag.String("service-account", "",
 			"gateway account: permit its uid and give the socket its group (unless --allow-uid/--socket-gid are set)")
 		homesFromManifest = flag.String("home-dirs-from-manifest", "",
-			"protected guardian manifest whose enabled users' homes Plane C watches; restarts when it changes")
+			"protected guardian manifest: Plane C watches its enabled users' homes and those of the eligible accounts "+
+				"recorded next to it; restarts when they change")
 		showVersion = flag.Bool("version", false, "print the helper's version and commit, then exit")
 	)
 	flag.Parse()

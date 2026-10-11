@@ -7,9 +7,14 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +26,40 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// A scan must refuse a listener this home did not start before sending either token header.
+func TestGatewayScanRefusesForeignListenerBeforeSendingToken(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"verdict":"clean"}`))
+	}))
+	defer server.Close()
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldConfig, oldEndpoint := cfg, scanGatewayEndpoint
+	t.Cleanup(func() { cfg, scanGatewayEndpoint = oldConfig, oldEndpoint })
+	cfg = config.DefaultConfig()
+	cfg.Gateway.APIBind = host
+	cfg.Gateway.APIPort = port
+	scanGatewayEndpoint = func() (string, string, error) { return server.URL, "test-token", nil }
+
+	err = runGatewayScan(&cobra.Command{}, "skill", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "gateway token was not sent") {
+		t.Fatalf("scan did not refuse foreign listener: %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("foreign listener received %d scan requests", got)
+	}
+}
 
 func TestMarshalScanResultV7Shape(t *testing.T) {
 	t.Parallel()

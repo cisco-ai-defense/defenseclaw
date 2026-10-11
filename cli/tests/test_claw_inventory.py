@@ -75,6 +75,22 @@ from defenseclaw.models import ActionEntry
 from tests.helpers import seed_cached_plugin
 
 
+class TestLocalUserStamp(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX account name lookup")
+    def test_environment_login_name_cannot_override_uid_owner(self) -> None:
+        import pwd
+
+        from defenseclaw.inventory.claw_inventory import _stamp_local_user
+
+        owner = pwd.getpwuid(os.getuid()).pw_name
+        rows = {"plugins": [{}], "mcp": [{}]}
+        with patch.dict(os.environ, {"LOGNAME": "other-user", "USER": "other-user"}):
+            _stamp_local_user(rows)
+        for key in ("plugins", "mcp"):
+            self.assertEqual(rows[key][0]["user"], owner)
+            self.assertEqual(rows[key][0]["user_id"], str(os.getuid()))
+
+
 class TestAmpStaticAgentModeParser(unittest.TestCase):
     def test_register_agent_mode_accepts_literal_24_character_boundary(self) -> None:
         key = "abcdefghijklmnopqrstuvwx"
@@ -2056,9 +2072,10 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
             # unscanned (its only scan target, /tmp/downloads/codeguard,
             # does not match the resolved on-disk path — F-0423).
             self.assertEqual(inv["skills"][0]["policy_verdict"], "unscanned")
-            # The defenseclaw plugin has no untrusted source marker, so the
-            # first-party allow still applies on its resolved provenance.
-            self.assertEqual(inv["plugins"][0]["policy_verdict"], "allowed")
+            # GAP-0419: a plugin folder named defenseclaw is not trusted by
+            # its name and location alone (the gateway recognizes DefenseClaw's
+            # own plugin by its bytes), so this empty one stays unscanned.
+            self.assertEqual(inv["plugins"][0]["policy_verdict"], "unscanned")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

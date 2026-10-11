@@ -86,7 +86,7 @@ func (e *ComposeError) Error() string {
 // Compose returns base with every layer applied, validated. base is never
 // modified. Within a layer the order is: protections (each pack drops the
 // rules whose IDs it ships, then appends its rules to the rule file of the
-// same name, or adds the file), enable, disable, severity_overrides,
+// same category, or adds the file), enable, disable, severity_overrides,
 // suppressions, sensitive_tools. An unknown rule ID, a rule both enabled
 // and disabled, or a suppression ID that already exists is an error.
 func Compose(base *RulePack, protections ProtectionSource, layers ...Customization) (*RulePack, error) {
@@ -109,7 +109,7 @@ func Compose(base *RulePack, protections ProtectionSource, layers ...Customizati
 			return nil, err
 		}
 	}
-	if err := rp.Validate(); err != nil {
+	if err := rp.validate(true); err != nil {
 		return nil, fmt.Errorf("guardrail.rules: composed rule pack: %w", err)
 	}
 	return rp, nil
@@ -224,7 +224,7 @@ func (rp *RulePack) layerProtection(name string, protections ProtectionSource) e
 		ruleFile.Rules = kept
 	}
 	for _, pack := range decoded {
-		target := rp.ruleFileNamed(pack.SourcePath)
+		target := rp.ruleFileCategory(pack.Category)
 		if target == nil {
 			added := *pack
 			added.SourcePath = ""
@@ -249,9 +249,9 @@ func (rp *RulePack) layerProtection(name string, protections ProtectionSource) e
 	return nil
 }
 
-func (rp *RulePack) ruleFileNamed(name string) *RulesFileYAML {
+func (rp *RulePack) ruleFileCategory(category string) *RulesFileYAML {
 	for _, ruleFile := range rp.RuleFiles {
-		if ruleFile.SourcePath != "" && filepath.Base(ruleFile.SourcePath) == name {
+		if ruleFile.Category == category {
 			return ruleFile
 		}
 	}
@@ -305,7 +305,7 @@ func (rp *RulePack) mergeSensitiveTool(override SensitiveToolOverride) {
 // their rules, suppressions, sensitive tools). Judge configurations and
 // local patterns are read-only and stay shared.
 func cloneRulePackForCompose(base *RulePack) *RulePack {
-	out := &RulePack{JudgeConfigs: base.JudgeConfigs, LocalPatterns: base.LocalPatterns}
+	out := &RulePack{JudgeConfigs: base.JudgeConfigs, LocalPatterns: base.LocalPatterns, manifestDigest: base.manifestDigest}
 	if base.Suppressions != nil {
 		supps := *base.Suppressions
 		supps.PreJudgeStrips = append([]PreJudgeStrip(nil), base.Suppressions.PreJudgeStrips...)

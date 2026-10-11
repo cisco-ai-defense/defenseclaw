@@ -82,6 +82,29 @@ func foreignGatewayListenerAt(cfg *config.Config, host string, port int) string 
 	return ""
 }
 
+// otherAccountListenerAt explains a listener on host:port that belongs to
+// another account, and nothing else. foreignGatewayListenerAt also compares
+// the holder with this account's managed gateway, which the installer's
+// pre-flight cannot do for an older release: it would call this account's own
+// running gateway foreign. Linux names the holder's account; lsof on macOS
+// lists only this account's sockets, so a listener nobody lists that answers
+// is another account's.
+func otherAccountListenerAt(host string, port int) string {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	holder, err := gatewayPortHolder(host, port)
+	ownUID := os.Getuid()
+	var who string
+	switch {
+	case err == nil && holder.UID >= 0 && holder.UID != ownUID:
+		who = holder.String(ownUID)
+	case errors.Is(err, daemon.ErrNoListener) && gatewayPortAnswers(addr):
+		who = "a process of another account"
+	default:
+		return ""
+	}
+	return fmt.Sprintf("%s is held by %s, not by this account's gateway", addr, who)
+}
+
 // explainForeignListenerAtReadiness names the holder when another listener
 // answered readiness on the API port. The start check passed, but another
 // account's gateway took the port before this one bound it, and start

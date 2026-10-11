@@ -32,9 +32,13 @@ func withRestoredManagedPosture(t *testing.T) {
 	t.Helper()
 	priorAIDOnly := ManagedEnterpriseActive()
 	priorHosted := managedServiceHosted.Load()
+	// The fixture policy tree belongs to the test account, not root.
+	priorTreeTrust := managedPolicyTreeTrust
+	managedPolicyTreeTrust = func(*config.Config, string) error { return nil }
 	t.Cleanup(func() {
 		setManagedEnterpriseRedactionPosture(priorAIDOnly)
 		setManagedServiceHosted(priorHosted)
+		managedPolicyTreeTrust = priorTreeTrust
 	})
 }
 

@@ -5,6 +5,7 @@
 package gateway
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -254,4 +255,23 @@ func cloneVerdict(v *ScanVerdict) *ScanVerdict {
 		c.ScannerSources = append([]string(nil), v.ScannerSources...)
 	}
 	return &c
+}
+
+// Client replacement must be safe while an inspection holds the prior client.
+func TestCiscoInspectorReplacementDuringInspection(t *testing.T) {
+	g := NewGuardrailInspector("remote", nil, nil)
+	stub := &stubAIDInspector{verdict: allowVerdict("test")}
+	g.SetCiscoInspector(stub)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			g.SetCiscoInspector(nil)
+			g.SetCiscoInspector(stub)
+		}
+	}()
+	for i := 0; i < 100; i++ {
+		g.inspectManagedAIDOnly(context.Background(), "prompt", []ChatMessage{{Role: "user", Content: "hello"}})
+	}
+	<-done
 }

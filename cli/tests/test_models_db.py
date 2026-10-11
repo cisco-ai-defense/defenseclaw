@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.db import Store
 from defenseclaw.enforce.policy import PolicyEngine
+from defenseclaw.hook_metrics import aggregate_connector_hook_decision
 from defenseclaw.models import Event, compare_severity
 
 
@@ -290,6 +291,38 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(self.store.get_counts(alert_count_seconds=60).alerts, 5000)
         self.assertEqual(self.store.get_counts().alerts, 5000)
 
+    def test_status_alert_count_skips_the_classifier_for_rows_that_say_they_were_not_enforced(self):
+        # GAP-0199: the hook classifier is a Python function SQLite calls per
+        # row, so 25,000 allowed hook rows used up the whole budget of the
+        # status alert count. A row that says it was not enforced, or whose
+        # envelope states a non-block action (the shape the gateway writes:
+        # enforced NULL, no "enforced" key), never reaches the classifier.
+        now = datetime.now(timezone.utc).isoformat()
+        details = "connector=codex action=block mode=observe"
+        rows = [(f"column-{index}", now, details, '{"action":"allow"}', 0) for index in range(10)]
+        rows += [(f"envelope-{index}", now, details, '{"action":"allow","enforced":false}', None) for index in range(10)]
+        rows += [(f"gateway-{index}", now, details, '{"action":"allow","would_block":false}', None) for index in range(10)]
+        rows.append(("blocked-column", now, details, '{"action":"block"}', 1))
+        rows.append(("blocked-envelope", now, details, '{"action":"block","enforced":true}', None))
+        rows.append(("blocked-legacy", now, "connector=codex action=block mode=action", '{"action":"block"}', None))
+        self.store.db.executemany(
+            "INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json,"
+            " severity, connector, enforced) VALUES (?, ?, 'connector-hook', 'PreToolUse', 'a', ?, ?, 'INFO',"
+            " 'codex', ?)",
+            rows,
+        )
+        self.store.db.commit()
+        classified = []
+
+        def classify(details, structured, enforced):
+            classified.append(enforced)
+            return aggregate_connector_hook_decision(details, structured, enforced)
+
+        self.store.db.create_function("dc_hook_decision", 3, classify)
+
+        self.assertEqual(self.store.get_counts().alerts, 3)
+        self.assertEqual(sorted(classified, key=str), [1, None, None])
+
     def test_store_init_migrates_run_id_columns(self):
         self.store.close()
         os.unlink(self.tmp.name)
@@ -514,6 +547,30 @@ class ModelsDbTests(unittest.TestCase):
                     None,
                     1,
                 ),
+                # A legacy finding action a current gateway files as a compat
+                # row is an alert when its severity is real (GAP-0187).
+                (
+                    "v8-legacy-finding",
+                    now,
+                    "tool-result-pii-alert",
+                    "tool=Bash severity=HIGH entities=1",
+                    "HIGH",
+                    "security.finding",
+                    "legacy.audit.tool.result.pii.alert",
+                    "codex",
+                    None,
+                ),
+                (
+                    "v8-legacy-finding-info",
+                    now,
+                    "tool-result-pii-alert",
+                    "tool=Bash severity=HIGH entities=1",
+                    "INFO",
+                    "security.finding",
+                    "legacy.audit.tool.result.pii.alert",
+                    "codex",
+                    None,
+                ),
             ],
         )
         self.store.db.commit()
@@ -522,6 +579,10 @@ class ModelsDbTests(unittest.TestCase):
         summary_ids = [event.id for event in self.store.list_alert_summaries(10)]
         actionable_ids = [event.id for event in self.store.list_actionable_alert_summaries(10)]
 
+        self.assertIn("v8-legacy-finding", alert_ids)
+        self.assertIn("v8-legacy-finding", summary_ids)
+        self.assertIn("v8-legacy-finding", actionable_ids)
+        self.assertNotIn("v8-legacy-finding-info", alert_ids)
         self.assertIn("v8-finding", alert_ids)
         self.assertIn("v8-finding", summary_ids)
         self.assertIn("v8-finding", actionable_ids)

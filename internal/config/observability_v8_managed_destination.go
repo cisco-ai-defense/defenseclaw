@@ -188,6 +188,8 @@ func WithObservabilityV8ManagedAIDDestination(
 			},
 		},
 		managedAIDSourceContentHash: options.SourceContentHash,
+		managedAIDDeploymentAliasesOff: effective.TracePolicy.CompatibilityAliases != nil &&
+			!*effective.TracePolicy.CompatibilityAliases,
 	}
 	effective.Destinations = append(effective.Destinations, destination)
 	base := "observability.destinations." + ObservabilityV8ManagedAIDDestinationName
@@ -236,6 +238,16 @@ func ObservabilityV8ManagedAIDSourceContentHash(
 	value := destination.managedAIDSourceContentHash
 	return value, destination.Generated && validObservabilityV8ManagedAIDIdentity(destination) &&
 		validObservabilityV8SourceContentHash(value)
+}
+
+// ObservabilityV8ManagedAIDDeploymentAliases reports whether the managed AI
+// Defense sink adds deployment.environment and deployment.mode to its
+// resource. On main the provider added them while
+// observability.trace_policy.compatibility_aliases was on (the default), so
+// they follow that switch; only a Secure Client config_version 8 source can
+// still turn it off. defenseclaw.device.id does not depend on it.
+func ObservabilityV8ManagedAIDDeploymentAliases(destination ObservabilityV8EffectiveDestination) bool {
+	return !destination.managedAIDDeploymentAliasesOff
 }
 
 // reserveObservabilityV8ManagedInventory prepends a release-owned drop route

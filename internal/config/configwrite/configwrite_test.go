@@ -97,6 +97,49 @@ func TestApplyPatchesValidatesAndAdvancesGeneration(t *testing.T) {
 	}
 }
 
+func TestApplyKeepsCommentsOnRetainedListItems(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	path := writeTestConfig(t, "asset_policy:\n  skill:\n    denied:\n      - name: first # first operator note\n      - name: second # second operator note\n")
+	_, err := Apply(context.Background(), path, []Change{{
+		Path: "asset_policy.skill.denied",
+		Value: []map[string]string{
+			{"name": "second"},
+			{"name": "first"},
+			{"name": "third"},
+		},
+	}}, Options{Actor: "cli:test"})
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"name: first # first operator note", "name: second # second operator note"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("retained list item lost %q:\n%s", want, raw)
+		}
+	}
+}
+
+// yaml.Unmarshal decodes only the first document; a write must not delete a
+// second one an operator appended (GAP-1400).
+func TestApplyRefusesASecondYAMLDocument(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	path := writeTestConfig(t, "guardrail:\n  mode: observe\n---\nguardrail:\n  mode: action\n")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Apply(context.Background(), path, []Change{{Path: "gateway.api_port", Value: 18971}}, Options{Actor: "cli:test"})
+	if !errors.Is(err, ErrMultipleDocuments) {
+		t.Fatalf("Apply error = %v, want ErrMultipleDocuments", err)
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatalf("a refused write changed config.yaml:\n%s", after)
+	}
+}
+
 func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 	path := writeTestConfig(t, "observability: {}\n")
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "managed_enterprise")
@@ -107,6 +150,27 @@ func TestApplyRefusesLocalActorsOnStandaloneManagedHosts(t *testing.T) {
 	}
 	if _, err := ReadGenerationState(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a refused write recorded a generation: %v", err)
+	}
+	if _, err := os.Stat(path + ".lock"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a refused write took the writer lock: %v", err)
+	}
+}
+
+func TestApplyPutsTheOldConfigBackWhenTheGenerationRecordFails(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	path := writeTestConfig(t, "guardrail:\n  mode: observe\n")
+	before, _ := os.ReadFile(path)
+	// A directory where config.generation.json goes makes the second write
+	// of the transaction fail after config.yaml was replaced.
+	if err := os.Mkdir(GenerationPath(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	change := []Change{{Path: "guardrail.mode", Value: "action"}}
+	if _, err := Apply(context.Background(), path, change, Options{Actor: "cli:test"}); err == nil {
+		t.Fatal("Apply succeeded although the generation file could not be written")
+	}
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Fatalf("a failed write left the new config in place:\n%s", after)
 	}
 }
 
@@ -152,5 +216,40 @@ func TestOnlyTheWriterWritesConfigYAML(t *testing.T) {
 			}
 			return nil
 		})
+	}
+}
+
+// A managed host restarts for the enterprise block outside
+// enterprise.inspection, which the gateway reads once at start (GAP-0135).
+func TestManagedRestartRequiredCountsTheEnterpriseBlockOutsideInspection(t *testing.T) {
+	got := ManagedRestartRequired([]string{
+		"guardrail.mode", "enterprise.inspection.mode", "enterprise.enrollment.home_roots", "gateway.api_port",
+	})
+	if want := "gateway.api_port,enterprise.enrollment.home_roots"; strings.Join(got, ",") != want {
+		t.Fatalf("ManagedRestartRequired = %v, want %s", got, want)
+	}
+}
+
+// A block added or removed whole names its leaves, so the Windows hot path
+// sees an enrollment list and not an unknown enterprise key: the first
+// enterprise.enrollment block took the restart transaction (GAP-0887).
+func TestChangedPathsNamesTheLeavesOfABlockAddedOrRemovedWhole(t *testing.T) {
+	base := []byte("config_version: 9\nguardrail:\n  mode: action\n")
+	added := []byte("config_version: 9\nguardrail:\n  mode: action\nenterprise:\n  enrollment:\n    exclude_users: [svc]\n")
+	for _, tc := range []struct {
+		name          string
+		before, after []byte
+	}{
+		{"added", base, added}, {"removed", added, base},
+	} {
+		got, err := ChangedPaths(tc.before, tc.after)
+		if err != nil || strings.Join(got, ",") != "enterprise.enrollment.exclude_users" {
+			t.Fatalf("%s: ChangedPaths = %v, %v", tc.name, got, err)
+		}
+	}
+	// An empty block has no leaf: it is still a change, of the block.
+	got, err := ChangedPaths(base, append(append([]byte(nil), base...), []byte("  connectors:\n    cursor: {}\n")...))
+	if err != nil || strings.Join(got, ",") != "guardrail.connectors.cursor" {
+		t.Fatalf("empty block: ChangedPaths = %v, %v", got, err)
 	}
 }

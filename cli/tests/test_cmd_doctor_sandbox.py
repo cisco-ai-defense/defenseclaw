@@ -187,6 +187,20 @@ def test_a_hung_gateway_times_out(tmp_path: Path, monkeypatch) -> None:
     assert "did not finish" in result.checks[0]["detail"]
 
 
+
+def test_unused_sandbox_keeps_gateway_install_and_registration_failures() -> None:
+    for detail in (
+        "OpenShell 0.1.0 is older than 0.1.1; upgrade it in place",
+        "the gateway refused DefenseClaw's TLS credentials: certificate mismatch",
+    ):
+        rows = cmd_doctor._sandbox_checks_by_root_cause([
+            {"id": "gateway-version", "status": "fail", "detail": detail},
+            {"id": "overlay-images", "status": "warn", "detail": "not built yet: codex"},
+            {"id": "sandbox-hooks", "status": "pass", "detail": "no sandbox is running"},
+        ])
+        assert rows[0]["status"] == "fail"
+        assert rows[0]["detail"] == detail
+
 def test_a_stopped_gateway_is_one_root_cause_and_unused_sandboxes_only_warn(tmp_path: Path, monkeypatch) -> None:
     down = "the gateway is not answering"
     report = {
@@ -219,3 +233,14 @@ def test_a_stopped_gateway_is_one_root_cause_and_unused_sandboxes_only_warn(tmp_
     }
     assert result.checks[4]["detail"].startswith("depends on: OpenShell gateway")
     assert result.failed == 0
+
+
+def test_local_policy_digest_refuses_untrusted_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw import gateway
+
+    monkeypatch.setattr(gateway, "resolve_gateway_binary", lambda: "/tmp/untrusted-gateway")
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", lambda: None)
+    monkeypatch.setattr(
+        gateway.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("untrusted gateway executed")
+    )
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir="")) is None

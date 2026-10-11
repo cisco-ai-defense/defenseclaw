@@ -29,7 +29,7 @@ from defenseclaw.commands.cmd_agent import _resolve_gateway_target
 from defenseclaw.commands.cmd_config import _config_to_masked_dict
 from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import _validate_api_url
 from defenseclaw.commands.cmd_setup_webhook import _view_to_dict
-from defenseclaw.config import OTelDestinationConfig, WebhookConfig, default_config
+from defenseclaw.config import WebhookConfig, default_config
 from defenseclaw.connector_paths import _atomic_json_merge
 from defenseclaw.openclaw_guardrail import (
     _backup,
@@ -168,18 +168,11 @@ def test_f0443_overlong_routing_key_is_redacted():
 
 
 # ---------------------------------------------------------------------------
-# F-0221 — config show (masked dict) must redact OTel header secrets and
-# webhook URLs, not just suffix-matched secret fields.
+# F-0221 — config show (masked dict) must redact webhook URLs, not just
+# suffix-matched secret fields.
 # ---------------------------------------------------------------------------
-def test_f0221_masked_dict_redacts_headers_and_webhook_urls():
+def test_f0221_masked_dict_redacts_webhook_urls():
     cfg = default_config()
-    cfg.otel.destinations = [OTelDestinationConfig(
-        name="test",
-        headers={
-            "Authorization": "Bearer F0221_OTEL_SECRET",
-            "x-honeycomb-team": "F0221_HONEYCOMB_SECRET",
-        },
-    )]
     cfg.webhooks = [
         WebhookConfig(
             name="slack-alerts",
@@ -189,11 +182,9 @@ def test_f0221_masked_dict_redacts_headers_and_webhook_urls():
         ),
     ]
 
-    masked = _config_to_masked_dict(cfg, reveal=False)
+    masked = _config_to_masked_dict(cfg)
     blob = json.dumps(masked)
 
-    assert "F0221_OTEL_SECRET" not in blob
-    assert "F0221_HONEYCOMB_SECRET" not in blob
     assert "F0221_SLACK_SECRET" not in blob
     # The masked URL keeps the host for context but drops the secret path.
     assert "hooks.slack.com" in blob

@@ -301,6 +301,7 @@ func (adapter *LogAdapter) deliverGRPC(ctx context.Context, request *collectorlo
 	if len(headers) > 0 {
 		ctx = metadata.NewOutgoingContext(ctx, metadata.New(headers))
 	}
+	redialGRPC(ctx, adapter.connection)
 	response, err := adapter.grpcClient.Export(ctx, request)
 	if err != nil {
 		if adapter.config.tracker.unsafeSince(dialSequence) || errors.Is(err, netguard.ErrV8AddressProhibited) || errors.Is(err, netguard.ErrV8EndpointInvalid) {

@@ -319,6 +319,19 @@ class LiteLLMCompletionKwargsTests(unittest.TestCase):
         kwargs = litellm_completion_kwargs(llm)
         self.assertEqual(kwargs["api_base"], "http://localhost:11434")
 
+    def test_bare_host_of_an_openai_style_provider_gets_v1(self):
+        # GAP-0156: the judge posts to <host>/v1/chat/completions, LiteLLM only
+        # appends /chat/completions to what it is given.
+        for provider, given, want in (
+            ("openai", "http://127.0.0.1:28555", "http://127.0.0.1:28555/v1"),
+            ("openai-compatible", "https://llm.example/", "https://llm.example/v1"),
+            ("openai", "https://llm.example/v1", "https://llm.example/v1"),
+            ("openai", "https://llm.example/api", "https://llm.example/api"),
+            ("anthropic", "https://llm.example", "https://llm.example"),
+        ):
+            llm = LLMConfig(model="m", provider=provider, base_url=given)
+            self.assertEqual(litellm_completion_kwargs(llm)["api_base"], want, (provider, given))
+
 
 class ParityTests(unittest.TestCase):
     """Guard against the three API-key surfaces drifting apart.

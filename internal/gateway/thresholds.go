@@ -41,12 +41,37 @@ import (
 // does not change the running generation's levels. A pack without a
 // manifest posture is recorded as "", so a pack whose manifest drops the
 // field falls back to the folder-name table again.
+//
+// A build only notes the postures it read (notePackPosture); they become
+// visible here when the generation publishes (publishPackPostures), so an
+// edit of a pack's manifest in a candidate that is then rejected does not
+// change the levels hooks and sandbox decisions use under the running
+// generation.
 var packPostures sync.Map // directory -> posture
+
+// pendingPackPostures holds what builds read until a generation publishes.
+var pendingPackPostures sync.Map // directory -> posture
 
 func rememberPackPosture(dir, posture string) {
 	if dir = strings.TrimSpace(dir); dir != "" {
 		packPostures.Store(dir, posture)
 	}
+}
+
+func notePackPosture(dir, posture string) {
+	if dir = strings.TrimSpace(dir); dir != "" {
+		pendingPackPostures.Store(dir, posture)
+	}
+}
+
+// publishPackPostures makes the postures the published generation's build
+// read the ones the request path resolves with.
+func publishPackPostures() {
+	pendingPackPostures.Range(func(dir, posture any) bool {
+		packPostures.Store(dir, posture)
+		pendingPackPostures.Delete(dir)
+		return true
+	})
 }
 
 // packPosture returns the posture of ref's pack at dir (its resolved
@@ -90,12 +115,29 @@ func packLabel(ref config.RulePackRef, posture string) string {
 // resolveThresholds returns the block and alert levels for connector ("" for
 // the global scope) of cfg, a base or profile-derived configuration.
 func resolveThresholds(cfg *config.Config, connector string) ResolvedThresholds {
+	return resolveThresholdsWith(cfg, connector, packPosture)
+}
+
+func resolveThresholdsWith(cfg *config.Config, connector string, posture func(config.RulePackRef, string) string) ResolvedThresholds {
 	if cfg == nil {
 		return thresholdsFromLevels(nil, "", "default", config.RulePackRef{})
 	}
 	ref := cfg.EffectiveRulePackRefForConnector(connector)
-	posture := packPosture(ref, cfg.ResolveRulePackDir(ref))
-	return thresholdsFromLevels(&cfg.Guardrail, connector, posture, ref)
+	return thresholdsFromLevels(&cfg.Guardrail, connector, posture(ref, cfg.ResolveRulePackDir(ref)), ref)
+}
+
+// buildingPackPosture is packPosture for the generation being built: the
+// postures its build just read are not published yet, but the table built
+// with it is what the proxy path serves once it is, so it must resolve with
+// them, as the request-time resolution does after publishing.
+func buildingPackPosture(ref config.RulePackRef, dir string) string {
+	if dir = strings.TrimSpace(dir); dir == "" {
+		dir = strings.TrimSpace(ref.Dir)
+	}
+	if v, ok := pendingPackPostures.Load(dir); ok && v.(string) != "" {
+		return v.(string)
+	}
+	return packPosture(ref, dir)
 }
 
 // ConfigThresholds is resolveThresholds for a caller outside the gateway
@@ -151,6 +193,11 @@ func thresholdsFromLevels(gc *config.GuardrailConfig, connector, posture string,
 	if blockAt != "" || alertAt != "" {
 		out.Source = "config:" + thresholdConfigPath(gc, connector)
 	}
+	// Anything that blocks also alerts: report the alert level the gateway
+	// enforces (guardrailThresholdRanks clamps the same way).
+	if guardrailSeverityRank(out.Alert) > guardrailSeverityRank(out.Block) && guardrailSeverityRank(out.Block) > severityNone {
+		out.Alert = out.Block
+	}
 	return out
 }
 
@@ -202,9 +249,9 @@ func buildThresholdTable(cfg *config.Config, profiles *guardrailProfileSet) thre
 	}
 	connectors := thresholdConnectorNames(cfg)
 	fill := func(profile string, derived *config.Config) {
-		table[thresholdKey{Profile: profile}] = resolveThresholds(derived, "")
+		table[thresholdKey{Profile: profile}] = resolveThresholdsWith(derived, "", buildingPackPosture)
 		for _, name := range connectors {
-			table[thresholdKey{Profile: profile, Connector: name}] = resolveThresholds(derived, name)
+			table[thresholdKey{Profile: profile, Connector: name}] = resolveThresholdsWith(derived, name, buildingPackPosture)
 		}
 	}
 	fill("", cfg)
@@ -217,6 +264,15 @@ func buildThresholdTable(cfg *config.Config, profiles *guardrailProfileSet) thre
 }
 
 func thresholdConnectorNames(cfg *config.Config) []string {
+	return thresholdConnectorNamesWith(cfg, profileConnectorNames(cfg))
+}
+
+// thresholdConnectorNamesWith is thresholdConnectorNames with the profile
+// connector names (profileConnectorNames) listed by the caller: every profile
+// derived from one configuration shares its guardrail.profiles, and listing
+// them again for each of 1,000 profiles made the generation build quadratic
+// (GAP-0276).
+func thresholdConnectorNamesWith(cfg *config.Config, profileNames []string) []string {
 	seen := map[string]struct{}{}
 	add := func(name string) {
 		if name = config.NormalizeConnectorName(name); name != "" {
@@ -229,7 +285,7 @@ func thresholdConnectorNames(cfg *config.Config) []string {
 	for name := range cfg.Guardrail.Connectors {
 		add(name)
 	}
-	for _, name := range profileConnectorNames(cfg) {
+	for _, name := range profileNames {
 		add(name)
 	}
 	for name := range cfg.ApplicationProtection.Connectors {
@@ -300,10 +356,10 @@ func requestProfile(ctx context.Context, g *Generation) *resolvedGuardrailProfil
 }
 
 // requestPolicyConfig is the configuration a request without an API server
-// decides with: the live generation's, or its verified profile's derived
-// configuration. nil before the first generation.
+// decides with: its generation's (requestGeneration), or its verified
+// profile's derived configuration. nil before the first generation.
 func requestPolicyConfig(ctx context.Context) *config.Config {
-	g := currentGeneration()
+	g := requestGeneration(ctx)
 	if g == nil {
 		return nil
 	}
@@ -313,20 +369,21 @@ func requestPolicyConfig(ctx context.Context) *config.Config {
 	return g.Config
 }
 
-// requestThresholds resolves input.thresholds for a request: the live
-// generation, the request's verified profile and its connector.
+// requestThresholds resolves input.thresholds for a request: its generation
+// (requestGeneration), its verified profile and its connector.
 func requestThresholds(ctx context.Context) policy.ThresholdsInput {
-	g := currentGeneration()
+	g := requestGeneration(ctx)
 	profile := ""
 	if resolved := requestProfile(ctx, g); resolved != nil {
 		profile = resolved.decision.Name
 	}
-	resolved := ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
 	if g != nil && g.Config != nil && g.Config.SecureClientIntegration() {
-		// See guardrailContentAction: Secure Client content keeps the
-		// rule pack's posture levels.
-		resolved = resolvePackThresholds(g.Config, thresholdConnectorFrom(ctx))
+		// The 1.0 proxy verdict sent no thresholds, so the policy used the
+		// data.json levels and trust level (as /v1/guardrail/evaluate does),
+		// whatever the rule pack.
+		return policy.SecureClientGuardrailThresholds(g.Config.PolicyDir)
 	}
+	resolved := ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
 	block, alert := guardrailThresholdRanks(resolved)
 	trust := config.CiscoTrustFull
 	if g != nil && g.Config != nil {

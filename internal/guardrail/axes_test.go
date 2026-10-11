@@ -17,9 +17,57 @@
 package guardrail
 
 import (
+	"io/fs"
 	"reflect"
+	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestEmbeddedJudgeFindingAxes(t *testing.T) {
+	entries, err := fs.ReadDir(defaultsFS, "defaults/judge")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These categories describe capability or control changes, not data
+	// movement. Their lack of a data axis is deliberate.
+	axisless := map[string]bool{
+		"JUDGE-TOOL-SECURITY-CONTROL": true,
+		"JUDGE-TOOL-REMOTE-EXEC":      true,
+		"JUDGE-TOOL-INJ-DESTRUCT":     true,
+	}
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
+			continue
+		}
+		data, err := fs.ReadFile(defaultsFS, "defaults/judge/"+entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var judge JudgeYAML
+		if err := yaml.Unmarshal(data, &judge); err != nil {
+			t.Fatal(err)
+		}
+		for category, finding := range judge.Categories {
+			count++
+			axes := AxesForFinding(finding.FindingID, judge.Name+"."+category, nil)
+			if len(axes) == 0 && !axisless[finding.FindingID] {
+				t.Errorf("%s: %s (%s) has no data axis", entry.Name(), finding.FindingID, category)
+			}
+		}
+	}
+	if count == 0 {
+		t.Fatal("no embedded judge findings checked")
+	}
+	if got := AxesForFinding("JUDGE-TOOL-SENSITIVE-READ", "", nil); !reflect.DeepEqual(got, []DataAxis{AxisSensitiveAccess}) {
+		t.Errorf("sensitive read rule axis = %v", got)
+	}
+	if got := AxesForFinding("", "tool-injection.Sensitive Data Access", nil); !reflect.DeepEqual(got, []DataAxis{AxisSensitiveAccess}) {
+		t.Errorf("sensitive read category axis = %v", got)
+	}
+}
 
 func TestAxesForRuleID_KnownMappings(t *testing.T) {
 	cases := []struct {

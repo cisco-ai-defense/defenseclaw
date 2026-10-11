@@ -44,6 +44,16 @@ DefenseClaw doesn't claim it can override Antigravity's own permission bypass,
 because no recorded test with the official client has shown that.
 </Callout>
 
+<Callout title="A prompt rule blocks only where the agent can block a prompt">
+Claude Code, Codex, Cursor, Devin and Kiro have a prompt hook that can
+block, so a prompt that matches a rule in action mode is stopped before the
+model sees it. Copilot CLI, Hermes, OpenCode, Amp and Antigravity have no
+such hook: their only block events are the tool-call ones listed for each
+connector. On those connectors a prompt that matches a rule is not blocked,
+and the agent sends it to the model. Tool-call rules still block there, so a
+command the prompt leads to is judged before it runs.
+</Callout>
+
 <Accordions>
 <Accordion title="Where the data comes from (for contributors)">
 

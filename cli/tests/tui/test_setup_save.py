@@ -172,8 +172,22 @@ def test_unmodeled_key_edit_is_dropped_by_save_which_is_why_it_is_read_only(tmp_
         assert "agent" not in (yaml.safe_load(stream) or {})
 
 
+def test_macos_fallback_allow_list_bypass_saves_a_boolean(tmp_path, monkeypatch) -> None:
+    data_dir = str(tmp_path)
+    monkeypatch.setenv("HOME", data_dir)
+    monkeypatch.setenv("DEFENSECLAW_HOME", data_dir)
+    cfg = default_config()
+    cfg.data_dir = data_dir
+    cfg.admission.defaults.allow_list_bypass_scan = True
+    apply_config_field(cfg, "admission.defaults.allow_list_bypass_scan", "false")
+
+    assert cfg.admission.defaults.allow_list_bypass_scan is False
+    cfg.save()
+    with open(os.path.join(data_dir, "config.yaml"), encoding="utf-8") as stream:
+        assert yaml.safe_load(stream)["admission"]["defaults"]["allow_list_bypass_scan"] is False
+
 def test_guardrail_rule_pack_keeps_a_custom_pack_untouched() -> None:
-    cfg = {"guardrail": {"enabled": True, "rule_pack_dir": "/packs/MyPack"}}
+    cfg = {"guardrail": {"enabled": True, "rule_pack": "MyPack"}}
     fields = list(guardrail_wizard_fields(cfg))
     assert wizard_field_value(fields, "Rule Pack") == "custom (MyPack)"
     args = build_wizard_args(SetupWizard.GUARDRAIL, fields, cfg)
@@ -186,7 +200,7 @@ def test_guardrail_rule_pack_keeps_a_custom_pack_untouched() -> None:
 
 
 def test_guardrail_rule_pack_preset_is_shown_as_is() -> None:
-    cfg = {"guardrail": {"enabled": True, "rule_pack_dir": "/packs/strict"}}
+    cfg = {"guardrail": {"enabled": True, "rule_pack": "strict"}}
     fields = guardrail_wizard_fields(cfg)
     assert wizard_field_value(fields, "Rule Pack") == "strict"
 

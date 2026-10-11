@@ -32,6 +32,7 @@ from defenseclaw.hook_metrics import (
     connector_hook_decision,
     detection_only_hook_label,
     parse_detail_tokens,
+    would_block_hook_label,
 )
 from defenseclaw.tui.markup_safe import escape as rich_escape
 from defenseclaw.tui.panels.audit import (
@@ -238,6 +239,13 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
 
     severity = (row.severity or "INFO").strip().upper()
     if row.bucket == "security.finding":
+        if row.event_name.startswith("legacy.audit."):
+            # A legacy finding action a current gateway files as a compat row
+            # (tool-result-pii-alert, connector-hook-tampered, ...).
+            return (
+                (row.action or "").strip().lower() in ALERT_LEGACY_FINDING_ACTIONS
+                and severity in _V8_FINDING_SEVERITIES
+            )
         return (
             row.event_name == "finding.observed"
             and severity in _V8_FINDING_SEVERITIES
@@ -331,6 +339,9 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
             "defenseclaw.agent.id",
             "defenseclaw.health.subsystem",
         )
+        # A legacy.audit.* compat row (tool-result-pii-alert) has no target_ref; its own
+        # target is the tool, as the CLI table and the detail pane show (GAP-0217).
+        or (row.target or "").strip()
         or row.event_name
     )
     summary = (
@@ -356,6 +367,17 @@ def _v8_alert_event(row: V8EventHistoryRow, decisions: Mapping[str, str] | None 
     if summary:
         detail_parts.append(f"summary={summary}")
     facts: list[tuple[str, str]] = []
+    if payload_text(payload, "defenseclaw.scan.scanner") == "codeguard":
+        location = payload_text(payload, "defenseclaw.finding.location") or (row.target or "")
+        file_path = location.replace("\\", "/")
+        if ":" in file_path and file_path.rsplit(":", 1)[1].isdigit():
+            file_path = file_path.rsplit(":", 1)[0]
+        if "/" in file_path and not file_path.startswith("<hashed"):
+            file_name = file_path.rsplit("/", 1)[1]
+            if target == file_name:
+                parent = file_path.rsplit("/", 2)[-2]
+                target = f"{parent}/{file_name}"
+                facts.append(("File", file_path))
     if row.connector:
         facts.append(("Connector", row.connector))
     rule_id = payload_text(payload, "defenseclaw.finding.rule_id")
@@ -1338,6 +1360,10 @@ class AlertsPanelModel:
             if decision := _hook_decision_label(self.store, event.id, event.target):
                 facts = tuple(fact for fact in event.facts if fact[0] != "Decision")
                 event = replace(event, facts=(*facts, ("Decision", decision)))
+        if agent := _alert_agent_facts(self.store, event.id):
+            # Who ran it: user, agent identity, instance, session, depth (GAP-0381).
+            labels = {label for label, _ in agent}
+            event = replace(event, facts=(*(fact for fact in event.facts if fact[0] not in labels), *agent))
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
@@ -1782,6 +1808,16 @@ def _hook_decision_label(store: object | None, event_id: str, hook_target: str =
     return _hook_decision_from_rows(rows, hook_target)
 
 
+def _alert_agent_facts(store: object | None, event_id: str) -> tuple[tuple[str, str], ...]:
+    """The CLI's agent facts of an alert, for the detail pane (GAP-0381)."""
+    try:
+        from defenseclaw.commands.cmd_alerts import alert_agent_facts  # noqa: PLC0415
+
+        return tuple(alert_agent_facts(store, [event_id]).get(event_id, ()))
+    except Exception:  # noqa: BLE001 - detail enrichment must not hide the selected row.
+        return ()
+
+
 def _finding_display_title(rule_id: str, title: str) -> str:
     """The rule pack's title for a redacted secret finding, as the CLI shows it (GAP-1456)."""
     if not rule_id or not title:
@@ -1849,12 +1885,15 @@ def _hook_decision_from_rows(rows: Iterable[str], hook_target: str = "") -> str:
         action = tokens.get("action", "").strip().lower()
         mode = tokens.get("mode", "").strip().lower()
         if action == "block":
+            # A block on PostToolUse held the result back; the call had run (GAP-1344).
+            if detection_only_hook_label(hook_target) == POST_TOOL_DECISION:
+                return POST_TOOL_DECISION
             return f"blocked ({mode} mode)" if mode else "blocked"
         raw_action = tokens.get("raw_action", "").strip().lower()
         observed_block = action == "allow" and raw_action == "block"
         if tokens.get("would_block", "").strip().lower() == "true" or observed_block:
             # The same label as "defenseclaw alerts" (GAP-1560).
-            decision = detection_only_hook_label(hook_target) or "would block (observe mode)"
+            decision = would_block_hook_label(hook_target, mode)
         elif not decision and action:
             decision = "allowed" if action == "allow" else action
     return decision

@@ -41,6 +41,23 @@ func TestAgentRegistry_LRUEvictionAtCap(t *testing.T) {
 	}
 }
 
+// GAP-0291: evicting one of two agent identities that share a session keeps
+// the session ambiguous, so the evicted one seen again does not take the
+// session's identity-less traffic while the other still holds it.
+func TestAgentRegistry_EvictionKeepsSessionAmbiguity(t *testing.T) {
+	r := NewAgentRegistry("", "")
+	ctx := context.Background()
+	r.AgentInstanceFor("agt-a", "shared") // the older entry, or first by key order
+	r.AgentInstanceFor("agt-b", "shared")
+	r.mu.Lock()
+	r.evictOldestLocked()
+	r.mu.Unlock()
+	r.AgentInstanceFor("agt-a", "shared")
+	if got := r.AgentIdentityForSession(ctx, "shared"); got != "" {
+		t.Fatalf("session shared by two identities joined %q after an eviction", got)
+	}
+}
+
 // TestAgentRegistry_EvictionTieBreakDeterministic pins that when two
 // entries share the same LastSeen (common with low-resolution test
 // wallclocks), eviction picks the lexicographically smallest key

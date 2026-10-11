@@ -58,7 +58,8 @@ def test_permanent_installer_flags_are_documented_and_accepted() -> None:
     for flag in ("--yes", "--version", "--local", "--rollback"):
         assert f"`{flag}`" in runbook
         assert re.search(rf"^\s+{re.escape(flag)}[)|]", install_sh, re.MULTILINE), flag
-    assert '*) warn "Ignoring unknown option: $1" ;;' in install_sh
+    # Only the copy defenseclaw upgrade runs ignores an unknown flag.
+    assert '[[ -n "${RUN_BY_UPGRADE}" ]] || usage_error "Unknown option: $1"\n            warn "Ignoring unknown option: $1" ;;' in install_sh
 
 
 def test_handoff_marker_in_runbook_matches_the_script() -> None:

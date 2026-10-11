@@ -25,10 +25,10 @@
     With -UpgradeFrom it is the enterprise upgrade lane instead of step 1:
     the previous release's Setup /ensure installs with the same config, then
     this Setup's /ensure upgrades it. The upgrade must report the applied
-    policy from a newer config generation, write migration-v9.json and
-    config.yaml.v8.bak, and keep the secrets and the guardian ledger; steps
-    2-5 then run on the upgraded deployment. The v8 config, the upgraded
-    config and the migration record are kept in -ResultsRoot for
+    policy from a newer config generation, keep the secrets and the guardian
+    ledger, and write migration-v9.json plus config.yaml.v8.bak for v8 input.
+    Steps 2-5 then run on the upgraded deployment. The source config, upgraded
+    config and any migration record are kept in -ResultsRoot for
     scripts/check_enterprise_upgrade_config.py. The rollback drill of the
     Linux and macOS upgrade lanes is not run here: the Windows Setup
     transaction has no lifecycle test fault.
@@ -365,8 +365,10 @@ $config = Join-Path $stage 'config.yaml'
 # keeps security_complete false until an administrator records the live Claude
 # Code policy proof with Repair -AttestClaudeEffectivePolicy
 # (docs/WINDOWS-ENTERPRISE-CERTIFICATION.md), which a runner cannot give.
+# The lane config sets no LLM judge, so status and verify also warn
+# scanner_judge_missing once the Setup has installed the scanner runtime.
 $installedChecks = @(
-    '--coverage-complete', '--security-incomplete',
+    '--coverage-complete', '--security-incomplete', '--allow-warning', 'scanner_judge_missing',
     '--machine-policy-enforced', 'codex', '--machine-policy-target', 'claudecode'
 )
 
@@ -395,8 +397,14 @@ try {
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not protect $stage" }
     & icacls.exe $stage /setowner '*S-1-5-32-544' | Out-Null
     if ($LASTEXITCODE -ne 0) { Fail "icacls could not set the owner of $stage" }
+    $sourceConfigVersion = if ($UpgradeFrom -and $PreviousVersion -match '^v?0\.') { 8 } else { 9 }
+    # A standalone Windows host without a policy_dir keeps the embedded rule
+    # packs only while the config names none: rule_pack: default would select
+    # the default pack of a policy_dir this host does not have, and the Setup
+    # refuses it ("policy_dir is not set").
+    $rulePackLines = if ($sourceConfigVersion -eq 8) { @('  rule_pack_dir: ""') } else { @() }
     $configText = @(
-        'config_version: 8'
+        "config_version: $sourceConfigVersion"
         'deployment_mode: managed_enterprise'
         'enterprise:'
         '  profile: standalone'
@@ -406,7 +414,7 @@ try {
         'guardrail:'
         '  enabled: true'
         '  mode: observe'
-        '  rule_pack_dir: ""'
+        $rulePackLines
         '  connectors:'
         '    claudecode:'
         '      enabled: true'
@@ -428,7 +436,7 @@ try {
             $installedChecks + @('--allow-warning', 'ensure_install'))
         Assert-ServicesRunning
         Assert-PolicyApplied
-        Copy-Item -LiteralPath $config -Destination (Join-Path $ResultsRoot 'config-v8.yaml')
+        Copy-Item -LiteralPath $config -Destination (Join-Path $ResultsRoot 'config-before.yaml')
         $run = Invoke-Lifecycle -Name '01-previous-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
         Assert-Result $run 'previous-status' (@('--action', 'status', '--installed', '--version', $PreviousVersion) + $installedChecks)
         $previousGeneration = Get-ConfigGeneration $run.Result
@@ -442,10 +450,12 @@ try {
             $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$previousGeneration))
         Assert-ServicesRunning
         $record = Join-Path (Split-Path -Parent $installedConfig) 'migration-v9.json'
-        if (-not (Test-Path -LiteralPath $record -PathType Leaf)) { Fail "the upgrade wrote no $record" }
-        if ((Get-FileSha "$installedConfig.v8.bak") -ne $previousConfigSha) { Fail "$installedConfig.v8.bak is not the previous config" }
+        if ($sourceConfigVersion -eq 8) {
+            if (-not (Test-Path -LiteralPath $record -PathType Leaf)) { Fail "the upgrade wrote no $record" }
+            if ((Get-FileSha "$installedConfig.v8.bak") -ne $previousConfigSha) { Fail "$installedConfig.v8.bak is not the previous config" }
+            Copy-Item -LiteralPath $record -Destination (Join-Path $ResultsRoot 'migration-v9.json')
+        }
         Copy-Item -LiteralPath $installedConfig -Destination (Join-Path $ResultsRoot 'config-upgraded.yaml')
-        Copy-Item -LiteralPath $record -Destination (Join-Path $ResultsRoot 'migration-v9.json')
         if ((Get-TreeSha $secretsDirectory) -ne $previousSecretsSha) { Fail "the upgrade changed the secrets under $secretsDirectory" }
         if ((Get-FileSha $guardianLedger) -ne $previousLedgerSha) { Fail "the upgrade changed the guardian ledger $guardianLedger" }
     }
@@ -465,8 +475,7 @@ try {
     if ((Get-MarkerValue 'TrustMode') -ne 'hash_pinned') { Fail "the HKLM marker trust mode is '$(Get-MarkerValue 'TrustMode')', want 'hash_pinned'" }
     if (-not (Test-Path -LiteralPath $arpKey)) { Fail 'the Add/Remove Programs entry is missing' }
 
-    # The same command line an MDM re-applies: the v8 CONFIG= is installed as
-    # its v9 migration, which must not count as drift.
+    # The same command line an MDM re-applies must not count as drift.
     Step 'Setup /ensure again with the same CONFIG= (must be a no-op)'
     $run = Invoke-Lifecycle -Name '02-setup-ensure-noop' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
     Assert-Result $run 'setup-ensure-noop' (@('--action', 'ensure', '--noop', '--installed', '--version', $Version, '--ready') + $installedChecks)

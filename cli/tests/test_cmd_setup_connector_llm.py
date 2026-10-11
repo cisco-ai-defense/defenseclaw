@@ -59,7 +59,6 @@ class TestGuardrailConnectorAliases(unittest.TestCase):
                     "--scanner-mode",
                     "local",
                     "--no-restart",
-                    "--no-verify",
                 ],
                 self.app,
             )

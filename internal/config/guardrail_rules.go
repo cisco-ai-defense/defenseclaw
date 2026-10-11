@@ -22,6 +22,8 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 )
 
@@ -132,6 +134,21 @@ func (c *Config) ResolveRulePackDir(ref RulePackRef) string {
 	return ""
 }
 
+// EmbeddedRulePack reports whether ref selects the rule packs embedded in
+// the gateway: the built-in default pack with no policy_dir. A Windows
+// standalone install has none (standalonePolicyDirDefault: its Setup ships no
+// policy folder), and there the implicit default pack and an empty v8
+// rule_pack_dir are the embedded packs too. The documented v9 spelling
+// "rule_pack: default" was refused there with "policy_dir is not set", and
+// Setup /ensure exited 1639.
+func (c *Config) EmbeddedRulePack(ref RulePackRef) bool {
+	if c == nil || ref.Name != "default" || strings.TrimSpace(c.PolicyDir) != "" {
+		return false
+	}
+	_, custom := c.Guardrail.CustomPacks[ref.Name]
+	return !custom
+}
+
 // vendorRulePackDir is the shipped built-in pack name of the Linux or macOS
 // standalone layout this config is read from, "" elsewhere.
 func (c *Config) vendorRulePackDir(name string) string {
@@ -148,7 +165,8 @@ func (c *Config) vendorRulePackDir(name string) string {
 // ReferencedRulePackDirs maps every rule-pack setting the gateway can load
 // to the directory it resolves to, keyed by the config path an
 // administrator wrote: the global pack, each connector, each guardrail
-// profile and its connectors, and every custom_packs entry. A v8
+// profile and its connectors, automatic-protection overlays, and every
+// custom_packs entry. A v8
 // rule_pack_dir is labelled as such; an empty directory selects the
 // embedded packs.
 func (c *Config) ReferencedRulePackDirs() map[string]string {
@@ -179,14 +197,80 @@ func (c *Config) ReferencedRulePackDirs() map[string]string {
 			}
 		}
 	}
+	if ref, ok := rulePackRefOf(c.ApplicationProtection.Guardrail); ok {
+		out[label("application_protection.guardrail", c.ApplicationProtection.Guardrail)] = c.ResolveRulePackDir(ref)
+	}
+	for connector, pc := range c.ApplicationProtection.Connectors {
+		if ref, ok := rulePackRefOf(pc.Guardrail); ok {
+			out[label("application_protection.connectors."+connector+".guardrail", pc.Guardrail)] = c.ResolveRulePackDir(ref)
+		}
+	}
 	for name, pack := range g.CustomPacks {
 		out["guardrail.custom_packs."+name+".path"] = strings.TrimSpace(pack.Path)
 	}
 	return out
 }
 
+// cleanCustomPackPaths writes every absolute guardrail.custom_packs path in
+// its clean form, so one pack has one effective policy digest however its
+// path is spelled (/etc/p/guardrail/../guardrail/acme, a trailing slash):
+// the digest covers the loaded config, and two spellings of one pack gave
+// two digests (GAP-0548). Windows paths are left as written: Clean there
+// also turns forward slashes into backslashes.
+func cleanCustomPackPaths(cfg *Config) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	for name, pack := range cfg.Guardrail.CustomPacks {
+		path := strings.TrimSpace(pack.Path)
+		if !filepath.IsAbs(path) {
+			continue
+		}
+		if clean := filepath.Clean(path); clean != pack.Path {
+			pack.Path = clean
+			cfg.Guardrail.CustomPacks[name] = pack
+		}
+	}
+}
+
+// RulePackCheckOrder orders the keys of ReferencedRulePackDirs for a check:
+// the global setting first (guardrail.rule_pack, else guardrail.rule_pack_dir),
+// then every other setting whose pack differs from it, by key. A connector
+// that only inherits the global pack is not checked again, so a refusal names
+// the key the administrator wrote. It used to name
+// guardrail.connectors.amp.rule_pack_dir, which sorts first, for a config
+// that never set it (GAP-1193, GAP-0039).
+func RulePackCheckOrder(dirs map[string]string) []string {
+	global := "guardrail.rule_pack_dir"
+	if _, ok := dirs["guardrail.rule_pack"]; ok {
+		global = "guardrail.rule_pack"
+	}
+	globalDir, hasGlobal := dirs[global]
+	globalDir = strings.TrimSpace(globalDir)
+	labels := make([]string, 0, len(dirs))
+	for label := range dirs {
+		labels = append(labels, label)
+	}
+	sort.Strings(labels)
+	order := []string{}
+	if hasGlobal {
+		order = append(order, global)
+	}
+	for _, label := range labels {
+		if label == global {
+			continue
+		}
+		if dir := strings.TrimSpace(dirs[label]); hasGlobal && globalDir != "" && filepath.Clean(dir) == filepath.Clean(globalDir) {
+			continue
+		}
+		order = append(order, label)
+	}
+	return order
+}
+
 // EffectiveRulesForConnector returns the guardrail.rules layers that apply
-// to the connector, broadest first: guardrail.rules, the connector's
+// to the connector, broadest first: guardrail.rules, automatic protection
+// (when enabled for a connector without manual setup), the connector's
 // guardrail.connectors entry, then on a profile-derived configuration the
 // profile's rules and its connectors entry. Empty layers are left out.
 func (c *Config) EffectiveRulesForConnector(connector string) []GuardrailRulesConfig {
@@ -201,6 +285,12 @@ func (c *Config) EffectiveRulesForConnector(connector string) []GuardrailRulesCo
 		}
 	}
 	add(&g.Rules)
+	if c.ApplicationProtection.Enabled && !c.manualConnectorConfigured(connector) && strings.TrimSpace(connector) != "" {
+		add(c.ApplicationProtection.Guardrail.Rules)
+		if pc, ok := c.ApplicationProtection.connectorOverride(connector); ok {
+			add(pc.Guardrail.Rules)
+		}
+	}
 	if strings.TrimSpace(connector) != "" {
 		if pc, ok := g.connectorOverride(connector); ok {
 			add(pc.Rules)

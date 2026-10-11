@@ -7,6 +7,7 @@ package enterprisehooks
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -26,6 +27,33 @@ func (e *WindowsTargetSessionUnavailableError) Error() string {
 		"enterprise hooks: no active interactive session token matches explicit target SID %s; guardian will retry",
 		sid,
 	)
+}
+
+// windowsSessionState is one WTS session: its ID and connection state.
+type windowsSessionState struct {
+	ID           uint32
+	Active       bool
+	Disconnected bool
+}
+
+// windowsTargetSessionOrder is the order in which a target's session tokens
+// are tried: the active sessions, then, when allowDisconnected is set, the
+// disconnected ones, each in session ID order. A disconnected session keeps
+// its user signed in, and managed ACP enrollment refused such a user as
+// having no signed-in session (GAP-0835).
+func windowsTargetSessionOrder(sessions []windowsSessionState, allowDisconnected bool) []uint32 {
+	var active, disconnected []uint32
+	for _, session := range sessions {
+		switch {
+		case session.Active:
+			active = append(active, session.ID)
+		case session.Disconnected && allowDisconnected:
+			disconnected = append(disconnected, session.ID)
+		}
+	}
+	slices.Sort(active)
+	slices.Sort(disconnected)
+	return append(active, disconnected...)
 }
 
 // IsWindowsTargetSessionUnavailable reports only the typed absence case. It

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"sort"
 	"strings"
@@ -126,6 +127,22 @@ func (c *Config) ValidateGuardrailProfiles() error {
 	return c.Guardrail.validateProfiles(c.SecureClientIntegration())
 }
 
+// UnknownGuardrailProfileError is a profile name that an assignment or
+// guardrail.default_profile uses and guardrail.profiles does not define. The
+// text is the loader's, and config validate places it at Field (GAP-0288).
+type UnknownGuardrailProfileError struct {
+	// Where is the setting as the loader names it, Field the YAML path of the
+	// profile name it holds.
+	Where, Field string
+	Profile      string
+	// Defined are the profile names guardrail.profiles defines, sorted.
+	Defined []string
+}
+
+func (e *UnknownGuardrailProfileError) Error() string {
+	return fmt.Sprintf("%s: unknown profile %q", e.Where, e.Profile)
+}
+
 func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 	if !g.HasProfiles() {
 		return nil
@@ -148,7 +165,11 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 	}
 	for i, assignment := range g.ProfileAssignments {
 		if _, ok := g.Profiles[assignment.Profile]; !ok {
-			return fmt.Errorf("guardrail.profile_assignments[%d]: unknown profile %q", i, assignment.Profile)
+			return &UnknownGuardrailProfileError{
+				Where:   fmt.Sprintf("guardrail.profile_assignments[%d]", i),
+				Field:   fmt.Sprintf("guardrail.profile_assignments[%d].profile", i),
+				Profile: assignment.Profile, Defined: names,
+			}
 		}
 		if assignment.Match.Empty() {
 			return fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors or agents; use guardrail.default_profile for everyone else", i)
@@ -161,7 +182,9 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 	}
 	if def := strings.TrimSpace(g.DefaultProfile); def != "" {
 		if _, ok := g.Profiles[def]; !ok {
-			return fmt.Errorf("guardrail.default_profile: unknown profile %q", def)
+			return &UnknownGuardrailProfileError{
+				Where: "guardrail.default_profile", Field: "guardrail.default_profile", Profile: def, Defined: names,
+			}
 		}
 	}
 	return nil
@@ -263,12 +286,27 @@ func (c *Config) DerivedForProfile(name string) (*Config, error) {
 	if !ok {
 		return nil, fmt.Errorf("guardrail profile %q is not defined", name)
 	}
-	out, err := deepCopyConfig(c)
+	base, err := copyConfigSharingProfiles(c)
 	if err != nil {
 		return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
 	}
-	applyGuardrailProfile(out, profile)
-	return out, nil
+	return deriveProfileFrom(base, profile), nil
+}
+
+// deriveProfileFrom applies profile to a shallow copy of base, a private
+// copy of the configuration (copyConfigSharingProfiles) that every profile
+// derived from it shares read-only. applyGuardrailProfile writes entries of
+// guardrail.connectors, application_protection.connectors and
+// connector_hooks, so the copy gets its own of those maps. One copy for all
+// profiles instead of one each: with 1,000 profiles the copies took a fifth
+// of the gateway start (GAP-0276).
+func deriveProfileFrom(base *Config, profile GuardrailProfile) *Config {
+	out := *base
+	out.Guardrail.Connectors = maps.Clone(base.Guardrail.Connectors)
+	out.ApplicationProtection.Connectors = maps.Clone(base.ApplicationProtection.Connectors)
+	out.ConnectorHooks = maps.Clone(base.ConnectorHooks)
+	applyGuardrailProfile(&out, profile)
+	return &out
 }
 
 // DerivedGuardrailProfile is one precomputed profile: its derived
@@ -290,12 +328,13 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	base, err := copyConfigSharingProfiles(c)
+	if err != nil {
+		return nil, fmt.Errorf("guardrail profiles: %w", err)
+	}
 	out := make(map[string]DerivedGuardrailProfile, len(names))
 	for _, name := range names {
-		derived, err := c.DerivedForProfile(name)
-		if err != nil {
-			return nil, err
-		}
+		derived := deriveProfileFrom(base, c.Guardrail.Profiles[name])
 		digest, err := GuardrailPolicyDigest(derived)
 		if err != nil {
 			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
@@ -311,21 +350,22 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 // upstream and judge LLM blocks) are deliberately left out, so a digest never
 // commits to a credential.
 type guardrailPolicyDigestView struct {
-	Version           int                                    `json:"v"`
-	Mode              string                                 `json:"mode"`
-	BlockAt           string                                 `json:"block_at"`
-	AlertAt           string                                 `json:"alert_at"`
-	HILT              HILTConfig                             `json:"hilt"`
-	RulePackDir       string                                 `json:"rule_pack_dir"`
-	RulePack          string                                 `json:"rule_pack,omitempty"`
-	Rules             *GuardrailRulesConfig                  `json:"rules,omitempty"`
-	ProfileRules      *GuardrailRulesConfig                  `json:"profile_rules,omitempty"`
-	BlockMessage      string                                 `json:"block_message"`
-	Connectors        map[string]PerConnectorGuardrailConfig `json:"connectors"`
-	ProfileConnectors map[string]PerConnectorGuardrailConfig `json:"profile_connectors"`
-	AutoProtection    PerConnectorGuardrailConfig            `json:"application_protection"`
-	AutoConnectors    map[string]PerConnectorGuardrailConfig `json:"application_protection_connectors"`
-	HookModes         map[string]string                      `json:"hook_modes"`
+	Version               int                                    `json:"v"`
+	Mode                  string                                 `json:"mode"`
+	BlockAt               string                                 `json:"block_at"`
+	AlertAt               string                                 `json:"alert_at"`
+	HILT                  HILTConfig                             `json:"hilt"`
+	RulePackDir           string                                 `json:"rule_pack_dir"`
+	RulePack              string                                 `json:"rule_pack,omitempty"`
+	Rules                 *GuardrailRulesConfig                  `json:"rules,omitempty"`
+	ProfileRules          *GuardrailRulesConfig                  `json:"profile_rules,omitempty"`
+	BlockMessage          string                                 `json:"block_message"`
+	Connectors            map[string]PerConnectorGuardrailConfig `json:"connectors"`
+	ProfileConnectors     map[string]PerConnectorGuardrailConfig `json:"profile_connectors"`
+	AutoProtectionEnabled bool                                   `json:"application_protection_enabled"`
+	AutoProtection        PerConnectorGuardrailConfig            `json:"application_protection"`
+	AutoConnectors        map[string]PerConnectorGuardrailConfig `json:"application_protection_connectors"`
+	HookModes             map[string]string                      `json:"hook_modes"`
 }
 
 // GuardrailPolicyDigest returns "sha256:" + the hex SHA-256 of the canonical
@@ -338,17 +378,18 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 	}
 	g := cfg.Guardrail
 	view := guardrailPolicyDigestView{
-		Version:        1,
-		Mode:           strings.TrimSpace(g.Mode),
-		BlockAt:        canonicalGuardrailLevel(g.BlockAt),
-		AlertAt:        canonicalGuardrailLevel(g.AlertAt),
-		HILT:           g.HILT,
-		RulePackDir:    g.RulePackDir,
-		RulePack:       g.RulePack,
-		ProfileRules:   g.profileRules,
-		BlockMessage:   g.BlockMessage,
-		Connectors:     g.Connectors,
-		AutoProtection: cfg.ApplicationProtection.Guardrail,
+		Version:               1,
+		Mode:                  strings.TrimSpace(g.Mode),
+		BlockAt:               canonicalGuardrailLevel(g.BlockAt),
+		AlertAt:               canonicalGuardrailLevel(g.AlertAt),
+		HILT:                  g.HILT,
+		RulePackDir:           g.RulePackDir,
+		RulePack:              g.RulePack,
+		ProfileRules:          g.profileRules,
+		BlockMessage:          g.BlockMessage,
+		Connectors:            digestConnectors(g.Connectors),
+		AutoProtectionEnabled: cfg.ApplicationProtection.Enabled,
+		AutoProtection:        cfg.ApplicationProtection.Guardrail,
 		HookModes: map[string]string{
 			"claude_code": cfg.ClaudeCode.Mode,
 			"codex":       cfg.Codex.Mode,
@@ -376,6 +417,54 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// digestConnectors is the connector overrides with enabled: true cleared
+// (true is the default, so it digests like the unset key, GAP-0032) and the
+// block_at and alert_at levels upper-cased.
+func digestConnectors(in map[string]PerConnectorGuardrailConfig) map[string]PerConnectorGuardrailConfig {
+	if len(in) == 0 {
+		return in
+	}
+	out := make(map[string]PerConnectorGuardrailConfig, len(in))
+	for name, pc := range in {
+		if pc.Enabled != nil && *pc.Enabled {
+			pc.Enabled = nil
+		}
+		// The levels take any case, as the global ones do (GAP-0329).
+		pc.BlockAt, pc.AlertAt = canonicalGuardrailLevel(pc.BlockAt), canonicalGuardrailLevel(pc.AlertAt)
+		out[name] = pc
+	}
+	return out
+}
+
+// HILTBlockedByThreshold reports a valid but inert approval setting. Blocking
+// takes precedence over confirmation, so no finding at or above min_severity
+// can reach an approval prompt when the block threshold is at or below it.
+// Callers pass the resolved block level, including the selected pack default.
+func HILTBlockedByThreshold(hilt HILTConfig, blockAt string) bool {
+	if !hilt.Enabled {
+		return false
+	}
+	rank := func(level string) int {
+		switch canonicalGuardrailLevel(level) {
+		case "LOW":
+			return 1
+		case "MEDIUM":
+			return 2
+		case "HIGH":
+			return 3
+		case "CRITICAL":
+			return 4
+		default:
+			return 0
+		}
+	}
+	minimum := rank(hilt.MinSeverity)
+	if minimum == 0 {
+		minimum = rank("HIGH")
+	}
+	return rank(blockAt) > 0 && minimum >= rank(blockAt)
 }
 
 // policyFields returns the profile's policy fields in the per-connector
@@ -538,9 +627,32 @@ func (g *GuardrailConfig) profileConnectorOverlay(connector string, overlay PerC
 	return overlay
 }
 
-// deepCopyConfig copies c through JSON, which keeps nil and empty maps and
-// slices apart (the gateway's cloneConfig uses the same encoding).
-func deepCopyConfig(c *Config) (*Config, error) {
+// copyConfigSharingProfiles is DeepCopy for a derived configuration:
+// the copy shares c's profile table and assignments instead of copying
+// them. A derived configuration is read-only, and the copy used to carry
+// every profile again, so deriving P profiles copied P tables of P
+// profiles (500 profiles took 4 s, 1000 took 17 s and 2000 took 68 s, at
+// every start and reload of the gateway).
+func copyConfigSharingProfiles(c *Config) (*Config, error) {
+	slim := *c
+	slim.Guardrail.Profiles, slim.Guardrail.ProfileAssignments = nil, nil
+	out, err := slim.DeepCopy()
+	if err != nil {
+		return nil, err
+	}
+	out.Guardrail.Profiles, out.Guardrail.ProfileAssignments = c.Guardrail.Profiles, c.Guardrail.ProfileAssignments
+	return out, nil
+}
+
+// DeepCopy copies c through JSON, which keeps nil and empty maps and slices
+// apart; the cloneConfig of the gateway and every derived profile use it.
+// JSON drops RuntimeV8RulePackRebase (json:"-"), so it is copied explicitly:
+// a derived profile without it scanned with the 0.8.x pack unrebased while
+// every other user got the rebased one (GAP-1359). It also drops the
+// standalone AI Defense credential binding Load records, which is copied
+// too: without it a copy took the AI Defense key from api_key_env in the
+// service environment instead of the protected credential (GAP-1483).
+func (c *Config) DeepCopy() (*Config, error) {
 	data, err := json.Marshal(c)
 	if err != nil {
 		return nil, fmt.Errorf("copy configuration: %w", err)
@@ -549,5 +661,9 @@ func deepCopyConfig(c *Config) (*Config, error) {
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("copy configuration: %w", err)
 	}
+	out.RuntimeV8RulePackRebase = c.RuntimeV8RulePackRebase
+	aid := c.CiscoAIDefense
+	out.CiscoAIDefense.protectedCredentialRequired = aid.protectedCredentialRequired
+	out.CiscoAIDefense.protectedCredential, out.CiscoAIDefense.protectedSecretsDir = aid.protectedCredential, aid.protectedSecretsDir
 	return &out, nil
 }

@@ -14,7 +14,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/pelletier/go-toml/v2"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/spf13/cobra"
 )
 
@@ -1052,11 +1052,11 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 	// packaging/macos/uninstall.sh — the operator sees a clear
 	// diagnostic and the file stays intact for hand-editing.
 	//
-	// A nested TOML validation would need a full parser; go-toml is
-	// already imported by other parts of the tree, so the cost of
-	// this guard is one Unmarshal call per successful scrub.
+	// A nested TOML validation would need a full parser. Use the same
+	// BOM-aware parser as the gateway so a PowerShell-written config
+	// remains valid after the scrub.
 	var parsed map[string]any
-	if err := toml.Unmarshal([]byte(joined), &parsed); err != nil {
+	if err := connector.ParseCodexTOML([]byte(joined), &parsed); err != nil {
 		return false, fmt.Errorf("post-scrub TOML would not re-parse (%s left unchanged): %w", path, err)
 	}
 	if err := writeConfigAtomic(path, []byte(joined)); err != nil {

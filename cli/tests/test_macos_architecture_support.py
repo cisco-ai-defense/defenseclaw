@@ -53,6 +53,8 @@ def test_release_build_and_package_contract_is_arm64_only() -> None:
         (("goarch", "amd64"), ("goos", "linux")),
         (("goarch", "arm64"), ("goos", "linux")),
         (("goarch", "arm64"), ("goos", "darwin")),
+        # The Windows entry exercises the gateway-cross resource stamping.
+        (("goarch", "amd64"), ("goos", "windows")),
     }
 
     makefile = _text("Makefile")

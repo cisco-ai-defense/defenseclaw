@@ -16,6 +16,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // Result is the aggregate lifecycle outcome.
@@ -105,6 +107,22 @@ func targetNames() []string {
 	return names
 }
 
+// RetireError is a connector that left machine policy whose DefenseClaw
+// entries could not be removed from its vendor file (another tool holds the
+// file, for example with chattr +i). The entries stay and keep calling the
+// hook for a connector the new config no longer serves, so a caller fails
+// the transaction instead of committing that config.
+type RetireError struct {
+	Connector string
+	Err       error
+}
+
+func (e *RetireError) Error() string {
+	return fmt.Sprintf("retire %s machine policy: %v", e.Connector, e.Err)
+}
+
+func (e *RetireError) Unwrap() error { return e.Err }
+
 // retireUnpublished removes DefenseClaw's entries from every candidate
 // target that still holds an ownership record but is no longer intended,
 // so disabling a connector or setting ownership: off takes DefenseClaw's
@@ -139,7 +157,7 @@ func retireUnpublished(opts Options, intended, candidates []string) ([]State, er
 		}
 		state, err := target.RemoveOwned(opts)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("retire %s machine policy: %w", name, err))
+			errs = append(errs, &RetireError{Connector: name, Err: err})
 		}
 		state.detail("%s is no longer published through machine policy; removed DefenseClaw's entries", name)
 		retired = append(retired, state)
@@ -224,6 +242,7 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		} else if state.Route == RouteMachinePolicy {
 			verifyPublishedFiles(opts, name, &state)
+			noteVerifyOnlyExport(opts, &state)
 		}
 		result.States = append(result.States, state)
 	}
@@ -238,6 +257,23 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	}
 	result.MachinePolicyConnectors = reconciledConnectors(inPlace)
 	return result, errors.Join(errs...)
+}
+
+// noteVerifyOnlyExport names the fix for a file DefenseClaw only checks
+// (ownership: verify_only) that carries none of its entries: deploy the
+// export. enterprise policy verify listed a conflict per missing entry and
+// never named the export, which a publish run already says (GAP-0918).
+// Windows keeps its report as it is.
+func noteVerifyOnlyExport(opts Options, state *State) {
+	if opts.goos() == "windows" || state.Ownership != config.MachinePolicyOwnershipVerifyOnly || state.OwnedEntries > 0 {
+		return
+	}
+	for _, detail := range state.Details {
+		if strings.HasPrefix(detail, "missing_defenseclaw_hooks:") {
+			return
+		}
+	}
+	state.detail("missing_defenseclaw_hooks: DefenseClaw does not write this file (ownership: verify_only); deploy the output of `defenseclaw-gateway enterprise policy export --connector %s` through your policy tool, then run ensure", state.Connector)
 }
 
 // RemoveAll removes DefenseClaw's machine policy for every connector with a

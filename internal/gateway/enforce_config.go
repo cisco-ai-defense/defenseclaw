@@ -63,10 +63,20 @@ type assetListEdit struct {
 // lists: a block or allow first drops every rule for the same name and
 // connector from both lists (one decision per asset, as the actions table
 // kept), then appends the new rule; an unblock only drops the denied rule.
+// Names compare as the readers match them: skill, MCP and plugin names
+// case-insensitively (assetRuleMatches), tool names exactly
+// (ToolListDecision). An unnamed rule matches the first key shown by
+// /enforce/blocked and /enforce/allowed. An exact compare left a denied
+// MySkill in place on an unblock or allow of myskill (GAP-0319).
 func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Change {
 	base := "asset_policy." + edit.TargetType
 	sameAsset := func(name, connector string) bool {
-		return strings.TrimSpace(name) == edit.Name && config.SameConnector(connector, edit.Connector)
+		name = strings.TrimSpace(name)
+		sameName := strings.EqualFold(name, strings.TrimSpace(edit.Name))
+		if edit.TargetType == "tool" {
+			sameName = name == edit.Name
+		}
+		return sameName && config.SameConnector(connector, edit.Connector)
 	}
 	if edit.TargetType == "tool" {
 		denied, allowed := cfg.AssetPolicy.Tool.Denied, cfg.AssetPolicy.Tool.Allowed
@@ -105,7 +115,13 @@ func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Chang
 	keep := func(rules []config.AssetPolicyRule) []map[string]any {
 		out := []map[string]any{}
 		for _, rule := range rules {
-			if !sameAsset(rule.Name, rule.Connector) {
+			matches := sameAsset(rule.Name, rule.Connector)
+			if strings.TrimSpace(rule.Name) == "" {
+				key := listedAssetRuleName(rule)
+				matches = key != "" && key == strings.TrimSpace(edit.Name) &&
+					config.SameConnector(rule.Connector, edit.Connector)
+			}
+			if !matches {
 				out = append(out, assetRuleMap(rule))
 			}
 		}
@@ -116,6 +132,17 @@ func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Chang
 		nextAllowed = nil
 	}
 	rule := config.AssetPolicyRule{Name: edit.Name, Connector: edit.Connector, Reason: edit.Reason}
+	var prior []config.AssetPolicyRule
+	switch edit.Op {
+	case assetListOpBlock:
+		prior = p.Allowed
+	case assetListOpAllow:
+		prior = p.Denied
+	}
+	if listed, ok := listedUnnamedRule(prior, edit); ok {
+		rule = listed
+		rule.Connector, rule.Reason = edit.Connector, edit.Reason
+	}
 	if edit.SourcePath != "" {
 		rule.SourcePathContains = []string{edit.SourcePath}
 	}
@@ -126,6 +153,19 @@ func assetListChange(cfg *config.Config, edit assetListEdit) []configwrite.Chang
 		nextAllowed = append(nextAllowed, assetRuleMap(rule))
 	}
 	return listChanges(base, nextDenied, nextAllowed)
+}
+
+// listedUnnamedRule keeps the selector behind a URL, command or path shown
+// as target_name by /enforce/allowed or /enforce/blocked.
+func listedUnnamedRule(rules []config.AssetPolicyRule, edit assetListEdit) (config.AssetPolicyRule, bool) {
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Name) == "" &&
+			listedAssetRuleName(rule) == strings.TrimSpace(edit.Name) &&
+			config.SameConnector(rule.Connector, edit.Connector) {
+			return rule, true
+		}
+	}
+	return config.AssetPolicyRule{}, false
 }
 
 func listChanges(base string, denied, allowed []map[string]any) []configwrite.Change {
@@ -168,11 +208,26 @@ func toolRuleMap(rule config.AssetPolicyToolRule) map[string]any {
 	return out
 }
 
+// assetListResult is the writer result and the error of the reload that
+// followed it. The edit is saved either way.
+type assetListResult struct {
+	configwrite.Result
+	reloadErr error
+}
+
 // enforceWriteResponse is the /enforce write reply: the status, the
 // config_generation the writer recorded and, once the gateway has applied
-// it, the live generation's effective_policy_digest.
-func (a *APIServer) enforceWriteResponse(status string, generation uint64) map[string]any {
-	out := map[string]any{"status": status, "generation": generation}
+// it, the live generation's effective_policy_digest. When the gateway refused
+// the reload (a restart-required key it can not keep at its running value),
+// the reply says so instead of passing the old generation's digest off as the
+// new one's.
+func (a *APIServer) enforceWriteResponse(status string, result assetListResult) map[string]any {
+	out := map[string]any{"status": status, "generation": result.Generation}
+	if result.reloadErr != nil {
+		out["applied"] = false
+		out["reload_error"] = result.reloadErr.Error()
+		return out
+	}
 	if g := a.generation(); g != nil && g.Digest != "" {
 		out["effective_policy_digest"] = g.Digest
 	}
@@ -183,7 +238,7 @@ func (a *APIServer) enforceWriteResponse(status string, generation uint64) map[s
 // reading the lists from the file it changes (compare-and-swap on its
 // sha256, retried when another writer got there first), then applies the
 // new config to this gateway.
-func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, actor string) (configwrite.Result, error) {
+func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, actor string) (assetListResult, error) {
 	// Written as the canonical connector name the runtime passes.
 	edit.Connector = config.NormalizeConnectorName(edit.Connector)
 	path := configFilePathForSnapshot(a.liveConfig())
@@ -191,14 +246,14 @@ func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, 
 	for attempt := 0; attempt < 3; attempt++ {
 		raw, err := os.ReadFile(path)
 		if err != nil {
-			return configwrite.Result{}, fmt.Errorf("read %s: %w", path, err)
+			return assetListResult{}, fmt.Errorf("read %s: %w", path, err)
 		}
 		sum := sha256.Sum256(raw)
 		var current struct {
 			AssetPolicy config.AssetPolicyConfig `yaml:"asset_policy"`
 		}
 		if err := yaml.Unmarshal(raw, &current); err != nil {
-			return configwrite.Result{}, fmt.Errorf("parse %s: %w", path, err)
+			return assetListResult{}, fmt.Errorf("parse %s: %w", path, err)
 		}
 		changes := assetListChange(&config.Config{AssetPolicy: current.AssetPolicy}, edit)
 		apply := a.configApply
@@ -215,16 +270,17 @@ func (a *APIServer) applyAssetListEdit(ctx context.Context, edit assetListEdit, 
 			continue
 		}
 		if err != nil {
-			return configwrite.Result{}, err
+			return assetListResult{}, err
 		}
+		out := assetListResult{Result: result}
 		if a.configReloader != nil {
-			if reloadErr := a.configReloader(ctx, "enforce_api"); reloadErr != nil {
-				fmt.Fprintf(os.Stderr, "[api] config reload after %s %s %q: %v\n", edit.Op, edit.TargetType, edit.Name, reloadErr)
+			if out.reloadErr = a.configReloader(ctx, "enforce_api"); out.reloadErr != nil {
+				fmt.Fprintf(os.Stderr, "[api] config reload after %s %s %q: %v\n", edit.Op, edit.TargetType, edit.Name, out.reloadErr)
 			}
 		}
-		return result, nil
+		return out, nil
 	}
-	return configwrite.Result{}, lastErr
+	return assetListResult{}, lastErr
 }
 
 // liveConfig is the config a read-only decision uses: the sidecar's
@@ -323,7 +379,7 @@ func configListEntries(cfg *config.Config, denied bool) []enforcementEntry {
 			rules = typed.policy.Denied
 		}
 		for _, rule := range rules {
-			name := firstNonEmptyString(rule.Name, rule.URL, rule.Command, strings.Join(rule.SourcePathContains, ","))
+			name := listedAssetRuleName(rule)
 			add(typed.targetType, name, rule.Connector, rule.Reason)
 		}
 	}
@@ -335,6 +391,10 @@ func configListEntries(cfg *config.Config, denied bool) []enforcementEntry {
 		add("tool", rule.Name, rule.Connector, rule.Reason)
 	}
 	return out
+}
+
+func listedAssetRuleName(rule config.AssetPolicyRule) string {
+	return firstNonEmptyString(rule.Name, rule.URL, rule.Command, strings.Join(rule.SourcePathContains, ","))
 }
 
 func firstNonEmptyString(values ...string) string {

@@ -22,19 +22,6 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
-// stubPanicLogger captures audit envelopes written via logger.LogActionCtx
-// so the panic-path assertions can verify that the
-// result="panic" row reached the audit sink.
-type stubPanicLogger struct {
-	rows []map[string]interface{}
-}
-
-func (s *stubPanicLogger) entries() []map[string]interface{} {
-	out := make([]map[string]interface{}, len(s.rows))
-	copy(out, s.rows)
-	return out
-}
-
 // TestSafeEvaluateHook_RecoversAndReturnsFailOpen exercises
 // safeEvaluateHook directly: a panicking evaluator must not propagate
 // the panic, must mark panicked=true, and must return a fail-open

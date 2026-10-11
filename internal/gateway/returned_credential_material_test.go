@@ -87,9 +87,8 @@ func TestEvaluateDeterministicToolResultRejectsIncompleteProofs(t *testing.T) {
 	for _, command := range []string{
 		"cat /tmp/one /tmp/two",
 		"cat /tmp/kerberoast.txt | head -1",
-		// A lone "cat ~/..." is exact under the trusted ActiveHome; a
-		// parameter expansion is not.
-		"cat $HOME/kerberoast.txt",
+		// A non-home parameter remains dynamic and cannot prove a read.
+		"cat $OTHER_HOME/kerberoast.txt",
 	} {
 		input := base
 		args, err := json.Marshal(map[string]string{"command": command})

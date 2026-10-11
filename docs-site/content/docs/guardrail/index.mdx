@@ -269,6 +269,10 @@ Regex still runs first (cheap and offline) and the judge adjudicates what regex
 flags. `--detection-strategy judge_first` flips the order, which helps when
 regex is too noisy. Hook connectors are judged only in action mode; use
 `--judge-hook-connectors` to choose which hook connectors the judge covers.
+A judge verdict goes through `block_at` and `alert_at` like a rule finding:
+at the default `block_at: CRITICAL` a HIGH verdict (for example a request to
+print a credential file) alerts, and a read combined with an upload
+(CRITICAL) blocks.
 
 </Tab>
 
@@ -354,11 +358,7 @@ The table follows `defenseclaw setup guardrail --help`.
     },
     "--rule-pack": {
       type: "default|strict|permissive",
-      description: "Bundled rule-pack profile. Writes guardrail.rule_pack (guardrail.connectors.<name>.rule_pack for a multi-connector peer).",
-    },
-    "--rule-pack-dir": {
-      type: "path",
-      description: "Path of a built-in pack folder (default, strict or permissive under ~/.defenseclaw/policies/guardrail/), instead of --rule-pack; pass an empty string to clear the setting. A custom directory is refused with a pointer to defenseclaw guardrail use-pack, which pins it by digest.",
+      description: "Bundled rule-pack profile. Writes guardrail.rule_pack (guardrail.connectors.<name>.rule_pack for a multi-connector peer). A custom pack folder is registered with defenseclaw guardrail use-pack, which pins it by digest.",
     },
     "--judge-model": {
       type: "string",
@@ -492,11 +492,6 @@ The table follows `defenseclaw setup guardrail --help`.
       type: "flag",
       description: "Restart the gateway and the active connector after setup.",
       default: "--restart",
-    },
-    "--verify / --no-verify": {
-      type: "flag",
-      description: "Run connectivity checks after setup.",
-      default: "--verify",
     },
     "--non-interactive / --accept-defaults / --yes": {
       type: "flag",

@@ -25,7 +25,11 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -161,6 +165,22 @@ func TestMCPServerRuntimeBlock_NonMCPAndUnblocked(t *testing.T) {
 	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__jira__createIssue", "", ""); !deny || server != "jira" {
 		t.Errorf("blocked mcp server: deny=%v server=%q, want deny=true server=jira", deny, server)
 	}
+	// GAP-0963: a server its install admission disabled says so, with the
+	// journal's reason, so it is not read as an asset_policy decision.
+	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "claudecode", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	if deny, _, reason := mcpServerRuntimeBlock(pe, "mcp__wiki-rogue__count_words", "claudecode", ""); !deny ||
+		!strings.Contains(reason, "install admission rejected it (scanner failure (fail-closed): loopback)") {
+		t.Errorf("disabled mcp server: deny=%v reason=%q, want the admission verdict named", deny, reason)
+	}
+	// Codex passes the configured name its hook resolved (GAP-0939).
+	if err := store.SetActionFieldForConnector("mcp", "wiki-rogue", "codex", "runtime", "disable", "scanner failure (fail-closed): loopback"); err != nil {
+		t.Fatal(err)
+	}
+	if deny, server, _ := mcpServerRuntimeBlock(pe, "mcp__wiki_rogue__count_words", "codex", "wiki-rogue"); !deny || server != "wiki-rogue" {
+		t.Errorf("codex disabled mcp server: deny=%v server=%q, want it refused as in Claude Code", deny, server)
+	}
 }
 
 func TestInspectTool_MCPServerBlock_UsesExplicitServerName(t *testing.T) {
@@ -204,4 +224,46 @@ func hasFinding(findings []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// A URL block entered by the CLI must follow the configured server name into
+// the tool hook; the hook never supplies the endpoint itself.
+func TestMCPServerRuntimeBlock_URLRule(t *testing.T) {
+	store, _ := testStoreAndLogger(t)
+	path := filepath.Join(t.TempDir(), "openclaw.json")
+	if err := os.WriteFile(path, []byte(`{"mcp":{"servers":{"filesystem":{"url":"https://server.example/mcp"}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Claw.ConfigFile = path
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "https://server.example/mcp"}}
+	pe := configPolicy(store, cfg)
+	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__filesystem__read", "", ""); !deny {
+		t.Fatal("URL block did not deny the configured server tool")
+	}
+}
+
+// A reload between the MCP and tool checks must not combine permissions
+// from two policy generations into an allow.
+func TestInspectToolPolicyUsesOneConfigAcrossMCPAndToolChecks(t *testing.T) {
+	api, _ := toolPolicyAPI(t, "action")
+	old := api.scannerCfg
+	denyTool(old, "mcp__jira__createIssue", "codex", "old tool block")
+	newCfg := &config.Config{}
+	denyAsset(newCfg, "mcp", "jira", "codex", "new server block")
+	reads := 0
+	api.configSnapshot = func() *config.Config {
+		reads++
+		if reads <= 2 {
+			return old
+		}
+		return newCfg
+	}
+	ctx := withPinnedGeneration(context.Background(), &Generation{Config: old, N: 1})
+	verdict := api.inspectTrustedToolPolicyCtx(ctx, &ToolInspectRequest{
+		Tool: "mcp__jira__createIssue", Connector: "codex", Args: json.RawMessage(`{}`),
+	}, trustedActionRequest{})
+	if verdict.Action != "block" || !hasFinding(verdict.Findings, "STATIC-BLOCK") {
+		t.Fatalf("mixed-generation verdict = %+v, want the pinned tool block", verdict)
+	}
 }

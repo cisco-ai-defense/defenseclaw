@@ -19,7 +19,7 @@ import (
 // pluginRootDepth returns the plugin root that holds path and how many levels
 // below it path is (1 = <root>/<name>, 2 = <root>/<category>/<name>).
 func (w *InstallWatcher) pluginRootDepth(path string) (string, int) {
-	if watcherConnectorName(w.cfg) == "claudecode" {
+	if w.connectorForPath(path) == "claudecode" {
 		return "", 0
 	}
 	abs, err := filepath.Abs(path)
@@ -49,7 +49,7 @@ func (w *InstallWatcher) pluginRootDepth(path string) (string, int) {
 // it existed at start, so a plugin added to it later got no verdict
 // (GAP-2471).
 func (w *InstallWatcher) hermesCategoryFolder(dir string) bool {
-	return watcherConnectorName(w.cfg) == "hermes" && !hasPluginManifest(dir)
+	return w.connectorForPath(dir) == "hermes" && !hasPluginManifest(dir)
 }
 
 // waitForPluginFolder watches dir so that content or plugins added to it
@@ -116,7 +116,7 @@ func (w *InstallWatcher) pluginFolderEvents(path string) ([]InstallEvent, bool) 
 	}
 	plugin := []InstallEvent{{
 		Type: InstallPlugin, Name: name, Path: path,
-		Connector: watcherConnectorName(w.cfg), Timestamp: time.Now().UTC(),
+		Connector: w.connectorForPath(path), Timestamp: time.Now().UTC(),
 	}}
 	if hasPluginManifest(path) {
 		delete(w.pluginWaiting, filepath.Clean(path))
@@ -162,7 +162,7 @@ func (w *InstallWatcher) pluginFolderEvents(path string) ([]InstallEvent, bool) 
 // a bundled hermes-agent/plugins/<category>/, never reached admission
 // (GAP-2462).
 func (w *InstallWatcher) watchExistingPluginFolders(root string) {
-	if watcherConnectorName(w.cfg) == "claudecode" {
+	if w.connectorForPath(root) == "claudecode" {
 		return
 	}
 	entries, err := os.ReadDir(root)

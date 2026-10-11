@@ -11,8 +11,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func openReadOnlyNonblocking(path string) (*boundedReadFile, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+// openReadOnlyNonblocking opens path read-only without blocking on a FIFO,
+// and without following a final link unless follow is set.
+func openReadOnlyNonblocking(path string, follow bool) (*boundedReadFile, error) {
+	flags := unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK
+	if !follow {
+		flags |= unix.O_NOFOLLOW
+	}
+	fd, err := unix.Open(path, flags, 0)
 	if err != nil {
 		return nil, err
 	}

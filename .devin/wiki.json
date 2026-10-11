@@ -68,12 +68,12 @@
     },
     {
       "title": "Policy and Rego",
-      "purpose": "Guide to DefenseClaw policy layers: top-level YAML profiles, skill_actions, plugin_actions, MCP actions, guardrail config, scanner profiles, firewall Rego modules, data files, hot reload, testing with opa, and parity checks. Reference docs/CONFIG_FILES.md, policies/, policies/rego/, internal/policy/, and internal/config/.",
+      "purpose": "Guide to DefenseClaw policy layers: top-level YAML profiles, skill_actions, plugin_actions, MCP actions, guardrail config, scanner profiles, admission and guardrail Rego modules, hot reload, testing with opa, and parity checks. Reference docs/CONFIG_FILES.md, policies/, policies/rego/, internal/policy/, and internal/config/.",
       "parent": "Home"
     },
     {
       "title": "Firewall and OpenShell Sandboxes",
-      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, NVIDIA OpenShell 0.1 sandboxes (defenseclaw sandbox setup and run, policy packs and the repository policy, the egress proxy, destinations, the opt-in process tree), the removal of the openshell-sandbox 0.0.x standalone integration, and the config_version 9 migration that resets what it left in the config. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, docs-site/content/docs/sandboxes/, internal/openshell/, internal/config/migrate_v9.go, internal/firewall/, internal/gateway/connector/subprocess.go, policies/rego/firewall.rego, and policies/rego/data-sandbox.json.",
+      "purpose": "Explain firewall policy, the shell-shim subprocess policy used by OpenClaw and ZeptoClaw, NVIDIA OpenShell 0.1 sandboxes (defenseclaw sandbox setup and run, policy packs and the repository policy, the egress proxy, destinations, the opt-in process tree), the removal of the openshell-sandbox 0.0.x standalone integration, and the config_version 9 migration that resets what it left in the config. Reference docs/SANDBOX.md, docs/OPENSHELL_SANDBOX_EVENTS.md, docs-site/content/docs/sandboxes/, internal/openshell/, internal/config/migrate_v9.go, internal/firewall/, and internal/gateway/connector/subprocess.go.",
       "parent": "Home"
     },
     {

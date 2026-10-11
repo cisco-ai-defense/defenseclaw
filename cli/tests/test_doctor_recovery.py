@@ -873,7 +873,12 @@ def test_windows_publication_adapter_uses_native_create_new_and_security_checks(
 
     monkeypatch.setattr(windows_acl, "hold_directory_chain", lambda _path: nullcontext())
     monkeypatch.setattr(windows_acl, "capture_path", capture)
-    monkeypatch.setattr(windows_acl, "private_security_for_directory", lambda _path: parent_security)
+    def private_security(_path: str, *, administrators: bool = True):
+        # GAP-0911: a confidential file gets the owner and LocalSystem only.
+        assert administrators is False
+        return parent_security
+
+    monkeypatch.setattr(windows_acl, "private_security_for_directory", private_security)
     monkeypatch.setattr(windows_acl, "write_new_file", write_new)
     monkeypatch.setattr(
         windows_acl,
@@ -988,7 +993,7 @@ def test_windows_publication_conservatively_reports_post_create_failures(
     monkeypatch.setattr(
         windows_acl,
         "private_security_for_directory",
-        lambda _path: parent_security,
+        lambda _path, **_kwargs: parent_security,
     )
     monkeypatch.setattr(
         windows_acl,

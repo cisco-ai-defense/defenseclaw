@@ -35,10 +35,15 @@ func TestWaitForStartedDaemonKeepsSlowLiveProcessForInteractiveStart(t *testing.
 		t.Fatalf("stop calls = %d, want the slow gateway left running", process.stopCalls)
 	}
 	msg := reportGatewayStillStarting(err, 42, "/tmp/gateway.log", nil, errors.New("no config")).Error()
-	for _, want := range []string{"PID 42", "still starting and was left running", "defenseclaw-gateway status", "defenseclaw-gateway restart"} {
+	// GAP-0478: say protection is not active yet, and keep the probe internals out.
+	for _, want := range []string{"PID 42", "still starting and was left running", "Protection is not active",
+		"defenseclaw-gateway status", "defenseclaw-gateway restart"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("message %q lacks %q", msg, want)
 		}
+	}
+	if strings.Contains(msg, "remained STARTING") {
+		t.Fatalf("message %q repeats the readiness probe detail", msg)
 	}
 
 	fatal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

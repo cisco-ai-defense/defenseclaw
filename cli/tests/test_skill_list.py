@@ -251,6 +251,19 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
         self.assertEqual(rows[0]["description"], "Good")
 
 
+class TestSkillDescriptionEncoding(unittest.TestCase):
+    def test_bom_and_utf16_skill_md_show_the_front_matter_description(self):
+        # GAP-0417: a UTF-8 BOM showed as raw bytes plus '---'; UTF-16 as NULs.
+        text = "---\nname: notes\ndescription: Team notes\n---\n# Notes\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            for encoding in ("utf-8-sig", "utf-16"):
+                skill = os.path.join(tmp, encoding)
+                os.makedirs(skill)
+                with open(os.path.join(skill, "SKILL.md"), "wb") as fh:
+                    fh.write(text.encode(encoding))
+                self.assertEqual(skill_list._read_skill_description(skill), "Team notes", encoding)
+
+
 class TestListSkillsForOpenClaw(unittest.TestCase):
     """OpenClaw default keeps the subprocess-first behavior."""
 

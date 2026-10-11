@@ -467,8 +467,34 @@ try {
         [void]$closeJob.Invoke($null, @($emptyJob))
     }
     . $harness -NoRun
+    $liveClaudeGuardView = ${function:Get-ClaudeCodeLauncherGuardExecView}
     . $workflowRunPathHelper
     . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
+    # GAP-1091: both Claude Code registration checks read the exact generated
+    # cmd.exe launcher guard as its exec form and nothing else.
+    $guardLauncher = 'C:\Users\dc user\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe'
+    $guardSentence = @(('DefenseClaw blocked this: its Claude Code hook launcher is missing. ' +
+        'Run the DefenseClaw installer again to repair it.') -split ' ')
+    $guardArgs = @('/d', '/c', 'if', 'exist', $guardLauncher, '(', $guardLauncher, 'hook', '--connector',
+        'claudecode', ')', 'else', '(', 'echo') + $guardSentence + @('1>&2', '&', 'exit', '/b', '2', ')')
+    $guardProcessor = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $editedGuardArgs = @($guardArgs); $editedGuardArgs[-2] = '0'
+    foreach ($guardView in @($liveClaudeGuardView, ${function:Get-ClaudeCodeLauncherGuardExecView})) {
+        $exact = & $guardView ([pscustomobject]@{ type = 'command'; command = $guardProcessor; args = $guardArgs } |
+            ConvertTo-Json -Depth 4 | ConvertFrom-Json)
+        Assert-True ([string]$exact.command -ceq $guardLauncher -and
+            (@($exact.args) -join ' ') -ceq 'hook --connector claudecode') `
+            'Claude Code registration checks read the exact cmd.exe launcher guard as its exec form'
+        foreach ($other in @(
+            [pscustomobject]@{ command = $guardProcessor; args = $editedGuardArgs },
+            [pscustomobject]@{ command = $guardProcessor; args = @('/d', '/c', 'if', 'exist', $guardLauncher, '(', 'C:\Tools\other.exe', 'hook', ')', 'else', '(', 'echo', 'x', ')') },
+            [pscustomobject]@{ command = 'C:\Tools\cmd.exe'; args = $guardArgs },
+            [pscustomobject]@{ command = $guardProcessor; args = @('/d', '/c', 'echo', 'hook', '--connector', 'claudecode') }
+        )) {
+            Assert-True ([object]::ReferenceEquals((& $guardView $other), $other)) `
+                'Claude Code registration checks do not read an edited guard or another cmd.exe handler as DefenseClaw'
+        }
+    }
     $missingOptionalCleanupFields = '{"status":"pending-reboot"}' |
         ConvertFrom-Json -ErrorAction Stop
     foreach ($propertyName in @(
@@ -2647,7 +2673,7 @@ threading.Event().wait()
     )
     $requiredContractConnectors = @(
         'amp', 'antigravity', 'claudecode', 'codex', 'copilot',
-        'cursor', 'devin', 'hermes', 'omnigent', 'opencode'
+        'cursor', 'devin', 'hermes', 'opencode'
     )
     $excludedContractConnectors = @(
         'openhands', 'openclaw', 'zeptoclaw'
@@ -2657,19 +2683,12 @@ threading.Event().wait()
     } else {
         @()
     }
-    $omniGentJob = [regex]::Match(
-        $nativeWorkflowText,
-        '(?ms)^  omnigent-native-degraded:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
-    ).Value
     $actualContractConnectors = @($genericContractConnectors)
-    if (-not [string]::IsNullOrWhiteSpace($omniGentJob)) {
-        $actualContractConnectors += 'omnigent'
-    }
     Assert-True (
         $actualContractConnectors.Count -eq $requiredContractConnectors.Count -and
         ($actualContractConnectors | Sort-Object) -join ',' -ceq
             ($requiredContractConnectors | Sort-Object) -join ','
-    ) 'required Windows contract coverage is exactly the ten deterministic packaged connector lanes'
+    ) 'required Windows contract coverage is exactly the nine deterministic packaged connector lanes'
     Assert-True (@($excludedContractConnectors | Where-Object {
         $actualContractConnectors -ccontains $_
     }).Count -eq 0) 'packaged coverage excludes deprecated or unsupported connectors'
@@ -2693,8 +2712,7 @@ threading.Event().wait()
         $nativeWorkflowText,
         '(?ms)^  windows-native-required:.*?(?=^  [a-z0-9][a-z0-9-]*:|\z)'
     ).Value
-    Assert-True ($requiredFanInJob -match '(?m)^\s{6}- connector-contract\s*$' -and
-        $requiredFanInJob -match '(?m)^\s{6}- omnigent-native-degraded\s*$') `
+    Assert-True ($requiredFanInJob -match '(?m)^\s{6}- connector-contract\s*$') `
         'required Windows aggregate depends on every deterministic packaged connector contract'
     $invokeHookFunction = [regex]::Match(
         $harnessText,
@@ -2713,7 +2731,7 @@ threading.Event().wait()
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
         'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
-    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract', 'omnigent-native-degraded')) {
+    foreach ($job in @('windows-go', 'windows-python', 'powershell-static', 'package-artifact', 'packaged-acceptance', 'connector-contract')) {
         Assert-True ($nativeWorkflowText -match "(?m)^\s{6}- $([regex]::Escape($job))\s*$") "aggregate depends on $job"
         $requiredJob = [regex]::Match(
             $nativeWorkflowText,
@@ -2722,23 +2740,19 @@ threading.Event().wait()
         Assert-True ($requiredJob -notmatch 'continue-on-error') "required Windows job $job is not advisory"
     }
     Assert-True ($nativeWorkflowText -match '(?s)windows-native-required:.*?if: \$\{\{ always\(\) \}\}.*?result -ne ''success''') 'aggregate fails skipped or failed dependencies'
-    Assert-True ($omniGentJob -notmatch '(?m)^\s{4}if:' -and
-        $omniGentJob -notmatch '(?m)^\s{4}continue-on-error:') `
-        'OmniGent native-degraded contract is unconditional and non-advisory'
     Assert-True ($nativeWorkflowText -notmatch 'shell:\s*bash') 'dedicated Windows workflow never selects Bash'
     Assert-True ($nativeWorkflowText -notmatch 'secrets\.') 'dedicated deterministic workflow consumes no secrets'
     Assert-True ([regex]::Matches(
         $nativeWorkflowText,
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
-    ).Count -eq 7) 'every native Windows job uses the shared isolated-path initializer'
+    ).Count -eq 6) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
         '-Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',
         '-Leaf acc -DiagnosticsLeaf windows-native-diagnostics-acceptance -ArtifactLeaf windows-native-dist',
-        "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist",
-        '-Leaf omnigent -DiagnosticsLeaf windows-native-diagnostics-omnigent -ArtifactLeaf windows-native-dist'
+        "-Leaf ('ct-' + `$env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + `$env:CONNECTOR) -ArtifactLeaf windows-native-dist"
     )) {
         Assert-True ($nativeWorkflowText.Contains($leafContract)) `
             "native Windows workflow preserves isolated path contract: $leafContract"
@@ -2767,7 +2781,7 @@ threading.Event().wait()
         'native self-test rebinds child-only authority below the Profile Known Folder without weakening the shared guard'
     Assert-True ($nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$DiagnosticsLeaf' -and
         $nativePathInitializerText -match 'Join-Path \$env:RUNNER_TEMP \$ArtifactLeaf' -and
-        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 4) `
+        [regex]::Matches($nativeWorkflowText, '-ArtifactLeaf windows-native-dist').Count -eq 3) `
         'shared initializer keeps diagnostics and artifacts under RUNNER_TEMP'
     Assert-True ($nativeHarnessText -match '\$approvedStateBase' -and
         $nativeHarnessText -match 'interactive setup acceptance requires StateRoot below RUNNER_TEMP or DC_WINDOWS_NATIVE_BASE_ROOT') `
@@ -2786,6 +2800,23 @@ threading.Event().wait()
         [regex]::Matches($nativeHarnessText, 'Test-PathWithin \$root \$approvedStateBase').Count -eq 1 -and
         [regex]::Matches($wizardHarnessText, 'Test-PathWithin \$state \$_').Count -eq 1) `
         'setup cleanup and wizard gates require strict descendants while general state validation can recheck its exact approved root'
+    $wizardObservation = [regex]::Match(
+        $wizardHarnessText,
+        '(?s)function Get-WizardObservation\b.*?(?=\r?\n\$connectorIndices = )'
+    ).Value
+    $observedPathProbe = [regex]::Match(
+        $wizardHarnessText,
+        '(?s)function Test-ObservedPath\b.*?(?=\r?\n\r?\nfunction )'
+    ).Value
+    $deniedProbe = & {
+        function Test-Path { $false; throw [UnauthorizedAccessException]::new('Access to the path is denied.') }
+        . ([scriptblock]::Create($observedPathProbe))
+        Test-ObservedPath 'C:\setup-temp\payload\manifest.json' Leaf
+    }
+    Assert-True ($wizardObservation -match 'Test-ObservedPath' -and
+        $wizardObservation -notmatch 'Test-Path ' -and
+        $deniedProbe -is [bool] -and -not $deniedProbe) `
+        'wizard observer treats a path Setup is deleting (access denied) as absent instead of failing the run'
     Assert-True ($nativeWorkflowText -match 'Run native Windows Go DACL regressions explicitly') 'native Windows workflow has a required Go DACL regression step'
     foreach ($testName in @(
         'TestWriteWindowsRemovesInheritedUnauthorizedWriter',
@@ -3038,9 +3069,9 @@ threading.Event().wait()
         '(?s)function Set-WizardCodexLegacyNonWaitingHook\b.*?(?=\r?\nfunction )'
     ).Value
     Assert-True ($legacyLauncherFixture -match '\$bridge = Get-AwaitedHookBridge \$script' -and
-        $legacyLauncherFixture -match '\$bridge\.Invocation \+ ''; exit \$LASTEXITCODE''' -and
-        $legacyLauncherFixture -notmatch 'argumentLiterals') `
-        'legacy Codex launcher fixture preserves current event and hook-contract bindings'
+        $legacyLauncherFixture -match '"& \$legacyFile hook --connector codex; exit `\$LASTEXITCODE"' -and
+        $legacyLauncherFixture -notmatch '--event|--hook-contract|argumentLiterals|Invocation') `
+        'legacy Codex launcher fixture is the non-waiting call 0.8.x released, with no event or hook contract'
     $legacyWatchdogStop = $legacyLauncherAcceptance.IndexOf("@('watchdog', 'stop')", [StringComparison]::Ordinal)
     $legacyGatewayStop = $legacyLauncherAcceptance.IndexOf("@('stop')", [StringComparison]::Ordinal)
     $legacyFixture = $legacyLauncherAcceptance.IndexOf('Set-WizardCodexLegacyNonWaitingHook', [StringComparison]::Ordinal)
@@ -3106,21 +3137,6 @@ threading.Event().wait()
         $connectorContractJob -notmatch 'retried' -and
         $connectorContractJob -match 'Upload diagnostics on failure\r?\n        if: \$\{\{ failure\(\) \|\| cancelled\(\) \}\}') `
         'every connector contract runs once; a telemetry failure fails the job instead of being retried'
-    Assert-True ($omniGentJob -match '(?s)invoke-windows-setup-standard-user-ci\.ps1.*?-Mode omnigent-native-degraded.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
-        $standardUserCIText -match "'omnigent-native-degraded'" -and
-        $standardUserCIText -match 'test-omnigent-windows-native\.ps1' -and
-        $standardUserCIText -match 'SpecialFolder\]::LocalApplicationData' -and
-        $standardUserCIText -match 'Join-Path \$localAppData ''DefenseClaw-CI\\uv-input''' -and
-        $standardUserCIText -match 'Join-Path \$localAppData ''DefenseClaw-CI\\omnigent-native-degraded''' -and
-        $standardUserCIText -match 'Set-DisposableProtectedDirectoryAcl \$state \$identity\.User' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$state \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$uvRoot \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match 'Assert-DisposableChildAcl \$uvRoot \$identity\.User' -and
-        $standardUserCIText -match '(?s)Set-DisposableProtectedDirectoryAcl \$omnigentState \$identity\.User.*?-UseAdministratorsForCleanup' -and
-        $standardUserCIText -match 'Assert-DisposableChildAcl \$omnigentState \$identity\.User' -and
-        $standardUserCIText -match 'standard-user OmniGent uv copy does not match its authenticated input' -and
-        $standardUserCIText -match '(?s)-StateRoot \$omnigentState -ArtifactRoot \$artifacts.*?-UvPath \$uvPath') `
-        'hosted OmniGent packaged lifecycle runs as a disposable real standard user'
     Assert-True ($nativeWorkflowText -notmatch '-Operation acceptance\b' -and
         $nativeHarnessText -notmatch "'acceptance' \{ Invoke-Acceptance \}" -and
         $nativeWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -178,6 +179,9 @@ func LoadAISignatures() ([]AISignature, error) {
 // globs (ai_discovery.signature_packs, the only operator source since
 // config_version 9) and optional workspace-local packs.
 type AISignatureLoadOptions struct {
+	// DataDir is the data directory whose signature-packs/*.json the Secure
+	// Client profile still loads (issue #1092).
+	DataDir        string
 	SignaturePacks []string
 	// PackDigests pins pack files by path (ai_discovery.signature_pack_digests).
 	PackDigests map[string]string
@@ -190,6 +194,9 @@ type AISignatureLoadOptions struct {
 	WorkingDir               string
 	MaxPacks                 int
 	MaxPackBytes             int64
+	// SecureClient loads the embedded catalog as 1.0.0 shipped it
+	// (secureClientSignatures).
+	SecureClient bool
 }
 
 // LoadAISignaturesForConfig loads the embedded catalog plus any configured
@@ -201,7 +208,12 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 	}
 	home, _ := platformDiscoveryHomeDir()
 	wd, _ := os.Getwd()
+	dataDir := ""
+	if cfg.SecureClientIntegration() {
+		dataDir = cfg.DataDir
+	}
 	return LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		DataDir:                  dataDir,
 		SignaturePacks:           append([]string{}, cfg.AIDiscovery.SignaturePacks...),
 		PackDigests:              cfg.AIDiscovery.SignaturePackDigests,
 		RequireDigests:           cfg.StandaloneEnterprise(),
@@ -210,7 +222,90 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 		DisabledSignatureIDs:     append([]string{}, cfg.AIDiscovery.DisabledSignatureIDs...),
 		HomeDir:                  home,
 		WorkingDir:               wd,
+		SecureClient:             cfg.SecureClientIntegration(),
 	})
+}
+
+// CheckSignaturePackPins refuses, on a managed standalone host, a configured
+// signature pack file that the loader would skip: it does not match its pin in
+// ai_discovery.signature_pack_digests, or it has none. The loader only logs
+// the skip, so without this check an apply accepts a config whose pack never
+// loads (GAP-0173). A pack file that is not there yet is not a pin problem.
+func CheckSignaturePackPins(cfg *config.Config) error {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	home, _ := platformDiscoveryHomeDir()
+	packs, err := signaturePackPaths(AISignatureLoadOptions{SignaturePacks: cfg.AIDiscovery.SignaturePacks, HomeDir: home})
+	if err != nil {
+		return nil // reported when the catalog loads
+	}
+	pins := pinnedDigests(cfg.AIDiscovery.SignaturePackDigests, home, !cfg.SecureClientIntegration())
+	for _, pack := range packs {
+		raw, err := readAISignaturePackBytes(pack, defaultMaxSignatureBytes)
+		if err != nil {
+			continue
+		}
+		if refusal := pinRefusal(pins[signaturePinPath(pack, !cfg.SecureClientIntegration())], raw, true); refusal != "" {
+			return &config.V8SemanticError{
+				Path:     "$.ai_discovery.signature_pack_digests",
+				Summary:  "signature pack " + pack + " would not load: " + refusal,
+				Expected: "a sha256:<hex> digest of the pack file, keyed by its path",
+				Action:   "pin the file's current digest (sha256sum), or restore the pack the pin was taken from",
+			}
+		}
+	}
+	return nil
+}
+
+// SignaturePackEntry resolves one ai_discovery.signature_packs entry the way
+// the loader does (a ~ path, a directory of *.json, a glob). files are the
+// pack files it names now (a plain path stays listed while the file is not
+// there yet); watchDir is the folder a new pack would appear in, "" for an
+// entry that names one file.
+func SignaturePackEntry(entry string) (files []string, watchDir string) {
+	home, _ := platformDiscoveryHomeDir()
+	files, _ = expandSignaturePackCandidate(entry, home)
+	expanded := expandHome(entry, home)
+	if info, err := os.Stat(expanded); err == nil && info.IsDir() {
+		return files, filepath.Clean(expanded)
+	}
+	if hasGlobMeta(expanded) {
+		if dir := filepath.Dir(expanded); !hasGlobMeta(dir) {
+			return files, filepath.Clean(dir)
+		}
+		return files, ""
+	}
+	if len(files) == 0 && expanded != "" {
+		files = []string{expanded}
+	}
+	return files, ""
+}
+
+// Signature data added to the embedded catalog after 1.0.0. The Secure Client
+// profile keeps the catalog of 1.0.0 (issue #1092), so secureClientSignatures
+// removes it there.
+var (
+	postReleaseSignatureIDs = map[string]bool{"jetbrains-ai": true}
+	postReleaseExtensionIDs = map[string]string{"codex": "openai.chatgpt", "claudecode": "anthropic.claude-code"}
+)
+
+// secureClientSignatures returns the embedded catalog as 1.0.0 shipped it:
+// without the signatures and VS Code extension ids added since, and without
+// the JetBrains, Zed and Vim plugin ids, which only the IDE inventory reads.
+func secureClientSignatures(base []AISignature) []AISignature {
+	out := make([]AISignature, 0, len(base))
+	for _, sig := range base {
+		if postReleaseSignatureIDs[sig.ID] {
+			continue
+		}
+		if added := postReleaseExtensionIDs[sig.ID]; added != "" {
+			sig.ExtensionIDs = slices.DeleteFunc(slices.Clone(sig.ExtensionIDs), func(id string) bool { return id == added })
+		}
+		sig.JetBrainsPluginIDs, sig.ZedExtensionIDs, sig.VimPlugins = nil, nil, nil
+		out = append(out, sig)
+	}
+	return out
 }
 
 // LoadAISignaturesWithOptions merges all configured catalog sources and
@@ -219,6 +314,9 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 	base, err := LoadAISignatures()
 	if err != nil {
 		return nil, err
+	}
+	if opts.SecureClient {
+		base = secureClientSignatures(base)
 	}
 	disabled := normalizedSignatureIDSet(opts.DisabledSignatureIDs)
 	merged := make([]AISignature, 0, len(base))
@@ -246,13 +344,13 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxSignatureBytes
 	}
-	pins := pinnedDigests(opts.PackDigests, opts.HomeDir)
+	pins := pinnedDigests(opts.PackDigests, opts.HomeDir, !opts.SecureClient)
 	for _, packPath := range packs {
 		raw, err := readAISignaturePackBytes(packPath, maxBytes)
 		if err != nil {
 			return nil, err
 		}
-		if refusal := pinRefusal(pins[filepath.Clean(packPath)], raw, opts.RequireDigests); refusal != "" {
+		if refusal := pinRefusal(pins[signaturePinPath(packPath, !opts.SecureClient)], raw, opts.RequireDigests); refusal != "" {
 			// A pack that is not the one the administrator pinned is not
 			// loaded; the rest of the catalog still is.
 			fmt.Fprintf(os.Stderr, "[ai-discovery] signature pack %s not loaded: %s\n", packPath, refusal)
@@ -267,7 +365,19 @@ func LoadAISignaturesWithOptions(opts AISignatureLoadOptions) ([]AISignature, er
 				continue
 			}
 			if prev := seen[sig.ID]; prev != "" {
-				return nil, fmt.Errorf("ai signature catalog: duplicate id %q in %s (already defined in %s)", sig.ID, packPath, prev)
+				// This ID was introduced in the 1.0 builtin catalog. An older
+				// operator pack with the same ID keeps its configured signature.
+				if sig.ID != "jetbrains-ai" || prev != "builtin" || opts.SecureClient {
+					return nil, fmt.Errorf("ai signature catalog: duplicate id %q in %s (already defined in %s)", sig.ID, packPath, prev)
+				}
+				for i := range merged {
+					if merged[i].ID == sig.ID {
+						merged[i] = sig
+						break
+					}
+				}
+				seen[sig.ID] = packPath
+				continue
 			}
 			merged = append(merged, sig)
 			seen[sig.ID] = packPath
@@ -301,18 +411,35 @@ func parseAISignatureCatalog(source string, raw []byte) ([]AISignature, error) {
 	return cat.Signatures, nil
 }
 
-// pinnedDigests keys ai_discovery.signature_pack_digests by cleaned,
-// home-expanded path.
-func pinnedDigests(pins map[string]string, home string) map[string]string {
+// pinnedDigests keys ai_discovery.signature_pack_digests by resolved path
+// outside Secure Client. Secure Client keeps the legacy cleaned-path lookup.
+func pinnedDigests(pins map[string]string, home string, resolve bool) map[string]string {
 	out := make(map[string]string, len(pins))
 	for path, digest := range pins {
 		path = strings.TrimSpace(path)
 		if strings.HasPrefix(path, "~/") && home != "" {
 			path = filepath.Join(home, path[2:])
 		}
-		out[filepath.Clean(path)] = strings.ToLower(strings.TrimSpace(digest))
+		out[signaturePinPath(path, resolve)] = strings.ToLower(strings.TrimSpace(digest))
 	}
 	return out
+}
+
+// signaturePinPath matches Python Path.resolve for existing pack files and
+// relative keys, including symlinked directories.
+func signaturePinPath(path string, resolve bool) string {
+	path = filepath.Clean(path)
+	if !resolve {
+		return path
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	return abs
 }
 
 // pinRefusal is why raw may not load under the pinned digest want ("" when
@@ -363,6 +490,11 @@ func WorkspaceSignaturesAllowed(cfg *config.Config) bool {
 
 func signaturePackPaths(opts AISignatureLoadOptions) ([]string, error) {
 	var candidates []signaturePackCandidate
+	if opts.DataDir != "" {
+		candidates = append(candidates, signaturePackCandidate{
+			path: filepath.Join(opts.DataDir, "signature-packs", "*.json"),
+		})
+	}
 	for _, p := range opts.SignaturePacks {
 		candidates = append(candidates, signaturePackCandidate{path: p, required: true})
 	}
@@ -381,7 +513,15 @@ func signaturePackPaths(opts AISignatureLoadOptions) ([]string, error) {
 			return nil, err
 		}
 		if len(paths) == 0 && candidate.required {
-			return nil, fmt.Errorf("ai signature catalog: signature pack path matched nothing: %s", candidate.path)
+			if opts.SecureClient {
+				return nil, fmt.Errorf("ai signature catalog: signature pack path matched nothing: %s", candidate.path)
+			}
+			// A configured pack whose file is gone is left out, like one
+			// that fails its pin: the rest of the catalog, and every other
+			// key of the configuration generation, still applies (GAP-0232).
+			// doctor and config set name it.
+			fmt.Fprintf(os.Stderr, "[ai-discovery] signature pack %s not loaded: the path matches no file\n", candidate.path)
+			continue
 		}
 		for _, p := range paths {
 			if !seen[p] {

@@ -61,7 +61,7 @@ from defenseclaw.commands.cmd_setup import (
 from defenseclaw.commands.cmd_setup import (
     setup as setup_group,
 )
-from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig, load
+from defenseclaw.config import CustomRulePack, HILTConfig, PerConnectorGuardrailConfig, load
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
@@ -71,6 +71,11 @@ from tests.helpers import cleanup_app, make_app_context, record_test_setup_agent
 def _invoke(args, app):
     runner = CliRunner()
     return runner.invoke(setup_group, args, obj=app, catch_exceptions=False)
+
+
+def _custom_packs(root, *names):
+    """config_version 9 custom rule packs: ``guardrail.custom_packs`` keys pinned by digest."""
+    return {name: CustomRulePack(path=os.path.join(root, "packs", name), digest="sha256:" + "a" * 64) for name in names}
 
 
 @contextlib.contextmanager
@@ -719,7 +724,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         # One restart note, from the batch summary (GAP-1951).
-        self.assertEqual(result.output.count("takes effect once the gateway restarts"), 1, msg=result.output)
+        self.assertEqual(result.output.count("takes effect once the gateway starts"), 1, msg=result.output)
         self.assertNotIn("--no-restart: config updated", result.output)
         restart.assert_not_called()
         generic.assert_not_called()
@@ -805,7 +810,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
     def test_openclaw_next_to_hook_connectors_is_refused(self):
         self._seed_map("codex", "cursor")
         with _setup_patches():
-            result = _invoke(["openclaw", "--yes", "--no-restart", "--no-verify"], self.app)
+            result = _invoke(["openclaw", "--yes", "--no-restart"], self.app)
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cannot run next to hook connectors", result.output)
         self.assertIn("setup remove", result.output)
@@ -822,12 +827,12 @@ class TestAdditiveSetupCommand(unittest.TestCase):
     def test_openclaw_next_to_single_hook_connector_is_refused(self):
         self._seed_single("hermes")
         with _setup_patches():
-            result = _invoke(["openclaw", "--yes", "--no-restart", "--no-verify"], self.app)
+            result = _invoke(["openclaw", "--yes", "--no-restart"], self.app)
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("1 configured (hermes)", result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "hermes")
         with _setup_patches(), patch("defenseclaw.commands.cmd_setup.setup_guardrail"):
-            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
+            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("--replace removes 1 hook connector(s): hermes", result.output)
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
@@ -838,7 +843,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self._seed_map("codex", "cursor")
         with _setup_patches():
             declined = CliRunner().invoke(
-                setup_group, ["openclaw", "--replace", "--no-restart", "--no-verify"], obj=self.app, input="n\n"
+                setup_group, ["openclaw", "--replace", "--no-restart"], obj=self.app, input="n\n"
             )
         self.assertIn("--replace removes 2 hook connector(s): codex, cursor", declined.output)
         # GAP-2117: say when the removed hooks go away, not only in the prompt.
@@ -847,7 +852,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
 
         with _setup_patches(), patch("defenseclaw.commands.cmd_setup.setup_guardrail") as backend:
-            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart", "--no-verify"], self.app)
+            result = _invoke(["openclaw", "--replace", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         backend.assert_called_once()
         self.assertIn("Remove them now with: defenseclaw-gateway restart", result.output)
@@ -1444,7 +1449,7 @@ class TestRemoveConnector(unittest.TestCase):
             "codex": PerConnectorGuardrailConfig(
                 enabled=False,
                 mode="action",
-                rule_pack_dir="codex-pack",
+                rule_pack="codex-pack",
                 hook_fail_mode="closed",
                 hilt=HILTConfig(enabled=True, min_severity="LOW"),
                 block_message="codex-block",
@@ -1452,12 +1457,13 @@ class TestRemoveConnector(unittest.TestCase):
             "claudecode": PerConnectorGuardrailConfig(
                 enabled=False,
                 mode="action",
-                rule_pack_dir="claude-pack",
+                rule_pack="claude-pack",
                 hook_fail_mode="closed",
                 hilt=HILTConfig(enabled=True, min_severity="MEDIUM"),
                 block_message="claude-block",
             ),
         }
+        packs = _custom_packs(self.tmp_dir, "global-pack", "codex-pack", "claude-pack")
         cases = (("claudecode", "codex"), ("codex", "claudecode"))
 
         for removed, survivor in cases:
@@ -1465,7 +1471,8 @@ class TestRemoveConnector(unittest.TestCase):
                 gc = self.app.cfg.guardrail
                 gc.enabled = True
                 gc.mode = "observe"
-                gc.rule_pack_dir = "global-pack"
+                gc.custom_packs = copy.deepcopy(packs)
+                gc.rule_pack = "global-pack"
                 gc.hook_fail_mode = "open"
                 gc.hilt = HILTConfig(enabled=False, min_severity="HIGH")
                 gc.block_message = "global-block"
@@ -1494,6 +1501,7 @@ class TestRemoveConnector(unittest.TestCase):
                     reloaded = load()
                 self.assertEqual(set(reloaded.guardrail.connectors), {survivor})
                 self.assertEqual(reloaded.guardrail.connectors[survivor], expected_entry)
+                self.assertEqual(reloaded.guardrail.custom_packs, packs)
                 self.assertEqual(reloaded.guardrail.connector, survivor)
                 self.assertEqual(reloaded.claw.mode, survivor)
 
@@ -2358,6 +2366,36 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         message = str(raised.exception)
         self.assertNotIn("rollback was incomplete", message)
         self.assertIn("gateway still cannot start for the same reason", message)
+
+    def test_missing_hook_launcher_rollback_names_the_installer(self):
+        # GAP-0549: the restored config needs the missing launcher too, so the
+        # same readiness failure is not an incomplete rollback.
+        prior_path = os.path.abspath(os.path.join(self.tmp_dir, "registrations", "prior-a.json"))
+        atomic_write_private_bytes(prior_path, b"prior-a\n")
+        snapshot, _lock = self._snapshot_with_registration_lock(
+            {"codex": {"locations": {"hook_config_paths": [prior_path]}}}
+        )
+        cause = cmd_setup._GatewayRestartFailed(
+            "gateway restart/readiness failed for: connector runtime readiness. "
+            f"{cmd_setup._LAUNCHER_MISSING_RESTART_TEXT}: run the DefenseClaw installer again."
+        )
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._restore_prior_setup_lifecycle",
+                side_effect=cmd_setup._GatewayRestartFailed(cause.message),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._verify_restored_setup_runtime",
+                return_value=["connector codex: lock identity changed"],
+            ),
+            self.assertRaises(click.ClickException) as raised,
+        ):
+            cmd_setup._rollback_failed_connector_application(self.app, snapshot, cause)
+
+        message = str(raised.exception)
+        self.assertNotIn("rollback was incomplete", message)
+        self.assertIn("run the DefenseClaw installer again", message)
+        self.assertIn("lock identity changed", message)
 
     def test_gateway_start_failure_ends_with_one_next_step(self):
         # GAP-1808: one cause and one next step after the restored config.
@@ -3532,12 +3570,14 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 ("setup", "claude-code", "--yes", "--mode", "observe"),
             ),
         )
+        packs = _custom_packs(self.tmp_dir, "global-pack", "codex-pack", "claude-pack")
         for connector, effective_mode, expected_argv in cases:
             with self.subTest(connector=connector):
                 gc = self.app.cfg.guardrail
                 gc.enabled = True
                 gc.mode = "observe"
-                gc.rule_pack_dir = "global-pack"
+                gc.custom_packs = copy.deepcopy(packs)
+                gc.rule_pack = "global-pack"
                 gc.hook_fail_mode = "open"
                 gc.hilt = HILTConfig(enabled=False, min_severity="HIGH")
                 gc.block_message = "global-block"
@@ -3547,7 +3587,7 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                     "codex": PerConnectorGuardrailConfig(
                         enabled=False,
                         mode="action",
-                        rule_pack_dir="codex-pack",
+                        rule_pack="codex-pack",
                         hook_fail_mode="closed",
                         hilt=HILTConfig(enabled=True, min_severity="LOW"),
                         block_message="codex-block",
@@ -3555,7 +3595,7 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                     "claudecode": PerConnectorGuardrailConfig(
                         enabled=True,
                         mode="observe",
-                        rule_pack_dir="claude-pack",
+                        rule_pack="claude-pack",
                         hook_fail_mode="open",
                         hilt=HILTConfig(enabled=False, min_severity="MEDIUM"),
                         block_message="claude-block",
@@ -3601,6 +3641,7 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 ):
                     reloaded = load()
                 self.assertEqual(reloaded.guardrail.connectors, before_policies)
+                self.assertEqual(reloaded.guardrail.custom_packs, packs)
                 self.assertEqual(reloaded.guardrail.judge.hook_connectors, before_gate)
 
     def test_pdf_repro_peer_mode_not_flipped(self):

@@ -813,6 +813,42 @@ class TriggerPostEnableScanTests(unittest.TestCase):
         self.assertNotIn("once the sidecar is up", output)
 
 
+
+    def test_503_then_connection_failure_reports_unreachable_sidecar(self):
+        app = _make_ctx(enabled=True)
+        attempts = {"n": 0}
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def scan_ai_usage(self):
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    exc = requests.HTTPError("discovery loading")
+                    exc.response = MagicMock(status_code=503)
+                    raise exc
+                raise requests.ConnectionError("connection refused")
+
+        with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                   side_effect=_resolve_target_stub), \
+                patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient), \
+                patch("defenseclaw.commands.cmd_agent.time.sleep"):
+            runner = CliRunner()
+            with runner.isolation() as (out, _err, _input):
+                cmd_agent._trigger_post_enable_scan(
+                    app,
+                    gateway_host=None,
+                    gateway_port=None,
+                    gateway_token_env=None,
+                )
+                output = out.getvalue().decode()
+
+        self.assertGreaterEqual(attempts["n"], 2)
+        self.assertIn("agent usage --refresh", output)
+        self.assertNotIn("agent discovery status", output)
+
+
 class RequireLoadedConfigTests(unittest.TestCase):
     """Regression coverage for the pre-init / lazy-load path.
 

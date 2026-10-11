@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import unittest
 import uuid
@@ -125,6 +126,17 @@ class _SkillScanUXBase(unittest.TestCase):
 
 
 class TestSingleTargetUX(_SkillScanUXBase):
+    def test_secure_client_scanner_does_not_select_default_pack(self) -> None:
+        from defenseclaw.commands.cmd_skill import _build_skill_scanner
+
+        with (
+            patch("defenseclaw.commands.cmd_skill.asset_lists.is_secure_client", return_value=True),
+            patch("defenseclaw.scanner.skill.SkillScannerWrapper"),
+            patch("defenseclaw.scanner.rulepack.maybe_wrap") as wrap,
+        ):
+            _build_skill_scanner(self.app, use_llm=False)
+        self.assertFalse(wrap.call_args.kwargs["default_pack"])
+
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_preamble_lists_categories_and_source(self, mock_cls, _mock_info) -> None:
@@ -155,7 +167,11 @@ class TestSingleTargetUX(_SkillScanUXBase):
         self.assertIn("Summary: 1 skill scanned", result.output)
         self.assertIn("clean=1", result.output)
         self.assertIn("blocked=0", result.output)
-        self.assertIn("in 80ms", result.output)
+        # The summary reports the scan's 80ms plus the real time of the default
+        # rule-pack overlay (GAP-0164, GAP-2070), so only the floor is exact.
+        took = re.search(r"in (\d+)ms", result.output)
+        self.assertIsNotNone(took, result.output)
+        self.assertGreaterEqual(int(took.group(1)), 80)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")

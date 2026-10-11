@@ -1867,7 +1867,8 @@ compromised hook shows:
 
 - **Hook silence** (`hook_silence`): the harness is active (OCSF network
   events of the harness's own binaries under its install root, their
-  connections to the egress proxy included, native OTLP; OCSF process
+  connections to the egress proxy included, but not the native OTLP an idle
+  harness exports at its prompt; OCSF process
   events of those binaries count too, but OpenShell 0.1 reports only the
   processes its supervisor starts, never the ones a harness runs, so work
   without network traffic goes unseen) for the

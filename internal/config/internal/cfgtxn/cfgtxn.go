@@ -22,6 +22,7 @@
 package cfgtxn
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -46,6 +47,9 @@ const (
 
 // ErrLockBusy means another writer held the lock past the timeout.
 var ErrLockBusy = errors.New("configwrite: another DefenseClaw process is changing config.yaml")
+
+// ErrConflict means the file changed after the transaction read it.
+var ErrConflict = errors.New("configwrite: config.yaml changed since it was read")
 
 // GenerationState is config.generation.json.
 type GenerationState struct {
@@ -111,6 +115,8 @@ func SHA256Hex(raw []byte) string {
 type Txn struct {
 	path string
 	lock *os.File
+	// generationWrite permits a transaction-local durability fault in tests.
+	generationWrite func(string, []byte, os.FileMode) error
 }
 
 // Begin takes the writer lock for configPath, waiting up to timeout (zero
@@ -188,15 +194,51 @@ func (t *Txn) Read() (raw []byte, mode os.FileMode, exists bool, err error) {
 }
 
 // Commit replaces config.yaml with candidate (durably) and then advances
-// config.generation.json. The lock must still be held.
-func (t *Txn) Commit(candidate []byte, mode os.FileMode, actor, reason string) (GenerationState, error) {
+// config.generation.json. The lock must still be held. When either step
+// fails after the new bytes reached config.yaml (a failed directory fsync, a
+// full disk before the generation file), the previous bytes are put back so
+// the error means nothing changed; if that restore fails too, the error says
+// config.yaml holds the new bytes.
+func (t *Txn) Commit(expected, candidate []byte, expectedExists bool, mode os.FileMode, actor, reason string) (GenerationState, error) {
 	if t == nil || t.lock == nil {
 		return GenerationState{}, errors.New("configwrite: commit without the writer lock")
 	}
-	if err := WriteFileDurable(t.path, candidate, mode); err != nil {
-		return GenerationState{}, err
+	previous, readErr := os.ReadFile(t.path)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return GenerationState{}, fmt.Errorf("configwrite: read previous config %s: %w", t.path, readErr)
 	}
-	return t.RecordGeneration(SHA256Hex(candidate), actor, reason)
+	existed := readErr == nil
+	if existed != expectedExists || !bytes.Equal(previous, expected) {
+		return GenerationState{}, ErrConflict
+	}
+	if err := WriteFileDurable(t.path, candidate, mode); err != nil {
+		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
+	}
+	state, err := t.RecordGeneration(SHA256Hex(candidate), actor, reason)
+	if err != nil {
+		return GenerationState{}, t.undoCommit(err, candidate, previous, existed, mode)
+	}
+	return state, nil
+}
+
+// undoCommit restores the previous config.yaml after a failed Commit when the
+// candidate bytes are on disk, and returns cause (annotated if the restore
+// failed too).
+func (t *Txn) undoCommit(cause error, candidate, previous []byte, existed bool, mode os.FileMode) error {
+	onDisk, err := os.ReadFile(t.path)
+	if err != nil || !bytes.Equal(onDisk, candidate) {
+		return cause
+	}
+	var restoreErr error
+	if existed {
+		restoreErr = WriteFileDurable(t.path, previous, mode)
+	} else {
+		restoreErr = os.Remove(t.path)
+	}
+	if restoreErr != nil {
+		return fmt.Errorf("%w; config.yaml now holds the new bytes and the previous ones could not be restored: %v", cause, restoreErr)
+	}
+	return cause
 }
 
 // RecordGeneration advances config.generation.json for bytes that are
@@ -231,7 +273,48 @@ func (t *Txn) RecordGeneration(configSHA256, actor, reason string) (GenerationSt
 		return GenerationState{}, fmt.Errorf("configwrite: encode %s: %w", GenerationFileName, err)
 	}
 	encoded = append(encoded, '\n')
-	if err := WriteFileDurable(GenerationPath(t.path), encoded, 0o600); err != nil {
+	path := GenerationPath(t.path)
+	before, readErr := os.ReadFile(path)
+	existed := readErr == nil
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		return GenerationState{}, fmt.Errorf("configwrite: read %s before update: %w", path, readErr)
+	}
+	mode := os.FileMode(0o600)
+	if existed {
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			return GenerationState{}, fmt.Errorf("configwrite: stat %s before update: %w", path, statErr)
+		}
+		mode = info.Mode().Perm()
+	}
+	write := t.generationWrite
+	if write == nil {
+		write = WriteFileDurable
+	}
+	if err := write(path, encoded, 0o600); err != nil {
+		// WriteFileDurable may have renamed the file before a directory fsync
+		// failed. Put the old record back before Commit restores config.yaml.
+		current, currentErr := os.ReadFile(path)
+		changed := currentErr == nil && (!existed || !bytes.Equal(current, before))
+		if errors.Is(currentErr, os.ErrNotExist) && existed {
+			changed = true
+		} else if currentErr != nil && !errors.Is(currentErr, os.ErrNotExist) {
+			return GenerationState{}, fmt.Errorf("%w; cannot inspect generation rollback: %v", err, currentErr)
+		}
+		if changed {
+			var restoreErr error
+			if existed {
+				restoreErr = WriteFileDurable(path, before, mode)
+			} else {
+				restoreErr = os.Remove(path)
+				if restoreErr == nil {
+					restoreErr = syncDir(filepath.Dir(path))
+				}
+			}
+			if restoreErr != nil {
+				return GenerationState{}, fmt.Errorf("%w; generation record could not be restored: %v", err, restoreErr)
+			}
+		}
 		return GenerationState{}, err
 	}
 	return next, nil

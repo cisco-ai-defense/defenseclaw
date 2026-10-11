@@ -76,6 +76,42 @@ func executablePath(pid int) string {
 	return windows.UTF16ToString(buf[:size])
 }
 
+// commandLine reads the process's command line (ProcessCommandLineInformation,
+// which PROCESS_QUERY_LIMITED_INFORMATION may read) and splits it as the C
+// runtime does. Windows does not report another process's working directory
+// here.
+func commandLine(pid int) ([]string, string, error) {
+	if pid <= 0 || pid > int(^uint32(0)) {
+		return nil, "", errNotFound
+	}
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return nil, "", err
+	}
+	defer windows.CloseHandle(handle)
+	buf := make([]byte, 8192)
+	for {
+		var size uint32
+		err = windows.NtQueryInformationProcess(handle, windows.ProcessCommandLineInformation,
+			unsafe.Pointer(&buf[0]), uint32(len(buf)), &size)
+		if err == nil {
+			break
+		}
+		tooSmall := errors.Is(err, windows.STATUS_INFO_LENGTH_MISMATCH) || errors.Is(err, windows.STATUS_BUFFER_TOO_SMALL) ||
+			errors.Is(err, windows.STATUS_BUFFER_OVERFLOW)
+		if !tooSmall || size <= uint32(len(buf)) || size > 2*maxCommandLineBytes+64 {
+			return nil, "", err
+		}
+		buf = make([]byte, size)
+	}
+	line := (*windows.NTUnicodeString)(unsafe.Pointer(&buf[0])).String()
+	args, err := windows.DecomposeCommandLine(line)
+	if err != nil {
+		return nil, "", err
+	}
+	return args, "", nil
+}
+
 func processStart(pid int) (int64, bool, error) {
 	if pid <= 0 || pid > int(^uint32(0)) {
 		return 0, false, errNotFound

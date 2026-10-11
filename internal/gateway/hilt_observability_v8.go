@@ -160,7 +160,7 @@ func (m *HILTApprovalManager) startHILTApprovalV8(
 		DefenseClawTurnID:                 proxyV8OptionalID(correlation.TurnID),
 		UserID:                            proxyV8OptionalID(evaluation.UserID),
 		DefenseClawUserIDKind:             v8UserIDKind(evaluation.UserIDKind),
-		DefenseClawUserName:               proxyV8OptionalID(evaluation.UserName),
+		DefenseClawUserName:               v8UserName(evaluation.UserName, proxyV8OptionalID),
 		DefenseClawEvaluationID:           optionalJudgeMetricText(correlation.EvaluationID),
 		DefenseClawPolicyID:               optionalJudgeMetricText(correlation.PolicyID),
 		DefenseClawPolicyVersion:          proxyV8OptionalID(correlation.PolicyVersion),

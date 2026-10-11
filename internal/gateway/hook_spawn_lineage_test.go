@@ -33,6 +33,162 @@ func hookSpawnTestChild(source, sessionID, agentID string) llmEventMeta {
 	}
 }
 
+// A hook that names an agent no SubagentStart announced (the hooks that follow
+// a gateway restart, or an agent the connector started on its own) belongs to
+// a child of the session's main agent: depth 1 under it, not a second root at
+// depth 0 (GAP-0161, GAP-0162).
+func TestUnannouncedSubagentHooksAreChildrenOfTheMainAgent(t *testing.T) {
+	for _, source := range []string{"claudecode", "codex"} {
+		t.Run(source, func(t *testing.T) {
+			api := &APIServer{}
+			sessionID := source + "-unannounced-agent"
+			mainAgent := stableLLMEventID("agent", source, sessionID, "root")
+			emit := func(payload map[string]any) {
+				raw, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if source == "codex" {
+					api.emitCodexHookLLMEvent(t.Context(), decodeCodexRequestFromBytes(raw, payload), nil, raw)
+					return
+				}
+				api.emitClaudeCodeHookLLMEvent(t.Context(), decodeClaudeCodeRequestFromBytes(raw, payload), nil, raw)
+			}
+			tool := func(event, agentID, toolID string) map[string]any {
+				payload := map[string]any{
+					"hook_event_name": event, "session_id": sessionID, "tool_name": "Bash",
+					"tool_use_id": toolID, "tool_input": map[string]any{"command": "true"},
+				}
+				if agentID != "" {
+					payload["agent_id"] = agentID
+				}
+				return payload
+			}
+			emit(tool("PreToolUse", "", "tool-main"))
+			emit(tool("PreToolUse", "agent-unannounced", "tool-child"))
+			emit(tool("PostToolUse", "agent-unannounced", "tool-child"))
+
+			child, ok := api.hookLifecycleSnapshot(source, sessionID, "agent-unannounced")
+			if !ok || child.AgentDepth != 1 || child.ParentAgentID != mainAgent || child.RootAgentID != mainAgent {
+				t.Fatalf("unannounced agent lineage = %+v (retained %v), want depth 1 under %s", child, ok, mainAgent)
+			}
+			main, ok := api.hookLifecycleSnapshot(source, sessionID, mainAgent)
+			if !ok || main.AgentDepth != 0 || main.ParentAgentID != "" {
+				t.Fatalf("main agent lineage = %+v (retained %v), want depth 0", main, ok)
+			}
+		})
+	}
+}
+
+// Codex 0.160 runs a spawned agent as a thread with its own session id and
+// fires no SubagentStart; only the parent's create_thread result names it.
+// The thread's hooks are then a child of the calling agent, one level down,
+// with the parent session named (GAP-0179). A session nobody spawned stays a
+// root. The thread is not a session of the agent identity: agent identities
+// counts chats (GAP-0226).
+func TestCodexThreadSpawnLinksTheChildSessionToItsParent(t *testing.T) {
+	api := &APIServer{}
+	const parentSession = "01a112f0-847b-7161-9d89-41cd7dbafd82"
+	const childSession = "01a112f1-8bff-77b2-b8f8-a675ceccfdd2"
+	const identity = "agt-00000000000000d2"
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: identity})
+	parentAgent := agentNodeID(identity, "codex", parentSession, "root")
+	childAgent := agentNodeID(identity, "codex", childSession, "root")
+	emit := func(session, event, tool string, response any) {
+		if event == "SessionStart" { // the hook path counts a session it has not seen
+			sharedAgentIdentities.observe(agentIdentityFacts{ID: identity, UserID: "4747", Connector: "codex"}, session, true)
+		}
+		api.emitCodexHookLLMEvent(ctx, codexHookRequest{
+			HookEventName: event, SessionID: session, ToolName: tool, ToolUseID: "call-" + session + event,
+			ToolInput: map[string]any{"prompt": "run it"}, ToolResponse: response,
+			Payload: map[string]any{"source": "startup"},
+		}, nil, nil)
+	}
+	emit(parentSession, "SessionStart", "", nil)
+	emit(parentSession, "PreToolUse", "mcp__codex_tui__create_thread", nil)
+	emit(parentSession, "PostToolUse", "mcp__codex_tui__create_thread",
+		map[string]any{"content": `{"threadId":"` + childSession + `"}`})
+	emit(childSession, "SessionStart", "", nil)
+	emit(childSession, "PreToolUse", "Bash", nil)
+	emit("01a112f2-0000-7000-8000-000000000001", "SessionStart", "", nil)
+
+	child, ok := api.hookLifecycleSnapshot("codex", childSession, childAgent)
+	if !ok || child.AgentDepth != 1 || child.ParentAgentID != parentAgent || child.RootAgentID != parentAgent ||
+		child.ParentSessionID != parentSession || child.RootSessionID != parentSession {
+		t.Fatalf("child thread lineage = %+v (retained %v), want depth 1 under %s in session %s", child, ok, parentAgent, parentSession)
+	}
+	parent, ok := api.hookLifecycleSnapshot("codex", parentSession, parentAgent)
+	if !ok || parent.AgentDepth != 0 || parent.ParentAgentID != "" {
+		t.Fatalf("parent lineage = %+v (retained %v), want depth 0", parent, ok)
+	}
+	other := "01a112f2-0000-7000-8000-000000000001"
+	stranger, ok := api.hookLifecycleSnapshot("codex", other, agentNodeID(identity, "codex", other, "root"))
+	if !ok || stranger.AgentDepth != 0 || stranger.ParentSessionID != "" {
+		t.Fatalf("a session nobody spawned = %+v (retained %v), want a root", stranger, ok)
+	}
+	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 2 || pending[identity].LastSessionID != other {
+		t.Fatalf("agent identity counted %+v, want the parent and the stranger, not the thread", pending[identity])
+	}
+
+	// On a managed host the thread hooked 100 ms before the create_thread
+	// result reached the gateway, and its first rows were a root at depth 0.
+	// The call in flight links it from its first hook.
+	const earlyChild = "01a11c2f-0363-7e42-aabb-15f578154171"
+	emit(parentSession, "PreToolUse", "mcp__codex_tui__create_thread", nil)
+	emit(earlyChild, "SessionStart", "", nil)
+	early, ok := api.hookLifecycleSnapshot("codex", earlyChild, agentNodeID(identity, "codex", earlyChild, "root"))
+	if !ok || early.AgentDepth != 1 || early.ParentAgentID != parentAgent || early.ParentSessionID != parentSession {
+		t.Fatalf("a thread that hooks before the call result = %+v (retained %v), want depth 1 under %s", early, ok, parentAgent)
+	}
+	emit(parentSession, "PostToolUse", "mcp__codex_tui__create_thread",
+		map[string]any{"content": `{"threadId":"` + earlyChild + `"}`})
+	const later = "01a11c30-0000-7000-8000-000000000002"
+	emit(later, "SessionStart", "", nil)
+	if root, ok := api.hookLifecycleSnapshot("codex", later, agentNodeID(identity, "codex", later, "root")); !ok || root.AgentDepth != 0 {
+		t.Fatalf("a session started after the call returned = %+v (retained %v), want a root", root, ok)
+	}
+}
+
+// GAP-0371: Copilot CLI runs a task sub-agent in a session of its own whose
+// hooks name only that session. subagentStart comes first, in the parent's
+// session, and subagentStop names the child session as agentId. The child's
+// hooks are a sub-agent of the parent at depth one, and agent identities
+// counts the parent chat only.
+func TestCopilotSubagentSessionLinksToItsParent(t *testing.T) {
+	api := &APIServer{}
+	const parentSession = "6b5c0000-0000-4000-8000-000000000371"
+	const childSession = "e5aa4dff-407b-41c3-9ea8-2250e0de8e02"
+	const identity = "agt-00000000000003c1"
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: identity})
+	parentAgent := agentNodeID(identity, "copilot", parentSession, "root")
+	seen := map[string]bool{}
+	emit := func(req agentHookRequest) {
+		req.ConnectorName = "copilot"
+		if !seen[req.SessionID] { // the hook path counts a session it has not seen
+			sharedAgentIdentities.observe(agentIdentityFacts{ID: identity, UserID: "4371", Connector: "copilot"}, req.SessionID, true)
+			seen[req.SessionID] = true
+		}
+		api.emitAgentHookLLMEvent(ctx, req, nil)
+	}
+	emit(agentHookRequest{HookEventName: "sessionStart", SessionID: parentSession, Payload: map[string]any{"source": "new"}})
+	emit(agentHookRequest{HookEventName: "preToolUse", SessionID: parentSession, ToolName: "task", Payload: map[string]any{}})
+	emit(agentHookRequest{HookEventName: "subagentStart", SessionID: parentSession, AgentName: "explore",
+		Payload: map[string]any{"agentName": "explore"}})
+	emit(agentHookRequest{HookEventName: "preToolUse", SessionID: childSession, ToolName: "bash", Payload: map[string]any{}})
+	emit(agentHookRequest{HookEventName: "subagentStop", SessionID: parentSession, AgentID: childSession, AgentType: "explore",
+		Payload: map[string]any{"agentId": childSession, "agentType": "explore"}})
+
+	child, ok := api.hookLifecycleSnapshot("copilot", childSession, agentNodeID(identity, "copilot", childSession, "root"))
+	if !ok || child.AgentDepth != 1 || child.ParentAgentID != parentAgent || child.ParentSessionID != parentSession ||
+		child.RootSessionID != parentSession || child.LifecycleEvent != "subagent_stop" {
+		t.Fatalf("Copilot sub-agent session lineage = %+v (retained %v), want depth 1 under %s", child, ok, parentAgent)
+	}
+	if pending, _ := sharedAgentIdentities.snapshot(); pending[identity].SessionsSeen != 1 ||
+		pending[identity].LastSessionID != parentSession {
+		t.Fatalf("agent identity counted %+v, want the parent chat only", pending[identity])
+	}
+}
+
 func hookSpawnIntentCount(api *APIServer) int {
 	api.llmPromptMu.Lock()
 	defer api.llmPromptMu.Unlock()
@@ -508,5 +664,90 @@ func TestHookSpawnFirstEventEmitterSynthesizesOneStartConcurrently(t *testing.T)
 	}
 	if transitions := len(api.hookLifecycleTransitions); transitions != 1 {
 		t.Fatalf("concurrent inferred lifecycle transitions=%d want=1", transitions)
+	}
+}
+
+func TestSpawnIntentDoesNotCrossAgentIdentity(t *testing.T) {
+	api := &APIServer{}
+	now := time.Now().UTC()
+	parent := hookSpawnTestParent("claudecode", "shared-session", "agent-a", "agent-a", 0, "tool-a")
+	parent.AgentIdentityID, parent.UserID = "agt-a", "1001"
+	child := hookSpawnTestChild("claudecode", "shared-session", "agent-b-child")
+	child.AgentIdentityID, child.UserID = "agt-b", "1002"
+	api.rememberHookSpawnIntentAt(parent, "Agent", hookSpawnIntentCompleted, now)
+	got := api.applyHookSpawnIntentLineageAt(child, nil, now)
+	if got.ParentAgentID == parent.AgentID || got.RootAgentID == parent.AgentID || hookSpawnIntentCount(api) != 1 {
+		t.Fatalf("another identity consumed spawn intent: %+v", got)
+	}
+	parent.AgentIdentityID, parent.UserID = "agt-b", "1002"
+	parent.AgentID, parent.RootAgentID, parent.ToolID = "agent-b", "agent-b", "tool-b"
+	api.rememberHookSpawnIntentAt(parent, "Agent", hookSpawnIntentCompleted, now)
+	got = api.applyHookSpawnIntentLineageAt(child, nil, now)
+	if got.ParentAgentID != "agent-b" || hookSpawnIntentCount(api) != 1 {
+		t.Fatalf("same identity failed to take its intent: %+v", got)
+	}
+	ctxA := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-a"})
+	ctxB := ContextWithAgentIdentity(t.Context(), AgentIdentity{IdentityID: "agt-b"})
+	api.rememberHookPromptID(ctxA, "claudecode", "shared-session", "", "prompt-a")
+	if prompt := api.lastHookPromptID(ctxB, "claudecode", "shared-session"); prompt != "" {
+		t.Fatalf("another identity inherited prompt %q", prompt)
+	}
+}
+
+func TestCodexChildThreadRequiresRealToolAndIdentityScope(t *testing.T) {
+	api := &APIServer{}
+	parent := llmEventMeta{Source: "codex", SessionID: "parent-session", AgentID: "agent-a", RootAgentID: "agent-a", AgentIdentityID: "agt-a", UserID: "1001"}
+	child := llmEventMeta{Source: "codex", SessionID: "child-session-0001", AgentID: "agent-b", RootAgentID: "agent-b", AgentIdentityID: "agt-b", UserID: "1001"}
+	response := `{"threadId":"child-session-0001"}`
+	api.rememberHookChildThread(parent, "mcp__thirdparty__codex_tui_create_thread", response)
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != "" {
+		t.Fatalf("lookalike tool linked a child: %+v", got)
+	}
+	api.rememberHookChildThread(parent, "mcp__codex_tui__create_thread", response)
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != "" {
+		t.Fatalf("another identity linked a child: %+v", got)
+	}
+	child.AgentIdentityID = parent.AgentIdentityID
+	if got := api.applyHookChildThreadLineage(child); got.ParentAgentID != parent.AgentID {
+		t.Fatalf("same identity did not link a child: %+v", got)
+	}
+}
+
+// A parent session ID is supplied by the hook, so retained state from a
+// different managed agent identity cannot establish the child's lineage.
+func TestReconcileHookParentRequiresSameAgentIdentity(t *testing.T) {
+	api := &APIServer{}
+	parent := llmEventMeta{
+		Source: "opencode", SessionID: "shared-parent", AgentID: "owner-parent",
+		RootAgentID: "owner-root", RootSessionID: "owner-root-session",
+		AgentIdentityID: "agt-owner", UserID: "1001",
+	}
+	api.rememberHookSessionState(t.Context(), parent)
+	child := llmEventMeta{
+		Source: "opencode", SessionID: "other-child", AgentID: "other-child-agent",
+		ParentSessionID: parent.SessionID, ParentAgentID: "other-placeholder",
+		RootAgentID: "other-root", RootSessionID: "other-root-session",
+		AgentIdentityID: "agt-other", UserID: "1002", AgentDepth: 1,
+	}
+	got := api.reconcileHookParent(child)
+	if got.ParentAgentID != child.ParentAgentID || got.RootAgentID != child.RootAgentID ||
+		got.RootSessionID != child.RootSessionID || got.ParentLineageResolved {
+		t.Fatalf("foreign parent session changed child lineage: %+v", got)
+	}
+
+	// A later session with the same caller-supplied ID must not hide the
+	// matching parent from the identity-filtered lookup.
+	otherParent := parent
+	otherParent.AgentID = "other-parent"
+	otherParent.RootAgentID = "other-parent"
+	otherParent.AgentIdentityID = child.AgentIdentityID
+	otherParent.UserID = child.UserID
+	api.rememberHookSessionState(t.Context(), otherParent)
+
+	child.AgentIdentityID, child.UserID = parent.AgentIdentityID, parent.UserID
+	got = api.reconcileHookParent(child)
+	if got.ParentAgentID != parent.AgentID || got.RootAgentID != parent.RootAgentID ||
+		got.RootSessionID != parent.RootSessionID || !got.ParentLineageResolved {
+		t.Fatalf("same-identity parent session did not resolve: %+v", got)
 	}
 }

@@ -45,6 +45,7 @@ const (
 // A published inventory is shared read-only; never mutate one returned by
 // ContinuousDiscoveryService.IDEInventory.
 type IDEInventory struct {
+	ScanID        string            `json:"-"`
 	Scope         string            `json:"scope"`
 	ScannedAt     time.Time         `json:"scanned_at"`
 	Installations []IDEInstallation `json:"installations"`
@@ -199,6 +200,42 @@ func (idx ideAIIndex) match(family, id string) (AISignature, bool) {
 	return sig, ok
 }
 
+// Some marketplace AI extensions are newer than the curated signature catalog.
+// Exact IDs cover established products; the narrow description rule covers
+// new publishers that describe their own extension as an AI coding tool.
+var marketplaceAIExtensions = map[string]bool{
+	"augment.vscode-augment":                 true,
+	"kilocode.kilo-code":                     true,
+	"rjmacarthy.twinny":                      true,
+	"genieai.chatgpt-vscode":                 true,
+	"gitlab.gitlab-workflow":                 true,
+	"google.gemini-cli-vscode-ide-companion": true,
+	"sst-dev.opencode":                       true,
+	"visualstudioexptteam.vscodeintellicode": true,
+}
+
+func (idx ideAIIndex) matchPlugin(family string, p ideplugins.Plugin) (AISignature, bool) {
+	if sig, ok := idx.match(family, p.ID); ok {
+		return sig, true
+	}
+	if family != ideplugins.FamilyVSCode {
+		return AISignature{}, false
+	}
+	description := strings.ToLower(p.Description)
+	aiDescription := strings.Contains(description, "ai coding") ||
+		strings.Contains(description, "ai code completion") ||
+		strings.Contains(description, "ai-powered code") ||
+		strings.Contains(description, "llm coding") ||
+		strings.Contains(description, "chatgpt")
+	if !marketplaceAIExtensions[strings.ToLower(p.ID)] && !aiDescription {
+		return AISignature{}, false
+	}
+	return AISignature{
+		ID: "ide-" + strings.ToLower(p.ID), Name: p.DisplayName,
+		Vendor: p.Publisher, Category: "editor_extension", Confidence: 0.9,
+	}, true
+}
+
 // detectEditorExtensions reads every scanned home's IDEs. It returns the
 // AI editor-extension signals (one per signature, IDE installation and
 // account, attributed through the home's owner) and the full IDE
@@ -215,21 +252,21 @@ func (s *ContinuousDiscoveryService) detectEditorExtensions() ([]AISignal, *IDEI
 	inv := &IDEInventory{Scope: s.ideInventoryScope(), ScannedAt: now}
 	var signals []AISignal
 	for _, home := range homes {
-		limits := ideplugins.Limits{FollowSymlinks: !serviceContext}
+		// Only a user's own gateway follows links: a link a user planted
+		// toward another readable home must not put that account's
+		// plugins in a managed inventory (GAP-0396).
+		limits := ideplugins.Limits{FollowSymlinks: !serviceContext && !s.userHomeScan}
 		if !serviceContext {
 			limits.RoamingAppData, limits.LocalAppData = platformIDEAppData(home)
 		}
 		installs := ideplugins.Scan(home, runtime.GOOS, limits)
-		signals = append(signals, s.ideSignals(installs, index)...)
+		signals = append(signals, s.ideSignals(installs, index, serviceContext)...)
 		inv.add(installs, s.ideOwnerForHome(home, serviceContext), index, now)
 	}
 	if runtime.GOOS == "windows" {
 		machine := ideplugins.ScanMachine(runtime.GOOS, ideplugins.Limits{ProgramFiles: programFilesDirs()})
-		signals = append(signals, s.ideSignals(machine, index)...)
+		signals = append(signals, s.ideSignals(machine, index, true)...)
 		inv.add(machine, ideOwner{}, index, now)
-	}
-	if inv.Scope == config.IDEInventoryOff {
-		return signals, nil
 	}
 	inv.applyScope()
 	return signals, inv
@@ -239,23 +276,85 @@ func (s *ContinuousDiscoveryService) ideInventoryScope() string {
 	return config.AIDiscoveryConfig{IDEInventory: s.opts.IDEInventory}.EffectiveIDEInventory()
 }
 
-// ideSignals turns AI plugins into editor_extension signals. The evidence
-// is the installation's extensions directory, so a version update keeps
-// the signal's fingerprint and its owner is the home that holds it.
-func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, index ideAIIndex) []AISignal {
+// ideSignals turns AI plugins into editor_extension signals. A scan of one
+// home keys each signal on the matched extension id, as 0.8.x and 1.0.0 did,
+// so an upgrade keeps every fingerprint (GAP-0297) and a version update or a
+// second IDE with the same extension changes nothing. A service-context scan
+// reads many homes, so it keys each signal on the installation's extensions
+// directory: the same extension in two accounts' homes is two signals, each
+// owned by the home that holds it.
+func (s *ContinuousDiscoveryService) ideSignals(installs []ideplugins.Install, index ideAIIndex, serviceContext bool) []AISignal {
 	var out []AISignal
+	seenValue := map[string]bool{}
 	for _, inst := range installs {
 		seen := map[string]bool{}
 		for _, p := range inst.Plugins {
-			sig, ok := index.match(inst.Family, p.ID)
+			sig, ok := index.matchPlugin(inst.Family, p)
 			if !ok || seen[sig.ID] || inst.Root == "" {
 				continue
 			}
-			seen[sig.ID] = true
-			out = append(out, s.signalFromPath(sig, SignalEditorExtension, "editor_extension", inst.Root))
+			if serviceContext {
+				seen[sig.ID] = true
+				out = append(out, s.signalFromPath(sig, SignalEditorExtension, "editor_extension", inst.Root))
+				continue
+			}
+			value := strings.ToLower(strings.TrimSpace(p.ID))
+			if seenValue[sig.ID+"\x00"+value] {
+				continue
+			}
+			seenValue[sig.ID+"\x00"+value] = true
+			signal := s.signalFromValue(sig, SignalEditorExtension, "editor_extension", value)
+			s.stampHomeOwner(&signal, inst.Root)
+			if st, err := os.Stat(inst.Root); err == nil {
+				mt := st.ModTime().UTC()
+				signal.LastActiveAt = &mt
+			}
+			out = append(out, signal)
 		}
 	}
 	return out
+}
+
+// legacyEditorExtensionRows matches the editor-extension rows of 0.8.x and
+// 1.0.0 to the signals that replace them. Those builds keyed a signal on the
+// matched extension id (signalFromValue, as detectEditorExtensionsLegacy
+// still does for Secure Client); a service-context scan now keys it on the
+// installation. A full scan's editor-extension signal with no stored row takes the oldest
+// stored row of its signature's extension ids as its predecessor, and those
+// rows are replaced rather than gone: an upgrade keeps first-seen times and
+// reports no removal of a tool that is still installed. Remove once
+// upgrades from 0.8.x state files are no longer supported.
+func (s *ContinuousDiscoveryService) legacyEditorExtensionRows(prevMap map[string]aiStoredSignal, signals []AISignal, full bool) (map[string]aiStoredSignal, map[string]bool) {
+	if !full || s.opts.SecureClient || len(prevMap) == 0 {
+		return nil, nil
+	}
+	emitted := make(map[string]bool, len(signals))
+	for _, sig := range signals {
+		emitted[sig.Fingerprint] = true
+	}
+	catalog := make(map[string]AISignature, len(s.catalog))
+	for _, sig := range s.catalog {
+		catalog[sig.ID] = sig
+	}
+	predecessors, replaced := map[string]aiStoredSignal{}, map[string]bool{}
+	for _, sig := range signals {
+		if _, stored := prevMap[sig.Fingerprint]; stored || sig.Detector != "editor_extension" {
+			continue
+		}
+		signature := catalog[sig.SignatureID]
+		for _, ext := range signature.ExtensionIDs {
+			fp := s.signalFromValue(signature, SignalEditorExtension, "editor_extension", strings.ToLower(ext)).Fingerprint
+			old, ok := prevMap[fp]
+			if !ok || emitted[fp] || old.Detector != "editor_extension" {
+				continue
+			}
+			replaced[fp] = true
+			if first, have := predecessors[sig.Fingerprint]; !have || old.FirstSeen.Before(first.FirstSeen) {
+				predecessors[sig.Fingerprint] = old
+			}
+		}
+	}
+	return predecessors, replaced
 }
 
 // ideOwnerForHome names the account of a home: the profile owner on a
@@ -318,7 +417,7 @@ func (inv *IDEInventory) add(installs []ideplugins.Install, owner ideOwner, inde
 				InstallID: row.InstallID,
 			}
 			plugin.Fingerprint = idePluginFingerprint(plugin)
-			if sig, ok := index.match(inst.Family, p.ID); ok {
+			if sig, ok := index.matchPlugin(inst.Family, p); ok {
 				plugin.IsAI, plugin.AISignatureID = true, sig.ID
 			}
 			inv.Plugins = append(inv.Plugins, plugin)
@@ -398,6 +497,50 @@ func (s *ContinuousDiscoveryService) IDEInventory() *IDEInventory {
 	return s.lastIDE
 }
 
+// partialIDEKeepsSignal preserves an editor-extension signal when the same
+// installation's incomplete plugin list cannot prove its removal. The IDE
+// inventory uses the previous plugin baseline for this case; both lifecycles
+// must reach the same conclusion.
+func (s *ContinuousDiscoveryService) partialIDEKeepsSignal(inv *IDEInventory, old aiStoredSignal) bool {
+	if s.opts.SecureClient || inv == nil || !inv.Partial || old.Detector != "editor_extension" {
+		return false
+	}
+	if s.ideBaseline == nil {
+		s.ideBaseline = s.loadIDEBaseline()
+	}
+	partial := make(map[string]string)
+	for _, inst := range inv.Installations {
+		if inst.Partial {
+			partial[inst.InstallID] = inst.PathHash
+		}
+	}
+	for _, plugin := range s.ideBaseline {
+		rootHash, ok := partial[plugin.InstallID]
+		if !ok || !plugin.IsAI || plugin.AISignatureID != old.SignatureID {
+			continue
+		}
+		// Service scans key signals on the installation root; per-user
+		// scans (including 0.8.x state) key them on the extension id.
+		for _, ev := range old.StoredEvidence {
+			if ev.PathHash != "" && ev.PathHash == rootHash ||
+				ev.ValueHash != "" && ev.ValueHash == hashValue(strings.ToLower(strings.TrimSpace(plugin.PluginID))) {
+				return true
+			}
+		}
+		for _, pathHash := range old.PathHashes {
+			if pathHash == rootHash {
+				return true
+			}
+		}
+		if old.Fingerprint == s.signalFromValue(
+			AISignature{ID: old.SignatureID}, SignalEditorExtension, "editor_extension",
+			strings.ToLower(strings.TrimSpace(plugin.PluginID))).Fingerprint {
+			return true
+		}
+	}
+	return false
+}
+
 // finishIDEInventory classifies a full scan's inventory against the
 // previous one (new, changed, seen, and the removed rows), or carries the
 // previous one forward on a process-only scan.
@@ -416,12 +559,21 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 		carried.Removed, carried.Carried, carried.persist = nil, true, false
 		return &carried
 	}
-	if inv == nil {
+	if inv == nil || inv.Scope == config.IDEInventoryOff {
 		s.ideBaseline = nil
 		return nil
 	}
 	if s.ideBaseline == nil {
 		s.ideBaseline = s.loadIDEBaseline()
+	}
+	if inv.Scope == config.IDEInventoryAIOnly {
+		// A row ai_only no longer collects leaves the baseline silently: a
+		// removal record would export the very plugin ai_only withholds.
+		for fp, prev := range s.ideBaseline {
+			if !prev.IsAI {
+				delete(s.ideBaseline, fp)
+			}
+		}
 	}
 	partial := map[string]bool{}
 	for _, inst := range inv.Installations {
@@ -447,28 +599,35 @@ func (s *ContinuousDiscoveryService) finishIDEInventory(inv *IDEInventory, full 
 		}
 		current[p.Fingerprint] = *p
 	}
+	retained := false
 	for fp, prev := range s.ideBaseline {
 		if _, ok := current[fp]; ok {
 			continue
 		}
 		if partial[prev.InstallID] {
-			// A limit cut this installation short; keep the row rather
-			// than report a removal the scan cannot prove.
+			// A limit cut this installation short; keep the row, in the
+			// published inventory as well, rather than report a removal
+			// the scan cannot prove (GAP-0594: the CLI showed none).
+			prev.State = AIStateSeen
 			current[fp] = prev
+			inv.Plugins = append(inv.Plugins, prev)
+			retained = true
 			continue
 		}
 		prev.State = AIStateGone
 		inv.Removed = append(inv.Removed, prev)
 	}
+	if retained {
+		inv.sort()
+	}
 	sort.Slice(inv.Removed, func(i, j int) bool { return inv.Removed[i].Fingerprint < inv.Removed[j].Fingerprint })
 	inv.ScannedAt = now
-	changed := len(inv.Removed) > 0 || len(current) != len(inv.Plugins)
+	changed := len(inv.Removed) > 0
 	for _, p := range inv.Plugins {
 		changed = changed || p.State != AIStateSeen
 	}
 	if changed || now.Sub(s.ideRecordedAt) >= ideRecordInterval {
 		inv.persist = true
-		s.ideRecordedAt = now
 	}
 	s.ideBaseline = current
 	return inv
@@ -483,6 +642,9 @@ func (s *ContinuousDiscoveryService) loadIDEBaseline() map[string]IDEPlugin {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	if at, err := s.invStore.LatestIDEInventoryRecordedAt(ctx); err == nil {
+		s.ideRecordedAt = at
+	}
 	plugins, err := s.invStore.LatestIDEPlugins(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[ai-discovery] ide inventory baseline: %v\n", err)
@@ -557,29 +719,77 @@ func validateUserScanIDE(inv *IDEInventory) error {
 	}
 	installs := map[string]bool{}
 	for _, inst := range inv.Installations {
-		if !ideFamilies[inst.Family] || !ideTokenPattern.MatchString(inst.Product) || !isSHA256Hash(inst.PathHash) {
-			return errors.New("ide installation fields are invalid")
-		}
-		for _, value := range []string{inst.InstallID, inst.Channel, inst.RemoteKind, inst.Version} {
-			if !userScanText(value, maxUserScanField) {
-				return errors.New("ide installation fields must be short printable text")
-			}
+		if err := ideInstallationError(inst); err != nil {
+			return err
 		}
 		installs[inst.InstallID] = true
 	}
 	for _, p := range inv.Plugins {
-		if !installs[p.InstallID] || !ideFamilies[p.Family] || !ideTokenPattern.MatchString(p.Product) ||
-			!ideEnabledStates[p.Enabled] || strings.TrimSpace(p.PluginID) == "" ||
-			(p.PathHash != "" && !isSHA256Hash(p.PathHash)) {
-			return errors.New("ide plugin fields are invalid")
-		}
-		for _, value := range []string{p.PluginID, p.DisplayName, p.Publisher, p.Version, p.EnabledSource, p.Scope, p.AISignatureID} {
-			if !userScanText(value, maxUserScanField) {
-				return errors.New("ide plugin fields must be short printable text")
-			}
+		if err := idePluginError(p, installs); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func ideInstallationError(inst IDEInstallation) error {
+	if !ideFamilies[inst.Family] || !ideTokenPattern.MatchString(inst.Product) || !isSHA256Hash(inst.PathHash) {
+		return errors.New("ide installation fields are invalid")
+	}
+	for _, value := range []string{inst.InstallID, inst.Channel, inst.RemoteKind, inst.Version} {
+		if !userScanText(value, maxUserScanField) {
+			return errors.New("ide installation fields must be short printable text")
+		}
+	}
+	return nil
+}
+
+func idePluginError(p IDEPlugin, installs map[string]bool) error {
+	if !installs[p.InstallID] || !ideFamilies[p.Family] || !ideTokenPattern.MatchString(p.Product) ||
+		!ideEnabledStates[p.Enabled] || strings.TrimSpace(p.PluginID) == "" ||
+		(p.PathHash != "" && !isSHA256Hash(p.PathHash)) {
+		return errors.New("ide plugin fields are invalid")
+	}
+	for _, value := range []string{p.PluginID, p.DisplayName, p.Publisher, p.Version, p.EnabledSource, p.Scope, p.AISignatureID} {
+		if !userScanText(value, maxUserScanField) {
+			return errors.New("ide plugin fields must be short printable text")
+		}
+	}
+	return nil
+}
+
+// boundUserScanIDE keeps a worker's IDE inventory within
+// validateUserScanIDE. A row it would refuse, or one past the per-user
+// limits, is dropped and the inventory marked partial, so one odd folder in
+// a home costs that row, never the user's whole report.
+func boundUserScanIDE(inv *IDEInventory) {
+	installs := map[string]bool{}
+	installRows := map[string]int{}
+	kept := inv.Installations[:0]
+	for _, inst := range inv.Installations {
+		if len(kept) < maxIDEInstallationsPerUser && ideInstallationError(inst) == nil {
+			kept = append(kept, inst)
+			installs[inst.InstallID] = true
+			installRows[inst.InstallID] = len(kept) - 1
+		} else {
+			inv.Partial = true
+		}
+	}
+	inv.Installations = kept
+	plugins := inv.Plugins[:0]
+	for _, p := range inv.Plugins {
+		if len(plugins) < MaxIDEPluginsPerUser && idePluginError(p, installs) == nil {
+			plugins = append(plugins, p)
+		} else {
+			inv.Partial = true
+			// The cap may hide a plugin in a later installation. Mark
+			// that installation incomplete so lifecycle keeps its baseline.
+			if i, ok := installRows[p.InstallID]; ok {
+				inv.Installations[i].Partial = true
+			}
+		}
+	}
+	inv.Plugins = plugins
 }
 
 // sanitizeUserScanIDE strips the account a worker may have stamped; the

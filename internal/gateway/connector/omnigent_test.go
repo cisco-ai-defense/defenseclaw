@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -676,6 +678,106 @@ print(json.dumps(module.defenseclaw_policy({
 	}
 	if _, invented := received["agent_id"]; invented {
 		t.Fatalf("actor identity was reclassified as agent_id: %#v", received)
+	}
+}
+
+// drainOmnigentTestRequest reads the hook request body before the test
+// gateway answers. urllib sends Connection: close, so Go's server closes the
+// connection without reading an unread body; on Windows the reset that follows
+// can discard the response before Python reads it (WinError 10054 in CI).
+func drainOmnigentTestRequest(r *http.Request) {
+	_, _ = io.Copy(io.Discard, r.Body)
+}
+
+// GAP-0535: a gateway that is taking all the hook calls it can answers 429
+// with Retry-After before it evaluates the call. The bridge waits and sends
+// the call again instead of failing it (owner: live OmniGent run skipped).
+func TestOmnigentPolicyBridgeRetriesBusyGateway(t *testing.T) {
+	python := omnigentTestPython(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainOmnigentTestRequest(r)
+		w.Header().Set("Content-Type", "application/json")
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate_limited"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"action":"block","reason":"blocked by test"}`))
+	}))
+	defer server.Close()
+	root := testenv.PrivateTempDir(t)
+	withOmnigentPathOverrides(t, filepath.Join(root, ".omnigent", "config.yaml"), filepath.Join(root, "site-packages"))
+	token := strings.Repeat("b", 64)
+	opts := SetupOpts{
+		DataDir:      filepath.Join(root, "defenseclaw"),
+		APIAddr:      strings.TrimPrefix(server.URL, "http://"),
+		APIToken:     token,
+		HookFailMode: "closed",
+	}
+	writeOmnigentScopedToken(t, opts.DataDir, token)
+	conn := NewOmnigentConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Teardown(context.Background(), opts) })
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.defenseclaw_policy({"type": "tool_call", "target": "shell", "data": {"name": "shell", "arguments": {"command": "date"}}})))
+`
+	output, err := exec.Command(python, "-c", script, omnigentPolicyModulePath(opts)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute policy module: %v\n%s", err, output)
+	}
+	if !strings.Contains(string(output), `"blocked by test"`) || calls.Load() != 2 {
+		t.Fatalf("busy gateway: verdict %s after %d calls, want the gateway verdict after one retry", output, calls.Load())
+	}
+}
+
+func TestOmnigentSecureClientPolicyDoesNotRetryBusyGateway(t *testing.T) {
+	python := omnigentTestPython(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		drainOmnigentTestRequest(r)
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	}))
+	defer server.Close()
+
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testenv.PrivateTempDir(t)
+	path := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+	rendered := renderOmnigentPolicyFull(
+		string(templateBytes), strings.TrimPrefix(server.URL, "http://"),
+		"", "closed", "", 0, "", true,
+	)
+	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(module._post(b"{}", {})[0])
+`
+	output, err := exec.Command(python, "-c", script, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute policy module: %v\n%s", err, output)
+	}
+	if strings.TrimSpace(string(output)) != "429" || calls.Load() != 1 {
+		t.Fatalf("Secure Client busy gateway: status %s after %d calls, want 429 after one call", output, calls.Load())
 	}
 }
 
@@ -1796,5 +1898,84 @@ func TestOmnigentSetupRejectsNonMappingPoliciesWithoutClobberingConfig(t *testin
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("rollback left managed artifact %s: %v", path, err)
 		}
+	}
+}
+
+func TestOmnigentSecureClientKeepsOriginalIdentityHeaders(t *testing.T) {
+	requireOmnigentHost(t)
+	python := omnigentTestPython(t)
+	script := `
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("rendered_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+calls = []
+def facts():
+    calls.append(True)
+    return "v1;k=ssh;ca=192.0.2.10"
+module._session_facts_header = facts
+os.environ["SSH_CONNECTION"] = "192.0.2.10 12345 192.0.2.20 22"
+print(json.dumps({"headers": module._identity_headers(), "calls": len(calls)}))
+`
+	for _, tc := range []struct {
+		name    string
+		managed bool
+		want    bool
+	}{
+		{"secure-client", true, false},
+		{"per-user", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := &OmnigentConnector{}
+			module, err := conn.renderPolicyModule(SetupOpts{
+				DataDir:           t.TempDir(),
+				ManagedEnterprise: tc.managed,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "omnigent-policy.py")
+			if err := os.WriteFile(path, module, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command(python, "-c", script, path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("run rendered policy: %v\n%s", err, output)
+			}
+			var got struct {
+				Headers map[string]string `json:"headers"`
+				Calls   int               `json:"calls"`
+			}
+			if err := json.Unmarshal(output, &got); err != nil {
+				t.Fatal(err)
+			}
+			_, hasFacts := got.Headers["X-DefenseClaw-Session-Facts"]
+			if hasFacts != tc.want || (got.Calls > 0) != tc.want {
+				t.Fatalf("session facts header=%v, subprocess path called=%d; want %v", hasFacts, got.Calls, tc.want)
+			}
+		})
+	}
+}
+
+func TestRemoveOmnigentConfigEntriesKeepsOperatorComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	original := "# operator note\npolicy_modules:\n  - defenseclaw_omnigent_policy\n  - own_policy\npolicies:\n  defenseclaw_guardrail:\n    handler: defenseclaw_omnigent_policy.defenseclaw_policy\n  own_policy:\n    handler: own.policy\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeOmnigentConfigEntries(path); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"# operator note", "own_policy", "own.policy"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("operator edit %q lost: %s", want, body)
+		}
+	}
+	if strings.Contains(string(body), omnigentPolicyModuleName) {
+		t.Fatalf("managed entries remain: %s", body)
 	}
 }

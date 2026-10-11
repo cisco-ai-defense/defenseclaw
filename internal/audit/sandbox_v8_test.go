@@ -273,7 +273,7 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 	for index, step := range steps {
 		identity.Phase = step.phase
 		if err := recorder.RecordSandboxLifecycle(context.Background(), SandboxLifecycleEvent{
-			Sandbox: identity, Trigger: step.trigger, ExitCode: step.exitCode,
+			Sandbox: identity, Trigger: step.trigger, ExitCode: step.exitCode, UserID: "1005", UserName: "dcr-sbx",
 		}); err != nil {
 			t.Fatalf("step %d (%s): %v", index, step.phase, err)
 		}
@@ -297,6 +297,8 @@ func TestSandboxLifecycleEmitsTransitionsAndActiveGauge(t *testing.T) {
 			"defenseclaw.sandbox.phase.previous":    optional(step.previous),
 			"defenseclaw.sandbox.lifecycle.trigger": string(step.trigger),
 			"defenseclaw.sandbox.exit_code":         exit,
+			"user.id":                               "1005",
+			"defenseclaw.user.name":                 "dcr-sbx",
 		})
 		active := sandboxMetrics(t, runtime, observability.TelemetryInstrumentDefenseClawSandboxActive)
 		last := active[len(active)-1]
@@ -967,6 +969,26 @@ func TestSandboxFamilies(t *testing.T) {
 			t.Fatalf("paths kept=%d want %d", len(kept), maxSandboxWorkspacePaths)
 		}
 	})
+}
+
+// Sandbox decision events carry the live effective policy digest and generation.
+func TestSandboxDecisionEventsCarryThePolicyStamp(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		return observability.Present(digest), observability.Present(int64(9))
+	})
+	t.Cleanup(func() { SetPolicyStamp(nil) })
+	harness := newSandboxHarness(t)
+	for _, event := range []any{
+		SandboxEgressEvent{Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.com", Blocked: true},
+		SandboxEgressEvent{Sandbox: testSandboxIdentity(), Source: SandboxEgressSourceProxy, Host: "example.com"},
+	} {
+		_, record := harness.recordOne(t, router.AdmissionOrdinary, event)
+		assertSandboxFields(t, sandboxBody(t, record), map[string]any{
+			"defenseclaw.policy.effective_digest": digest,
+			"defenseclaw.policy.generation":       int64(9),
+		})
+	}
 }
 
 func TestSandboxEgressAdmissionPaths(t *testing.T) {

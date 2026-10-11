@@ -44,7 +44,8 @@ import (
 //     drops user hook files.
 //
 // Both are rendered from the administrator's hook binary only, so the guard
-// recognizes every handler as DefenseClaw's by exact command equality.
+// recognizes every handler as DefenseClaw's by exact command equality (the
+// current render, or the one 1.0.0 wrote until the guardian rewrites it).
 
 // CopilotVSCodeLocalHookFileName is the per-user Local harness hook file.
 const CopilotVSCodeLocalHookFileName = "defenseclaw-vscode.json"
@@ -69,6 +70,12 @@ func CopilotVSCodeLocalHookFilePath(home string) string {
 // CopilotPluginDir is DefenseClaw's plugin directory under home.
 func CopilotPluginDir(home string) string {
 	return filepath.Join(home, ".copilot", "installed-plugins", CopilotPluginMarketplace, CopilotPluginName)
+}
+
+// CopilotPluginHooksPath is the hook document of DefenseClaw's plugin under
+// home.
+func CopilotPluginHooksPath(home string) string {
+	return filepath.Join(CopilotPluginDir(home), "hooks", "hooks.json")
 }
 
 // RenderCopilotVSCodeLocalHooks renders the Local harness hook document for
@@ -103,18 +110,17 @@ func renderCopilotPluginManifest() ([]byte, error) {
 
 // copilotVSCodeLocalCommandOwned reports whether command is exactly the
 // Local harness command DefenseClaw renders for one of its events, or the
-// one an earlier build rendered for the same binary (GAP-1098: a managed
-// 1.0.2 install kept the earlier plugin and then blocked every Copilot CLI
-// call as a foreign hook).
+// one DefenseClaw 1.0.0 rendered for the same binary
+// (connector.CopilotVSCodeLocalPriorReleaseHookCommand): an upgraded
+// install rewrites that one instead of keeping it, and the foreign-hook
+// guard never blocks it (GAP-1232).
 func copilotVSCodeLocalCommandOwned(goos, hookBinary, command string) bool {
 	if strings.TrimSpace(hookBinary) == "" || command == "" {
 		return false
 	}
 	for _, event := range connector.CopilotVSCodeLocalHookEvents {
-		if command == strings.TrimSpace(connector.CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event)) {
-			return true
-		}
-		if legacy := strings.TrimSpace(connector.CopilotVSCodeLocalLegacyManagedHookCommand(goos, hookBinary, event)); legacy != "" && command == legacy {
+		if command == strings.TrimSpace(connector.CopilotVSCodeLocalManagedHookCommand(goos, hookBinary, event)) ||
+			command == strings.TrimSpace(connector.CopilotVSCodeLocalPriorReleaseHookCommand(goos, hookBinary, event)) {
 			return true
 		}
 	}
@@ -185,7 +191,7 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	}
 	result.HookFile = CopilotVSCodeLocalHookFilePath(home)
 	result.PluginDir = CopilotPluginDir(home)
-	pluginHooks := filepath.Join(result.PluginDir, "hooks", "hooks.json")
+	pluginHooks := CopilotPluginHooksPath(home)
 	pluginManifest := filepath.Join(result.PluginDir, "plugin.json")
 	var missing []string
 	if !req.DryRun {
@@ -453,7 +459,14 @@ func CopilotVSCodeUserState(home, goos, hookBinary string) (hookFile, plugin boo
 		data, _, regular, err := readUserFile(path, int64(len(want)))
 		return err == nil && regular && bytes.Equal(data, want)
 	}
-	dir := CopilotPluginDir(home)
 	return same(CopilotVSCodeLocalHookFilePath(home), hooks),
-		same(filepath.Join(dir, "hooks", "hooks.json"), hooks) && same(filepath.Join(dir, "plugin.json"), manifest)
+		same(CopilotPluginHooksPath(home), hooks) && same(filepath.Join(CopilotPluginDir(home), "plugin.json"), manifest)
+}
+
+// copilotVSCodeUserKept reports, read-only, the plugin files under home
+// that the guardian leaves in place because they hold hooks DefenseClaw did
+// not write (an earlier DefenseClaw render is replaced, not kept).
+func copilotVSCodeUserKept(home, goos, hookBinary string) []string {
+	result, _ := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, HookFile: true, Plugin: true, DryRun: true})
+	return result.Kept
 }

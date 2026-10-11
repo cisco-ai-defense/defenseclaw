@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"reflect"
 	"sync"
 	"time"
 )
@@ -140,6 +141,10 @@ const requestDeadline = 30 * time.Second
 // table on a busy host is a real payload, but finite because a stalled
 // client must not pin a privileged goroutine forever.
 const responseDeadline = 60 * time.Second
+
+// coverageRefresh is how often an event stream checks its source for a
+// changed coverage.
+const coverageRefresh = 2 * time.Second
 
 func (s *Server) handle(ctx context.Context, conn net.Conn) {
 	var request Request
@@ -260,11 +265,33 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 		cancel()
 	}()
 
+	// Coverage can change while the stream runs -- a Windows Security-log
+	// reader that falls behind says so until it catches up (GAP-1473) -- so a
+	// changed coverage is sent as its own frame. A gateway that predates this
+	// skips a frame without an event.
+	refresh := time.NewTicker(coverageRefresh)
+	defer refresh.Stop()
+	sent := coverage
 	events := source.Events()
 	for {
 		select {
 		case <-streamCtx.Done():
 			return
+		case <-refresh.C:
+			current := encodeCoverage(source.Coverage())
+			if reflect.DeepEqual(current, sent) {
+				continue
+			}
+			body, err := json.Marshal(eventStreamFrame{Coverage: &current})
+			if err != nil {
+				continue
+			}
+			if err := writeFrame(conn, Response{
+				Version: protocolVersion, Op: request.Op, Body: body,
+			}, responseDeadline); err != nil {
+				return
+			}
+			sent = current
 		case event, ok := <-events:
 			if !ok {
 				return

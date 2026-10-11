@@ -33,6 +33,26 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
+func TestReadConfigErrorDoesNotNameOldVersion(t *testing.T) {
+	_, err := readConfigV8Source(filepath.Join(t.TempDir(), "missing-config.yaml"))
+	if err == nil || strings.Contains(err.Error(), "v8") || !strings.Contains(err.Error(), "read config") {
+		t.Fatalf("config read error = %v", err)
+	}
+}
+
+func TestV9ValidationFailureNamesCurrentVersion(t *testing.T) {
+	err := &config.V8SchemaError{
+		Version: 9, Path: "$.guardrail.mode", Keyword: "enum",
+		Summary: "configuration violates the enum constraint",
+		Action:  "inspect the config_version 9 settings reference and correct this field",
+	}
+	failure := configV8ValidationFailure(err)
+	if failure.ConfigVersion != 9 || strings.Contains(failure.Reason, "v8") ||
+		!strings.Contains(failure.Reason, "config_version 9") {
+		t.Fatalf("v9 validation failure = %+v", failure)
+	}
+}
+
 func TestLoadConfigV8FileValidatesTargetRuntimeConnectorRoster(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")
@@ -253,6 +273,38 @@ func TestConfigV8ValidateNamesTheFieldAndWhatItTakes(t *testing.T) {
 	}
 }
 
+// GAP-0288: an assignment naming a profile that guardrail.profiles does not
+// define reached the wire only as "configuration could not be compiled
+// safely" at "$". It now names the assignment's field and the profile.
+func TestConfigV8ValidateNamesTheUnknownProfile(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + directory + "\nguardrail:\n  profiles:\n    ihs-a: {mode: observe}\n" +
+		"  profile_assignments:\n    - profile: ihs-nope\n      match: {groups: [dc-s-a]}\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+	previousOutput := configV8ValidateCmd.OutOrStdout()
+	configV8ConfigPath, configV8DataDir = path, directory
+	output := &strings.Builder{}
+	configV8ValidateCmd.SetOut(output)
+	err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+	configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+	configV8ValidateCmd.SetOut(previousOutput)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted an assignment of an undefined profile")
+	}
+	var failure configV8WireFailure
+	if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+		t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+	}
+	if failure.Path != "$.guardrail.profile_assignments[0].profile" ||
+		!strings.Contains(failure.Reason, `unknown profile "ihs-nope"`) || !strings.Contains(failure.Reason, "defines ihs-a") {
+		t.Fatalf("structured validation failure = %+v", failure)
+	}
+}
+
 func TestCompileConfigV8FileLoadsInstallationDotEnvForValidationOnly(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")
@@ -369,14 +421,8 @@ observability:
 func TestConfigV8ReadOnlyManagedPlanAndStatusUseEffectiveConfig(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "config.yaml")
-	t.Setenv(managed.DeploymentModeEnv, "")
-	if err := os.WriteFile(
-		filepath.Join(directory, ".env"),
-		[]byte(managed.DeploymentModeEnv+"="+managed.DeploymentModeManagedEnterprise+"\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
+	// The service definition pins the mode; a .env cannot (GAP-0082).
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	raw := []byte("config_version: 8\ndata_dir: " + directory + `
 observability:
   buckets:

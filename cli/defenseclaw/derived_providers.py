@@ -154,15 +154,35 @@ def refresh(cfg, path: str | None = None) -> bool:
     return True
 
 
+def legacy_request_override_providers(path: str) -> list[str]:
+    """Names of the providers that set ``request_overrides`` in a legacy
+    (unmarked) overlay at *path*. ``llm_providers`` cannot hold those
+    overrides, so such a file stays a live input the gateway merges."""
+    current = _read(path) if os.path.exists(path) else None
+    if current is None or current.get(DERIVED_FROM_KEY):
+        return []
+    providers = current.get("providers")
+    if not isinstance(providers, list):
+        return []
+    return [
+        str(p.get("name") or "")
+        for p in providers
+        if isinstance(p, dict) and isinstance(p.get("request_overrides"), dict) and p["request_overrides"]
+    ]
+
+
 def write(cfg, path: str | None = None) -> str:
     """Render ``llm_providers`` to the overlay file (0600, atomic) and return
     its path. A legacy operator overlay is left alone while config has no
-    ``llm_providers`` yet, so nothing it declares is lost."""
+    ``llm_providers`` yet, so nothing it declares is lost, and always when it
+    sets ``request_overrides``: that file stays a live input (GAP-0500)."""
     path = path or overlay_path(cfg)
     payload = render(cfg)
     current = _read(path) if os.path.exists(path) else None
-    if not payload["providers"] and not payload["ollama_ports"]:
-        if current is not None and not current.get(DERIVED_FROM_KEY):
+    if current is not None and not current.get(DERIVED_FROM_KEY):
+        if not payload["providers"] and not payload["ollama_ports"]:
+            return path
+        if legacy_request_override_providers(path):
             return path
     document = {DERIVED_FROM_KEY: digest(payload), **payload}
     parent = os.path.dirname(path) or "."

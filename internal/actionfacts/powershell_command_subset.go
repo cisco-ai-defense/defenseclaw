@@ -23,7 +23,91 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"mvdan.cc/sh/v3/syntax"
 )
+
+// POSIXPowerShellCommandFacts analyzes the literal body of a PowerShell
+// -Command invocation carried by a POSIX shell tool. The shell projection
+// loses single backslashes in unquoted Windows paths, so those words are
+// recovered from the same parsed shell call before the PowerShell analysis.
+// Only one unconditional invocation with a statically named executable and
+// a -Command or -c body is eligible.
+func POSIXPowerShellCommandFacts(input Input, facts Facts) []Facts {
+	if input.Command == "" || len(facts.Commands) == 0 ||
+		(facts.Parse.Dialect != DialectPOSIX && facts.Parse.Dialect != DialectMixed) ||
+		len(input.Command) > maxCommandBytes {
+		return nil
+	}
+	outer := facts.Commands[0]
+	if outer.ParentCommandID != 0 || len(outer.Argv) < 3 {
+		return nil
+	}
+	switch strings.ToLower(outer.Program) {
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+	default:
+		return nil
+	}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangPOSIX)).Parse(strings.NewReader(input.Command), "")
+	if err != nil || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 ||
+		file.Stmts[0].Background || file.Stmts[0].Negated {
+		return nil
+	}
+	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) != len(outer.Argv) {
+		return nil
+	}
+	argv := append([]string(nil), outer.Argv...)
+	commandSwitch := false
+	for _, argument := range argv[1:] {
+		if strings.EqualFold(argument, "-Command") || strings.EqualFold(argument, "-c") {
+			commandSwitch = true
+		}
+	}
+	if !commandSwitch {
+		return nil
+	}
+	for index, word := range call.Args {
+		if index == 0 {
+			continue
+		}
+		start, end := int(word.Pos().Offset()), int(word.End().Offset())
+		if start < 0 || end <= start || end > len(input.Command) {
+			return nil
+		}
+		raw := input.Command[start:end]
+		if strings.Contains(raw, `\`) && !strings.ContainsAny(raw, `"'`+"`"+`$`) {
+			argv[index] = raw
+		} else if index >= 2 && !outer.ArgvComplete &&
+			strings.HasPrefix(raw, `"`) && strings.HasSuffix(raw, `"`) {
+			body := raw[1 : len(raw)-1]
+			body = strings.ReplaceAll(body, `\"`, `"`)
+			body = strings.ReplaceAll(body, `\$`, `$`)
+			argv[index] = body
+		}
+	}
+	body, ok := exactPowerShellCommandBody(argv)
+	if !ok {
+		return nil
+	}
+	segments, ok := staticPowerShellSegments(body, 0)
+	if !ok {
+		return nil
+	}
+	var result []Facts
+	for _, segment := range segments {
+		inner := input
+		inner.Args, inner.Argv = nil, nil
+		inner.Tool = "powershell"
+		inner.Command = segment
+		inner.DialectHint = DialectPowerShell
+		parsed := Analyze(inner)
+		if parsed.EnforcementEligible() || parsed.Parse.Status == StatusPartial {
+			result = append(result, parsed)
+		}
+	}
+	return result
+}
 
 // PowerShellCommandSubsetReduction projects statically supplied commands of
 // a PowerShell -Command or -EncodedCommand body. The original action remains
@@ -33,14 +117,19 @@ import (
 // inner commands of each exact body. A caller may use a match only for a
 // monotone argv subset rule, as an extra pass next to any other view of the
 // action; a non-match proves nothing about the original action.
+//
+// An action that is itself a PowerShell script, as a Windows shell tool sends
+// it (Codex runs every shell call through PowerShell), is read as such a body:
+// the view holds the commands of its leading statements and pipeline stages
+// (GAP-1415).
 func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok bool) {
 	defer func() {
 		if recover() != nil {
 			view, ok = Facts{}, false
 		}
 	}()
-	if facts.Parse.Status == StatusPartial && facts.Parse.Dialect == DialectPowerShell {
-		return rawPowerShellStatementSubset(input, facts)
+	if facts.Parse.Dialect == DialectPowerShell {
+		return powerShellScriptSubset(input, facts)
 	}
 	if facts.Parse.Status != StatusPartial ||
 		(facts.Parse.Dialect != DialectPOSIX && facts.Parse.Dialect != DialectMixed) ||
@@ -96,7 +185,11 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 		if !valid {
 			continue
 		}
-		commands := powerShellBodyCommands(input, body)
+		segments, valid := staticPowerShellSegments(body, 0)
+		if !valid {
+			continue
+		}
+		commands := staticPowerShellSegmentCommands(input, segments)
 		if len(commands) == 0 || len(view.Commands)+len(commands) > maxCommands {
 			continue
 		}
@@ -106,60 +199,6 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 		return Facts{}, false
 	}
 	return view, true
-}
-
-// rawPowerShellStatementSubset is the reduction of a raw PowerShell action,
-// such as a Codex shell call on Windows, where the action is a body itself
-// (GAP-0175). An exit after a static command, or a cmdlet with no operand
-// grammar next to it, leaves the whole action partial, so without the view a
-// monotone argv rule could not count its match on `Write-Output marker;
-// exit 0` or `Get-Location; Write-Output marker`.
-func rawPowerShellStatementSubset(input Input, facts Facts) (Facts, bool) {
-	extracted := extractArgsForTool(input.Args, input.Tool)
-	if len(input.Argv) != 0 || len(extracted.argv) != 0 {
-		return Facts{}, false
-	}
-	body := input.Command
-	if body == "" {
-		body = extracted.command
-	}
-	if body == "" || len(body) > maxCommandBytes {
-		return Facts{}, false
-	}
-	commands := powerShellBodyCommands(input, body)
-	if len(commands) == 0 || len(commands) > maxCommands {
-		return Facts{}, false
-	}
-	view := Facts{
-		Tool:       facts.Tool,
-		CWD:        facts.CWD,
-		ActiveHome: facts.ActiveHome,
-		Parse:      ParseResult{Status: StatusComplete, Dialect: DialectPowerShell},
-	}
-	appendPowerShellBodyCommands(&view, commands)
-	return view, true
-}
-
-// powerShellBodyCommands parses the static segments of an exact PowerShell
-// body in order, and stops at the first it cannot prove or after a command
-// that may change what the next one runs.
-func powerShellBodyCommands(input Input, body string) []CommandFact {
-	segments, valid := staticPowerShellSegments(body, 0)
-	if !valid {
-		return nil
-	}
-	var commands []CommandFact
-	for _, segment := range segments {
-		if len(commands) != 0 && !powerShellCommandPreservesNext(commands[len(commands)-1]) {
-			break
-		}
-		command, valid := exactPowerShellSegmentCommand(input, segment)
-		if !valid {
-			break
-		}
-		commands = append(commands, command)
-	}
-	return commands
 }
 
 // appendPowerShellBodyCommands adds a body's commands to view as top-level
@@ -175,6 +214,150 @@ func appendPowerShellBodyCommands(view *Facts, commands []CommandFact) int {
 		view.Commands = append(view.Commands, command)
 	}
 	return len(commands)
+}
+
+// powerShellScriptSubset is the view of a partial PowerShell action read as a
+// -Command body: the commands of its leading statements and pipeline stages
+// that staticPowerShellStatements keeps. The first statement runs before
+// anything later in the script can change what it is, and the first stage of
+// a pipeline runs whatever the later stages are, so each kept command runs as
+// the view has it (GAP-1415: "New-Item -Name marker.txt | Out-Null").
+//
+// What follows the kept statements never takes one out of the view: the
+// script is read up to its first construct the segments do not model (a
+// comment, a call operator, an escape, a pipeline chain), and a compound
+// statement (if/else, foreach, try) only ends the kept commands. A kept
+// statement that no pipeline feeds also brings the paths and hosts of its
+// own complete analysis, so a rule that matches the statement alone (a path
+// that holds a literal) matches it here too (GAP-1415: "New-Item -Path
+// <file> -Force | Out-Null; if (Test-Path ...) { ... } else { ... }").
+func powerShellScriptSubset(input Input, facts Facts) (Facts, bool) {
+	if facts.Parse.Status != StatusPartial || len(input.Argv) != 0 {
+		return Facts{}, false
+	}
+	for _, issue := range facts.Parse.Issues {
+		if issue != IssueUnsupportedConstruct && issue != IssueDynamicWord &&
+			issue != IssueUnknownOperandGrammar {
+			return Facts{}, false
+		}
+	}
+	source := input.Command
+	if source == "" {
+		extracted := extractArgsForTool(input.Args, input.Tool)
+		if len(extracted.issues) != 0 || extracted.status != StatusComplete || len(extracted.argv) != 0 {
+			return Facts{}, false
+		}
+		source = extracted.command
+	}
+	segments, ok := scanPowerShellSegments(source, 0, true)
+	if !ok {
+		return Facts{}, false
+	}
+	statements := staticPowerShellStatements(input, segments)
+	if len(statements) == 0 || len(statements) > maxCommands {
+		return Facts{}, false
+	}
+	view := Facts{
+		Tool:       facts.Tool,
+		CWD:        facts.CWD,
+		ActiveHome: facts.ActiveHome,
+		Parse:      ParseResult{Status: StatusComplete, Dialect: DialectPowerShell},
+	}
+	for _, statement := range statements {
+		command := statement.command
+		own := command.ID
+		command.ID = int64(len(view.Commands) + 1)
+		command.ParentCommandID = 0
+		command.PipelineID = 0
+		command.ControlFlowUncertain = false
+		command.ControlFlowOperator = ControlFlowOperatorNone
+		command.Wrappers = nil
+		view.Commands = append(view.Commands, command)
+		if statement.piped {
+			// Pipeline input may bind to its parameters.
+			continue
+		}
+		for _, path := range statement.paths {
+			if path.CommandID == own {
+				path.CommandID = command.ID
+				view.Paths = append(view.Paths, path)
+			}
+		}
+		for _, network := range statement.network {
+			if network.CommandID == own {
+				network.CommandID = command.ID
+				view.Network = append(view.Network, network)
+			}
+		}
+	}
+	return view, true
+}
+
+// powerShellSegment is one statement or pipeline stage of a PowerShell body.
+type powerShellSegment struct {
+	text string
+	// piped is set on a pipeline stage after the first.
+	piped bool
+}
+
+// powerShellStatement is the exact command of a segment, with the path and
+// network facts of the segment's own complete analysis.
+type powerShellStatement struct {
+	command CommandFact
+	paths   []PathFact
+	network []NetworkFact
+	piped   bool
+}
+
+// staticPowerShellSegmentCommands returns the commands of
+// staticPowerShellStatements.
+func staticPowerShellSegmentCommands(input Input, segments []string) []CommandFact {
+	scanned := make([]powerShellSegment, len(segments))
+	for i, segment := range segments {
+		scanned[i] = powerShellSegment{text: segment}
+	}
+	statements := staticPowerShellStatements(input, scanned)
+	commands := make([]CommandFact, 0, len(statements))
+	for _, statement := range statements {
+		commands = append(commands, statement.command)
+	}
+	return commands
+}
+
+// staticPowerShellStatements returns the exact statements of the leading
+// segments of a PowerShell body: the first one, and each next one only while
+// the command before it cannot change what the next command is. A segment
+// "$null = <command>" runs <command> and drops its output.
+func staticPowerShellStatements(input Input, segments []powerShellSegment) []powerShellStatement {
+	var statements []powerShellStatement
+	for _, segment := range segments {
+		if len(statements) != 0 && !powerShellCommandPreservesNext(statements[len(statements)-1].command) {
+			break
+		}
+		statement, valid := exactPowerShellStatement(input, powerShellNullAssignmentCommand(segment.text))
+		if !valid {
+			break
+		}
+		statement.piped = segment.piped
+		statements = append(statements, statement)
+	}
+	return statements
+}
+
+// powerShellNullAssignmentCommand returns the command of "$null = <command>",
+// or segment unchanged.
+func powerShellNullAssignmentCommand(segment string) string {
+	if len(segment) < 6 || !strings.EqualFold(segment[:5], "$null") {
+		return segment
+	}
+	rest := strings.TrimLeft(segment[5:], " \t")
+	if !strings.HasPrefix(rest, "=") || strings.HasPrefix(rest, "==") {
+		return segment
+	}
+	if command := strings.TrimSpace(rest[1:]); command != "" {
+		return command
+	}
+	return segment
 }
 
 // Only these output/read commands can precede another statement in the
@@ -279,24 +462,47 @@ func decodePowerShellCommand(value string) (string, bool) {
 // contributes a stdout redirect, so it is represented as > in the view.
 // Both transformations omit information; the subset rule must be monotone.
 func staticPowerShellSegments(source string, depth int) ([]string, bool) {
+	scanned, ok := scanPowerShellSegments(source, depth, false)
+	if !ok {
+		return nil, false
+	}
+	segments := make([]string, len(scanned))
+	for i, segment := range scanned {
+		segments[i] = segment.text
+	}
+	return segments, true
+}
+
+// scanPowerShellSegments splits source as staticPowerShellSegments does. With
+// leading set, a construct it does not model ends the scan instead of failing
+// it, and the statements and stages before that construct are returned: each
+// is complete, and nothing after it changes it.
+func scanPowerShellSegments(source string, depth int, leading bool) ([]powerShellSegment, bool) {
 	if depth > maxWrapperDepth || len(source) > maxCommandBytes {
 		return nil, false
 	}
 	source = strings.TrimSpace(source)
 	if inner, ok := exactPowerShellScriptBlock(source); ok {
-		return staticPowerShellSegments(inner, depth+1)
+		return scanPowerShellSegments(inner, depth+1, leading)
 	}
 	runes := []rune(source)
 	var part strings.Builder
-	segments := make([]string, 0, 2)
+	segments := make([]powerShellSegment, 0, 2)
 	quote := rune(0)
+	piped := false
+	stop := func() ([]powerShellSegment, bool) {
+		if !leading || len(segments) == 0 {
+			return nil, false
+		}
+		return segments, true
+	}
 	flush := func() bool {
 		segment := strings.TrimSpace(part.String())
 		part.Reset()
 		if segment == "" || len(segments) >= maxCommands {
 			return false
 		}
-		segments = append(segments, segment)
+		segments = append(segments, powerShellSegment{text: segment, piped: piped})
 		return true
 	}
 	for i := 0; i < len(runes); i++ {
@@ -304,7 +510,7 @@ func staticPowerShellSegments(source string, depth int) ([]string, bool) {
 		delimiter := windowsPowerShellQuoteDelimiter(r)
 		if quote != 0 {
 			if quote == '"' && r == '`' {
-				return nil, false
+				return stop()
 			}
 			part.WriteRune(r)
 			if delimiter == quote {
@@ -322,7 +528,7 @@ func staticPowerShellSegments(source string, depth int) ([]string, bool) {
 			quote = delimiter
 			part.WriteRune(r)
 		case r == '`' || r == '#' || r == '&':
-			return nil, false
+			return stop()
 		case r == '2' && i+3 < len(runes) && string(runes[i:i+4]) == "2>&1" &&
 			(i == 0 || unicode.IsSpace(runes[i-1])) &&
 			(i+4 == len(runes) || unicode.IsSpace(runes[i+4]) || runes[i+4] == ';' || runes[i+4] == '|'):
@@ -334,22 +540,23 @@ func staticPowerShellSegments(source string, depth int) ([]string, bool) {
 		case r == ';' || r == '|' || r == '\n' || r == '\r':
 			if r == '|' && i+1 < len(runes) && (runes[i+1] == '|' || runes[i+1] == '&') ||
 				i+1 < len(runes) && runes[i+1] == r && r == ';' {
-				return nil, false
+				return stop()
 			}
 			if !flush() {
-				return nil, false
+				return stop()
 			}
+			piped = r == '|'
 			if r == '\r' && i+1 < len(runes) && runes[i+1] == '\n' {
 				i++
 			}
 		case r == '\x00':
-			return nil, false
+			return stop()
 		default:
 			part.WriteRune(r)
 		}
 	}
 	if quote != 0 || !flush() {
-		return nil, false
+		return stop()
 	}
 	return segments, true
 }
@@ -398,7 +605,10 @@ func exactPowerShellScriptBlock(source string) (string, bool) {
 	return string(runes[start : len(runes)-1]), true
 }
 
-func exactPowerShellSegmentCommand(input Input, segment string) (CommandFact, bool) {
+// exactPowerShellStatement is the exact command of segment, with the path and
+// network facts of its complete analysis (none when its operands have no
+// reviewed effect grammar).
+func exactPowerShellStatement(input Input, segment string) (powerShellStatement, bool) {
 	segmentInput := input
 	segmentInput.Args = nil
 	segmentInput.Argv = nil
@@ -407,12 +617,12 @@ func exactPowerShellSegmentCommand(input Input, segment string) (CommandFact, bo
 	parsed := Analyze(segmentInput)
 	if len(parsed.Commands) != 1 || parsed.Commands[0].ParentCommandID != 0 ||
 		!parsed.Commands[0].ArgvComplete {
-		return CommandFact{}, false
+		return powerShellStatement{}, false
 	}
 	command := parsed.Commands[0]
 	if command.Program != "cmd" && command.Program != "cmd.exe" {
 		if parsed.EnforcementEligible() {
-			return command, true
+			return powerShellStatement{command: command, paths: parsed.Paths, network: parsed.Network}, true
 		}
 		if parsed.Parse.Status == StatusPartial && len(parsed.Parse.Issues) == 1 &&
 			parsed.Parse.Issues[0] == IssueUnknownOperandGrammar &&
@@ -422,28 +632,28 @@ func exactPowerShellSegmentCommand(input Input, segment string) (CommandFact, bo
 			// positive match on this subset.
 			command.Operations = nil
 			command.Redirects = nil
-			return command, true
+			return powerShellStatement{command: command}, true
 		}
-		return CommandFact{}, false
+		return powerShellStatement{}, false
 	}
 	if command.Effect != EffectExecute ||
 		(parsed.Parse.Status != StatusComplete &&
 			(parsed.Parse.Status != StatusPartial || len(parsed.Parse.Issues) != 1 ||
 				parsed.Parse.Issues[0] != IssueUnsupportedConstruct)) {
-		return CommandFact{}, false
+		return powerShellStatement{}, false
 	}
 	cmdBody, ok := exactCMDCommandBody(command.Argv)
 	if !ok {
-		return CommandFact{}, false
+		return powerShellStatement{}, false
 	}
 	segmentInput.Command = cmdBody
 	segmentInput.DialectHint = DialectCMD
 	parsed = Analyze(segmentInput)
 	if !parsed.EnforcementEligible() || len(parsed.Commands) != 1 ||
 		parsed.Commands[0].ParentCommandID != 0 || !parsed.Commands[0].ArgvComplete {
-		return CommandFact{}, false
+		return powerShellStatement{}, false
 	}
-	return parsed.Commands[0], true
+	return powerShellStatement{command: parsed.Commands[0], paths: parsed.Paths, network: parsed.Network}, true
 }
 
 func exactCMDCommandBody(argv []string) (string, bool) {

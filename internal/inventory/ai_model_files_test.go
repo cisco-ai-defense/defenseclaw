@@ -432,6 +432,32 @@ func TestDetectModelFilesRejectsMalformedOllamaManifest(t *testing.T) {
 // EPERM; it is skipped, not counted as a filesystem error, so a Mac without
 // a PPPC profile no longer reports every scan partial. Ordinary permission
 // errors, and EPERM on other systems, still count.
+func TestModelScanSkipsSymlinkIntoMacOSProtectedFolder(t *testing.T) {
+	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
+	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
+	discoveryGOOS = "darwin"
+	macOSFullDiskAccess = func() bool { return false }
+
+	home := t.TempDir()
+	target := filepath.Join(home, "Documents", "private.gguf")
+	writeModelTestFile(t, target, strings.Repeat("g", 64))
+	work := filepath.Join(home, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(work, "linked.gguf")); err != nil {
+		t.Fatal(err)
+	}
+	svc := newModelFileTestService(t, home, work, 100, false)
+	signals, _, err := svc.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(signals) != 0 || !svc.tccSkipped {
+		t.Fatalf("protected symlink target was scanned: signals=%+v skipped=%t", signals, svc.tccSkipped)
+	}
+}
+
 func TestModelScanSkipsMacOSPrivacyProtectedEntries(t *testing.T) {
 	protected := &fs.PathError{Op: "open", Path: "/Users/alice/Library/Containers/com.example.app", Err: syscall.EPERM}
 	if !macOSPrivacyDenied("darwin", protected) {

@@ -469,8 +469,7 @@ func FindingLifecycleExcludesScanner(scannerName string) bool {
 }
 
 func findingLifecycleEligible(summary scanner.ScanSummaryParams) bool {
-	if summary.ExitCode != 0 || strings.TrimSpace(summary.ScanError) != "" ||
-		strings.TrimSpace(summary.EvaluationID) != "" {
+	if summary.ExitCode != 0 || strings.TrimSpace(summary.ScanError) != "" {
 		return false
 	}
 	scannerName := strings.ToLower(strings.TrimSpace(summary.Scanner))
@@ -478,6 +477,13 @@ func findingLifecycleEligible(summary scanner.ScanSummaryParams) bool {
 		return false
 	}
 	targetType := strings.ToLower(strings.TrimSpace(summary.TargetType))
+	// A scan made for a policy evaluation is a runtime occurrence and never
+	// sets current state, except the install watcher's admission scan of a
+	// skill, MCP server or plugin: that is an asset scan, and its findings
+	// belong in 'audit findings' like a CLI scan's (GAP-0363).
+	if strings.TrimSpace(summary.EvaluationID) != "" && !installAdmissionScan(targetType, scannerName) {
+		return false
+	}
 	switch targetType {
 	case "file", "code", "skill", "mcp", "plugin", "aibom", "inventory":
 		return true
@@ -497,6 +503,20 @@ func findingLifecycleEligible(summary scanner.ScanSummaryParams) bool {
 	default:
 		return false
 	}
+}
+
+// installAdmissionScan reports an asset scanner's scan of an installed asset.
+func installAdmissionScan(targetType, scannerName string) bool {
+	switch targetType {
+	case "skill", "mcp", "plugin":
+	default:
+		return false
+	}
+	switch scannerName {
+	case "skill-scanner", "mcp-scanner", "plugin-scanner", "defenseclaw-plugin-scanner":
+		return true
+	}
+	return false
 }
 
 type persistedFindingState struct {

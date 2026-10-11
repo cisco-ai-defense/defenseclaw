@@ -132,7 +132,7 @@ jobs:
         # report. Fail the deploy at build time instead.
         run: |
           missing=0
-          for f in manifest.json admission.wasm guardrail.wasm firewall.wasm audit.wasm; do
+          for f in manifest.json admission.wasm guardrail.wasm; do
             if [ ! -f "out/opa/$f" ]; then
               echo "::error::out/opa/$f is missing — policy creator Live Test pane will 404."
               missing=1

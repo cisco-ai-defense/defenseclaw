@@ -138,7 +138,7 @@ func enterpriseHookPerUserEnrolled(manifest enterprisehooks.Manifest, machinePol
 // the eligible accounts or policies changed. Cleanup is best effort: the
 // hook-side guard still denies tool calls while an unapproved hook remains.
 // perUser is enterpriseHookPerUserEnrolled for this pass.
-func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Writer, now time.Time, perUser map[string]map[string]bool) int {
+func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Writer, now time.Time, manifest enterprisehooks.Manifest, perUser map[string]map[string]bool) int {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return 0
 	}
@@ -151,6 +151,9 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise foreign-hook guard: eligible accounts: %v\n", err)
 		return 0
+	}
+	if enterpriseHookManifestEnrollment() {
+		accounts = enterprisehooks.ManifestEnrolledAccounts(accounts, manifest)
 	}
 	// Accounts the guardian wrote VS Code Local hooks for that are no
 	// longer eligible (excluded, removed from the groups): their files call

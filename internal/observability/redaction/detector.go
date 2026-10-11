@@ -7,7 +7,6 @@ package redaction
 
 import (
 	"sort"
-	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -320,5 +319,3 @@ func overlapsCredentialClaim(start, end int, accepted []acceptedMatch) bool {
 	}
 	return false
 }
-
-func asciiEqualFold(left, right string) bool { return strings.EqualFold(left, right) }

@@ -395,6 +395,8 @@ func usesClosedCodingAgentArgumentSchema(raw json.RawMessage, tool string) bool 
 		return hasAny("limit", "offset", "pages")
 	case "edit":
 		return hasAny("old_string", "new_string", "replace_all")
+	case "multiedit", "multi_edit", "multi-edit":
+		return hasAny("edits")
 	case "grep", "glob":
 		return hasAny("pattern")
 	case "webfetch":
@@ -470,6 +472,38 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 		}
 		allowed["replace_all"] = boolean
 		require["file_path"], require["old_string"], require["new_string"] = true, true, true
+	case "multiedit", "multi_edit", "multi-edit":
+		allowed["file_path"] = stringField
+		allowed["edits"] = func(_ string, value any) bool {
+			edits, ok := value.([]any)
+			if !ok || len(edits) == 0 || len(edits) > 64 {
+				return false
+			}
+			for _, value := range edits {
+				edit, ok := value.(map[string]any)
+				if !ok || len(edit) < 2 || len(edit) > 3 {
+					return false
+				}
+				old, oldOK := edit["old_string"].(string)
+				newText, newOK := edit["new_string"].(string)
+				if !oldOK || !newOK || validateScalar(old, maxScalarBytes) != "" ||
+					validateScalar(newText, maxScalarBytes) != "" {
+					return false
+				}
+				for key, value := range edit {
+					if key == "replace_all" {
+						if _, ok := value.(bool); !ok {
+							return false
+						}
+					} else if key != "old_string" && key != "new_string" {
+						return false
+					}
+				}
+				out.payload = append(out.payload, extractedPayload{key: "content", nonEmpty: newText != ""})
+			}
+			return true
+		}
+		require["file_path"], require["edits"] = true, true
 	case "grep":
 		allowed["pattern"] = metadataString
 		allowed["path"] = stringField

@@ -877,8 +877,8 @@ func assertExactOTLPLogResource(
 		}
 	}
 	if got["team.name"] != "integration-security" ||
-		got["deployment.environment"] != got["deployment.environment.name"] {
-		t.Fatalf("OTLP resource lost custom/compatibility attributes: %+v", got)
+		got["deployment.environment.name"] == "" || got["deployment.environment"] != "" {
+		t.Fatalf("OTLP resource lost custom/canonical attributes: %+v", got)
 	}
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
@@ -964,5 +965,27 @@ func TestRecoverWindowsManagedHooksCursorTeardownCapture(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// An activated standalone deployment that enrolled no Codex user writes its
+// teardown journal with codex_targets [], which the reader requires; a nil
+// slice was written as null and the uninstall failed (GAP-0248).
+func TestWindowsManagedHooksTeardownJournalWritesEmptyCodexTargets(t *testing.T) {
+	journal := windowsManagedHooksTeardownJournal{ActivationState: "activated"}
+	journal.ClaudeTargetSIDs, journal.CodexPolicyActive, journal.CodexTargets, journal.CursorTargets =
+		windowsManagedHooksTeardownExpectedEnrollment(journal.ActivationState, []string{"S-1-5-21-111-222-333-1001"}, nil, nil)
+	for _, c := range []struct{ profile, want string }{
+		{managed.ProfileStandalone, `"codex_targets":[]`},
+		{"", `"codex_targets":null`}, // Secure Client: unchanged
+	} {
+		t.Setenv(managed.EnterpriseProfileEnv, c.profile)
+		body, err := json.Marshal(windowsManagedHooksTeardownJournalForWrite(journal))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), c.want) {
+			t.Fatalf("profile %q: journal %s does not contain %s", c.profile, body, c.want)
+		}
 	}
 }

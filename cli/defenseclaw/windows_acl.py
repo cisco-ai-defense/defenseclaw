@@ -254,7 +254,9 @@ class _WindowsApi(Protocol):
 
     def delete_open_regular_file(self, handle: int) -> None: ...
 
-    def private_security(self, owner: bytes, *, ace_flags: int = 0) -> WindowsFileSecurity: ...
+    def private_security(
+        self, owner: bytes, *, ace_flags: int = 0, administrators: bool = True
+    ) -> WindowsFileSecurity: ...
 
     def trusted_owner_sids(self) -> frozenset[str]: ...
 
@@ -1176,8 +1178,12 @@ class _CtypesWindowsApi:
             self._raise_last_error("CreateWellKnownSid")
         return bytes(buffer.raw[: size.value])
 
-    def private_security(self, owner: bytes, *, ace_flags: int = 0) -> WindowsFileSecurity:
-        sid_values: list[bytes] = [owner, self._well_known_sid(22), self._well_known_sid(26)]
+    def private_security(
+        self, owner: bytes, *, ace_flags: int = 0, administrators: bool = True
+    ) -> WindowsFileSecurity:
+        sid_values: list[bytes] = [owner, self._well_known_sid(22)]
+        if administrators:
+            sid_values.append(self._well_known_sid(26))
         unique: list[bytes] = []
         for sid in sid_values:
             if sid not in unique:
@@ -1646,15 +1652,24 @@ def private_security_for_directory(
     path: str,
     *,
     inherit_children: bool = False,
+    administrators: bool = True,
 ) -> WindowsFileSecurity:
+    """Return the protected owner/SYSTEM/Administrators DACL for a new member of *path*.
+
+    ``administrators=False`` leaves out BUILTIN\\Administrators: the owner and
+    LocalSystem only, the DACL a per-user secret such as device.key needs to
+    pass the Private files check of Doctor and the private-file check of the
+    gateway (GAP-0911).
+    """
     parent = capture_path(path, directory=True)
     assert_trusted_owner(parent)
     if inherit_children:
         return _get_api().private_security(
             parent.owner,
             ace_flags=_OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE,
+            administrators=administrators,
         )
-    return _get_api().private_security(parent.owner)
+    return _get_api().private_security(parent.owner, administrators=administrators)
 
 
 

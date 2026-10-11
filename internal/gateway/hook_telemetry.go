@@ -53,19 +53,6 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 	}
 }
 
-func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, eventType, details string) {
-	if a.logger == nil {
-		return
-	}
-	connectorName = normalizeHookTelemetryLabel(connectorName, "unknown")
-	eventType = normalizeHookTelemetryLabel(eventType, "unknown")
-	if strings.TrimSpace(details) == "" {
-		details = "result=ok"
-	}
-	_ = a.logger.LogActionCtx(ctx, string(audit.ActionConnectorHook), eventType,
-		fmt.Sprintf("connector=%s %s", connectorName, details))
-}
-
 // logConnectorHookAuditEnvelope is the structured-audit entry point
 // every connector hook handler should use once it has a fully-built
 // HookAuditEnvelope.
@@ -98,7 +85,13 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		caller := auditCallerIdentity(ctx)
 		env.UserID, env.UserIDKind, env.UserName = caller.ID, caller.IDKind, caller.Name
 	}
+	if a.managedAIDOnly() {
+		env.SecureClientRulePackDir = env.RulePackDir
+	}
 	auditAction := string(audit.ActionConnectorHook)
+	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
+		auditAction = env.AuditActionOverride
+	}
 	jsonDetails, structured := renderHookAuditEnvelopePayload(env)
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
@@ -119,6 +112,9 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		StepIdx:     env.StepIdx,
 		Enforced:    env.Enforced,
 		RulePackDir: env.RulePackDir,
+		// Secure Client keeps the directory in the envelope and the raw
+		// column, as on main (issue #1092).
+		RulePackDirInEnvelope: env.SecureClientRulePackDir != "",
 		// Carry the cloud-controlled per-inspection redaction directive
 		// (re-injected onto ctx before finalizeAgentHook) so the audit
 		// sanitize + webhook fan-out honor it on the Details surface.
@@ -134,12 +130,23 @@ func (a *APIServer) logAssetPolicyAudit(ctx context.Context, connector, target, 
 	// fill the rest of the correlation envelope) so asset-policy decisions
 	// are filterable per connector — previously the connector lived only
 	// inside the free-form details string and never reached Event.Connector.
-	_ = a.logger.LogEventCtx(ctx, audit.Event{
+	event := audit.Event{
 		Action:    string(audit.ActionAssetPolicy),
 		Target:    target,
 		Details:   details,
 		Connector: connector,
-	})
+	}
+	// The row names the caller under the keys of the hook_decision row of
+	// the same event, so one filter on the user finds both (GAP-0577).
+	// Secure Client rows keep the shape of main (issue #1092).
+	if !ManagedEnterpriseActive() {
+		structured := map[string]any{}
+		auditCallerIdentity(ctx).addTo(structured)
+		if len(structured) > 0 {
+			event.Structured = structured
+		}
+	}
+	_ = a.logger.LogEventCtx(ctx, event)
 }
 
 // enrichConnectorHookIdentitySpan stamps the per-connector forensic identity

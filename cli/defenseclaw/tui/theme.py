@@ -140,31 +140,6 @@ def state_dot(state: str) -> str:
     return STATE_DOTS.get(state.lower(), "○")
 
 
-def css_variables(tokens: ThemeTokens = DEFAULT_TOKENS) -> dict[str, str]:
-    """Return Textual CSS variable names for the current theme."""
-
-    return {
-        "dc-surface-base": tokens.surface_base,
-        "dc-surface-panel": tokens.surface_panel,
-        "dc-surface-raised": tokens.surface_raised,
-        "dc-surface-hover": tokens.surface_hover,
-        "dc-surface-selected": tokens.surface_selected,
-        "dc-border-muted": tokens.border_muted,
-        "dc-border-active": tokens.border_active,
-        "dc-text-primary": tokens.text_primary,
-        "dc-text-secondary": tokens.text_secondary,
-        "dc-text-muted": tokens.text_muted,
-        "dc-accent-cyan": tokens.accent_cyan,
-        "dc-accent-blue": tokens.accent_blue,
-        "dc-accent-violet": tokens.accent_violet,
-        "dc-accent-green": tokens.accent_green,
-        "dc-accent-amber": tokens.accent_amber,
-        "dc-accent-orange": tokens.accent_orange,
-        "dc-accent-red": tokens.accent_red,
-        "dc-accent-pink": tokens.accent_pink,
-    }
-
-
 def textual_css(tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
     """Return a small Textual CSS block for the initial app shell."""
 

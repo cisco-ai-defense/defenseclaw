@@ -163,7 +163,9 @@ class _FakeApi:
     def delete_open_regular_file(self, handle: int) -> None:
         self.events.append(("handle-delete", handle))
 
-    def private_security(self, owner: bytes, *, ace_flags: int = 0) -> WindowsFileSecurity:
+    def private_security(
+        self, owner: bytes, *, ace_flags: int = 0, administrators: bool = True
+    ) -> WindowsFileSecurity:
         assert owner == OWNER
         self.private_flags.append(ace_flags)
         return PRIVATE

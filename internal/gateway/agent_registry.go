@@ -20,7 +20,9 @@ package gateway
 //     from the agent identity (defenseclaw.agent.identity.id) and the
 //     session id ("ais-…", agentidentity.InstanceID), so it is stable
 //     across sidecar restarts and two users who send the same session
-//     id get different instances. Under the Secure Client integration
+//     id get different instances. Before an agent identity is known, the
+//     instance is scoped to this sidecar so matching session ids from
+//     different users cannot collide. Under the Secure Client integration
 //     it stays a random UUID minted on first sight.
 //   - SidecarInstanceID: the sidecar process. Minted exactly once
 //     at boot and stable for the process lifetime. Primarily
@@ -242,7 +244,14 @@ func (r *AgentRegistry) agentInstanceFor(agentIdentityID, sessionID string) (str
 	if len(r.sessions) >= agentRegistryMaxSessions {
 		r.evictOldestLocked()
 	}
-	instance := agentidentity.InstanceID(key.agent, key.session)
+	// A session can reach the gateway before its hook identity. A hash of
+	// the session alone would give two users the same fleet-wide instance
+	// ID; scope this temporary identity to the sidecar instead.
+	identityForHash := key.agent
+	if identityForHash == "" {
+		identityForHash = r.sidecarInstanceID
+	}
+	instance := agentidentity.InstanceID(identityForHash, key.session)
 	if ManagedEnterpriseActive() {
 		// Secure Client keeps the random, process-scoped instance ids its
 		// records have always carried.
@@ -304,9 +313,22 @@ func (r *AgentRegistry) evictOldestLocked() {
 		return
 	}
 	delete(r.sessions, oldestKey)
-	if ref, ok := r.sessionAgents[oldestKey.session]; ok && (ref.ambiguous || ref.agent == oldestKey.agent) {
-		delete(r.sessionAgents, oldestKey.session)
+	ref, ok := r.sessionAgents[oldestKey.session]
+	if !ok || (!ref.ambiguous && ref.agent != oldestKey.agent) {
+		return
 	}
+	// An ambiguous session stays ambiguous while another agent identity
+	// still holds an entry for it: forgetting that would let the evicted
+	// identity, seen again, claim the session's identity-less traffic alone
+	// (GAP-0291).
+	if ref.ambiguous {
+		for key := range r.sessions {
+			if key.session == oldestKey.session && key.agent != "" {
+				return
+			}
+		}
+	}
+	delete(r.sessionAgents, oldestKey.session)
 }
 
 func agentSessionKeyLess(a, b agentSessionKey) bool {
@@ -329,6 +351,21 @@ func (r *AgentRegistry) AgentIdentityForSession(ctx context.Context, sessionID s
 		return ref.agent
 	}
 	return ""
+}
+
+// SessionSharedWithOtherIdentity reports whether sessionID was seen on the
+// hook path under an agent identity other than agentIdentityID, or under
+// several. Two users can send the same session id; state keyed by session
+// alone is then not necessarily the caller's.
+func (r *AgentRegistry) SessionSharedWithOtherIdentity(ctx context.Context, sessionID, agentIdentityID string) bool {
+	if r == nil || sessionID == "" {
+		return false
+	}
+	sessionID = sandboxSessionStateKey(ctx, sessionID)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	ref, ok := r.sessionAgents[sessionID]
+	return ok && (ref.ambiguous || ref.agent != agentIdentityID)
 }
 
 // Resolve returns the three-tier identity for a request context.
@@ -384,6 +421,13 @@ func (r *AgentRegistry) resolve(ctx context.Context, agentIdentityID, sessionID,
 		SidecarInstanceID: r.SidecarInstanceID(),
 	}
 	minted := false
+	// Without an agent identity, a shared gateway cannot prove who owns a
+	// caller-supplied session id. Leave its instance empty instead of joining
+	// another user's hook session, even during the unauthenticated peek.
+	if !ManagedEnterpriseActive() && agentIdentityID == "" &&
+		(serviceAccountGatewayFromContext(ctx) || gatewayRunsAsServiceAccount()) {
+		return id, false
+	}
 	if sessionID != "" {
 		if mint {
 			// agent_instance_id is session-scoped so every record for one

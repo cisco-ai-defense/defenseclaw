@@ -22,8 +22,8 @@ func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
 	now := time.Unix(3_000_000, 0)
 	limiter := &hookCallerLimiter{now: func() time.Time { return now }, rate: 2, burst: 2, inFlight: 3}
 	admit := func(caller string) (func(), bool) {
-		release, _, ok, _ := limiter.acquire(caller)
-		return release, ok
+		release, _, refusal, _ := limiter.acquire(caller)
+		return release, refusal == ""
 	}
 	for i := 0; i < 2; i++ {
 		release, ok := admit("1001")
@@ -77,6 +77,29 @@ func TestHookCallerLimiterBoundsEachCallerSeparately(t *testing.T) {
 	}
 }
 
+func TestHookCallerLimiterReservesGlobalCapacityForOtherAccounts(t *testing.T) {
+	limiter := &hookCallerLimiter{rate: 1000, burst: 1000, inFlight: 32, globalInFlight: 32}
+	var releases []func()
+	for i := 0; i < 8; i++ {
+		release, _, refusal, _ := limiter.acquire("1001")
+		if refusal != "" {
+			t.Fatalf("first caller request %d refused: %s", i, refusal)
+		}
+		releases = append(releases, release)
+	}
+	if release, _, refusal, _ := limiter.acquire("1001"); release != nil || refusal == "" {
+		t.Fatal("one caller consumed more than its fair share of the global bound")
+	}
+	if release, _, refusal, _ := limiter.acquire("1002"); refusal != "" {
+		t.Fatalf("second caller starved: %s", refusal)
+	} else {
+		release()
+	}
+	for _, release := range releases {
+		release()
+	}
+}
+
 func TestAdmitHookCallerAnswersRateLimited(t *testing.T) {
 	api := &APIServer{}
 	api.hookCallerLimits = hookCallerLimiter{rate: 1, burst: 1}
@@ -93,6 +116,74 @@ func TestAdmitHookCallerAnswersRateLimited(t *testing.T) {
 	if refused.Code != http.StatusTooManyRequests || refused.Header().Get("Retry-After") == "" ||
 		!strings.Contains(refused.Body.String(), managedHookReasonRateLimited) {
 		t.Fatalf("refusal = %d %v %q", refused.Code, refused.Header(), refused.Body.String())
+	}
+}
+
+// 200 accounts under their own caps can still hold more requests than the
+// gateway answers before the hook deadline, and then every hook times out. The
+// gateway also bounds the requests it holds at once: the next one gets an
+// immediate 429 with its own reason whoever sends it, and a finished request
+// frees a place. A client that left before it had a slot costs nothing.
+func TestAdmitHookCallerBoundsAllCallersTogether(t *testing.T) {
+	const route = "/api/v1/inspect/tool"
+	api := &APIServer{}
+	api.hookCallerLimits = hookCallerLimiter{rate: 1000, burst: 1000, globalInFlight: 2}
+	admit := func(identity string) (*httptest.ResponseRecorder, func()) {
+		w := httptest.NewRecorder()
+		_, release := api.admitHookCaller(w, httptest.NewRequest(http.MethodPost, route, nil), identity, route)
+		return w, release
+	}
+	_, first := admit("1001")
+	_, second := admit("1002")
+	if first == nil || second == nil {
+		t.Fatal("requests inside the gateway-wide bound were refused")
+	}
+	refused, third := admit("1003")
+	if third != nil || refused.Code != http.StatusTooManyRequests || refused.Header().Get("Retry-After") == "" ||
+		!strings.Contains(refused.Body.String(), managedHookReasonOverloaded) {
+		t.Fatalf("request past the bound = %d %v %q", refused.Code, refused.Header(), refused.Body.String())
+	}
+	first()
+	_, again := admit("1003")
+	if again == nil {
+		t.Fatal("a finished request did not free its place")
+	}
+	again()
+	second()
+
+	gone, hangUp := context.WithCancel(t.Context())
+	hangUp()
+	if _, release := api.admitHookCaller(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, route, nil).WithContext(gone), "1004", route); release != nil {
+		t.Fatal("a request whose client had left was admitted")
+	}
+	if got := api.hookCallerLimits.total; got != 0 {
+		t.Fatalf("%d requests still counted after all finished", got)
+	}
+}
+
+// OTLP exporters share the host bound, with half of it reserved for hooks.
+func TestOTLPBatchesShareHostAdmissionBound(t *testing.T) {
+	limiter := &hookCallerLimiter{rate: 1000, burst: 1000, globalInFlight: 4}
+	first, _, refusal, _ := limiter.acquire("1001" + hookCallerTelemetryBudget)
+	if refusal != "" {
+		t.Fatalf("first OTLP batch refused: %s", refusal)
+	}
+	second, _, refusal, _ := limiter.acquire("1002" + hookCallerTelemetryBudget)
+	if refusal != "" {
+		t.Fatalf("second OTLP batch refused: %s", refusal)
+	}
+	if release, _, refusal, _ := limiter.acquire("1003" + hookCallerTelemetryBudget); release != nil || refusal != managedHookReasonOverloaded {
+		t.Fatalf("OTLP batch over host reserve: release=%v refusal=%s", release != nil, refusal)
+	}
+	hook, _, refusal, _ := limiter.acquire("1003")
+	if refusal != "" {
+		t.Fatalf("hook lost reserved capacity: %s", refusal)
+	}
+	hook()
+	first()
+	second()
+	if limiter.total != 0 || limiter.telemetryTotal != 0 {
+		t.Fatalf("admission counts after release = %d, %d", limiter.total, limiter.telemetryTotal)
 	}
 }
 

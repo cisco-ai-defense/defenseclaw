@@ -17,6 +17,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+from rich.cells import cell_len, set_cell_size
+
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.overview_state import friendly_connector_name
 
@@ -67,6 +69,9 @@ IDE_PLUGIN_ENABLED_LABELS: Mapping[str, str] = {
     "unknown": "unknown",
 }
 
+
+# The most agent identity rows the Agents sub-tab keeps.
+AGENT_IDENTITY_ROWS = 1000
 
 @dataclass(frozen=True)
 class InventoryCommandIntent:
@@ -261,6 +266,7 @@ class InventoryIDEPlugin:
     user: str = ""
     ide_family: str = ""
     ide_product: str = ""
+    ide_version: str = ""
     display_name: str = ""
     publisher: str = ""
     version: str = ""
@@ -281,6 +287,7 @@ class InventoryIDEPlugin:
             user=_user_of(raw),
             ide_family=str(raw.get("ide_family") or ""),
             ide_product=str(raw.get("ide_product") or ""),
+            ide_version=str(raw.get("ide_version") or ""),
             display_name=str(raw.get("display_name") or ""),
             publisher=str(raw.get("publisher") or ""),
             version=str(raw.get("version") or ""),
@@ -311,6 +318,8 @@ class InventoryIDEPlugin:
     @property
     def ide_label(self) -> str:
         product = self.ide_product or self.ide_family
+        if self.ide_version:
+            product = f"{product} {self.ide_version}"
         return f"{product} ({self.location})" if self.location else product
 
     @property
@@ -487,6 +496,7 @@ class InventorySnapshot:
     ide_plugins: tuple[InventoryIDEPlugin, ...] = ()
     ide_collected: bool = False
     ide_note: str = ""
+    ide_partial: bool = False
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventorySnapshot:
@@ -559,6 +569,7 @@ class InventorySnapshot:
             ),
             ide_collected="ide_plugins" in raw,
             ide_note=str(raw.get("ide_plugins_note") or ""),
+            ide_partial=bool((summary_raw or {}).get("ide_plugins", {}).get("partial")) if isinstance(summary_raw, Mapping) else False,
         )
 
     @classmethod
@@ -604,12 +615,15 @@ class InventorySubTabInfo:
     label: str
     active: bool = False
     count: int | None = None
+    # The count leaves rows out (the identity list stopped at its page
+    # bound), so the label reads "Agents (64000+)".
+    partial: bool = False
 
     @property
     def display_label(self) -> str:
         if self.count is None:
             return self.label
-        return f"{self.label} ({self.count})"
+        return f"{self.label} ({self.count}{'+' if self.partial else ''})"
 
 
 @dataclass(frozen=True)
@@ -666,8 +680,14 @@ class InventoryPanelModel:
         # breakdown; ``inventory`` holds the merged view used by every tab.
         self.connector_snapshots: tuple[tuple[str, InventorySnapshot], ...] = ()
         # Stable agent ids from ``defenseclaw agent identities --json``; empty
-        # when the command is unavailable or fails.
+        # when the command is unavailable or fails. agent_identities_total is
+        # set when the command listed only the most recently seen ones.
         self.agent_identities: tuple[InventoryAgent, ...] = ()
+        self.agent_identities_total = 0
+        # (inventory, agent identities, sub-tab, answer) of the last
+        # _show_user_column: the snapshots are immutable tuples, so the answer
+        # holds while the same objects are shown (GAP-0184).
+        self._user_column_memo: tuple[object, object, str, bool] | None = None
 
     def set_size(self, width: int, height: int) -> None:
         self.width = width
@@ -803,6 +823,8 @@ class InventoryPanelModel:
                 label=INVENTORY_SUBTAB_LABELS[subtab],
                 active=subtab == self.active_sub,
                 count=counts.get(subtab),
+                partial=(subtab == "agents" and self.agent_identities_total > 0)
+                        or (subtab == "ide_plugins" and bool(self.inventory and self.inventory.ide_partial)),
             )
             for subtab in INVENTORY_SUBTABS
         )
@@ -826,9 +848,11 @@ class InventoryPanelModel:
         self.apply_loaded(InventorySnapshot.from_json(text))
 
     def identities_intent(self) -> InventoryCommandIntent:
+        # The table redraws every row on each key, so it keeps the most
+        # recently seen identities and says when it left some out.
         return InventoryCommandIntent(
             label="agent identities --json",
-            args=("agent", "identities", "--json"),
+            args=("agent", "identities", "--json", "--limit", str(AGENT_IDENTITY_ROWS)),
             hint="Loading agent identities...",
         )
 
@@ -839,12 +863,12 @@ class InventoryPanelModel:
         malformed answer is not an error the panel shows.
         """
         rows: tuple[InventoryAgent, ...] = ()
+        total = 0
         if text:
             try:
                 raw = json.loads(text)
             except (json.JSONDecodeError, ValueError):
                 raw = None
-            #  prints {enabled, identities}.
             identities = raw.get("identities") if isinstance(raw, Mapping) else None
             if isinstance(identities, list):
                 rows = tuple(
@@ -852,8 +876,11 @@ class InventoryPanelModel:
                     for item in identities
                     if isinstance(item, Mapping) and item.get("agent_id")
                 )
+                if raw.get("next_cursor"):
+                    total = max(_safe_int(raw.get("total")), len(rows))
         selected = self._selected_key()
         self.agent_identities = rows
+        self.agent_identities_total = total
         self._reselect(selected)
 
     def apply_merged(self, results: Sequence[tuple[str, str | None]]) -> None:
@@ -982,6 +1009,7 @@ class InventoryPanelModel:
             ide_plugins=tuple(ide_plugins),
             ide_collected=ide_collected,
             ide_note=ide_note,
+            ide_partial=any(snap.ide_partial for snap in snaps),
         )
 
     def scroll_by(self, delta: int) -> None:
@@ -1089,15 +1117,24 @@ class InventoryPanelModel:
     def _show_user_column(self) -> bool:
         if self.inventory is None:
             return False
-        match self.active_sub:
+        sub = self.active_sub
+        if sub not in {"plugins", "mcp", "agents"}:
+            return False
+        # Every row of data_table_rows asks, and each answer reads every item
+        # of the sub-tab: with 1,300 agent identities that made each redraw
+        # (one per j or k key) take about 0.4 s (GAP-0184).
+        memo = self._user_column_memo
+        if memo is not None and memo[0] is self.inventory and memo[1] is self.agent_identities and memo[2] == sub:
+            return memo[3]
+        match sub:
             case "plugins":
-                return self._multi_user(self.inventory.plugins)
+                answer = self._multi_user(self.inventory.plugins)
             case "mcp":
-                return self._multi_user(self.inventory.mcps)
-            case "agents":
-                return self._multi_user((*self.inventory.agents, *self.agent_identities))
+                answer = self._multi_user(self.inventory.mcps)
             case _:
-                return False
+                answer = self._multi_user((*self.inventory.agents, *self.agent_identities))
+        self._user_column_memo = (self.inventory, self.agent_identities, sub, answer)
+        return answer
 
     def filtered_tools(self) -> tuple[InventoryTool, ...]:
         if self.inventory is None:
@@ -1396,6 +1433,7 @@ class InventoryPanelModel:
                     ("AI", "yes" if ide.is_ai else "no"),
                     ("IDE", ide.ide_label),
                     ("Version", ide.version),
+                    ("IDE version", ide.ide_version),
                     ("User", ide.user),
                     ("Name", ide.display_name),
                     ("Publisher", ide.publisher),
@@ -1443,7 +1481,9 @@ class InventoryPanelModel:
 
     def _with_connector_cell(self, entity: object, cells: tuple[str, ...]) -> tuple[str, ...]:
         if self._show_user_column():
-            cells = (str(getattr(entity, "user", "") or "—"), *cells)
+            user = str(getattr(entity, "user", "") or "—")
+            user = "".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in user)
+            cells = ((user[:29] + "...") if len(user) > 32 else user, *cells)
         if not self.show_connector_column:
             return cells
         return (str(getattr(entity, "connector", "") or "—"), *cells)
@@ -1596,16 +1636,33 @@ class InventoryPanelModel:
         if key in {"h", "left"}:
             before = self.active_sub
             self.move_subtab(-1)
-            return InventoryPanelAction(True, hint="" if self.active_sub != before else "(first inventory sub-tab)")
+            hint = self._subtab_hint() if self.active_sub != before else "(first inventory sub-tab)"
+            return InventoryPanelAction(True, hint=hint)
         if key in {"l", "right"}:
             before = self.active_sub
             self.move_subtab(1)
-            return InventoryPanelAction(True, hint="" if self.active_sub != before else "(last inventory sub-tab)")
+            hint = self._subtab_hint() if self.active_sub != before else "(last inventory sub-tab)"
+            return InventoryPanelAction(True, hint=hint)
         if key in {"j", "down"}:
             self.scroll_by(1)
             return InventoryPanelAction(True)
         if key in {"k", "up"}:
             self.scroll_by(-1)
+            return InventoryPanelAction(True)
+        # Page and end jumps: reaching row 1,000 of a long list took holding
+        # j for minutes (GAP-0184). g and G follow the vim habit of j and k.
+        page = max(1, (self.height or 24) - 8)
+        if key in {"pagedown", "page_down", "ctrl+f"}:
+            self.scroll_by(page)
+            return InventoryPanelAction(True)
+        if key in {"pageup", "page_up", "ctrl+b"}:
+            self.scroll_by(-page)
+            return InventoryPanelAction(True)
+        if key in {"home", "g"}:
+            self.set_cursor(0)
+            return InventoryPanelAction(True)
+        if key in {"end", "G"}:
+            self.set_cursor(self.current_list_len() - 1)
             return InventoryPanelAction(True)
         if key == "esc" and self.detail_open:
             self.detail_open = False
@@ -1622,6 +1679,14 @@ class InventoryPanelModel:
         if key == "r":
             return InventoryPanelAction(True, self.load_intent())
         return InventoryPanelAction(False)
+
+    def _subtab_hint(self) -> str:
+        if self.active_sub == "agents" and self.agent_identities_total:
+            return (
+                f"Agents: newest {len(self.agent_identities)} of {self.agent_identities_total} identities. "
+                "All: defenseclaw agent identities"
+            )
+        return ""
 
     def empty_state(self) -> str:
         if self.message:
@@ -1680,17 +1745,18 @@ def _fit_cells(
     The widest other column loses a character at a time (never below its
     header or 6), and a clipped cell ends in "…".
     """
-    widths = [max([len(name), *(len(row[i]) for row in rows)]) for i, name in enumerate(columns)]
+    widths = [max([cell_len(name), *(cell_len(row[i]) for row in rows)]) for i, name in enumerate(columns)]
     # Panel margins, the scrollbar and one space of padding each side of a cell.
     budget = width - 8 - 2 * len(columns)
     shrinkable = [i for i, name in enumerate(columns) if name not in keep]
     while shrinkable and sum(widths) > budget:
         i = max(shrinkable, key=lambda j: widths[j])
-        if widths[i] <= max(6, len(columns[i])):
+        if widths[i] <= max(6, cell_len(columns[i])):
             break
         widths[i] -= 1
     return tuple(
-        tuple(cell if len(cell) <= widths[i] else cell[: widths[i] - 1] + "…" for i, cell in enumerate(row))
+        tuple(cell if cell_len(cell) <= widths[i] else set_cell_size(cell, widths[i] - 1) + "…"
+              for i, cell in enumerate(row))
         for row in rows
     )
 

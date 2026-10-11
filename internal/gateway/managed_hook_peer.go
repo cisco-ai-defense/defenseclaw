@@ -23,12 +23,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 // Stable diagnostics returned to a standalone hook caller the gateway
@@ -259,11 +261,6 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		}
 		return allowManagedHook()
 	}
-	if z.exempt(peer) {
-		decision := allowManagedHook()
-		decision.Exempt = true
-		return decision
-	}
 	refuse := z.enrollment.UnverifiedVersionsFor(connectorName) == config.EnterpriseUnverifiedRefuse
 	if refuse && connector.SurfaceRefused(connectorName, surface, config.EnterpriseUnverifiedRefuse) {
 		return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
@@ -276,6 +273,11 @@ func (z *managedHookAuthorizer) decide(peer managedHookPeer, connectorName, surf
 		if refused.refused(peer, connectorName) {
 			return denyManagedHook(http.StatusForbidden, managedHookReasonSurfaceUnverified)
 		}
+	}
+	if z.exempt(peer) {
+		decision := allowManagedHook()
+		decision.Exempt = true
+		return decision
 	}
 	machine := z.machinePolicy[connectorName]
 	strict := strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny)
@@ -471,6 +473,24 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			return
 		}
 		defer release()
+		if r.URL.Path == managedRefusalAuditPath {
+			// Any kernel-verified local account may report its own refused
+			// policy write; the route has no connector to enroll for.
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Header.Get(hookexec.ClientRefusalHeader) == hookexec.ManagedUserNamespaceReason {
+			// A hook in a private user namespace refused its agent before it
+			// could check the runtime state; the refusal left no audit row or
+			// log line, unlike a refused unenrolled account (GAP-0923).
+			connectorName, _ := a.managedHookRouteScope(r)
+			fmt.Fprintf(os.Stderr,
+				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent runs in a private user namespace\n",
+				peer.UID, connectorName, route, hookexec.ManagedUserNamespaceReason)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, hookexec.ManagedUserNamespaceReason, connectorName)
+			writeManagedHookRefusal(w, http.StatusForbidden, hookexec.ManagedUserNamespaceReason)
+			return
+		}
 		connectorName, inspect := a.managedHookRouteScope(r)
 		decision := authorizer.decide(peer, connectorName, r.Header.Get(hookexec.AgentSurfaceHeader))
 		if !decision.Allow {
@@ -487,7 +507,11 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 				peer.UID, peer.Name, connectorName, route)
 		}
 		ctx := PromoteSessionIfAuthenticated(r.Context())
-		ctx = a.attachVerifiedSubject(ctx, strconv.Itoa(peer.UID), peer.Name, subjectSourcePeerCredentials)
+		ctx = attachVerifiedSubject(ctx, a.observabilityV8RuntimeEmitter(), strconv.Itoa(peer.UID), peer.Name, subjectSourcePeerCredentials)
+		if decision.Exempt {
+			ctx = withEnterpriseExemptUser(ctx)
+			a.auditEnterpriseExemptUser(ctx, peer, connectorName, route, time.Now())
+		}
 		if inspect {
 			ctx = withAuthenticatedInspectConnector(ctx, connectorName)
 		} else {
@@ -539,9 +563,10 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 }
 
 // managedHookSocketMux registers only the agent-facing routes on the hook
-// socket: connector hook endpoints, the inspect endpoints and the Codex
-// notifier. Management, status, configuration, policy and scan routes are
-// not reachable through it at all.
+// socket: connector hook endpoints, the inspect endpoints, the Codex
+// notifier and the refused-write report of a standard user CLI. Management,
+// status, configuration, policy and scan routes are not reachable through it
+// at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
@@ -554,6 +579,59 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.Handle("/api/v1/inspect/", limiter(a.guardrailProfileInspectMiddleware(inspectMux)))
 	a.registerConnectorHookRoutes(mux, limiter)
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
+	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	return a.apiCSRFProtect(handler)
+}
+
+// enterpriseExemptUserContextKey marks a request from an account
+// enterprise.enrollment.exempt_users lists.
+type enterpriseExemptUserContextKey struct{}
+
+func withEnterpriseExemptUser(ctx context.Context) context.Context {
+	return context.WithValue(ctx, enterpriseExemptUserContextKey{}, true)
+}
+
+// enterpriseEnrollmentV8 is defenseclaw.user.enrollment for a record emitted
+// under ctx: exempt for an exempt_users account, absent otherwise, so the
+// hook_decision rows of exempt accounts are found in the audit store and a
+// SIEM, not only in the gateway log (GAP-0832).
+func enterpriseEnrollmentV8(ctx context.Context) observability.Optional[string] {
+	if exempt, _ := ctx.Value(enterpriseExemptUserContextKey{}).(bool); exempt {
+		return observability.Present("exempt")
+	}
+	return observability.Absent[string]()
+}
+
+// enterpriseExemptAuditInterval bounds the enterprise-exempt-user audit rows:
+// one per account and connector in each interval.
+const (
+	enterpriseExemptAuditInterval = 10 * time.Minute
+	enterpriseExemptAuditMaxKeys  = 4096
+)
+
+// auditEnterpriseExemptUser writes the enterprise-exempt-user audit row for
+// an exempt account's hook call, at most once per account and connector in
+// each enterpriseExemptAuditInterval. It reports whether it wrote one.
+func (a *APIServer) auditEnterpriseExemptUser(ctx context.Context, peer managedHookPeer, connectorName, route string, now time.Time) bool {
+	if a == nil || a.logger == nil {
+		return false
+	}
+	key := strconv.Itoa(peer.UID) + "/" + connectorName
+	a.exemptAuditMu.Lock()
+	if last, seen := a.exemptAuditAt[key]; seen && now.Sub(last) < enterpriseExemptAuditInterval {
+		a.exemptAuditMu.Unlock()
+		return false
+	}
+	if a.exemptAuditAt == nil || len(a.exemptAuditAt) >= enterpriseExemptAuditMaxKeys {
+		a.exemptAuditAt = make(map[string]time.Time)
+	}
+	a.exemptAuditAt[key] = now
+	a.exemptAuditMu.Unlock()
+	details := fmt.Sprintf("uid=%d user=%s connector=%s route=%s; allowed and inspected, not enrolled (enterprise.enrollment.exempt_users)",
+		peer.UID, sanitizeLLMEventUser(peer.Name), connectorName, route)
+	if err := a.logger.LogActionSeverityConnector(string(audit.ActionEnterpriseExemptUser), "uid:"+strconv.Itoa(peer.UID), details, "INFO", connectorName); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar-api] enterprise-exempt-user audit row for uid=%d: %v\n", peer.UID, err)
+	}
+	return true
 }

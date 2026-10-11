@@ -7,9 +7,11 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -323,6 +325,152 @@ func TestHookConfigGuardRepairUsesCurrentRuntimePolicy(t *testing.T) {
 	}
 }
 
+// failModeBakedConnector keeps its registration independent of the hook fail
+// mode, like the real hook connectors: the mode lives in the generated script,
+// so a stale mode leaves the registration present.
+type failModeBakedConnector struct{ runtimePolicyCaptureConnector }
+
+func (c *failModeBakedConnector) Setup(_ context.Context, opts connector.SetupOpts) error {
+	c.mu.Lock()
+	c.setupCalls++
+	c.mu.Unlock()
+	return os.WriteFile(c.configPath, fmt.Appendf(nil, "{\"command\":\"managed-hook\",\"failMode\":%q}\n", opts.HookFailMode), 0o600)
+}
+
+func (*failModeBakedConnector) HookConfigReferenceNeedles(connector.SetupOpts) []string {
+	return []string{"managed-hook"}
+}
+
+// TestHookConfigGuardRefreshPolicyRerendersStaleFailMode pins GAP-0029:
+// guardrail.mode action implies the global (closed) hook fail mode, and the
+// rendered hooks follow it without a restart; nothing re-renders when the
+// effective fail mode is unchanged.
+func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "hooks.json")
+	conn := &failModeBakedConnector{runtimePolicyCaptureConnector{
+		stubConnector: stubConnector{name: "baked-mode"},
+		configPath:    configPath,
+	}}
+	cached := connector.SetupOpts{DataDir: root, HookFailMode: "open"}
+	if err := conn.Setup(context.Background(), cached); err != nil {
+		t.Fatalf("initial Setup: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	if !guard.Start(ctx, conn, cached) {
+		t.Fatal("hook registration guard did not start")
+	}
+	defer guard.Stop()
+	sidecar := &Sidecar{}
+	sidecar.bindHookRuntimePolicyResolver(guard)
+	setupCalls := func() int {
+		conn.mu.Lock()
+		defer conn.mu.Unlock()
+		return conn.setupCalls
+	}
+
+	live := config.DefaultConfig()
+	live.DataDir = root
+	live.Guardrail.Mode = "observe"
+	live.Guardrail.HookFailMode = "closed"
+	sidecar.publishConfig(live)
+	before := setupCalls()
+	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before {
+		t.Fatalf("observe mode (fail open, as rendered): err=%v, Setup calls %d -> %d, want none", err, before, setupCalls())
+	}
+
+	action := cloneConfig(live)
+	action.Guardrail.Mode = "action"
+	sidecar.publishConfig(action)
+	if err := guard.RefreshPolicy(ctx); err != nil {
+		t.Fatalf("refresh after guardrail.mode action: %v", err)
+	}
+	if setupCalls() != before+1 {
+		t.Fatalf("Setup calls = %d, want %d (one re-render)", setupCalls(), before+1)
+	}
+	if body, err := os.ReadFile(configPath); err != nil || !strings.Contains(string(body), `"failMode":"closed"`) {
+		t.Fatalf("rendered hooks = %q (%v), want fail mode closed", body, err)
+	}
+	if lock := connector.LoadHookContractLockEntry(root, conn.Name()); lock.HookFailMode != "closed" {
+		t.Fatalf("hook contract lock fail mode = %q, want closed (doctor compares it with the rendered hooks)", lock.HookFailMode)
+	}
+	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before+1 {
+		t.Fatalf("second refresh: err=%v, Setup calls %d, want %d", err, setupCalls(), before+1)
+	}
+
+	// A mode change inside the suppression window of that re-render is
+	// applied when the window ends, not dropped (GAP-0317).
+	guard.mu.Lock()
+	guard.suppressUntil = time.Now().Add(100 * time.Millisecond)
+	guard.mu.Unlock()
+	sidecar.publishConfig(live)
+	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before+2 {
+		t.Fatalf("refresh inside the suppression window: err=%v, Setup calls %d, want %d", err, setupCalls(), before+2)
+	}
+	if body, err := os.ReadFile(configPath); err != nil || !strings.Contains(string(body), `"failMode":"open"`) {
+		t.Fatalf("rendered hooks = %q (%v), want fail mode open", body, err)
+	}
+}
+
+type failOnceBakedConnector struct {
+	failModeBakedConnector
+	failClosedOnce bool
+}
+
+func (c *failOnceBakedConnector) Setup(ctx context.Context, opts connector.SetupOpts) error {
+	if opts.HookFailMode == "closed" && c.failClosedOnce {
+		c.failClosedOnce = false
+		return errors.New("temporary hook write failure")
+	}
+	return c.failModeBakedConnector.Setup(ctx, opts)
+}
+
+func TestHookConfigGuardRetriesFailedFailModeRefresh(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "hooks.json")
+	conn := &failOnceBakedConnector{
+		failModeBakedConnector: failModeBakedConnector{runtimePolicyCaptureConnector{
+			stubConnector: stubConnector{name: "baked-mode"}, configPath: path,
+		}},
+		failClosedOnce: true,
+	}
+	opts := connector.SetupOpts{DataDir: root, HookFailMode: "open"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, time.Hour)
+	if !guard.Start(ctx, conn, opts) {
+		t.Fatal("guard did not start")
+	}
+	defer guard.Stop()
+	sidecar := &Sidecar{}
+	sidecar.bindHookRuntimePolicyResolver(guard)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = root
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.HookFailMode = "closed"
+	sidecar.publishConfig(cfg)
+	if err := guard.RefreshPolicy(ctx); err == nil {
+		t.Fatal("expected first refresh to fail")
+	}
+	guard.mu.Lock()
+	pending := guard.pendingPolicyRefresh
+	guard.suppressUntil = time.Time{}
+	guard.mu.Unlock()
+	if !pending {
+		t.Fatal("failed refresh was not queued for the policy audit")
+	}
+	guard.processPolicyAudit()
+	raw, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(raw), `"failMode":"closed"`) {
+		t.Fatalf("hooks after retry = %q, %v; want closed", raw, err)
+	}
+}
+
 func TestHookConfigGuard_ContinuesAfterWatcherReplacement(t *testing.T) {
 	conn, opts, cfgPath := installedCursorConnector(t)
 
@@ -442,6 +590,67 @@ func TestHookConfigGuard_IgnoresUnrelatedEdits(t *testing.T) {
 	}
 	if afterCfg["_dc_test_unrelated"] != "keepme" {
 		t.Fatal("unrelated key was clobbered by the guard")
+	}
+}
+
+// GAP-0906: with one of Copilot's per-event entries edited, the other entries
+// still matched, so the guard saw its hooks as present and never repaired the
+// file: no log line, mtime unchanged, the edited event unguarded until the
+// gateway restarted. The file watcher must now restore the Setup render. An
+// operator-removed connector is still not re-added.
+func TestHookConfigGuard_RepairsOneEditedEntry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows registers the native hook launcher, not a hook script")
+	}
+	root := testenv.PrivateTempDir(t)
+	cfgPath := filepath.Join(root, "copilot", "hooks", "defenseclaw.json")
+	prev := connector.CopilotHooksPathOverride
+	connector.CopilotHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CopilotHooksPathOverride = prev })
+	opts := connector.SetupOpts{
+		DataDir:      filepath.Join(root, ".defenseclaw"),
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+		WorkspaceDir: t.TempDir(),
+	}
+	conn := connector.NewCopilotConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("copilot Setup: %v", err)
+	}
+	pristine, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(nil, nil, guardTestDebounce)
+	repairs := observeRepairs(guard)
+	guard.Start(ctx, conn, opts)
+	defer guard.Stop()
+	requireOwnedHooks(t, conn, opts)
+
+	edited := strings.Replace(string(pristine), "copilot-hook.sh' --event 'agentStop'", "copilot-hookX.sh' --event 'agentStop'", 1)
+	if edited == string(pristine) {
+		t.Fatalf("fixture has no agentStop entry:\n%s", pristine)
+	}
+	if err := os.WriteFile(cfgPath, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForRepair(t, repairs, conn, opts)
+	if got, err := os.ReadFile(cfgPath); err != nil || string(got) != string(pristine) {
+		t.Fatalf("repair is not the Setup render (%v):\n%s", err, got)
+	}
+
+	if _, err := connector.MarkConnectorInactive(opts.DataDir, conn.Name()); err != nil {
+		t.Fatalf("mark connector inactive: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * guardTestDebounce)
+	if present, err := connector.OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("hook guard re-added a removed connector: present=%v err=%v", present, err)
 	}
 }
 

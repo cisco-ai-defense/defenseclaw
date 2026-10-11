@@ -296,6 +296,7 @@ func (adapter *ProjectedTraceAdapter) deliverGRPC(
 		ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs(pairs...))
 	}
 	dialSequence := adapter.config.tracker.snapshot()
+	redialGRPC(ctx, adapter.connection)
 	response, err := adapter.grpcClient.Export(ctx, projected.Request, grpc.WaitForReady(false))
 	if err != nil {
 		if adapter.config.tracker.unsafeSince(dialSequence) ||

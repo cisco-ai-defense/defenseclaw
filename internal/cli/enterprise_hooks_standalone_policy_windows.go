@@ -61,6 +61,9 @@ func windowsCopilotVSCodeUser(home string, verify, remove bool) error {
 	if err != nil {
 		return err
 	}
+	if verify && len(result.Kept) > 0 {
+		return fmt.Errorf("DefenseClaw's Copilot plugin under %s holds hooks DefenseClaw did not write: %s; the guardian leaves such a file in place and the foreign-hook guard denies this user's Copilot calls while it is there: move it aside, and the guardian writes DefenseClaw's plugin on its next pass", home, strings.Join(result.Kept, ", "))
+	}
 	if verify && len(result.Changed)+len(result.Removed) > 0 {
 		return fmt.Errorf("DefenseClaw's VS Code Local hooks under %s are not current: %s", home, strings.Join(append(result.Changed, result.Removed...), ", "))
 	}
@@ -144,14 +147,20 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 
 // enterpriseHookStandalonePlatformPrepare publishes the Go-owned Windows
 // machine policy and summary, re-checks the Claude Code version floor
-// drop-in (inside the lifecycle's Claude Code policy lock) and reconciles
-// the WSL agent-session registry policy. Failure is
+// drop-in (inside the lifecycle's Claude Code policy lock), reconciles
+// the WSL agent-session registry policy and retires the runtime selections
+// of users the machine policies no longer enroll. Failure is
 // reported, not fatal: rows that depend on the policy (Copilot) fail their
 // own verification, and `enterprise policy verify` reports a missing floor.
 func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	opts, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone {
 		return
+	}
+	// After this pass's revocations and before any row: a deferred row
+	// whose SID kept a selection would fail its pending proof (GAP-0262).
+	if retireErr := enterprisehooks.RetireWindowsUnregisteredRuntimeSelections(); retireErr != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks (Windows): runtime selections of unenrolled users: %v\n", retireErr)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
@@ -185,10 +194,11 @@ var enterpriseHookWindowsCursorAdapterRefresh = enterprisehooks.RefreshWindowsCu
 var windowsStandaloneGoOwnedPolicyMu sync.Mutex
 
 // enterpriseHookStandalonePlatformWatch starts, for the life of the watch
-// loop, the guardian's managed OpenCode plugin watch, which restores the
-// plugin right after a standard account changes its attributes instead of
-// at the next pass.
+// loop, the guardian's hook binary check and its managed OpenCode plugin
+// watch, which restores the plugin right after a standard account changes
+// its attributes instead of at the next pass.
 func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer) {
+	go watchWindowsStandaloneHookBinary(ctx, stderr)
 	opts, _, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone || err != nil || strings.TrimSpace(opts.OpenCodePluginPath) == "" {
 		return

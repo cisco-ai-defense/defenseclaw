@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -475,6 +476,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	}
 	ev := audit.SandboxLifecycleEvent{
 		Sandbox: id, PreviousPhase: previous, Trigger: trigger, ExitCode: exit, Condition: cond, Timestamp: m.now(),
+		UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
 	}
 	m.tel.RecordSandboxLifecycle(ctx, ev)
 	if phase != audit.SandboxPhaseDeleted {

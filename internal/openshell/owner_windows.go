@@ -29,3 +29,6 @@ func ownedByCallerOrRoot(fs.FileInfo) bool { return false }
 func ownerName(fs.FileInfo) string { return "" }
 
 func dirWritable(string) bool { return true }
+
+// writableByCaller serves the macOS Homebrew check, which never runs on Windows.
+func writableByCaller(string) bool { return true }

@@ -19,30 +19,42 @@ package config
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 
+	"github.com/open-policy-agent/opa/ast"
+	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/policy/regodata"
 	"github.com/defenseclaw/defenseclaw/policies"
 )
 
 // The v8 to v9 migration moves admin intent into config.yaml: data.json
 // admission and guardrail values, the *_actions keys,
 // watch.allow_list_bypass_scan, rule_pack_dir, the v8 scanner keys,
-// update_check and (OSS only) the operator block/allow rows of audit.db and a
-// legacy custom-providers.json overlay.
+// update_check, the reserved privacy: section and (OSS only) the operator
+// block/allow rows of audit.db and a legacy custom-providers.json overlay.
+// The runtime Config has no field for any of those keys; the migration reads
+// them from the raw YAML.
 // It is the one implementation: `defenseclaw-gateway config migrate --to 9`,
 // the Python CONFIG_MIGRATIONS[8] step and enterprise ensure all call it,
 // and the gateway runs it in memory (read-only) on a v8 file at load.
@@ -72,7 +84,8 @@ type MigrateV9Input struct {
 	ConfigPath string
 	// Source is the v8 bytes; when nil they are read from ConfigPath.
 	Source []byte
-	// DataJSONPath is <policy_dir>/rego/data.json; "" or missing is skipped.
+	// DataJSONPath is the data.json the 0.8.x engine loaded (v8DataJSONIn);
+	// "" or missing is skipped.
 	DataJSONPath string
 	// PolicyDir is the resolved policy_dir. A v8 rule_pack_dir is a preset
 	// only when it is <PolicyDir>/guardrail/<name>, which is where the v9
@@ -100,6 +113,27 @@ type MigrateV9Input struct {
 	// a custom rule_pack_dir pass it; without it such a directory is a
 	// migration error.
 	RulePackDigest func(dir string) (string, error)
+	// RebaseRulePack plans the 1.0 copy of a 0.8.x custom rule-pack directory
+	// whose rules block a tool call with a pattern alone, which 1.0 does only
+	// with an expression (guardrail.PlanRulePackRebase); a nil plan needs
+	// none. Without it such a pack is pinned as it is (GAP-0360, GAP-1225).
+	RebaseRulePack func(dir string) (*RulePackRebasePlan, error)
+	// ack completes a pending record without its audit.db cleanup
+	// (AcknowledgeMigrationV9).
+	ack bool
+}
+
+// RulePackRebasePlan is guardrail.RulePackRebase, which this package can not
+// import: the rebased pack's files and FilesDigest (no Files: the pack is
+// pinned as it is), and what changed.
+type RulePackRebasePlan struct {
+	Files                                                   map[string][]byte
+	Digest                                                  string
+	Updated                                                 int
+	Carried, Expressed, AlertOnly, Disabled, Merged, Linked []string
+	// Renamed says which built-in rules the operator gave a pattern of their
+	// own now have an ID of theirs ("CMD-RM-RF -> CUSTOM-CMD-RM-RF").
+	Renamed []string
 }
 
 // MigrateV9Result is the outcome of one migration.
@@ -145,8 +179,75 @@ type MigrationRecord struct {
 	// Notes are behaviour changes the operator should know about (for
 	// example block_at now applies on every path).
 	Notes []string `json:"notes,omitempty"`
+	// DetectionOnlyRules names the operator's own rules that blocked a tool
+	// call on 0.8.x with their pattern and in 1.0, without an expression,
+	// only record it; the upgrade prints them (GAP-1225).
+	DetectionOnlyRules []string `json:"detection_only_rules,omitempty"`
+	// RuleFileMerges says which rule files of a custom pack that shared a
+	// category, which 1.0 refuses, were merged into one; the upgrade prints
+	// them (GAP-1339).
+	RuleFileMerges []string `json:"rule_file_merges,omitempty"`
+	// RenamedRules says which 0.8.x built-in rules the operator gave a
+	// pattern of their own were kept as rules of theirs under a new ID
+	// ("CMD-RM-RF -> CUSTOM-CMD-RM-RF"): the built-in ID keeps the shipped
+	// rule (GAP-1314). ExpressedRules names the operator's rules that got
+	// an expression from their literal pattern and still block (GAP-1344).
+	// The upgrade and doctor print them.
+	RenamedRules   []string `json:"renamed_rules,omitempty"`
+	ExpressedRules []string `json:"expressed_rules,omitempty"`
+	// RulePackRebaseFailures names each 0.8.x custom pack whose 1.0 copy
+	// could not be made, and why. It is pinned as it is, so its rules that
+	// blocked a tool call with a pattern alone only record the match. The
+	// upgrade, doctor and an audit alert at each gateway start name it until
+	// the record is acknowledged (GAP-1358).
+	RulePackRebaseFailures []string `json:"rule_pack_rebase_failures,omitempty"`
+	// UnenforcedRegoData names each Rego module that reads a data document
+	// 1.0 no longer provides and the migration did not move into config.yaml
+	// (an operator's own data.json key): its rules that read it are not
+	// enforced. It also names each 0.8.x vendor module the operator edited,
+	// which the shipped module replaced, with its saved .migrated-v9 copy
+	// (GAP-1498). The upgrade, config migrate, the managed lifecycle and
+	// doctor print them until the record is acknowledged (GAP-1399).
+	UnenforcedRegoData []string `json:"unenforced_rego_data,omitempty"`
+	// UnscannableMCP names the MCP servers of the account the 1.0 scanner
+	// refuses to start (a command path or a program other than npx or uvx
+	// with a package). They keep running without a scan. The Python upgrade
+	// step adds them after the commit, with the scanner's own check, and
+	// prints them; doctor warns about each one still configured (GAP-1340).
+	UnscannableMCP []MigrationUnscannableMCP `json:"unscannable_mcp,omitempty"`
+	// AuditCleanup identifies only the copied operator rows. It lets a retry
+	// finish cleanup after config commit without deleting later decisions.
+	AuditCleanup *MigrationAuditCleanup `json:"audit_cleanup,omitempty"`
+	// Pending is true until the v9 config and audit cleanup commit.
+	Pending bool `json:"pending,omitempty"`
 	// Acknowledged is set by `defenseclaw config migrate --ack`.
 	Acknowledged bool `json:"acknowledged,omitempty"`
+}
+
+// MigrationAuditCleanup is the post-commit cleanup plan. Fingerprints avoid
+// persisting raw audit reasons or action state in the migration record.
+type MigrationAuditCleanup struct {
+	Path    string                     `json:"path"`
+	Skipped bool                       `json:"skipped,omitempty"`
+	Rows    []MigrationAuditCleanupRow `json:"rows,omitempty"`
+}
+
+type MigrationAuditCleanupRow struct {
+	ID          string `json:"id"`
+	Fingerprint string `json:"fingerprint"`
+}
+
+// MigrationUnscannableMCP is one MCP server a scan refuses to start.
+type MigrationUnscannableMCP struct {
+	Name      string `json:"name"`
+	Connector string `json:"connector"`
+	Command   string `json:"command"`
+	// Reason is the scanner's refusal.
+	Reason string `json:"reason"`
+	// RuntimeEffect says what the gateway does with the server.
+	RuntimeEffect string `json:"runtime_effect"`
+	// Fix is the defenseclaw mcp set command that makes it scannable.
+	Fix string `json:"fix"`
 }
 
 // MigrationMove is one value moved from a v8 source to a v9 key.
@@ -215,14 +316,38 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	if err != nil {
 		return nil, err
 	}
+	if in.ack && !already {
+		return nil, errors.New("config: config.yaml is not on config_version 9 yet, so there is no committed migration " +
+			"to complete; run `defenseclaw-gateway config migrate --to 9`")
+	}
 	m.record.ResultSHA256 = cfgtxn.SHA256Hex(migrated)
 	result := &MigrateV9Result{Migrated: migrated, Record: m.record, EnvKey: m.envKey, EnvValue: m.envValue}
 	if already {
 		result.Record.FromVersion = ConfigVersionV9
+		// A config.yaml changed since the commit (config set, the TUI,
+		// connector setup) still resumes the pre-9 Rego refresh and the
+		// audit.db cleanup (GAP-1517, GAP-1533).
+		if record, ok := readMigrationRecord(abs); ok && record.Pending {
+			committed := strings.EqualFold(record.ResultSHA256, cfgtxn.SHA256Hex(source))
+			switch {
+			case !in.DryRun && !in.InMemory:
+				if err := m.finishPending(ctx, source, record, in.ack); err != nil {
+					return result, err
+				}
+				result.Written = append(result.Written, MigrationRecordPath(abs))
+				record.Pending = false
+				result.Record = record
+			case committed:
+				result.Record = record
+			}
+		}
 		return result, nil
 	}
 	if err := ValidateCandidate(abs, migrated); err != nil {
 		return nil, fmt.Errorf("config: the migrated config_version 9 document does not validate: %w", err)
+	}
+	if err := m.validateAssets(abs, migrated); err != nil {
+		return nil, fmt.Errorf("config: the migrated config_version 9 assets do not validate: %w", err)
 	}
 	if in.DryRun || in.InMemory {
 		return result, nil
@@ -233,22 +358,230 @@ func MigrateV9(ctx context.Context, in MigrateV9Input) (*MigrateV9Result, error)
 	return result, err
 }
 
+// validateAssets runs the asset check of a config write (ValidateCandidateAssets)
+// on the migrated document, before a preview or a commit. A rebased pack is
+// written only at commit, so the check reads it from a temporary copy of its
+// files, which the custom_packs entry of the candidate points at; its pinned
+// digest is checked against that copy. Skipping the whole check for a rebased
+// pack let an unrelated reference the gateway refuses into config_version 9
+// (GAP-1482).
+func (m *v9Migrator) validateAssets(configPath string, migrated []byte) error {
+	if len(m.rebasedPacks) == 0 || candidateAssetCheck == nil {
+		return ValidateCandidateAssets(configPath, migrated)
+	}
+	candidate, err := LoadRuntimeV8InspectionCandidateFromBytes(configPath, migrated)
+	if err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp("", "defenseclaw-rebased-packs-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
+	for _, name := range slices.Sorted(maps.Keys(candidate.Guardrail.CustomPacks)) {
+		pack := candidate.Guardrail.CustomPacks[name]
+		files, ok := m.rebasedPacks[filepath.Clean(pack.Path)]
+		if !ok {
+			continue
+		}
+		copied := filepath.Join(staging, name, filepath.Base(pack.Path))
+		if err := writeRebasedRulePack(copied, files); err != nil {
+			return fmt.Errorf("stage the rebased rule pack %s: %w", pack.Path, err)
+		}
+		pack.Path = copied
+		candidate.Guardrail.CustomPacks[name] = pack
+	}
+	return CheckCandidateAssets(candidate)
+}
+
+// finishPending resumes the part after config commit under the config lock:
+// the audit.db row cleanup and the pre-9 Rego module refresh. A missing
+// cleanup snapshot cannot prove which operator rows were copied, so it
+// remains pending for an operator to resolve. So does a module the gateway
+// loads that still reads data.json (GAP-1497): the gateway refuses such a
+// bundle, and the input-based modules of the operator stop applying with it.
+// The row cleanup runs also when config.yaml changed since the commit: the
+// rows were moved at the commit, and resumeV9ActionCleanup refuses a row
+// whose fingerprint changed since, so a later config edit does not make
+// clearing them unsafe (GAP-1533). A cleanup that cannot finish names
+// `config migrate --ack`; with ack the cleanup is skipped, the Rego refresh
+// still has to pass, and the record completes with the rows left in audit.db.
+func (m *v9Migrator) finishPending(ctx context.Context, source []byte, record MigrationRecord, ack bool) error {
+	configPath := m.configPath
+	txn, err := cfgtxn.Begin(ctx, configPath, 0)
+	if err != nil {
+		return err
+	}
+	defer txn.Close()
+	current, _, exists, err := txn.Read()
+	if err != nil {
+		return err
+	}
+	if !exists || !bytes.Equal(current, source) {
+		return errors.New("config: config.yaml changed while finishing the config_version 9 migration; run it again")
+	}
+	latest, ok := readMigrationRecord(configPath)
+	if !ok || !latest.Pending || latest.SourceSHA256 != record.SourceSHA256 ||
+		latest.ResultSHA256 != record.ResultSHA256 {
+		return errors.New("config: pending migration record changed while finishing config_version 9; run it again")
+	}
+	if !ack {
+		if err := finishV9ActionCleanup(ctx, latest); err != nil {
+			return fmt.Errorf("%w; the config_version 9 migration stays pending: run `defenseclaw-gateway config migrate "+
+				"--to 9` again once that is fixed, or `defenseclaw-gateway config migrate --ack` to complete it and keep "+
+				"the moved rows in audit.db", err)
+		}
+	}
+	unenforced, err := m.resumeRegoRefresh()
+	if err != nil {
+		return err
+	}
+	for _, line := range unenforced {
+		if !slices.Contains(latest.UnenforcedRegoData, line) {
+			latest.UnenforcedRegoData = append(latest.UnenforcedRegoData, line)
+		}
+	}
+	latest.Pending = false
+	if ack {
+		latest.Acknowledged = true
+		if cleanup := latest.AuditCleanup; latest.ActionsRowsMoved > 0 && (cleanup == nil || !cleanup.Skipped) {
+			latest.Notes = append(latest.Notes, "`config migrate --ack` completed the migration without the audit.db "+
+				"cleanup: the operator rows it moved to config.yaml may still be in audit.db")
+		}
+	}
+	return writeMigrationRecord(MigrationRecordPath(configPath), latest)
+}
+
+// finishV9ActionCleanup clears the operator rows a pending record moved from
+// audit.db. A missing or incomplete snapshot cannot prove which rows were
+// copied, so it is refused.
+func finishV9ActionCleanup(ctx context.Context, record MigrationRecord) error {
+	cleanup := record.AuditCleanup
+	if cleanup == nil {
+		if record.ActionsRowsMoved > 0 {
+			return errors.New("config: pending migration record lacks an audit cleanup snapshot; operator review is required")
+		}
+		return nil
+	}
+	if cleanup.Skipped {
+		return nil
+	}
+	if len(cleanup.Rows) != record.ActionsRowsMoved {
+		return errors.New("config: pending migration record has an incomplete audit cleanup snapshot; operator review is required")
+	}
+	if err := resumeV9ActionCleanup(ctx, *cleanup); err != nil {
+		return fmt.Errorf("config: finish migrated audit.db row cleanup: %w", err)
+	}
+	return nil
+}
+
+// resumeRegoRefresh runs the pre-9 Rego module refresh again for a commit that
+// stopped after config.yaml (GAP-1497), then checks that no module the gateway
+// loads still needs it. planRegoRefresh finds nothing once the modules are
+// current, so a later retry changes nothing. It returns the
+// unenforced_rego_data lines of the plan.
+func (m *v9Migrator) resumeRegoRefresh() ([]string, error) {
+	m.rego, m.record.Notes, m.record.UnenforcedRegoData = nil, nil, nil
+	if err := m.planRegoRefresh(); err != nil {
+		return nil, err
+	}
+	unenforced := m.record.UnenforcedRegoData
+	if err := m.refreshRegoModules(nil); err != nil {
+		return nil, err
+	}
+	m.rego = nil
+	if err := m.planRegoRefresh(); err != nil {
+		return nil, err
+	}
+	if len(m.rego) > 0 {
+		return nil, fmt.Errorf("config: the pre-9 Rego module %s still reads data.json after its refresh; "+
+			"the config_version 9 migration stays pending", m.rego[0].path)
+	}
+	return unenforced, nil
+}
+
 // NeedsMigrationV9 reports whether raw is a config_version 8 document.
 func NeedsMigrationV9(raw []byte) bool {
 	var doc struct {
 		ConfigVersion int `yaml:"config_version"`
 	}
-	return yaml.Unmarshal(raw, &doc) == nil && doc.ConfigVersion == ObservabilityV8ConfigVersion
+	return decodeSourceYAML(raw, &doc) == nil && doc.ConfigVersion == ObservabilityV8ConfigVersion
+}
+
+// V8PolicyDataJSON resolves a config_version 8 policy_dir (as config.yaml
+// spells it) to the folder config_version 9 names and the data.json the
+// migration reads. 0.8.x did not expand a "~/" policy_dir: `policy activate`
+// wrote <cwd>/~/<rest>/rego/data.json and its gateway read the same relative
+// path, both from the home directory when run from a shell. When that literal
+// folder holds a data.json at least as new as the expanded folder's, it is
+// the one 0.8.x last activated and enforced, so it is the one migrated
+// (GAP-1031).
+func V8PolicyDataJSON(policyDir string) (dir, dataJSON string) {
+	raw := strings.TrimSpace(policyDir)
+	dir = expandPath(raw)
+	dataJSON = v8DataJSONIn(dir)
+	if dir == raw {
+		return dir, dataJSON
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return dir, dataJSON
+	}
+	literal := v8DataJSONIn(filepath.Join(home, raw))
+	written, err := os.Stat(literal)
+	if err != nil || !written.Mode().IsRegular() {
+		return dir, dataJSON
+	}
+	if expanded, err := os.Stat(dataJSON); err == nil && expanded.ModTime().After(written.ModTime()) {
+		return dir, dataJSON
+	}
+	return dir, literal
+}
+
+// v8DataJSONIn is the data.json the 0.8.x engine (policy.New) loaded for
+// policy_dir dir: <dir>/rego/data.json, or the data.json next to Rego modules
+// kept flat in dir itself when <dir>/rego holds no modules (GAP-1453).
+func v8DataJSONIn(dir string) string {
+	nested := filepath.Join(dir, "rego", "data.json")
+	if _, err := os.Stat(nested); err == nil || v8HasRegoModules(filepath.Join(dir, "rego")) {
+		return nested
+	}
+	if flat := filepath.Join(dir, "data.json"); v8RegularFile(flat) {
+		return flat
+	}
+	return nested
+}
+
+// v8HasRegoModules is the 0.8.x engine's hasRegoFiles: a folder with a .rego
+// file, or one it could not list for another reason than its absence.
+func v8HasRegoModules(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return !errors.Is(err, fs.ErrNotExist)
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".rego" {
+			return true
+		}
+	}
+	return false
+}
+
+func v8RegularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // MigrateV8InMemory is the gateway's read-only load of a config_version 8
-// file (spec 2.0): it returns the config_version 9 bytes the migration would
-// write, so the data.json admission and thresholds, the *_actions keys and,
+// file (spec 2.0): it returns config_version 9 bytes with the migrated
+// admission and thresholds, the *_actions keys and,
 // on a per-user install, the operator rows of audit.db keep applying until
 // the file is migrated. Nothing is written. raw comes back unchanged for a
 // config_version 9 file and on a Secure Client host, whose path does not
 // change; on a migration error it comes back unchanged with the error, and
-// the caller refuses the file (InMemoryMigrationError).
+// the caller refuses the file (InMemoryMigrationError). A custom 0.8.x rule
+// pack keeps its original path and pin here; the runtime rebases the loaded
+// pack in memory after verifying that pin.
 func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) ([]byte, error) {
 	if !NeedsMigrationV9(raw) {
 		return raw, nil
@@ -262,14 +595,15 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 		return raw, nil
 	}
 	dataDir := migrationDataDir(configFile, root)
-	policyDir := expandPath(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "policy_dir"))))
+	policyDir, dataJSON := V8PolicyDataJSON(yamlScalarValue(v8YAMLMapValue(root, "policy_dir")))
 	if policyDir == "" {
 		policyDir = filepath.Join(dataDir, "policies")
+		dataJSON = v8DataJSONIn(policyDir)
 	}
 	managedHost := StandaloneManagedSource(raw)
 	in := MigrateV9Input{
 		ConfigPath: configFile, Source: raw, PolicyDir: policyDir, DataDir: dataDir,
-		DataJSONPath: filepath.Join(policyDir, "rego", "data.json"),
+		DataJSONPath: dataJSON,
 		Managed:      managedHost, InMemory: true, RulePackDigest: rulePackDigest,
 	}
 	if !managedHost {
@@ -319,7 +653,28 @@ func MigratedFrom(configPath, sourceSHA256, installedSHA256 string) bool {
 // records sourceSHA256 (hex) as the v8 input it migrated.
 func MigratedSource(configPath, sourceSHA256 string) bool {
 	record, ok := readMigrationRecord(configPath)
-	return ok && strings.EqualFold(record.SourceSHA256, sourceSHA256)
+	return ok && !record.Pending && strings.EqualFold(record.SourceSHA256, sourceSHA256)
+}
+
+// UnrebasedRulePacks returns the RulePackRebaseFailures of the committed
+// migration recorded next to configPath, until it is acknowledged.
+func UnrebasedRulePacks(configPath string) []string {
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.Pending || record.Acknowledged {
+		return nil
+	}
+	return record.RulePackRebaseFailures
+}
+
+// MigratedFromV8 returns the source digest of the committed config_version
+// 9 migration of a v8 file recorded next to configPath. The gateway uses it
+// to recognise its first start after a 0.8.x upgrade.
+func MigratedFromV8(configPath string) (string, bool) {
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.Pending || record.FromVersion >= ConfigVersionV9 {
+		return "", false
+	}
+	return record.SourceSHA256, true
 }
 
 func readMigrationRecord(configPath string) (MigrationRecord, bool) {
@@ -331,10 +686,13 @@ func readMigrationRecord(configPath string) (MigrationRecord, bool) {
 	return record, record.SourceSHA256 != ""
 }
 
-// AcknowledgeMigrationV9 marks migration-v9.json next to configPath as read
-// (`defenseclaw config migrate --ack`), so doctor stops reporting it.
-func AcknowledgeMigrationV9(configPath string) error {
-	recordPath := MigrationRecordPath(configPath)
+// AcknowledgeMigrationV9 marks migration-v9.json next to in.ConfigPath as
+// read (`defenseclaw config migrate --ack`), so doctor stops reporting it. A
+// record still pending after the config_version 9 commit is completed first,
+// without the audit.db row cleanup that kept it pending; the pre-9 Rego
+// refresh still has to pass (finishPending, GAP-1533).
+func AcknowledgeMigrationV9(ctx context.Context, in MigrateV9Input) error {
+	recordPath := MigrationRecordPath(in.ConfigPath)
 	raw, err := os.ReadFile(recordPath)
 	if err != nil {
 		return err
@@ -342,6 +700,11 @@ func AcknowledgeMigrationV9(configPath string) error {
 	var record MigrationRecord
 	if err := json.Unmarshal(raw, &record); err != nil {
 		return fmt.Errorf("config: decode %s: %w", recordPath, err)
+	}
+	if record.Pending {
+		in.ack, in.DryRun, in.InMemory = true, false, false
+		_, err := MigrateV9(ctx, in)
+		return err
 	}
 	record.Acknowledged = true
 	return writeMigrationRecord(recordPath, record)
@@ -362,16 +725,29 @@ type v9Migrator struct {
 	record     MigrationRecord
 	// rows are the audit.db rows moved into asset_policy, cleared after the
 	// config commit.
-	rows []v9ActionRow
+	rows              []v9ActionRow
+	auditRowsSnapshot []v9ActionRow
+	auditRowsRead     bool
 	// envKey is an inline scanner key moved to .env on commit.
 	envKey, envValue string
-	// rego are the pre-9 Rego modules under <policy_dir>/rego that commit
-	// replaces with the shipped module (nil data retires the file).
+	// rego are the pre-9 Rego modules the gateway loads (planRegoRefresh) that
+	// commit replaces with the shipped module (nil data retires the file).
 	rego []v9RegoRefresh
 	// providersOverlay is the legacy custom-providers.json folded into
 	// llm_providers; commit writes providerCAs and retires the file.
 	providersOverlay string
 	providerCAs      []v9RegoRefresh
+	// retired are the unmodified 0.8 copies of retired policy files that
+	// commit removes.
+	retired []string
+	// seedPacks maps a missing rule-pack folder to the shipped pack commit
+	// writes there (planShippedPacks).
+	seedPacks map[string]string
+	// rebasedPacks maps a new rule-pack folder to the files commit writes
+	// there, and rebasedFrom a custom pack folder to its rebased copy.
+	rebasedPacks   map[string]map[string][]byte
+	rebasedFrom    map[string]string
+	rebasedDigests map[string]string
 	// globalPackPosture is the posture the gateway gives the global v8
 	// rule_pack_dir ("" when none was set); the data.json thresholds are
 	// compared with it.
@@ -417,15 +793,21 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	m.migratePolicyDir(root)
 	if err := m.migrateRulePacks(root); err != nil {
 		return nil, false, err
 	}
 	m.migrateAdmission(root, data)
 	m.migrateThresholds(root, data)
+	if !v9SecureClientDocument(root) {
+		m.normalizeCursorFailMode(root)
+	}
 	if err := m.migrateScanners(root); err != nil {
 		return nil, false, err
 	}
-	m.migrateSignaturePacks(root)
+	if err := m.migrateSignaturePacks(root); err != nil {
+		return nil, false, err
+	}
 	if node := v9Pop(root, "update_check"); node != nil {
 		var check bool
 		if node.Decode(&check) == nil {
@@ -433,6 +815,9 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 			m.moved("config", "update_check", "update.check", check)
 		}
 	}
+	m.migrateTelemetryAliases(root)
+	m.migratePrivacy(root)
+	m.migrateRegistrySources(root)
 	if err := m.migrateActionsRows(root); err != nil {
 		return nil, false, err
 	}
@@ -440,6 +825,11 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	m.migrateRetiredStandaloneSandbox(root)
 	if err := m.planRegoRefresh(); err != nil {
 		return nil, false, err
+	}
+	// A Secure Client policy folder is the deployment's, not the user's.
+	if !v9SecureClientDocument(root) {
+		m.planRetiredPolicyFiles()
+		m.planShippedPacks()
 	}
 	versionNode.Value = fmt.Sprint(ConfigVersionV9)
 	versionNode.Tag = "!!int"
@@ -454,6 +844,119 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("config: encode the migrated config: %w", err)
 	}
 	return out.Bytes(), false, nil
+}
+
+// normalizeCursorFailMode removes a v8 Cursor value that contradicts the
+// native hook contract. Other connectors keep their independent fail mode.
+func (m *v9Migrator) normalizeCursorFailMode(root *yaml.Node) {
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	if guardrail == nil || guardrail.Kind != yaml.MappingNode {
+		return
+	}
+	globalMode := yamlScalarValue(v8YAMLMapValue(guardrail, "mode"))
+	pinned := func(mode string) string {
+		if strings.EqualFold(strings.TrimSpace(mode), "action") {
+			return "closed"
+		}
+		return "open"
+	}
+	connectors := v8YAMLMapValue(guardrail, "connectors")
+	if connectors != nil && connectors.Kind == yaml.MappingNode && len(connectors.Content) > 0 {
+		for i := 0; i+1 < len(connectors.Content); i += 2 {
+			if normalizeConnectorKey(connectors.Content[i].Value) != "cursor" {
+				continue
+			}
+			entry := connectors.Content[i+1]
+			if entry.Kind != yaml.MappingNode {
+				continue
+			}
+			stored := v8YAMLMapValue(entry, "hook_fail_mode")
+			if stored == nil {
+				continue
+			}
+			mode := yamlScalarValue(v8YAMLMapValue(entry, "mode"))
+			if strings.TrimSpace(mode) == "" {
+				mode = globalMode
+			}
+			want := pinned(mode)
+			if !strings.EqualFold(strings.TrimSpace(stored.Value), want) {
+				stored.Value = want
+				m.moved("config", "guardrail.connectors.cursor.hook_fail_mode",
+					"guardrail.connectors.cursor.hook_fail_mode", want)
+			}
+		}
+		return
+	}
+	if normalizeConnectorKey(yamlScalarValue(v8YAMLMapValue(guardrail, "connector"))) != "cursor" {
+		return
+	}
+	stored := v8YAMLMapValue(guardrail, "hook_fail_mode")
+	if stored != nil {
+		want := pinned(globalMode)
+		if !strings.EqualFold(strings.TrimSpace(stored.Value), want) {
+			stored.Value = want
+			m.moved("config", "guardrail.hook_fail_mode", "guardrail.hook_fail_mode", want)
+		}
+	}
+}
+
+// migratePolicyDir writes a "~/" policy_dir as the folder it names: the 1.0
+// gateway reads policy_dir as written, so "~/team-policies" named no folder and
+// it refused every policy reload ("read rego directory", GAP-1033). It also
+// records where the migrated data.json came from when 0.8.x wrote it under the
+// unexpanded path (V8PolicyDataJSON).
+func (m *v9Migrator) migratePolicyDir(root *yaml.Node) {
+	raw := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(root, "policy_dir")))
+	dir := expandPath(raw)
+	if dir == raw {
+		return
+	}
+	v9Set(root, v9Scalar(dir), "policy_dir")
+	m.moved("config", "policy_dir", "policy_dir", dir)
+	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && filepath.Clean(dj) != v8DataJSONIn(dir) {
+		m.note("0.8.x did not expand policy_dir %s and kept its policy data in %s; that data.json was migrated", raw, dj)
+	}
+}
+
+// migrateTelemetryAliases retires the telemetry attribute alias switch. Since
+// config_version 9 telemetry carries only canonical attribute names, so
+// observability.trace_policy.compatibility_aliases is dropped (recorded in
+// Removed) and a configured resource attribute deployment.environment becomes
+// deployment.environment.name. A host that exports to a backend is told its
+// queries and dashboards must use the canonical names. Keep this until the
+// config_version 8 migration is dropped (1.1.0).
+func (m *v9Migrator) migrateTelemetryAliases(root *yaml.Node) {
+	observability := v8YAMLMapValue(root, "observability")
+	if observability == nil || observability.Kind != yaml.MappingNode {
+		return
+	}
+	if policy := v8YAMLMapValue(observability, "trace_policy"); policy != nil {
+		if v9Pop(policy, "compatibility_aliases") != nil {
+			m.record.Removed = append(m.record.Removed, "observability.trace_policy.compatibility_aliases")
+		}
+		if policy.Kind == yaml.MappingNode && len(policy.Content) == 0 {
+			v9Pop(observability, "trace_policy")
+		}
+	}
+	const from, to = "deployment.environment", "deployment.environment.name"
+	attributes := v8YAMLMapValue(v8YAMLMapValue(observability, "resource"), "attributes")
+	if node := v9Pop(attributes, from); node != nil {
+		prefix := "observability.resource.attributes."
+		if v8YAMLMapValue(attributes, to) == nil {
+			v9Set(attributes, node, to)
+			m.moved("config", prefix+from, prefix+to, node.Value)
+		} else if v8YAMLMapValue(attributes, to).Value != node.Value {
+			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+				To: prefix + to, Kept: to, Lost: from,
+				Reason: "both spellings were set to different values; the canonical name wins",
+			})
+		}
+	}
+	if len(v9SeqItems(v8YAMLMapValue(observability, "destinations"))) > 0 {
+		m.note("telemetry no longer carries the alias attributes deployment.environment, deployment.mode and " +
+			"defenseclaw.device.id; queries, dashboards and alerts on an exported backend must use " +
+			"deployment.environment.name, defenseclaw.deployment.mode and defenseclaw.device.public_key_fingerprint")
+	}
 }
 
 // commit writes the migration under config.yaml.lock: the v8 backup, the
@@ -472,12 +975,56 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 	if !exists || !bytes.Equal(current, source) {
 		return nil, errors.New("config: config.yaml changed while the config_version 9 migration ran; run it again")
 	}
-	var written []string
-	backup := m.configPath + ConfigV8BackupSuffix
-	if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
-		return written, err
+	// Reserve audit.db before writing config so a changed operator decision
+	// cannot be committed from a stale snapshot.
+	var auditDB *sql.DB
+	if m.auditRowsRead && !m.in.Managed {
+		auditDB, err = lockV9ActionRows(ctx, m.in.AuditDBPath, m.auditRowsSnapshot)
+		if err != nil {
+			return nil, fmt.Errorf("config: %w", err)
+		}
+		defer auditDB.Close()
+		defer func() { _, _ = auditDB.Exec("ROLLBACK") }()
 	}
-	written = append(written, backup)
+	var written []string
+	// The documented rollback path must hold the v8 source of this run.
+	// Keep an older backup as a timestamped sibling before refreshing it.
+	backup := m.configPath + ConfigV8BackupSuffix
+	earlier, err := os.ReadFile(backup)
+	switch {
+	case err == nil && bytes.Equal(earlier, source):
+	case err == nil:
+		kept := freeSiblingPath(backup + "." + migrationStamp())
+		if err := cfgtxn.WriteFileDurable(kept, earlier, 0o600); err != nil {
+			return written, err
+		}
+		written = append(written, kept)
+		m.note("previous backup %s saved as %s; rollback now restores this migration's config_version 8 source", backup, kept)
+		fallthrough
+	case errors.Is(err, fs.ErrNotExist):
+		if err := cfgtxn.WriteFileDurable(backup, source, mode); err != nil {
+			return written, err
+		}
+		written = append(written, backup)
+	default:
+		return written, fmt.Errorf("config: read %s: %w", backup, err)
+	}
+
+	// Before the config that pins them.
+	for _, dir := range slices.Sorted(maps.Keys(m.rebasedPacks)) {
+		if err := writeRebasedRulePack(dir, m.rebasedPacks[dir]); err != nil {
+			return written, fmt.Errorf("config: write the rebased rule pack %s: %w", dir, err)
+		}
+		written = append(written, dir)
+	}
+	// A committed v9 config can reference these packs immediately. Install
+	// every missing shipped pack first, and leave v8 available if any fails.
+	for _, dir := range slices.Sorted(maps.Keys(m.seedPacks)) {
+		if err := seedShippedRulePack(dir, m.seedPacks[dir]); err != nil {
+			return written, fmt.Errorf("config: seed the shipped %s rule pack at %s: %w", m.seedPacks[dir], dir, err)
+		}
+		written = append(written, dir)
+	}
 	if m.envKey != "" {
 		envPath := filepath.Join(m.dataDir(), ".env")
 		if err := appendDotEnvKey(envPath, m.envKey, m.envValue); err != nil {
@@ -485,13 +1032,59 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 		}
 		written = append(written, envPath)
 	}
-	if _, err := txn.Commit(migrated, mode, m.record.Actor, "config_version 9 migration"); err != nil {
+	// Provider CA files and the evidence record must exist before the
+	// committed config can reference them. An obstructed record path then
+	// leaves the v8 config available for a retry.
+	if err := m.writeProviderCAs(&written); err != nil {
+		return written, err
+	}
+	recordPath := MigrationRecordPath(m.configPath)
+	// The record of an earlier migration is kept next to the new one: it
+	// lists what the 0.8.x upgrade moved, which a later run cannot know. A
+	// record this source left pending (an interrupted run) is replaced.
+	if earlier, err := os.ReadFile(recordPath); err == nil {
+		var previous MigrationRecord
+		retry := json.Unmarshal(earlier, &previous) == nil && previous.Pending &&
+			strings.EqualFold(previous.SourceSHA256, m.record.SourceSHA256)
+		if !retry {
+			kept := freeSiblingPath(strings.TrimSuffix(recordPath, ".json") + "." + migrationStamp() + ".json")
+			if err := cfgtxn.WriteFileDurable(kept, earlier, 0o600); err != nil {
+				return written, err
+			}
+			written = append(written, kept)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return written, fmt.Errorf("config: read %s: %w", recordPath, err)
+	}
+	auditCleanup := false
+	if len(m.rows) > 0 {
+		outside := m.leftOutsideRollbackCopy(m.in.AuditDBPath)
+		m.record.AuditCleanup = &MigrationAuditCleanup{
+			Path: m.in.AuditDBPath, Skipped: outside,
+		}
+		if !outside {
+			auditCleanup = true
+			for _, row := range m.rows {
+				m.record.AuditCleanup.Rows = append(m.record.AuditCleanup.Rows,
+					MigrationAuditCleanupRow{ID: row.id, Fingerprint: v9ActionRowFingerprint(row)})
+			}
+		}
+	}
+	m.record.Pending = true
+	if err := writeMigrationRecord(recordPath, m.record); err != nil {
+		return written, err
+	}
+	written = append(written, recordPath)
+	if _, err := txn.Commit(current, migrated, exists, mode, m.record.Actor, "config_version 9 migration"); err != nil {
 		return written, err
 	}
 	written = append(written, m.configPath)
 	// On a managed host the admin owns policy_dir (as planRegoRefresh
 	// reports): its data.json stays, so a rollback to the v8 config finds it.
-	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed {
+	// A file outside the data home stays too: the installer's rollback copy
+	// does not cover it, so renaming it would leave a rolled-back 1.0.0 gateway
+	// without its policy data (see leftOutsideRollbackCopy).
+	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed && !m.leftOutsideRollbackCopy(dj) {
 		if _, statErr := os.Stat(dj); statErr == nil {
 			if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
 				m.note("could not rename %s: %v", dj, err)
@@ -500,29 +1093,77 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) ([]str
 			}
 		}
 	}
-	for _, module := range m.rego {
-		if err := m.refreshRegoModule(module); err != nil {
-			m.note("could not replace the pre-9 module %s: %v; the gateway refuses it and uses the config-driven fallback", module.path, err)
-			continue
-		}
-		written = append(written, module.path+DataJSONMigratedSuffix)
-	}
-	if m.providersOverlay != "" {
+	refreshErr := m.refreshRegoModules(&written)
+	if m.providersOverlay != "" && !m.leftOutsideRollbackCopy(m.providersOverlay) {
 		m.retireProvidersOverlay(&written)
+	}
+	for _, path := range m.retired {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			m.note("could not remove the retired policy file %s: %v; nothing reads it", path, err)
+		}
 	}
 	// Rows are cleared only after the config commit, so a failure leaves
 	// them enforcing from the table and recorded in config: never lost.
-	if len(m.rows) > 0 {
-		if err := clearV9ActionRows(m.in.AuditDBPath, m.rows); err != nil {
-			m.note("audit.db rows were copied to asset_policy but not cleared: %v", err)
+	if auditCleanup {
+		if err := clearV9ActionRowsDB(auditDB, m.rows); err != nil {
+			return written, fmt.Errorf("config: clean up migrated audit.db rows: %w", err)
 		}
 	}
-	recordPath := MigrationRecordPath(m.configPath)
+	if auditDB != nil {
+		if _, err := auditDB.Exec("COMMIT"); err != nil {
+			return written, fmt.Errorf("config: commit audit.db cleanup: %w", err)
+		}
+	}
+	// A pre-9 module left in place keeps the record pending, and a retry
+	// resumes its refresh (finishPending).
+	m.record.Pending = refreshErr != nil
 	if err := writeMigrationRecord(recordPath, m.record); err != nil {
 		return written, err
 	}
-	written = append(written, recordPath)
-	return written, nil
+	return written, refreshErr
+}
+
+// migrationStamp names the copies a migration keeps beside an earlier one's
+// files (UTC, second resolution).
+func migrationStamp() string {
+	return time.Now().UTC().Format("20060102T150405Z")
+}
+
+// freeSiblingPath is path, or path with the first free ".N" suffix.
+func freeSiblingPath(path string) string {
+	candidate := path
+	for n := 2; ; n++ {
+		if _, err := os.Lstat(candidate); errors.Is(err, fs.ErrNotExist) {
+			return candidate
+		}
+		candidate = fmt.Sprintf("%s.%d", path, n)
+	}
+}
+
+// leftOutsideRollbackCopy reports whether the migration must leave path as it is. The
+// installer saves a rollback copy of DEFENSECLAW_HOME, plus only the config
+// file when DEFENSECLAW_CONFIG points outside that home. A failed upgrade
+// or `defenseclaw rollback` puts config.yaml back but not a data.json, Rego module,
+// custom-providers.json or audit.db that policy_dir, data_dir or
+// observability.local.path place elsewhere. Those stay as they are (their
+// content is already in config.yaml, and a 1.0 gateway still finds them) and a
+// note says so. Managed hosts follow the lifecycle's own rollback and are
+// not affected.
+func (m *v9Migrator) leftOutsideRollbackCopy(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" || m.in.Managed {
+		return false
+	}
+	resolvedPath, pathErr := filepath.EvalSymlinks(path)
+	resolvedHome, homeErr := filepath.EvalSymlinks(DefaultDataPath())
+	if pathErr == nil && homeErr == nil {
+		rel, relErr := filepath.Rel(resolvedHome, resolvedPath)
+		if relErr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false
+		}
+	}
+	m.note("%s is outside the data home, so the upgrade's rollback copy does not cover it; it was left as it is", path)
+	return true
 }
 
 // dataDir is the data_dir the runtime uses for this config.
@@ -573,14 +1214,32 @@ func appendDotEnvKey(path, key, value string) error {
 	return cfgtxn.WriteFileDurable(path, updated, 0o600)
 }
 
-// DotEnvWithKey returns the .env bytes existing with key=value appended, and
-// false when key is already defined there (existing is then unchanged).
+// DotEnvWithKey returns the .env bytes with a usable key. An existing
+// nonempty assignment wins; an empty assignment is replaced so the inline
+// v8 fallback remains available after migration.
 func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
-	for _, line := range strings.Split(string(existing), "\n") {
-		name, _, ok := strings.Cut(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export ")), "=")
-		if ok && strings.TrimSpace(name) == key {
+	lines := bytes.Split(existing, []byte("\n"))
+	for i, line := range lines {
+		entry := strings.TrimSpace(string(line))
+		if entry == "" || strings.HasPrefix(entry, "#") {
+			continue
+		}
+		name, current, ok := strings.Cut(entry, "=")
+		if !ok || strings.TrimSpace(name) != key {
+			continue
+		}
+		current = strings.TrimSpace(current)
+		if current != "" && current != "\"\"" && current != "''" {
 			return existing, false
 		}
+		equals := bytes.IndexByte(line, '=')
+		updated := append([]byte(nil), line[:equals+1]...)
+		updated = append(updated, value...)
+		if bytes.HasSuffix(line, []byte("\r")) {
+			updated = append(updated, '\r')
+		}
+		lines[i] = updated
+		return bytes.Join(lines, []byte("\n")), true
 	}
 	var out bytes.Buffer
 	out.Write(existing)
@@ -594,18 +1253,59 @@ func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
 // ---------------------------------------------------------------------------
 // Rego modules
 
-// v9LegacyRegoData matches the data.json documents a pre-9 admission,
-// guardrail or skill_actions module read. Since 9 those values are
-// evaluation input, so such a module sees nothing and fails open.
-var v9LegacyRegoData = regexp.MustCompile(`\bdata\.(config|actions|scanner_overrides|first_party_allow_list|guardrail|severity_ranking)\b`)
+// v9DataJSONDocs are the data.json documents the 0.8.x admission, guardrail
+// and skill_actions modules read. The migration moves their values into
+// config.yaml, where the shipped module and the config-driven fallback read
+// them. Any other document a module reads, such as an operator's own key in
+// data.json, has no config_version 9 home (GAP-1399).
+var v9DataJSONDocs = map[string]bool{
+	"data.config": true, "data.actions": true, "data.scanner_overrides": true,
+	"data.first_party_allow_list": true, "data.guardrail": true, "data.severity_ranking": true,
+}
 
-// planRegoRefresh finds the pre-9 vendor modules left under
-// <policy_dir>/rego: init only seeded missing files, so an upgrade keeps the
-// old ones. On a per-user install they are replaced with the shipped module
-// (skill_actions.rego, removed in 9, is retired); on a managed host the
-// admin owns policy_dir, so they are only reported.
+// v9VendorRegoModules are the modules 0.8.x init seeded.
+var v9VendorRegoModules = []string{"admission.rego", "guardrail.rego", "skill_actions.rego"}
+
+// v9StockRegoDigests are the SHA-256 digests (CRLF read as LF) of the vendor
+// modules 0.5.0 to 0.8.10 shipped, which init seeded byte for byte. A module
+// that matches none holds edits of the operator, which the shipped module
+// that replaces it does not carry (GAP-1498). Remove this table with the v8
+// to v9 migration (1.1.0).
+var v9StockRegoDigests = map[string][]string{
+	"admission.rego": {
+		"67a1831178e23d6bf8a4dd6d95ea53402c6827c6b1dc0536c8e7667c7586a53b", // 0.5.0 to 0.7.2
+		"9dfe95603d4a738909795a4e77eb7315fc114768dee4f87ec9fab7759f8f30d5", // 0.8.0 to 0.8.10
+	},
+	"guardrail.rego":     {"18a563b37c0bec87a3743f566f4f4200bbac87977b783a290841d1aaeedfb753"},
+	"skill_actions.rego": {"c3cb1ab336b9799ccecaef453cd33d583aeada0571e87092e1491c2c8ded924a"},
+}
+
+// v9StockRegoModule reports whether raw is a copy of the vendor module name
+// that a 0.x release shipped.
+func v9StockRegoModule(name string, raw []byte) bool {
+	sum := sha256.Sum256(bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")))
+	return slices.Contains(v9StockRegoDigests[name], hex.EncodeToString(sum[:]))
+}
+
+// planRegoRefresh finds the modules the gateway loads that read a data
+// document outside data.defenseclaw, which config_version 9 no longer
+// provides: the gateway refuses such a bundle and uses the config-driven
+// admission and thresholds (regodata, the check the policy engine runs). The
+// gateway loads <policy_dir>/rego, or the modules kept flat in policy_dir
+// when rego holds none (policy.resolveRegoDir), as 0.8.x did with them and
+// their data.json (v8DataJSONIn, GAP-1453); a flat folder was left as it was
+// and its custom block stopped applying without a word (GAP-1481). A
+// pre-9 vendor module left by init (it only seeded missing files) is
+// replaced on a per-user install with the shipped module (skill_actions.rego,
+// removed in 9, is retired); on a managed host the admin owns policy_dir, so
+// it is only reported. A document data.json held that the migration does not
+// move is recorded in unenforced_rego_data: the rules that read it are no
+// longer enforced, and the upgrade and doctor say so.
 func (m *v9Migrator) planRegoRefresh() error {
 	dir := filepath.Join(m.policyDir(), "rego")
+	if !v8HasRegoModules(dir) {
+		dir = m.policyDir()
+	}
 	shipped := map[string][]byte{}
 	files, err := policyassets.Files()
 	if err != nil {
@@ -616,38 +1316,256 @@ func (m *v9Migrator) planRegoRefresh() error {
 			shipped[strings.TrimPrefix(f.Path, "rego/")] = f.Data
 		}
 	}
-	for _, name := range []string{"admission.rego", "guardrail.rego", "skill_actions.rego"} {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	parsed, sources := map[string]*ast.Module{}, map[string][]byte{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if filepath.Ext(name) != ".rego" || !entry.Type().IsRegular() {
+			continue
+		}
 		path := filepath.Join(dir, name)
 		raw, err := os.ReadFile(path)
-		if err != nil || !v9LegacyRegoData.Match(raw) {
+		if err != nil {
 			continue
 		}
-		if m.in.Managed {
+		mod, parseErr := ast.ParseModuleWithOpts(name, string(raw), ast.ParserOptions{RegoVersion: ast.RegoV1})
+		if parseErr != nil {
+			if slices.Contains(v9VendorRegoModules, name) {
+				m.note("%s could not be parsed to check its data references (%v); it was left in place", path, parseErr)
+			}
+			continue
+		}
+		parsed[name], sources[name] = mod, raw
+	}
+	reads := map[string][]string{}
+	for _, read := range regodata.OutsideReads(parsed, "data.defenseclaw.admission", "data.defenseclaw.guardrail") {
+		reads[read.Module] = read.Docs
+	}
+	for _, name := range v9VendorRegoModules {
+		if mod := parsed[name]; mod != nil && reads[name] == nil {
+			if _, docs := regodata.ModuleReads(mod); len(docs) > 0 {
+				reads[name] = docs
+			}
+		}
+	}
+	names := make([]string, 0, len(reads))
+	for name := range reads {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		var effect string
+		edited := false
+		switch {
+		case !slices.Contains(v9VendorRegoModules, name):
+			m.note("%s reads %s, which config_version 9 no longer provides; the gateway refuses the Rego modules and "+
+				"uses the config-driven admission and thresholds until it reads input instead", path, strings.Join(reads[name], ", "))
+			effect = "the gateway refuses the Rego modules and uses the config-driven admission"
+		case m.in.Managed || m.leftOutsideRollbackCopy(path):
 			m.note("%s is a pre-9 module that reads data.json; the gateway refuses it and uses the config-driven "+
-				"admission and thresholds until the admin replaces it with the shipped module", path)
+				"admission and thresholds until it is replaced with the shipped module", path)
+			effect = "the gateway refuses the module and uses the config-driven admission"
+		default:
+			m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
+			edited = !v9StockRegoModule(name, sources[name])
+			if shipped[name] == nil {
+				m.note("%s (removed in 9) is kept as %s%s", path, name, DataJSONMigratedSuffix)
+				effect = "the module is retired and kept as " + name + DataJSONMigratedSuffix
+			} else {
+				m.note("%s is a pre-9 module that reads data.json; it is kept as %s%s and replaced with the shipped module",
+					path, name, DataJSONMigratedSuffix)
+				effect = "the module is kept as " + name + DataJSONMigratedSuffix + " and replaced with the shipped one"
+			}
+		}
+		var lost []string
+		for _, doc := range reads[name] {
+			if !v9DataJSONDocs[doc] {
+				lost = append(lost, doc)
+			}
+		}
+		if edited {
+			// Rules added to a vendor module may read only the data.json
+			// documents the migration moves; the shipped module still has none
+			// of them (GAP-1498).
+			read := ""
+			if len(lost) > 0 {
+				read = "; it reads " + strings.Join(lost, ", ") + ", which 1.0 no longer loads (no data.json)"
+			}
+			m.record.UnenforcedRegoData = append(m.record.UnenforcedRegoData, fmt.Sprintf(
+				"%s differs from every copy 0.8.x shipped, so it holds rules added after install%s: %s, and those "+
+					"rules are not enforced. The saved copy is %s%s. Express them in config.yaml (asset_policy, "+
+					"admission) or in a module that reads input, then run `defenseclaw-gateway config migrate --ack`",
+				path, read, effect, path, DataJSONMigratedSuffix))
 			continue
 		}
-		m.rego = append(m.rego, v9RegoRefresh{path: path, data: shipped[name]})
-		if shipped[name] == nil {
-			m.note("%s (removed in 9) is kept as %s%s", path, name, DataJSONMigratedSuffix)
-		} else {
-			m.note("%s is a pre-9 module that reads data.json; it is kept as %s%s and replaced with the shipped module",
-				path, name, DataJSONMigratedSuffix)
+		if len(lost) > 0 {
+			m.record.UnenforcedRegoData = append(m.record.UnenforcedRegoData, fmt.Sprintf(
+				"%s reads %s, which 1.0 no longer loads (no data.json): the rules that use it are not enforced (%s). "+
+					"Express them in config.yaml (asset_policy, admission) or in a module that reads input, then run "+
+					"`defenseclaw-gateway config migrate --ack`", path, strings.Join(lost, ", "), effect))
 		}
 	}
 	return nil
 }
 
+// v9RetiredPolicyFiles are the policy files 0.8.x could leave under
+// <policy_dir>/rego that 1.0 no longer ships: the firewall and audit Rego
+// modules (seeded by init) and the data file the firewall dry runs read
+// (never seeded by the wheel, but carried by source installs). Every release
+// from 0.5.0 to 0.8.10 carried them byte for byte (SHA-256 below), so a copy
+// that still matches was never edited. Remove this table with the v8 to v9
+// migration (1.1.0).
+var v9RetiredPolicyFiles = []struct{ name, sha256 string }{
+	{"firewall.rego", "cc51d978cf63b63f5bb0f21c4710019d106e9bcf7f9100536d35525b8d4ce5a5"},
+	{"audit.rego", "a40b408b08f976153e5937220efaaeb73460055b3ba10831061b5be55ae2c108"},
+	{"data-sandbox.json", "a1cfab935ac600eefb57d027093b6e615f9e7fa2139febebc034d05527ef7cc4"},
+}
+
+// planRetiredPolicyFiles removes the unmodified 0.8 copies of the retired
+// policy files. An edited copy belongs to the operator: it stays, and the
+// report says so. On a managed host the admin owns policy_dir, so the files
+// are only reported. A copy outside the data home stays as well: the 0.8
+// gateway a rollback restores still loads it (leftOutsideRollbackCopy).
+func (m *v9Migrator) planRetiredPolicyFiles() {
+	dir := filepath.Join(m.policyDir(), "rego")
+	for _, file := range v9RetiredPolicyFiles {
+		path := filepath.Join(dir, file.name)
+		info, err := os.Lstat(path)
+		if err != nil {
+			continue
+		}
+		var raw []byte
+		if info.Mode().IsRegular() && info.Size() <= 1<<20 {
+			raw, _ = os.ReadFile(path)
+		}
+		sum := sha256.Sum256(bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n")))
+		switch {
+		case raw == nil || hex.EncodeToString(sum[:]) != file.sha256:
+			m.note("%s was changed after install and is kept; 1.0 no longer ships or reads it (the firewall and audit "+
+				"Rego policies are retired)", path)
+		case m.in.Managed:
+			m.note("%s is the unmodified 0.8 copy of a retired policy; nothing reads it, remove it", path)
+		case m.leftOutsideRollbackCopy(path):
+			// Kept, and noted there.
+		default:
+			m.retired = append(m.retired, path)
+			m.note("%s, the unmodified 0.8 copy of a retired policy, is removed", path)
+		}
+	}
+}
+
+// planShippedPacks finds the rule-pack folders config_version 9 reads that are
+// missing. An empty 0.8 rule_pack_dir selected the packs embedded in the
+// gateway; after the migration the implicit default pack is
+// <data_dir>/policies/guardrail/default and a built-in rule_pack name is
+// <policy_dir>/guardrail/<name>. init seeds those folders, but a home without
+// them (removed, or a policy_dir init never filled) would stop the gateway
+// at start, so commit writes the shipped pack there (GAP-0150). A managed host
+// installs the vendor packs with its lifecycle.
+func (m *v9Migrator) planShippedPacks() {
+	if m.in.Managed {
+		return
+	}
+	want := map[string]string{filepath.Join(expandPath(m.dataDir()), "policies", "guardrail", "default"): "default"}
+	for _, name := range BuiltinRulePacks {
+		want[filepath.Join(expandPath(m.policyDir()), "guardrail", name)] = name
+	}
+	for dir, name := range want {
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if m.seedPacks == nil {
+			m.seedPacks = map[string]string{}
+		}
+		m.seedPacks[filepath.Clean(dir)] = name
+		m.note("%s was missing; the shipped %s rule pack is written there (config_version 9 reads the rule pack from that folder)", dir, name)
+	}
+}
+
+// seedShippedRulePack writes the embedded pack name to dir, which must not
+// exist: the files go to a sibling folder that is renamed into place.
+func seedShippedRulePack(dir, name string) error {
+	files, err := policyassets.Files()
+	if err != nil {
+		return err
+	}
+	prefix := "guardrail/" + name + "/"
+	staging := dir + ".seeding"
+	_ = os.RemoveAll(staging)
+	wrote := false
+	for _, f := range files {
+		rel, ok := strings.CutPrefix(f.Path, prefix)
+		if !ok {
+			continue
+		}
+		target := filepath.Join(staging, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		if err := cfgtxn.WriteFileDurable(target, f.Data, 0o600); err != nil {
+			_ = os.RemoveAll(staging)
+			return err
+		}
+		wrote = true
+	}
+	if !wrote {
+		return fmt.Errorf("this build ships no %s rule pack", name)
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		_ = os.RemoveAll(staging)
+		return err
+	}
+	if err := os.Rename(staging, dir); err != nil {
+		_ = os.RemoveAll(staging)
+		return err
+	}
+	return nil
+}
+
+// refreshRegoModules replaces every planned pre-9 module. A failure is
+// returned once the others ran: the gateway refuses a bundle that still holds
+// a pre-9 module, so the migration must not be recorded as complete
+// (GAP-1497).
+func (m *v9Migrator) refreshRegoModules(written *[]string) error {
+	var errs []error
+	for _, module := range m.rego {
+		if err := m.refreshRegoModule(module); err != nil {
+			errs = append(errs, fmt.Errorf("replace the pre-9 Rego module %s: %w", module.path, err))
+			continue
+		}
+		if written != nil {
+			*written = append(*written, module.path+DataJSONMigratedSuffix)
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("config: %w; the gateway refuses a pre-9 module, so the config_version 9 migration stays "+
+		"pending: fix it and run `defenseclaw-gateway config migrate --to 9` again", errors.Join(errs...))
+}
+
+// refreshRegoModule keeps the pre-9 module as <name>.migrated-v9 and puts the
+// shipped one in its place (nil data retires it). The copy is written before
+// the module is replaced, so a stop leaves the module pre-9, which a retry
+// refreshes (finishPending), or replaced: never missing.
 func (m *v9Migrator) refreshRegoModule(module v9RegoRefresh) error {
 	info, err := os.Stat(module.path)
 	if err != nil {
 		return err
 	}
-	if err := os.Rename(module.path, module.path+DataJSONMigratedSuffix); err != nil {
+	raw, err := os.ReadFile(module.path)
+	if err != nil {
+		return err
+	}
+	if err := cfgtxn.WriteFileDurable(module.path+DataJSONMigratedSuffix, raw, info.Mode().Perm()); err != nil {
 		return err
 	}
 	if module.data == nil {
-		return nil
+		return os.Remove(module.path)
 	}
 	return cfgtxn.WriteFileDurable(module.path, module.data, info.Mode().Perm())
 }
@@ -739,6 +1657,36 @@ var v9BuiltinFirstParty = map[string][]AdmissionFirstParty{
 	}},
 }
 
+// v9ShippedFirstParty are the first_party_allow_list entries data.json shipped
+// before 1.0: the 0.8.0 to 0.8.10 list and the broader 0.4 to 0.7 one, which a
+// bridge upgrade can carry. A shipped list was never an operator's choice
+// (`policy activate` copied the same list from the preset), so it is not
+// pinned: the 1.0 built-in list applies, as on a fresh install, and a migrated
+// preset still matches its named policy in `policy list` (GAP-0971).
+var v9ShippedFirstParty = map[string][][]AdmissionFirstParty{
+	AdmissionTypeSkill: {
+		{{Name: "codeguard", SourcePathContains: []string{".openclaw/workspace/skills/codeguard", ".openclaw/skills/codeguard",
+			".zeptoclaw/skills/codeguard", ".claude/skills/codeguard", ".codex/skills/codeguard"}}},
+		{{Name: "codeguard", SourcePathContains: []string{".defenseclaw", "workspace/skills/codeguard", "skills/codeguard",
+			".openclaw/workspace/skills", ".openclaw/skills", ".zeptoclaw/skills", ".claude/skills", ".codex/skills"}}},
+	},
+	AdmissionTypePlugin: {
+		{{Name: "defenseclaw", SourcePathContains: []string{".openclaw/extensions/defenseclaw", ".zeptoclaw/extensions/defenseclaw",
+			".claude/extensions/defenseclaw", ".codex/extensions/defenseclaw"}}},
+		{{Name: "defenseclaw", SourcePathContains: []string{".defenseclaw", "extensions/defenseclaw", ".openclaw/extensions",
+			".zeptoclaw/extensions", ".claude/extensions", ".codex/extensions", ".codex-plugin"}}},
+	},
+}
+
+func v9IsShippedFirstParty(assetType string, list []AdmissionFirstParty) bool {
+	for _, shipped := range v9ShippedFirstParty[assetType] {
+		if v9SameFirstParty(list, shipped) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a v9DataJSONAction) config() SeverityAction {
 	out := SeverityAction{
 		Install: InstallAction(strings.ToLower(strings.TrimSpace(a.Install))),
@@ -778,12 +1726,19 @@ func v9ActionNode(action SeverityAction) (*yaml.Node, any) {
 }
 
 func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
+	// What enforcement read: data.json, or the built-in defaults where there
+	// is none (a managed layout never has one).
+	source, read := "data.json", "data.json"
+	if !data.present {
+		source, read = "defaults", "the built-in defaults, there being no data.json"
+	}
 	// The v8 keys enforcement never read: removed, with a conflict when an
-	// operator customised them away from what data.json enforced.
+	// operator customised them away from what was enforced.
 	legacy := map[string]map[string]SeverityAction{}
-	for key, assetType := range map[string]string{
-		"skill_actions": AdmissionTypeSkill, "mcp_actions": AdmissionTypeMCP, "plugin_actions": AdmissionTypePlugin,
+	for _, item := range []struct{ key, assetType string }{
+		{"skill_actions", AdmissionTypeSkill}, {"mcp_actions", AdmissionTypeMCP}, {"plugin_actions", AdmissionTypePlugin},
 	} {
+		key, assetType := item.key, item.assetType
 		node := v9Pop(root, key)
 		if node == nil {
 			continue
@@ -806,14 +1761,21 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			enforced := !data.present || (data.Config.AllowListBypassScan != nil && *data.Config.AllowListBypassScan)
 			if node.Decode(&bypass) == nil && !bypass && enforced {
 				m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
-					To: "admission.defaults.allow_list_bypass_scan", Kept: "data.json:true",
-					Lost: "watch.allow_list_bypass_scan:false", Reason: "enforcement read data.json; watch.allow_list_bypass_scan had no reader",
+					To: "admission.defaults.allow_list_bypass_scan", Kept: source + ":true",
+					Lost: "watch.allow_list_bypass_scan:false", Reason: "enforcement read " + read + "; watch.allow_list_bypass_scan had no reader",
 				})
 			}
 		}
 	}
 
 	if !data.present {
+		for assetType, old := range legacy {
+			effective := map[string]SeverityAction{}
+			for _, severity := range v9Severities {
+				effective[severity] = v9BuiltinAdmissionAction(assetType, severity)
+			}
+			m.legacyActionConflicts(assetType, v9WithoutConfigured(old, v9ConfiguredActions(root, assetType)), effective, source, read)
+		}
 		return
 	}
 	for _, key := range []string{"policy_name", "max_enforcement_delay_seconds"} {
@@ -846,50 +1808,110 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 			enforced = value == nil || *value
 		}
 		if !enforced {
+			if kept := v9ConfiguredBool(root, "defaults", key); kept != nil {
+				if *kept {
+					m.keptConfig("admission.defaults."+key, "admission.defaults."+key+":true", "data.json:config."+key+":false")
+				}
+				continue
+			}
 			v9Set(root, v9Scalar(false), "admission", "defaults", key)
 			m.moved("data.json", "data.json:config."+key, "admission.defaults."+key, false)
 		}
 	}
 
 	for _, assetType := range []string{AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin} {
+		configured := v9ConfiguredActions(root, assetType)
 		effective := map[string]SeverityAction{}
-		differs := false
+		from := map[string]string{}
+		// differs: data.json customised the type. pin: it did so at a
+		// severity the file does not set, so the severities the file leaves
+		// unset are written; otherwise they keep their v9 default. A
+		// severity the file sets is never overwritten.
+		differs, pin := false, false
 		for _, severity := range v9Severities {
 			action, ok := data.ScannerOverrides[assetType][severity]
+			from[severity] = "data.json:scanner_overrides." + assetType + "." + severity
 			if !ok {
 				action, ok = data.Actions[severity]
+				from[severity] = "data.json:actions." + severity
 			}
 			value := v9BuiltinAdmissionAction(assetType, severity)
 			if ok {
 				value = action.config()
+			} else {
+				from[severity] = "defaults:" + severity
 			}
 			effective[severity] = value
 			if value != v9BuiltinAdmissionAction(assetType, severity) {
-				differs = true
+				_, set := configured[severity]
+				differs, pin = true, pin || !set
 			}
 		}
 		if differs {
 			for _, severity := range v9Severities {
-				node, display := v9ActionNode(effective[severity])
 				lower := strings.ToLower(severity)
+				if kept, ok := configured[severity]; ok {
+					if lost := v9ActionLabel(effective[severity]); kept.label != lost {
+						m.keptConfig("admission."+assetType+".actions."+lower, kept.from+":"+kept.label, from[severity]+":"+lost)
+					}
+					continue
+				}
+				if !pin {
+					continue
+				}
+				node, display := v9ActionNode(effective[severity])
 				v9Set(root, node, "admission", assetType, "actions", lower)
 				m.moved("data.json", "data.json:actions."+severity, "admission."+assetType+".actions."+lower, display)
 			}
 		}
 		if old, ok := legacy[assetType]; ok {
-			m.legacyActionConflicts(assetType, old, effective)
+			m.legacyActionConflicts(assetType, v9WithoutConfigured(old, configured), effective, source, read)
 		}
 	}
 
 	if data.FirstPartyAllowList != nil {
 		byType := map[string][]AdmissionFirstParty{}
 		for _, entry := range *data.FirstPartyAllowList {
+			switch entry.TargetType {
+			case AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin:
+			default:
+				m.note("data.json first_party_allow_list entry %q has the unknown type %q and is not migrated",
+					entry.TargetName, entry.TargetType)
+				continue
+			}
+			if len(entry.SourcePathContains) == 0 {
+				// v8 matched an entry without source_path_contains on any
+				// path, and skipped the scan for it only where
+				// allow_list_bypass_scan was true. A first-party entry needs
+				// a path marker now, so where the bypass applies the closest
+				// equal is a name-only asset_policy allow, which always skips
+				// the scan. Elsewhere v8 scanned the asset anyway, so the
+				// entry never changed a verdict and is dropped.
+				if !v9AllowListBypassed(root, entry.TargetType) {
+					m.note("data.json first_party_allow_list entry %q has no source_path_contains and was dropped: allow_list_bypass_scan is off for %s, so it was scanned at any path and the entry had no effect",
+						entry.TargetName, entry.TargetType)
+					continue
+				}
+				m.addAssetRule(root, "data.json", "data.json:first_party_allow_list", v9ActionRow{
+					targetType: entry.TargetType, targetName: entry.TargetName, reason: entry.Reason,
+				}, "allowed", entry.TargetName, "")
+				m.note("data.json first_party_allow_list entry %q has no source_path_contains; it became asset_policy.%s.allowed (any path)",
+					entry.TargetName, entry.TargetType)
+				continue
+			}
 			byType[entry.TargetType] = append(byType[entry.TargetType], AdmissionFirstParty{
 				Name: entry.TargetName, SourcePathContains: entry.SourcePathContains, Reason: entry.Reason,
 			})
 		}
 		for _, assetType := range []string{AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin} {
 			if v9SameFirstParty(byType[assetType], v9BuiltinFirstParty[assetType]) {
+				continue
+			}
+			if v9IsShippedFirstParty(assetType, byType[assetType]) {
+				m.note("data.json first_party_allow_list for %s is the list DefenseClaw 0.x shipped; the 1.0 built-in list applies", assetType)
+				continue
+			}
+			if m.keepConfiguredFirstParty(root, assetType, byType[assetType]) {
 				continue
 			}
 			list := &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
@@ -912,6 +1934,9 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 	} else {
 		// An older data.json without the list allowed nothing first party.
 		for _, assetType := range []string{AdmissionTypeSkill, AdmissionTypePlugin} {
+			if m.keepConfiguredFirstParty(root, assetType, nil) {
+				continue
+			}
 			v9Set(root, &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq", Style: yaml.FlowStyle},
 				"admission", assetType, "first_party_allow_list")
 			m.moved("data.json", "data.json:first_party_allow_list", "admission."+assetType+".first_party_allow_list", []string{})
@@ -919,21 +1944,50 @@ func (m *v9Migrator) migrateAdmission(root *yaml.Node, data *v9DataJSON) {
 	}
 }
 
-// legacyActionConflicts records a conflict for every severity an operator
-// customised in a *_actions key away from what data.json enforced.
-func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[string]SeverityAction) {
-	defaults := map[string]SeverityAction{}
-	switch assetType {
-	case AdmissionTypeSkill:
-		d := DefaultSkillActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
-	case AdmissionTypeMCP:
-		d := DefaultMCPActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
-	case AdmissionTypePlugin:
-		d := DefaultPluginActions()
-		defaults = map[string]SeverityAction{"critical": d.Critical, "high": d.High, "medium": d.Medium, "low": d.Low, "info": d.Info}
+// migratePrivacy drops the reserved privacy: section, which config_version 9
+// does not have. A v8 loader refused privacy.disable_redaction, so it was
+// never applied; a true value is reported, and redaction stays as
+// observability.redaction_profiles sets it.
+func (m *v9Migrator) migratePrivacy(root *yaml.Node) {
+	section := v9Pop(root, "privacy")
+	if section == nil {
+		return
 	}
+	if section.Kind != yaml.MappingNode || len(section.Content) == 0 {
+		m.record.Removed = append(m.record.Removed, "privacy")
+		return
+	}
+	for index := 0; index+1 < len(section.Content); index += 2 {
+		key := section.Content[index].Value
+		m.record.Removed = append(m.record.Removed, "privacy."+key)
+		var disabled bool
+		if key == "disable_redaction" && section.Content[index+1].Decode(&disabled) == nil && disabled {
+			m.note("privacy.disable_redaction: true was dropped: no config_version 8 or 9 runtime applies it; " +
+				"redaction follows observability.redaction_profiles (set a destination's redaction_profile to none to send unredacted data)")
+		}
+	}
+}
+
+// migrateRegistrySources drops registries.sources[].auto_sync and
+// sync_interval_hours, reserved for a scheduled sync that never shipped:
+// nothing read them, and `defenseclaw registry sync` is the only ingest path.
+// Keep this until the config_version 8 migration is dropped (1.1.0).
+func (m *v9Migrator) migrateRegistrySources(root *yaml.Node) {
+	sources := v8YAMLMapValue(v8YAMLMapValue(root, "registries"), "sources")
+	for index, source := range v9SeqItems(sources) {
+		for _, key := range []string{"auto_sync", "sync_interval_hours"} {
+			if v9Pop(source, key) != nil {
+				m.record.Removed = append(m.record.Removed, fmt.Sprintf("registries.sources[%d].%s", index, key))
+			}
+		}
+	}
+}
+
+// legacyActionConflicts records a conflict for every severity an operator
+// customised in a *_actions key away from what was enforced (source names
+// where that came from, read says it in a sentence).
+func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[string]SeverityAction, source, read string) {
+	defaults := v9LegacyActionDefaults(assetType)
 	for _, severity := range v9Severities {
 		lower := strings.ToLower(severity)
 		value, ok := old[lower]
@@ -945,11 +1999,24 @@ func (m *v9Migrator) legacyActionConflicts(assetType string, old, effective map[
 		}
 		m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
 			To:     "admission." + assetType + ".actions." + lower,
-			Kept:   "data.json:" + v9ActionString(effective[severity]),
+			Kept:   source + ":" + v9ActionString(effective[severity]),
 			Lost:   assetType + "_actions." + lower + ":" + v9ActionString(v9NormalAction(value)),
-			Reason: "enforcement read data.json; " + assetType + "_actions only filled unknown severities",
+			Reason: "enforcement read " + read + "; " + assetType + "_actions only filled unknown severities",
 		})
 	}
+}
+
+// v9LegacyActionDefaults are the 0.8.x defaults of a *_actions key: a value
+// equal to its default was never customised. Only MCP servers blocked
+// install at CRITICAL and HIGH.
+func v9LegacyActionDefaults(assetType string) map[string]SeverityAction {
+	none := SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallNone}
+	block := SeverityAction{File: FileActionNone, Runtime: RuntimeEnable, Install: InstallBlock}
+	defaults := map[string]SeverityAction{"critical": none, "high": none, "medium": none, "low": none, "info": none}
+	if assetType == AdmissionTypeMCP {
+		defaults["critical"], defaults["high"] = block, block
+	}
+	return defaults
 }
 
 func v9NormalAction(a SeverityAction) SeverityAction {
@@ -979,6 +2046,118 @@ func v9SameFirstParty(a, b []AdmissionFirstParty) bool {
 		}
 	}
 	return true
+}
+
+// v9AllowListBypassed reports whether allow-listed assets of assetType skip
+// the scan under the migrated document, resolved as CompileAdmission does:
+// admission.<type>, then admission.defaults, then the built-in true.
+func v9AllowListBypassed(root *yaml.Node, assetType string) bool {
+	for _, scope := range []string{assetType, "defaults"} {
+		if bypass := v9ConfiguredBool(root, scope, "allow_list_bypass_scan"); bypass != nil {
+			return *bypass
+		}
+	}
+	return true
+}
+
+// v9ConfiguredBool is the boolean admission.<scope>.<key> the document sets,
+// or nil when it sets none.
+func v9ConfiguredBool(root *yaml.Node, scope, key string) *bool {
+	node := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "admission"), scope), key)
+	var value bool
+	if node == nil || node.Kind != yaml.ScalarNode || node.ShortTag() == "!!null" || node.Decode(&value) != nil {
+		return nil
+	}
+	return &value
+}
+
+// keptConfig records a value the config_version 8 file already sets under
+// admission: (config set, policy activate and the TUI write there before the
+// file is migrated). It wins over data.json, as guardrail block_at does, and
+// the data.json value is the loss.
+func (m *v9Migrator) keptConfig(to, kept, lost string) {
+	m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+		To: to, Kept: "config:" + kept, Lost: lost,
+		Reason: "the config_version 8 file already set it, and the config value wins",
+	})
+}
+
+// v9ConfiguredAction is an admission action the document already sets: its
+// key and its shorthand or triple.
+type v9ConfiguredAction struct{ from, label string }
+
+// v9ConfiguredActions are the severities of assetType whose action the
+// document already sets, resolved as CompileAdmission does:
+// admission.<type>.actions, then admission.defaults.actions except for skill,
+// where the scanner gate comes before the defaults.
+func v9ConfiguredActions(root *yaml.Node, assetType string) map[string]v9ConfiguredAction {
+	scopes := []string{assetType}
+	if assetType != AdmissionTypeSkill {
+		scopes = append(scopes, "defaults")
+	}
+	out := map[string]v9ConfiguredAction{}
+	for _, scope := range scopes {
+		actions := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "admission"), scope), "actions")
+		for _, severity := range v9Severities {
+			lower := strings.ToLower(severity)
+			node := v8YAMLMapValue(actions, lower)
+			var action AdmissionAction
+			if _, done := out[severity]; done || node == nil || node.ShortTag() == "!!null" || node.Decode(&action) != nil {
+				continue
+			}
+			label := action.Shorthand
+			if label == "" {
+				label = v9ActionLabel(v9NormalAction(action.Triple))
+			}
+			out[severity] = v9ConfiguredAction{from: "admission." + scope + ".actions." + lower, label: label}
+		}
+	}
+	return out
+}
+
+// v9WithoutConfigured drops from a *_actions map the severities the document
+// sets under admission: that later choice supersedes the never-read key.
+func v9WithoutConfigured(old map[string]SeverityAction, configured map[string]v9ConfiguredAction) map[string]SeverityAction {
+	for severity := range configured {
+		delete(old, strings.ToLower(severity))
+	}
+	return old
+}
+
+// v9ActionLabel is the shorthand an action matches, else its triple.
+func v9ActionLabel(action SeverityAction) string {
+	_, display := v9ActionNode(action)
+	if shorthand, ok := display.(string); ok {
+		return shorthand
+	}
+	return v9ActionString(action)
+}
+
+// keepConfiguredFirstParty reports whether the document already sets the
+// first-party list of assetType (admission.<type>, else admission.defaults,
+// as CompileAdmission resolves it). That list wins over the data.json list,
+// and a conflict is recorded when they differ.
+func (m *v9Migrator) keepConfiguredFirstParty(root *yaml.Node, assetType string, data []AdmissionFirstParty) bool {
+	names := func(list []AdmissionFirstParty) string {
+		out := make([]string, 0, len(list))
+		for _, entry := range list {
+			out = append(out, entry.Name)
+		}
+		return "[" + strings.Join(out, ",") + "]"
+	}
+	for _, scope := range []string{assetType, "defaults"} {
+		node := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "admission"), scope), "first_party_allow_list")
+		var kept []AdmissionFirstParty
+		if node == nil || node.ShortTag() == "!!null" || node.Decode(&kept) != nil {
+			continue
+		}
+		if !v9SameFirstParty(kept, data) {
+			m.keptConfig("admission."+assetType+".first_party_allow_list",
+				"admission."+scope+".first_party_allow_list:"+names(kept), "data.json:first_party_allow_list:"+names(data))
+		}
+		return true
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,6 +2261,18 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 		guardrail = v8YAMLMapValue(root, "guardrail")
 		m.pinStricterScopePostures(guardrail, item.key, *item.value)
 	}
+	for _, item := range []struct {
+		key     string
+		value   *int
+		shipped int
+	}{
+		{"block_at", data.Guardrail.BlockThreshold, shippedBlock},
+		{"alert_at", data.Guardrail.AlertThreshold, shippedAlert},
+	} {
+		if item.value != nil {
+			m.keepProxyConnectorLevel(root, item.key, *item.value, item.shipped)
+		}
+	}
 	if level := strings.TrimSpace(data.Guardrail.CiscoTrustLevel); level != "" && level != "full" {
 		v9Set(root, v9Scalar(level), "guardrail", "cisco_trust_level")
 		m.moved("data.json", "data.json:guardrail.cisco_trust_level", "guardrail.cisco_trust_level", level)
@@ -1094,6 +2285,86 @@ func (m *v9Migrator) migrateThresholds(root *yaml.Node, data *v9DataJSON) {
 			}
 		}
 	}
+}
+
+// keepProxyConnectorLevel keeps the data.json level the v8 LLM proxy enforced
+// for the connector it served. v8 guardrail.rego read only data.json, whatever
+// that connector's own pack or block_at said; v9 resolves the proxy's levels
+// for that connector (spec 2.2), so its guardrail.connectors entry would now
+// govern the proxy. Its own key still wins, as a recorded conflict. A pack
+// default looser than the data.json level is pinned at the connector, unless
+// the level is the shipped one, which was never a choice (as for the global
+// key). A connector that inherits the global key or pack is covered by the
+// global migration above.
+func (m *v9Migrator) keepProxyConnectorLevel(root *yaml.Node, key string, rank, shipped int) {
+	guardrail := v8YAMLMapValue(root, "guardrail")
+	connector := v9ProxyConnector(root)
+	name, named := v9RankNames[rank]
+	if connector == "" || !named {
+		return
+	}
+	var scope v9NamedNode
+	for _, c := range v9ChildMappings(v8YAMLMapValue(guardrail, "connectors")) {
+		if normalizeConnectorKey(c.name) == connector {
+			scope = c
+			break
+		}
+	}
+	if scope.node == nil {
+		return
+	}
+	path := "guardrail.connectors." + scope.name
+	legacy := "data.json:guardrail." + strings.Replace(key, "_at", "_threshold", 1)
+	if set := strings.ToUpper(strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, key)))); set != "" {
+		if rank < v9RankOf(set) {
+			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
+				To: path + "." + key, Kept: "config:" + path + "." + key + ":" + set, Lost: legacy + ":" + name,
+				Reason: "the stricter data.json level applied to the " + connector + " LLM proxy; " + path + "." + key + " now applies to the proxy too",
+			})
+		}
+		return
+	}
+	posture := m.scopePackPosture(guardrail, scope.node)
+	if posture == "" || strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(guardrail, key))) != "" {
+		return
+	}
+	block, alert := v9PostureRanks(posture)
+	own := block
+	if key == "alert_at" {
+		own = alert
+	}
+	if own <= rank {
+		return
+	}
+	if rank == shipped {
+		m.note("data.json guardrail %s (%s) is the shipped value; the %s LLM proxy now follows the %s pack default of %s",
+			strings.Replace(key, "_at", "_threshold", 1), name, connector, posture, path)
+		return
+	}
+	v9Set(scope.node, v9Scalar(name), key)
+	m.moved("data.json", legacy, path+"."+key, name)
+	m.note("%s.%s is set to the data.json level (%s) the %s LLM proxy enforced, so the %s pack default (%s) does not loosen the proxy; it now applies to that connector's hook prompts and tool calls too",
+		path, key, name, connector, posture, v9RankNames[own])
+}
+
+// v9ProxyConnector is the connector the v8 LLM proxy served:
+// guardrail.connector, else claw.mode, else openclaw (the gateway's
+// configuredConnectorName and resolveActiveConnector), when it is a built-in
+// proxy connector (proxyShouldBindForConfiguredConnector). It is "" for a
+// hook connector, whose traffic never reached the proxy, so data.json never
+// applied to it (and for a plugin connector, which is not resolved here).
+func v9ProxyConnector(root *yaml.Node) string {
+	name := normalizeConnectorKey(yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "guardrail"), "connector")))
+	if name == "" {
+		name = normalizeConnectorKey(yamlScalarValue(v8YAMLMapValue(v8YAMLMapValue(root, "claw"), "mode")))
+	}
+	switch name {
+	case "", "openclaw":
+		return "openclaw"
+	case "zeptoclaw":
+		return name
+	}
+	return ""
 }
 
 // pinStricterScopePostures keeps a connector or profile pack posture that is
@@ -1258,7 +2529,138 @@ func (m *v9Migrator) migrateRulePacks(root *yaml.Node) error {
 			m.moved("config", scope.name+".rule_pack_dir", scope.name+".rules.protections", protections)
 		}
 	}
+	return m.rebaseEditedPresetPacks(guardrail)
+}
+
+// rebaseEditedPresetPacks moves each scope that selects a default, strict or
+// permissive folder of policy_dir that its operator edited in place onto the
+// 1.0 copy of that folder, as rulePackFor does for a custom pack. The upgrade
+// keeps such a folder as it is, so the 1.0 gateway refused its two rule files
+// of one category (GAP-1479), and only recorded a match of its rules that
+// blocked a tool call with a pattern alone and of its 0.8.x copies of the
+// built-in action rules (GAP-1480, GAP-0360). The global scope selects the
+// default pack when it names none (0.8.x init writes no rule_pack_dir). A
+// folder that some 0.8.x release shipped and nobody edited keeps its preset
+// name: the upgrade replaces it with this release's copy. A managed host's
+// packs belong to its administrator, and a read-only load writes no copy.
+func (m *v9Migrator) rebaseEditedPresetPacks(guardrail *yaml.Node) error {
+	if m.in.RebaseRulePack == nil || m.in.RulePackDigest == nil || m.in.Managed || m.in.InMemory {
+		return nil
+	}
+	rebased := map[string]string{}
+	for _, scope := range v9GuardrailScopes(guardrail) {
+		preset := strings.TrimSpace(yamlScalarValue(v8YAMLMapValue(scope.node, "rule_pack")))
+		if preset == "" && scope.name == "guardrail" {
+			preset = "default"
+		}
+		if !v9BuiltinPacks[preset] {
+			continue
+		}
+		dir := filepath.Join(expandPath(m.policyDir()), "guardrail", preset)
+		name, done := rebased[preset]
+		if !done {
+			var err error
+			if name, err = m.rebaseEditedPresetPack(guardrail, preset, dir); err != nil {
+				return fmt.Errorf("config: %s.rule_pack %s: %w", scope.name, preset, err)
+			}
+			rebased[preset] = name
+		}
+		if name == "" {
+			continue
+		}
+		v9Set(scope.node, v9Scalar(name), "rule_pack")
+		m.moved("config", dir, scope.name+".rule_pack", name)
+		if scope.name == "guardrail" {
+			m.globalPackPosture = v9DirPosture(dir)
+		}
+	}
 	return nil
+}
+
+// rebaseEditedPresetPack pins the 1.0 copy of the preset folder dir when its
+// operator edited it and returns the name of that custom pack; "" leaves the
+// folder selected by its preset name: it is a pack 0.8.x shipped, needs no
+// 1.0 copy, or could not be rebased (RulePackRebaseFailures names it).
+func (m *v9Migrator) rebaseEditedPresetPack(guardrail *yaml.Node, preset, dir string) (string, error) {
+	clean := filepath.Clean(dir)
+	if info, err := os.Lstat(clean); err != nil || !info.IsDir() || v9Stock08Pack(preset, clean) {
+		return "", nil
+	}
+	target, digest, err := m.rebaseRulePack(clean, clean)
+	if err != nil || target == clean {
+		return "", err
+	}
+	name := m.pinCustomPack(guardrail, preset, target, digest)
+	m.note("%s is the %s pack edited in place; the upgrade keeps it as it is for a rollback to 0.8.x, and the config "+
+		"selects its 1.0 copy %s as guardrail.custom_packs.%s instead of the %s preset", clean, preset, target, name, preset)
+	return name, nil
+}
+
+// v9Stock08PackDigests are the digests (profile_digest of
+// cli/defenseclaw/guardrail_profiles.py, whose STOCK_PROFILE_DIGESTS lists
+// them too) of the default, strict and permissive packs that 0.8.0 to 0.8.3
+// and 0.8.4 to 0.8.10 shipped. Keep until the config_version 8 migration is
+// dropped (1.1.0).
+var v9Stock08PackDigests = map[string][]string{
+	"default": {"5b9ca53ad605b53d1d1618b51e52c658140d42190e6f903abaaca604ae145c93",
+		"9dc9a1aa028a8b2232babe38e8519f864a1f6d3a6b3990150c2ec3f907d71b8a"},
+	"strict": {"9a718f87b06f75cfb1f4fa223fc6f3692ced3ecc17c10b5c8b96fff617d5da67",
+		"5b9b0f79c491c27b3feed63b90765091d37345621a95792ebcd34195abb097fd"},
+	"permissive": {"fa8ca0ad415436e8b4f5d6043f36de782cfe27bfbfca83f27d2359b97914f5f7",
+		"29ce292e52f2fac289d6567ec7994b1f17af98e3fd1c4a5e2084f8c8a97b5371"},
+}
+
+// v9Stock08Pack reports whether dir holds exactly the files of the preset
+// pack some 0.8.x release shipped, by the digest the Python upgrade uses to
+// refresh an unedited pack.
+func v9Stock08Pack(preset, dir string) bool {
+	digest, err := v9ProfileDigest(dir)
+	return err == nil && slices.Contains(v9Stock08PackDigests[preset], digest)
+}
+
+// v9ProfileDigest is guardrail_profiles.profile_digest: the sha256 over the
+// relative slash path of each file, a NUL, the hex sha256 of its bytes and a
+// newline, in path order, leaving out dot files and __pycache__. A link or
+// other non-regular file, or more files than a shipped pack has, is not a
+// shipped pack.
+func v9ProfileDigest(dir string) (string, error) {
+	sums := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || path == dir {
+			return err
+		}
+		if name := entry.Name(); strings.HasPrefix(name, ".") || name == "__pycache__" {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() || len(sums) >= 64 {
+			return errors.New("not a shipped rule pack")
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		sums[filepath.ToSlash(rel)] = hex.EncodeToString(sum[:])
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	for _, rel := range slices.Sorted(maps.Keys(sums)) {
+		h.Write([]byte(rel + "\x00" + sums[rel] + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // embeddedPackDropped reports whether dropping an empty rule_pack_dir changes
@@ -1318,9 +2720,9 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	clean := filepath.Clean(dir)
 	base := strings.ToLower(filepath.Base(clean))
 	parent := filepath.Base(filepath.Dir(clean))
-	if base == "balanced" {
-		base = "default"
-	}
+	// Only default, strict and permissive are presets. 0.8.x never shipped a
+	// guardrail/balanced folder, so one is the operator's own pack: it is
+	// pinned under its own name, not mapped to the default folder (GAP-1452).
 	if v9BuiltinPacks[base] && v9SameDir(clean, filepath.Join(m.policyDir(), "guardrail", filepath.Base(clean))) {
 		return base, nil, nil
 	}
@@ -1339,25 +2741,32 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 				dir, base, shadow, base)
 		}
 	}
+	// A protected-* folder is a concrete rule pack. Its manifest names the
+	// inputs that created it, but cannot prove its rules were not edited later.
+	// Pin the actual files so a local rule cannot disappear on upgrade.
 	if strings.HasPrefix(parent, "protected-") && v9BuiltinPacks[base] {
-		var manifest struct {
-			Protection []string `json:"protection"`
-		}
-		raw, err := os.ReadFile(filepath.Join(clean, "defenseclaw-pack.json"))
-		if err == nil && json.Unmarshal(raw, &manifest) == nil {
-			return base, manifest.Protection, nil
-		}
-		m.note("%s has no readable defenseclaw-pack.json; migrated as the %s pack without its protections", dir, base)
-		return base, nil, nil
+		m.note("%s is a composed rule pack; its current files are pinned as a custom pack to preserve local edits", dir)
 	}
 	if m.in.RulePackDigest == nil {
 		return "", nil, fmt.Errorf("custom rule pack %s needs a digest; run `defenseclaw-gateway config migrate`", dir)
 	}
-	digest, err := m.in.RulePackDigest(clean)
+	target, digest, err := m.rebaseRulePack(dir, clean)
 	if err != nil {
-		return "", nil, fmt.Errorf("load custom rule pack %s: %w", dir, err)
+		return "", nil, err
 	}
-	stem := strings.Trim(v9PackNameUnsafe.ReplaceAllString(base, "-"), "-_")
+	if target == clean && digest == "" {
+		if digest, err = m.in.RulePackDigest(clean); err != nil {
+			return "", nil, fmt.Errorf("load custom rule pack %s: %w", dir, err)
+		}
+	}
+	return m.pinCustomPack(guardrail, base, target, digest), nil, nil
+}
+
+// pinCustomPack names the folder target guardrail.custom_packs.<stem of
+// base>, custom-<base> for a preset name, pinned by digest, and returns the
+// name.
+func (m *v9Migrator) pinCustomPack(guardrail *yaml.Node, base, target, digest string) string {
+	stem := strings.Trim(v9PackNameUnsafe.ReplaceAllString(v9PackNameASCII(base), "-"), "-_")
 	if stem == "" || v9BuiltinPacks[stem] {
 		stem = strings.TrimRight("custom-"+stem, "-")
 	}
@@ -1368,16 +2777,209 @@ func (m *v9Migrator) rulePackFor(guardrail *yaml.Node, dir string) (string, []st
 	name := stem
 	for suffix := 2; ; suffix++ {
 		existing := v8YAMLMapValue(packs, name)
-		if existing == nil || yamlScalarValue(v8YAMLMapValue(existing, "path")) == clean {
+		if existing == nil || yamlScalarValue(v8YAMLMapValue(existing, "path")) == target {
 			break
 		}
 		name = fmt.Sprintf("%s-%d", stem, suffix)
 	}
 	if v8YAMLMapValue(packs, name) == nil {
-		v9Set(guardrail, v9Mapping("path", v9Scalar(clean), "digest", v9Scalar("sha256:"+digest)), "custom_packs", name)
-		m.moved("config", "rule_pack_dir", "guardrail.custom_packs."+name, map[string]string{"path": clean, "digest": "sha256:" + digest})
+		v9Set(guardrail, v9Mapping("path", v9Scalar(target), "digest", v9Scalar("sha256:"+digest)), "custom_packs", name)
+		m.moved("config", "rule_pack_dir", "guardrail.custom_packs."+name, map[string]string{"path": target, "digest": "sha256:" + digest})
 	}
-	return name, nil, nil
+	return name
+}
+
+// rebaseRulePack returns the folder and digest to pin for the custom pack at
+// clean: a 0.8.x copy of the default pack's action rules enforced nothing in
+// 1.0, where such a rule blocks only with an expression, and doctor still
+// said PASS (GAP-0360). Its 1.0 copy goes next to it (commit writes it) and
+// the folder stays for a rollback to 0.8.x. Any other pack is pinned as it is
+// (digest ""). A managed host's packs belong to its administrator.
+func (m *v9Migrator) rebaseRulePack(dir, clean string) (string, string, error) {
+	if target, ok := m.rebasedFrom[clean]; ok {
+		return target, m.rebasedDigests[target], nil
+	}
+	if m.in.RebaseRulePack == nil || m.in.Managed || m.in.InMemory {
+		return clean, "", nil
+	}
+	plan, err := m.in.RebaseRulePack(clean)
+	if err != nil {
+		digest, loadErr := m.in.RulePackDigest(clean)
+		if loadErr != nil {
+			// Nor does it load as it is: the rebase error names what to
+			// change, such as two rule files of one category (GAP-1339).
+			return "", "", fmt.Errorf("custom rule pack %s: %w", dir, err)
+		}
+		failure := fmt.Sprintf("%s could not be rebased on the 1.0 default pack (%v). It is pinned as it is, so its "+
+			"0.8.x copies of built-in rules and its rules without an expression no longer block a tool call, they "+
+			"only record the match: copy policies/guardrail/default to a new folder, add your rules with an "+
+			"expression, then run defenseclaw guardrail use-pack <folder>", dir, err)
+		m.record.RulePackRebaseFailures = append(m.record.RulePackRebaseFailures, failure)
+		m.note("%s", failure)
+		return clean, digest, nil
+	}
+	if plan == nil {
+		return clean, "", nil
+	}
+	if m.rebasedPacks == nil {
+		m.rebasedPacks, m.rebasedFrom, m.rebasedDigests = map[string]map[string][]byte{}, map[string]string{}, map[string]string{}
+	}
+	if plan.Files == nil {
+		// Nothing to rewrite: pinned as it is, once per folder.
+		m.rebasedFrom[clean] = clean
+		m.noteDetectionOnly(dir, plan.AlertOnly)
+		return clean, "", nil
+	}
+	target := clean + "-1.0"
+	for suffix := 2; ; suffix++ {
+		if _, err := os.Lstat(target); errors.Is(err, fs.ErrNotExist) {
+			if _, taken := m.rebasedPacks[target]; !taken {
+				break
+			}
+		}
+		target = fmt.Sprintf("%s-1.0-%d", clean, suffix)
+	}
+	m.rebasedPacks[target], m.rebasedFrom[clean], m.rebasedDigests[target] = plan.Files, target, plan.Digest
+	m.record.RenamedRules = append(m.record.RenamedRules, plan.Renamed...)
+	m.record.ExpressedRules = append(m.record.ExpressedRules, plan.Expressed...)
+	expressed := ""
+	if len(plan.Expressed) > 0 {
+		// GAP-1344, GAP-1478: 0.8.x matched the literal anywhere in the
+		// tool call; the gateway runs the pattern over its text for these.
+		expressed = fmt.Sprintf("these got an expression and, as on 0.8.x, block a tool call whose text holds "+
+			"their literal (as a whole word when the pattern has \\b), file content a tool writes included: %s",
+			strings.Join(plan.Expressed, ", "))
+	}
+	if len(plan.Merged) > 0 {
+		// 1.0 refuses two rule files of one category; 0.8.x enforced only
+		// the last of them (GAP-1339).
+		for _, merged := range plan.Merged {
+			m.record.RuleFileMerges = append(m.record.RuleFileMerges, target+": "+merged)
+		}
+		m.note("%s has rule files that share a category, which 1.0 refuses (0.8.x enforced only the last of them). "+
+			"Its 1.0 copy %s has one file per category and keeps every rule: %s; %s is kept for a rollback to 0.8.x",
+			dir, target, strings.Join(plan.Merged, "; "), dir)
+	}
+	if plan.Updated > 0 {
+		kept := fmt.Sprintf("%d built-in rules are their 1.0 versions", plan.Updated)
+		if len(plan.Disabled) > 0 {
+			kept += fmt.Sprintf(", %s stay off (the copy had removed them)", strings.Join(plan.Disabled, ", "))
+		}
+		if len(plan.Carried) > 0 {
+			kept += fmt.Sprintf("; your own rules were carried over: %s", strings.Join(plan.Carried, ", "))
+		}
+		if len(plan.Renamed) > 0 {
+			// GAP-1314: under the built-in ID the gateway checks a match
+			// against the shipped rule's meaning and drops the operator's.
+			kept += fmt.Sprintf("; built-in rules you gave a pattern of your own are now rules of yours under a "+
+				"new ID, next to the shipped rule (%s): use the new ID in audit searches and suppressions",
+				strings.Join(plan.Renamed, ", "))
+		}
+		if expressed != "" {
+			kept += "; " + expressed
+		}
+		m.note("%s is a 0.8.x copy of the default pack's command, path, agent-file or C2 rules, which have no expression; "+
+			"in 1.0 such a rule blocks only with one, so the pack enforced nothing. It was rebased on the 1.0 default "+
+			"pack in %s, which is pinned instead (%s); %s is kept for a rollback to 0.8.x", dir, target, kept, dir)
+	} else if expressed != "" {
+		// Only the operator's own rules changed (GAP-1225).
+		m.note("%s has rules of yours that blocked a tool call with their pattern alone, which 1.0 does only with an "+
+			"expression. Its 1.0 copy %s is pinned instead (%s); %s is kept for a rollback to 0.8.x",
+			dir, target, expressed, dir)
+	}
+	if len(plan.Linked) > 0 {
+		// 0.8.x read a rule file through a link; 1.0 refuses a link in a
+		// pack (GAP-1346).
+		m.note("%s reads files through links, which 1.0 refuses in a rule pack (%s). Its 1.0 copy %s holds the "+
+			"files they point to and is pinned instead: edit the copy from now on; %s is kept for a rollback to 0.8.x",
+			dir, strings.Join(plan.Linked, ", "), target, dir)
+	}
+	m.noteDetectionOnly(target, plan.AlertOnly)
+	return target, plan.Digest, nil
+}
+
+// noteDetectionOnly names the operator's own rules that blocked a tool call
+// on 0.8.x with their pattern and, with no expression, only record it in 1.0
+// (GAP-1225). The upgrade prints DetectionOnlyRules.
+func (m *v9Migrator) noteDetectionOnly(pack string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	m.record.DetectionOnlyRules = append(m.record.DetectionOnlyRules, ids...)
+	m.note("%d custom rule(s) in %s now detection-only for tool calls: %s; add an expression, see policies/rules",
+		len(ids), pack, strings.Join(ids, ", "))
+}
+
+// MigratedRuleLines is one line per rule of the operator's that the rebase
+// of a custom pack changed: the rules that still block a tool call as on
+// 0.8.x with an expression derived from their literal pattern (and under
+// which ID, for a built-in rule they gave a pattern of their own, GAP-1314),
+// and the detection-only ones (GAP-1469). `config migrate` prints them; the
+// Python upgrade summary and doctor read the same record fields.
+func MigratedRuleLines(r MigrationRecord) []string {
+	was := map[string]string{}
+	for _, renamed := range r.RenamedRules {
+		if old, own, ok := strings.Cut(renamed, " -> "); ok {
+			was[own] = old
+		}
+	}
+	name := func(id string) string {
+		if old := was[id]; old != "" {
+			return fmt.Sprintf("%s (your edited %s; %s is the shipped 1.0 rule)", id, old, old)
+		}
+		return id
+	}
+	var lines []string
+	for _, id := range r.ExpressedRules {
+		lines = append(lines, name(id)+": enforced as on 0.8.x (its severity decides block or alert) when "+
+			"the text of a tool call holds its literal (as a whole word when the pattern has \\b): a command "+
+			"word, a quoted string, a file path, a network host or text a tool writes, such as file content")
+	}
+	for _, id := range r.DetectionOnlyRules {
+		lines = append(lines, name(id)+": detection-only for tool calls in 1.0 (its pattern is not a literal); "+
+			"add an expression to block")
+	}
+	return lines
+}
+
+// writeRebasedRulePack writes a rebased pack to dir, which must not exist:
+// the files go to a sibling folder that is renamed into place.
+func writeRebasedRulePack(dir string, files map[string][]byte) error {
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return err
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(dir), filepath.Base(dir)+".rebasing-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging)
+	for rel, data := range files {
+		target := filepath.Join(staging, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		if err := cfgtxn.WriteFileDurable(target, data, 0o600); err != nil {
+			_ = os.RemoveAll(staging)
+			return err
+		}
+	}
+	if err := os.Rename(staging, dir); err != nil {
+		return err
+	}
+	return nil
+}
+
+// v9PackNameASCII folds a folder name to the letters a pack name keeps: an
+// accented letter becomes its base letter, so "équipe sécu" is equipe-secu,
+// where the name rule dropped it and left quipe-s-cu (GAP-0390).
+func v9PackNameASCII(name string) string {
+	var folded strings.Builder
+	for _, r := range norm.NFKD.String(name) {
+		if !unicode.Is(unicode.Mn, r) {
+			folded.WriteRune(r)
+		}
+	}
+	return folded.String()
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,12 +3075,7 @@ func (m *v9Migrator) migrateSkillScanner(skill *yaml.Node) error {
 	default:
 		raw, err := os.ReadFile(policy)
 		if err != nil {
-			v9Set(skill, v9Scalar("quiet"), "policy")
-			m.record.Conflicts = append(m.record.Conflicts, MigrationConflict{
-				To: prefix + "policy", Kept: "quiet", Lost: policy,
-				Reason: "the policy file could not be read, so it could not be pinned by digest",
-			})
-			break
+			return fmt.Errorf("config: read custom skill-scanner policy %q: %w", policy, err)
 		}
 		v9Set(skill, v9Scalar("custom"), "policy")
 		ref := v9Mapping("path", v9Scalar(policy), "digest", v9Scalar("sha256:"+cfgtxn.SHA256Hex(raw)))
@@ -1566,36 +3163,135 @@ func v9NonEmptyLLM(node *yaml.Node) bool {
 
 // migrateSignaturePacks lists the packs installed under
 // <data_dir>/signature-packs in ai_discovery.signature_packs: v8 loaded that
-// folder implicitly, and since 9 only configured packs load.
-func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) {
+// folder implicitly, and since 9 only configured packs load. A managed
+// standalone host loads only pinned packs, so pin the bytes v8 loaded: the
+// installed packs, and on a managed host also the files the configured
+// signature_packs entries name, wherever they are (GAP-1287).
+func (m *v9Migrator) migrateSignaturePacks(root *yaml.Node) error {
 	dataDir := m.dataDir()
 	installed, _ := filepath.Glob(filepath.Join(dataDir, "signature-packs", "*.json"))
-	if len(installed) == 0 {
-		return
-	}
 	discovery := v8YAMLMapValue(root, "ai_discovery")
-	listed := map[string]bool{}
 	packs := v8YAMLMapValue(discovery, "signature_packs")
+	pins := v8YAMLMapValue(discovery, "signature_pack_digests")
+	secureClient := v9SecureClientDocument(root)
+	listed := map[string]bool{}
+	var listedFiles []string
 	for _, item := range v9SeqItems(packs) {
-		listed[filepath.Clean(expandPath(item.Value))] = true
+		entry := strings.TrimSpace(expandPath(strings.TrimSpace(item.Value)))
+		if entry == "" {
+			continue
+		}
+		listed[filepath.Clean(entry)] = true
+		if m.in.Managed && !secureClient {
+			files, err := v9SignaturePackFiles(entry)
+			if err != nil {
+				return err
+			}
+			listedFiles = append(listedFiles, files...)
+		}
+	}
+	if len(installed) == 0 && len(listedFiles) == 0 {
+		return nil
+	}
+	pinned := map[string]bool{}
+	if pins != nil && pins.Kind == yaml.MappingNode {
+		for i := 0; i+1 < len(pins.Content); i += 2 {
+			pinned[filepath.Clean(expandPath(pins.Content[i].Value))] = true
+		}
+	}
+	var order []string
+	installedPins, listedPins := map[string]string{}, map[string]string{}
+	pin := func(path, why string, into map[string]string) error {
+		path = filepath.Clean(path)
+		if secureClient || pinned[path] {
+			return nil
+		}
+		if _, done := installedPins[path]; done {
+			return nil
+		}
+		if _, done := listedPins[path]; done {
+			return nil
+		}
+		raw, err := os.ReadFile(path) // #nosec G304 -- a pack in the data_dir or named by ai_discovery.signature_packs.
+		if err != nil {
+			return fmt.Errorf("config: read signature pack %s (%s): %w; a managed host loads only the packs pinned in ai_discovery.signature_pack_digests, so the migration pins it: make the file readable, or remove it from ai_discovery.signature_packs, and run the upgrade again", path, why, err)
+		}
+		into[path] = "sha256:" + cfgtxn.SHA256Hex(raw)
+		order = append(order, path)
+		return nil
 	}
 	var added []string
 	for _, path := range installed {
 		if !listed[filepath.Clean(path)] {
 			added = append(added, path)
 		}
+		if err := pin(path, "installed in the data_dir", installedPins); err != nil {
+			return err
+		}
 	}
-	if len(added) == 0 {
-		return
+	for _, path := range listedFiles {
+		if err := pin(path, "listed in ai_discovery.signature_packs", listedPins); err != nil {
+			return err
+		}
 	}
-	if packs == nil || packs.Kind != yaml.SequenceNode {
-		packs = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-		v9Set(root, packs, "ai_discovery", "signature_packs")
+	if len(added) > 0 {
+		if packs == nil || packs.Kind != yaml.SequenceNode {
+			packs = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+			v9Set(root, packs, "ai_discovery", "signature_packs")
+		}
+		for _, path := range added {
+			packs.Content = append(packs.Content, v9Scalar(path))
+		}
+		m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_packs", added)
 	}
-	for _, path := range added {
-		packs.Content = append(packs.Content, v9Scalar(path))
+	if len(order) > 0 {
+		if pins == nil || pins.Kind != yaml.MappingNode {
+			pins = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			v9Set(root, pins, "ai_discovery", "signature_pack_digests")
+		}
+		for _, path := range order {
+			digest, ok := installedPins[path]
+			if !ok {
+				digest = listedPins[path]
+			}
+			v9Set(pins, v9Scalar(digest), path)
+		}
 	}
-	m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_packs", added)
+	if len(installedPins) > 0 {
+		m.moved("config", filepath.Join(dataDir, "signature-packs", "*.json"), "ai_discovery.signature_pack_digests", installedPins)
+	}
+	if len(listedPins) > 0 {
+		m.moved("config", "ai_discovery.signature_packs", "ai_discovery.signature_pack_digests", listedPins)
+	}
+	return nil
+}
+
+// v9SignaturePackFiles lists the files one ai_discovery.signature_packs
+// entry names, the way the catalog loader expands it: a directory is its
+// *.json, a glob its *.json matches, a path the file. An entry that names no
+// file yet has nothing to pin.
+func v9SignaturePackFiles(entry string) ([]string, error) {
+	pattern := entry
+	if info, err := os.Stat(pattern); err == nil && info.IsDir() {
+		pattern = filepath.Join(pattern, "*.json")
+	}
+	if strings.ContainsAny(pattern, "*?[") {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("config: ai_discovery.signature_packs entry %s is not a valid glob: %w", entry, err)
+		}
+		var files []string
+		for _, match := range matches {
+			if info, err := os.Stat(match); err == nil && !info.IsDir() && strings.EqualFold(filepath.Ext(match), ".json") {
+				files = append(files, match)
+			}
+		}
+		return files, nil
+	}
+	if _, err := os.Stat(pattern); errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	return []string{pattern}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,7 +3415,7 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 		if t := p.TLS; t != nil {
 			entry.TLS = &LLMCustomProviderTLS{InsecureSkipVerify: t.InsecureSkipVerify}
 			if pem := strings.TrimSpace(t.CACertPEM); pem != "" {
-				ca := filepath.Join(m.dataDir(), "provider-ca", v9PackNameUnsafe.ReplaceAllString(strings.ToLower(name), "_")+".pem")
+				ca := filepath.Join(m.dataDir(), "provider-ca", v9ProviderCAName(name))
 				entry.TLS.CACertFile = ca
 				m.providerCAs = append(m.providerCAs, v9RegoRefresh{path: ca, data: []byte(t.CACertPEM)})
 			}
@@ -1767,23 +3463,31 @@ func (m *v9Migrator) migrateCustomProviders(root *yaml.Node) {
 	m.providersOverlay = path
 }
 
-// retireProvidersOverlay writes the moved CA bundles and renames the legacy
-// overlay once its providers are in the committed config; the next config
-// write renders the derived file. A CA bundle that can not be written
-// leaves the overlay in place.
-func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
+// v9ProviderCAName gives each case-insensitive provider a stable CA path.
+func v9ProviderCAName(name string) string {
+	digest := sha256.Sum256([]byte(strings.ToLower(name)))
+	return hex.EncodeToString(digest[:]) + ".pem"
+}
+
+// writeProviderCAs places TLS roots before the config commit. A failure must
+// abort migration while the v8 config can still use its inline CA overlay.
+func (m *v9Migrator) writeProviderCAs(written *[]string) error {
 	for _, ca := range m.providerCAs {
-		if err := func() error {
-			if err := os.MkdirAll(filepath.Dir(ca.path), 0o700); err != nil {
-				return err
-			}
-			return cfgtxn.WriteFileDurable(ca.path, ca.data, 0o600)
-		}(); err != nil {
-			m.note("could not write the provider CA bundle %s: %v; %s stays in place", ca.path, err, m.providersOverlay)
-			return
+		if err := os.MkdirAll(filepath.Dir(ca.path), 0o700); err != nil {
+			return fmt.Errorf("config: create provider CA directory for %s: %w", ca.path, err)
+		}
+		if err := cfgtxn.WriteFileDurable(ca.path, ca.data, 0o600); err != nil {
+			return fmt.Errorf("config: write provider CA bundle %s: %w", ca.path, err)
 		}
 		*written = append(*written, ca.path)
 	}
+	return nil
+}
+
+// retireProvidersOverlay renames the legacy overlay once its providers and
+// CA files are in the committed config. The next config write renders the
+// derived file.
+func (m *v9Migrator) retireProvidersOverlay(written *[]string) {
 	if err := os.Rename(m.providersOverlay, m.providersOverlay+DataJSONMigratedSuffix); err != nil {
 		m.note("could not rename %s: %v", m.providersOverlay, err)
 		return
@@ -1805,7 +3509,15 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 		return nil
 	}
 	if _, err := os.Stat(path); err != nil {
-		return nil
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if m.in.Managed {
+			m.note("%s: could not access %s (%v); the admin config is the policy",
+				LocalEnforcementEntriesIgnored, path, err)
+			return nil
+		}
+		return fmt.Errorf("config: access operator rows in %s: %w", path, err)
 	}
 	// A Secure Client gateway keeps reading operator rows from the table
 	// (PolicyEngine.legacyOperatorRows), so they stay there untouched.
@@ -1833,6 +3545,7 @@ func (m *v9Migrator) migrateActionsRows(root *yaml.Node) error {
 	if err != nil {
 		return fmt.Errorf("config: read operator rows from %s: %w", path, err)
 	}
+	m.auditRowsSnapshot, m.auditRowsRead = rows, true
 	if m.in.Managed {
 		m.record.ActionsRowsIgnored = len(rows)
 		if len(rows) > 0 {
@@ -1864,6 +3577,19 @@ func v9AuditDBDamaged(err error) bool {
 		strings.Contains(message, "file is not a database")
 }
 
+// SecureClientSource reports whether config bytes describe a Secure Client
+// deployment (its deployment mode and profile, or their environment pins).
+// The Secure Client integration stays on config_version 8, so `config
+// migrate` leaves such a file unchanged (issue #1092).
+func SecureClientSource(raw []byte) bool {
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return false
+	}
+	root := v8DocumentRoot(&doc)
+	return root != nil && root.Kind == yaml.MappingNode && v9SecureClientDocument(root)
+}
+
 // v9SecureClientDocument reports whether the document is a managed
 // deployment on the Secure Client profile (pinned or configured).
 func v9SecureClientDocument(root *yaml.Node) bool {
@@ -1888,24 +3614,55 @@ func (m *v9Migrator) appendAssetRule(root *yaml.Node, row v9ActionRow, list stri
 	switch row.targetType {
 	case AdmissionTypeSkill, AdmissionTypeMCP, AdmissionTypePlugin:
 	case AdmissionTypeTool:
+		// Only the @<connector>/<tool> form was scoped at runtime. A
+		// <source>/<tool> row was audit-only, and v8 matched a bare name
+		// exactly, so any other name keeps its whole text (a slash included)
+		// and never becomes a global rule for its last segment.
 		if strings.HasPrefix(name, "@") {
 			if conn, tool, ok := strings.Cut(name[1:], "/"); ok {
 				connector, name = conn, tool
 			}
-		} else if i := strings.LastIndex(name, "/"); i >= 0 {
-			// <source>/<tool>: the source was audit-only.
-			name = name[i+1:]
 		}
 	default:
 		return false
 	}
+	m.addAssetRule(root, "audit.db", "actions:"+row.id, row, list, name, connector)
+	return true
+}
+
+// addAssetRule appends one asset_policy rule unless an identical one exists.
+func (m *v9Migrator) addAssetRule(root *yaml.Node, origin, from string, row v9ActionRow, list, name, connector string) {
 	target := v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(root, "asset_policy"), row.targetType), list)
 	for _, existing := range v9SeqItems(target) {
-		if yamlScalarValue(v8YAMLMapValue(existing, "name")) == name &&
-			yamlScalarValue(v8YAMLMapValue(existing, "connector")) == connector {
-			m.moved("audit.db", "actions:"+row.id, "asset_policy."+row.targetType+"."+list, name)
-			return true
+		if yamlScalarValue(v8YAMLMapValue(existing, "name")) != name ||
+			yamlScalarValue(v8YAMLMapValue(existing, "connector")) != connector {
+			continue
 		}
+		// An audit deny is name-wide. Do not discard it beside a narrower
+		// config rule; commit cleanup would then remove the only broad block.
+		// Audit allows can carry a source path, but no other constraints.
+		if row.targetType != AdmissionTypeTool {
+			constrained := false
+			for _, key := range []string{"url", "command", "transport"} {
+				constrained = constrained || yamlScalarValue(v8YAMLMapValue(existing, key)) != ""
+			}
+			constrained = constrained || len(v9SeqItems(v8YAMLMapValue(existing, "args_prefix"))) != 0
+			if constrained {
+				continue
+			}
+			paths := v9SeqItems(v8YAMLMapValue(existing, "source_path_contains"))
+			if list == "denied" && len(paths) != 0 {
+				continue
+			}
+			if list == "allowed" && row.sourcePath == "" && len(paths) != 0 {
+				continue
+			}
+			if list == "allowed" && row.sourcePath != "" && (len(paths) != 1 || yamlScalarValue(paths[0]) != row.sourcePath) {
+				continue
+			}
+		}
+		m.moved(origin, from, "asset_policy."+row.targetType+"."+list, name)
+		return
 	}
 	item := v9Mapping("name", v9Scalar(name))
 	if connector != "" {
@@ -1928,8 +3685,7 @@ func (m *v9Migrator) appendAssetRule(root *yaml.Node, row v9ActionRow, list stri
 		v9Set(root, target, "asset_policy", row.targetType, list)
 	}
 	target.Content = append(target.Content, item)
-	m.moved("audit.db", "actions:"+row.id, "asset_policy."+row.targetType+"."+list, name)
-	return true
+	m.moved(origin, from, "asset_policy."+row.targetType+"."+list, name)
 }
 
 // ---------------------------------------------------------------------------

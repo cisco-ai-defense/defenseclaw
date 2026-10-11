@@ -20,8 +20,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
 
@@ -52,7 +54,42 @@ func TestConfigWriterRefusesAnUnloadableRuleReference(t *testing.T) {
 	if after, _ := os.ReadFile(path); string(after) != string(before) {
 		t.Fatal("a refused change modified config.yaml")
 	}
+	// A webhook the dispatcher would drop is refused the same way, naming it
+	// but not its URL (GAP-0094).
+	for _, url := range []string{"not a url", "http://127.0.0.1:19999/hook?token=s3cret"} {
+		hook := []any{map[string]any{"name": "p0bad", "url": url, "type": "generic", "enabled": true}}
+		_, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: "webhooks", Value: hook}}, opt)
+		if err == nil || !strings.Contains(err.Error(), `webhook "p0bad"`) || strings.Contains(err.Error(), "s3cret") {
+			t.Fatalf("webhook url %q: err = %v, want a refusal naming the webhook and not the URL", url, err)
+		}
+	}
 	if _, err := configwrite.Apply(ctx, path, []configwrite.Change{{Path: "guardrail.mode", Value: "action"}}, opt); err != nil {
 		t.Fatalf("a valid change was refused: %v", err)
+	}
+}
+
+// GAP-0363: a profile rule_pack_dir the gateway's reload refuses (written
+// with ~, or naming a folder that does not exist) is refused by the
+// validator too; a built-in pack folder that is not seeded yet is not.
+func TestCandidateAssetsRefuseAProfileRulePackDirTheGatewayCannotOpen(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	raw := func(packDir string) []byte {
+		return []byte("config_version: 8\ndata_dir: " + dir + "\nguardrail:\n  enabled: true\n  profiles:\n" +
+			"    strict: {mode: action, block_at: medium, rule_pack_dir: '" + packDir + "'}\n" +
+			"    watch: {mode: observe}\n  default_profile: watch\nobservability: {}\n")
+	}
+	for packDir, want := range map[string]string{
+		"~/.defenseclaw/policies/guardrail/marker": "is not an absolute path",
+		filepath.Join(dir, "no-such-pack"):         "directory_not_found",
+	} {
+		if err := config.ValidateCandidateAssets(path, raw(packDir)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("rule_pack_dir %q: err = %v, want %q", packDir, err, want)
+		}
+	}
+	seeded := filepath.Join(dir, "policies", "guardrail", "default")
+	if err := config.ValidateCandidateAssets(path, raw(seeded)); err != nil {
+		t.Fatalf("an unseeded built-in pack folder was refused: %v", err)
 	}
 }

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -263,35 +263,82 @@ def _is_within(path: str, directory: str) -> bool:
     return real_path == real_dir or real_path.startswith(real_dir + os.sep)
 
 
+def _legacy_active_policy_name(policy_dir: str | os.PathLike[str] | None) -> str:
+    """Secure Client v8 keeps its active policy name in OPA data.json."""
+    candidates = []
+    if policy_dir:
+        candidates.append(os.path.join(os.fspath(policy_dir), "rego", "data.json"))
+    bundled = _bundled_dir()
+    if bundled:
+        candidates.append(os.path.join(bundled, "rego", "data.json"))
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            with open(candidate, encoding="utf-8") as stream:
+                data = json.load(stream)
+        except (OSError, ValueError, UnicodeDecodeError):
+            continue
+        config = data.get("config") if isinstance(data, dict) else None
+        name = config.get("policy_name") if isinstance(config, dict) else None
+        return name if isinstance(name, str) else ""
+    return ""
+
+
 def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = None) -> str:
     """The named policy ``cfg`` runs ("" when none matches or there is no config).
 
     Since config_version 9 a named policy is a preset: ``policy activate``
-    writes its admission, guardrail levels and Cisco trust level as config
-    keys and records nothing else, so the active policy is the one whose
+    writes its admission, guardrail levels, watch settings and Cisco trust
+    level as config keys and records nothing else, so the active policy is the one whose
     values the config holds now. A config that sets none of them runs the
-    shipped defaults, which is the ``default`` policy.
+    shipped defaults, which is the ``default`` policy. Secure Client
+    instead keeps the active name in its v8 OPA data.json.
     """
     if cfg is None or getattr(cfg, "guardrail", None) is None:
         return ""
+    from defenseclaw.enforce import asset_lists
+
+    if asset_lists.is_secure_client(cfg):
+        return _legacy_active_policy_name(policy_dir)
     import copy
 
     from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
     from defenseclaw.config import AdmissionConfig
+    from defenseclaw.enforce.admission import compile_admission
+
+    def admission(config: Any) -> tuple[Any, ...]:
+        # Compare what admission enforces, not how config.yaml spells it: the
+        # v8 -> v9 migration writes a preset's actions per type in shorthand
+        # (admission.skill.actions.high: quarantine) and leaves values equal
+        # to the built-in defaults unset, where `policy activate` writes
+        # admission.defaults triples (GAP-0903).
+        out = []
+        for target_type in ("skill", "mcp", "plugin"):
+            c = compile_admission(config, target_type)
+            first_party = tuple(sorted((name, tuple(sorted(m))) for name, m in c.first_party_allow.items()))
+            out.append((c.scan_on_install, c.allow_list_bypass_scan, c.actions, c.scanner_overrides, first_party))
+        return tuple(out)
 
     def keys(config: Any) -> tuple[Any, ...]:
         g = config.guardrail
         trust = str(getattr(g, "cisco_trust_level", "") or "").strip() or "full"
         return (
-            getattr(config, "admission", None),
+            admission(config),
             level_value(getattr(g, "block_at", "")),
             level_value(getattr(g, "alert_at", "")),
             trust,
+            getattr(config.watch, "rescan_enabled", None),
+            getattr(config.watch, "rescan_interval_min", None),
         )
 
     current = keys(cfg)
     sources = _policy_sources(policy_dir)
-    if current == (AdmissionConfig(), "", "", "full") and "default" in sources:
+    if (
+        getattr(cfg, "admission", None) == AdmissionConfig()
+        and current[1:] == ("", "", "full", True, 60)
+        and "default" in sources
+    ):
         return "default"
     for stem, (path, _bundled) in sorted(sources.items()):
         data = load_policy_yaml(path)
@@ -299,8 +346,19 @@ def active_policy_name(policy_dir: str | os.PathLike[str] | None, cfg: Any = Non
             continue
         preset = copy.copy(cfg)
         preset.guardrail = copy.copy(cfg.guardrail)
-        preset.admission = _admission_from_policy(data)
-        _apply_policy_guardrail(preset, data)
+        preset.watch = copy.copy(cfg.watch)
+        try:
+            preset.admission = _admission_from_policy(data)
+            _apply_policy_guardrail(preset, data)
+            watch = data.get("watch") or {}
+            if not isinstance(watch, dict):
+                continue
+            if "rescan_enabled" in watch:
+                preset.watch.rescan_enabled = watch["rescan_enabled"]
+            if "rescan_interval_min" in watch:
+                preset.watch.rescan_interval_min = watch["rescan_interval_min"]
+        except (TypeError, ValueError):
+            continue
         if keys(preset) == current:
             return stem
     return ""
@@ -487,21 +545,18 @@ def _guardrail(cfg: Any) -> Any:
 def configured_pack_dir(cfg: Any, block: Any) -> str:
     """The directory a guardrail scope block selects, "" when it selects none.
 
-    ``rule_pack`` (a preset name or a ``guardrail.custom_packs`` key) wins
-    over the v8 ``rule_pack_dir`` at the same scope, as in the gateway
-    (``config.ResolveRulePackDir``).
+    A scope selects its ``rule_pack``: a preset name or a
+    ``guardrail.custom_packs`` key (``config.ResolveRulePackDir`` in the gateway).
     """
-    if block is None:
-        return ""
     name = str(getattr(block, "rule_pack", "") or "").strip()
-    if name:
-        custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
-        if custom is not None:
-            return normalize_pack_path(str(getattr(custom, "path", "") or ""))
-        if name in RULE_PACK_PRESETS:
-            return preset_pack_dir(cfg, name)
+    if not name:
         return ""
-    return normalize_pack_path(str(getattr(block, "rule_pack_dir", "") or ""))
+    custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
+    if custom is not None:
+        return normalize_pack_path(str(getattr(custom, "path", "") or ""))
+    if name in RULE_PACK_PRESETS:
+        return preset_pack_dir(cfg, name)
+    return ""
 
 
 def global_pack(cfg: Any) -> ConnectorPack:
@@ -530,18 +585,7 @@ def _override_dir(gc: Any, connector: str, cfg: Any = None) -> str:
     if block is None:
         connectors = getattr(gc, "connectors", None)
         block = connectors.get(connector) if isinstance(connectors, Mapping) else None
-    if block is not None:
-        return configured_pack_dir(cfg, block)
-    if callable(getter) or not callable(getattr(gc, "effective_rule_pack_dir", None)):
-        return ""
-    # Duck-typed configs that only expose the effective resolver: anything
-    # that differs from the global dir is a per-connector override.
-    try:
-        effective = normalize_pack_path(str(gc.effective_rule_pack_dir(connector) or ""))
-    except Exception:  # noqa: BLE001
-        return ""
-    global_dir = normalize_pack_path(str(getattr(gc, "rule_pack_dir", "") or ""))
-    return effective if effective and effective != global_dir else ""
+    return configured_pack_dir(cfg, block)
 
 
 def _active_connectors(cfg: Any) -> list[str]:
@@ -943,6 +987,24 @@ def _pack_rules_by_id(pack_dir: str) -> dict[str, Mapping[str, Any]]:
             if rule_id:
                 out[rule_id] = rule
     return out
+
+
+def pack_rule_defaults(pack_dir: str) -> dict[str, bool]:
+    """Rule id -> shipped on (True) or off (False) for the rule files of *pack_dir*.
+
+    Empty when the directory is missing or has no readable rule file."""
+    return {rule_id: _rule_enabled(rule) for rule_id, rule in _pack_rules_by_id(pack_dir).items()}
+
+
+def rule_defaults_with_protections(pack_dir: str, protections: Iterable[str]) -> dict[str, bool]:
+    """``pack_rule_defaults`` with the named use-case packs layered on, as the gateway composes them
+    (a protection pack's rule replaces the base rule with the same id). Empty when the base has none."""
+    rules = pack_rule_defaults(pack_dir)
+    if not rules:
+        return {}
+    for name in protections:
+        rules.update(pack_rule_defaults(protection_pack_dir(name)))
+    return rules
 
 
 def _raw_rule_text(pack_dir: str) -> str:
@@ -1358,6 +1420,27 @@ def hilt_label(hilt: object) -> str:
         return "off"
     label = threshold_label(str(getattr(hilt, "min_severity", "") or "HIGH"))
     return "HIGH+" if label == "none" else label
+
+
+def inert_hilt_warning(hilt: str, block_at: str) -> str:
+    """Explain an approval floor that blocking consumes before it can ask."""
+    minimum = level_value(hilt.rstrip("+"))
+    block = level_value(block_at.rstrip("+"))
+    if not minimum or not block or _SEVERITY_RANK[minimum] < _SEVERITY_RANK[block]:
+        return ""
+    return (
+        f"human approval at {minimum} cannot ask: block_at {block} blocks those findings first; "
+        "lower hilt.min_severity or raise block_at"
+    )
+
+
+def configured_hilt_warnings(cfg: Any) -> list[str]:
+    """Warnings for the configured global and connector postures."""
+    return [
+        f"{row.scope}: {note}"
+        for row in scope_postures(cfg)
+        if (note := inert_hilt_warning(row.hilt, row.block_at))
+    ]
 
 
 def _connector_block(gc: Any, connector: str) -> Any:

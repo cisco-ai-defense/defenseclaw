@@ -89,6 +89,42 @@ func TestApplicationProtectionPolicyOverlay(t *testing.T) {
 	}
 }
 
+func TestApplicationProtectionRulesSurviveLoadAndLayer(t *testing.T) {
+	raw := []byte(`config_version: 9
+guardrail:
+  rules: {enable: [GLOBAL-RULE]}
+  connectors:
+    cursor: {rules: {enable: [MANUAL-RULE]}}
+application_protection:
+  enabled: true
+  guardrail:
+    rules: {enable: [AUTO-RULE]}
+  connectors:
+    codex:
+      guardrail:
+        rules: {disable: [CODEX-RULE]}
+observability: {}
+`)
+	cfg, err := LoadRuntimeV8CandidateFromBytes("config.yaml", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.EffectiveRulesForConnector("codex"); len(got) != 3 ||
+		len(got[0].Enable) != 1 || got[0].Enable[0] != "GLOBAL-RULE" ||
+		len(got[1].Enable) != 1 || got[1].Enable[0] != "AUTO-RULE" ||
+		len(got[2].Disable) != 1 || got[2].Disable[0] != "CODEX-RULE" {
+		t.Errorf("automatic codex rules = %+v, want global, auto, connector layers", got)
+	}
+	if got := cfg.EffectiveRulesForConnector("claudecode"); len(got) != 2 ||
+		len(got[1].Enable) != 1 || got[1].Enable[0] != "AUTO-RULE" {
+		t.Errorf("automatic claudecode rules = %+v, want global and auto layers", got)
+	}
+	if got := cfg.EffectiveRulesForConnector("cursor"); len(got) != 2 ||
+		len(got[1].Enable) != 1 || got[1].Enable[0] != "MANUAL-RULE" {
+		t.Errorf("manual cursor rules = %+v, want global and manual layers", got)
+	}
+}
+
 func TestManagedEnterpriseNativeHookFailModesAreAlwaysClosed(t *testing.T) {
 	cfg := &Config{DeploymentMode: "managed_enterprise"}
 	cfg.Guardrail.Mode = "observe"

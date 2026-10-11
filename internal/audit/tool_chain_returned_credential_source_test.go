@@ -16,10 +16,10 @@ import (
 )
 
 func TestToolChainReturnedCredentialSourceMigrationIsValueFreeAndIdempotent(t *testing.T) {
-	const migrationIndex = 48
+	const migrationIndex = 35
 	if len(migrations) <= migrationIndex || migrations[migrationIndex].description !=
 		"guardrails: bind pending credential sources to authoritative results" {
-		t.Fatal("returned credential-source state is not append-only migration 49")
+		t.Fatal("returned credential-source state is not append-only migration 36")
 	}
 	if actionfacts.ReturnedCredentialSourceNone != 0 ||
 		actionfacts.ReturnedCredentialSourceSecretsDump != 1 ||

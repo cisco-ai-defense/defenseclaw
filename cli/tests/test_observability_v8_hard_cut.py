@@ -40,6 +40,14 @@ def test_hard_cut_checker_is_semantic_and_allows_only_migration_boundary(tmp_pat
     ]
 
 
+def test_hard_cut_checker_rejects_a_reintroduced_go_config_decoder(tmp_path: Path) -> None:
+    _write(tmp_path, "internal/config/config.go", "package config\nconst CurrentConfigVersion = 7\n")
+    failures, _ = check(tmp_path)
+    assert [(item["rule"], item["path"]) for item in failures] == [
+        ("legacy-go-config-decoder", "internal/config/config.go"),
+    ]
+
+
 def test_hard_cut_checker_rejects_removed_writer_even_in_tests(tmp_path: Path) -> None:
     _write(
         tmp_path,

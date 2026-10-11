@@ -27,6 +27,7 @@
  * the proxy can route to the correct upstream after inspection.
  */
 
+import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createEgressReporter, type EgressReporter } from "./egress-telemetry.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
@@ -1099,6 +1100,8 @@ export interface InterceptorLayers {
   httpsRequest: boolean;
   httpGet: boolean;
   undiciDispatcher: boolean;
+  /** The host application's own undici copy, which its model requests go through. */
+  hostUndiciDispatcher: boolean;
 }
 
 export interface InterceptionSelfTest {
@@ -1137,6 +1140,15 @@ function readUndiciHeader(headers: unknown, name: string): string {
 
 function completeUndiciProbe(handler: unknown): boolean {
   const sink = handler as {
+    onRequestStart?: (controller: unknown, context?: unknown) => void;
+    onResponseStart?: (
+      controller: unknown,
+      status: number,
+      headers: Record<string, string>,
+      statusText?: string,
+    ) => void;
+    onResponseData?: (controller: unknown, chunk: Buffer) => void;
+    onResponseEnd?: (controller: unknown, trailers: Record<string, string>) => void;
     onConnect?: (abort: () => void) => void;
     onHeaders?: (
       status: number,
@@ -1149,6 +1161,28 @@ function completeUndiciProbe(handler: unknown): boolean {
     onError?: (err: Error) => void;
   };
   try {
+    // undici 7+ drives a handler through the request lifecycle callbacks.
+    if (typeof sink.onResponseStart === "function") {
+      const controller = {
+        abort: () => undefined,
+        pause: () => undefined,
+        resume: () => undefined,
+        paused: false,
+        aborted: false,
+        reason: null,
+        rawHeaders: [],
+      };
+      sink.onRequestStart?.(controller, {});
+      sink.onResponseStart(
+        controller,
+        200,
+        { [INTERCEPTION_PROBE_HEADER.toLowerCase()]: "1", "content-type": "application/json" },
+        "OK",
+      );
+      sink.onResponseData?.(controller, Buffer.from('{"id":"dc-intercept-probe"}'));
+      sink.onResponseEnd?.(controller, {});
+      return true;
+    }
     sink.onConnect?.(() => undefined);
     sink.onHeaders?.(
       200,
@@ -1168,6 +1202,54 @@ function completeUndiciProbe(handler: unknown): boolean {
     sink.onError?.(err instanceof Error ? err : new Error(String(err)));
     return false;
   }
+}
+
+/** The undici copy the host application ships, as far as the interceptor needs it. */
+type HostUndici = {
+  Agent: (new () => { close?: () => Promise<void> }) & { prototype: object };
+  request?: (
+    url: string,
+    opts?: Record<string, unknown>,
+  ) => Promise<{ body?: { text?: () => Promise<string> } }>;
+};
+
+/**
+ * Locate the undici copy of the application this plugin runs in. OpenClaw
+ * bundles its own undici and sends every model request through an SSRF-guarded
+ * fetch that hands it an explicit per-request dispatcher, so neither
+ * globalThis.fetch nor the global dispatcher ever sees the request (GAP-0190).
+ * Every dispatcher of one undici copy inherits dispatch() from the same base
+ * class, which is the one place that sees those requests. The copy is found
+ * from the application's entry point, the way the application finds it.
+ */
+function resolveHostUndici(): { module: HostUndici; base: { dispatch: UndiciDispatchFn } } | null {
+  const entry = process.argv[1];
+  if (!entry) return null;
+  try {
+    const module = createRequire(realpathSync(entry))("undici") as HostUndici;
+    const base = Object.getPrototypeOf(module.Agent.prototype) as { dispatch?: unknown } | null;
+    if (!base || !Object.prototype.hasOwnProperty.call(base, "dispatch") || typeof base.dispatch !== "function") {
+      return null;
+    }
+    return { module, base: base as { dispatch: UndiciDispatchFn } };
+  } catch {
+    return null;
+  }
+}
+
+/** Dispatch headers arrive as an object from fetch() and as a flat array from other callers. */
+function undiciHeadersToRecord(headers: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (Array.isArray(headers)) {
+    for (let i = 0; i + 1 < headers.length; i += 2) {
+      out[String(headers[i])] = String(headers[i + 1]);
+    }
+  } else if (headers && typeof headers === "object") {
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (value != null) out[key] = Array.isArray(value) ? value.join(", ") : String(value);
+    }
+  }
+  return out;
 }
 
 export interface CreateFetchInterceptorOptions {
@@ -1212,6 +1294,9 @@ export function createFetchInterceptor(
   let lastSelfTestLine = "";
   const loggedInterceptHosts = new Set<string>();
   let lastUndiciProbeDestination = "";
+  let hostUndici: ReturnType<typeof resolveHostUndici> = null;
+  let originalHostDispatch: UndiciDispatchFn | null = null;
+  let lastHostProbeDestination = "";
 
   function describeLayers(): InterceptorLayers {
     return {
@@ -1224,6 +1309,9 @@ export function createFetchInterceptor(
           originalUndiciDispatcher &&
           undici.getGlobalDispatcher() !== originalUndiciDispatcher,
       ),
+      hostUndiciDispatcher: Boolean(
+        hostUndici && originalHostDispatch && hostUndici.base.dispatch !== originalHostDispatch,
+      ),
     };
   }
 
@@ -1231,6 +1319,7 @@ export function createFetchInterceptor(
     logInfo(
       `[defenseclaw] interceptor layers fetch=${layers.fetch} https.request=${layers.httpsRequest} ` +
         `http.request=${layers.httpRequest} http.get=${layers.httpGet} undici=${layers.undiciDispatcher} ` +
+        `undici_host=${layers.hostUndiciDispatcher} ` +
         `fetch_resolvable=${typeof globalThis.fetch === "function"} undici_resolvable=${Boolean(undici)}`,
     );
   }
@@ -1282,6 +1371,57 @@ export function createFetchInterceptor(
       decision: "allow",
       reason: "chatgpt-codex-oauth-passthrough",
     });
+  }
+
+  // One dispatch decision for every undici layer: rewrite a recognised LLM
+  // request onto the guardrail proxy, answer the self-test probe locally, and
+  // hand everything else to the dispatcher it came through.
+  function interceptUndiciDispatch(
+    opts: UndiciDispatchOptions,
+    handler: unknown,
+    layer: "global" | "host",
+    next: (opts: UndiciDispatchOptions, handler: unknown) => boolean,
+  ): boolean {
+    const origin = opts.origin?.toString() ?? "";
+    const pathStr = opts.path ?? "";
+    const urlStr = origin + pathStr;
+
+    if (
+      urlStr &&
+      !isAlreadyProxied(urlStr, guardrailPort) &&
+      !isKnownSafeDomain(urlStr) &&
+      (isLLMUrl(urlStr, guardrailPort) || hasLLMPathSuffix(urlStr))
+    ) {
+      opts.origin = proxyBase;
+      const existingHeaders = undiciHeadersToRecord(opts.headers);
+      const providerKey = extractProviderKeyFromRecord(existingHeaders);
+      // The proxy rejoins the request path to X-DC-Target-URL, so the header
+      // carries the origin only, as on the fetch and https layers (GAP-0242).
+      const proxyHdrs = buildProxyHeaders(new URL(origin).origin, providerKey, getCorrelationHeaders);
+      opts.headers = { ...existingHeaders, ...proxyHdrs };
+
+      noteInterceptLayer(layer === "host" ? "undici-host" : "undici", urlStr);
+      egressReporter?.report({
+        targetHost: new URL(origin).hostname,
+        targetPath: pathStr,
+        bodyShape: "none",
+        looksLikeLLM: true,
+        branch: "undici",
+        decision: "intercept",
+        reason: layer === "host" ? "undici-host-dispatcher" : "undici-dispatcher",
+      });
+      if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
+        // Either layer proves a probe was rewritten: OpenClaw swaps the global
+        // dispatcher for its own after the first agent run, and the host layer
+        // keeps intercepting.
+        const destination = `${proxyBase}${pathStr || "/v1/chat/completions"}`;
+        lastUndiciProbeDestination = destination;
+        if (layer === "host") lastHostProbeDestination = destination;
+        return completeUndiciProbe(handler);
+      }
+    }
+
+    return next(opts, handler);
   }
 
   function start(): void {
@@ -1869,45 +2009,10 @@ export function createFetchInterceptor(
       originalUndiciDispatcher = undici.getGlobalDispatcher() as UndiciDispatcher;
       const parentDispatcher = originalUndiciDispatcher;
 
-      const interceptingDispatch: UndiciDispatchFn = (opts, handler) => {
-        const origin = opts.origin?.toString() ?? "";
-        const pathStr = opts.path ?? "";
-        const urlStr = origin + pathStr;
-
-        if (
-          urlStr &&
-          !isAlreadyProxied(urlStr, guardrailPort) &&
-          !isKnownSafeDomain(urlStr) &&
-          (isLLMUrl(urlStr, guardrailPort) || hasLLMPathSuffix(urlStr))
-        ) {
-          opts.origin = proxyBase;
-          const existingHeaders = (opts.headers ?? {}) as Record<string, string>;
-          const providerKey = extractProviderKeyFromRecord(existingHeaders);
-          const proxyHdrs = buildProxyHeaders(
-            origin + pathStr,
-            providerKey,
-            getCorrelationHeaders,
-          );
-          opts.headers = { ...existingHeaders, ...proxyHdrs };
-
-          noteInterceptLayer("undici", urlStr);
-          egressReporter?.report({
-            targetHost: new URL(origin).hostname,
-            targetPath: pathStr,
-            bodyShape: "none",
-            looksLikeLLM: true,
-            branch: "undici",
-            decision: "intercept",
-            reason: "undici-dispatcher",
-          });
-          if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
-            lastUndiciProbeDestination = `${proxyBase}${pathStr || "/v1/chat/completions"}`;
-            return completeUndiciProbe(handler);
-          }
-        }
-
-        return (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(opts, handler);
-      };
+      const interceptingDispatch: UndiciDispatchFn = (opts, handler) =>
+        interceptUndiciDispatch(opts, handler, "global", (nextOpts, nextHandler) =>
+          (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(nextOpts, nextHandler),
+        );
 
       // Proxy object that delegates dispatch to our interceptor and
       // all other Dispatcher methods to the original.
@@ -1915,6 +2020,24 @@ export function createFetchInterceptor(
         dispatch: { value: interceptingDispatch, writable: true, configurable: true },
       });
       undici.setGlobalDispatcher(proxyDispatcher);
+    }
+
+    // The host application's own undici copy: its requests carry an explicit
+    // dispatcher, so they never reach the global dispatcher above.
+    hostUndici = resolveHostUndici();
+    if (hostUndici) {
+      const base = hostUndici.base;
+      const original = base.dispatch;
+      originalHostDispatch = original;
+      base.dispatch = function dispatchThroughGuardrail(
+        this: unknown,
+        opts: UndiciDispatchOptions,
+        handler: unknown,
+      ): boolean {
+        return interceptUndiciDispatch(opts, handler, "host", (nextOpts, nextHandler) =>
+          original.call(this, nextOpts, nextHandler),
+        );
+      };
     }
 
     logInfo(
@@ -1985,18 +2108,40 @@ export function createFetchInterceptor(
       }
     }
 
+    // The host application's model requests carry their own dispatcher, so the
+    // probe does too: a pass here proves the path those requests take.
+    lastHostProbeDestination = "";
+    if (hostUndici?.module.request && layers.hostUndiciDispatcher) {
+      const agent = new hostUndici.module.Agent();
+      try {
+        const response = await hostUndici.module.request(INTERCEPTION_SELF_TEST_URL, {
+          ...probeInit,
+          dispatcher: agent,
+        });
+        await response.body?.text?.();
+      } catch {
+        // Rewrite is recorded on the dispatcher even if the sink is stubbed.
+      } finally {
+        await agent.close?.().catch(() => undefined);
+      }
+    }
+
     const requiredLayers =
       layers.fetch && layers.httpsRequest && layers.httpRequest && layers.httpGet;
     const undiciRequired = Boolean(undici);
     const undiciOk =
       !undiciRequired ||
       (layers.undiciDispatcher && lastUndiciProbeDestination === expectedDest);
-    const ok = destination === expectedDest && requiredLayers && undiciOk;
+    const hostOk =
+      !hostUndici || (layers.hostUndiciDispatcher && lastHostProbeDestination === expectedDest);
+    const ok = destination === expectedDest && requiredLayers && undiciOk && hostOk;
     let reason = "interception-self-test-miss";
     if (ok) {
       reason = "interception-self-test";
     } else if (destination === expectedDest && requiredLayers && !undiciOk) {
       reason = "interception-self-test-undici-miss";
+    } else if (destination === expectedDest && requiredLayers && !hostOk) {
+      reason = "interception-self-test-host-undici-miss";
     }
     return {
       ok,
@@ -2084,6 +2229,11 @@ export function createFetchInterceptor(
       undici.setGlobalDispatcher(originalUndiciDispatcher);
       originalUndiciDispatcher = null;
     }
+    if (hostUndici && originalHostDispatch) {
+      hostUndici.base.dispatch = originalHostDispatch;
+    }
+    hostUndici = null;
+    originalHostDispatch = null;
     if (egressReporter) {
       egressReporter.stop();
       egressReporter = null;

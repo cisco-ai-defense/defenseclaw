@@ -370,6 +370,12 @@ func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	if c == nil {
 		return "closed"
 	}
+	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
+		if strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
+			return "closed"
+		}
+		return "open"
+	}
 	configured := ""
 	if pc, ok := c.appProtectionGuardrailOverride(connector); ok {
 		if strings.TrimSpace(pc.HookFailMode) != "" {

@@ -311,7 +311,7 @@ func requiredResourceAttributes(
 	family observability.EventName,
 	input map[string]any,
 ) ([]*commonpb.KeyValue, bool) {
-	if observability.ValidateTelemetryResourceAttributes(input) != nil {
+	if observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(input) != nil {
 		return nil, false
 	}
 	return keyValues(input, func(key string) (observability.OTLPValueKind, bool) {

@@ -15,6 +15,7 @@ package enterpriseunix
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,7 +74,7 @@ func TestUninstallStopsRepairersBeforeRemovingRegistrations(t *testing.T) {
 			}
 			removeAll := false
 			h.env.Runner = observingRunner{Runner: h.runner, observe: func(name string, args []string) {
-				if strings.Contains(strings.Join(args, " "), "hooks remove-all") {
+				if joined := strings.Join(args, " "); strings.Contains(joined, "hooks remove-all") && !strings.HasSuffix(joined, " --check") {
 					removeAll = true
 					check("per-user remove-all")
 				}
@@ -165,17 +166,115 @@ func TestFailedUninstallKeepsTheRecordForARetryOrReinstall(t *testing.T) {
 	}
 }
 
-// removeAllRunner answers `enterprise hooks remove-all` with answer.
+// failingRemoveAccounts cannot delete the service account.
+type failingRemoveAccounts struct{ AccountManager }
+
+func (failingRemoveAccounts) Remove(context.Context, string) error {
+	return errors.New("remove /Users/_defenseclaw: eDSPermissionError")
+}
+
+// macOS can deny the directory-record delete of the service account (GAP-0101).
+// The uninstall had already removed the binaries, the CLI included, so
+// failing it left a command that could not be rerun. It completes and tells
+// the administrator how to delete the account.
+func TestUninstallCompletesWhenTheServiceAccountCannotBeDeleted(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Accounts = failingRemoveAccounts{h.env.Accounts}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	if len(done.Warnings) != 1 || done.Warnings[0].Code != codeAccount ||
+		!strings.Contains(done.Warnings[0].Message, "sudo dscl . -delete /Users/"+h.env.Layout.ServiceUser) {
+		t.Fatalf("warnings = %+v, want the service-account warning with the delete command", done.Warnings)
+	}
+	if exists(h.env.deploymentPath()) {
+		t.Fatal("the deployment record is still there: the uninstall did not complete")
+	}
+}
+
+// removeAllRunner answers `enterprise hooks remove-all` with answer, and
+// its --check preflight with check (nil: every row resolves).
 type removeAllRunner struct {
 	Runner
 	answer func(args string) (CommandResult, error)
+	check  func() (CommandResult, error)
 }
 
 func (r removeAllRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
 	if joined := strings.Join(args, " "); strings.HasPrefix(joined, "enterprise hooks remove-all ") {
-		return r.answer(joined)
+		if !strings.HasSuffix(joined, " --check") {
+			return r.answer(joined)
+		}
+		if r.check == nil {
+			return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+		}
+		return r.check()
 	}
 	return r.Runner.Run(ctx, name, args...)
+}
+
+// GAP-1101: a manifest row remove-all cannot resolve (no such account, a
+// home-only row whose owner is unknown) failed the uninstall only after the
+// services were unloaded and part of the machine policy was removed. The
+// preflight names the row and refuses before anything changes.
+func TestUninstallRefusesUnresolvedRowsBeforeStoppingAnything(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+				t.Fatal("remove-all ran after its preflight refused")
+				return CommandResult{}, nil
+			}, check: func() (CommandResult, error) {
+				return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false,"failed":["/Users/gone/claudecode: user home /Users/gone: no such file or directory"]}`)}, errors.New("exit 1")
+			}}
+			h.env.MachinePolicy = observingPolicy{MachinePolicyManager: h.env.MachinePolicy, observe: func() {
+				t.Fatal("the machine policy was removed after the preflight refused")
+			}}
+			before := len(h.services.calls)
+			refused := h.run(Options{Action: ActionUninstall, Purge: true})
+			requireError(t, refused, codePerUserHooks)
+			requireError(t, refused, codeUninstallPrecheck)
+			if got := messagesOf(refused.Errors, codePerUserHooks); !strings.Contains(got, "claudecode manifest row of user /Users/gone cannot be removed") {
+				t.Fatalf("the refusal does not name the row: %s", got)
+			}
+			for _, call := range h.services.calls[before:] {
+				if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "disable ") {
+					t.Fatalf("the refused uninstall ran %q", call)
+				}
+			}
+			if !exists(h.env.deploymentPath()) {
+				t.Fatal("the refused uninstall removed the deployment record")
+			}
+		})
+	}
+}
+
+// A precheck command can fail before it identifies any manifest rows (for
+// example while parsing an untrusted manifest). The deployment stays intact.
+func TestUninstallRefusesFailedHookPrecheckBeforeStoppingAnything(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		t.Fatal("remove-all ran after its precheck failed")
+		return CommandResult{}, nil
+	}, check: func() (CommandResult, error) {
+		return CommandResult{ExitCode: 1, Stdout: []byte(`{"ok":false}`)}, errors.New("invalid manifest")
+	}}
+	h.env.MachinePolicy = observingPolicy{MachinePolicyManager: h.env.MachinePolicy, observe: func() {
+		t.Fatal("machine policy was removed after the precheck failed")
+	}}
+	before := len(h.services.calls)
+	refused := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireError(t, refused, codeUninstallPrecheck)
+	for _, call := range h.services.calls[before:] {
+		if strings.HasPrefix(call, "stop ") || strings.HasPrefix(call, "disable ") {
+			t.Fatalf("the refused uninstall ran %q", call)
+		}
+	}
+	if !exists(h.env.deploymentPath()) {
+		t.Fatal("the refused uninstall removed the deployment record")
+	}
 }
 
 // A macOS uninstall --purge returned ok while one account's Devin hooks,
@@ -232,6 +331,62 @@ func TestUninstallKeepsTheBinariesWhilePerUserHooksRemain(t *testing.T) {
 	}
 }
 
+// failingRemovePolicy cannot withdraw DefenseClaw's machine policy entries
+// while fail is set (an immutable Claude Code managed-settings file).
+type failingRemovePolicy struct {
+	MachinePolicyManager
+	fail *bool
+}
+
+func (p failingRemovePolicy) RemoveAll() (enterprisepolicy.Result, error) {
+	if *p.fail {
+		return enterprisepolicy.Result{}, errors.New("claudecode: remove managed-settings.json: operation not permitted")
+	}
+	return p.MachinePolicyManager.RemoveAll()
+}
+
+// GAP-1321: a failed machine policy removal left the vendor policy calling a
+// hook binary the uninstall then deleted, so the agent ran unguarded. The
+// binaries, record and state stay until a rerun can withdraw the policy.
+// GAP-1500: the gateway and its sockets stayed stopped and disabled, so the
+// retained hooks got no decisions; the services are put back as they were.
+func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	ctx := context.Background()
+	running, enabled := map[string]bool{}, map[string]bool{}
+	for _, unit := range h.services.Units() {
+		running[unit.Name] = h.services.Active(ctx, unit)
+		enabled[unit.Name] = h.services.Enabled(ctx, unit)
+	}
+	fail := true
+	h.env.MachinePolicy = failingRemovePolicy{MachinePolicyManager: h.env.MachinePolicy, fail: &fail}
+	failed := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireError(t, failed, codeUninstall)
+	if got := messagesOf(failed.Errors, codeUninstall); !strings.Contains(got, "operation not permitted") ||
+		!strings.Contains(got, h.env.lifecycleCommand(ActionUninstall)+" --purge`") {
+		t.Fatalf("the uninstall does not name the policy failure and the rerun: %s", got)
+	}
+	hook := h.env.P(filepath.Join(h.env.Layout.BinDir, binHook))
+	if !exists(hook) || !exists(h.env.deploymentPath()) {
+		t.Fatal("the uninstall removed the hook binary the machine policy still names")
+	}
+	for _, unit := range h.services.Units() {
+		if h.services.Active(ctx, unit) != running[unit.Name] || h.services.Enabled(ctx, unit) != enabled[unit.Name] {
+			t.Errorf("%s: active %v enabled %v after the refused uninstall, was %v %v", unit.Name,
+				h.services.Active(ctx, unit), h.services.Enabled(ctx, unit), running[unit.Name], enabled[unit.Name])
+		}
+	}
+	if code, _, err := h.env.HealthGet(ctx); err != nil || code != 200 {
+		t.Fatalf("the gateway the retained hooks call is not ready: %d %v", code, err)
+	}
+	fail = false
+	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+	if exists(hook) || exists(h.env.deploymentPath()) {
+		t.Fatal("the rerun did not finish the removal")
+	}
+}
+
 // GAP-1444: uninstall --purge said every enrolled account lost per-user
 // binaries and a per-user gateway, also an account that never had a
 // per-user install. Each account's line now names only what was removed.
@@ -270,6 +425,40 @@ func TestUninstallPurgeNamesOnlyWhatEachAccountHad(t *testing.T) {
 	}
 	if got := purgedUserChange("erin", &purgedUserDetail{UVCache: true}); got != "removed DefenseClaw's entries in the uv cache (~/.cache/uv) of user erin" {
 		t.Fatalf("an account with only uv cache entries: %q", got)
+	}
+}
+
+// GAP-1186: an account enrolled only for machine-policy connectors (Claude
+// Code) has no manifest row, so the per-user purge left the session cache
+// the managed hook wrote in its home. The purge removes the cache and the
+// ~/.defenseclaw it leaves empty, keeps a folder with other files in it,
+// and does not follow a cache that is a symlink.
+func TestUninstallPurgeRemovesTheSessionFactsCache(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	uid := os.Getuid()
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath), fmt.Sprintf(
+		`{"accounts":[{"user":"alice","uid":%d,"home":"/home/alice"},{"user":"bob","uid":%d,"home":"/home/bob"},{"user":"carol","uid":%d,"home":"/home/carol"}]}`,
+		uid, uid, uid))
+	writeHostFile(t, h, "/home/alice/.defenseclaw/session-facts.json", "{}")
+	writeHostFile(t, h, "/home/bob/.defenseclaw/session-facts.json", "{}")
+	writeHostFile(t, h, "/home/bob/.defenseclaw/notes.txt", "kept")
+	writeHostFile(t, h, "/home/carol/.defenseclaw/notes.txt", "kept")
+	writeHostFile(t, h, "/srv/elsewhere.json", "{}")
+	if err := os.Symlink(h.env.P("/srv/elsewhere.json"), h.env.P("/home/carol/.defenseclaw/session-facts.json")); err != nil {
+		t.Fatal(err)
+	}
+	h.env.Runner = removeAllRunner{Runner: h.runner, answer: func(string) (CommandResult, error) {
+		return CommandResult{Stdout: []byte(`{"ok":true}`)}, nil
+	}}
+	done := h.run(Options{Action: ActionUninstall, Purge: true})
+	requireOK(t, done)
+	if exists(h.env.P("/home/alice/.defenseclaw")) || exists(h.env.P("/home/bob/.defenseclaw/session-facts.json")) ||
+		!exists(h.env.P("/home/bob/.defenseclaw/notes.txt")) || !exists(h.env.P("/srv/elsewhere.json")) {
+		t.Fatalf("purge left the cache, removed other files or followed a symlink; changes %v", done.Changes)
+	}
+	if got := messagesOf(done.Warnings, codePerUserState); !strings.Contains(got, "user carol") {
+		t.Fatalf("the symlinked cache of carol is not reported: %q", got)
 	}
 }
 
@@ -324,6 +513,10 @@ func TestPurgeAfterDefaultUninstallNamesTheAccountsItCannotClean(t *testing.T) {
 	if !exists(h.env.P(filepath.Join(h.env.Layout.BinDir, binGateway))) {
 		t.Fatal("the purge removed the binaries the rpm still owns")
 	}
+	// The rpm ships the managed OpenCode plugin too (GAP-0763).
+	if !exists(h.env.P(enterprisepolicy.OpenCodeManagedPluginPath(h.env.Layout))) {
+		t.Fatal("the uninstall removed the OpenCode plugin the rpm still owns")
+	}
 	if !exists(h.env.P("/home/alice/.defenseclaw")) {
 		t.Fatal("the purge deleted a home folder without an enrollment record")
 	}
@@ -348,5 +541,22 @@ func TestPurgeAfterKeepStateUninstallPurgesTheAccounts(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(purge.Changes, "\n"), "per-user data of user alice") {
 		t.Fatalf("the purge does not name the account it purged: %v", purge.Changes)
+	}
+}
+
+// GAP-0516: a plain uninstall that removes the service account but leaves
+// the package installed turns off the package's tmpfiles.d entries, which
+// name that account; the next install removes the override.
+func TestPackageKeptUninstallTurnsOffTheTmpfilesEntriesUntilTheNextInstall(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	h.env.Runner = packageOwnedRunner{Runner: h.runner, passwd: "root:x:0:0:root:/root:/bin/bash\n"}
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	if got := h.read(packageTmpfilesOverride); !strings.HasPrefix(got, packageTmpfilesOverrideMarker) {
+		t.Fatalf("no tmpfiles.d override after the uninstall: %q", got)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	if exists(h.env.P(packageTmpfilesOverride)) {
+		t.Fatal("the next install kept the tmpfiles.d override")
 	}
 }

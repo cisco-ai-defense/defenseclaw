@@ -87,6 +87,31 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	addManagedWindowsAnswer(root, "setup", func(args []string) error {
 		return managedWindowsSetupRefusal(where, args)
 	})
+	for _, verb := range []string{"set", "unset"} {
+		verb := verb
+		addManagedWindowsAnswer(configCmd, verb, func([]string) error {
+			return withExitCode(fmt.Errorf("This device is managed: change config.yaml in the admin config (MDM or management plane); config %s did not change it", verb), 3)
+		})
+	}
+	for _, kind := range []string{"skill", "mcp", "plugin", "tool"} {
+		kind := kind
+		addManagedWindowsAnswer(root, kind, func(args []string) error {
+			if len(args) > 0 && args[0] == "scan" && kind != "tool" {
+				// A scan changes no policy; the refusal said asset_policy
+				// was set in the admin config (GAP-0975).
+				target := "<path>"
+				if kind == "mcp" {
+					target = "<url>"
+				}
+				return withExitCode(fmt.Errorf("This device is managed: scan a %s with `defenseclaw scan %s %s`, "+
+					"which runs the gateway's %s scanner", kind, kind, target, kind), 3)
+			}
+			if len(args) == 0 || (args[0] != "block" && args[0] != "allow" && args[0] != "unblock") {
+				return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane)", kind), 3)
+			}
+			return withExitCode(fmt.Errorf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it", kind, kind, args[0]), 3)
+		})
+	}
 }
 
 // addManagedWindowsAnswer adds a hidden root command name that only returns
@@ -298,8 +323,12 @@ var managedHostCurrentAccount = func() string {
 // cannot find the file" error with the managed-computer answer when a user
 // runs a per-user command (for example `status`) on a managed Windows
 // computer, which never has a per-user config.
+// describeManagedConfigLoadError names the accounts in a managed config
+// trust refusal; set on Windows (GAP-0925), the identity elsewhere.
+var describeManagedConfigLoadError = func(err error) error { return err }
+
 func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
-	if err == nil || !errors.Is(err, fs.ErrNotExist) || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+	if err == nil || (!errors.Is(err, fs.ErrNotExist) && !errors.Is(err, fs.ErrPermission)) || managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
 		return err
 	}
 	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" {
@@ -325,6 +354,10 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 		if command != "this command" {
 			asAdmin = fmt.Sprintf("run `sudo %s %s` or ", managedHostGatewayCommand(), command)
 		}
+		if errors.Is(err, fs.ErrPermission) {
+			return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s); `%s` needs administrator access to the managed configuration: run `sudo %s %s`",
+				record, command, managedHostGatewayCommand(), command)
+		}
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
 			"per-user gateway to check; an administrator can %scheck the managed deployment with "+
 			"`sudo %s enterprise %s status`. Nothing was changed.",
@@ -338,9 +371,21 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 // each listed user through hooks, so `setup kiro` says so.
 func managedWindowsSetupRefusal(where string, args []string) error {
 	detail := "Rotating the credentials of a managed Windows deployment is not available yet. "
-	if len(args) > 0 && strings.EqualFold(strings.TrimSpace(args[0]), "kiro") {
+	sub := ""
+	if len(args) > 0 {
+		sub = strings.ToLower(strings.TrimSpace(args[0]))
+	}
+	switch sub {
+	case "kiro":
 		detail = "On a managed Windows computer the guardian enrolls Kiro for each user when your administrator " +
 			"lists it in the deployment (guardrail.connectors.kiro); the ACP guard stays available for editors that start Kiro over ACP. "
+	case "trusted-paths":
+		// The MCP scanner printed this command as the remedy for an
+		// untrusted npx or uvx, and the refusal spoke of credentials
+		// (GAP-0779).
+		detail = "There is no per-user trusted-paths list here: the scanners start an MCP launcher (npx, uvx) installed for all " +
+			"users in a folder that only administrators can change, such as one under Program Files (Node.js installs npx in " +
+			"C:\\Program Files\\nodejs), so an administrator installs it there. "
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so per-user setup "+
 		"commands are not available; your administrator manages its connectors and credentials. "+
@@ -390,6 +435,43 @@ func refuseGatewayLifecycleOnManagedHost() error {
 		return nil
 	}
 	return managedHostUnixRefusal(path)
+}
+
+// pinManagedUnixGatewayInputs makes the managed unix gateway service read
+// the administrator's config and data directory of the standalone layout,
+// whatever its environment names (GAP-0473). A unit drop-in that set
+// DEFENSECLAW_CONFIG or DEFENSECLAW_HOME pointed the gateway at another
+// config, so it enforced a policy the lifecycle never applied while status
+// and verify stayed green. It runs after refuseGatewayLifecycleOnManagedHost
+// let the caller through, and only for the managed_enterprise service on a
+// host with a trusted standalone descriptor; warn gets one line per value
+// it replaced.
+func pinManagedUnixGatewayInputs(warn io.Writer) {
+	if runtime.GOOS == "windows" || !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		return
+	}
+	if _, present := managedHostUnixRecord(nil); !present {
+		return
+	}
+	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	if err != nil {
+		return
+	}
+	for _, pin := range []struct{ key, value string }{
+		{managed.ConfigPathEnv, layout.ConfigPath},
+		{"DEFENSECLAW_HOME", layout.DataDir},
+		{managed.EnterpriseProfileEnv, managed.ProfileStandalone},
+		{managed.HookGuardianAuthorizationDirEnv, layout.GuardianAuthDir},
+	} {
+		got := strings.TrimSpace(os.Getenv(pin.key))
+		if got == pin.value || (filepath.IsAbs(got) && filepath.Clean(got) == pin.value) {
+			continue
+		}
+		if got != "" && warn != nil {
+			fmt.Fprintf(warn, "[defenseclaw] the managed gateway ignores %s=%s from its environment and uses %s\n", pin.key, got, pin.value)
+		}
+		_ = os.Setenv(pin.key, pin.value)
+	}
 }
 
 // managedHostServiceUID returns the uid of the standalone gateway service
@@ -448,6 +530,20 @@ func managedHostUnixRefusal(record string) error {
 	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the per-user gateway is disabled; "+
 		"an administrator can check the managed deployment with `sudo %s enterprise %s status`", record, gateway, platform)
+}
+
+// managedStandardUserGatewayRefusal prevents a managed account's diagnostic
+// command from loading an unrelated ~/.defenseclaw/config.yaml.
+func managedStandardUserGatewayRefusal() error {
+	record, present := managedHostUnixRecord(nil)
+	if !present || managedHostCallerUID() == 0 {
+		return nil
+	}
+	serviceUID, known := managedHostServiceUID(record)
+	if known && managedHostCallerUID() == serviceUID {
+		return nil
+	}
+	return managedHostUnixRefusal(record)
 }
 
 // managedHostServiceRestartCommand restarts the standalone gateway service:

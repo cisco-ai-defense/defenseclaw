@@ -147,6 +147,25 @@ def test_checker_upgrade_gate_options(tmp_path: Path) -> None:
         "--allow-warning", "lifecycle_test_fault", "--allow-warning", "rolled_back",
     )
     assert result.returncode == 0, result.stderr
+    # On Linux the package hold keeps the apply trigger stopped while the
+    # postinstall writes the result of the drill (GAP-0268).
+    held = dict(drill, services=[*drill["services"], {"name": "defenseclaw-enterprise-apply.path", "kind": "path",
+                                                       "state": "inactive/dead", "required": True}])
+    drill_args = ("--expect-error", "lifecycle_test_fault", "--allow-warning", "lifecycle_test_fault",
+                  "--allow-warning", "rolled_back", "--ready")
+    assert "required service defenseclaw-enterprise-apply.path" in _check(tmp_path, held, *drill_args).stderr
+    assert _check(tmp_path, held, *drill_args, "--held-service", "defenseclaw-enterprise-apply.path").returncode == 0
+    failed_rollback = dict(
+        drill,
+        errors=[*drill["errors"], {"code": "rollback_failed", "message": "gateway did not restart"}],
+        readiness={key: False for key in drill["readiness"]},
+    )
+    result = _check(
+        tmp_path, failed_rollback, "--expect-error", "lifecycle_test_fault",
+        "--allow-warning", "lifecycle_test_fault", "--allow-warning", "rolled_back",
+    )
+    assert result.returncode == 1, result.stderr
+    assert "unexpected error rollback_failed" in result.stderr
     # The upgrade itself must report an applied policy from a newer config generation.
     upgraded = _result(policy={"effective_digest": "sha256:ab", "config_generation": 2, "applied": True})
     assert _check(tmp_path, upgraded, *FULL, "--policy-applied", "--config-generation-above", "1").returncode == 0
@@ -178,9 +197,38 @@ def test_upgrade_config_check_requires_every_v8_value_kept_or_recorded(tmp_path:
 
     kept = "config_version: 9\nguardrail:\n  mode: observe\n  connectors:\n    codex: {enabled: true}\nadmission:\n  skill:\n    actions: {high: block}\n"
     assert run(kept).returncode == 0, run(kept).stderr
+    moved_changed = run(kept.replace("actions: {high: block}", "actions: {high: allow}"))
+    assert moved_changed.returncode == 1
+    assert "skill_actions.high.install moved to admission.skill.actions.high" in moved_changed.stderr
+    record["moved"].append({"from": "update_check", "to": "update.check", "value": False})
+    (tmp_path / "v8.yaml").write_bytes(before + b"update_check: true\n")
+    record["source_sha256"] = hashlib.sha256((tmp_path / "v8.yaml").read_bytes()).hexdigest()
+    (tmp_path / "record.json").write_text(json.dumps(record), encoding="utf-8")
+    changed_boolean = run(kept + "update: {check: false}\n")
+    assert changed_boolean.returncode == 1
+    assert "update_check moved to update.check" in changed_boolean.stderr
     changed = run(kept.replace("mode: observe", "mode: action"))
     assert changed.returncode == 1
     assert "  - guardrail.mode changed from 'observe' to 'action'" in changed.stderr.splitlines()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")
+def test_unix_upgrade_lane_applies_v8_to_previous_package(tmp_path: Path) -> None:
+    lane = UNIX_LANE.read_text(encoding="utf-8")
+    writer = re.search(r"^write_admin_config\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    upgrade = re.search(r"^upgrade_lane\(\) \{\n.*?^\}\n", lane, re.MULTILINE | re.DOTALL)
+    assert writer and upgrade
+    assert "write_admin_config" in upgrade.group(0)
+    env = {**os.environ, "stage": str(tmp_path), "data_dir": str(tmp_path / "data"),
+           "vendor_policy_dir": str(tmp_path / "policy"), "upgrade_from": str(tmp_path / "previous.pkg")}
+    # A 0.8.x package reads only version 8 (GAP-0496); a 1.x one gets version 9 (GAP-0510).
+    for previous, want in (("0.8.10", "config_version: 8\n"), ("1.0.0", "config_version: 9\n")):
+        result = subprocess.run(["bash", "-c", writer.group(0) + "\nwrite_admin_config"],
+                                env={**env, "previous_version": previous}, capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stderr
+        text = (tmp_path / "config.yaml").read_text()
+        assert text.startswith(want), (previous, text)
+        assert ("rule_pack: default" in text) == (want == "config_version: 9\n"), text
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shell scripts")

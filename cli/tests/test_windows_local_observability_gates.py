@@ -39,9 +39,9 @@ def test_local_observability_routes_are_available_on_windows(tmp_path: Path) -> 
         url = CliRunner().invoke(local_observability, ["url", "--json"], obj=app)
         env = CliRunner().invoke(local_observability, ["env", "--json"], obj=app)
     assert url.exit_code == 0, url.output
-    assert json.loads(url.output)["otlp_endpoint"] == "127.0.0.1:4317"
+    assert json.loads(url.stdout)["otlp_endpoint"] == "127.0.0.1:4317"
     assert env.exit_code == 0, env.output
-    assert json.loads(env.output)["OTEL_EXPORTER_OTLP_PROTOCOL"] == "grpc"
+    assert json.loads(env.stdout)["OTEL_EXPORTER_OTLP_PROTOCOL"] == "grpc"
     assert "unsupported" not in (url.output + env.output).lower()
 
 

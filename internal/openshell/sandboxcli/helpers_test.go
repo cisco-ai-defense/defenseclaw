@@ -1236,13 +1236,6 @@ func runAnswers(ta *testApp, state, log string) {
 	}
 }
 
-func ranScript(ta *testApp, script string) bool {
-	return slices.ContainsFunc(ta.stream.runs, func(argv []string) bool {
-		cmd := sandboxCommand(argv)
-		return len(cmd) > 2 && cmd[0] == "sh" && cmd[2] == script
-	})
-}
-
 // execSession splits a `sandbox exec` command into its session id and the
 // user's command, without the session shell and the sandbox-env wrapper.
 func execSession(cmd []string) (string, []string) {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -170,5 +171,55 @@ func TestReadinessIdentityMismatchNamesForeignHolder(t *testing.T) {
 	other := errors.New("gateway did not become ready before timeout")
 	if got := explainForeignListenerAtReadiness(c, other); got != other {
 		t.Fatalf("unrelated readiness error changed: %v", got)
+	}
+}
+
+// GAP-0130: the installer's pre-flight refuses an API port another account's
+// process holds before it builds or swaps anything, but never calls this
+// account's own older gateway foreign.
+func TestCheckAPIPortRefusesOnlyAnotherAccountsListener(t *testing.T) {
+	oldHolder, oldAnswers := gatewayPortHolder, gatewayPortAnswers
+	t.Cleanup(func() { gatewayPortHolder, gatewayPortAnswers = oldHolder, oldAnswers })
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("gateway:\n  api_port: 19321\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holder := func(h daemon.PortHolder, err error) {
+		gatewayPortHolder = func(string, int) (daemon.PortHolder, error) { return h, err }
+	}
+	gatewayPortAnswers = func(string) bool { return true }
+
+	holder(daemon.PortHolder{PID: 77, UID: os.Getuid()}, nil)
+	if err := checkAPIPort(path, false); err != nil {
+		t.Fatalf("this account's own gateway refused: %v", err)
+	}
+	holder(daemon.PortHolder{UID: os.Getuid() + 1}, nil)
+	err := checkAPIPort(path, false)
+	if err == nil || !strings.Contains(err.Error(), "127.0.0.1:19321 is held by a process of another account") ||
+		!strings.Contains(err.Error(), "defenseclaw setup gateway --api-port ") ||
+		!strings.Contains(err.Error(), "upgrade again") {
+		t.Fatalf("another account's listener: %v", err)
+	}
+	// GAP-0384: the closing summary of an upgrade that left the gateway
+	// stopped; any listener then is another process's, also where the
+	// holder has no account (Windows).
+	holder(daemon.PortHolder{PID: 4242, UID: -1}, nil)
+	if err := checkAPIPort(path, true); err == nil ||
+		!strings.Contains(err.Error(), "127.0.0.1:19321 is held by PID 4242") ||
+		!strings.Contains(err.Error(), "then start it with: defenseclaw-gateway start") {
+		t.Fatalf("installed wording: %v", err)
+	}
+	holder(daemon.PortHolder{UID: os.Getuid() + 1}, nil)
+	// macOS lsof does not list another account's sockets: an answering port nobody lists is theirs.
+	holder(daemon.PortHolder{UID: -1}, daemon.ErrNoListener)
+	if err := checkAPIPort(path, false); err == nil {
+		t.Fatal("an unlisted listener that answers was not refused")
+	}
+	gatewayPortAnswers = func(string) bool { return false }
+	if err := checkAPIPort(path, false); err != nil {
+		t.Fatalf("a free port refused: %v", err)
+	}
+	if err := checkAPIPort(filepath.Join(t.TempDir(), "missing.yaml"), false); err != nil {
+		t.Fatalf("a missing config refused: %v", err)
 	}
 }

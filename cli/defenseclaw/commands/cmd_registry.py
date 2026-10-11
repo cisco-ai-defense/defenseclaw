@@ -37,7 +37,6 @@ import os
 import re
 import shutil
 import sys
-from dataclasses import asdict
 from typing import Any
 
 import click
@@ -211,6 +210,16 @@ def _find_source(cfg: Config, sid: str) -> RegistrySource:
     raise SystemExit(1)
 
 
+def _require_writable_cfg(app: AppContext, command: str) -> Config:
+    """``_require_cfg`` for a command that changes config.yaml: a managed device
+    refuses it first, with exit 3 (GAP-0052)."""
+    from defenseclaw.enforce.asset_lists import refuse_config_writer_on_managed_device
+
+    cfg = _require_cfg(app)
+    refuse_config_writer_on_managed_device(cfg, f"registry {command}", "registry")
+    return cfg
+
+
 def _require_cfg(app: AppContext) -> Config:
     """Return ``app.cfg`` after asserting it is loaded.
 
@@ -243,10 +252,11 @@ def _emit_json(payload: Any) -> None:
     click.echo(_json.dumps(payload, indent=2, sort_keys=True))
 
 
-# GAP-2422: the gateway reads asset_policy only when it starts (its config
-# reload refuses the change), so agent hooks kept the old registry rules until
-# a manual restart. A registry command that changed asset_policy restarts a
-# running gateway on its way out, as `policy activate` does.
+# The gateway reloads asset_policy hot from the new configuration generation
+# (spec 2.4), so a registry change reaches agent hooks without a restart
+# (GAP-0056). A Secure Client gateway keeps the start-time asset policy of
+# main (issue #1092), so there a registry command that changed asset_policy
+# still restarts a running gateway on its way out (GAP-2422).
 _JSON_OUTPUT_KEY = "defenseclaw.registry.json_output"
 
 
@@ -259,10 +269,15 @@ def _apply_asset_policy_to_gateway(ctx: click.Context, app: AppContext, before: 
     if _asset_policy_fingerprint(app.cfg) == before:
         return
     from defenseclaw.commands import cmd_policy, cmd_setup
+    from defenseclaw.enforce import asset_lists
 
     if not cmd_policy._gateway_pid_alive(app):
         return  # a stopped gateway loads the saved policy when it starts
     quiet = bool(ctx.meta.get(_JSON_OUTPUT_KEY))
+    if not asset_lists.is_secure_client(app.cfg):
+        if not quiet:
+            ux.ok("The running gateway applies the new asset policy now, without a restart.")
+        return
     # --json keeps stdout a single JSON document; the restart progress goes to stderr.
     with contextlib.redirect_stdout(sys.stderr) if quiet else contextlib.nullcontext():
         restarted = cmd_setup._restart_defense_gateway(app.cfg.data_dir, start_if_stopped=False)
@@ -285,8 +300,6 @@ def _source_to_dict(source: RegistrySource) -> dict[str, Any]:
         "content": source.content,
         "auth_env": source.auth_env,
         "enabled": source.enabled,
-        "auto_sync": source.auto_sync,
-        "sync_interval_hours": source.sync_interval_hours,
         "last_sync": source.last_sync,
         "last_status": source.last_status,
     }
@@ -327,9 +340,6 @@ def registry(ctx: click.Context) -> None:
 @click.option("--auth-env", default=None,
               help="ENV VAR NAME holding a bearer token (never the literal token)")
 @click.option("--enabled/--disabled", default=True, help="Mark source enabled or disabled")
-# Scheduled sync is not implemented: the options are hidden and refused (GAP-2209).
-@click.option("--auto-sync/--no-auto-sync", default=None, hidden=True)
-@click.option("--sync-interval-hours", type=int, default=None, hidden=True)
 @click.option("--non-interactive", is_flag=True,
               help="Skip prompts; required flags must be present")
 @click.option("--json", "emit_json", is_flag=True, help="Emit JSON")
@@ -342,8 +352,6 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     content: str | None,
     auth_env: str | None,
     enabled: bool,
-    auto_sync: bool | None,
-    sync_interval_hours: int | None,
     non_interactive: bool,
     emit_json: bool,
 ) -> None:
@@ -369,8 +377,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
     \b
       defenseclaw registry add clawhub --kind clawhub --content skill --non-interactive
     """
-    _refuse_scheduled_sync(auto_sync, sync_interval_hours)
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "add")
 
     if not non_interactive:
         if not source_id:
@@ -455,15 +462,6 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
 _WIZARD_SYNC_PROMPT_KEY = "defenseclaw.registry.wizard_offers_sync"
 
 
-def _refuse_scheduled_sync(auto_sync: bool | None, sync_interval_hours: int | None) -> None:
-    """Refuse --auto-sync / --sync-interval-hours: nothing runs a schedule yet (GAP-2209)."""
-    if auto_sync or sync_interval_hours is not None:
-        raise click.UsageError(
-            "scheduled sync is not available yet. Run 'defenseclaw registry sync "
-            "<id>' (or 'registry sync --all' from cron) to sync a source."
-        )
-
-
 def _print_sync_hint(sid: str) -> None:
     ux.subhead(
         f"Run `defenseclaw registry sync {sid}` to fetch + scan + promote entries."
@@ -482,8 +480,6 @@ def _print_sync_hint(sid: str) -> None:
 @click.option("--clear-auth-env", is_flag=True, help="Drop auth_env back to empty")
 @click.option("--enabled/--disabled", default=None,
               help="Toggle the enabled flag")
-@click.option("--auto-sync/--no-auto-sync", default=None, hidden=True)
-@click.option("--sync-interval-hours", type=int, default=None, hidden=True)
 @click.option("--non-interactive", is_flag=True, help="Never prompt; fail if a required value is missing.")
 @click.option("--json", "emit_json", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
@@ -496,8 +492,6 @@ def edit_cmd(  # noqa: PLR0913
     auth_env: str | None,
     clear_auth_env: bool,
     enabled: bool | None,
-    auto_sync: bool | None,
-    sync_interval_hours: int | None,
     non_interactive: bool,
     emit_json: bool,
 ) -> None:
@@ -513,13 +507,12 @@ def edit_cmd(  # noqa: PLR0913
     holds. Use the bare form (no flags) when you want to re-confirm
     every field.
     """
-    _refuse_scheduled_sync(auto_sync, sync_interval_hours)
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "edit")
     source = _find_source(cfg, source_id)
     before = {field: getattr(source, field) for field in _EDIT_AUDIT_FIELDS}
 
     any_mutating = any(v is not None for v in (
-        kind, content, url, auth_env, enabled, auto_sync, sync_interval_hours,
+        kind, content, url, auth_env, enabled,
     )) or clear_auth_env
 
     if not non_interactive and not any_mutating:
@@ -554,8 +547,6 @@ def edit_cmd(  # noqa: PLR0913
         source.auth_env = _validate_auth_env(auth_env)
     if enabled is not None:
         source.enabled = enabled
-    if auto_sync is False:
-        source.auto_sync = False
 
     # Validate the post-edit (kind, url) pair so flipping an
     # ``http_yaml`` source to ``kind=file`` without re-supplying the
@@ -588,7 +579,7 @@ def edit_cmd(  # noqa: PLR0913
 
 
 # The fields `registry edit` can change, in the order its audit row names them.
-_EDIT_AUDIT_FIELDS = ("kind", "content", "url", "auth_env", "enabled", "auto_sync", "sync_interval_hours")
+_EDIT_AUDIT_FIELDS = ("kind", "content", "url", "auth_env", "enabled")
 
 
 def _registry_edit_details(source: RegistrySource, before: dict[str, Any]) -> str:
@@ -777,7 +768,7 @@ def remove_cmd(
     are removed from config too — the registry source is the source
     of truth for those entries.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "remove")
     source = _find_source(cfg, source_id)
     sid = source.id
 
@@ -971,7 +962,7 @@ def sync_cmd(  # noqa: PLR0913
     prints a one-line notice for each entry it skipped.
     Remote (URL) MCP entries start no local process and are always scanned.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "sync")
 
     callback: ScanCallback | None = (
         _make_scan_callback(app, allow_private=allow_private, scan_stdio=scan_stdio)
@@ -1741,7 +1732,7 @@ def _do_manual_verdict(
     implementation would silently swallow a fetch failure here and
     leave the operator believing the rule had landed.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, action_label)
     source = _find_source(cfg, source_id)
     entry_name, entry_type = _split_typed_name(cfg, source, entry_name, entry_type)
     entry_type = _resolve_entry_type(cfg, source, entry_name, entry_type)
@@ -1879,7 +1870,7 @@ def require_cmd(
     (``asset_policy.enabled=true`` and ``mode=action``). --enforce turns
     both on in the same save; --no-enforce sets ``mode=observe`` again.
     """
-    cfg = _require_cfg(app)
+    cfg = _require_writable_cfg(app, "require")
     asset = asset_type.lower()
     connector = (connector or "").strip()
     if enforce and not enabled:
@@ -2094,8 +2085,6 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
         content=content,
         auth_env=auth_env or None,
         enabled=True,
-        auto_sync=None,
-        sync_interval_hours=None,
         non_interactive=True,
         emit_json=False,
     )
@@ -2119,15 +2108,3 @@ def wizard_cmd(ctx: click.Context, app: AppContext) -> None:
 # ---------------------------------------------------------------------------
 # Helpers exposed for tests
 # ---------------------------------------------------------------------------
-
-def _config_dump_for_test(cfg: Config) -> dict[str, Any]:
-    """Test helper — return the config slice the registry CLI mutates."""
-    return {
-        "registries": [_source_to_dict(s) for s in cfg.registries.sources],
-        "asset_policy.skill.registry": [
-            asdict(r) for r in cfg.asset_policy.skill.registry
-        ],
-        "asset_policy.mcp.registry": [
-            asdict(r) for r in cfg.asset_policy.mcp.registry
-        ],
-    }

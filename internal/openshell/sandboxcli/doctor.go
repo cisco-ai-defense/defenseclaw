@@ -594,9 +594,6 @@ func (a *App) RunDoctor(ctx context.Context, o DoctorOptions) error {
 		}
 		restarted := false
 		for _, out := range outcomes {
-			if out.ID == openshell.CheckIDBindMounts && out.Applied {
-				a.dropCopyMode(o.Output != OutputJSON)
-			}
 			if c := rep.Get(out.ID); out.Applied && c != nil && c.Fix != nil && c.Fix.RestartsGateway {
 				restarted = true
 			}
@@ -655,23 +652,6 @@ func (a *App) waitReconnect(ctx context.Context) {
 		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait || a.Sleep(ctx, poll) != nil {
 			return
 		}
-	}
-}
-
-// dropCopyMode removes the openshell.workdir.mode copy that a setup
-// without bind mounts recorded, once a fix allows them, as setup does when
-// they are allowed there: the pack decides again.
-func (a *App) dropCopyMode(say bool) {
-	if a.Cfg == nil || a.Cfg.OpenShell.Workdir.Mode != config.OpenShellWorkdirCopy {
-		return
-	}
-	if err := a.patchConfig(map[string]any{"openshell.workdir.mode": ""}); err != nil {
-		a.warnErr("bind mounts are on, but openshell.workdir.mode stays copy, so runs still work on a copy: " + err.Error())
-		return
-	}
-	a.Cfg.OpenShell.Workdir.Mode = ""
-	if say {
-		a.ok("openshell.workdir.mode copy removed from " + a.tildePath(a.ConfigPath) + " now that bind mounts are on")
 	}
 }
 

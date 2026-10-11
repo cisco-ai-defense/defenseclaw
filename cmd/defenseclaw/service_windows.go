@@ -223,7 +223,6 @@ func (service *defenseClawWindowsService) Execute(
 			return false, 0
 		case request, ok := <-requests:
 			if !ok {
-				stopRequested = true
 				stopOnce.Do(cancel)
 				return false, 0
 			}

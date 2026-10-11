@@ -60,7 +60,7 @@ def _llm_to_override(llm: LLMConfig | None) -> dict | None:
     if api_key:
         override["api_key"] = api_key
     if llm.base_url:
-        override["api_base"] = llm.base_url
+        override["api_base"] = llm.request_base_url()
     if llm.provider:
         override["provider"] = llm.provider
     return override or None
@@ -164,6 +164,7 @@ class PluginScannerWrapper:
             provider=str(override.get("provider") or ""),
             api_key=str(override.get("api_key") or ""),
             base_url=str(override.get("api_base") or ""),
+            bedrock=self._llm.bedrock if self._llm else None,
         )
         llm_ready = model_configured and llm_analyzer_ready(readiness_llm)
         if use_llm is None:

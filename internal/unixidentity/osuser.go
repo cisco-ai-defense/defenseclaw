@@ -91,7 +91,7 @@ func (r *OSUserResolver) LookupUID(uid int) (Account, error) {
 
 // LookupGroup resolves by name.
 func (r *OSUserResolver) LookupGroup(name string) (Group, error) {
-	if err := validName(name); err != nil {
+	if err := validGroupName(name); err != nil {
 		return Group{}, err
 	}
 	g, err := user.LookupGroup(name)
@@ -123,7 +123,7 @@ func (r *OSUserResolver) GroupIDs(account Account) ([]int, error) {
 	if err != nil {
 		return nil, translateUserErr(err)
 	}
-	raw, err := u.GroupIds()
+	raw, err := AccountGroupIDs(r.ctx, u)
 	if err != nil {
 		return nil, err
 	}
@@ -141,6 +141,17 @@ func (r *OSUserResolver) GroupIDs(account Account) ([]int, error) {
 	}
 	sort.Ints(ids)
 	return withPrimary(ids, account.GID), nil
+}
+
+// AccountGroupIDs lists the gids of an OS account, its primary group
+// included, as decimal strings: os/user's GroupIds, checked by the platform
+// where os/user cannot be trusted with a long membership. On macOS os/user
+// lists into a buffer of 256 groups and getgrouplist does not report how many
+// it holds, so an account in more fails (a mobile Active Directory account) or
+// comes back cut at 256 (a local one) without an error (GAP-0201).
+func AccountGroupIDs(ctx context.Context, account *user.User) ([]string, error) {
+	ids, err := account.GroupIds()
+	return platformAccountGroupIDs(ctx, runTrustedCommand, account, ids, err)
 }
 
 // ListUsers enumerates local accounts; directory accounts are not listed.

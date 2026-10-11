@@ -1,0 +1,39 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "'/opt/defenseclaw/bin/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'SessionStart' --hook-surface vscode-local",
+        "timeout": 30
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "'/opt/defenseclaw/bin/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'UserPromptSubmit' --hook-surface vscode-local",
+        "timeout": 30
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "'/opt/defenseclaw/bin/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PreToolUse' --hook-surface vscode-local",
+        "timeout": 30
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "'/opt/defenseclaw/bin/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'PostToolUse' --hook-surface vscode-local",
+        "timeout": 30
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "'/opt/defenseclaw/bin/defenseclaw-hook' hook --connector copilot --enterprise-managed --event 'Stop' --hook-surface vscode-local",
+        "timeout": 30
+      }
+    ]
+  }
+}

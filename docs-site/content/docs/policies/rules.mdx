@@ -42,7 +42,7 @@ defenseclaw guardrail use-pack --clear --connector codex # back to the global pa
 defenseclaw guardrail list-packs                         # who enforces which
 ```
 
-A global `use-pack` removes the per-connector `rule_pack` entries and says which ones it removed. Profile scopes have no `use-pack` option; set them with `defenseclaw config set guardrail.profiles.contractors.rule_pack strict`. The most specific scope wins: profile connector, then profile, then connector, then global. Pack names are lower case letters, digits, `-` and `_`, at most 64 characters.
+A global `use-pack` removes the per-connector `rule_pack` entries and says which ones it removed. It also drops `enable`, `disable` and `severity_overrides` IDs that the new pack does not have (protection packs layered on it count), in the same save, and says which. That is the way out when a pack directory was deleted: `defenseclaw guardrail use-pack default` saves a valid config even though the rules the old pack defined are still named. Profile scopes have no `use-pack` option; set them with `defenseclaw config set guardrail.profiles.contractors.rule_pack strict`. The most specific scope wins: profile connector, then profile, then connector, then global. Pack names are lower case letters, digits, `-` and `_`, at most 64 characters.
 
 ## Add your own pack
 
@@ -64,13 +64,23 @@ A custom pack is a directory of rule files that you review and pin. `config.yaml
       - id: ACME-INTERNAL-DUMP
         tool_call_only: true
         pattern: (?i)\bpg_dump\b.{0,200}\bacme-prod\b
+        expression: f.commands.exists(c, c.argv_complete && c.program == 'pg_dump' && 'acme-prod' in c.argv)
         title: "Dump of the acme-prod database"
         severity: HIGH
         confidence: 0.9
         tags: [acme, database]
     ```
 
-    The [CEL rule guide](/docs/policies/cel/authoring) has the full rule shape, including `expression` for structured tool-call rules.
+    A pattern-only rule can block matching prompts and content, but a tool-call
+    pattern match is detection-only: it alerts and never blocks, regardless of
+    `block_at`. For a tool-call block, use an `expression` over complete action
+    facts as above. `tool_call_only` limits where the pattern runs; it does not
+    make the pattern enforceable. The [CEL rule guide](/docs/policies/cel/authoring)
+    explains the available facts and proof requirements.
+    A 0.8.x rule blocked a tool call with its pattern alone. The upgrade to 1.0
+    gives each of your rules whose pattern is a plain literal an expression, and
+    names the others so you can add one; see the
+    [v8 to v9 migration guide](/docs/reference/migrate-v9).
   </Step>
   <Step>
     **Validate it.** The gateway's own loader checks the whole directory offline and prints the digest:
@@ -83,7 +93,8 @@ A custom pack is a directory of rule files that you review and pin. `config.yaml
     Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/acme-rules"
       rules: 240/244 enabled across 8 files
       components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
-      digest: 4201916150bb32dd7895b604c2f9b36a9bbe0d09d14a93658a5f63179d9f4454
+      digest: <compiled pack digest>
+      files digest: <SHA-256 of the pack files>
     ```
 
     Your counts and digest will differ from these. See [Validate rule packs](/docs/policies/rulepack-validation) for the exit codes and the `--json` form.
@@ -103,7 +114,7 @@ A custom pack is a directory of rule files that you review and pin. `config.yaml
       custom_packs:
         acme-rules:
           path: /home/alice/.defenseclaw/policies/guardrail/acme-rules
-          digest: sha256:4201916150bb32dd7895b604c2f9b36a9bbe0d09d14a93658a5f63179d9f4454
+          digest: sha256:<files digest>
     ```
 
     `use-pack` takes a pack name under `~/.defenseclaw/policies/guardrail/` or a directory path (`./NAME` for a folder in the current directory). Add `--connector X` to select the pack for one connector only.
@@ -123,7 +134,7 @@ On a managed host the Python CLI is not installed. Validate with `defenseclaw-ga
 
 ### What the digest covers
 
-The digest is the SHA-256 of the loaded pack: its rules, judge files, suppressions, sensitive tools and local patterns, with the compiled baseline filled in for any component your directory leaves out. Comments, key order and the pack's location do not change it, and any change to a rule, a pattern or a severity does. The optional `defenseclaw-pack.json` posture file is read separately and is not part of the digest. The config format is `sha256:` followed by the 64 hex characters that `validate-pack` prints.
+The `digest:` line describes the loaded pack after compilation. The `files digest:` line is the pin in `guardrail.custom_packs.NAME.digest`: it hashes the pack files byte for byte. Comments, key order, line endings and a UTF-8 BOM change the files digest even when the loaded rules stay the same. The config format is `sha256:` followed by the 64 hex characters on the `files digest:` line.
 
 ### Change a pinned pack
 
@@ -143,14 +154,13 @@ defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/acme-rules
 defenseclaw guardrail use-pack acme-rules-2
 ```
 
-The second re-pins the edited directory. `use-pack` validates it again and writes its new digest:
+The second re-pins the edited directory in place. `use-pack` validates the directory, writes its new digest to `guardrail.custom_packs`, and runs even while the old digest makes `config.yaml` fail validation:
 
 ```bash
-defenseclaw guardrail validate-pack ~/.defenseclaw/policies/guardrail/acme-rules
-defenseclaw guardrail use-pack acme-rules
+defenseclaw guardrail use-pack ~/.defenseclaw/policies/guardrail/acme-rules
 ```
 
-`use-pack` runs while the stale pin fails the config check, which stops the other `guardrail` commands; `use-pack default` switches back to the default pack instead.
+The running gateway applies the new digest on its next reload; nothing is restarted. To pin a digest yourself, run `defenseclaw guardrail validate-pack` on the directory and write its `files digest:` value with `defenseclaw config set guardrail.custom_packs.acme-rules.digest sha256:<files digest>`.
 
 ## Customise a pack with guardrail.rules
 
@@ -186,7 +196,7 @@ guardrail:
 | `disable` | Turns off rules, by rule ID. |
 | `severity_overrides` | Sets a rule's severity: `LOW`, `MEDIUM`, `HIGH` or `CRITICAL`. |
 | `suppressions` | Drops [LLM judge](/docs/policies) findings. Each entry has an `id` that is unique in the pack and the config, a `finding_pattern` (matched against the whole finding ID), an optional `entity_pattern` (matched against the reported text; left out, it matches every value) and a required `reason`. |
-| `sensitive_tools` | Adds a tool to the pack's sensitive-tool list, or changes an existing one: `result_inspection`, `judge_result` and `min_entities_for_alert`. |
+| `sensitive_tools` | Adds a tool to the pack's sensitive-tool list, or changes an existing one. `name` is the tool name the agent reports. With `result_inspection: true`, a result that carries at least `min_entities_for_alert` distinct sensitive values (default 1) raises a `tool-result-pii-alert` alert on every connector. It shows in `defenseclaw alerts` and the Alerts panel with the severity of the findings, and goes to the webhooks that accept `guardrail` events. The values are counted from the rule matches, so an address that two rules match counts once and the LLM judge being on or off does not change the count; the row carries the count and never the matched text. `judge_result` also sends the result to the LLM judge, for OpenClaw and ZeptoClaw tool results. |
 
 Inside one layer, the order is protections, then `enable`, `disable`, `severity_overrides`, `suppressions` and `sensitive_tools`. Suppressions never silence a regex or CEL rule finding; they act on the judge only, as the [suppression cookbook](/docs/policies/suppression-cookbook) explains.
 
@@ -198,14 +208,14 @@ Most keys have a command that edits them through the config writer (`sensitive_t
 
 | Command | Writes |
 | --- | --- |
-| `defenseclaw guardrail rule disable RULE_ID` | `guardrail.rules.disable` |
-| `defenseclaw guardrail rule enable RULE_ID` | `guardrail.rules.enable`, and removes the ID from `disable` in the same scope |
+| `defenseclaw guardrail rule disable RULE_ID` | `guardrail.rules.disable`, and removes the ID from `enable` in the same scope. When the pack already ships the rule off, it only removes the `enable` entry |
+| `defenseclaw guardrail rule enable RULE_ID` | `guardrail.rules.enable`, and removes the ID from `disable` in the same scope. When the pack ships the rule on, it only removes the `disable` entry, so a disable followed by an enable leaves the config as it was |
 | `defenseclaw guardrail rule severity RULE_ID high` | `guardrail.rules.severity_overrides` (`critical`, `high`, `medium`, `low`; `default` removes the override) |
 | `defenseclaw guardrail suppress add ID --finding PATTERN --entity PATTERN --reason TEXT` | `guardrail.rules.suppressions` (`--finding` and `--reason` are required) |
 | `defenseclaw guardrail suppress remove ID` | removes that suppression |
 | `defenseclaw guardrail protection list` | read only: the opt-in packs and where they are on |
 | `defenseclaw guardrail protection enable NAME` | `guardrail.rules.protections` |
-| `defenseclaw guardrail protection disable NAME` | removes the pack from `protections` |
+| `defenseclaw guardrail protection disable NAME` | removes the pack from this scope's `protections`; an inherited pack must be disabled at the wider scope |
 
 ```bash
 defenseclaw guardrail rule disable CMD-REVSHELL-NC

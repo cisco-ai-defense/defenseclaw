@@ -13,7 +13,10 @@
 package managed
 
 import (
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -369,4 +372,196 @@ func unusedManagedTestDriveLetter() (string, bool) {
 		return "", false
 	}
 	return `O:`, true
+}
+
+// GAP-0672: the rule-pack check walks into the pack: the manifest and a file
+// in the rules folder are checked, not only the pack folder and its parents,
+// and the first refusal stops the walk.
+func TestWalkWindowsRulePackTreeChecksEveryFileInThePack(t *testing.T) {
+	pack := t.TempDir()
+	rules := filepath.Join(pack, "rules")
+	if err := os.MkdirAll(rules, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{filepath.Join(pack, "defenseclaw-pack.json"), filepath.Join(rules, "markers.yaml")} {
+		if err := os.WriteFile(name, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var checked []string
+	err := walkWindowsRulePackTree(pack, func(path string, isDir bool) error {
+		checked = append(checked, path)
+		if path == filepath.Join(rules, "markers.yaml") {
+			return &UntrustedPrincipalError{Path: path, SID: "S-1-5-11"}
+		}
+		return nil
+	})
+	var principal *UntrustedPrincipalError
+	if !errors.As(err, &principal) || principal.Path != filepath.Join(rules, "markers.yaml") {
+		t.Fatalf("walk = %v, want the refusal of the rules file", err)
+	}
+	for _, want := range []string{filepath.Join(pack, "defenseclaw-pack.json"), rules} {
+		found := false
+		for _, path := range checked {
+			found = found || path == want
+		}
+		if !found {
+			t.Fatalf("checked %q, want %s among them", checked, want)
+		}
+	}
+}
+
+// GAP-0953: the fix Setup prints for a refused config runs as printed in
+// PowerShell and leaves the folder and the config to SYSTEM and
+// Administrators. A new folder under C:\ on a Windows client edition holds
+// Authenticated Users Modify as its own entry, which /inheritance:r keeps;
+// the old fix failed to parse in PowerShell, kept that entry and, with /T,
+// left the config with an empty DACL.
+func TestDescribeUntrustedSourceFixRunsInPowerShell(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the fixed folder is readable only by SYSTEM and Administrators")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is not available")
+	}
+	root := t.TempDir()
+	folder := filepath.Join(root, "Staging")
+	if err := os.Mkdir(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	daclOf := func(path string) *windows.ACL {
+		t.Helper()
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil || dacl == nil {
+			t.Fatalf("DACL of %s: %v", path, err)
+		}
+		return dacl
+	}
+	clientEdition, err := windows.SecurityDescriptorFromString(
+		"D:P(A;OICI;0x1301bf;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	own, _, err := clientEdition.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(folder, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, own, nil); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(folder, "config.yaml")
+	if err := os.WriteFile(config, []byte("deployment_mode: managed_enterprise\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused := rejectUntrustedWindowsWriteACEs(config, daclOf(config))
+	text, ok := DescribeUntrustedSource("config", config, refused)
+	if !ok {
+		t.Fatalf("refusal %v is not described", refused)
+	}
+	runPrintedFix(t, powershell, root, text)
+	for _, path := range []string{folder, config} {
+		dacl := daclOf(path)
+		if dacl.AceCount == 0 {
+			t.Fatalf("the printed fix left %s with an empty DACL", path)
+		}
+		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
+			t.Fatalf("after the printed fix: %v", err)
+		}
+	}
+}
+
+// runPrintedFix runs, one by one in Windows PowerShell, the commands of a
+// refusal's "From an elevated prompt run ..." fix.
+func runPrintedFix(t *testing.T, powershell, root, text string) {
+	t.Helper()
+	_, commands, found := strings.Cut(text, "From an elevated prompt run ")
+	if !found {
+		t.Fatalf("no fix to run in %q", text)
+	}
+	commands, _, _ = strings.Cut(commands, ", and run it again")
+	for i, command := range strings.Split(commands, ", then ") {
+		script := filepath.Join(root, fmt.Sprintf("fix%d.ps1", i))
+		body := "$ErrorActionPreference = 'Stop'\r\n" + command + "\r\nexit $LASTEXITCODE\r\n"
+		if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script).CombinedOutput()
+		if err != nil {
+			t.Fatalf("printed fix %q failed in PowerShell: %v\n%s", command, err, out)
+		}
+	}
+}
+
+// GAP-1326: a rule pack that Users can modify is refused with a fix that
+// grants Users Read & execute, which the gateway service reads the pack
+// through, and then removes the Users grants by name. The fix gave that read
+// grant and took it away again, so the service still could not read the pack
+// after the operator ran it.
+func TestDescribeUntrustedRulePackFixKeepsUsersRead(t *testing.T) {
+	refused := &UntrustedPrincipalError{Path: `C:\Packs\pack`, SID: "S-1-5-32-545"}
+	text, ok := DescribeUntrustedRulePack("guardrail.rule_pack_dir", `C:\Packs\pack`, refused)
+	remove := strings.Index(text, `/remove:g "*S-1-5-32-545"`)
+	if !ok || remove < 0 || !strings.Contains(text[remove:], `/grant:r "*S-1-5-32-545:(OI)(CI)RX"`) {
+		t.Fatalf("the fix does not grant Users read after removing its grants: %s", text)
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the fixed folder is writable only by SYSTEM and Administrators")
+	}
+	powershell, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skip("Windows PowerShell is not available")
+	}
+	root := t.TempDir()
+	pack := filepath.Join(root, "pack")
+	if err := os.Mkdir(pack, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	modify, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := modify.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(pack, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	rules := filepath.Join(pack, "rules.yaml")
+	if err := os.WriteFile(rules, []byte("rules: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused.Path = pack
+	text, ok = DescribeUntrustedRulePack("guardrail.rule_pack_dir", pack, refused)
+	if !ok {
+		t.Fatal("refusal is not described")
+	}
+	runPrintedFix(t, powershell, root, text)
+	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{pack, rules} {
+		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
+			t.Fatalf("after the printed fix: %v", err)
+		}
+		if !serviceHasAccess(path, []*windows.SID{users}, serviceTreeAccess) {
+			t.Fatalf("after the printed fix Users cannot read %s", path)
+		}
+	}
 }

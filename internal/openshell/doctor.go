@@ -954,6 +954,9 @@ func (r *doctorRun) dockerAccessFix(msg string) *Fix {
 	case !denied:
 		return &Fix{Summary: "start the Docker daemon", Command: "sudo systemctl enable --now docker", Sudo: true}
 	}
+	if r.GOOS == "darwin" {
+		return &Fix{Summary: "Docker Desktop denied access to its socket; start Docker Desktop as this account and check the Docker context and socket permissions, then retry"}
+	}
 	member, inSession, err := r.DockerGroup()
 	if err == nil && member && !inSession {
 		return &Fix{Summary: "you are in the docker group, but this login session predates it; log out and back in (or run `newgrp docker`)"}
@@ -1168,7 +1171,7 @@ func (r *doctorRun) checkService(ctx context.Context) {
 
 func (r *doctorRun) startCommand() serviceCommand {
 	if r.GOOS == "darwin" {
-		return serviceCommand{"brew", []string{"services", "start", GatewayFormula}}
+		return serviceCommand{r.Gateway.BrewCommand(), []string{"services", "start", GatewayFormula}}
 	}
 	return serviceCommand{"systemctl", []string{"--user", "enable", "--now", GatewayService}}
 }
@@ -1574,6 +1577,17 @@ func (r *doctorRun) upgradeFix() *Fix {
 		"which drops the connections of every sandbox on it)", Command: installOpenShellCommand}
 }
 
+// brewPrefix is the Homebrew prefix on a Mac ("" elsewhere).
+func (r *doctorRun) brewPrefix() string {
+	switch {
+	case r.GOOS != "darwin":
+		return ""
+	case r.Gateway.BrewPrefix != "":
+		return r.Gateway.BrewPrefix
+	}
+	return homebrewPrefix()
+}
+
 func (r *doctorRun) checkRegistration() {
 	c := Check{ID: CheckIDRegistration, Title: "Gateway registration"}
 	m := Check{ID: CheckIDMTLS, Title: "Gateway mTLS files"}
@@ -1603,7 +1617,7 @@ func (r *doctorRun) checkRegistration() {
 	case errors.Is(err, ErrUnauthenticatedGateway):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "serve the local gateway over mTLS (the OpenShell package default; remove OPENSHELL_DISABLE_TLS from gateway.env) and register it with its client certificate",
-			Command: "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName}
+			Command: r.addCommandLine()}
 	case errors.Is(err, ErrNoGateway), errors.Is(err, ErrGatewayNotFound):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = r.registrationFix()
@@ -1646,7 +1660,7 @@ func (r *doctorRun) checkRegistration() {
 // service stopped the service's fix comes first: it starts the gateway and
 // registers it.
 func (r *doctorRun) registrationFix() *Fix {
-	add := r.addCommand().String()
+	add := r.addCommandLine()
 	switch {
 	case r.portHeld:
 		return &Fix{Summary: "nothing to register while this account's gateway cannot run (see Gateway service)"}

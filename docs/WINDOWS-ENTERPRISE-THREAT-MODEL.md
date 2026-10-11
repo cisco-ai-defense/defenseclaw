@@ -253,7 +253,7 @@ authority.
 | Guardian authorization ledger | LocalSystem/Administrators write; exact gateway service SID read-only |
 | Gateway runtime and scoped tokens | Administrators/LocalSystem and exact gateway service SID only; no standard-user read |
 | Per-user hook footprint | Confined to the manifest SID's canonical profile; exact protected OWNER RIGHTS DACL; regular files have one NTFS link; repairable after target-user tamper |
-| Inventory-directory grants | Exact gateway service SID receives inheritable Read+Execute/Traverse only on the fixed inventory-dotdir set beneath unique manifest homes; existing non-null DACLs are merged, missing directories are retried, and per-directory failures are logged |
+| Inventory-directory grants | Exact gateway service SID receives inheritable Read+Execute/Traverse only on the fixed inventory-dotdir set and the enrolled connectors' skill and plugin folders beneath unique manifest homes; existing non-null DACLs are merged, missing directories are retried, and per-directory failures are logged. A folder on a managed hook path is not granted, except the Amp and OpenCode plugin folders: their exact guardian DACL admits this one grant for `NT SERVICE\DefenseClawGateway` (both of its ACEs or none; no write, append, delete, delete-child, WRITE_DAC or WRITE_OWNER), added only to a folder at that exact DACL; DefenseClaw's plugin file keeps its own protected DACL and does not inherit it. Uninstall revokes every grant |
 | Codex machine requirements | Exact `%ProgramData%\OpenAI\Codex\requirements.toml`, ten managed hook groups, protected ownership/ACL preimage records, and guardian-repaired enrollment state |
 | Claude Code managed policy | DefenseClaw-owned protected drop-in and ownership state; effective precedence verified with the real approved Claude client |
 | Agent application-control attestation | Protected schema-v2 evidence for approved-client rules and Claude effective-policy verification |
@@ -581,10 +581,12 @@ authority.
   requires the exact gateway pipe-client SID and live SCM PID, and the gateway
   requires a nonce-bound authenticated response from the protected broker key.
 - On each enumerator grant pass, inventory access is added only for the exact
-  gateway service SID and only at the fixed inventory-dotdir names for homes
-  represented in that manifest generation. It is an inheritable
-  Read+Execute/Traverse grant merged into an existing non-null DACL, never a
-  whole-profile or profile-root rewrite.
+  gateway service SID and only at the fixed inventory-dotdir names and the
+  enrolled connectors' skill and plugin folders for homes represented in that
+  manifest generation. It is an inheritable Read+Execute/Traverse grant merged
+  into an existing non-null DACL, never a whole-profile or profile-root
+  rewrite. The Amp and OpenCode plugin folders are the only guardian-protected
+  folders that get it; there the guardian's exact DACL admits it.
 - Application-control attestation is an optional posture signal, independent
   of managed-hook installation and reconciliation. Its absence does not make
   an otherwise healthy Codex target incomplete.

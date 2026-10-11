@@ -283,12 +283,12 @@ func newTenantAccount(
 	}
 	if providerKey == schemas.VLLM {
 		key.VLLMKeyConfig = &schemas.VLLMKeyConfig{
-			URL: schemas.SecretVar{Val: vllmServerURL(baseURL)},
+			URL: schemas.SecretVar{Val: serverRootURL(baseURL)},
 		}
 	}
 	if providerKey == schemas.Ollama {
 		key.OllamaKeyConfig = &schemas.OllamaKeyConfig{
-			URL: schemas.SecretVar{Val: ollamaServerURL(baseURL)},
+			URL: schemas.SecretVar{Val: serverRootURL(baseURL)},
 		}
 	}
 
@@ -358,7 +358,7 @@ func newTenantAccount(
 		DefaultRequestTimeoutInSeconds: 120,
 	}
 	if baseURL != "" {
-		nc.BaseURL = baseURL
+		nc.BaseURL = serverRootURL(baseURL)
 	}
 	if tls.InsecureSkipVerify {
 		nc.InsecureSkipVerify = true
@@ -376,16 +376,14 @@ func newTenantAccount(
 	}
 }
 
-func vllmServerURL(baseURL string) string {
+// serverRootURL drops a trailing "/v1" from a configured base URL. Bifrost
+// appends the provider route ("/v1/chat/completions", "/v1/messages") to the
+// base, while the OpenAI SDK convention, and LiteLLM (which the scanners and
+// doctor use), put "/v1" in the base URL itself. The same llm.base_url
+// therefore reached the judge as /v1/v1/chat/completions (GAP-0064).
+func serverRootURL(baseURL string) string {
 	trimmed := strings.TrimRight(baseURL, "/")
-	if strings.HasSuffix(trimmed, "/v1") {
-		return strings.TrimSuffix(trimmed, "/v1")
-	}
-	return trimmed
-}
-
-func ollamaServerURL(baseURL string) string {
-	return vllmServerURL(baseURL)
+	return strings.TrimSuffix(trimmed, "/v1")
 }
 
 func deploymentAliasesToBifrost(aliases map[string]string) schemas.KeyAliases {

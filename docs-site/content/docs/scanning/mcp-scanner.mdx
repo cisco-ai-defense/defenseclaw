@@ -57,7 +57,7 @@ The default sources include:
 - `~/.kiro/settings/mcp.json` and `<workspace>/.kiro/settings/mcp.json` → `mcpServers` (Kiro)
 - The MCP config of every other connector you set up with `defenseclaw setup <connector>`.
 
-Each server is scanned independently and findings are tagged with the connector that discovered them. Use `--connector <name>` on list, scan, set, unset, block, allow, and unblock commands when you want one connector's MCP source instead of the full configured roster. Without `--connector`, `mcp set` writes the server into every configured connector's MCP source, and `mcp unset` removes it from every configured connector that has it.
+Each server is scanned independently and findings are tagged with the connector that discovered them. Use `--connector <name>` on list, scan, set, unset, block, allow, and unblock commands when you want one connector's MCP source instead of the full configured roster. Without `--connector`, `mcp set` writes the server into every configured connector's MCP source, and `mcp unset` removes it from every configured connector that has it. For Claude Code, `mcp set` writes `~/.claude.json` (the file Claude Code reads) and removes a same-named entry that DefenseClaw 0.8.x left in `~/.claude/settings.json`; `mcp unset` removes the name from both.
 
 ## One-shot scans
 
@@ -167,6 +167,19 @@ The Cisco AI Defense endpoint and key are not scanner keys. They stay in `cisco_
 | `behavioral` | Checks that a tool's description matches how it behaves (dataflow analysis). Off in the recommended setup. | Nothing extra. |
 | `readiness` | Production-readiness heuristics. Off in the recommended setup. | Nothing. |
 
+To add your own YARA rules, list the files in `scanners.mcp_scanner.yara.extra_rules`, each with the `sha256:` digest of the file. A scan loads them next to the bundled rules (set `include_bundled: false` to use only yours), and only from bytes that match the digest:
+
+```yaml title="config.yaml"
+scanners:
+  mcp_scanner:
+    yara:
+      extra_rules:
+        - path: C:\ProgramData\DefenseClaw-RulePacks\marker.yar
+          digest: sha256:<sha256 of the file>
+```
+
+A pin that does not match its file is refused where the config is applied: the managed lifecycle (`ensure`, `install`, `upgrade`, Setup) names the key and changes nothing, and the gateway rejects a reload with `policy_reload_rejected`, keeping the policy it last built. A rule file edited in place under its pin is rejected the same way; until you pin the new digest or restore the file, MCP scans that load it fail closed.
+
 Automatic selection never fails a scan for a missing optional key: a configured cloud model without its key falls back to YARA and prints `warning: LLM analyzer skipped: DEFENSECLAW_LLM_KEY is not configured; continuing with local analyzers`. An explicit list is honored exactly as written.
 
 ```bash
@@ -238,15 +251,9 @@ defenseclaw setup llm --provider vllm --model acme-judge-8b --base-url http://12
 
 Until a judge works, automatic selection runs YARA alone, so the server is still scanned, and each scan prints `LLM analyzer skipped` with the name of the missing key. Treat that as a gap to close, not a setup: YARA matches known patterns, and it is the judge that reads a tool's description against what the tool does.
 
-## Keys accepted but not applied yet
+## Removed keys
 
-<Callout type="warn" title="These keys do nothing in this release">
-`scanners.mcp_scanner` also accepts the keys below, and `config set` validates them, but the MCP scan does not read them yet. Do not rely on them for security.
-
-- `api.endpoint`, `api.api_key_env`: the `api` analyzer uses `cisco_ai_defense.endpoint` and `cisco_ai_defense.api_key_env`.
-- `yara.include_bundled`, `yara.extra_rules` (a list of `path` and `digest`): a scan loads the scanner's own rules and DefenseClaw's bundled MCP rules, and no extra rule file. The files are part of the effective policy digest, but they are not loaded.
-- `timeouts.stdio_s`, `remote_s`, `llm_s`: not read. A local stdio scan on native Windows stops the server's process tree after 60 seconds; see the warning below.
-</Callout>
+`scanners.mcp_scanner.api` and `scanners.mcp_scanner.timeouts` are not configuration keys: no scan read them, so they were removed. The `api` analyzer uses `cisco_ai_defense.endpoint` and `cisco_ai_defense.api_key_env`, and a local stdio scan on native Windows stops the server's process tree after 60 seconds (see the warning below). A `config.yaml` written by a pre-release build that still holds them loads with them ignored, the next write leaves them out, and `defenseclaw config set` refuses them.
 
 ## Pinned version
 
@@ -256,14 +263,26 @@ It stays on 4.3.0 on purpose. Later mcp-scanner releases pin LiteLLM to one exac
 
 ## Continuous protection
 
-MCP servers are not found by watching files. They are admitted through the CLI
-and rescanned on a schedule:
+MCP servers are admitted through the CLI, admitted when the agent's own
+commands add them, and rescanned on a schedule:
 
 <Steps>
   <Step>
     **Scan on add.** `defenseclaw mcp set <name> ...` scans the server before
     writing it into the connector's MCP config, unless you pass `--skip-scan`.
     A scan failure stops the add.
+  </Step>
+  <Step>
+    **Admit what the agent adds.** The gateway reads every configured
+    connector's servers in every scope, including Claude Code's local scope
+    (`claude mcp add`) and each project's `.mcp.json` for every project Claude
+    Code knows, and within about 30 seconds scans and admits a server it has
+    not seen before, as `mcp set` would. A server that was there when the
+    gateway started is admitted the same way, except at the first start after
+    an upgrade from 0.8.x: the servers the earlier release already ran are
+    scanned once to record their baseline and keep running, so findings raise
+    alerts and a server the scanner cannot start shows `scan failed` instead
+    of being blocked. A server on a block list stays blocked.
   </Step>
   <Step>
     **Act on the verdict.** The top severity maps through `admission.mcp` (below):
@@ -316,8 +335,8 @@ The scan verdict is the default. Operators always have manual override (block / 
 defenseclaw mcp list                                         # what is configured + state across configured connectors
 defenseclaw mcp list --connector opencode                    # one connector's MCP source
 defenseclaw mcp list --connector amp                         # Amp settings + skill-bundled mcp.json
-defenseclaw mcp set context7 --command uvx --args context7-mcp
-defenseclaw mcp set context7 --command uvx --args context7-mcp --connector opencode
+defenseclaw mcp set context7 --command npx --args '["-y", "@upstash/context7-mcp"]'
+defenseclaw mcp set time --command uvx --args mcp-server-time --connector opencode
 defenseclaw mcp unset context7 --connector opencode
 defenseclaw mcp block untrusted-fs --reason "exfil tool found"
 defenseclaw mcp allow cisco-internal --reason "first-party"
@@ -325,6 +344,17 @@ defenseclaw mcp unblock cisco-internal                       # remove the block 
 ```
 
 `mcp block`, `mcp allow` and `mcp unblock` write the server's entry in `asset_policy.mcp` (`denied` or `allowed`) in `config.yaml`, and the gateway applies it at once; on a managed device they are refused, and the entry goes in the administrator's config. [Admission](/docs/policies/admission) covers `asset_policy`.
+
+### Servers on local and internal addresses
+
+The scanner does not connect to loopback, private, link-local or multicast addresses: `localhost`, `127.0.0.1`, `10.x`, `172.16-31.x`, `192.168.x`, `169.254.x`, or a host name that resolves to one. `defenseclaw mcp scan --allow-private` scans such a server from your shell. The scan the gateway runs when a server is added has no such option, so a server there is not scanned: the scan fails and admission blocks the server (scanner failure, fail-closed). Its `install-scan-error` audit row says `the MCP scanner does not connect to loopback, private, link-local or multicast addresses ... so the server was not scanned` and names the two ways to admit a server you trust:
+
+- an `allowed` entry with its `name` and `url` (`defenseclaw mcp allow <name>`, or on a managed device `asset_policy.mcp.allowed` in the admin config); an allowed server is not scanned;
+- `admission.mcp.scan_on_install: false`, which admits new MCP servers without a scan.
+
+Stdio servers (a `command`) are scanned on the computer and are not affected.
+
+A block follows the name. An allow is pinned to the server you reviewed: `mcp allow` copies the server's `url`, or its `command` and `args_prefix`, from the connector's MCP config into the rule, so a different server added later under the same name is scanned again. For a server that is not configured yet, pass the definition with `--url`, or `--command` and `--args`; otherwise the rule matches the name only and the command prints a note saying so.
 
 `mcp unblock` removes a server's block or allow entry, so its scan verdict
 decides again. It says which one it removed and prints the
@@ -368,6 +398,31 @@ settings through Amp tooling) for schema-preserving writes and workspace
 approval, then re-run `defenseclaw mcp scan --connector amp`.
 
 Every action is audited (`block-mcp`, etc.) so the trail is intact even when the manual override contradicts a scan verdict.
+
+### Local servers: npx and uvx only
+
+`mcp set` and `mcp scan` start a local (stdio) server only when its command is
+`npx` or `uvx` with a package argument (on Windows, `npx.cmd` and `uvx.exe` are
+the same launchers). The scan never runs another program, so a server started
+with `node`, `python3`, `docker` or a binary is refused with "not an
+allowlisted stdio launcher (allowed: npx, uvx)". For such a server:
+
+- publish it as an npm or PyPI package and start it with `npx` or `uvx`;
+- or serve it over HTTP and add it with `--url`;
+- or review it yourself, allow that exact definition with
+  `defenseclaw mcp allow <name> --command <cmd> --args '<json array>'`, then run
+  the same `mcp set` again: the pinned allow skips the scan for that
+  definition only.
+
+On Windows the launcher must sit in a trusted folder (the Node.js installer folder and
+uv's default `%USERPROFILE%\.local\bin` are trusted by default). A launcher installed for all users under Program Files is trusted when
+only administrators can change it and its folders. The error names the file it found;
+`defenseclaw setup trusted-paths add "<folder>"` trusts an admin-owned folder on a per-user install.
+On a managed Windows computer there is no per-user trusted-paths list and `setup` is refused:
+the scanner runs in the gateway service and trusts launchers under Program Files only (for example
+Node.js in `C:\Program Files\nodejs`), so an administrator installs Node.js or uv there for all users.
+A `uvx.exe` in a user profile is never trusted there, because the user can replace it.
+When the server exits before it answers, its last stderr lines are printed.
 
 ## How the settings reach the scanner
 

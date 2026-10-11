@@ -37,8 +37,11 @@ import (
 // file already running, and the pin adds nothing. macOS has no descriptor
 // exec, so the pin holds the resolved file open, requires that only root or
 // this account can change it or any directory above it, and records their
-// identity and change times. They must be unchanged once the child exists, or
-// the child is stopped and the start fails.
+// identity, owner and mode, and the file's change times. They must be
+// unchanged once the child exists, or the child is stopped and the start
+// fails. A directory's times are not recorded: they move whenever any entry
+// in it changes (a sibling build, a saved shell history), which made a start
+// fail at random, and each element's own identity already binds the path.
 type daemonLaunchPin struct {
 	path     string
 	file     *os.File
@@ -137,16 +140,18 @@ func launchPathSnapshot(path string) ([]launchPathEntry, error) {
 		if err := unix.Lstat(current, &st); err != nil {
 			return nil, fmt.Errorf("inspect %s: %w", current, err)
 		}
-		entries = append(entries, launchPathEntry{
-			path:  current,
-			dev:   uint64(st.Dev), //nolint:unconvert // int32 on darwin
-			ino:   st.Ino,
-			mode:  uint32(st.Mode), //nolint:unconvert // uint16 on darwin
-			uid:   st.Uid,
-			gid:   st.Gid,
-			mtime: st.Mtim,
-			ctime: st.Ctim,
-		})
+		entry := launchPathEntry{
+			path: current,
+			dev:  uint64(st.Dev), //nolint:unconvert // int32 on darwin
+			ino:  st.Ino,
+			mode: uint32(st.Mode), //nolint:unconvert // uint16 on darwin
+			uid:  st.Uid,
+			gid:  st.Gid,
+		}
+		if current == path {
+			entry.mtime, entry.ctime = st.Mtim, st.Ctim
+		}
+		entries = append(entries, entry)
 		if filepath.Dir(current) == current {
 			return entries, nil
 		}

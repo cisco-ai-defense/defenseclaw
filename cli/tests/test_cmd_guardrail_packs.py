@@ -21,12 +21,19 @@ from unittest.mock import MagicMock
 
 import pytest
 from click.testing import CliRunner
-from defenseclaw import config_writer, rulepack_validation
+from defenseclaw import config_writer, policy_catalog, rulepack_validation
 from defenseclaw.commands import cmd_guardrail
-from defenseclaw.config import PerConnectorGuardrailConfig, default_config
+from defenseclaw.config import (
+    CustomRulePack,
+    GuardrailProfile,
+    GuardrailRulesConfig,
+    PerConnectorGuardrailConfig,
+    default_config,
+)
 from defenseclaw.context import AppContext
 
 from tests.environment import isolated_home_env
+from tests.helpers import select_pack
 
 
 def _valid(path, **_kwargs):
@@ -67,7 +74,7 @@ def env(tmp_path, monkeypatch):
     cfg.guardrail.enabled = True
     cfg.guardrail.mode = "action"
     cfg.guardrail.port = 4321
-    cfg.guardrail.rule_pack_dir = str(guardrail_root / "default")
+    cfg.guardrail.rule_pack = "default"
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
@@ -86,9 +93,9 @@ def _run(app, args):
 
 
 def _multi(app, overrides: dict[str, str]):
-    app.cfg.guardrail.connectors = {
-        name: PerConnectorGuardrailConfig(rule_pack_dir=path) for name, path in overrides.items()
-    }
+    app.cfg.guardrail.connectors = {name: PerConnectorGuardrailConfig() for name in overrides}
+    for name, path in overrides.items():
+        select_pack(app.cfg, app.cfg.guardrail.connectors[name], path)
 
 
 def test_global_switch_clears_overrides_and_reports_them(env):
@@ -125,8 +132,45 @@ def test_connector_scope_leaves_peers_alone(env):
     assert paths == [
         "guardrail.custom_packs.team",
         "guardrail.connectors.codex.rule_pack",
-        "guardrail.connectors.codex.rule_pack_dir",
     ]
+
+
+def test_connector_custom_path_cannot_replace_global_pack(env, tmp_path):
+    app, _root, custom, writes = env
+    app.cfg.guardrail.rule_pack = "team"
+    app.cfg.guardrail.custom_packs = {
+        "team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)
+    }
+    other = tmp_path / "another" / "team"
+    (other / "rules").mkdir(parents=True)
+
+    result = _run(app, ["use-pack", str(other), "--connector", "codex", "--json"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.output)["ok"] is False
+    assert app.cfg.guardrail.custom_packs["team"].path == str(custom)
+    assert writes == []
+
+
+def test_registered_custom_pack_key_is_selected_by_name(env):
+    """GAP-0049: a guardrail.custom_packs key selects like config set guardrail.rule_pack does,
+    keeping its pinned digest; a pack edited since it was pinned is refused."""
+    app, _root, custom, writes = env
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "a" * 64)}
+    result = _run(app, ["use-pack", "team", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["pack"] == "team"
+    assert writes[-1] == [config_writer.Change("guardrail.rule_pack", "team")]
+
+    app.cfg.guardrail.custom_packs = {"team": CustomRulePack(path=str(custom), digest="sha256:" + "b" * 64)}
+    refused = _run(app, ["use-pack", "team"])
+    assert refused.exit_code == 1
+    assert "config set guardrail.custom_packs.team.digest sha256:" + "a" * 64 in refused.output
+    assert len(writes) == 1
+
+    # GAP-0159: an unknown name lists the registered custom_packs names it could have been.
+    unknown = _run(app, ["use-pack", "nosuch"])
+    assert unknown.exit_code == 1 and "guardrail.custom_packs name (team)" in unknown.output
 
 
 def test_bare_name_selects_installed_pack_over_cwd_folder(env, tmp_path, monkeypatch):
@@ -186,12 +230,57 @@ def test_clear_connector_override(env):
     payload = json.loads(result.output)
     assert payload["connector"] == "codex"
     assert payload["path"] == str(root / "default")
-    assert writes == [
-        [
-            config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
-            config_writer.Change("guardrail.connectors.codex.rule_pack_dir", unset=True),
-        ]
+    # The custom pin only codex selected goes with its pack (GAP-0127).
+    assert writes == [[
+        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
+        config_writer.Change("guardrail.custom_packs.team", unset=True),
+    ]]
+
+
+def test_clear_connector_pack_drops_stale_rule_overrides(env, monkeypatch):
+    app, _root, _custom, writes = env
+    monkeypatch.setattr(policy_catalog, "pack_rule_defaults", lambda _path: {"SEC-AWS-KEY": True})
+    monkeypatch.setattr(policy_catalog, "rule_defaults_with_protections", lambda _path, _packs: {"SEC-AWS-KEY": True})
+    app.cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(
+            rule_pack="strict", rules=GuardrailRulesConfig(disable=["SEC-ENV-DUMP-REQUEST"])
+        )
+    }
+    result = _run(app, ["use-pack", "--clear", "--connector", "codex", "--json"])
+    assert result.exit_code == 0, result.output
+    assert writes[-1] == [
+        config_writer.Change("guardrail.connectors.codex.rule_pack", unset=True),
+        config_writer.Change("guardrail.connectors.codex.rules.disable", unset=True),
     ]
+    assert json.loads(result.output)["dropped_rule_references"] == [
+        "guardrail.connectors.codex.rules.disable: SEC-ENV-DUMP-REQUEST"
+    ]
+
+
+def test_global_pack_switch_keeps_profile_connector_rule_from_profile_protection(env, monkeypatch):
+    app, _root, _custom, writes = env
+    rule_id = "impact.sql_schema_destroy"
+    protection = "database-destruction-protection"
+    monkeypatch.setattr(policy_catalog, "pack_rule_defaults", lambda _path: {"other.rule": True})
+    monkeypatch.setattr(
+        policy_catalog,
+        "rule_defaults_with_protections",
+        lambda _path, packs: {"other.rule": True, **({rule_id: True} if protection in packs else {})},
+    )
+    app.cfg.guardrail.profiles = {
+        "engineering": GuardrailProfile(
+            rules=GuardrailRulesConfig(protections=[protection]),
+            connectors={
+                "codex": PerConnectorGuardrailConfig(
+                    rules=GuardrailRulesConfig(severity_overrides={rule_id: "LOW"})
+                )
+            },
+        )
+    }
+    result = _run(app, ["use-pack", "permissive", "--json"])
+    assert result.exit_code == 0, result.output
+    assert not any(c.path.endswith("severity_overrides") for c in writes[-1])
+    assert json.loads(result.output)["dropped_rule_references"] == []
 
 
 def test_usage_errors(env):
@@ -280,4 +369,14 @@ def test_use_pack_skips_the_startup_config_check(monkeypatch, argv, expected):
     monkeypatch.setattr(main_module.sys, "argv", ["defenseclaw", *argv])
     ctx = click.Context(main_module.cli)
     ctx.invoked_subcommand = argv[0]
-    assert main_module._is_rule_pack_switch(ctx) is expected
+    assert main_module._is_pack_repin(ctx) is expected
+
+
+def test_validate_pack_unknown_bare_name_lists_available_packs(env, monkeypatch):
+    app, root, _custom, _writes = env
+    monkeypatch.setattr("defenseclaw.config.load", lambda: app.cfg)
+    (root / "team2" / "rules").mkdir(parents=True)
+    result = _run(app, ["validate-pack", "nosuchpack"])
+    assert result.exit_code != 0
+    assert "no pack with the name 'nosuchpack' was found" in result.output
+    assert "default" in result.output and "team2" in result.output

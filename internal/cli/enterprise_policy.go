@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -501,11 +502,7 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 	}
 	fmt.Fprintf(out, "Standalone machine agent policy (hook binary %s)\n", report.HookBinary)
 	if p := report.Policy; p != nil {
-		short := p.EffectiveDigest
-		if len(short) > len("sha256:")+12 {
-			short = short[:len("sha256:")+12]
-		}
-		fmt.Fprintf(out, "Effective policy %s, config generation %d\n", short, p.ConfigGeneration)
+		fmt.Fprintf(out, "Effective policy %s, config generation %d\n", enterprisestatus.ShortDigest(p.EffectiveDigest), p.ConfigGeneration)
 	}
 	fmt.Fprintln(out)
 	for _, state := range report.Result.States {

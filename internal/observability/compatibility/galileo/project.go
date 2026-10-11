@@ -595,7 +595,7 @@ func projectResource(value any, maximum int) (map[string]any, bool) {
 	if !ok {
 		return nil, false
 	}
-	if err := observability.ValidateTelemetryResourceAttributes(attributes); err != nil {
+	if err := observability.ValidateTelemetryResourceAttributesWithSecureClientAliases(attributes); err != nil {
 		return nil, false
 	}
 	projected := make(map[string]any, len(attributes))
@@ -1227,11 +1227,6 @@ func setSpanMetadata(attributes map[string]any, status any, resource any) {
 			for _, key := range resourceMetadataKeys {
 				if value, ok := stringAttribute(resourceAttributes, key); ok && value != "" {
 					metadata[key] = value
-				}
-			}
-			if _, ok := metadata["deployment.environment.name"]; !ok {
-				if value, ok := stringAttribute(resourceAttributes, "deployment.environment"); ok && value != "" {
-					metadata["deployment.environment.name"] = value
 				}
 			}
 		}

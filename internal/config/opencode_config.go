@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -186,6 +187,21 @@ func ReadMCPServersOpenCodeUnderHome(home string) ([]MCPServerEntry, error) {
 	return readMCPServersOpenCodeResolution(openCodeConfigResolution{
 		Layers: loadOpenCodeConfigCandidates(candidates),
 	}), nil
+}
+
+// ReadMCPFromOpenCodeConfig reads the servers of one OpenCode config file
+// (its JSONC mcp map, local commands as arrays) for AI discovery (GAP-1062).
+func ReadMCPFromOpenCodeConfig(path string) ([]MCPServerEntry, error) {
+	data, ok := gatewayconnector.ReadStableInventoryFile(path, maxOpenCodeInventoryConfigBytes)
+	if !ok {
+		return nil, fmt.Errorf("config: read OpenCode config %s", path)
+	}
+	doc, err := parseOpenCodeJSONC(data)
+	if err != nil {
+		return nil, err
+	}
+	layer := openCodeConfigLayer{Source: path, Scope: "global", Data: doc}
+	return readMCPServersOpenCodeResolution(openCodeConfigResolution{Layers: []openCodeConfigLayer{layer}}), nil
 }
 
 func readMCPServersOpenCodeResolution(resolution openCodeConfigResolution) []MCPServerEntry {

@@ -5,12 +5,15 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
@@ -51,6 +54,20 @@ func TestBuildGenerationComposesRulesPreparesOPAAndPinsCustomPacks(t *testing.T)
 	}
 	if plain.OPA == nil || !strings.HasPrefix(plain.Components["rego"], "sha256:") {
 		t.Fatalf("generation OPA = %v, components = %v", plain.OPA, plain.Components)
+	}
+
+	// With no policy_dir (a Windows standalone install) the default pack is
+	// the embedded one, as the implicit default is there; the other built-in
+	// names still need policy_dir.
+	embedded := &config.Config{}
+	embedded.Guardrail.RulePack = "default"
+	if _, err := loadGlobalRulePack(guardrail.NewRulePackCache(), embedded, "global"); err != nil {
+		t.Fatalf("rule_pack default with no policy_dir: %v", err)
+	}
+	embedded.Guardrail.RulePack = "strict"
+	if _, err := loadGlobalRulePack(guardrail.NewRulePackCache(), embedded, "global"); err == nil ||
+		!strings.Contains(err.Error(), "policy_dir is not set") {
+		t.Fatalf("rule_pack strict with no policy_dir = %v, want policy_dir is not set", err)
 	}
 
 	cfg.Guardrail.Rules = config.GuardrailRulesConfig{
@@ -123,5 +140,187 @@ func TestGenerationAssetFilesFollowTheDigestedFiles(t *testing.T) {
 	}
 	if _, ok := assetDigestComponents(cfg)["provider_ca:acme"]; !ok {
 		t.Fatal("the provider CA file is not in the effective digest")
+	}
+}
+
+// GAP-0664: a pinned scanner file that does not match its digest (a wrong
+// pin, or the file edited in place) fails a reload build, so the previous
+// generation stays; a boot build records it for policy.last_reload_error.
+func TestBuildGenerationChecksScannerFilePins(t *testing.T) {
+	rule := filepath.Join(t.TempDir(), "marker.yar")
+	body := []byte("rule marker { condition: false }\n")
+	if err := os.WriteFile(rule, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{}
+	cfg.Scanners.MCPScanner.YARA.ExtraRules = []config.AssetFileRef{{Path: rule, Digest: fmt.Sprintf("sha256:%x", sha256.Sum256(body))}}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, strictScannerPins: true}); err != nil {
+		t.Fatalf("a matching pin: %v", err)
+	}
+	if err := os.WriteFile(rule, append(body, []byte("// edit\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, strictScannerPins: true}); err == nil ||
+		!strings.Contains(err.Error(), "extra_rules[0]") || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("reload build with the file edited under its pin = %v, want it refused", err)
+	}
+	g, err := buildGeneration(context.Background(), generationInputs{cfg: cfg})
+	if err != nil || g.scannerPinError == "" {
+		t.Fatalf("boot build = %v, pin error %v; want it built and the mismatch recorded", err, g)
+	}
+}
+
+func TestBuildGenerationRejectsUnreadableProviderCA(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.LLMProviders.Custom = []config.LLMCustomProvider{{
+		Name: "private", TLS: &config.LLMCustomProviderTLS{CACertFile: filepath.Join(t.TempDir(), "missing-ca.pem")},
+	}}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg}); err == nil || !strings.Contains(err.Error(), "missing-ca.pem") {
+		t.Fatalf("build with missing provider CA = %v, want failure", err)
+	}
+}
+
+// A policy directory without Rego is the managed packages' config-driven mode:
+// the generation has no OPA and no error to report (GAP-0021).
+func TestBuildGenerationTreatsMissingRegoAsNoOPA(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		g, err := buildGeneration(context.Background(), generationInputs{cfg: &config.Config{PolicyDir: t.TempDir()}, strictOPA: strict})
+		if err != nil {
+			t.Fatalf("strict=%v empty policy dir: %v, want no error", strict, err)
+		}
+		if g.OPA != nil || g.opaError != "" {
+			t.Fatalf("strict=%v empty policy dir: OPA=%v opaError=%q, want no OPA and no error", strict, g.OPA, g.opaError)
+		}
+	}
+}
+
+// A corrupt Rego module rejects a (strict) reload build, so the previous
+// generation stays and last_reload_error names the file; boot falls back
+// (GAP-0043).
+func TestBuildGenerationRejectsACorruptModuleOnlyWhenStrict(t *testing.T) {
+	policyDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(policyDir, "bad.rego"), []byte("package defenseclaw\nnot rego {"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{PolicyDir: policyDir}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg, strictOPA: true}); err == nil || !strings.Contains(err.Error(), "bad.rego") {
+		t.Fatalf("strict build with a corrupt module = %v, want a parse error naming the file", err)
+	}
+	g, err := buildGeneration(context.Background(), generationInputs{cfg: cfg})
+	if err != nil || g.opaError == "" {
+		t.Fatalf("boot build with a corrupt module: err=%v opaError=%q, want the fallback with its reason", err, g.opaError)
+	}
+	// The fallback generation was applied: /health names the module as
+	// opa_unavailable, so a client can tell it from a rejected change (GAP-1033).
+	previous := liveGeneration.Load()
+	previousErr, _ := liveReloadError.Load().(string)
+	liveGeneration.Store(g)
+	clearGenerationBuildError()
+	defer func() { liveGeneration.Store(previous); liveReloadError.Store(previousErr) }()
+	if h, ok := CurrentPolicyHealth(); !ok || !strings.Contains(h.OPAUnavailable, "bad.rego") ||
+		h.LastReloadError != "opa: "+h.OPAUnavailable {
+		t.Fatalf("health = %+v, want opa_unavailable naming bad.rego", h)
+	}
+}
+
+// GAP-0088: guardrail.rules.protections composed onto a custom pack pinned by
+// digest reach every connector's rule set and block the command, as the same
+// rules shipped as files of the custom pack do. An enterprise admin config
+// pins a custom pack and enables protections together.
+func TestProtectionsComposeOntoAPinnedCustomPackForEveryConnector(t *testing.T) {
+	policyDir := repoPolicyDir(t)
+	pack := filepath.Join(policyDir, "guardrail", "default")
+	pin, err := guardrail.RulePackDigest(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{PolicyDir: policyDir}
+	cfg.Guardrail.RulePack = "acme"
+	cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"acme": {Path: pack, Digest: "sha256:" + pin}}
+	cfg.Guardrail.Rules = config.GuardrailRulesConfig{Protections: []string{"cloud-production-protection"}}
+	const command = "aws rds delete-db-instance --db-instance-identifier marker-db"
+	cache := guardrail.NewRulePackCache()
+	for _, connector := range []string{"codex", "claudecode"} {
+		rp, err := loadConnectorRulePack(cache, cfg, connector, "connector "+connector)
+		if err != nil {
+			t.Fatalf("%s: %v", connector, err)
+		}
+		if packRule(rp, "impact.cloud_resource_delete") == nil {
+			t.Fatalf("%s: the protection pack's rules are not in its composed rule pack", connector)
+		}
+		if err := ApplyConnectorRulePackOverrides(connector, rp); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { RemoveConnectorRulePackOverrides(connector) })
+		got := EvaluateDeterministicAction(context.Background(), actionfacts.Input{Tool: "shell", Command: command}, command, connector, "default")
+		if !strings.Contains(strings.Join(got.RuleIDs, ","), "impact.cloud_resource_delete") || got.Action != "block" {
+			t.Fatalf("%s: rules=%v action=%q, want a block by impact.cloud_resource_delete", connector, got.RuleIDs, got.Action)
+		}
+	}
+}
+
+// GAP-0276: every profile resolves to the same loaded packs, and the build
+// digests each pack once; it digested one per profile scope, which with
+// 1,000 profiles added seconds to gateway start.
+func TestBuildGenerationDigestsEachRulePackOnce(t *testing.T) {
+	cfg := &config.Config{PolicyDir: repoPolicyDir(t)}
+	cfg.Guardrail.RulePack = "default"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{}
+	for i := 0; i < 40; i++ {
+		cfg.Guardrail.Profiles[fmt.Sprintf("scale-%02d", i)] = config.GuardrailProfile{
+			Mode:       "observe",
+			Connectors: map[string]config.PerConnectorGuardrailConfig{"claudecode": {Mode: "observe"}, "codex": {Mode: "observe"}},
+		}
+	}
+	cache := guardrail.NewRulePackCache()
+	global, err := loadGlobalRulePack(cache, cfg, "global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := newGuardrailProfileSet(cfg, cache, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digests := 0
+	previous := rulePackComponentDigest
+	t.Cleanup(func() { rulePackComponentDigest = previous })
+	rulePackComponentDigest = func(pack *guardrail.RulePack) string {
+		digests++
+		return previous(pack)
+	}
+	g, err := buildGeneration(context.Background(), generationInputs{
+		cfg: cfg, rulePacks: &sidecarRulePackCandidate{global: global, active: global}, profiles: profiles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	distinct := map[*guardrail.RulePack]bool{}
+	for _, pack := range g.RulePacks {
+		distinct[pack] = true
+	}
+	if len(g.RulePacks) <= len(distinct) || digests != len(distinct) {
+		t.Fatalf("%d pack scopes, %d distinct packs, %d digests: want one digest per distinct pack", len(g.RulePacks), len(distinct), digests)
+	}
+}
+
+// A managed standalone policy_dir whose Rego a standard user can change is
+// not loaded: the build fails, so a reload keeps the previous generation
+// (GAP-1499).
+func TestBuildGenerationRefusesUntrustedManagedPolicyTree(t *testing.T) {
+	dir := t.TempDir()
+	rego := filepath.Join(dir, "rego")
+	if err := os.Mkdir(rego, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	module := filepath.Join(rego, "guardrail.rego")
+	if err := os.WriteFile(module, []byte("package defenseclaw.guardrail\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(module, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{DeploymentMode: "managed_enterprise", PolicyDir: dir, Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	if _, err := buildGeneration(context.Background(), generationInputs{cfg: cfg}); err == nil || !strings.Contains(err.Error(), "not administrator-controlled") {
+		t.Fatalf("buildGeneration error = %v, want the untrusted policy tree refused", err)
 	}
 }

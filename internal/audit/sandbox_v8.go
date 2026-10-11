@@ -190,6 +190,10 @@ type SandboxLifecycleEvent struct {
 	// Severity overrides the phase default (error HIGH, unknown MEDIUM, else INFO).
 	Severity  string
 	Timestamp time.Time
+	// UserID and UserName are the host account the sandbox runs as, as on
+	// SandboxEgressEvent.
+	UserID   string
+	UserName string
 }
 
 // SandboxEgressSource identifies which boundary observed an egress decision.
@@ -734,6 +738,9 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: string(identity.Phase), DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+				UserID:                             optionalNetworkIdentifier(input.UserID),
+				DefenseClawUserIDKind:              optionalNetworkUserIDKind(useridentity.KindForID(input.UserID)),
+				DefenseClawUserName:                observability.UserName(input.UserName, optionalNetworkIdentifier),
 				DefenseClawSandboxPhasePrevious:    optionalSandboxEnum(string(previous)),
 				DefenseClawSandboxLifecycleTrigger: optionalSandboxEnum(string(input.Trigger)),
 				DefenseClawSandboxExitCode:         exitCode,
@@ -859,6 +866,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 		duration = observability.Present(input.Duration.Milliseconds())
 	}
 	actorPID, actorExe := optionalSandboxPID(input.PID), optionalSandboxText(input.Executable, maxSandboxPathBytes)
+	policyDigest, policyGeneration := livePolicyStamp()
 	log := sandboxV8Log{
 		action: ActionSandboxEgress, event: event, bucket: observability.BucketNetworkEgress,
 		eventName: eventName, phase: "policy", outcome: outcome, mandatory: input.Blocked,
@@ -873,7 +881,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				GenAIAgentID:                agentID,
 				UserID:                      optionalNetworkIdentifier(input.UserID),
 				DefenseClawUserIDKind:       optionalNetworkUserIDKind(useridentity.KindForID(input.UserID)),
-				DefenseClawUserName:         optionalNetworkIdentifier(input.UserName),
+				DefenseClawUserName:         observability.UserName(input.UserName, optionalNetworkIdentifier),
 				DefenseClawNetworkTargetRef: host, DefenseClawNetworkTargetPath: path,
 				DefenseClawNetworkResolvedIp: resolvedIP, DefenseClawNetworkPolicyOutcome: policyOutcome,
 				DefenseClawNetworkDecision: observability.Present(decision), DefenseClawNetworkDecisionCode: decisionCode,
@@ -883,6 +891,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				DefenseClawNetworkBytesUp: bytesUp, DefenseClawNetworkBytesDown: bytesDown,
 				DefenseClawNetworkDurationMs: duration,
 				DefenseClawSandboxProcessPid: actorPID, DefenseClawSandboxProcessExecutable: actorExe,
+				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
@@ -911,6 +920,7 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				DefenseClawNetworkBlocked: allowed.DefenseClawNetworkBlocked,
 				URLScheme:                 scheme, ServerAddress: allowed.ServerAddress, ServerPort: port,
 				DefenseClawSandboxProcessPid: actorPID, DefenseClawSandboxProcessExecutable: actorExe,
+				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
@@ -992,6 +1002,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 	userID := optionalNetworkIdentifier(input.UserID)
 	userKind := optionalNetworkUserIDKind(useridentity.KindForID(input.UserID))
 	userName := optionalNetworkIdentifier(input.UserName)
+	policyDigest, policyGeneration := livePolicyStamp()
 	log := sandboxV8Log{
 		action: ActionSandboxApproval, event: event, bucket: observability.BucketComplianceActivity,
 		eventName: eventName, phase: "approval", outcome: outcome, mandatory: resolved,
@@ -1008,6 +1019,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 					DefenseClawApprovalID: approvalID, DefenseClawApprovalDangerous: risky,
 					DefenseClawGuardrailReason: reason, DefenseClawSandboxApprovalKind: kind,
 					ServerAddress: host, ServerPort: port,
+					DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
 					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
@@ -1026,6 +1038,7 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 				DefenseClawSandboxApprovalKind:  kind,
 				DefenseClawSandboxApprovalScope: optionalSandboxEnum(string(input.Scope)),
 				ServerAddress:                   host, ServerPort: port,
+				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
@@ -1084,6 +1097,7 @@ func (recorder *SandboxRecorder) RecordSandboxPolicy(ctx context.Context, input 
 	if input.PolicyHash != "" {
 		afterSummary = observability.Present("sha256:" + input.PolicyHash)
 	}
+	policyDigest, policyGeneration := livePolicyStamp()
 	log := sandboxV8Log{
 		action: ActionSandboxPolicy, event: event, bucket: observability.BucketComplianceActivity,
 		eventName: observability.TelemetryEventPolicyUpdated, phase: "apply", outcome: outcome, mandatory: true,
@@ -1095,15 +1109,16 @@ func (recorder *SandboxRecorder) RecordSandboxPolicy(ctx context.Context, input 
 				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 				DefenseClawAdminOperation:    string(input.Operation),
 				DefenseClawAdminPrincipalRef: principal, ConditionAdminPrincipalKnown: principalKnown,
-				DefenseClawAdminActorRef:        optionalControlPlaneV8Actor(event.Actor),
-				DefenseClawAdminOrigin:          optionalSandboxEnum(input.Origin),
-				DefenseClawAdminTargetRef:       target,
-				DefenseClawAdminAfterSummary:    afterSummary,
-				DefenseClawAdminReason:          optionalControlPlaneV8Reason(input.Reason),
-				DefenseClawAdminRevision:        revision,
-				DefenseClawAdminCurrentRevision: current,
-				DefenseClawAdminChangeCount:     observability.Present(int64(input.ChangeCount)),
-				DefenseClawSandboxID:            fields.id, DefenseClawSandboxName: fields.name,
+				DefenseClawAdminActorRef:         optionalControlPlaneV8Actor(event.Actor),
+				DefenseClawAdminOrigin:           optionalSandboxEnum(input.Origin),
+				DefenseClawAdminTargetRef:        target,
+				DefenseClawAdminAfterSummary:     afterSummary,
+				DefenseClawAdminReason:           optionalControlPlaneV8Reason(input.Reason),
+				DefenseClawAdminRevision:         revision,
+				DefenseClawAdminCurrentRevision:  current,
+				DefenseClawAdminChangeCount:      observability.Present(int64(input.ChangeCount)),
+				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
+				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
 				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,

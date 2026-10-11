@@ -236,10 +236,10 @@ Limits do not turn a partial observation into a false deletion. API inventories 
 
 The continuous scanner runs inside the gateway. Unmanaged deployments emit
 `ai_discovery` events when a signal transitions state; managed-enterprise full
-scans emit the complete snapshot described above. Fresh CLI-generated configs
-enable discovery; an older or minimal config that omits the `ai_discovery`
-block leaves the gateway runtime default disabled. Use these commands to make
-the intended state explicit:
+scans emit the complete snapshot described above. A fresh `defenseclaw init`
+leaves AI discovery disabled. Run `defenseclaw agent discovery enable` after
+initialization to collect the IDE inventory. This also enables runtime
+monitoring planes A and B. Use these commands to make the intended state explicit:
 
 <Tabs items={['Enable', 'Status', 'One-shot scan', 'Disable']}>
   <Tab value="Enable">
@@ -295,15 +295,20 @@ enabled:
   started the scan for, never from the scan's own output. The
   `ai_component.discovered`, `changed` and `removed` records carry the same
   user (`user.id`, `defenseclaw.user.name`) to your observability
-  destinations, without the entry's name. The per-entry skill, plugin and
-  MCP records (`ai_component.observed`, which name each entry) carry the
-  user too, but stay in the local inventory (a Secure Client deployment
-  also sends them to Cisco AI Defense). Read entry names with the
-  `discovery` view below.
+  destinations, without the entry's name. The inventory retains the
+  per-entry skill, plugin and MCP names locally; discovery does not emit
+  per-entry `ai_component.observed` records. Names can still reach configured
+  observability destinations in hook decision and asset-policy audit rows
+  when those assets are used, scanned, admitted or rejected. Read the full
+  inventory with the `discovery` view below. With `ai_discovery.include_user_email` on, each
+  account's Claude Code and Codex address goes to your destinations on one
+  `ai_component.observed` record per account and connector each discovery
+  cycle, without entry names
+  ([Optional connector email](/docs/observability/end-user-identity#optional-connector-email)).
 - The gateway's own process detector does not run; the scan summary reports
   `detector_notes.process: provided by per-user scans`.
-- A user's results turn `gone` when the user leaves the manifest, or three
-  scan intervals after the user's last successful scan.
+- A user's results turn `gone` when the user leaves the manifest, or after the longer of three
+  scan intervals and 15 minutes since the user's last successful scan.
 - `mode`, `include_shell_history`, `include_package_manifests` and
   `store_raw_local_paths` apply as usual.
 - Administrators read the per-user records on the host with
@@ -320,13 +325,16 @@ scans every enrolled user's profile itself: the hook enumerator grants the
 service read access to each user's agent folders (`.claude`, `.codex`,
 `.cursor`, `.kiro`, `%LOCALAPPDATA%\hermes\skills` and the others) and to
 the IDE folders the [IDE plugin inventory](#ide-plugin-inventory) reads
-(`.vscode\extensions` and the forks', `%APPDATA%\Code\User\globalStorage`
-and `profiles`, `%APPDATA%\JetBrains`, `%LOCALAPPDATA%\Microsoft\VisualStudio`,
-Zed, Neovim, `vimfiles` and `.eclipse`), and nothing else in the profile. A folder on an enrolled connector's hook path
+([Whose plugins](#whose-plugins) lists them), and nothing else in the
+profile. A folder on an enrolled connector's hook path
 stays at the guardian's protected permissions, so the service is not granted
 it: `.kiro` for a user enrolled for Kiro, `.config` for Amp or OpenCode,
 `.gemini` for Antigravity, `.copilot` for Copilot and
-`%APPDATA%\devin` for Devin. Kiro CLI is then found by its install folder
+`%APPDATA%\devin` for Devin. Devin's user MCP servers are still listed:
+the service is granted read on `%APPDATA%\devin\mcp_config.json` alone, not
+on the folder or the hook file `config.json` beside it. The Kiro IDE plugins in `.kiro\extensions` are
+still listed: the service is granted that folder alone and reads it without
+any access to `.kiro`. Kiro CLI is then found by its install folder
 `%LOCALAPPDATA%\Kiro-Cli`, Copilot CLI by its package cache
 `%LOCALAPPDATA%\copilot\pkg`, Devin CLI by `%LOCALAPPDATA%\devin\cli` and
 Amp by its npm install `%APPDATA%\npm\node_modules\@ampcode\cli`,
@@ -340,7 +348,14 @@ process started from one, carries that profile's account (`user.id` is the
 account SID, `defenseclaw.user.id_kind` is `windows_sid`,
 `defenseclaw.user.name` the account name). Folders outside the granted ones,
 such as the profile root that `scan_roots: ["~"]` names, are skipped
-without failing the scan.
+without failing the scan. Only enrolled profiles are read: the profile of an
+account that `enterprise.enrollment.exclude_users` names is not, the
+processes in its sessions are left out, and the components it reported
+before are reported `removed` once, at the first scan after the change is
+applied, without a gateway restart; the enumerator also takes away the read
+access an earlier install granted it. `ai_discovery.home_dirs` adds folders
+to the enrolled profiles and never replaces them, and a folder inside an
+excluded profile is not read.
 
 ### Inside OpenShell sandboxes
 
@@ -435,6 +450,15 @@ in [Capability matrix](/docs/connectors/capability-matrix). Custom packs are use
 you ship internal AI tooling and want it surfaced as a first-party signal
 rather than `unknown`.
 
+A pack whose sha256 is not the one pinned in `ai_discovery.signature_pack_digests` (or, on a
+managed standalone device, a pack with no pin) is not loaded. `signatures list` prints a
+`Not loaded:` line with both digests and leaves its signatures out, `agent discovery status`
+counts it, and `defenseclaw doctor` warns. A configured pack whose file is gone is reported the same
+way (`file not found`); `signatures list` still prints the rest of the catalog, and the gateway keeps
+enforcing the last catalog it built until the file is restored or removed from
+`ai_discovery.signature_packs`. A pack edited on disk while the gateway runs is checked again within
+a few seconds.
+
 ## IDE plugin inventory
 
 Beyond the AI agents on a host, DefenseClaw lists **every extension and plugin
@@ -444,6 +468,9 @@ Continue installed, and is it switched on?" is one command. The inventory is
 part of the continuous scan and refreshes with every full scan (every five
 minutes by default). Nothing is executed: the scan reads small, bounded
 metadata files only.
+Bundled extensions inside an IDE application, including VS Code built-in GitHub
+Copilot Chat, are not listed. The inventory reads per-user extension data folders.
+
 
 ```text
 $ defenseclaw agent ide-plugins --user alice
@@ -471,7 +498,7 @@ alice  zed              html                                              0.2.1 
 
 | IDE family | Products | Plugin list | Enabled state from |
 | --- | --- | --- | --- |
-| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop, Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including every profile) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
+| VS Code and forks | VS Code, Insiders, VSCodium, Cursor, Devin Desktop (including legacy Windsurf folders), Kiro, Trae, Void, Antigravity, Positron | `extensions.json` (including every profile) and each extension's `package.json` | The `extensionsIdentifiers/disabled` key of the editor's `state.vscdb`, opened read-only: enabled when not listed (or when the editor has no state database yet), `unknown` when the database cannot be read |
 | VS Code Remote-SSH servers | `~/.vscode-server`, `~/.cursor-server` and the other forks' servers, on the host you connect to | The server's `extensions` folder, shown as `vscode (ssh)`, `cursor (ssh)` and so on | `client_side_unknown`, shown as `client side`: the IDE on your laptop keeps that state |
 | JetBrains | IntelliJ IDEA, PyCharm, WebStorm, GoLand, CLion, Rider, RubyMine, PhpStorm, DataGrip, DataSpell, RustRover, Aqua, Writerside and Android Studio, plus JetBrains remote development (shown as `(remote dev)`) | Each plugin's `META-INF/plugin.xml` in the plugin folders and bundled JARs | `disabled_plugins.txt`: enabled when not listed |
 | Visual Studio (Windows) | Visual Studio per instance, including the experimental hive: the user's extensions under `%LOCALAPPDATA%\Microsoft\VisualStudio`, and the machine-wide ones under Program Files | `extension.vsixmanifest` | Visual Studio's private registry (`privateregistry.bin`); `unknown` while Visual Studio is running and holds the hive locked |
@@ -490,20 +517,46 @@ The enabled state of a row is one of `enabled`, `disabled`,
 
 ### Whose plugins
 
-Each row carries the user it belongs to: the home's owner, or on a managed
-host the account the guardian or the gateway scanned. One user can never
-appear in another user's rows: a planted extension folder changes only its own
-owner's inventory.
+Each per-user row carries the user it belongs to: the home's owner, or on a
+managed host the account the guardian or the gateway scanned. One user can
+never appear in another user's rows: a planted extension folder changes only
+its own owner's inventory.
 
 | Install | Who scans | Whose homes |
 | --- | --- | --- |
 | Per-user (OSS) | The user's own gateway | That user's home only |
 | Standalone enterprise, Linux and macOS | The hook guardian, as each enrolled user | Each enrolled user's home. It does not follow links out of the home |
-| Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each profile in the ProfileList; Visual Studio installs under Program Files are machine-wide |
+| Standalone enterprise, Windows | The gateway service, which the enumerator grants read access to the IDE folders of each profile (and nothing else in the profile) | Each enrolled profile; Visual Studio installs under Program Files are machine-wide. It reads nothing through a link, junction or mount point below a profile, and skips an `ai_discovery.home_dirs` folder that is one; each refused path gets one `ai_discovery_link_refused` warning in the gateway log |
 
-A managed Windows gateway does not read VS Code-family Remote-SSH servers,
-`%LOCALAPPDATA%\JetBrains` or Android Studio folders in a profile, because
-they are rare on a desktop and large.
+A machine-wide row belongs to no account. A Visual Studio extension
+installed for all users under `Program Files` is listed once, however many
+users are enrolled, with `scope` `machine`, no `user` or `user_id`, and an
+enabled state of `unknown`. `--user` never returns it, `counts.users` does not
+count it, and its `ide.plugin.*` records are exported without `user.id` or any
+`defenseclaw.user.*` attribute.
+
+A managed Windows gateway reads the same IDE sources as a per-user scan, and
+the enabled state comes from the same places. The hook enumerator grants its
+service account read access to these folders in each enrolled profile (one
+with at least one enrolled agent) at every cycle, every 5 minutes, so a new
+IDE or plugin folder shows up after the next cycle and the next scan:
+
+| IDE | Read, with what it holds | Only the folder or file itself |
+| --- | --- | --- |
+| VS Code and forks | `.vscode\extensions` and the forks' `extensions`, `%APPDATA%\Code\User\globalStorage` and `profiles` (and the forks') | |
+| Remote-SSH servers | `.vscode-server\extensions` and the forks' | `.vscode-server` and `.vscode-server\cli\servers` (to list the server builds), each build's `server\package.json` (its version). The server's own data and binaries are not granted |
+| JetBrains | `%APPDATA%\JetBrains`, and `plugins` in each product folder under `%LOCALAPPDATA%\JetBrains` | `%LOCALAPPDATA%\JetBrains` (to list the products), `RemoteDev\dist` and each backend's `product-info.json`. The caches, indexes and logs beside them are not granted |
+| Android Studio | Each `%APPDATA%\Google\AndroidStudio<version>` folder, and `plugins` in each `%LOCALAPPDATA%\Google\AndroidStudio<version>` | `%APPDATA%\Google` and `%LOCALAPPDATA%\Google` (to list the versions). Other Google folders are not granted |
+| Visual Studio, Zed, Neovim, Vim | `%LOCALAPPDATA%\Microsoft\VisualStudio`, `%LOCALAPPDATA%\Zed\extensions\installed`, `%LOCALAPPDATA%\nvim` and `nvim-data`, `vimfiles` | |
+| Eclipse | `.eclipse` | `eclipse` (Oomph's installs) and each install's `bundles.info` |
+
+Nothing is granted through a link or junction inside a profile. The
+enumerator reads the default `%APPDATA%` and `%LOCALAPPDATA%` under each
+profile, so a profile whose AppData is redirected elsewhere is not read. The
+Secure Client profile keeps its historical editor-extension detector and
+has no IDE inventory, so it gets none of these grants. JetBrains Toolbox's
+own folder is not read on any platform: the IDEs it installs keep their
+plugins in the product folders above.
 
 ### What is collected, and what is not
 
@@ -516,13 +569,42 @@ remote server, and a hash of its path.
 
 Not collected: the contents or source of any extension, settings, tokens or
 credentials, workspace and project files, chat or editor history, or the
-extension's own data. The only database read is the one key
+extension's own data. Each text field (a display name, a publisher) is kept
+to one printable line of at most 256 bytes: format characters such as
+right-to-left overrides are dropped and control characters become a space, so
+a planted name cannot render differently in a table or a dashboard. The only
+database read is the one key
 `extensionsIdentifiers/disabled` in a VS Code `state.vscdb`, opened read-only
 and immutable with a 2-second limit. Paths leave the host only as hashes.
 
-Every scan is bounded per home: at most 4,096 plugins, 16,384 files and 64 MiB
-of metadata, and 1 MiB per file. A home that exceeds a bound is reported as a
-partial installation rather than read further.
+Every scan is bounded: at most 4,096 plugins per IDE installation, 16,384
+files and 64 MiB of metadata per home, and 1 MiB per file. An IDE that
+exceeds a bound is reported as a partial installation rather than read further.
+
+The scan reads regular files only: it skips a FIFO, a device, a socket or a
+folder it cannot open without waiting on it, and a manifest it walks to is read
+as the file itself, never through a link. On a managed Linux host, each
+user's scan runs in a worker with a 1 GiB memory ceiling, so a home that
+defeats these bounds ends that user's worker, not the host. On managed Linux
+and macOS, when a user's scan fails three passes in a row, the guardian
+pauses that home for an hour (then two, up to a day) and keeps the user's
+last inventory meanwhile.
+
+Most IDE rows describe plugin data found in each user profile; Windows Visual
+Studio also has machine-wide rows. Removing an IDE
+application can leave those folders behind, so an `enabled` plugin row means
+its metadata is present and enabled in that saved profile; it does not prove
+that the IDE application is still installed.
+
+### Folder coverage
+
+For VS Code, the scanner reads `~/.vscode/extensions` on macOS and Linux
+and `%USERPROFILE%\.vscode\extensions` on Windows, plus the default
+per-user data folders for the listed forks and their remote SSH servers.
+It does not read portable VS Code `data/extensions` beside the app, folders
+selected with `--extensions-dir` or `VSCODE_EXTENSIONS`, Linux XDG
+relocations, or Snap and Flatpak extension roots. Those installations and
+their editor-extension AI signals can be absent from the inventory.
 
 ### Privacy and scope
 
@@ -540,7 +622,9 @@ ai_discovery:
   ide_inventory: ai_only    # all | ai_only | off
 ```
 
-A running gateway applies the change on its next reload, and the inventory
+Set the scope with `defenseclaw agent discovery enable --ide-inventory ai_only --yes`
+(or choose `all` or `off`). This also enables discovery and runtime planes A
+and B. A running gateway applies the change on its next reload, and the inventory
 follows at the next full scan. On a managed host, edit the
 [machine configuration](/docs/enterprise/configuration#where-the-config-lives).
 When the scope is `off`, `defenseclaw agent ide-plugins` says so and exports
@@ -558,7 +642,8 @@ defenseclaw aibom scan --only ide_plugins
 ```
 
 `--ide` takes a product (`vscode`, `cursor`, `pycharm`) or a family
-(`jetbrains`). The footer line reports the counts of the rows that the filters
+(`jetbrains`). `--ide windsurf` is an alias for `devin-desktop` so
+older Windsurf profiles can be found by that name. The footer line reports the counts of the rows that the filters
 select. Without AI discovery enabled, the command tells you to run
 `defenseclaw agent discovery enable`.
 
@@ -569,7 +654,11 @@ enterprise macos ide-plugins`) prints the managed gateway's inventory as
 JSON, with the `--user`, `--ide`, `--ai-only` and `--cursor` filters. On a
 managed Windows computer, `defenseclaw.exe enterprise windows ide-plugins`
 does the same from an elevated prompt. These commands print the counts of the
-whole machine next to the filtered rows.
+whole machine next to the filtered rows. An answer without an inventory
+carries a `reason`: on a managed computer whose config leaves AI discovery
+off, it says to set `ai_discovery.enabled: true` in the managed config (the
+file Setup, the package or the MDM delivers); `agent discovery enable` is a
+per-user command.
 
 - **API.** `GET /api/v1/ai-usage/ide-plugins` returns the last full scan's
   plugins, filtered by `user` (account name or ID), `ide` (product or family)
@@ -580,6 +669,7 @@ whole machine next to the filtered rows.
   installations that hold an AI plugin. `GET /api/v1/ai-usage` carries the
   same counts for the whole machine. See the
   [gateway API](/docs/reference/gateway-api#identity-profiles-and-ide-inventory).
+  Secure Client does not register the IDE plugin route, so it returns `404`.
 - **AIBOM.** The `ide_plugins` category lists the same rows. `--only` can
   leave it out or select it alone.
 - **TUI.** Inventory (`6`) → **IDE plugins** lists IDE, Plugin, Version,
@@ -809,12 +899,10 @@ The local observability stack ships the **AI Agent Usage & Detection** board
 - Prometheus: `defenseclaw_ai_discovery_signals_total` (labels `state`,
   `signal_category`, `ai_vendor`, `ai_product`, `detector`), the active-signal
   gauge and the IDE plugin gauge `defenseclaw_inventory_ide_plugins` (labels
-  `ide`, `ai`, `enabled`). These short label names are the
-  `local-observability-v1` projection, which only the OTLP destination named
-  `local-observability` receives (`setup observability add local-otlp`). A
-  plain `otlp` destination exports the canonical names
-  `defenseclaw_ide_product`, `defenseclaw_ide_plugin_ai` and
-  `defenseclaw_ide_plugin_enabled`, which the board does not read.
+  `defenseclaw_ide_product`, `defenseclaw_ide_plugin_ai`, and
+  `defenseclaw_ide_plugin_enabled`; the sample without labels is the current
+  total). The board queries the exported label names directly, including for
+  a plain `otlp` destination.
 - Loki: the `ai.discovery.completed`, `ai_component.*` and `ide.plugin.*`
   records.
 - Tempo: the discovery scan traces.
@@ -874,7 +962,7 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
   </Step>
 </Steps>
 
-On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. If one or more roots cannot be read, successful detections are retained but the scan summary reports `result: partial`, increments `errors`, and includes sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
+On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. Without Full Disk Access the scan does not open the folders that make macOS prompt the user (Desktop, Documents, Downloads, Movies, Music, Pictures, iCloud Drive, `~/Library/Containers`, `~/Library/Group Containers` and Contacts data); it skips them without counting an error. If one or more roots cannot be read, successful detections are retained but the scan summary reports `result: partial`, increments `errors`, and includes sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
 
 The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`; the gateway prunes scans older than `observability.local.retention_days` (seven days by default) and always keeps the latest scan. Records sent to a destination follow that destination's redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired `privacy.disable_redaction` setting no longer turns redaction off.
 
@@ -955,6 +1043,15 @@ Windows has two prerequisites that fail differently and are therefore reported
 differently: Advanced Audit Policy for the events at all, and the separate
 command-line policy for argv. Without the second, lineage still works and
 argument-vector tactics do not.
+
+On Windows the plane reads the Security log from the last record it read, and
+it reads file and account events before process events. A burst of process
+starts, such as a scheduled task looping a short command, delays a file write
+that comes after it by about 30 seconds at most: the write waits for the
+process events ahead of it, so it can still be traced to the agent whose
+process made it. A reader that falls behind is listed in `degraded_reasons` as
+`agent actions partially covered: Security event log reader is behind ...`
+until it catches up. Process events are delayed then, not skipped.
 
 ```powershell
 # Windows, elevated: the events themselves
@@ -1301,7 +1398,14 @@ dashboards:
 | --- | --- |
 | `ai.runtime.finding` | One scored finding, its evidence trail, and the inventory verdict |
 | `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage |
-| `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero |
+| `ai.runtime.plane_health` | One running plane per poll cycle |
+
+A running plane emits about one health record per poll cycle (roughly once a
+minute with the default runtime poll), per enabled destination that routes
+ai.discovery logs. Unselected or stopped planes emit no recurring health
+record. Exclude the ai.discovery bucket from a destination route to remove
+this stream there; this also removes runtime findings and discovery events on
+that route. Local sensor status still reports every plane.
 
 A degraded cycle is reported with outcome `partial` rather than `completed`.
 

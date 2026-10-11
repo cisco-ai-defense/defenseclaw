@@ -41,7 +41,10 @@ ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
 # publishes for the gateway (enterprise.enrollment.unverified_versions).
 # It is root:defenseclaw 0640 so the gateway can read it; CAP_CHOWN lets
 # the enumerator set that group (GAP-1760).
-ReadWritePaths=/etc/defenseclaw/hook-guardian /var/lib/defenseclaw-hook-guardian
+# The ACP service records live in /var/lib/defenseclaw/acp: the enumerator
+# revokes the enrollments of deleted accounts there, and under
+# ProtectSystem=strict alone every such revoke failed (GAP-0697).
+ReadWritePaths=/etc/defenseclaw/hook-guardian /var/lib/defenseclaw-hook-guardian -/var/lib/defenseclaw/acp
 # CAP_SETUID and CAP_SETGID are also ambient: systemd 255 (Ubuntu 24.04)
 # drops CAP_SETUID from a User= service that filters system calls unless it
 # is in the ambient set, and the per-user workers need both. The kernel

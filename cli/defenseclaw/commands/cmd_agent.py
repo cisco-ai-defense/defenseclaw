@@ -33,6 +33,7 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw import legacy_connector
 from defenseclaw.config import (
     FULL_RUNTIME_PLANES,
     USER_RUNTIME_PLANES,
@@ -51,7 +52,36 @@ def _mapping_block(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-@click.group()
+class _AgentGroup(click.Group):
+    """Keep new identity and IDE commands off the Secure Client command tree."""
+
+    def _secure_client(self, ctx: click.Context) -> bool:
+        from defenseclaw.commands.cmd_status import _enterprise_profile
+
+        app = ctx.find_object(AppContext)
+        cfg = app.cfg if app is not None else None
+        if cfg is None:
+            # Help is rendered before the root callback loads configuration.
+            from defenseclaw.config import load
+
+            try:
+                cfg = load()
+            except (OSError, ValueError, RuntimeError):
+                return False
+        return _enterprise_profile(cfg) == "secure_client"
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = super().list_commands(ctx)
+        return ([name for name in names if name not in {"ide-plugins", "identities"}]
+                if self._secure_client(ctx) else names)
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        if cmd_name in {"ide-plugins", "identities"} and self._secure_client(ctx):
+            return None
+        return super().get_command(ctx, cmd_name)
+
+
+@click.group(cls=_AgentGroup)
 def agent() -> None:
     """Inspect locally installed agent surfaces."""
 
@@ -339,8 +369,7 @@ def usage(
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
+        raise _usage_rejected(exc) from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
@@ -423,6 +452,9 @@ _IDE_REMOTE_LABELS = {"ssh_server": "ssh", "jetbrains_remote_dev": "remote dev"}
 def ide_plugin_ide_label(item: Mapping[str, Any]) -> str:
     """IDE cell: the product, plus where it runs for a remote install."""
     product = str(item.get("ide_product") or item.get("ide_family") or "-")
+    version = str(item.get("ide_version") or "")
+    if version:
+        product = f"{product} {version}"
     kind = str(item.get("remote_kind") or "")
     if kind:
         return f"{product} ({_IDE_REMOTE_LABELS.get(kind, 'remote')})"
@@ -435,7 +467,7 @@ def ide_plugin_enabled_label(value: object) -> str:
     return _IDE_PLUGIN_ENABLED_LABELS.get(text, text)
 
 
-def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
+def ide_plugin_rows(plugins: list[Any], versions: Mapping[str, str] | None = None) -> list[list[str]]:
     """User | IDE | Plugin | Version | Enabled | AI cells, sorted for reading."""
     rows: list[list[str]] = []
     for item in plugins:
@@ -447,7 +479,7 @@ def ide_plugin_rows(plugins: list[Any]) -> list[list[str]]:
             plugin = f"{plugin} ({name})" if plugin else name
         rows.append([
             str(item.get("user") or item.get("user_id") or "-"),
-            ide_plugin_ide_label(item),
+            ide_plugin_ide_label({**item, "ide_version": (versions or {}).get(str(item.get("install_id") or ""), "")}),
             plugin or "-",
             str(item.get("version") or "-"),
             ide_plugin_enabled_label(item.get("enabled")),
@@ -494,7 +526,11 @@ def ide_plugins(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.ai_usage_ide_plugins_all(user=user.strip(), ide=ide.strip().lower(), ai_only=ai_only)
+        payload = client.ai_usage_ide_plugins_all(
+            user=user.strip(),
+            ide="devin-desktop" if ide.strip().lower() == legacy_connector.RETIRED_DESKTOP_ID else ide.strip().lower(),
+            ai_only=ai_only,
+        )
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
@@ -519,11 +555,13 @@ def ide_plugins(
     if str(payload.get("scope") or "") == "off":
         click.echo(
             "The IDE plugin inventory is turned off (ai_discovery.ide_inventory: off). "
-            "Set it to all in the config file that 'defenseclaw config path' shows."
+            "Turn it on with: defenseclaw config set ai_discovery.ide_inventory all"
         )
         return
     plugins = payload.get("plugins") or []
-    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [])
+    versions = {str(inst.get("install_id") or ""): str(inst.get("version") or "")
+                for inst in payload.get("installations") or [] if isinstance(inst, Mapping)}
+    rows = ide_plugin_rows(plugins if isinstance(plugins, list) else [], versions)
     if not rows:
         filtered = bool(user or ide or ai_only)
         click.echo("No IDE plugins match these filters." if filtered else "No IDE plugins found yet.")
@@ -538,6 +576,8 @@ def ide_plugins(
         )
     if payload.get("scope") == "ai_only":
         summary += " (the inventory keeps AI plugins only)"
+    if payload.get("partial") or any(i.get("partial") for i in payload.get("installations") or []):
+        summary += " — partial installation; scan limits were reached"
     click.echo(summary)
 
 
@@ -604,8 +644,7 @@ def processes(
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        raise click.ClickException(f"sidecar rejected AI usage request: HTTP {status}") from exc
+        raise _usage_rejected(exc) from exc
     except requests.RequestException as exc:
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
@@ -1292,6 +1331,10 @@ def discovery() -> None:
     ),
 )
 @click.option(
+    "--ide-inventory", type=click.Choice(("all", "ai_only", "off")), default=None,
+    help="IDE plugin inventory scope (all, ai_only or off).",
+)
+@click.option(
     "--enable-host-plane/--no-enable-host-plane",
     default=None,
     help=(
@@ -1328,6 +1371,7 @@ def discovery_enable(
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
     enable_host_plane: bool | None,
+    ide_inventory: str | None,
     restart: bool,
     scan: bool,
     yes: bool,
@@ -1361,6 +1405,7 @@ def discovery_enable(
         lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
+        ide_inventory=ide_inventory,
     )
 
     from defenseclaw import ux
@@ -1645,6 +1690,15 @@ def discovery_status(
         ),
     }
 
+    pack_total, refused_packs = ai_signatures.refused_packs(cfg)
+    packs = {
+        "configured": pack_total,
+        "not_loaded": [
+            {"path": pack.path, "reason": pack.reason, "digest": pack.digest, "pinned": pack.pinned}
+            for pack in refused_packs
+        ],
+    }
+
     live: dict[str, Any] = {
         "reachable": False,
         "enabled": None,
@@ -1698,6 +1752,7 @@ def discovery_status(
         click.echo(json.dumps(
             {
                 "on_disk": on_disk,
+                "signature_packs": packs,
                 "live": live,
                 "drift": drift,
                 "comparison": {
@@ -1723,6 +1778,15 @@ def discovery_status(
         "enabled" if on_disk["lookup_model_provenance_online"] else "disabled",
         indent="  ",
     )
+    if pack_total:
+        ux.kv(
+            "Signature packs",
+            f"{pack_total - len(refused_packs)} of {pack_total} loaded"
+            + (f", {len(refused_packs)} not loaded" if refused_packs else ""),
+            indent="  ",
+        )
+        for pack in refused_packs:
+            ux.warn(f"Not loaded: {pack.path}: {pack.reason}", indent="  ")
 
     click.echo()
     ux.section("Live (sidecar)")
@@ -2183,11 +2247,13 @@ def _render_runtime_table(headers: list[str], rows: list[list[str]]) -> str:
 
     stream = StringIO()
     console = Console(file=stream, force_terminal=False, color_system=None, width=140)
+    from rich.text import Text
+
     table = Table()
     for header in headers:
         table.add_column(header)
     for row in rows:
-        table.add_row(*row)
+        table.add_row(*(Text("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in str(cell))) for cell in row))
     console.print(table)
     return stream.getvalue()
 
@@ -3304,6 +3370,7 @@ def _build_discovery_overrides(
     lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
+    ide_inventory: str | None = None,
 ) -> dict[str, Any]:
     """Collect non-None overrides into a stable, ordered mapping.
 
@@ -3347,6 +3414,8 @@ def _build_discovery_overrides(
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
         overrides["store_raw_local_paths"] = bool(store_raw_local_paths)
+    if ide_inventory is not None:
+        overrides["ide_inventory"] = ide_inventory
     return overrides
 
 
@@ -3598,6 +3667,8 @@ def _trigger_post_enable_scan(
     discovery_off = False
     for delay in delays:
         time.sleep(delay)
+        # Only the latest attempt can establish why the scan did not run.
+        discovery_off = False
         try:
             client = _usage_client(
                 app,
@@ -3679,21 +3750,44 @@ def signatures() -> None:
 def signatures_list(app: AppContext, as_json: bool, include_disabled: bool) -> None:
     """List the merged AI discovery signature catalog."""
     cfg = _load_config_best_effort(app)
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+
+    secure_client = _enterprise_profile(cfg) == "secure_client"
     disabled = [] if include_disabled else list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
+    pins, require_pins = ai_signatures.pack_pins(cfg)
+    configured = list(cfg.ai_discovery.signature_packs)
+    if secure_client:
+        # Secure Client v8 still discovers every pack in this directory. An
+        # empty or absent directory is not an error there, so list the files
+        # that exist instead of a pattern that must match.
+        pack_dir = ai_signatures.signature_pack_dir(cfg.data_dir)
+        configured[:0] = [str(path) for path in sorted(pack_dir.glob("*.json")) if path.is_file()]
     try:
-        sigs = ai_signatures.load_ai_signatures(
-            signature_packs=cfg.ai_discovery.signature_packs,
+        sigs, refused = ai_signatures.load_ai_signature_catalog(
+            signature_packs=configured,
             allow_workspace_signatures=cfg.ai_discovery.allow_workspace_signatures,
             scan_roots=cfg.ai_discovery.scan_roots,
             disabled_signature_ids=disabled,
+            pack_digests=pins,
+            require_digests=require_pins,
+            secure_client=secure_client,
         )
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
 
     if as_json:
-        click.echo(json.dumps([asdict(sig) for sig in sigs], indent=2, sort_keys=True))
-        return
-    click.echo(_render_signatures_table(sigs).rstrip())
+        payload = [asdict(sig) for sig in sigs]
+        if secure_client:
+            for sig in payload:
+                for field in ai_signatures.IDE_INVENTORY_FIELDS:
+                    sig.pop(field, None)
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    else:
+        click.echo(_render_signatures_table(sigs).rstrip())
+    # A pack that fails its pin is not loaded: its signatures are not listed.
+    # Say so where the list is read (stderr keeps --json parseable).
+    for pack in refused:
+        click.echo(f"Not loaded: {pack.path}: {pack.reason}", err=as_json)
 
 
 @signatures.command("validate")
@@ -3717,19 +3811,66 @@ def signatures_validate(pack_path: Path, as_json: bool) -> None:
 @click.option("--replace", is_flag=True, help="Replace an installed pack with the same pack id.")
 @pass_ctx
 def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
-    """Install a validated pack into the managed signature-pack directory and
-    add it to ai_discovery.signature_packs, the only packs discovery loads."""
+    """Install a validated pack and configure it for standalone discovery."""
+    from defenseclaw import config_writer
+    from defenseclaw.commands.cmd_status import _enterprise_profile
+    from defenseclaw.config import config_path_for_data_dir
+    from defenseclaw.config import load as load_config
+
     cfg = _require_loaded_config(app)
-    configured = list(getattr(cfg.ai_discovery, "signature_packs", []) or [])
+    secure_client = _enterprise_profile(cfg) == "secure_client"
+    if secure_client:
+        # Match the v8 command: install into the directory without a config
+        # write. The Secure Client gateway discovers that directory itself.
+        try:
+            legacy_packs = sorted(ai_signatures.signature_pack_dir(cfg.data_dir).glob("*.json"))
+            dest = ai_signatures.install_signature_pack(
+                pack_path, data_dir=cfg.data_dir, signature_packs=[str(path) for path in legacy_packs],
+                replace=replace,
+                secure_client=True,
+            )
+        except ai_signatures.SignaturePackError as exc:
+            raise click.ClickException(str(exc)) from exc
+        click.echo(f"Installed signature pack: {dest}")
+        return
+
+    config_path = config_path_for_data_dir(cfg.data_dir)
     try:
-        dest = ai_signatures.install_signature_pack(
-            pack_path, data_dir=cfg.data_dir, signature_packs=configured, replace=replace
-        )
+        # A managed refusal must happen before an existing pack is replaced.
+        config_writer.refuse_when_managed(config_path)
+        with config_writer.hold_lock(config_path):
+            config_writer.refuse_when_managed(config_path)
+            # The command may have loaded config before another install committed.
+            # Read it again under the writer lock before checking and editing packs.
+            current_cfg = load_config(data_dir=cfg.data_dir) if Path(config_path).is_file() else cfg
+            configured = list(current_cfg.ai_discovery.signature_packs or [])
+            dest = ai_signatures.signature_pack_destination(pack_path, current_cfg.data_dir)
+            previous = dest.read_bytes() if dest.exists() else None
+            previous_mode = dest.stat().st_mode & 0o777 if previous is not None else None
+            dest = ai_signatures.install_signature_pack(
+                pack_path, data_dir=current_cfg.data_dir, signature_packs=configured, replace=replace
+            )
+            original_pins = dict(current_cfg.ai_discovery.signature_pack_digests or {})
+            try:
+                if str(dest) not in configured:
+                    current_cfg.ai_discovery.signature_packs = [*configured, str(dest)]
+                pins = dict(original_pins)
+                if str(dest) in pins:
+                    pins[str(dest)] = "sha256:" + hashlib.sha256(dest.read_bytes()).hexdigest()
+                    current_cfg.ai_discovery.signature_pack_digests = pins
+                if str(dest) not in configured or str(dest) in pins:
+                    current_cfg.save()
+                app.cfg = current_cfg
+            except Exception:
+                if previous is None:
+                    dest.unlink()
+                else:
+                    ai_signatures.restore_signature_pack(dest, previous, previous_mode)
+                current_cfg.ai_discovery.signature_packs = configured
+                current_cfg.ai_discovery.signature_pack_digests = original_pins
+                raise
     except ai_signatures.SignaturePackError as exc:
         raise click.ClickException(str(exc)) from exc
-    if str(dest) not in configured:
-        cfg.ai_discovery.signature_packs = [*configured, str(dest)]
-        cfg.save()
     click.echo(f"Installed signature pack: {dest} (added to ai_discovery.signature_packs)")
 
 
@@ -3835,7 +3976,7 @@ def _require_loaded_config(app: AppContext):
 
         if not is_current_schema(getattr(cfg, "_source_config_version", None)):
             raise click.ClickException(
-                "Configuration schema v8 is required — run 'defenseclaw migrate' first."
+                "This configuration was written by an older DefenseClaw — run 'defenseclaw migrate' first."
             )
         return cfg
     from defenseclaw import config as cfg_mod
@@ -3925,6 +4066,18 @@ def _emit_discovery_report(
     except requests.RequestException as exc:
         result["error"] = f"sidecar request failed: {exc}"
     return result
+
+
+def _usage_rejected(exc: requests.HTTPError) -> click.ClickException:
+    """The error for an AI usage request the sidecar refused.
+
+    A refresh with AI discovery off (503) does not get here: _usage_payload
+    reads it as the disabled view, which says how to enable discovery
+    (GAP-0150, GAP-0281).
+    """
+    response = exc.response
+    status = response.status_code if response is not None else "unknown"
+    return click.ClickException(f"sidecar rejected AI usage request: HTTP {status}")
 
 
 def _sidecar_unavailable(exc: Exception, host: str | None = None, port: int | None = None) -> str:
@@ -4061,6 +4214,11 @@ def _format_missing_token_error(app: AppContext) -> str:
     the wording (presence of remediation hints) without bringing the
     whole click.ClickException raise path into the assertion.
     """
+    from defenseclaw import config as config_module
+
+    if not config_module.config_path().is_file():
+        return "DefenseClaw is not initialized — run defenseclaw init first."
+
     configured_env = ""
     cfg = getattr(app, "cfg", None)
     gw = getattr(cfg, "gateway", None) if cfg is not None else None
@@ -5905,6 +6063,7 @@ def _error_class(error: str) -> str:
 @agent.command("identities")
 @click.option("--user", "user", default=None, help="Only this user (uid, SID or account name).")
 @click.option("--connector", "connector_name", default=None, help="Only this connector.")
+@click.option("--limit", type=click.IntRange(min=1), default=None, help="Only the N most recently seen.")
 @click.option("--json", "as_json", is_flag=True, help="Output the identities as JSON.")
 @click.option("--gateway-host", default=None, help="Sidecar API host override.")
 @click.option("--gateway-port", type=int, default=None, help="Sidecar API port override.")
@@ -5918,6 +6077,7 @@ def identities(
     app: AppContext,
     user: str | None,
     connector_name: str | None,
+    limit: int | None,
     as_json: bool,
     gateway_host: str | None,
     gateway_port: int | None,
@@ -5928,7 +6088,19 @@ def identities(
     The ID (agt-...) is derived from the machine id, the verified user,
     the connector and its config root, so it is stable across sessions
     and gateway restarts. Each session of an agent has its own ais- id.
+    Every identity is listed, most recently seen first.
     """
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS
+
+    if connector_name:
+        raw_connector, connector_name = connector_name, normalize_connector(connector_name)
+        if connector_name not in KNOWN_CONNECTORS:
+            raise click.BadParameter(
+                f"unknown connector {raw_connector!r}; valid names: {', '.join(KNOWN_CONNECTORS)}",
+                param_hint="--connector",
+            )
+    if limit is not None and limit > 1000:
+        raise click.BadParameter("limit too large (maximum 1000)", param_hint="--limit")
     client = _usage_client(
         app,
         gateway_host=gateway_host,
@@ -5936,7 +6108,7 @@ def identities(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.agent_identities(user=user, connector=connector_name)
+        payload = client.agent_identities_all(user=user, connector=connector_name or None, limit=limit or 0)
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
@@ -5946,16 +6118,55 @@ def identities(
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     rows = [row for row in payload.get("identities", []) or [] if isinstance(row, Mapping)]
+    total = payload.get("total")
+    total = total if isinstance(total, int) and total > len(rows) else len(rows)
+    next_cursor = str(payload.get("next_cursor") or "")
+    if next_cursor:
+        hint = "" if limit else " Narrow the list with --user or --connector."
+        click.echo(f"Showing the {len(rows)} most recently seen of {total} agent identities.{hint}", err=True)
+    persisted = payload.get("persisted")
+    persist_error = str(payload.get("persist_error") or "").strip()
     if as_json:
-        click.echo(json.dumps(
-            {"enabled": bool(payload.get("enabled", False)), "identities": rows},
-            indent=2, sort_keys=True))
+        out: dict[str, Any] = {"enabled": bool(payload.get("enabled", False)), "identities": rows,
+                               "total": total, "next_cursor": next_cursor}
+        if isinstance(persisted, bool):
+            out["persisted"] = persisted
+        if persist_error:
+            out["persist_error"] = persist_error
+        click.echo(json.dumps(out, indent=2, sort_keys=True))
         return
+    if persisted is False and payload.get("enabled") is not False:
+        # GAP-0393: the list is the gateway's memory only.
+        reason = f" ({persist_error})" if persist_error else ""
+        click.echo(
+            f"Warning: agent identities are not being saved to inventory.db{reason}; session counts and "
+            "first-seen times reset at the next gateway restart. Run 'defenseclaw doctor'.",
+            err=True,
+        )
     if payload.get("enabled") is False:
         click.echo("Agent identities are not recorded on this deployment.")
         return
     if not rows:
-        click.echo("No agent identities seen yet. They appear after an agent's first hook.")
+        if user or connector_name:
+            try:
+                existing = client.agent_identities(limit=1).get("total", 0)
+            except requests.ConnectionError as exc:
+                raise click.ClickException(_sidecar_unavailable(exc)) from exc
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else "unknown"
+                raise click.ClickException(f"sidecar rejected agent identities request: HTTP {status}") from exc
+            except requests.RequestException as exc:
+                raise click.ClickException(f"sidecar request failed: {exc}") from exc
+            label = f"--user {user}" if user else f"--connector {connector_name}"
+            click.echo(
+                f"No agent identity matches {label} "
+                f"({existing} identities exist; run without a filter to list them)."
+            )
+        else:
+            click.echo(
+                "No agent identities seen yet. They appear after an agent's first hook, "
+                "LLM proxy or ACP request."
+            )
         return
     click.echo(_render_agent_identities(rows))
 
@@ -5970,16 +6181,24 @@ def _render_agent_identities(rows: list[Mapping[str, Any]]) -> str:
         if hint:
             root = f"{root} (agent claims {hint})"
         table.append((
-            _bounded(user, 32),
+            # A retired identity's account no longer holds its uid (GAP-0947).
+            _bounded(user, 32) + (" (retired)" if row.get("retired") else ""),
             str(row.get("connector", "")),
             str(row.get("agent_id", "")),
             str(row.get("sessions_seen", 0)),
             _format_relative_time(str(row.get("last_seen", "") or "")),
             root,
         ))
-    widths = [max(len(line[i]) for line in table) for i in range(len(headers) - 1)]
+    from rich.cells import cell_len
+
+    table = [
+        tuple("".join(" " if ord(c) < 32 or ord(c) == 127 else c for c in cell) for cell in line)
+        for line in table
+    ]
+    widths = [max(cell_len(line[i]) for line in table) for i in range(len(headers) - 1)]
     lines = [
-        "  ".join(cell.ljust(width) for cell, width in zip(line[:-1], widths)) + "  " + line[-1]
+        "  ".join(cell + " " * (width - cell_len(cell)) for cell, width in zip(line[:-1], widths))
+        + "  " + line[-1]
         for line in table
     ]
     return "\n".join(line.rstrip() for line in lines)

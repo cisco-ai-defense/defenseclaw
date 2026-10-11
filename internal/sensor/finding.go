@@ -46,7 +46,15 @@ type Finding struct {
 	Process string
 	// Cmdline is argv. It is a content-class field on the wire.
 	Cmdline string
+	// User is the owning account, DOMAIN\name (COMPUTER\name for a local
+	// Windows account), and UserSID its SID where the platform has one.
+	// Both are empty exactly when Attribution is unattributed.
 	User    string
+	UserSID string
+	// Attribution is how the finding was tied to User (Attribution* in
+	// owner.go); AttributionReason says why an unattributed one is not.
+	Attribution       string
+	AttributionReason string
 	// AgentName is the lineage-attributed agent, when one was found.
 	AgentName string
 	Score     int
@@ -90,10 +98,12 @@ const (
 
 // PlaneHealth is one plane's current state.
 //
-// It is emitted on every tick including zero. If it were emitted only while
-// healthy, a subscription that died would leave no trace at all, and absence
-// is the hardest thing to alert on.
+// The local sensor snapshot includes every plane on every tick, including
+// stopped and unselected planes. Optional telemetry exports selected planes.
 type PlaneHealth struct {
+	// Selected is the configured plane choice; it is internal bookkeeping,
+	// not part of the public snapshot shape.
+	Selected  bool `json:"-"`
 	Plane     platform.Plane
 	Available bool
 	// Running distinguishes "this platform can do it" from "it is doing it

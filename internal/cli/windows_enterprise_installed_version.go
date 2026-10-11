@@ -13,7 +13,9 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -102,6 +104,14 @@ func windowsEnterpriseRepairRecordingOptions(action string, opts *windowsEnterpr
 		return opts
 	}
 	version, err := windowsEnterpriseInstalledProductVersion(opts)
+	if restored, ok := windowsEnterprisePendingRestoredVersion(opts); ok {
+		// A pending transaction is recovered by restoring its snapshot, so
+		// the binaries this repair keeps are the snapshot ones. The binary
+		// in place can be the half-replaced new one: recording its version
+		// reported 1.0.1811 for restored 1.0.1810 binaries, and the next
+		// plan refused the installed CLI as a downgrade (GAP-0767).
+		version, err = restored, nil
+	}
 	version = strings.TrimSpace(version)
 	if err != nil || version == "" {
 		return opts
@@ -112,4 +122,84 @@ func windowsEnterpriseRepairRecordingOptions(action string, opts *windowsEnterpr
 	copied := *opts
 	copied.productVersion = version
 	return &copied
+}
+
+// windowsEnterprisePendingRestoredVersion is the version of the gateway
+// binary that the recovery of a pending lifecycle transaction restores: the
+// ProductVersion of its copy in the protected transaction snapshot. ok is
+// false without a pending transaction, for one that had no gateway binary
+// before it (a first install), or when the snapshot cannot be read and
+// trusted. A seam for tests.
+var windowsEnterprisePendingRestoredVersion = readWindowsEnterprisePendingRestoredVersion
+
+func readWindowsEnterprisePendingRestoredVersion(opts *windowsEnterpriseLifecycleOptions) (string, bool) {
+	roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+	if err != nil || strings.TrimSpace(roots.MetadataPath) == "" {
+		return "", false
+	}
+	installRoot := strings.TrimSpace(roots.InstallRoot)
+	if opts != nil && strings.TrimSpace(opts.installRoot) != "" {
+		installRoot = strings.TrimSpace(opts.installRoot)
+	}
+	installState := filepath.Dir(filepath.Clean(roots.MetadataPath))
+	readTrusted := func(path string) ([]byte, bool) {
+		if managed.ValidateTrustedFilePath(path, "lifecycle transaction record") != nil {
+			return nil, false
+		}
+		body, err := readWindowsEnterpriseBoundedFile(path, 4<<20)
+		return body, err == nil
+	}
+	pendingPath := filepath.Join(installState, "pending.json")
+	if _, err := os.Lstat(pendingPath); err != nil {
+		return "", false
+	}
+	body, ok := readTrusted(pendingPath)
+	if !ok {
+		return "", false
+	}
+	var pending struct {
+		Snapshot string `json:"snapshot"`
+	}
+	if json.Unmarshal(trimWindowsJSONBOM(body), &pending) != nil {
+		return "", false
+	}
+	snapshotPath := filepath.Clean(strings.TrimSpace(pending.Snapshot))
+	transactions := filepath.Join(installState, "transactions")
+	if !strings.EqualFold(filepath.Dir(filepath.Dir(snapshotPath)), transactions) ||
+		!strings.EqualFold(filepath.Base(snapshotPath), "snapshot.json") {
+		return "", false
+	}
+	if body, ok = readTrusted(snapshotPath); !ok {
+		return "", false
+	}
+	var snapshot struct {
+		Files []struct {
+			Path    string `json:"path"`
+			Existed bool   `json:"existed"`
+			Backup  string `json:"backup"`
+		} `json:"files"`
+	}
+	if json.Unmarshal(trimWindowsJSONBOM(body), &snapshot) != nil {
+		return "", false
+	}
+	gateway := filepath.Join(installRoot, "bin", "defenseclaw-gateway.exe")
+	for _, file := range snapshot.Files {
+		if !strings.EqualFold(filepath.Clean(file.Path), gateway) {
+			continue
+		}
+		backup := filepath.Clean(strings.TrimSpace(file.Backup))
+		if !file.Existed || !strings.EqualFold(filepath.Dir(backup), filepath.Dir(snapshotPath)) ||
+			managed.ValidateTrustedFilePath(backup, "lifecycle transaction snapshot") != nil {
+			return "", false
+		}
+		version, err := windowsFileProductVersion(backup)
+		if err != nil {
+			return "", false
+		}
+		if _, _, ok := parseWindowsEnterpriseVersion(strings.TrimSpace(version)); !ok {
+			return "", false
+		}
+		return strings.TrimSpace(version), true
+	}
+	return "", false
 }

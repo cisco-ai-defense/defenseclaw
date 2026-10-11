@@ -48,12 +48,14 @@ import {
 import { emit } from '../components/policy-creator/lib/emit.js';
 import { projectPolicyToData, withPolicyInput } from '../components/policy-creator/lib/data-projection.js';
 import { emitInstallScript } from '../components/policy-creator/lib/emit-script.js';
+import { pickVerdictEntrypoint } from '../components/policy-creator/lib/opa-eval.js';
 import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/lib/rego-highlight.js';
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
 import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
-import { BLOCK_CARDS } from '../components/policy-creator/quick-start/questions.js';
+import { BLOCK_CARDS, SINK_CARDS, defaultAnswers } from '../components/policy-creator/quick-start/questions.js';
+import { applyAnswers } from '../components/policy-creator/quick-start/apply.js';
 import {
   BOUNDED_CHAINS,
   HIGH_ASSURANCE_PACKS,
@@ -450,6 +452,20 @@ test('live test: config_version 9 Rego gets the policy as input.admission and in
   assert.equal(guardrail.thresholds.block, policy.guardrail.block_threshold);
 });
 
+test('live test withholds built-in first-party trust without content verification', () => {
+  const data = projectPolicyToData(policyFromPreset('default'));
+  data.first_party_allow_list = [
+    { target_type: 'skill', target_name: 'codeguard', reason: '', source_path_contains: ['.claude/skills/codeguard'] },
+    { target_type: 'plugin', target_name: 'defenseclaw', reason: '', source_path_contains: ['.claude/extensions/defenseclaw'] },
+    { target_type: 'plugin', target_name: 'acme', reason: '', source_path_contains: ['.acme/plugins/acme'] },
+  ];
+  const entries = (target_type: string) => (withPolicyInput('admission', { target_type }, data) as {
+    admission: { first_party_allow_list: Array<{ name: string }> };
+  }).admission.first_party_allow_list;
+  assert.deepEqual(entries('skill'), []);
+  assert.deepEqual(entries('plugin').map((entry) => entry.name), ['acme']);
+});
+
 test('regex tester supports the shipped Go Unicode scalar syntax', () => {
   const pattern = String.raw`(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}`;
   assert.equal(lintRegex(pattern).compiled, true);
@@ -503,6 +519,21 @@ test('share: encode → decode preserves the policy verbatim', async () => {
   if (result.ok) {
     assert.deepEqual(result.policy, original);
   }
+});
+
+test('quick start hard block exports action mode for activation', () => {
+  const answers = defaultAnswers();
+  answers.response = 'block';
+  const policy = applyAnswers(answers);
+  const exported = yaml.load(emit(policy).find((f) => f.path.endsWith('.yaml'))!.contents) as {
+    guardrail: { mode: string; block_threshold: number };
+  };
+  assert.equal(exported.guardrail.mode, 'action');
+  assert.equal(exported.guardrail.block_threshold, 2);
+});
+
+test('quick start does not present Splunk HEC as a generic webhook', () => {
+  assert.equal(SINK_CARDS.some((card) => card.id === 'splunk' && card.type === 'generic'), false);
 });
 
 // ── share: failure modes ────────────────────────────────────────────
@@ -816,6 +847,46 @@ test('download-button (B5): disabledReason blocks the download', async () => {
   }
 });
 
+test('guardrail Live Test evaluates the action that thresholds control', () => {
+  assert.equal(pickVerdictEntrypoint('guardrail'), 'defenseclaw/guardrail/action');
+});
+
+test('policy export excludes inactive firewall choices and warns before activation', () => {
+  const policy = makePolicy({
+    firewall: { default_action: 'deny', blocked_destinations: ['example.test'], allowed_domains: [], allowed_ports: [443] },
+  });
+  const top = emit(policy).find((f) => f.path.endsWith('test-policy.yaml'));
+  assert.ok(top);
+  const parsed = yaml.load(top.contents) as Record<string, unknown>;
+  assert.equal(parsed.firewall, undefined);
+  assert.match(top.contents, /firewall and audit choices are not applied/i);
+  const script = emitInstallScript(policy);
+  assert.match(script, /WARNING: Firewall and audit choices are not applied/i);
+  assert.ok(script.indexOf('WARNING: Firewall') < script.lastIndexOf('defenseclaw policy activate'));
+});
+
+test('policy export excludes inactive audit choices', () => {
+  const policy = makePolicy({
+    audit: { log_all_actions: false, log_scan_results: false, retention_days: 7 },
+  });
+  const top = emit(policy).find((f) => f.path.endsWith('test-policy.yaml'));
+  assert.ok(top);
+  const parsed = yaml.load(top.contents) as Record<string, unknown>;
+  assert.equal(parsed.audit, undefined);
+  assert.match(top.contents, /firewall and audit choices are not applied/i);
+});
+
+test('manual v9 rollback distinguishes 0.8.4 config v7 from later 0.8.x config v8', () => {
+  const guide = readFileSync(
+    new URL('../content/docs/reference/migrate-v9.mdx', import.meta.url),
+    'utf8',
+  );
+  const rollback = guide.split('## Going back to 0.8.x')[1] ?? '';
+  assert.match(rollback, /0\.8\.4[\s\S]{0,120}version 7|version 7[\s\S]{0,120}0\.8\.4/i);
+  assert.match(rollback, /pre-upgrade backup/i);
+  assert.doesNotMatch(rollback, /only version 0\.8\.x reads/i);
+});
+
 // ── emit branches (B4) ─────────────────────────────────────────────
 // Each branch corresponds to one file emit() conditionally produces.
 // Without these tests a refactor of emit() could silently drop a
@@ -1071,24 +1142,9 @@ test('parity (B2): default preset emits action matrix consistent with policies/d
       'to match — they MUST stay in sync.',
   );
 
-  // 2) firewall.default_action MUST round-trip — operators rely on
-  // "the playground's default = the gateway's default" so they can
-  // download an unmodified preset and get behaviour equivalent to
-  // not installing a policy at all.
-  const wizardFw = wizardYaml.firewall as Record<string, unknown> | undefined;
-  const bundledFw = bundled.firewall as Record<string, unknown> | undefined;
-  assert.equal(
-    wizardFw?.default_action,
-    bundledFw?.default_action,
-    'firewall.default_action in wizard default preset diverges from policies/default.yaml',
-  );
-
-  // Note: name + description are intentionally NOT compared — the
-  // playground preset is a *starting point* the operator will rename
-  // (default name: "my-policy") before activating, whereas
-  // policies/default.yaml ships under the literal name "default".
-  // The structural fields above (action matrix, firewall default)
-  // are the ones that must agree.
+  // Firewall settings are planning notes; activation never consumes them.
+  assert.equal(wizardYaml.firewall, undefined);
+  assert.equal(wizardYaml.audit, undefined);
 });
 
 // ── round-trip property (B1) ───────────────────────────────────────
@@ -1396,7 +1452,7 @@ test('json-highlight: punctuation chars get the punctuation kind', () => {
 
 const FIXTURE = [
   { sectionId: 'firewall', label: 'Allowed domains', group: 'Firewall', keywords: ['domain', 'allowlist'] },
-  { sectionId: 'webhooks', label: 'Splunk HEC sink', group: 'Webhooks', keywords: ['splunk', 'token'] },
+  { sectionId: 'webhooks', label: 'Webhook signing secret', group: 'Webhooks', keywords: ['hmac', 'env var'] },
   { sectionId: 'guardrail', label: 'HILT', group: 'Guardrail', keywords: ['human in the loop', 'hilt severity'] },
 ];
 
@@ -1406,14 +1462,14 @@ test('cmdk-filter: empty / whitespace-only query returns the input unmodified', 
 });
 
 test('cmdk-filter: substring match in label hits the right entry', () => {
-  const out = filterIndex(FIXTURE, 'splunk');
+  const out = filterIndex(FIXTURE, 'webhook');
   assert.equal(out.length, 1);
   assert.equal(out[0].sectionId, 'webhooks');
 });
 
 test('cmdk-filter: token AND across label and keyword matches', () => {
-  // "token" is a keyword, "splunk" is in the label — both must match.
-  const out = filterIndex(FIXTURE, 'splunk token');
+  // "env" is a keyword, "webhook" is in the label — both must match.
+  const out = filterIndex(FIXTURE, 'webhook env');
   assert.equal(out.length, 1);
   assert.equal(out[0].sectionId, 'webhooks');
 });

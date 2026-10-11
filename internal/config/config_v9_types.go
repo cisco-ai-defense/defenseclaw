@@ -161,17 +161,9 @@ type ScannerAnalyzerToggle struct {
 	Enabled bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
 }
 
-// SkillScannerTimeouts are in seconds; zero uses the defaults (300, 60).
+// SkillScannerTimeouts are in seconds; zero uses the default (300).
 type SkillScannerTimeouts struct {
 	ScanS int `mapstructure:"scan_s" yaml:"scan_s,omitempty"`
-	LLMS  int `mapstructure:"llm_s"  yaml:"llm_s,omitempty"`
-}
-
-// MCPScannerAPIConfig is scanners.mcp_scanner.api; empty values inherit
-// cisco_ai_defense.endpoint and api_key_env.
-type MCPScannerAPIConfig struct {
-	Endpoint  string `mapstructure:"endpoint"    yaml:"endpoint,omitempty"`
-	APIKeyEnv string `mapstructure:"api_key_env" yaml:"api_key_env,omitempty"`
 }
 
 // MCPScannerYARAConfig is scanners.mcp_scanner.yara.
@@ -179,11 +171,4 @@ type MCPScannerYARAConfig struct {
 	// IncludeBundled defaults to true when nil.
 	IncludeBundled *bool          `mapstructure:"include_bundled" yaml:"include_bundled,omitempty"`
 	ExtraRules     []AssetFileRef `mapstructure:"extra_rules"     yaml:"extra_rules,omitempty"`
-}
-
-// MCPScannerTimeouts are in seconds; zero uses the defaults (60, 120, 30).
-type MCPScannerTimeouts struct {
-	StdioS  int `mapstructure:"stdio_s"  yaml:"stdio_s,omitempty"`
-	RemoteS int `mapstructure:"remote_s" yaml:"remote_s,omitempty"`
-	LLMS    int `mapstructure:"llm_s"    yaml:"llm_s,omitempty"`
 }

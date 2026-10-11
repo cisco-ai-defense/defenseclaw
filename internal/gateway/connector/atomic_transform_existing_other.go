@@ -62,7 +62,7 @@ func conditionalCommitAtomicTransformExisting(
 		if errors.Is(err, errAtomicTransformConflict) || errors.Is(err, os.ErrNotExist) {
 			return recoverAfterAtomicTransformError(path, stateDir, errAtomicTransformConflict)
 		}
-		return recoverAfterAtomicTransformError(path, stateDir, fmt.Errorf("move compared config to tombstone: %w", err))
+		return recoverAfterAtomicTransformError(path, stateDir, configWriteError(intent.TargetPath, err))
 	}
 	if err := syncAtomicTransformParent(filepath.Dir(intent.TargetPath)); err != nil {
 		return recoverAfterAtomicTransformError(path, stateDir, err)
@@ -94,7 +94,7 @@ func conditionalCommitAtomicTransformExisting(
 			if errors.Is(err, errAtomicTransformConflict) {
 				return recoverAfterAtomicTransformError(path, stateDir, errAtomicTransformConflict)
 			}
-			return recoverAfterAtomicTransformError(path, stateDir, fmt.Errorf("publish staged config: %w", err))
+			return recoverAfterAtomicTransformError(path, stateDir, fmt.Errorf("publish staged config: %w", configWriteError(intent.TargetPath, err)))
 		}
 		if err := syncAtomicTransformParent(filepath.Dir(intent.TargetPath)); err != nil {
 			return recoverAfterAtomicTransformError(path, stateDir, err)

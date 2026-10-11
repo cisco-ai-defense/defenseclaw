@@ -1159,10 +1159,14 @@
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
           "description": "Windows SCM service env pin (both DefenseClawGateway + DefenseClawHookGuardian); already the source of the managed_enterprise value the spec 003 wait loops key off"
+        },
+        {
+          "location": "internal/cli/root.go",
+          "description": "Refuses the pin from .env files so only the service definition sets it"
         }
       ],
       "since": "0.8.0",
-      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases."
+      "security_note": "Immutable managed-mode boundary — prevents config replacement from disabling administrator-owned path and ownership checks. Spec 003 additionally uses this pin as the deploy-mode probe BEFORE config.yaml loads, so a mis-set value would incorrectly hard-exit (OSS drift) or spin the wait loop (managed_enterprise drift) — the finite value set in accepted_values guards both cases. Refused from .env files: only the service definition may set it."
     },
     {
       "name": "DEFENSECLAW_DEV",
@@ -3423,10 +3427,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Preserves the effective v7 OTel master-toggle decision during upgrade"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Binds the variable only inside the legacy configuration loader used before v8 activation"
         }
       ],
       "since": "0.4.0",
@@ -3450,10 +3450,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 endpoint into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the endpoint only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3477,10 +3473,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3508,10 +3500,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3535,10 +3523,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3566,10 +3550,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.8.0",
@@ -3597,10 +3577,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 protocol into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the protocol only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3628,10 +3604,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts the captured v7 TLS policy into a canonical v8 destination"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads the TLS decision only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3655,10 +3627,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific endpoints into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific endpoints only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -3686,10 +3654,6 @@
         {
           "location": "cli/defenseclaw/observability/v8_migration.py",
           "description": "Converts captured v7 signal-specific protocols into canonical v8 destinations"
-        },
-        {
-          "location": "internal/config/config.go",
-          "description": "Reads signal-specific protocols only inside the legacy configuration loader"
         }
       ],
       "since": "0.4.0",
@@ -4251,6 +4215,201 @@
       ],
       "since": "0.9.0",
       "security_note": "Never log or persist the value. Sandbox hooks must read it from the environment at request time; a placeholder baked into static config does not resolve."
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_AID_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport of the Cisco AI Defense API key (cisco_ai_defense.api_key or api_key_env) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan), so the key never appears on its command line. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the AI Defense API key"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_AID_ENDPOINT",
+      "category": "hook_internal",
+      "purpose": "Cisco AI Defense endpoint (cisco_ai_defense.endpoint) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan); the runtime uses the default endpoint when it is unset. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (the default AI Defense endpoint)",
+      "accepted_values": [
+        "https URL",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the AI Defense endpoint"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_API_KEY",
+      "category": "credential",
+      "purpose": "Secret transport of the LLM judge API key (llm.api_key or api_key_env) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan), so the key never appears on its command line. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "secret-value",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge API key"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_BASE_URL",
+      "category": "hook_internal",
+      "purpose": "LLM judge base URL (llm.base_url) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "URL",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge base URL"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_BEDROCK_AUTH_MODE",
+      "category": "hook_internal",
+      "purpose": "Bedrock auth mode of the LLM judge (llm.bedrock.auth_mode) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). For iam_credentials the gateway also hands the runtime the keys it reads from the variables named by llm.bedrock access_key_env, secret_key_env and session_token_env, as AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY and AWS_SESSION_TOKEN. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for a Bedrock judge with a bedrock block)",
+      "accepted_values": [
+        "api_key",
+        "iam_credentials",
+        "profile",
+        "instance_role",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: addBedrockAuthEnv derives it from config for the scanner runtime (GAP-1460)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan and plugin-scan scripts read it as the judge Bedrock auth mode"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_MODEL",
+      "category": "hook_internal",
+      "purpose": "LiteLLM model id of the LLM judge (llm.provider and llm.model) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "LiteLLM model id",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge model"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_PROVIDER",
+      "category": "hook_internal",
+      "purpose": "LLM judge provider (llm.provider) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan). The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "provider name",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge provider"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCANNER_LLM_REGION",
+      "category": "hook_internal",
+      "purpose": "LLM judge region (llm.region, or llm.bedrock.region when set) for the standalone Windows payload's scanner runtime (defenseclaw-scanners mcp-scan and plugin-scan); the gateway also sets AWS_REGION to it. The gateway sets it from config in the runtime's child environment only; a value in the gateway's own environment never reaches the runtime.",
+      "default": "unset (set by the gateway for the scanner runtime)",
+      "accepted_values": [
+        "cloud region",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/scanner/scanner_runtime.go",
+          "description": "Gateway writer: runtimeEnv derives it from config for the scanner runtime (GAP-0132)"
+        },
+        {
+          "location": "cmd/defenseclaw-scanners/main.go",
+          "description": "The embedded mcp-scan script reads it as the judge region"
+        }
+      ],
+      "since": "1.0.0"
     },
     {
       "name": "DEFENSECLAW_SCRUB_BIN",
@@ -5688,6 +5847,26 @@
       "since": "0.9.0"
     },
     {
+      "name": "DEFENSECLAW_UPDATE_SECURE_CLIENT_EVALUATION",
+      "category": "test_fixture",
+      "purpose": "Regenerates the Secure Client admission and guardrail evaluation goldens instead of comparing against them. Use it only for an approved change to Secure Client behaviour.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/secure_client_evaluation_golden_test.go",
+          "description": "Rewrites testdata/secure_client_evaluation/*.golden.json for the current OS"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
       "category": "security_opt_out",
       "purpose": "Retired 0.x upgrade override with no effect in 1.x. Still refused from .env files so an old dotenv cannot carry it forward.",
@@ -6698,6 +6877,30 @@
       "since": "1.0.0"
     },
     {
+      "name": "DEFENSECLAW_EXPLICIT_CODEX_SETUP",
+      "category": "hook_internal",
+      "purpose": "Set by the Python CLI to the absolute Codex home while a Codex setup restarts the gateway, so that gateway binds Codex to the home the user just chose instead of the root recorded in the managed backup (GAP-1106). The gateway uses it only when it names the Codex home the gateway itself resolves.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Sets it to the Codex home while it restarts the gateway after a Codex setup"
+        },
+        {
+          "location": "internal/gateway/connector/config_root_pin.go",
+          "description": "Skips the recorded Codex root pin when it names the current Codex home"
+        }
+      ],
+      "since": "1.0.0"
+    },
+    {
       "name": "DEFENSECLAW_SCAN_RECORDED_BY_CALLER",
       "category": "hook_internal",
       "purpose": "Set to 1 by the gateway when it runs a defenseclaw plugin scan child whose result it records itself, so the CLI child does not write a second scan row and scan-finding alert (GAP-2482).",
@@ -6720,6 +6923,54 @@
         }
       ],
       "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_SESSION_FACTS_BIN",
+      "category": "hook_internal",
+      "purpose": "Administrator-owned hook binary a rendered standalone managed Unix hook runs as `hook session-facts` to read the user's Kerberos credential cache, which a shell cannot read. The socket transport block assigns it after the hook hardening drops any inherited value, so only a managed hook that names one uses it.",
+      "default": "(rendered by setup for standalone managed Unix installs; absent everywhere else)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hook_socket_transport.go",
+          "description": "Shell transport block that assigns and exports the binary path"
+        },
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Hook hardening drops an inherited value; the session-facts read runs the binary"
+        }
+      ],
+      "since": "1.0.1"
+    },
+    {
+      "name": "DEFENSECLAW_STANDALONE_FORCED_UNINSTALL",
+      "category": "upgrade_internal",
+      "purpose": "Carries Setup /uninstall FORCE=1 (enterprise windows uninstall --force) from the native lifecycle CLI to the standalone Windows installer, which removes the deployment without reading its pending transaction. It is not an installer parameter because the installer parameter set is the Secure Client command line. The installer reads it only for an Uninstall and clears it so no child process inherits it.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/windows_enterprise_standalone.go",
+          "description": "Sets it in the strict installer environment only when --force was requested for an Uninstall action"
+        },
+        {
+          "location": "packaging/windows/install-enterprise.ps1",
+          "description": "Reads and clears it, and passes Force to the lifecycle only for the Uninstall action"
+        }
+      ],
+      "since": "1.0.1",
+      "security_note": "Skips recovery of a pending transaction, so it is honoured only in the environment the signed, elevated lifecycle CLI builds for the installer and cleared before any child starts."
     }
   ]
 }

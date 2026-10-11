@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from defenseclaw import ux
 from defenseclaw.config import config_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
-from defenseclaw.scanner_binary import resolve_scanner_binary
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
 
 # ---------------------------------------------------------------------------
 # Color conventions for `defenseclaw status`
@@ -87,8 +88,9 @@ def _enterprise_profile(cfg) -> str:
     try:
         import yaml
 
-        with open(config_path()) as handle:
-            raw = yaml.safe_load(handle) or {}
+        from defenseclaw.config import read_config_text
+
+        raw = yaml.safe_load(read_config_text(config_path())) or {}
         enterprise = raw.get("enterprise") if isinstance(raw, dict) else None
         if isinstance(enterprise, dict):
             configured = str(enterprise.get("profile") or "").strip().lower()
@@ -369,8 +371,8 @@ def status(app: AppContext, as_json: bool) -> None:
     # Scanners
     ux.section("Scanners")
     scanner_bins = [
-        ("skill-scanner", cfg.scanners.skill_scanner.binary),
-        ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
+        ("skill-scanner", SKILL_SCANNER_BINARY),
+        ("mcp-scanner", MCP_SCANNER_BINARY),
         ("codeguard", "built-in"),
     ]
     for name, binary in scanner_bins:
@@ -381,10 +383,10 @@ def status(app: AppContext, as_json: bool) -> None:
         else:
             ux.echo(f"    {ux.bold(f'{name:<16s}')}{ux._style('not found', fg='yellow')}")
 
-    # N3: surface the active policy's scanner action overrides (data.json).
-    # Only `policy show` exposed these before, so `status` was blind to a
-    # policy that, say, downgrades a scanner surface to warn/allow. Empty for a
-    # policy that declares none, so the common case renders nothing.
+    # N3: surface the admission actions config.yaml sets for an asset type
+    # (admission.<type>.actions) when they differ from the built-in policy, so
+    # `status` shows a type that, say, downgrades a severity to warn/allow.
+    # Empty when config.yaml sets none, so the common case renders nothing.
     overrides_summary = _scanner_overrides_summary(cfg)
     if overrides_summary:
         _echo_wrapped(f"    {ux.bold('overrides'.ljust(16))}{ux.dim(overrides_summary)}", 20)
@@ -452,8 +454,17 @@ def status(app: AppContext, as_json: bool) -> None:
     # live counters from its identity-bound status snapshot). The same code
     # path drives a single-connector install (one row) and a fan-out install
     # (N rows), so the output never branches on connector count.
-    health = _fetch_runtime_bound_health(client, cfg)
-    if health is not None:
+    # Secure Client has historically reported its live accepted state even
+    # when a later on-disk edit is invalid.
+    skip_live_health = bool(config_problems) and profile != "secure_client"
+    health = None if skip_live_health else _fetch_runtime_bound_health(client, cfg)
+    if skip_live_health:
+        _status_row(
+            "Sidecar",
+            ux._style("not checked while config.yaml is invalid; run defenseclaw config validate", fg="yellow"),
+        )
+        _print_agents(cfg, sidecar_down=True)
+    elif health is not None:
         from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
 
         if _gateway_runs_replaced_binary(cfg):
@@ -468,6 +479,7 @@ def status(app: AppContext, as_json: bool) -> None:
             )
         _print_policy(health)
         _print_audit_log_health(cfg, health)
+        _print_agent_identity_ledger(health)
         _print_agents(cfg, health=health)
         _print_guardrail_profile(cfg)
         _print_application_protection(cfg, health=health)
@@ -634,6 +646,8 @@ def _print_guardrail_profile(cfg) -> None:
     result = current_user_guardrail_profile(cfg)
     if result is not None:
         _status_row("Profile", profile_status_text(cfg, result))
+        for note in result.get("warnings") or []:
+            ux.warn(str(note))
 
 
 def _guardrail_turned_off(gc) -> bool:
@@ -718,7 +732,12 @@ def _print_agents(
     disabled_count = len(actives) - enabled_count
     # GAP-1937: a connector whose setup failed at gateway start is not
     # enforced; count it the way `defenseclaw-gateway status` does.
-    not_running_count = sum(1 for c in actives if _is_enabled(c) and c not in health_map and c in not_started)
+    not_running_count = sum(
+        1 for c in actives if _is_enabled(c) and (
+            c == "claudecode" and not shutil.which("claude")
+            or c not in health_map and c in not_started
+        )
+    )
     header = f"{enabled_count - not_running_count} active"
     if not_running_count:
         header += f", {not_running_count} not running"
@@ -754,7 +773,8 @@ def _print_agents(
         source = roster.get(conn, {}).get("source", "manual")
         mode = _effective_status_mode(cfg, conn, source)
         fail_mode = _effective_status_fail_mode(cfg, conn)
-        fail_mode_suffix = f" fail-mode={fail_mode['effective']} provenance={fail_mode['provenance']}"
+        fail_mode_note = f" ({fail_mode['note']})" if fail_mode.get("note") else ""
+        fail_mode_suffix = f" fail-mode={fail_mode['effective']}{fail_mode_note} provenance={fail_mode['provenance']}"
         friendly = _friendly_connector_name(conn)
         disclosure = _cursor_priority_conflict_disclosure(conn)
         disclosure_suffix = f" {disclosure}" if disclosure else ""
@@ -784,6 +804,8 @@ def _print_agents(
                 # The gateway does not dial an OpenClaw gateway that is only
                 # the claw.mode default and is not installed (#958).
                 runtime_state, runtime_detail = "off", "OpenClaw is not installed"
+            elif conn == "claudecode" and not shutil.which("claude"):
+                runtime_state, runtime_detail = "off", "Claude Code is not detected on PATH"
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
@@ -812,6 +834,9 @@ def _print_agents(
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn == "claudecode" and not shutil.which("claude"):
+                suffix = _connector_state_verb("off") + ux.dim(" (Claude Code is not detected on PATH)")
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn.strip().lower() in not_started:
                 # Setup failed when the gateway started (GAP-1714).
                 suffix = _connector_state_verb("not running") + ux.dim(
@@ -823,20 +848,6 @@ def _print_agents(
                 # A drifted or removed hook registration shows with the
                 # gateway stopped too (GAP-1230).
                 _echo_wrapped(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}", 18)
-
-
-def _canonical_data_dir(value) -> str | None:
-    """Return the platform-canonical absolute form of a configured data dir."""
-    try:
-        raw = os.fspath(value)
-    except TypeError:
-        return None
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        return os.path.normcase(os.path.abspath(os.path.normpath(raw)))
-    except (OSError, ValueError):
-        return None
 
 
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
@@ -890,6 +901,8 @@ def _fetch_runtime_bound_health(client, cfg) -> dict | None:
 
 def _policy_status(health: dict | None) -> dict | None:
     """The applied effective policy from /status, or None when not reported."""
+    from defenseclaw.gateway import policy_reload_rejection
+
     policy = (health or {}).get("policy")
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
         return None
@@ -897,7 +910,8 @@ def _policy_status(health: dict | None) -> dict | None:
         "effective_digest": policy.get("effective_digest"),
         "generation": policy.get("generation"),
         "config_generation": policy.get("config_generation"),
-        "last_reload_error": policy.get("last_reload_error") or "",
+        "last_reload_error": policy_reload_rejection(policy),
+        "opa_unavailable": policy.get("opa_unavailable") or "",
     }
 
 
@@ -910,6 +924,11 @@ def _print_policy(health: dict | None) -> None:
     value = f"generation {policy['generation']}, {short}"
     if policy["last_reload_error"]:
         _status_row("Policy", ux._style(f"{value}; the last change was rejected (see defenseclaw doctor)", fg="yellow"))
+        return
+    if policy["opa_unavailable"]:
+        # Applied without the Rego modules, not rejected (GAP-1033).
+        note = "the Rego modules did not load, config.yaml decides (see defenseclaw doctor)"
+        _status_row("Policy", ux._style(f"{value}; {note}", fg="yellow"))
         return
     _status_row("Policy", value)
 
@@ -992,18 +1011,17 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
 def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
     """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
     try:
-        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, setup_command
+        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
 
         problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:
         return ""
-    return (
-        " — "
-        + ux._style("DEGRADED", fg="red", bold=True)
-        + ux.dim(f" ({problems[0]}; run `{setup_command(connector)}`)")
-    )
+    step = repair_command(connector, problems[0])
+    if not (step.startswith("run ") or getattr(problems[0], "repair", "")):
+        step = f"run `{step}`"
+    return " — " + ux._style("DEGRADED", fg="red", bold=True) + ux.dim(f" ({problems[0]}; {step})")
 
 
 def _connectors_not_started(health: dict | None) -> set[str]:
@@ -1247,6 +1265,16 @@ def _print_audit_log_health(cfg, health: dict | None) -> None:
         _status_row("Audit log", ux._style(value[0].upper() + value[1:], fg="yellow"))
 
 
+def _print_agent_identity_ledger(health: dict | None) -> None:
+    """Warn when the gateway cannot save agent identities (GAP-0393)."""
+    from defenseclaw.commands.cmd_doctor import agent_identity_ledger_failure
+
+    value = agent_identity_ledger_failure(health)
+    if value:
+        value = value[0].upper() + value[1:] + "; run 'defenseclaw doctor'"
+        _status_row("Agent identities", ux._style(value, fg="yellow"))
+
+
 def _gateway_audit_write_failure(health: dict | None) -> str:
     """The gateway's own report that audit writes fail, in plain words, or "".
 
@@ -1297,6 +1325,14 @@ def _print_llm_judge(health: dict | None) -> None:
     state = str(details.get("judge_state"))
     total = details.get("judge_recent_calls", 0)
     failed = details.get("judge_failed_calls", 0)
+    if state == "unavailable":
+        # The enabled judge could not start (GAP-0383).
+        reason = str(details.get("judge_unavailable_reason") or "it could not start").strip()
+        _status_row(
+            "LLM judge",
+            ux._style(f"not running: {reason}; only the rules decide; run defenseclaw doctor", fg="yellow"),
+        )
+        return
     if state == "ok":
         _status_row("LLM judge", ux._style(f"working (last {total} call(s) completed)", fg="green"))
         return
@@ -1506,15 +1542,34 @@ def _print_native_delivery_status(summary, *, configured: set[str] | None = None
 
 
 def _scanner_overrides_summary(cfg) -> str:
-    """One-line summary of the per-type admission actions config.yaml sets
-    (N3), the same list the TUI Overview shows, e.g. ``mcp: MEDIUM
-    install=block, file=quarantine``. ``""`` when none are set."""
+    """Summarize v9 admission actions or Secure Client v8 scanner overrides."""
     try:
+        from defenseclaw.enforce import asset_lists
         from defenseclaw.tui.services.overview_state import (
             admission_action_overrides,
             format_scanner_overrides_summary,
         )
 
+        if asset_lists.is_secure_client(cfg):
+            from defenseclaw.enforce.admission import _read_policy_data
+
+            data = _read_policy_data(getattr(cfg, "policy_dir", "") or "")
+            if not isinstance(data, dict):
+                return ""
+            flat: list[tuple[str, str, str, str]] = []
+            overrides = data.get("scanner_overrides", {})
+            if isinstance(overrides, dict):
+                for scanner_type, sevs in overrides.items():
+                    if not isinstance(sevs, dict):
+                        continue
+                    for severity, surface_actions in sevs.items():
+                        if not isinstance(surface_actions, dict):
+                            continue
+                        for surface in ("install", "file", "runtime"):
+                            action = surface_actions.get(surface)
+                            if action:
+                                flat.append((str(scanner_type), str(severity), surface, str(action)))
+            return format_scanner_overrides_summary(tuple(flat))
         return format_scanner_overrides_summary(admission_action_overrides(cfg))
     except Exception:  # noqa: BLE001 — the override line is purely informational.
         return ""
@@ -1525,8 +1580,8 @@ def _scanner_status_map(cfg) -> dict[str, str]:
     section): ``installed`` / ``not_found`` / ``built-in``."""
     out: dict[str, str] = {}
     for name, binary in (
-        ("skill-scanner", cfg.scanners.skill_scanner.binary),
-        ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
+        ("skill-scanner", SKILL_SCANNER_BINARY),
+        ("mcp-scanner", MCP_SCANNER_BINARY),
         ("codeguard", "built-in"),
     ):
         if binary == "built-in":
@@ -1690,20 +1745,26 @@ def _status_payload(app) -> dict:
         payload["enforcement"] = None
         payload["activity"] = None
 
-    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+    config_invalid = bool(getattr(app, "config_problems", None))
+    skip_live_health = config_invalid and profile != "secure_client"
+    health = None
+    if not skip_live_health:
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
-    bind = gateway_api_client_host(cfg)
-    try:
-        client = OrchestratorClient(
-            host=bind,
-            port=cfg.gateway.api_port,
-            token=cfg.gateway.resolved_token(),
-        )
-        health = _fetch_runtime_bound_health(client, cfg)
-    except Exception:
-        health = None
-    running = health is not None
-    payload["sidecar"] = {"running": running}
+        bind = gateway_api_client_host(cfg)
+        try:
+            client = OrchestratorClient(
+                host=bind,
+                port=cfg.gateway.api_port,
+                token=cfg.gateway.resolved_token(),
+            )
+            health = _fetch_runtime_bound_health(client, cfg)
+        except Exception:
+            health = None
+    if skip_live_health:
+        payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
+    else:
+        payload["sidecar"] = {"running": health is not None}
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

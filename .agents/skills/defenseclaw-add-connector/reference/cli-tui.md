@@ -101,7 +101,7 @@ Batch mode (`setup -c a -c b --detected --all`, `--replace`), rollback and the c
 
 - **Backup markers.** `cmd_uninstall._CONNECTOR_BACKUP_MARKERS` lists fixed backup file names under `connector_backups/<x>/`. `_teardown_connectors` uses them to also sweep inactive but dirty connectors.
 - **Teardown failures.** `_connector_teardown` aborts uninstall if Go teardown fails for any connector other than openclaw. `_GATEWAY_UNKNOWN_CONNECTOR_EXIT = 2` turns a connector this build no longer ships into a warning.
-- **Native installer state.** `commands/windows_native_uninstall.py` has the allowlist of connectors in authenticated native-installer state. `RETIRED_INSTALL_STATE_CONNECTORS` is in `retired_install_state.py`.
+- **Native installer state.** `commands/windows_native_uninstall.py` has the allowlist of connectors in authenticated native-installer state.
 - **Renaming or retiring.** Use `legacy_connector.py`, which mirrors Go `internal/legacyconnector` (core.md §1). It lists every config map where a connector ID appears. `defenseclaw migrate` persists the change.
 
 ### Step 10. Credentials and registries

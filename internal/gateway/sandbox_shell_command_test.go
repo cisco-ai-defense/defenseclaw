@@ -381,7 +381,7 @@ func TestHostShellCallsInTheirOwnWorkdirAreJudged(t *testing.T) {
 					}
 				}
 				profile := connectorProfileForHostTest(t, registry, tc.connector)
-				req := normalizeAgentHookRequestWithRawProfileEvent(tc.connector, payload, []byte(body), profile, event)
+				req := normalizeAgentHookRequestWithRawProfileEvent(tc.connector, payload, []byte(body), profile, event, "")
 				req.CWD = hookCWDForContext(context.Background(), req.CWD)
 				store, logger := testStoreAndLogger(t)
 				cfg := &config.Config{}

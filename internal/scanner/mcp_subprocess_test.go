@@ -6,6 +6,8 @@ package scanner
 
 import (
 	"context"
+	"errors"
+	"os/exec"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -38,5 +40,23 @@ func TestMCPScanner_NonZeroExitFailsClosed(t *testing.T) {
 	}
 	if result.Findings[0].LineNumber == nil || *result.Findings[0].LineNumber != 4 {
 		t.Errorf("LineNumber = %v, want 4 (line_number must deserialize)", result.Findings[0].LineNumber)
+	}
+}
+
+// GAP-0712: the MCP path must use the process-tree runner that owns the
+// embedded runtime's Python child on Windows.
+func TestMCPScannerUsesTreeRunner(t *testing.T) {
+	prior := runMCPScannerCommand
+	t.Cleanup(func() { runMCPScannerCommand = prior })
+	marker := errors.New("tree runner called")
+	called := false
+	runMCPScannerCommand = func(_ *exec.Cmd) error {
+		called = true
+		return marker
+	}
+	scanner := &MCPScanner{Config: config.MCPScannerConfig{Binary: "scanner-fixture"}}
+	_, _ = scanner.Scan(context.Background(), "local")
+	if !called {
+		t.Fatal("MCP scan bypassed the process-tree runner")
 	}
 }

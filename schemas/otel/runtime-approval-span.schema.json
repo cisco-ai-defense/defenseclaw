@@ -50,10 +50,7 @@
       "properties": {
         "tenant.id": { "type": "string" },
         "workspace.id": { "type": "string" },
-        "deployment.environment": { "type": "string" },
-        "deployment.mode": { "type": "string" },
         "discovery.source": { "type": "string" },
-        "defenseclaw.device.id": { "type": "string" },
         "defenseclaw.approval.id": { "type": "string" },
         "defenseclaw.approval.command_name": { "type": "string" },
         "defenseclaw.approval.argc": { "type": "integer", "minimum": 0 },

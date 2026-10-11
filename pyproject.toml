@@ -142,7 +142,6 @@ exclude = ["tests", "tests.*"]
 defenseclaw = [
     "_data/policies/*.yaml",
     "_data/policies/rego/*.rego",
-    "_data/policies/rego/*.json",
     "_data/policies/yara/mcp-tools/*.yara",
     "_data/envvars/*.json",
     "_data/plugin/*.json",

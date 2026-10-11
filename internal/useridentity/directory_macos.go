@@ -17,10 +17,17 @@ import (
 //   - dsconfigad -show: the AD domain the Mac is bound to;
 //   - app-sso platform -s: the Platform SSO extension, which names the
 //     identity provider (Microsoft Company Portal for Entra ID, Okta Verify
-//     for Okta).
+//     for Okta);
+//   - dscl ... AltSecurityIdentities: an account registered with Platform SSO
+//     (linked at registration, or created at the login window) carries
+//     PlatformSSO:<login UPN>, which root can read (GAP-0324).
 //
-// The Platform SSO login UPN is per user and is not reported here: until a
-// root-readable source for it is confirmed it stays a claimed fact.
+// An account is a Platform SSO account only when its own record carries that
+// link: a Mac with Platform SSO also has local accounts that never registered
+// (the administrator, service accounts), and those stay local. macOS 15
+// prints app-sso as JSON ("extensionIdentifier" : "..."); older releases
+// printed a property list (extensionIdentifier = "..."). Both are read: the
+// JSON form went unread, so every account reported local (GAP-0330).
 
 // MacOSDirectoryInputs are the raw outputs of the three commands.
 type MacOSDirectoryInputs struct {
@@ -37,12 +44,14 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 		fields := strings.Split(authority, ";")
 		if len(fields) >= 5 && fields[1] == "Kerberosv5" && !strings.HasPrefix(fields[4], "LKDC:") {
 			if principal := NormalizePrincipal(fields[3]); principal != "" {
-				facts.Principal = principal
+				facts.Principal = NormalizeUPN(principal)
 				facts.Realm = RealmOf(principal)
 			}
 		}
-		if len(fields) >= 4 && fields[1] == "NetLogon" && facts.Domain == "" {
-			facts.Domain = strings.TrimSpace(fields[3])
+		// ;NetLogon;bob;CORP names the account's NetBIOS domain: the
+		// DOMAIN\user namespace, not its DNS domain (GAP-0365).
+		if len(fields) >= 4 && fields[1] == "NetLogon" && facts.AccountDomain == "" {
+			facts.AccountDomain = macOSNetBIOSDomain(fields[3])
 		}
 	}
 	node := ""
@@ -57,19 +66,43 @@ func ParseMacOSDirectoryFacts(in MacOSDirectoryInputs, now time.Time) DirectoryF
 		// for a forest-wide search node, which names no domain.
 		if parts := strings.Split(node, "/"); len(parts) >= 4 && !strings.ContainsAny(parts[len(parts)-1], " \t") {
 			facts.Domain = parts[len(parts)-1]
+			// The middle part is the NetBIOS name of the domain the Mac is
+			// bound to, so it is the account's DOMAIN\user namespace only
+			// when the account is in that domain: the one macOS lists the
+			// account's groups in (CORP\group), and a users entry
+			// CORP\user names (GAP-0635). An account of another domain of
+			// the forest keeps none.
+			if facts.AccountDomain == "" && adDomain != "" && strings.EqualFold(facts.Domain, adDomain) {
+				facts.AccountDomain = macOSNetBIOSDomain(parts[2])
+			}
 		}
 	case strings.HasPrefix(node, "/LDAPv3/"):
 		facts.Directory = DirectoryLDAP
 		facts.Domain = strings.TrimPrefix(node, "/LDAPv3/")
-	case facts.Principal != "" && adDomain != "":
+	case facts.Principal != "" && (facts.AccountDomain != "" || adDomain != ""):
+		// The NetLogon authority identifies AD even when the
+		// machine-wide dsconfigad lookup fails.
 		facts.Directory = DirectoryActiveDirectory
 	}
 	if facts.Directory == DirectoryActiveDirectory && facts.Domain == "" {
-		facts.Domain = adDomain
+		// A network account has no original node: its Kerberos realm names
+		// its DNS domain, else the domain the Mac is bound to.
+		facts.Domain = strings.ToLower(facts.Realm)
+		if facts.Domain == "" {
+			facts.Domain = adDomain
+		}
 	}
-	if provider := platformSSOProvider(in.AppSSO); provider != "" && facts.Directory == "" {
-		facts.Directory = provider
+	if facts.Directory != DirectoryActiveDirectory {
+		facts.AccountDomain = ""
+	}
+	if upn := platformSSOLoginUPN(attrs["AltSecurityIdentities"]); upn != "" && facts.Directory == "" {
+		facts.Directory = platformSSOProvider(in.AppSSO)
+		if facts.Directory == "" {
+			facts.Directory = DirectoryOther
+		}
 		facts.Source = SourceMacOSPlatformSSO
+		facts.UPN, facts.Principal = upn, upn
+		facts.Domain = upn[strings.LastIndexByte(upn, '@')+1:]
 	}
 	if facts.Directory == "" {
 		facts.Directory = DirectoryLocal
@@ -108,6 +141,21 @@ func parseDSCLAttributes(output string) map[string][]string {
 	return attrs
 }
 
+// macOSNetBIOSDomain returns name when it can be a NetBIOS domain name (no
+// separators, spaces or controls, at most 15 characters), else "".
+func macOSNetBIOSDomain(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 15 || strings.ContainsAny(name, "\\/@.:;*?\"<>| \t") {
+		return ""
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return ""
+		}
+	}
+	return name
+}
+
 func parseDSConfigADDomain(output string) string {
 	for _, line := range strings.Split(output, "\n") {
 		key, value, found := strings.Cut(line, "=")
@@ -118,15 +166,31 @@ func parseDSConfigADDomain(output string) string {
 	return ""
 }
 
+// platformSSOLoginUPN returns the login UPN of a PlatformSSO:<upn> entry of
+// AltSecurityIdentities, or "".
+func platformSSOLoginUPN(values []string) string {
+	for _, value := range values {
+		if rest, ok := strings.CutPrefix(value, "PlatformSSO:"); ok {
+			if upn := NormalizeUPN(rest); upn != "" {
+				return upn
+			}
+		}
+	}
+	return ""
+}
+
 // platformSSOProvider maps the device's Platform SSO extension to the
 // directory behind it.
 func platformSSOProvider(output string) Directory {
 	for _, line := range strings.Split(output, "\n") {
 		key, value, found := strings.Cut(line, "=")
-		if !found || strings.TrimSpace(key) != "extensionIdentifier" {
+		if !found {
+			key, value, found = strings.Cut(line, ":")
+		}
+		if !found || strings.Trim(strings.TrimSpace(key), `"`) != "extensionIdentifier" {
 			continue
 		}
-		bundle := strings.ToLower(strings.Trim(strings.TrimSpace(value), `";`))
+		bundle := strings.ToLower(strings.Trim(strings.TrimSpace(value), `";, `))
 		switch {
 		case strings.HasPrefix(bundle, "com.microsoft."):
 			return DirectoryEntraID

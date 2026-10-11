@@ -49,9 +49,16 @@ func secureClientEnumeratorConfig(connector string) *config.Config {
 func injectWindowsProfileList(t *testing.T, homes map[string]string) {
 	t.Helper()
 	previousSubkeys, previousPath := windowsProfileListSubkeyReader, windowsProfileImagePathReader
+	previousLookup := windowsEnrollmentLookupAccountSID
 	t.Cleanup(func() {
 		windowsProfileListSubkeyReader, windowsProfileImagePathReader = previousSubkeys, previousPath
+		windowsEnrollmentLookupAccountSID = previousLookup
 	})
+	// The injected SIDs are not real accounts on the runner, and a local SID
+	// that LookupAccountSid cannot map is a deleted account (GAP-0430): these
+	// tests model existing users. A test that needs another answer stubs the
+	// lookup after this call.
+	windowsEnrollmentLookupAccountSID = func(string) (string, string, error) { return "user", "HOST", nil }
 	names := make([]string, 0, len(homes)+3)
 	for sid := range homes {
 		names = append(names, sid)

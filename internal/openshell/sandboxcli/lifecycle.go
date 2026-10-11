@@ -503,7 +503,7 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	if o.Shell {
 		// A shell in the project, reviewed at its end like a harness
 		// session: what it changed is kept or undone the same way.
-		if code, err = s.attachShell(ctx); err != nil {
+		if _, err = s.attachShell(ctx); err != nil {
 			return fail(err)
 		}
 		code = 0

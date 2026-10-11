@@ -8,6 +8,30 @@ import (
 	"time"
 )
 
+// GAP-0423: PutRelationship says whether an occurrence created the
+// relationship or changed its status, or only added evidence to it.
+func TestPutRelationshipReportsAnUnchangedRelationship(t *testing.T) {
+	_, repo := newCorrelationTestStore(t)
+	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyDefenseClaw)
+	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{mutate: func(tx *CorrelationTx, event CorrelationEvent) {
+		put := func(status CorrelationRelationshipStatus) bool {
+			relationship, err := tx.PutRelationship(t.Context(), CorrelationRelationshipInput{
+				FromKind: CorrelationNodeSemanticEvent, FromID: string(event.SemanticEventID),
+				ToKind: CorrelationNodeSession, ToID: "session-1", Type: CorrelationBelongsTo,
+				Method: CorrelationMethodReported, RuleID: "membership", RuleVersion: "v1", Status: status,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return relationship.Unchanged
+		}
+		if put(CorrelationRelationshipCandidate) || !put(CorrelationRelationshipCandidate) ||
+			put(CorrelationRelationshipActive) {
+			t.Fatal("Unchanged must be set only when the relationship existed with the same status")
+		}
+	}})
+}
+
 func TestCorrelationRetentionIsBoundedGraphAwareAndPreservesActiveState(t *testing.T) {
 	store, repo := newCorrelationTestStore(t)
 	instance := mustCorrelationInstance(t, repo, "codex", ConnectorCustodyDefenseClaw)

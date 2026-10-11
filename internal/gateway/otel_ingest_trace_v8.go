@@ -128,15 +128,6 @@ func (trace *otlpIngestTraceV8) startNormalize(
 	trace.normalStart = started
 }
 
-func (trace *otlpIngestTraceV8) refreshCorrelation(ctx context.Context, connector string) {
-	if trace == nil || ctx == nil {
-		return
-	}
-	correlation := otlpIngestCorrelation(ctx, connector)
-	trace.receiveInput.Envelope.Correlation = correlation
-	trace.normalInput.Envelope.Correlation = correlation
-}
-
 func otlpIngestTraceEnvelope(
 	ctx context.Context,
 	signal otelIngestSignal,

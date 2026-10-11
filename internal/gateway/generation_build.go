@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -52,8 +55,25 @@ type generationInputs struct {
 	rulePacks *sidecarRulePackCandidate
 	profiles  *guardrailProfileSet
 	// strictOPA makes a Rego module that fails to load a build error. When
-	// false the generation has no OPA and the guardrail falls back.
+	// false (boot) the generation has no OPA and the guardrail falls back.
 	strictOPA bool
+	// strictScannerPins makes a pinned scanner file that does not match its
+	// digest a build error, so a reload keeps the previous generation. When
+	// false (boot) the generation records it and the scans that load the
+	// file fail closed.
+	strictScannerPins bool
+}
+
+// managedPolicyTreeTrust refuses a managed standalone policy_dir that a
+// standard user could change (managed.ValidateTrustedServiceRuntimeTree).
+var managedPolicyTreeTrust = func(cfg *config.Config, dir string) error {
+	if !cfg.StandaloneEnterprise() || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return managed.ValidateTrustedServiceRuntimeTree(dir, "policy_dir", os.Getenv(managed.WindowsServiceAccountEnv))
 }
 
 func buildGeneration(ctx context.Context, in generationInputs) (*Generation, error) {
@@ -83,13 +103,24 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 			g.RulePacks["conn:"+name] = pack
 		}
 		g.active = rp.active
+		g.activeRules = rp.activeRules
+		g.activePatterns = rp.activePatterns
+		for raw, rules := range rp.connectorRules {
+			if name := canonicalConnectorRulePackKey(raw); name != "" && rules != nil {
+				if g.connectorRules == nil {
+					g.connectorRules = make(map[string]*compiledRulePackCategories, len(rp.connectorRules))
+				}
+				g.connectorRules[name] = rules
+			}
+		}
 	}
 	if in.profiles != nil {
+		tuned := profileConnectorNames(in.profiles.base)
 		for name, derived := range in.profiles.profiles {
 			if pack := in.profiles.packs[globalRulePackScope(derived.Config).key()]; pack != nil {
 				g.RulePacks["prof:"+name] = pack
 			}
-			for _, connector := range thresholdConnectorNames(derived.Config) {
+			for _, connector := range thresholdConnectorNamesWith(derived.Config, tuned) {
 				if pack := in.profiles.packs[effectiveRulePackKey(derived.Config, connector)]; pack != nil {
 					g.RulePacks["prof:"+name+"/"+connector] = pack
 				}
@@ -98,15 +129,37 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	}
 
 	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {
+		// A module a standard user could change since the config was
+		// loaded is not loaded as managed policy: the build fails, so a
+		// reload keeps the previous generation (GAP-1499).
+		if err := managedPolicyTreeTrust(cfg, dir); err != nil {
+			return nil, fmt.Errorf("generation: OPA policy: managed standalone policy_dir is not administrator-controlled: %w", err)
+		}
 		prepared, err := policy.Prepare(ctx, dir)
 		switch {
 		case err == nil:
 			g.OPA = prepared
+		case errors.Is(err, policy.ErrNoModules):
+			// No Rego in the policy directory is the config-driven mode
+			// (the managed packages ship none), not a failed load.
 		case in.strictOPA:
 			return nil, fmt.Errorf("generation: OPA policy: %w", err)
 		default:
 			g.opaError = err.Error()
-			fmt.Fprintf(os.Stderr, "[sidecar] OPA policy unavailable (guardrail falls back to the resolved thresholds): %v\n", err)
+			// Secure Client logs the start-up line of main instead
+			// (logSecureClientPolicyEngine, issue #1092).
+			if !cfg.SecureClientIntegration() {
+				fmt.Fprintf(os.Stderr, "[sidecar] OPA policy unavailable (guardrail falls back to the resolved thresholds): %v\n", err)
+			}
+		}
+	}
+
+	if !cfg.SecureClientIntegration() {
+		if err := cfg.Scanners.CheckPinnedFiles(); err != nil {
+			if in.strictScannerPins {
+				return nil, fmt.Errorf("generation: %w", err)
+			}
+			g.scannerPinError = err.Error()
 		}
 	}
 
@@ -118,16 +171,31 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 		return nil, fmt.Errorf("generation: %w", err)
 	}
 	g.Components["config"] = configComponent
+	if digest := observabilityDigest(cfg, in.raw); digest != "" {
+		g.Components["observability"] = digest
+	}
 	if digest, err := config.GuardrailPolicyDigest(cfg); err == nil {
 		g.Components["guardrail_policy"] = digest
 	}
 	for key, digest := range assetDigestComponents(cfg) {
 		g.Components[key] = digest
 	}
-	g.Providers = buildGenerationProviders(cfg)
+	g.Providers, err = buildGenerationProviders(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("generation: providers: %w", err)
+	}
 	g.Components["providers"] = g.Providers.digest()
+	// Every profile scope that resolves to a pack points at the same loaded
+	// pack, so each pack is digested once: digesting it per scope cost about
+	// 1.5 s of gateway start with 1,000 profiles (GAP-0276).
+	packDigests := make(map[*guardrail.RulePack]string, 4)
 	for key, pack := range g.RulePacks {
-		g.Components["rule_pack:"+key] = "sha256:" + pack.Summary().Digest
+		digest, done := packDigests[pack]
+		if !done {
+			digest = rulePackComponentDigest(pack)
+			packDigests[pack] = digest
+		}
+		g.Components["rule_pack:"+key] = digest
 	}
 	if g.OPA != nil {
 		g.Components["rego"] = g.OPA.RegoDigest
@@ -145,6 +213,12 @@ func buildGeneration(ctx context.Context, in generationInputs) (*Generation, err
 	return g, nil
 }
 
+// rulePackComponentDigest is a pack's effective-digest component; a seam
+// for tests.
+var rulePackComponentDigest = func(pack *guardrail.RulePack) string {
+	return "sha256:" + pack.Summary().Digest
+}
+
 // generationAssetFiles lists the single-file assets the effective digest
 // covers (assetDigestComponents), so an edit to one rebuilds the generation.
 func generationAssetFiles(cfg *config.Config) []string {
@@ -157,8 +231,11 @@ func generationAssetFiles(cfg *config.Config) []string {
 			seen[filepath.Clean(path)] = struct{}{}
 		}
 	}
-	for _, path := range cfg.AIDiscovery.SignaturePacks {
-		add(path)
+	for _, entry := range cfg.AIDiscovery.SignaturePacks {
+		files, _ := inventory.SignaturePackEntry(entry)
+		for _, file := range files {
+			add(file)
+		}
 	}
 	add(cfg.AIDiscovery.ConfidencePolicyPath)
 	add(cfg.Scanners.SkillScanner.PolicyFile.Path)
@@ -251,10 +328,16 @@ func generationAssetDirs(cfg *config.Config, g *Generation) []string {
 		addPack(custom.Path)
 	}
 	if g.Profiles != nil {
+		tuned := profileConnectorNames(cfg)
 		for _, derived := range g.Profiles.profiles {
-			for _, scope := range profileRulePackScopes(derived.Config) {
+			for _, scope := range profileRulePackScopes(derived.Config, tuned) {
 				addPack(scope.dir)
 			}
+		}
+	}
+	for _, entry := range cfg.AIDiscovery.SignaturePacks {
+		if _, watchDir := inventory.SignaturePackEntry(entry); watchDir != "" {
+			add(watchDir)
 		}
 	}
 	if dir := strings.TrimSpace(cfg.PolicyDir); dir != "" {
@@ -300,7 +383,9 @@ func publishGeneration(g *Generation) {
 	publishGenerationMu.Lock()
 	defer publishGenerationMu.Unlock()
 	g.N = generationSeq.Add(1)
+	bindRegisteredConnectorRules(g)
 	liveGeneration.Store(g)
+	publishPackPostures()
 	liveReloadError.Store("")
 	applyGenerationProviders(g.Providers)
 }
@@ -332,8 +417,18 @@ func recordGenerationBuildError(err error) {
 	}
 }
 
-// clearGenerationBuildError drops the reported rejection once a rebuild
-// matched the live generation: the refused change is gone from disk.
+// livePendingRestart holds the config keys the running gateway keeps at their
+// running values until it restarts (a listener, a connector's hooks),
+// published as policy.pending_restart so doctor can tell a pending restart
+// from a stale gateway.
+var livePendingRestart atomic.Value // []string
+
+func setPendingRestart(keys []string) {
+	livePendingRestart.Store(append([]string(nil), keys...))
+}
+
+// clearGenerationBuildError ends a rejection: the next rebuild succeeded,
+// even when it built the generation already live and swapped nothing.
 func clearGenerationBuildError() {
 	liveReloadError.Store("")
 }
@@ -352,15 +447,16 @@ func CurrentPolicyHealth() (PolicyHealth, bool) {
 		ConfigGeneration:         g.ConfigGen,
 		ConfigGenerationRecorded: g.ConfigGenRecorded,
 		BuiltAt:                  g.BuiltAt.Format(time.RFC3339),
-		Components:               make(map[string]string, len(g.Components)),
+		ComponentCount:           len(g.Components),
 	}
-	for key, value := range g.Components {
-		health.Components[key] = value
-	}
+	health.PendingRestart, _ = livePendingRestart.Load().([]string)
 	if msg, _ := liveReloadError.Load().(string); msg != "" {
 		health.LastReloadError = msg
 	} else if g.opaError != "" {
 		health.LastReloadError = "opa: " + g.opaError
+	} else if g.scannerPinError != "" {
+		health.LastReloadError = g.scannerPinError
 	}
+	health.OPAUnavailable = g.opaError
 	return health, true
 }

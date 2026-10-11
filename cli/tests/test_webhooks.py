@@ -735,3 +735,24 @@ def test_private_webhook_target_refusal_explains_the_guard_and_next_step(monkeyp
     with _pytest.raises(ValueError) as loop:
         validate_webhook_url("http://127.0.0.1:9/hook")
     assert "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1" in str(loop.value)
+
+
+def test_webhook_list_disable_remove_run_when_only_a_webhook_url_is_bad():
+    # GAP-0219: the validation message says "fix the url, or remove the webhook"; those commands must run.
+    from types import SimpleNamespace
+
+    import click
+    from defenseclaw.commands import cmd_setup
+
+    bad_url = 'line 15: webhooks[0].url: webhook "p0hook": IP 127.0.0.1 is private/reserved; fix the url, or remove the webhook.'
+
+    def allowed(verb, errors, sub="webhook"):
+        ctx = click.Context(click.Command("setup"))
+        ctx.invoked_subcommand = sub
+        ctx.meta[cmd_setup._SETUP_CHILD_ARGS_KEY] = [verb]
+        return cmd_setup._webhook_url_cleanup(ctx, SimpleNamespace(errors=errors, parse_error="", timed_out=False))
+
+    assert all(allowed(verb, [bad_url]) for verb in ("list", "disable", "remove"))
+    assert not allowed("add", [bad_url])
+    assert not allowed("list", [bad_url, "line 3: gateway.api_port: must be a number"])
+    assert not allowed("list", [bad_url], sub="llm")

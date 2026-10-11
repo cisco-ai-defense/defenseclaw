@@ -15,6 +15,8 @@ package unixidentity
 import (
 	"context"
 	"errors"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // DefaultUIDRange is a conservative default for other Unix systems.
@@ -23,6 +25,11 @@ func DefaultUIDRange() (int, int) { return 1000, 60000 }
 // Default returns the os/user resolver.
 func Default(ctx context.Context) Resolver {
 	return NewCachingResolver(NewOSUserResolver(ctx))
+}
+
+// DirectoryFactsFunc has no directory facts to offer here.
+func DirectoryFactsFunc(context.Context) func(uid int) (useridentity.DirectoryFacts, bool) {
+	return nil
 }
 
 func platformLocalUserLister(context.Context, commandRunner) ([]Account, error) {

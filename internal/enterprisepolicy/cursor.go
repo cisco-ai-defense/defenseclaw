@@ -212,7 +212,7 @@ func inspectCursor(opts Options, current []byte, state *State) error {
 			}
 		}
 		if count != 1 {
-			state.conflict("Cursor event %s has %d DefenseClaw enterprise hooks, want exactly one", group.Event, count)
+			state.entryConflict("Cursor event %s has %d DefenseClaw enterprise hooks, want exactly one", group.Event, count)
 		}
 	}
 	state.OwnedEntries = owned

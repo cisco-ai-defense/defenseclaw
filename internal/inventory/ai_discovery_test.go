@@ -37,6 +37,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func cleanupPreparedDiscoveryService(t *testing.T, svc *ContinuousDiscoveryService) {
@@ -452,6 +453,41 @@ func TestLoadAISignaturesWithManagedPackAndDisabledIDs(t *testing.T) {
 	}
 }
 
+func TestLoadAISignaturesResolvesPackPinSymlink(t *testing.T) {
+	dir := t.TempDir()
+	body := `{"version": 1, "signatures": [{"id": "linked-ai", "name": "Linked", "vendor": "Example", "category": "ai_cli", "confidence": 0.7}]}`
+	target := filepath.Join(dir, "target.json")
+	mustWrite(t, target, body)
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		SignaturePacks: []string{link},
+		PackDigests:    map[string]string{target: "sha256:" + hex.EncodeToString(sum[:])},
+		RequireDigests: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "linked-ai" }) {
+		t.Fatal("pack with a resolved-path pin was not loaded")
+	}
+	legacy, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{
+		SignaturePacks: []string{link},
+		PackDigests:    map[string]string{target: "sha256:" + hex.EncodeToString(sum[:])},
+		RequireDigests: true,
+		SecureClient:   true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(legacy, func(sig AISignature) bool { return sig.ID == "linked-ai" }) {
+		t.Fatal("Secure Client changed its legacy pin lookup")
+	}
+}
+
 // TestLoadAISignaturesPinnedByDigest: a pack pinned in
 // ai_discovery.signature_pack_digests loads only when it matches, and a
 // managed device loads no unpinned pack (a file dropped into a glob).
@@ -483,6 +519,29 @@ func TestLoadAISignaturesPinnedByDigest(t *testing.T) {
 	if seen := load("sha256:"+strings.Repeat("0", 64), false); seen["pinned-ai"] || !seen["dropped-ai"] {
 		t.Fatalf("mismatched pin = %v, want the pinned pack refused", seen)
 	}
+
+	// An apply refuses what the loader would skip, instead of accepting it
+	// with only a log line (GAP-0173); a host that is not managed standalone
+	// is left alone.
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.AIDiscovery.SignaturePacks = []string{pack}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + hex.EncodeToString(sum[:])}
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("matching pin refused: %v", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = map[string]string{pack: "sha256:" + strings.Repeat("0", 64)}
+	if err := CheckSignaturePackPins(cfg); err == nil || !strings.Contains(err.Error(), "does not match the pinned") {
+		t.Fatalf("mismatched pin: err = %v, want a refusal naming the mismatch", err)
+	}
+	cfg.AIDiscovery.SignaturePackDigests = nil
+	if err := CheckSignaturePackPins(cfg); err == nil {
+		t.Fatal("an unpinned pack on a managed standalone host was accepted")
+	}
+	cfg.DeploymentMode = ""
+	if err := CheckSignaturePackPins(cfg); err != nil {
+		t.Fatalf("an unmanaged host was refused: %v", err)
+	}
 }
 
 func TestConfidencePolicyPinnedByDigest(t *testing.T) {
@@ -513,6 +572,37 @@ func TestConfidencePolicyPinnedByDigest(t *testing.T) {
 	}
 }
 
+// GAP-0170: the Secure Client profile keeps the embedded catalog of 1.0.0
+// (issue #1092); every other profile gets the signatures added since.
+func TestLoadAISignaturesSecureClientKeepsReleaseCatalog(t *testing.T) {
+	load := func(profile string) map[string]AISignature {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = profile
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatalf("%s: %v", profile, err)
+		}
+		byID := map[string]AISignature{}
+		for _, sig := range sigs {
+			byID[sig.ID] = sig
+		}
+		return byID
+	}
+	secureClient, standalone := load(managed.ProfileSecureClient), load(managed.ProfileStandalone)
+	if _, ok := standalone["jetbrains-ai"]; !ok || len(standalone["codex"].ExtensionIDs) == 0 {
+		t.Fatalf("standalone catalog lacks the post-1.0.0 signatures")
+	}
+	if _, ok := secureClient["jetbrains-ai"]; ok || len(secureClient) != len(standalone)-1 {
+		t.Fatalf("Secure Client catalog has %d signatures (jetbrains-ai %t), want %d", len(secureClient), ok, len(standalone)-1)
+	}
+	for id, sig := range secureClient {
+		if (id == "codex" || id == "claudecode") && len(sig.ExtensionIDs) != 0 ||
+			len(sig.JetBrainsPluginIDs)+len(sig.ZedExtensionIDs)+len(sig.VimPlugins) != 0 {
+			t.Fatalf("Secure Client signature %s keeps post-1.0.0 ids: %+v", id, sig)
+		}
+	}
+}
+
 func TestLoadAISignaturesWithOptionsRejectsDuplicatePackID(t *testing.T) {
 	tmp := t.TempDir()
 	mustWrite(t, filepath.Join(tmp, "signature-packs", "dup.json"), `{
@@ -529,6 +619,20 @@ func TestLoadAISignaturesWithOptionsRejectsDuplicatePackID(t *testing.T) {
 	_, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{filepath.Join(tmp, "signature-packs", "dup.json")}})
 	if err == nil || !strings.Contains(err.Error(), "duplicate id") {
 		t.Fatalf("expected duplicate id error, got %v", err)
+	}
+}
+
+// A configured pack whose file is gone is left out and the rest of the
+// catalog loads, so a missing optional pack does not reject every later
+// config reload; Secure Client keeps the refusal it shipped (GAP-0232).
+func TestLoadAISignaturesWithOptionsLeavesOutAMissingPack(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone.json")
+	sigs, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{missing}})
+	if err != nil || len(sigs) == 0 {
+		t.Fatalf("missing pack: %d signatures, err %v; want the embedded catalog", len(sigs), err)
+	}
+	if _, err := LoadAISignaturesWithOptions(AISignatureLoadOptions{SignaturePacks: []string{missing}, SecureClient: true}); err == nil {
+		t.Fatal("Secure Client loaded a catalog with a configured pack that matches nothing")
 	}
 }
 
@@ -1156,9 +1260,8 @@ func TestIngestExternalReport_ForcesExternalSourceAttribution(t *testing.T) {
 // processes. It ingests the guardian's per-user scans instead: each signal
 // belongs to the account the guardian's record names (not to anything the
 // scan reported), identical files of two users stay distinct, and the
-// gateway's own process detector is reported as covered, not failed. A v2
-// record's IDE inventory is attributed the same way; a v1 record (a
-// guardian from before the IDE inventory) is still read.
+// gateway's own process detector is reported as covered, not failed. A
+// record's IDE inventory is attributed the same way.
 func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	withoutMachineIDEs(t)
 	tmp := t.TempDir()
@@ -1178,19 +1281,21 @@ func TestUserScanRecordsAreIngestedAsTheGuardiansAccount(t *testing.T) {
 	for i := range report.Signals {
 		report.Signals[i].UserName = "mallory"
 	}
-	if err := SanitizeUserScanReport(&report, catalog, false); err != nil {
+	if err := SanitizeUserScanReport(&report, catalog, false, false); err != nil {
 		t.Fatalf("SanitizeUserScanReport: %v", err)
 	}
 	if report.IDEInventory == nil || len(report.IDEInventory.Plugins) != 1 || report.IDEInventory.Plugins[0].UserName != "" {
 		t.Fatalf("worker IDE inventory = %+v, want one plugin with no account", report.IDEInventory)
 	}
 	spool := filepath.Join(tmp, "spool")
-	for uid, user := range map[int]string{1001: "alice", 1002: "bob"} {
-		version, userReport := UserScanRecordVersion, report
+	// The guardian names an SSSD account as NSS does; its records carry the
+	// bare name, as its hook records do (GAP-0447).
+	for uid, user := range map[int]string{1001: "alice@corp.example.com", 1002: "bob"} {
+		userReport := report
 		if uid == 1002 {
-			version, userReport.IDEInventory = 1, nil
+			userReport.IDEInventory = nil
 		}
-		data, err := json.Marshal(UserScanRecord{Version: version, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
+		data, err := json.Marshal(UserScanRecord{Version: UserScanRecordVersion, UID: uid, User: user, UpdatedAt: time.Now().UTC(), Report: userReport})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1252,7 +1357,7 @@ func TestUserScanRecordStaysCurrentDuringASlowPass(t *testing.T) {
 	spool := t.TempDir()
 	now := time.Now().UTC()
 	report := ScanUserHome(context.Background(), t.TempDir(), "alice", 1001, UserScanOptions{}, nil)
-	if err := SanitizeUserScanReport(&report, nil, false); err != nil {
+	if err := SanitizeUserScanReport(&report, nil, false, false); err != nil {
 		t.Fatal(err)
 	}
 	report.Summary.FilesScanned = 7
@@ -2287,6 +2392,81 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	}
 }
 
+// Without Full Disk Access the scans never open a folder that makes macOS
+// prompt the user, so an employee is not asked about "defenseclaw-gateway"
+// (GAP-0128); with it, or elsewhere, they walk them like any other folder.
+func TestScansSkipMacOSPromptFoldersWithoutFullDiskAccess(t *testing.T) {
+	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
+	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
+	discoveryGOOS = "darwin"
+	fullDiskAccess := false
+	macOSFullDiskAccess = func() bool { return fullDiskAccess }
+
+	home := t.TempDir()
+	for _, dir := range []string{"Desktop/app", "Documents/app", "Downloads/app", "work/app"} {
+		mustWrite(t, filepath.Join(home, dir, "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+	}
+	mustWrite(t, filepath.Join(home, "Documents", "models", "m.gguf"), "gguf")
+	mustWrite(t, filepath.Join(home, "work", "models", "m.gguf"), "gguf")
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	newService := func(roots ...string) *ContinuousDiscoveryService {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: roots, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		return svc
+	}
+	manifestProjects := func() int {
+		signals, _, err := newService(home).detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatalf("detectPackageManifests: %v", err)
+		}
+		count := 0
+		for _, sig := range signals {
+			if sig.Component != nil && sig.Component.Name == "ai" {
+				count++
+			}
+		}
+		return count
+	}
+	modelRoots := func() int {
+		count := 0
+		for _, root := range newService(filepath.Join(home, "Documents", "models"), filepath.Join(home, "work", "models")).modelFileScanRoots() {
+			if strings.HasPrefix(root.path, home+string(filepath.Separator)) && !strings.HasPrefix(root.path, filepath.Join(home, "data")) {
+				count++
+			}
+		}
+		return count
+	}
+	if projects, roots := manifestProjects(), modelRoots(); projects != 1 || roots != 1 {
+		t.Fatalf("without Full Disk Access: %d manifest projects and %d model roots, want only work/ (1 and 1)", projects, roots)
+	}
+	fullDiskAccess = true
+	if projects, roots := manifestProjects(), modelRoots(); projects != 4 || roots != 2 {
+		t.Fatalf("with Full Disk Access: %d manifest projects and %d model roots, want every folder (4 and 2)", projects, roots)
+	}
+	discoveryGOOS, fullDiskAccess = "linux", false
+	if projects := manifestProjects(); projects != 4 {
+		t.Fatalf("off macOS: %d manifest projects, want 4", projects)
+	}
+
+	for rel, want := range map[string]bool{
+		"Desktop": true, "documents/app": true, "Library/Containers": true,
+		"Library/Group Containers/group.example": true, "Library/Mobile Documents/com~apple~CloudDocs": true,
+		"Library/Application Support/AddressBook/Sources": true,
+		"Library": false, "Library/Application Support/Slack": false, "Library/Containers2": false,
+		"work/Documents": false, ".claude": false, "Desktops": false,
+	} {
+		if got := macOSTCCProtectedPath(filepath.Join(home, rel), []string{home}); got != want {
+			t.Errorf("macOSTCCProtectedPath(~/%s) = %v, want %v", rel, got, want)
+		}
+	}
+}
+
 // TestRunScan_SingleFlight (H-1) verifies that concurrent scans serialize on
 // the per-service mutex instead of racing on the state store / detector
 // fanout. It uses the single-flight boundary directly so the assertion does
@@ -2665,5 +2845,68 @@ func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
 					opts.ProcessInterval, tc.want, tc.managed, tc.input)
 			}
 		})
+	}
+}
+
+// A Secure Client host still loads the packs in <data_dir>/signature-packs
+// (GAP-0146, issue #1092); every other profile loads only the packs that
+// ai_discovery.signature_packs lists.
+func TestSecureClientLoadsTheDataDirSignaturePacks(t *testing.T) {
+	tmp := t.TempDir()
+	mustWrite(t, filepath.Join(tmp, "signature-packs", "custom.json"),
+		`{"version": 1, "signatures": [{"id": "custom-data-dir-ai", "name": "Custom", "vendor": "Example", "category": "ai_cli", "confidence": 0.8}]}`)
+	loaded := func(cfg *config.Config) bool {
+		sigs, err := LoadAISignaturesForConfig(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(sigs, func(sig AISignature) bool { return sig.ID == "custom-data-dir-ai" })
+	}
+	if !loaded(&config.Config{DeploymentMode: "managed_enterprise", DataDir: tmp}) {
+		t.Fatal("Secure Client did not load the data directory pack")
+	}
+	if loaded(&config.Config{DataDir: tmp}) {
+		t.Fatal("a per-user host loaded an unlisted data directory pack")
+	}
+}
+
+func TestSecureClientPackageManifestFollowsSymlink(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	manifest := filepath.Join(project, "package.json")
+	mustWrite(t, filepath.Join(home, "shared", "manifest.json"), `{"dependencies":{"openai":"^4.0.0"}}`)
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "shared", "manifest.json"), manifest); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	catalog, err := LoadAISignatures()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := func(secureClient bool) bool {
+		svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+			Enabled: true, Mode: "enhanced", SecureClient: secureClient,
+			DataDir: filepath.Join(home, "data"), HomeDir: home,
+			ScanRoots: []string{project}, MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+		}, catalog)
+		cleanupPreparedDiscoveryService(t, svc)
+		signals, _, err := svc.detectPackageManifests(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, signal := range signals {
+			if signal.Component != nil && signal.Component.Name == "openai" {
+				return true
+			}
+		}
+		return false
+	}
+	if !scan(true) {
+		t.Fatal("Secure Client lost the symlinked package dependency")
+	}
+	if scan(false) {
+		t.Fatal("standalone scan followed a package manifest symlink")
 	}
 }

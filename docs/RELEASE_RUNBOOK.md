@@ -214,7 +214,8 @@ the `release-channel` branch. After the first 1.x release is published and
 verified, run the Release workflow once with `operation: legacy-channel` and
 `version: <that release>`. It runs the 0.8.10 channel publisher from the
 `0.8.10` tag, pointing 0.8.x clients at the release's `defenseclaw-upgrade.sh`,
-which hands off to the latest `install.sh`. It does not need to run again.
+which hands off to the requested release's `install.sh` (or the latest if no
+version was requested). It does not need to run again.
 
 ## Never change
 
@@ -222,8 +223,12 @@ which hands off to the latest `install.sh`. It does not need to run again.
   `releases/latest/download/` and `releases/download/X.Y.Z/` URLs, and bare
   `X.Y.Z` tags. Every installed client downloads these.
 - The installer flags `--yes`, `--version`, `--local` and `--rollback`
-  (`-Yes`, `-Version`, `-Local`, `-Rollback`). Unknown flags must stay
-  warnings, not errors.
+  (`-Yes`, `-Version`, `-Local`, `-Rollback`). The copy that `defenseclaw
+  upgrade` and `rollback` run (from a `defenseclaw-upgrade-*` or
+  `defenseclaw-rollback-*` folder) must keep ignoring an unknown flag with a
+  warning, so an older release's installer accepts a newer client's flags.
+  Run any other way, an unknown flag stops the installer with exit 2 before
+  it changes anything.
 - `cli/defenseclaw/upgrade_shim.py` stays standard-library only.
 - The install paths: binaries are real files in `~/.local/bin` (hooks record
   those paths) and the Python environment is `~/.defenseclaw/.venv`.
@@ -273,7 +278,6 @@ which hands off to the latest `install.sh`. It does not need to run again.
     (`scripts/check_enterprise_upgrade_config.py` checks 8 to 9, and the lane
     scripts install a version 8 config on the previous release).
 
-  Do not touch Go's `CurrentConfigVersion` (7), the legacy decoder.
   `defenseclaw migrate --check` does not validate these steps, so test that a
   migrated file loads in both loaders.
 - **Audit database changes** are forward-only migrations the gateway applies

@@ -70,6 +70,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from defenseclaw import codex_toml
+
 try:  # Python 3.11+ ships ``tomllib`` in the stdlib.
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 fallback to the ``tomli`` backport.
@@ -148,28 +150,6 @@ Consumers that walk *installed* connectors keep using
 :data:`KNOWN_CONNECTORS`; consumers that enumerate *known agents*
 (inventory / agent_discovery) use this.
 """
-
-HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
-    {
-        "hermes",
-        "cursor",
-        "devin",
-        "copilot",
-        "openhands",
-        "antigravity",
-        "opencode",
-        "amp",
-        "omnigent",
-        "kiro",
-    }
-)
-"""Connectors added through lifecycle hook surfaces.
-
-Kept as a compatibility constant for older tests/importers. These connectors
-now expose connector-specific MCP/skill/rule/plugin path discovery instead of
-falling back to OpenClaw or returning hook-only empty paths.
-"""
-
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -672,17 +652,17 @@ def claude_user_config_paths() -> list[str]:
     raises a finding when a plugin reads its credentials. MCP discovery
     was the one place that did not.
 
-    Two candidates, not one: ``~/.claude.json`` always, plus
-    ``$CLAUDE_CONFIG_DIR/.claude.json`` when that variable is set. I could
-    not confirm from the outside whether Claude Code relocates this file
-    along with the directory, and probing a path that does not exist costs
-    one failed ``open`` — guessing wrong costs another silent zero.
+    Two candidates, not one: :func:`claude_mcp_state_path` (the file
+    ``mcp set`` writes, ``$CLAUDE_CONFIG_DIR/.claude.json`` when that
+    variable is set) first, so it wins a same-named entry, then
+    ``~/.claude.json``. Probing a path that does not exist costs one failed
+    ``open``.
     """
 
-    paths = [os.path.join(os.path.abspath(str(Path.home())), ".claude.json")]
-    if (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip():
-        paths.append(os.path.join(claude_config_dir(), ".claude.json"))
-    return _dedup(paths)
+    return _dedup([
+        claude_mcp_state_path(),
+        os.path.join(os.path.abspath(str(Path.home())), ".claude.json"),
+    ])
 
 
 def claude_mcp_state_path() -> str:
@@ -697,6 +677,18 @@ def claude_mcp_state_path() -> str:
     if configured:
         return os.path.join(claude_config_dir(), ".claude.json")
     return os.path.join(os.path.abspath(str(Path.home())), ".claude.json")
+
+
+def claude_legacy_mcp_settings_path() -> str:
+    """Return the ``settings.json`` whose ``mcpServers`` DefenseClaw 0.8.x wrote.
+
+    Claude Code reads user MCP servers from :func:`claude_mcp_state_path`.
+    DefenseClaw still reads this block, last, so an entry 0.8.x wrote stays
+    visible after an upgrade, and ``mcp set`` / ``mcp unset`` remove a
+    same-named entry from it (GAP-1340).
+    """
+
+    return os.path.join(claude_config_dir(), "settings.json")
 
 
 def claude_settings_paths(workspace_dir: str | None = None) -> list[str]:
@@ -936,7 +928,7 @@ def _codex_project_root_markers() -> tuple[str, ...]:
     path = os.path.join(codex_home(), "config.toml")
     try:
         payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
-        config = tomllib.loads(payload.decode("utf-8"))
+        config = codex_toml.loads(payload)
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return (".git",)
     raw = config.get("project_root_markers")
@@ -2268,9 +2260,9 @@ def mcp_source_locations(
     if name == "claudecode":
         return _dedup(
             [
-                os.path.join(claude_config_dir(), "settings.json"),
-                ws(".mcp.json"),
                 *claude_user_config_paths(),
+                ws(".mcp.json"),
+                claude_legacy_mcp_settings_path(),
                 ws(".claude", "settings.json"),
                 ws(".claude", "settings.local.json"),
             ]
@@ -3585,6 +3577,9 @@ def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
 # --- MCP readers -----------------------------------------------------------
 
 
+CLAUDE_LEGACY_MCP_SCOPE = "legacy-settings"
+
+
 def _claudecode_mcp_servers(
     workspace_dir: str | None = None,
     *,
@@ -3593,27 +3588,15 @@ def _claudecode_mcp_servers(
 ) -> list[MCPServerEntry]:
     """Return Claude Code's MCP registrations across all five read surfaces.
 
-    Order is additive on purpose. ``_dedup_mcp_entries`` is first-wins, so
-    the two pre-existing sources stay in front and any name that resolved
-    before resolves to the same entry now; the sources added below can only
-    contribute names that were previously invisible. Making
-    ``~/.claude.json`` *win* over settings.json would match Claude Code's
-    own precedence more closely, but that is a behaviour change for
-    existing installs and belongs in its own commit.
+    ``_dedup_mcp_entries`` is first-wins, so the order is Claude Code's own
+    precedence: local, then project ``.mcp.json``, then user
+    (``~/.claude.json``). The ``settings.json`` block DefenseClaw 0.8.x
+    wrote comes after them, tagged ``legacy-settings``: a name in both
+    files counts once and resolves to the entry Claude Code reads, as the
+    Go reader does (GAP-1340).
     """
 
     entries: list[MCPServerEntry] = []
-    # settings.json stays first so names that resolved before this change
-    # still resolve to the same entry. Claude's own local → project → user
-    # order then applies to ~/.claude.json and workspace .mcp.json.
-    entries.extend(
-        _read_mcp_settings_block(
-            os.path.join(claude_config_dir(), "settings.json"),
-            keys=("mcpServers",),
-            diagnostic_sink=diagnostic_sink,
-        )
-    )
-
     workspace = _discovery_workspace_dir(workspace_dir, infer_from_cwd=infer_from_cwd) or None
     local_entries: list[MCPServerEntry] = []
     user_entries: list[MCPServerEntry] = []
@@ -3637,6 +3620,15 @@ def _claudecode_mcp_servers(
             )
         )
     entries.extend(user_entries)
+    legacy_path = claude_legacy_mcp_settings_path()
+    entries.extend(
+        replace(entry, source=legacy_path, source_scope=CLAUDE_LEGACY_MCP_SCOPE)
+        for entry in _read_mcp_settings_block(
+            legacy_path,
+            keys=("mcpServers",),
+            diagnostic_sink=diagnostic_sink,
+        )
+    )
 
     # Workspace settings, which agent_discovery already probes but MCP
     # discovery never did. `.local.` is the git-ignored personal override.
@@ -3838,7 +3830,7 @@ def _read_codex_config_toml(
     """
     try:
         payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
-        data = tomllib.loads(payload.decode("utf-8"))
+        data = codex_toml.loads(payload)
     except FileNotFoundError:
         return []
     except OSError:
@@ -3948,14 +3940,6 @@ def _openclaw_mcp_servers(
 _HERMES_MCP_KEY = ("mcp_servers",)
 _HERMES_LEGACY_MCP_KEY = ("mcp", "servers")
 _HERMES_MCP_HINT = "add or remove the server with `hermes mcp add` / `hermes mcp remove` instead"
-
-
-def _drop_hermes_legacy_mcp_server(path: str, name: str) -> None:
-    """Remove a server older DefenseClaw builds wrote under ``mcp.servers``."""
-    try:
-        _atomic_yaml_delete(path, _HERMES_LEGACY_MCP_KEY + (name,))
-    except MCPWriteUnsupportedError:
-        pass  # best-effort cleanup of a key Hermes never reads
 
 
 def _hermes_mcp_servers(
@@ -4338,28 +4322,6 @@ def _opencode_mcp_servers(
     ]
 
 
-def _read_opencode_mcp_block(path: str) -> dict[str, dict[str, Any]]:
-    """Parse opencode's top-level ``mcp`` map without losing partial overrides.
-
-    Tolerates JSONC (``//`` and ``/* */`` comments) via the optional
-    ``json5`` backport — mirroring the OpenClaw reader — so a
-    hand-authored ``opencode.jsonc`` still parses. A missing file,
-    unparseable content, or missing ``mcp`` block all yield ``{}``.
-    """
-    data = _load_json_or_jsonc(path)
-    if not isinstance(data, dict):
-        return {}
-    servers = data.get("mcp")
-    if not isinstance(servers, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for name, cfg in servers.items():
-        if not isinstance(cfg, dict):
-            continue
-        out[str(name)] = cfg
-    return out
-
-
 def _merge_opencode_mcp_config(
     base: dict[str, Any],
     override: dict[str, Any],
@@ -4475,13 +4437,6 @@ def _load_json_or_jsonc(
         _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return None
     return parsed
-
-
-def _parse_json_or_jsonc(raw: str) -> Any:
-    """Parse already-read JSON/JSONC text without changing read policy."""
-
-    parsed, valid = _parse_json_or_jsonc_result(raw)
-    return parsed if valid else None
 
 
 def _parse_json_or_jsonc_result(raw: str) -> tuple[Any, bool]:
@@ -4857,17 +4812,6 @@ def _read_mcp_servers_from_openclaw_json(
     return _parse_mcp_servers_dict(servers)
 
 
-def _parse_mcp_servers_text(text: str) -> list[MCPServerEntry]:
-    text = text.strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return []
-    return _parse_mcp_servers_value(parsed)
-
-
 def _parse_mcp_servers_value(servers: Any) -> list[MCPServerEntry]:
     if isinstance(servers, dict):
         return _parse_mcp_servers_dict(servers)
@@ -5034,6 +4978,18 @@ def set_mcp_server(
             _set_claudecode_mcp_server(path, name, _claude_mcp_entry(entry))
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
+        # The new entry is in the file Claude Code reads; a same-named copy
+        # that 0.8.x left in settings.json would linger in list, doctor and
+        # inventory (GAP-1340). The write above already succeeded, so a
+        # failure here is a warning, not a failed set.
+        try:
+            _remove_claude_legacy_mcp_server(name)
+        except (MCPWriteUnsupportedError, UnsafePathError, ValueError, OSError) as exc:
+            sys.stderr.write(
+                f"[defenseclaw] warning: the old {name!r} entry in "
+                f"{claude_legacy_mcp_settings_path()} was not removed ({exc}); Claude Code "
+                "does not read it, delete it from mcpServers there by hand\n"
+            )
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
@@ -5051,10 +5007,9 @@ def set_mcp_server(
         )
     if name_n == "hermes":
         # GAP-1591: Hermes loads top-level ``mcp_servers`` (what ``hermes mcp
-        # add`` writes); the old ``mcp.servers`` copy is legacy DefenseClaw.
+        # add`` writes).
         path = hermes_config_path()
         _atomic_yaml_merge(path, _HERMES_MCP_KEY + (name,), entry, hint=_HERMES_MCP_HINT)
-        _drop_hermes_legacy_mcp_server(path, name)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -5114,6 +5069,43 @@ def set_mcp_server(
 MCP_PRIOR_RESTORED = "prior-restored"
 
 
+def _roll_back_claude_unset(
+    exc: BaseException,
+    path: str,
+    legacy_path: str,
+    publications: dict[str, dict[str, Any]],
+) -> None:
+    """Undo a failed Claude unset without overwriting another writer's edit.
+
+    The state write may have published before its final metadata step
+    failed. Each file is restored only while it still holds exactly what this
+    command wrote; the ownership journal follows only a restored state file,
+    so it never comes back describing settings that are no longer there.
+    """
+    left: list[str] = []
+    with _locked_claude_mcp_mutation(path):
+        state_key = os.path.normcase(os.path.abspath(path))
+        if not _undo_claude_publication(path, publications):
+            left.append(path)
+        elif state_key in publications:
+            metadata_path = _claude_mcp_ownership_path(path)
+            if not _undo_claude_publication(metadata_path, publications):
+                left.append(metadata_path)
+    with _locked_claude_mcp_mutation(legacy_path):
+        if not _undo_claude_publication(legacy_path, publications):
+            left.append(legacy_path)
+    if not left:
+        return
+    note = (
+        f"Another program changed {', '.join(left)} during the unset, so DefenseClaw "
+        "kept that change and did not restore its earlier copy."
+    )
+    if isinstance(exc, Exception) and len(exc.args) == 1 and isinstance(exc.args[0], str):
+        exc.args = (f"{exc.args[0]} {note}",)
+    elif hasattr(exc, "add_note"):
+        exc.add_note(note)
+
+
 def unset_mcp_server(
     connector: str | None,
     name: str,
@@ -5144,8 +5136,32 @@ def unset_mcp_server(
         return
     if name_n == "claudecode":
         path = claude_mcp_state_path()
+        legacy_path = claude_legacy_mcp_settings_path()
         try:
-            outcome = _unset_claudecode_mcp_server(path, name)
+            # Validate both active-profile targets before changing either.
+            # Discovery can also read the default profile, but an override
+            # must never delete another profile's MCP entry (GAP-1364).
+            with _locked_claude_mcp_mutation(path):
+                _parse_claude_settings(path, _read_regular_bytes_if_present(path))
+                _load_claude_mcp_envelope(path)
+            with _locked_claude_mcp_mutation(legacy_path):
+                _parse_claude_settings(legacy_path, _read_regular_bytes_if_present(legacy_path))
+
+            publications: dict[str, dict[str, Any]] = {}
+            legacy_changed = False
+            token = _CLAUDE_PUBLICATIONS.set(publications)
+            try:
+                legacy_changed = _remove_claude_legacy_mcp_server(name)
+                outcome = _unset_claudecode_mcp_server(path, name)
+            except BaseException as exc:
+                _CLAUDE_PUBLICATIONS.reset(token)
+                token = None
+                if legacy_changed:
+                    _roll_back_claude_unset(exc, path, legacy_path, publications)
+                raise
+            finally:
+                if token is not None:
+                    _CLAUDE_PUBLICATIONS.reset(token)
         except UnsafePathError as exc:
             raise ValueError(str(exc)) from exc
         return MCP_PRIOR_RESTORED if outcome == MCP_PRIOR_RESTORED else None
@@ -5166,7 +5182,6 @@ def unset_mcp_server(
     if name_n == "hermes":
         path = hermes_config_path()
         _atomic_yaml_delete(path, _HERMES_MCP_KEY + (name,), hint=_HERMES_MCP_HINT)
-        _drop_hermes_legacy_mcp_server(path, name)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -5272,6 +5287,9 @@ def _codex_mcp_section_names(name: str) -> set[str]:
 
 
 def _strip_codex_mcp_block(text: str, name: str) -> str:
+    has_bom = text.startswith("\ufeff")
+    if has_bom:
+        text = text[1:]
     section_names = _codex_mcp_section_names(name)
     out: list[str] = []
     skipping = False
@@ -5282,7 +5300,8 @@ def _strip_codex_mcp_block(text: str, name: str) -> str:
             skipping = section_name in section_names
         if not skipping:
             out.append(line)
-    return "\n".join(out).rstrip() + ("\n" if out else "")
+    result = "\n".join(out).rstrip() + ("\n" if out else "")
+    return ("\ufeff" if has_bom else "") + result
 
 
 def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -> None:
@@ -5293,7 +5312,7 @@ def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -
         text = ""
     if text.strip():
         try:
-            tomllib.loads(text)
+            codex_toml.loads(text.encode("utf-8"))
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"refusing to modify malformed Codex config.toml: {exc}") from exc
     updated = _strip_codex_mcp_block(text, name)
@@ -5688,6 +5707,64 @@ _CLAUDE_MUTATION_GUARD: ContextVar[dict[str, Any] | None] = ContextVar(
     "claude_mcp_mutation_guard",
     default=None,
 )
+# Files one Claude MCP command published, keyed by path: the snapshot before
+# its first write and after its last one. A failed unset rolls back only
+# what this log proves the command itself wrote (GAP-1378).
+_CLAUDE_PUBLICATIONS: ContextVar[dict[str, dict[str, Any]] | None] = ContextVar(
+    "claude_mcp_publications",
+    default=None,
+)
+
+
+def _record_claude_publication(path: str, before: Any, after: Any) -> None:
+    log = _CLAUDE_PUBLICATIONS.get()
+    if log is None:
+        return
+    key = os.path.normcase(os.path.abspath(path))
+    entry = log.get(key)
+    if entry is None:
+        log[key] = {"before": before, "after": after, "foreign": False}
+        return
+    prior = entry["after"]
+    if prior.existed != before.existed or prior.payload != before.payload:
+        # Another writer changed the file between two of this command's
+        # writes, so the first pre-image is no longer the one to restore.
+        entry["foreign"] = True
+    entry["after"] = after
+
+
+def _undo_claude_publication(path: str, log: dict[str, dict[str, Any]]) -> bool:
+    """Restore *path* to its pre-image only while it holds this command's write.
+
+    Returns False, leaving the file alone, when another writer changed its
+    content, mode, owner or inode since this command wrote it.
+    """
+    from defenseclaw.observability import v8_activation
+
+    entry = log.get(os.path.normcase(os.path.abspath(path)))
+    if entry is None:
+        return True
+    if entry["foreign"]:
+        return False
+    after = entry["after"]
+    current = v8_activation._snapshot_regular_file(path, required=False)
+    if current.existed != after.existed or (
+        after.existed
+        and (current.payload != after.payload or not v8_activation._same_snapshot_identity(current, after))
+    ):
+        return False
+    before = entry["before"]
+    if current.existed == before.existed and current.payload == before.payload:
+        return True
+    try:
+        _publish_claude_config_if_unchanged(
+            path,
+            current.payload if current.existed else None,
+            before.payload if before.existed else None,
+        )
+    except MCPWriteUnsupportedError:
+        return False
+    return True
 
 
 def _read_regular_bytes_if_present(path: str) -> bytes | None:
@@ -6288,6 +6365,7 @@ def _write_claude_private_metadata(
             raise MCPWriteUnsupportedError(
                 f"refusing Claude MCP mutation: private metadata was replaced after publication: {path}",
             )
+        _record_claude_publication(path, snapshot, observed)
         if is_ownership:
             guard["ownership_snapshot"] = published
     except MCPWriteUnsupportedError:
@@ -6373,6 +6451,8 @@ def _clear_claude_mcp_ownership(path: str) -> None:
         metadata_path,
         required=False,
     )
+    if expected.existed:
+        _record_claude_publication(metadata_path, expected, guard["ownership_snapshot"])
 
 
 def _directory_identity(path: str) -> tuple[int, int]:
@@ -7548,6 +7628,7 @@ def _publish_claude_config_if_unchanged(
                 path,
                 expected_snapshot=snapshot,
             )
+            _record_claude_publication(path, snapshot, v8_activation._snapshot_regular_file(path, required=False))
         else:
             metadata = None
             if os.name == "nt" and not snapshot.existed:
@@ -7590,6 +7671,7 @@ def _publish_claude_config_if_unchanged(
         # staged file object with the expected bytes and security.  The
         # pre-publication journal remains the crash-safe fallback until this
         # callback durably records the observed public identity.
+        _record_claude_publication(path, snapshot, observed)
         observed_identity = _claude_postimage_identity_from_snapshot(observed)
         if candidate_verified is not None:
             candidate_verified(observed_identity)
@@ -7989,6 +8071,29 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool | str:
             next_released=next_released,
         )
         return MCP_PRIOR_RESTORED if prior_restored else True
+
+
+def _remove_claude_legacy_mcp_server(name: str) -> bool:
+    """Remove *name* from the ``mcpServers`` block 0.8.x wrote in settings.json.
+
+    Only that entry goes; the other keys (hooks, env) stay. An emptied block
+    is dropped. The publish is atomic, keeps the file's mode and refuses a
+    file changed concurrently. Returns True when an entry was removed.
+    """
+    path = claude_legacy_mcp_settings_path()
+    if not os.path.lexists(path):
+        return False
+    with _locked_claude_mcp_mutation(path):
+        raw = _read_regular_bytes_if_present(path)
+        data = _parse_claude_settings(path, raw)
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict) or name not in servers:
+            return False
+        del servers[name]
+        if not servers:
+            del data["mcpServers"]
+        _publish_claude_config_if_unchanged(path, raw, _render_json_bytes(data))
+    return True
 
 
 def _reject_symlink_config(path: str) -> None:
@@ -8538,28 +8643,6 @@ def _registry_path() -> str:
     return os.path.join(_registry_dir(), "registry.json")
 
 
-def _registry_load() -> dict[str, dict[str, str]]:
-    path = _registry_path()
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    out: dict[str, dict[str, str]] = {}
-    for k, v in data.items():
-        if isinstance(k, str) and isinstance(v, dict):
-            out[k] = {kk: str(vv) for kk, vv in v.items() if isinstance(kk, str)}
-    return out
-
-
-def _registry_save(state: dict[str, dict[str, str]]) -> None:
-    path = _registry_path()
-    payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
-    atomic_write_private_bytes(path, payload.encode("utf-8"))
-
-
 def _registry_key(abs_target: str) -> str:
     """Stable identifier for *abs_target* used as the registry key.
 
@@ -8637,23 +8720,6 @@ def _registry_register(abs_target: str, backup: str) -> None:
     with _locked_claude_mcp_mutation(abs_target):
         with _locked_claude_file_update(_registry_path(), label="legacy registry lock"):
             _registry_register_locked(abs_target, backup)
-
-
-def _registry_clear(abs_target: str) -> None:
-    with _locked_claude_mcp_mutation(abs_target):
-        with _locked_claude_file_update(_registry_path(), label="legacy registry lock"):
-            state, snapshot = _load_claude_legacy_registry()
-            keys = _registry_matching_keys(state, abs_target)
-            if not keys:
-                return
-            for key in keys:
-                state.pop(key, None)
-            _write_claude_private_metadata(
-                _registry_path(),
-                _render_json_bytes(state),
-                owner_path=abs_target,
-                expected_snapshot=snapshot,
-            )
 
 
 def _registry_backup_for(abs_target: str) -> str | None:

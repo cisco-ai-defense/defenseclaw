@@ -7,21 +7,26 @@ import (
 	"archive/zip"
 	"bufio"
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 )
 
 const (
-	jetbrainsMaxProducts   = 128
-	jetbrainsMaxPlugins    = 1024
-	jetbrainsMaxJars       = 32
-	jetbrainsMaxJarBytes   = 256 << 20
-	jetbrainsMaxXMLBytes   = 1 << 20
-	jetbrainsMaxRemoteDist = 32
+	jetbrainsMaxProducts       = 128
+	jetbrainsMaxPlugins        = 1024
+	jetbrainsMaxJars           = 32
+	jetbrainsMaxJarBytes       = 64 << 20
+	jetbrainsMaxJarEntries     = 1 << 14
+	jetbrainsMaxDirectoryBytes = 8 << 20
+	jetbrainsMaxXMLBytes       = 1 << 20
+	jetbrainsMaxRemoteDist     = 32
 )
 
 // jetbrainsProductDir matches a versioned product directory such as
@@ -48,13 +53,19 @@ var jetbrainsProductTokens = map[string]string{
 	"studio":        "android-studio",
 }
 
-// jetbrainsToken turns a product directory prefix into a bounded token.
+// jetbrainsToken turns a product directory prefix into a token of at most
+// maxProductLen bytes: a product the table does not name keeps its
+// lowercased prefix, cut to fit.
 func jetbrainsToken(prefix string) string {
 	key := strings.ToLower(strings.ReplaceAll(prefix, "-", ""))
 	if token, ok := jetbrainsProductTokens[key]; ok {
 		return token
 	}
-	return "jetbrains-" + key
+	const unknown = "jetbrains-"
+	if len(key) > maxProductLen-len(unknown) {
+		key = key[:maxProductLen-len(unknown)] // ASCII letters only (jetbrainsProductDir)
+	}
+	return unknown + key
 }
 
 type jetbrainsProduct struct {
@@ -131,7 +142,11 @@ func (s *scanner) scanJetBrainsProduct(p *jetbrainsProduct) {
 	if m == nil {
 		return
 	}
-	disabled, haveList := s.readJetBrainsDisabled(p.config)
+	disabled, enabledSource := s.readJetBrainsDisabled(p.config)
+	enabled := EnabledOn
+	if enabledSource == SourceUnknown {
+		enabled = EnabledUnknown
+	}
 	inst := Install{Family: FamilyJetBrains, Product: jetbrainsToken(m[1]), Channel: "stable", Version: m[2]}
 	seen := map[string]bool{}
 	for _, dir := range p.pluginDirs {
@@ -157,12 +172,12 @@ func (s *scanner) scanJetBrainsProduct(p *jetbrainsProduct) {
 			default:
 				continue
 			}
+			if !ok {
+				continue // cache folders and jars without a plugin descriptor are not plugins
+			}
 			id := clean(meta.ID)
 			if id == "" {
 				id = clean(meta.Name)
-			}
-			if !ok || id == "" {
-				id = clean(strings.TrimSuffix(name, ".jar"))
 			}
 			if id == "" || seen[id] {
 				continue
@@ -171,13 +186,10 @@ func (s *scanner) scanJetBrainsProduct(p *jetbrainsProduct) {
 			plugin := Plugin{
 				ID: id, DisplayName: clean(meta.Name), Version: clean(meta.Version),
 				Publisher: clean(meta.Vendor), Scope: ScopeUser, Path: path,
-				Enabled: EnabledOn, EnabledSource: SourceDefault,
+				Enabled: enabled, EnabledSource: enabledSource,
 			}
-			if haveList {
-				plugin.EnabledSource = SourceDisabledPlugins
-				if disabled[id] {
-					plugin.Enabled = EnabledOff
-				}
+			if disabled[id] {
+				plugin.Enabled = EnabledOff
 			}
 			inst.Plugins = append(inst.Plugins, plugin)
 		}
@@ -192,13 +204,19 @@ func (s *scanner) scanJetBrainsProduct(p *jetbrainsProduct) {
 }
 
 // readJetBrainsDisabled reads disabled_plugins.txt, one plugin id a line.
-func (s *scanner) readJetBrainsDisabled(config string) (map[string]bool, bool) {
+// A missing list means the IDE default applies; an unreadable or malformed
+// list cannot establish which plugins are enabled.
+func (s *scanner) readJetBrainsDisabled(config string) (map[string]bool, string) {
 	if config == "" {
-		return nil, false
+		return nil, SourceDefault
 	}
-	data, ok := s.readFile(filepath.Join(config, "disabled_plugins.txt"))
+	path := filepath.Join(config, "disabled_plugins.txt")
+	data, ok := s.readFile(path)
 	if !ok {
-		return nil, false
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return nil, SourceDefault
+		}
+		return nil, SourceUnknown
 	}
 	out := map[string]bool{}
 	lines := bufio.NewScanner(bytes.NewReader(data))
@@ -207,7 +225,10 @@ func (s *scanner) readJetBrainsDisabled(config string) (map[string]bool, bool) {
 			out[id] = true
 		}
 	}
-	return out, true
+	if lines.Err() != nil {
+		return nil, SourceUnknown
+	}
+	return out, SourceDisabledPlugins
 }
 
 type jetbrainsPluginXML struct {
@@ -270,11 +291,11 @@ func (s *scanner) readJetBrainsJar(path string) (jetbrainsPluginXML, bool) {
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > jetbrainsMaxJarBytes {
 		return jetbrainsPluginXML{}, false
 	}
-	if !s.charge(0) {
+	if !s.charge(info.Size()) || !jetbrainsJarDirectoryBounded(f, info.Size()) {
 		return jetbrainsPluginXML{}, false
 	}
 	zr, err := zip.NewReader(f, info.Size())
-	if err != nil || len(zr.File) > 1<<16 {
+	if err != nil || len(zr.File) > jetbrainsMaxJarEntries {
 		return jetbrainsPluginXML{}, false
 	}
 	for _, entry := range zr.File {
@@ -292,6 +313,35 @@ func (s *scanner) readJetBrainsJar(path string) (jetbrainsPluginXML, bool) {
 		return parseJetBrainsPluginXML(io.LimitReader(rc, jetbrainsMaxXMLBytes))
 	}
 	return jetbrainsPluginXML{}, false
+}
+
+// jetbrainsJarDirectoryBounded checks the end-of-central-directory record
+// before archive/zip allocates one File for every entry. ZIP64 and oversized
+// directories are skipped; inventory can still report the jar filename.
+func jetbrainsJarDirectoryBounded(f io.ReaderAt, size int64) bool {
+	const maxTail = 22 + 65535
+	tailSize := size
+	if tailSize > maxTail {
+		tailSize = maxTail
+	}
+	tail := make([]byte, int(tailSize))
+	if _, err := f.ReadAt(tail, size-tailSize); err != nil {
+		return false
+	}
+	for i := len(tail) - 22; i >= 0; i-- {
+		if !bytes.Equal(tail[i:i+4], []byte("PK\x05\x06")) {
+			continue
+		}
+		if i+22+int(binary.LittleEndian.Uint16(tail[i+20:i+22])) != len(tail) {
+			continue
+		}
+		entries := binary.LittleEndian.Uint16(tail[i+10 : i+12])
+		directoryBytes := binary.LittleEndian.Uint32(tail[i+12 : i+16])
+		return entries != 0xffff && int(entries) <= jetbrainsMaxJarEntries &&
+			directoryBytes != 0xffffffff && directoryBytes <= jetbrainsMaxDirectoryBytes &&
+			int64(directoryBytes) <= size
+	}
+	return false
 }
 
 // parseJetBrainsPluginXML reads the id, name, version and vendor children

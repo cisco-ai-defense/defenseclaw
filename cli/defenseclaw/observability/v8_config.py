@@ -33,6 +33,7 @@ generated artifacts rather than copied into a second implementation.
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import ipaddress
 import json
@@ -228,11 +229,10 @@ CONFIGURABLE_CORE_RESOURCE_ATTRIBUTE_KEYS = frozenset(
         "workspace.id",
     }
 )
-_RESOURCE_ALIAS_PAIRS = (
-    ("deployment.environment.name", "deployment.environment"),
-    ("defenseclaw.deployment.mode", "deployment.mode"),
-    ("defenseclaw.device.public_key_fingerprint", "defenseclaw.device.id"),
-)
+# A config_version 8 source may still spell the environment deployment.environment
+# (read as deployment.environment.name); config_version 9 refuses it. The
+# deployment.mode and defenseclaw.device.id spellings were never configurable.
+_RESOURCE_ALIAS_PAIRS = (("deployment.environment.name", "deployment.environment"),)
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 ENDPOINT_HOST_PUBLIC = "public"
 ENDPOINT_HOST_LOCALHOST = "localhost"
@@ -301,13 +301,13 @@ def yaml_error_mark(exc: BaseException) -> Any:
 class V8ConfigError(ValueError):
     """A source-validation error whose message never contains source values."""
 
-    def __init__(self, source_name: str, path: str, keyword: str, corrective_action: str, *, label: str = "v8") -> None:
+    def __init__(self, source_name: str, path: str, keyword: str, corrective_action: str) -> None:
         self.source_name = source_name
         self.path = path or "$"
         self.keyword = keyword
         self.corrective_action = corrective_action
         super().__init__(
-            f"{source_name}: invalid {label} configuration at {self.path} ({keyword}); {corrective_action}"
+            f"{source_name}: invalid configuration at {self.path} ({keyword}); {corrective_action}"
         )
 
 
@@ -341,8 +341,8 @@ class ValidatedV8Config:
         return hashlib.sha256(self.masked_json().encode("utf-8")).hexdigest()
 
 
-class _StrictLoader(yaml.SafeLoader):
-    """SafeLoader variant that rejects aliases, merge keys, and duplicates."""
+class _StrictConstructors:
+    """Construction rules shared by the pure-Python and the libyaml loaders."""
 
     _ALLOWED_TAGS = frozenset(
         (
@@ -357,12 +357,6 @@ class _StrictLoader(yaml.SafeLoader):
             "tag:yaml.org,2002:binary",
         )
     )
-
-    def compose_node(self, parent: Any, index: Any) -> Any:
-        if self.check_event(AliasEvent):
-            event = self.peek_event()
-            raise ComposerError(None, None, "aliases are not allowed", event.start_mark)
-        return super().compose_node(parent, index)
 
     def construct_object(self, node: Any, deep: bool = False) -> Any:
         if node.tag not in self._ALLOWED_TAGS:
@@ -389,6 +383,16 @@ class _StrictLoader(yaml.SafeLoader):
                 raise ConstructorError(None, None, "duplicate mapping key", key_node.start_mark)
             result[key] = self.construct_object(value_node, deep=deep)
         return result
+
+
+class _StrictLoader(_StrictConstructors, yaml.SafeLoader):
+    """SafeLoader variant that rejects aliases, merge keys, and duplicates."""
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(AliasEvent):
+            event = self.peek_event()
+            raise ComposerError(None, None, "aliases are not allowed", event.start_mark)
+        return super().compose_node(parent, index)
 
 
 def _construct_text_scalar(loader: _StrictLoader, node: Any) -> str:
@@ -422,6 +426,68 @@ _V8SourceLoader.add_implicit_resolver(
     _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
 )
 
+# libyaml parses a 150 KB policy config in tens of milliseconds where the
+# pure-Python parser needs about 1.5 s, and the source is parsed twice (the
+# preflight events, then the load): with 100 profiles and 2,000 assignments
+# that was most of the 4 s a `defenseclaw status` spent checking the config
+# (GAP-0199). The libyaml classes do not run compose_node, so the preflight,
+# which rejects aliases first, must stay in front of every load. PyYAML builds
+# without libyaml fall back to the pure-Python loaders.
+_LIBYAML_LOADER = getattr(yaml, "CSafeLoader", None)
+
+if _LIBYAML_LOADER is not None:
+
+    class _V8SourceLibyamlLoader(_StrictConstructors, _LIBYAML_LOADER):  # type: ignore[misc, valid-type]
+        """_V8SourceLoader's rules on the libyaml parser."""
+
+    _V8SourceLibyamlLoader.add_constructor("tag:yaml.org,2002:timestamp", _construct_text_scalar)
+    _V8SourceLibyamlLoader.add_constructor("tag:yaml.org,2002:binary", _construct_text_scalar)
+    _V8SourceLibyamlLoader.yaml_implicit_resolvers = {
+        first: [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_BOOL_TAG]
+        for first, resolvers in _LIBYAML_LOADER.yaml_implicit_resolvers.items()
+    }
+    _V8SourceLibyamlLoader.add_implicit_resolver(
+        _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+    )
+    _V8_SOURCE_LOADER: type = _V8SourceLibyamlLoader
+    _PREFLIGHT_LOADER: type = _LIBYAML_LOADER
+else:
+    _V8_SOURCE_LOADER = _V8SourceLoader
+    _PREFLIGHT_LOADER = _StrictLoader
+
+# What a parser (not a construction rule) rejects: the cases libyaml and the
+# pure-Python parser can word differently.
+_PARSE_ERRORS = (yaml.reader.ReaderError, yaml.scanner.ScannerError, yaml.parser.ParserError)
+
+
+def _load_v8_source(text: str) -> Any:
+    """Load one source with libyaml, and let the pure-Python loader decide on a parse error.
+
+    libyaml is stricter than PyYAML in a few places (a lone surrogate escape
+    such as ``"\\uD800"``), and the validation reports those with their own
+    wording; a document the C parser rejects is therefore parsed again by the
+    pure-Python loader, which accepts it or words the error as it always did.
+    """
+
+    if _V8_SOURCE_LOADER is not _V8SourceLoader:
+        try:
+            return yaml.load(text, Loader=_V8_SOURCE_LOADER)
+        except _PARSE_ERRORS:
+            pass
+    return yaml.load(text, Loader=_V8SourceLoader)
+
+
+def load_config_value(text: str) -> Any:
+    """Parse one ``config set`` VALUE as the gateway reads config.yaml.
+
+    ``yaml.safe_load`` is YAML 1.1, where ``off`` and ``on`` are booleans, so
+    ``config set ai_discovery.ide_inventory off`` wrote ``false`` and the
+    schema refused it; the core schema keeps them text, as the file reader and
+    Go do.
+    """
+
+    return yaml.load(text, Loader=_V8SourceLoader)
+
 
 def load_validate_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> ValidatedV8Config:
     """Parse and validate one exact-v8 source without reading secrets or network."""
@@ -431,6 +497,28 @@ def load_validate_v8(data: str | bytes | Mapping[str, Any], *, source_name: str 
     _validate_schema(document, source_name)
     _validate_semantics(document, source_name)
     return ValidatedV8Config(source_name, _masked_copy(document))
+
+
+def load_masked_v8(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> dict[str, Any]:
+    """Parse one v8 source and mask its secrets, without validating it.
+
+    For reads of a value (``config get``): the strict parse still rejects
+    malformed YAML, but the schema and semantic checks of every section, which
+    cost seconds with many guardrail profiles, are left to ``config validate``
+    and the gateway (GAP-0276).
+    """
+
+    return _masked_copy(_parse_source(data, source_name))
+
+
+def load_masked_v8_with_source(
+    data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml"
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """load_masked_v8 and the parsed source it masked (secrets included), from
+    one parse, for a caller that also builds the configuration (GAP-0276)."""
+
+    document = _parse_source(data, source_name)
+    return _masked_copy(document), document
 
 
 def validate_v8_source(data: str | bytes | Mapping[str, Any], *, source_name: str = "config.yaml") -> dict[str, Any]:
@@ -505,7 +593,7 @@ def _parse_source(data: str | bytes | Mapping[str, Any], source_name: str) -> di
             raise V8ConfigError(source_name, "$", "utf-8", "save the configuration as UTF-8") from exc
         _preflight_yaml_structure(text, source_name)
         try:
-            document = yaml.load(text, Loader=_V8SourceLoader)
+            document = _load_v8_source(text)
         except (RecursionError, OverflowError):
             raise V8ConfigError(
                 source_name,
@@ -538,7 +626,34 @@ def _parse_source(data: str | bytes | Mapping[str, Any], source_name: str) -> di
         raise V8ConfigError(source_name, "$", "max-nodes", "reduce the configuration below 65536 nodes")
     if depth > MAX_YAML_DEPTH:
         raise V8ConfigError(source_name, "$", "max-depth", "reduce nesting depth below 33 levels")
+    drop_retired_scanner_keys(document)
     return document
+
+
+# Scanner keys that no scan path ever read and that config_version 9 dropped
+# (GAP-0295, GAP-0301). 1.0 pre-release builds accepted and wrote them, so a
+# source that still holds one loads with the key ignored, as Go
+# dropRetiredScannerKeys does. A Secure Client document keeps the closed
+# schema of main (issue #1092), which never had them. Remove after 1.1.
+_RETIRED_SCANNER_KEYS: tuple[tuple[str, ...], ...] = (
+    ("scanners", "mcp_scanner", "api"),
+    ("scanners", "mcp_scanner", "timeouts"),
+    ("scanners", "skill_scanner", "timeouts", "llm_s"),
+)
+
+
+def drop_retired_scanner_keys(document: dict[str, Any]) -> None:
+    """Remove the retired scanner keys from *document* in place."""
+    from defenseclaw import config_writer
+
+    if config_writer.secure_client_document(document):
+        return
+    for parts in _RETIRED_SCANNER_KEYS:
+        node: Any = document
+        for part in parts[:-1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        if isinstance(node, dict):
+            node.pop(parts[-1], None)
 
 
 def _preflight_python_structure(value: Any, source_name: str) -> None:
@@ -578,7 +693,22 @@ def _preflight_python_structure(value: Any, source_name: str) -> None:
 
 
 def _preflight_yaml_structure(text: str, source_name: str, *, reject_aliases: bool = True) -> None:
-    """Enforce YAML node, collection-depth, and mapping limits before construction."""
+    """Enforce YAML node, collection-depth, and mapping limits before construction.
+
+    The events come from libyaml where PyYAML has it; a document it rejects is
+    read again by the pure-Python parser, which words the error as before.
+    """
+
+    if _PREFLIGHT_LOADER is not _StrictLoader:
+        try:
+            return _preflight_yaml_events(text, source_name, reject_aliases, _PREFLIGHT_LOADER)
+        except V8ConfigError as exc:
+            if exc.keyword != "yaml":
+                raise
+    return _preflight_yaml_events(text, source_name, reject_aliases, _StrictLoader)
+
+
+def _preflight_yaml_events(text: str, source_name: str, reject_aliases: bool, loader: type) -> None:
 
     nodes = 0
     frames: list[list[int | bool]] = []
@@ -599,7 +729,7 @@ def _preflight_yaml_structure(text: str, source_name: str, *, reject_aliases: bo
         frame[1] = frame[1] is not True
 
     try:
-        for event in yaml.parse(text, Loader=_StrictLoader):
+        for event in yaml.parse(text, Loader=loader):
             if reject_aliases and isinstance(event, AliasEvent):
                 raise V8ConfigError(
                     source_name,
@@ -779,7 +909,8 @@ def _schema_validator() -> Any:
         schema_path = root / "schemas" / "config" / "v8" / "defenseclaw-config.schema.json"
         with schema_path.open(encoding="utf-8") as stream:
             schema = json.load(stream)
-    Draft202012Validator.check_schema(schema)
+    # The packaged schema is static data: test_packaged_v8_schema_is_a_valid_draft_2020_12_schema
+    # checks it, so a process does not spend half a second on it per run (GAP-0199).
     _assert_schema_parity(schema)
     go_anchored = validators.extend(Draft202012Validator, {"pattern": _go_pattern_keyword})
     return go_anchored(schema)
@@ -869,6 +1000,7 @@ def _assert_schema_parity(schema: dict[str, Any]) -> None:
 # v8 keys that config_version 9 replaced, as Go's rejectV9RemovedKeys names them:
 # (path of the removed key, what to use instead).
 _V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("otel",), "observability.destinations"),
     (("skill_actions",), "admission.skill.actions"),
     (("mcp_actions",), "admission.mcp.actions"),
     (("plugin_actions",), "admission.plugin.actions"),
@@ -885,6 +1017,32 @@ _V9_REMOVED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("scanners", "mcp_scanner", "binary"), "the managed scanner install"),
 )
 
+# v8 keys config_version 9 dropped with nothing in their place, with what
+# rejectV9RemovedKeys (Go) tells the reader to do.
+_V9_DROPPED_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("privacy",), "remove it: config_version 9 has no privacy section"),
+    (
+        ("observability", "trace_policy", "compatibility_aliases"),
+        "remove it: telemetry carries only canonical attribute names",
+    ),
+)
+
+
+# The corrective action of a retired key in a config_version 8 source;
+# cmd_config words it plainly for config set.
+RETIRED_KEY_ACTION_PREFIX = "this key was replaced by "
+
+
+def retired_key_replacement(field: str) -> str:
+    """What replaced the config_version 8 key at dotted ``field``, or ""."""
+
+    for parts, target in _V9_REMOVED_KEYS:
+        if field == ".".join(parts):
+            return target
+    if field.startswith("guardrail.") and field.endswith(".rule_pack_dir"):
+        return "rule_pack or custom_packs"
+    return ""
+
 
 def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
     """Name the replacement for a v8 key a config_version 9 source still carries."""
@@ -897,18 +1055,20 @@ def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
             node = node[part]
         return True
 
-    def refuse(parts: tuple[str, ...], target: str) -> None:
+    def refuse(parts: tuple[str, ...], action: str) -> None:
         raise V8ConfigError(
             source_name,
             _json_path(parts),
             "legacy-key-forbidden",
-            f"a v8 configuration key is not accepted in config_version 9; use {target}",
-            label="v9",
+            f"a retired configuration key is not accepted in config_version 9; {action}",
         )
 
     for parts, target in _V9_REMOVED_KEYS:
         if lookup(parts):
-            refuse(parts, target)
+            refuse(parts, f"use {target}")
+    for parts, action in _V9_DROPPED_KEYS:
+        if lookup(parts):
+            refuse(parts, action)
     guardrail = document.get("guardrail")
     if not isinstance(guardrail, dict):
         return
@@ -924,7 +1084,7 @@ def _reject_v9_removed_keys(document: dict[str, Any], source_name: str) -> None:
         scopes += children(profile_path, profile, "connectors")
     for scope_path, scope in scopes:
         if isinstance(scope, dict) and "rule_pack_dir" in scope:
-            refuse((*scope_path, "rule_pack_dir"), "rule_pack or custom_packs")
+            refuse((*scope_path, "rule_pack_dir"), "use rule_pack or custom_packs")
 
 
 def _validate_schema(document: dict[str, Any], source_name: str) -> None:
@@ -937,28 +1097,139 @@ def _validate_schema(document: dict[str, Any], source_name: str) -> None:
     )
     if not errors:
         return
-    error = errors[0]
-    path = _json_path(tuple(error.absolute_path))
+    error = _narrow_one_of(errors[0], source_name)
     keyword = str(error.validator or "schema")
+    parts = tuple(error.absolute_path)
+    if keyword == "additionalProperties":
+        # Name the key the schema does not know, not just the object that
+        # holds it ("$.no.such", not "$").
+        parts += _first_unexpected_key(error)
+    path = _json_path(parts)
     action = {
-        "additionalProperties": (
-            "remove unsupported fields; see the configuration reference"
-            if v9
-            else "remove unsupported or legacy fields and run defenseclaw upgrade"
-        ),
-        "required": "add the required field shown by the v8 reference",
-        "const": "use the exact v8 value from the canonical reference",
-        "enum": "choose a value from the canonical v8 vocabulary",
-        "oneOf": "use exactly one supported v8 source shape",
-        "type": "use the value type documented by the canonical v8 schema",
-    }.get(keyword, "correct the field using the canonical v8 schema and reference")
-    raise V8ConfigError(
-        source_name, path, keyword, _declared_action(keyword, error) or action, label="v9" if v9 else "v8"
+        "additionalProperties": "remove unsupported fields; see the configuration reference",
+        "const": "use the exact value from the configuration reference",
+        "enum": "choose a value from the documented vocabulary",
+        "oneOf": "use exactly one supported source shape",
+        "type": "use the value type documented by the configuration schema",
+    }.get(keyword, "correct the field using the configuration schema and reference")
+    if keyword == "required":
+        action = _required_field_action(error)
+    elif keyword == "additionalProperties" and v9:
+        action = _unknown_field_action(error, parts)
+    elif keyword == "additionalProperties" and (
+        replacement := retired_key_replacement(".".join(str(part) for part in parts))
+    ):
+        # A config_version 8 source still carrying a key version 9 moved:
+        # migrating carries its value over, deleting it loses the value.
+        action = f"{RETIRED_KEY_ACTION_PREFIX}{replacement} in config_version 9; run: defenseclaw migrate"
+    raise V8ConfigError(source_name, path, keyword, _declared_action(keyword, error) or action)
+
+
+def _narrow_one_of(error: Any, source_name: str) -> Any:
+    """Narrow a ``oneOf`` over ``kind``-pinned shapes to the shape the source chose.
+
+    Without this the reader gets every shape's key list in one line. A ``kind``
+    no shape declares is named with the kinds that exist; a declared ``kind``
+    reports the first problem inside its own shape.
+    """
+
+    while error.validator == "oneOf" and isinstance(error.instance, Mapping):
+        kinds: dict[str, int] = {}
+        for index, branch in enumerate(error.validator_value if isinstance(error.validator_value, list) else []):
+            const = ((_resolve_branch(branch).get("properties") or {}).get("kind") or {}).get("const")
+            if not isinstance(const, str):
+                return error
+            kinds[const] = index
+        if not kinds:
+            return error
+        kind = error.instance.get("kind")
+        chosen = kinds.get(kind) if isinstance(kind, str) else None
+        if chosen is None:
+            raise V8ConfigError(
+                source_name,
+                _json_path((*error.absolute_path, "kind")),
+                "enum",
+                "use one of " + ", ".join(kinds),
+            )
+        inner = sorted(
+            (item for item in error.context or () if item.relative_schema_path[0] == chosen),
+            key=lambda item: tuple(str(part) for part in item.absolute_path),
+        )
+        if not inner:
+            return error
+        error = inner[0]
+    return error
+
+
+def _resolve_branch(branch: Any) -> Mapping[str, Any]:
+    """A oneOf branch with a local $ref followed; {} when it is not a mapping."""
+
+    if isinstance(branch, Mapping) and str(branch.get("$ref", "")).startswith("#/$defs/"):
+        branch = _schema_validator().schema.get("$defs", {}).get(str(branch["$ref"])[len("#/$defs/"):], {})
+    return branch if isinstance(branch, Mapping) else {}
+
+
+_PLAIN_KEY = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _required_field_action(error: Any) -> str:
+    """Name the field a required-property error is missing."""
+
+    required = error.validator_value if isinstance(error.validator_value, list) else []
+    present = error.instance if isinstance(error.instance, Mapping) else {}
+    missing = [str(name) for name in required if name not in present and _PLAIN_KEY.match(str(name))]
+    if not missing:
+        return "add the required field"
+    return "add the required " + ("field " if len(missing) == 1 else "fields ") + ", ".join(missing)
+
+
+def _unknown_field_action(error: Any, parts: tuple[str, ...]) -> str:
+    """Say a v9 key is unknown, with the closest known key when there is one.
+
+    ``parts`` already names the key when it is a plain name; otherwise the
+    object holding it is all the path can say.
+    """
+
+    schema = error.schema if isinstance(error.schema, Mapping) else {}
+    if len(parts) == len(tuple(error.absolute_path)):
+        return "remove the unsupported fields"
+    close = difflib.get_close_matches(parts[-1], [str(name) for name in schema.get("properties") or {}], n=1)
+    return "unknown field" + (f' (did you mean "{close[0]}"?)' if close else "")
+
+
+def _first_unexpected_key(error: Any) -> tuple[str, ...]:
+    """The first key an additionalProperties error rejects, or () when it is not a plain name."""
+
+    schema = error.schema if isinstance(error.schema, Mapping) else {}
+    instance = error.instance if isinstance(error.instance, Mapping) else {}
+    known = schema.get("properties") or {}
+    patterns = [re.compile(pattern) for pattern in (schema.get("patternProperties") or {})]
+    extras = sorted(
+        str(key)
+        for key in instance
+        if key not in known and not any(pattern.search(str(key)) for pattern in patterns)
     )
+    return (extras[0],) if extras and _PLAIN_KEY.match(extras[0]) else ()
 
 
 # An enum longer than this is left to the reference rather than listed.
 _MAX_LISTED_ENUM_VALUES = 16
+
+
+def _enum_action(values: Any) -> str:
+    """The words an enum allows, or "" when it is not a short list of strings."""
+
+    if not (
+        isinstance(values, list)
+        and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
+        and all(isinstance(value, str) for value in values)
+    ):
+        return ""
+    # An empty value is how a field inherits; list the words only.
+    words = [value for value in values if value]
+    if not words:
+        return ""
+    return "use one of " + ", ".join(words) + (" (empty inherits)" if len(words) < len(values) else "")
 
 
 def _declared_action(keyword: str, error: Any) -> str:
@@ -969,14 +1240,23 @@ def _declared_action(keyword: str, error: Any) -> str:
     """
 
     if keyword == "enum":
-        values = error.validator_value
-        if (
-            isinstance(values, list)
-            and 0 < len(values) <= _MAX_LISTED_ENUM_VALUES
-            and all(isinstance(value, str) for value in values)
-        ):
-            return "use one of " + ", ".join(values)
-        return ""
+        return _enum_action(error.validator_value)
+    if keyword == "pattern":
+        return _pattern_action(error.validator_value)
+    if keyword == "oneOf":
+        return _one_of_action(error.validator_value)
+    if keyword == "type":
+        types = error.validator_value if isinstance(error.validator_value, list) else [error.validator_value]
+        if not types:
+            return ""
+        # A number typed for an enum or pattern key learns the words it takes,
+        # as a wrong string does (GAP-0222).
+        schema = error.schema if isinstance(error.schema, Mapping) else {}
+        return (
+            _enum_action(schema.get("enum"))
+            or _pattern_action(schema.get("pattern"))
+            or "use a value of type " + " or ".join(str(t) for t in types)
+        )
     if keyword not in ("minimum", "maximum") or not isinstance(error.schema, Mapping):
         return ""
 
@@ -994,6 +1274,64 @@ def _declared_action(keyword: str, error: Any) -> str:
     if high:
         return f"use a number at or below {high}"
     return ""
+
+
+def _pattern_action(pattern: Any) -> str:
+    """The words a ``^(a|b|c)$`` pattern allows (``[Cc][Rr]...`` spellings
+    mean any case, an empty alternative means empty inherits); "" for any
+    other pattern."""
+
+    if not isinstance(pattern, str) or not (pattern.startswith("^(") and pattern.endswith(")$")):
+        return ""
+    words: list[str] = []
+    any_case = empty = False
+    for part in pattern[2:-2].split("|"):
+        if not part:
+            empty = True
+        elif re.fullmatch(r"(?:\[[A-Za-z][A-Za-z]\])+", part):
+            words.append("".join(pair[1] for pair in re.findall(r"\[[A-Za-z][A-Za-z]\]", part)).upper())
+            any_case = True
+        elif re.fullmatch(r"[A-Za-z0-9_-]+", part):
+            words.append(part)
+        else:
+            return ""
+    if not words:
+        return ""
+    return "use one of " + ", ".join(words) + (" in any case" if any_case else "") + (
+        " (empty inherits)" if empty else ""
+    )
+
+
+def _one_of_action(branches: Any) -> str:
+    """The shapes a ``oneOf`` allows, for example ``one of a, b or a mapping
+    with x, y``; "" when a branch is not a string list or a mapping."""
+
+    if not isinstance(branches, list) or not branches:
+        return ""
+    resolved = [_resolve_branch(branch) for branch in branches]
+    objects = [branch for branch in resolved if branch.get("type") == "object"]
+    if len(objects) > 2:
+        # Many shapes (the destination kinds): name the keys every shape needs, not each
+        # shape's whole key list, which ran to 759 bytes for ``destinations: [5]`` (GAP-0211).
+        common = [
+            name
+            for name in objects[0].get("required") or []
+            if all(name in (other.get("required") or []) for other in objects)
+        ]
+        if common:
+            names = ", ".join(common[:-1]) + " and " + common[-1] if len(common) > 1 else common[0]
+            return "use a mapping with " + names
+    parts: list[str] = []
+    for branch in resolved:
+        values = branch.get("enum")
+        if isinstance(values, list) and values and all(isinstance(value, str) for value in values):
+            parts.append("one of " + ", ".join(values))
+        elif branch.get("type") == "object":
+            names = list(branch.get("properties") or {})
+            parts.append("a mapping with " + ", ".join(names) if names else "a mapping")
+        else:
+            return ""
+    return "use " + " or ".join(parts)
 
 
 def _json_path(parts: tuple[Any, ...]) -> str:
@@ -1092,19 +1430,22 @@ def _validate_private_upstream_allowlist(guardrail: dict[str, Any], source_name:
 
 
 def _validate_profile_references(observability: dict[str, Any], known: set[str], source_name: str) -> None:
+    def unknown(profile: str) -> str:
+        return f"profile {profile!r} is not defined; defined: {', '.join(sorted(known))}"
+
     defaults = observability.get("defaults", {})
     if defaults.get("redaction_profile", "none") not in known:
         _semantic_error(
             source_name,
             "observability.defaults.redaction_profile",
-            "select a built-in or defined custom profile",
+            unknown(defaults["redaction_profile"]),
         )
     for bucket, policy in observability.get("buckets", {}).items():
         if "redaction_profile" in policy and policy["redaction_profile"] not in known:
             _semantic_error(
                 source_name,
                 f"observability.buckets.{bucket}.redaction_profile",
-                "select a built-in or defined custom profile",
+                unknown(policy["redaction_profile"]),
             )
     for index, destination in enumerate(observability.get("destinations", [])):
         if "send" in destination:
@@ -1118,7 +1459,7 @@ def _validate_profile_references(observability: dict[str, Any], known: set[str],
                 _semantic_error(
                     source_name,
                     f"observability.destinations[{index}].{suffix}.redaction_profile",
-                    "select a built-in or defined custom profile",
+                    unknown(policy["redaction_profile"]),
                 )
 
 

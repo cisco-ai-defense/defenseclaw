@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -948,10 +949,10 @@ func TestEnumerateUnixExcludeAndExemptAcceptUIDs(t *testing.T) {
 	root := trustedTestDir(t)
 	homes := filepath.Join(root, "home")
 	accounts := map[string]unixidentity.Account{}
-	for name, uid := range map[string]int{"svc-release": 1500, "build": 1600, "alice": 1700} {
+	for name, uid := range map[string]int{"svc-release": 1500, "build": 1600, "alice": 1700, "bob": 1800} {
 		accounts[name] = unixidentity.Account{Name: name, UID: uid, GID: uid, Home: filepath.Join(homes, name), Shell: "/bin/bash"}
 	}
-	resolver := &fakeResolver{accounts: accounts, listed: []string{"svc-release", "build", "alice"}}
+	resolver := &fakeResolver{accounts: accounts, listed: []string{"svc-release", "build", "alice", "bob"}}
 	cfg := enumeratorConfig("opencode")
 	cfg.Enterprise.Enrollment.ExemptUsers = []string{"1500"}
 	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"1600"}
@@ -965,12 +966,29 @@ func TestEnumerateUnixExcludeAndExemptAcceptUIDs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if users := manifestUsers(manifest); len(users) != 1 || !users["alice"] {
+	if users := manifestUsers(manifest); len(users) != 2 || !users["alice"] || !users["bob"] {
 		t.Fatalf("enrolled = %v (skipped %v)", users, report.Skipped)
 	}
 	joined := strings.Join(report.Skipped, "\n")
 	if !strings.Contains(joined, "svc-release: exempt") || !strings.Contains(joined, "build: excluded") {
 		t.Fatalf("skipped = %v", report.Skipped)
+	}
+	// Every agent on machine policy: no rows, but the record the sensor
+	// helper watches homes from still lists the eligible accounts only
+	// (GAP-1470).
+	cfg.Guardrail.Connectors = enumeratorConfig("claudecode", "codex").Guardrail.Connectors
+	opts.MachinePolicyConnectors = []string{"claudecode", "codex"}
+	manifest, report, err = EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil || len(manifest.Targets) != 0 {
+		t.Fatalf("machine-policy-only rows %+v %v", manifest.Targets, err)
+	}
+	var eligible []string
+	for _, account := range report.EligibleAccounts {
+		eligible = append(eligible, account.User)
+	}
+	sort.Strings(eligible)
+	if strings.Join(eligible, ",") != "alice,bob" {
+		t.Fatalf("eligible accounts = %v (skipped %v)", eligible, report.Skipped)
 	}
 }
 

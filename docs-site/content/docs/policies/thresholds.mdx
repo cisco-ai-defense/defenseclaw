@@ -46,6 +46,16 @@ The resolved levels decide every guardrail verdict that carries a severity:
 | Guardrail proxy tool calls in model responses | Yes |
 | Tool responses and message content | Yes |
 
+These levels apply only after a finding is eligible to block. A tool-call
+pattern match is detection-only, and a rule whose trusted proof is explicitly
+alert-only stays an alert at every `block_at` value. For example,
+`impact.sql_destructive_mutation` reports destructive SQL as an alert in the
+standard packs because the operation can be authorized administration.
+The inline hook notice identifies that rule as alert-only. Other alert-only
+tool findings include `attack.http_command_injection`,
+`attack.http_sql_injection`, and `exec.postgresql_copy_program`. See
+[CEL rule authoring](/docs/policies/cel/authoring) for the proof boundary.
+
 A preset (`defenseclaw policy activate`), `defenseclaw guardrail block-at` and a hand edit of `config.yaml` all change the same two keys.
 
 <Callout type="info" title="Upgrading from config_version 8">
@@ -123,7 +133,7 @@ The three built-in packs need no manifest. **A custom pack is `default` unless i
 {"posture": "strict"}
 ```
 
-The manifest is not part of the pack digest, and `defenseclaw guardrail validate-pack` accepts a pack with or without it. See [Rules and custom packs](/docs/policies/rules) for pinning a pack.
+The manifest is part of the pack digest: adding or editing it changes the `custom_packs` pin and the effective policy digest, like a rule file, so a pinned pack whose manifest changed is refused until you pin the new digest. `defenseclaw guardrail validate-pack` accepts a pack with or without it. See [Rules and custom packs](/docs/policies/rules) for pinning a pack.
 
 Because a profile or connector can select a different `rule_pack`, the default can differ per scope. Setting `block_at` explicitly at a scope removes that dependency.
 
@@ -205,7 +215,7 @@ A change to a threshold, a rule pack, `guardrail.rules`, a profile, the mode, HI
 
 If a change is invalid, the previous generation keeps running. The rejected change shows up as `policy.last_reload_error` in the gateway `/health` output and as a failing **Policy** row in `defenseclaw doctor`, which also lists the generation and the digest still being enforced. The `guardrail` commands wait up to 10 seconds for the running gateway to report the new config generation; when it does not (it rejected the change, or it never reloaded it), they end with `The running gateway did not apply it and still enforces the previous setting (defenseclaw-gateway status says why); restart it to apply this: defenseclaw-gateway restart.` (`mode`, `block-at` and `alert-at` then exit 1; `use-pack`, `protection`, `rule` and `suppress` print the same line after `Saved (config generation N).`).
 
-A restart is still needed for the process-level guardrail keys: `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies`, `guardrail.hook_fail_mode`, the hook self-heal settings, and a connector's own `enabled` and `hook_fail_mode` (they are baked into the installed hooks). The writer prints `Restart the gateway to apply <key>: defenseclaw-gateway restart` when you change one. The rest of such a change still applies at once; the gateway logs which keys wait for the restart. With `gateway.config_reload.mode: restart` the gateway restarts itself when a change needs it, instead of waiting for you.
+A restart is still needed for the process-level guardrail keys: `guardrail.host`, `guardrail.port`, `guardrail.enabled`, `guardrail.connector`, `guardrail.scanner_mode`, `guardrail.retain_judge_bodies` and the hook self-heal settings. A connector's own `enabled` applies in place: the gateway sets up or removes its hooks. `guardrail.hook_fail_mode` reloads hot: the gateway rewrites the installed hook scripts (with hook self-heal off it runs the connector setup again), and `defenseclaw guardrail fail-mode` rewrites them itself. The writer prints `Restart the gateway to apply <key>: defenseclaw-gateway restart` when you change one. The rest of such a change still applies at once; the gateway logs which keys wait for the restart. With `gateway.config_reload.mode: restart` the gateway restarts itself when a change needs it, instead of waiting for you.
 
 <Callout type="info" title="Secure Client">
 When Cisco Secure Client integration is active, the gateway keeps the rule pack's posture levels for content decisions. `guardrail.block_at` and `alert_at` do not change them.

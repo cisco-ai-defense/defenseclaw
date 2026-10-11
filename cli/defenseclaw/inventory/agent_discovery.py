@@ -28,6 +28,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import uuid
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -90,6 +91,9 @@ CACHE_FILENAME = "agent_discovery.json"
 # busy host.
 VERSION_TIMEOUT_SECONDS = 8.0
 VERSION_PROBE_TIMED_OUT = "version probe timed out"
+#: The error of an agent whose CLI the current command did not run because it
+#: only sets up other connectors (GAP-0901).
+VERSION_NOT_PROBED = "version not probed: not being set up"
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
 _WINDOWS_LOCAL_APP_DATA_FOLDER_ID = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
@@ -942,6 +946,190 @@ _SPECS: dict[str, _AgentSpec] = {
 
 
 _FRESH_SCANS: ContextVar[dict[tuple, AgentDiscovery] | None] = ContextVar("_FRESH_SCANS", default=None)
+_PROBE_ONLY: ContextVar[frozenset[str] | None] = ContextVar("_PROBE_ONLY", default=None)
+
+
+def _configured_probe_names(data_dir: str | os.PathLike[str] | None) -> frozenset[str]:
+    """Avoid starting unrelated agent CLIs during passive discovery."""
+    try:
+        path = config_path_for_data_dir(data_dir)
+        with open(path, "rb") as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return frozenset()
+        document = yaml.safe_load(raw) or {}
+        guardrail = document.get("guardrail", {})
+        connectors = guardrail.get("connectors", {})
+        names = {
+            str(name).lower() for name, entry in connectors.items()
+            if isinstance(entry, dict) and entry.get("enabled") is not False
+        } if isinstance(connectors, dict) else set()
+        primary = guardrail.get("connector")
+        if guardrail.get("enabled") and isinstance(primary, str) and primary:
+            names.add(primary.lower())
+        return frozenset(names)
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        return frozenset()
+
+
+def restrict_probes(connectors: list[str]) -> Any:
+    """Run only the CLIs of ``connectors`` in this command's discovery scans.
+
+    ``init --connector copilot`` ran every installed agent CLI as a version
+    probe, and those CLIs wrote their own config and cache folders
+    (~/.codex, ~/.cursor, ~/.config/opencode, ...) into the home of a user
+    who never started them (GAP-0901). The other agents are still found by
+    binary and config path; their version is the last one observed for the
+    same unchanged binary, else unknown. Returns the token for
+    :func:`end_probe_restriction`.
+    """
+    return _PROBE_ONLY.set(frozenset(connectors))
+
+
+def end_probe_restriction(token: Any) -> None:
+    _PROBE_ONLY.reset(token)
+
+
+def discover_with_probes(connectors: list[str], **kwargs: Any) -> AgentDiscovery:
+    """Probe only connectors explicitly selected by the current setup flow."""
+    token = restrict_probes(connectors)
+    try:
+        return discover_agents(**kwargs)
+    finally:
+        end_probe_restriction(token)
+
+
+#: What an agent CLI's ``--version`` creates in a home that never ran it
+#: ("~" is the home, "$XDG_*" the XDG base folder) (GAP-0901).
+_PROBE_STATE_PATHS: dict[str, tuple[str, ...]] = {
+    "codex": ("~/.codex",),
+    "cursor": (
+        "~/.cursor", "~/.cursor/cli-config.json", "$XDG_CACHE_HOME/cursor-compile-cache",
+        "/var/tmp/cursor-agent-logs-{uid}",
+    ),
+    "opencode": (
+        "$XDG_CONFIG_HOME/opencode",
+        "$XDG_DATA_HOME/opencode",
+        "$XDG_STATE_HOME/opencode",
+        "$XDG_CACHE_HOME/opencode",
+    ),
+    "amp": ("$XDG_CACHE_HOME/amp",),
+    "copilot": ("$XDG_CACHE_HOME/copilot",),
+}
+_XDG_DEFAULTS = {
+    "XDG_CONFIG_HOME": ".config",
+    "XDG_CACHE_HOME": ".cache",
+    "XDG_DATA_HOME": ".local/share",
+    "XDG_STATE_HOME": ".local/state",
+}
+#: The record of what version probes created; uninstall removes each entry
+#: that is still exactly as the probe left it.
+PROBE_STATE_RECORD = "probe-created-paths.json"
+PROBE_STATE_MAX_ENTRIES = 2000
+_PROBE_STATE_LOCK = threading.Lock()
+
+
+def _probe_state_paths(name: str) -> list[str]:
+    home = os.path.expanduser("~")
+    out = []
+    for raw in _PROBE_STATE_PATHS.get(name, ()):
+        if raw.startswith("/") and os.name != "nt":
+            out.append(raw.format(uid=os.getuid()))
+        elif raw.startswith("$"):
+            var, _, rest = raw[1:].partition("/")
+            base = os.environ.get(var) or os.path.join(home, _XDG_DEFAULTS[var])
+            out.append(os.path.join(base, rest))
+        else:
+            out.append(os.path.join(home, raw[2:]))
+    return out
+
+
+def probe_state_fingerprint(path: str) -> str | None:
+    """A digest of ``path`` and everything below it (names, types, sizes and
+    modification times, links not followed), or None when it is missing or
+    too large to compare."""
+    entries: list[str] = []
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    entries.append(f".|{stat.S_IFMT(info.st_mode)}|{info.st_size}|{info.st_mtime_ns}")
+    if stat.S_ISDIR(info.st_mode):
+        for root, dirs, files in os.walk(path, followlinks=False):
+            for entry in sorted(dirs + files):
+                full = os.path.join(root, entry)
+                try:
+                    st = os.lstat(full)
+                except OSError:
+                    return None
+                rel = os.path.relpath(full, path)
+                entries.append(f"{rel}|{stat.S_IFMT(st.st_mode)}|{st.st_size}|{st.st_mtime_ns}")
+                if len(entries) > PROBE_STATE_MAX_ENTRIES:
+                    return None
+    return hashlib.sha256("\n".join(entries).encode("utf-8", "surrogateescape")).hexdigest()
+
+
+def _missing_probe_state(name: str) -> tuple[list[str], list[str]]:
+    """The agent's probe state paths missing now, and their missing parent
+    folders below the home folder."""
+    if os.name == "nt":
+        return [], []
+    home = os.path.abspath(os.path.expanduser("~"))
+    paths: list[str] = []
+    parents: list[str] = []
+    for path in _probe_state_paths(name):
+        if os.path.lexists(path):
+            continue
+        paths.append(path)
+        parent = os.path.dirname(path)
+        while parent != home and parent.startswith(home + os.sep) and not os.path.lexists(parent):
+            if parent not in parents:
+                parents.append(parent)
+            parent = os.path.dirname(parent)
+    return paths, parents
+
+
+def _record_probe_state(
+    missing: tuple[list[str], list[str]],
+    *,
+    data_dir: str | os.PathLike[str] | None,
+) -> None:
+    """Add to :data:`PROBE_STATE_RECORD` what a probe created of ``missing``."""
+    paths, parents = missing
+    created: dict[str, str] = {}
+    for path in paths:
+        if any(path.startswith(done + os.sep) for done in created):
+            continue
+        fingerprint = probe_state_fingerprint(path)
+        if fingerprint is not None:
+            created[path] = fingerprint
+    if not created:
+        return
+    dirs = [d for d in parents if os.path.isdir(d) and not os.path.islink(d)]
+    target_dir = Path(data_dir) if data_dir else default_data_path()
+    if not target_dir.is_dir():
+        return
+    record = target_dir / PROBE_STATE_RECORD
+    with _PROBE_STATE_LOCK:
+        try:
+            with open(record, encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        known = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
+        known.update(created)
+        known_dirs = payload.get("dirs") if isinstance(payload.get("dirs"), list) else []
+        payload = {"paths": known, "dirs": sorted(set(known_dirs) | set(dirs))}
+        try:
+            tmp = record.with_name(record.name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, sort_keys=True)
+                fh.write("\n")
+            os.replace(tmp, record)
+        except OSError:
+            pass
 
 
 @contextmanager
@@ -987,8 +1175,16 @@ def discover_agents(
 
     scanned_at = _format_rfc3339(_now_utc())
     require_trusted, _prefixes = _ai_discovery_trust_config(data_dir)
+    probe_only = _PROBE_ONLY.get()
+    if probe_only is None:
+        probe_only = _configured_probe_names(data_dir)
     shared = _FRESH_SCANS.get()
-    shared_key = (str(config_path_for_data_dir(data_dir)), require_trusted, tuple(_prefixes))
+    shared_key = (
+        str(config_path_for_data_dir(data_dir)),
+        require_trusted,
+        tuple(_prefixes),
+        tuple(sorted(probe_only)) if probe_only is not None else None,
+    )
     if shared is not None and shared_key in shared:
         reused = shared[shared_key]
         if persist_cache:
@@ -1007,6 +1203,7 @@ def discover_agents(
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
                     include_workspace_config=False,
+                    probe=probe_only is None or name in probe_only,
                 ),
                 DISCOVERABLE_CONNECTORS,
             )
@@ -1029,7 +1226,8 @@ def _keep_versions_of_slow_unchanged_agents(
     *,
     data_dir: str | os.PathLike[str] | None = None,
 ) -> None:
-    """Keep the last observed version of a CLI whose probe only timed out.
+    """Keep the last observed version of a CLI whose probe only timed out
+    or was not run (:func:`restrict_probes`).
 
     Setup rescans every agent and republishes this cache, and the gateway
     reads each peer's version from it when it restarts. On a busy host one
@@ -1041,7 +1239,9 @@ def _keep_versions_of_slow_unchanged_agents(
     slow = [
         signal
         for signal in agents.values()
-        if signal.binary_path and not signal.version and VERSION_PROBE_TIMED_OUT in (signal.error or "")
+        if signal.binary_path
+        and not signal.version
+        and (VERSION_PROBE_TIMED_OUT in (signal.error or "") or signal.error == VERSION_NOT_PROBED)
     ]
     if not slow:
         return
@@ -1243,11 +1443,22 @@ def _scan_agent(
     data_dir: str | os.PathLike[str] | None = None,
     require_trusted_binary_paths: bool = False,
     include_workspace_config: bool = True,
+    probe: bool = True,
 ) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_path = _agent_config_path(name, include_workspace_config=include_workspace_config)
     binary_candidates = _binary_candidates_for_agent(name, spec)
     binary_path = binary_candidates[0] if binary_candidates else ""
+    if not probe:
+        return AgentSignal(
+            name=name,
+            installed=bool(binary_path),
+            config_path=config_path,
+            binary_path=binary_path,
+            version="",
+            error=VERSION_NOT_PROBED if binary_path else "",
+            configured=bool(config_path),
+        )
     version = ""
     error = ""
     version_ok = False
@@ -1256,6 +1467,7 @@ def _scan_agent(
         require_trusted_binary_paths = True
     probe_errors: list[str] = []
     timed_out = ""
+    missing_state = _missing_probe_state(name) if binary_candidates else ([], [])
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
             name,
@@ -1287,6 +1499,8 @@ def _scan_agent(
         )
         if candidate_version and not candidate_error:
             binary_path, version, version_ok = timed_out, candidate_version, True
+    if missing_state[0]:
+        _record_probe_state(missing_state, data_dir=data_dir)
     if not version_ok and probe_errors:
         error = "; ".join(probe_errors)
     if not version_ok and timed_out:

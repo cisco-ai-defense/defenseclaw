@@ -66,6 +66,9 @@ type InventoryStore struct {
 	// closing the database pool more than once.
 	closeOnce sync.Once
 	closeErr  error
+	// legacySchema keeps the file on secureClientInventorySchema and makes
+	// the store write no table or column of a later schema.
+	legacySchema bool
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
@@ -125,6 +128,18 @@ const inventoryPragmas = "?_pragma=auto_vacuum(INCREMENTAL)" +
 // hashes and, when StoreRawLocalPaths is enabled, raw filesystem
 // paths.
 func NewInventoryStore(dbPath string) (*InventoryStore, error) {
+	return NewInventoryStoreForProfile(dbPath, false)
+}
+
+// secureClientInventorySchema is the inventory.db schema of 1.0.0. The Secure
+// Client profile keeps it (issue #1092): its gateway does not migrate the
+// file further and writes no later table or column, so 1.0.0 still reads it
+// after a rollback. A store opened for any other profile migrates it then.
+const secureClientInventorySchema = 3
+
+// NewInventoryStoreForProfile is NewInventoryStore for the deployment
+// profile: a Secure Client store stays on secureClientInventorySchema.
+func NewInventoryStoreForProfile(dbPath string, secureClient bool) (*InventoryStore, error) {
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, errors.New("inventory store: db path is required")
 	}
@@ -142,7 +157,7 @@ func NewInventoryStore(dbPath string) (*InventoryStore, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
-	st := &InventoryStore{db: db, path: dbPath}
+	st := &InventoryStore{db: db, path: dbPath, legacySchema: secureClient}
 	if err := st.init(); err != nil {
 		st.Close() //nolint:errcheck
 		return nil, err
@@ -465,7 +480,8 @@ var inventoryMigrations = []invMigration{
 		// and the agent identity ledger. ide_installations and
 		// ide_plugins hang off ai_scans like ai_signals, so retention
 		// pruning (PruneScanHistory) bounds them through ON DELETE
-		// CASCADE. agent_identities is one row per agent, not per scan.
+		// CASCADE. agent_identities is one row per agent, not per scan;
+		// PruneAgentIdentities bounds it by last_seen.
 		description: "v4: signal accounts, IDE inventory, agent identities",
 		apply: func(ex invDBExecer) error {
 			stmts := []string{
@@ -510,12 +526,50 @@ var inventoryMigrations = []invMigration{
 				`CREATE INDEX IF NOT EXISTS idx_ide_plugins_user_id ON ide_plugins(user_id)`,
 				`CREATE INDEX IF NOT EXISTS idx_ide_plugins_plugin_id ON ide_plugins(plugin_id)`,
 				`CREATE TABLE IF NOT EXISTS agent_identities (agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, user_name TEXT, connector TEXT NOT NULL, install_fp TEXT, machine_hash TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL, last_session_id TEXT, sessions_seen INTEGER NOT NULL DEFAULT 0)`,
-				`CREATE INDEX IF NOT EXISTS idx_agent_identities_user_id ON agent_identities(user_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_agent_identities_last_seen ON agent_identities(last_seen DESC, agent_id)`,
 				`CREATE INDEX IF NOT EXISTS idx_agent_identities_connector ON agent_identities(connector)`,
 			}
 			for _, q := range stmts {
 				if _, err := ex.Exec(q); err != nil {
 					return fmt.Errorf("ai inventory: v4 migration: %w (stmt: %s)", err, firstLine(q))
+				}
+			}
+			return nil
+		},
+	},
+	{
+		description: "v5: mark every persisted IDE inventory, including empty snapshots",
+		apply: func(ex invDBExecer) error {
+			for _, q := range []string{
+				`CREATE TABLE IF NOT EXISTS ide_inventory_snapshots (
+					scan_id TEXT PRIMARY KEY REFERENCES ai_scans(scan_id) ON DELETE CASCADE
+				)`,
+				`INSERT OR IGNORE INTO ide_inventory_snapshots(scan_id)
+				SELECT DISTINCT scan_id FROM ide_installations`,
+			} {
+				if _, err := ex.Exec(q); err != nil {
+					return fmt.Errorf("ai inventory: v5 migration: %w", err)
+				}
+			}
+			return nil
+		},
+	},
+	{
+		description: "v6: track the last sighting of each agent identity session",
+		apply: func(ex invDBExecer) error {
+			// v5 stores may have this table (created on first upsert) or may
+			// not. Create the old shape first so the ALTER works in either case.
+			for _, q := range []string{
+				`CREATE TABLE IF NOT EXISTS agent_identity_sessions (
+					agent_id TEXT NOT NULL, session_id TEXT NOT NULL, first_seen TEXT NOT NULL,
+					PRIMARY KEY (agent_id, session_id)) WITHOUT ROWID`,
+				`ALTER TABLE agent_identity_sessions ADD COLUMN last_seen TEXT NOT NULL DEFAULT ''`,
+				`UPDATE agent_identity_sessions SET last_seen = first_seen`,
+				`CREATE INDEX IF NOT EXISTS idx_agent_identity_sessions_last_seen
+					ON agent_identity_sessions(last_seen)`,
+			} {
+				if _, err := ex.Exec(q); err != nil {
+					return fmt.Errorf("ai inventory: v6 migration: %w", err)
 				}
 			}
 			return nil
@@ -547,7 +601,11 @@ func (s *InventoryStore) init() error {
 	if err := s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&current); err != nil {
 		return fmt.Errorf("inventory store: read schema version: %w", err)
 	}
-	for i := current; i < len(inventoryMigrations); i++ {
+	target := len(inventoryMigrations)
+	if s.legacySchema {
+		target = secureClientInventorySchema
+	}
+	for i := current; i < target; i++ {
 		ver := i + 1
 		m := inventoryMigrations[i]
 		if err := s.applyMigration(ver, m); err != nil {
@@ -681,13 +739,7 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 			lastActive = sql.NullTime{Time: *sig.LastActiveAt, Valid: true}
 		}
 
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO ai_signals
-			(scan_id, fingerprint, signal_id, signature_id, name, vendor, product,
-			 category, detector, state, confidence,
-			 component_ecosystem, component_name, component_framework, component_version,
-			 last_seen, last_active_at, evidence_json, runtime_json, model_json,
-			 user_id, user_name)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		args := []any{
 			report.Summary.ScanID,
 			sig.Fingerprint,
 			sig.SignalID,
@@ -705,9 +757,24 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 			string(evidenceJSON),
 			nullStringFromBytes(runtimeJSON),
 			nullStringFromBytes(modelJSON),
-			nullString(sig.UserID),
-			nullString(sig.UserName),
-		); err != nil {
+		}
+		insert := `INSERT OR REPLACE INTO ai_signals
+			(scan_id, fingerprint, signal_id, signature_id, name, vendor, product,
+			 category, detector, state, confidence,
+			 component_ecosystem, component_name, component_framework, component_version,
+			 last_seen, last_active_at, evidence_json, runtime_json, model_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		if !s.legacySchema {
+			insert = `INSERT OR REPLACE INTO ai_signals
+			(scan_id, fingerprint, signal_id, signature_id, name, vendor, product,
+			 category, detector, state, confidence,
+			 component_ecosystem, component_name, component_framework, component_version,
+			 last_seen, last_active_at, evidence_json, runtime_json, model_json,
+			 user_id, user_name)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			args = append(args, nullString(sig.UserID), nullString(sig.UserName))
+		}
+		if _, err := tx.ExecContext(ctx, insert, args...); err != nil {
 			return fmt.Errorf("inventory store: insert signal %s: %w", sig.SignalID, err)
 		}
 
@@ -750,7 +817,7 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 		}
 	}
 
-	if inv := report.IDEInventory; inv != nil && inv.persist && !inv.Carried {
+	if inv := report.IDEInventory; inv != nil && inv.persist && !inv.Carried && !s.legacySchema {
 		if err := recordIDEInventory(ctx, tx, report.Summary.ScanID, inv); err != nil {
 			return err
 		}
@@ -764,6 +831,10 @@ func (s *InventoryStore) RecordScan(ctx context.Context, report AIDiscoveryRepor
 
 // recordIDEInventory writes a scan's IDE installations and plugins.
 func recordIDEInventory(ctx context.Context, tx *sql.Tx, scanID string, inv *IDEInventory) error {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO ide_inventory_snapshots(scan_id) VALUES (?)`, scanID); err != nil {
+		return fmt.Errorf("inventory store: mark ide inventory: %w", err)
+	}
 	for _, inst := range inv.Installations {
 		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO ide_installations
 			(scan_id, install_id, user_id, user_name, ide_family, ide_product,
@@ -804,7 +875,7 @@ func recordIDEInventory(ctx context.Context, tx *sql.Tx, scanID string, inv *IDE
 // LatestIDEPlugins returns the plugins of the most recently recorded IDE
 // inventory.
 func (s *InventoryStore) LatestIDEPlugins(ctx context.Context) ([]IDEPlugin, error) {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || s.legacySchema {
 		return nil, nil
 	}
 	rows, err := s.queryDB(ctx, "inventory_ide_plugins", `
@@ -813,7 +884,9 @@ func (s *InventoryStore) LatestIDEPlugins(ctx context.Context) ([]IDEPlugin, err
 		       p.scope, p.is_ai, p.ai_signature_id, p.path_hash, p.installed_at, p.last_seen
 		FROM ide_plugins p
 		LEFT JOIN ide_installations i ON i.scan_id = p.scan_id AND i.install_id = p.install_id
-		WHERE p.scan_id = (SELECT scan_id FROM ide_installations ORDER BY last_seen DESC, scan_id DESC LIMIT 1)`)
+		WHERE p.scan_id = (SELECT snap.scan_id FROM ide_inventory_snapshots snap
+			JOIN ai_scans sc ON sc.scan_id = snap.scan_id
+			ORDER BY sc.scanned_at DESC, snap.scan_id DESC LIMIT 1)`)
 	if err != nil {
 		return nil, fmt.Errorf("inventory store: list ide plugins: %w", err)
 	}
@@ -843,6 +916,21 @@ func (s *InventoryStore) LatestIDEPlugins(ctx context.Context) ([]IDEPlugin, err
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// LatestIDEInventoryRecordedAt also works for an empty recorded inventory.
+func (s *InventoryStore) LatestIDEInventoryRecordedAt(ctx context.Context) (time.Time, error) {
+	if s == nil || s.db == nil || s.legacySchema {
+		return time.Time{}, nil
+	}
+	var at time.Time
+	err := s.db.QueryRowContext(ctx, `SELECT sc.scanned_at FROM ide_inventory_snapshots snap
+		JOIN ai_scans sc ON sc.scan_id = snap.scan_id
+		ORDER BY sc.scanned_at DESC, snap.scan_id DESC LIMIT 1`).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	return at, err
 }
 
 func nullString(value string) sql.NullString {

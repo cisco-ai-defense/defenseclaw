@@ -140,6 +140,16 @@ func (a *APIServer) auditForeignHookSessionDenial(
 	if a == nil {
 		return
 	}
+	// The denial names the agent identity (agt-) of the caller like any
+	// other hook decision: the verified user and the connector derive it, no
+	// session is needed. The rows had the user but no agt- (GAP-1039). The
+	// guard keys its block on the agent process, not a session, so an
+	// OpenCode denial carries no ais-.
+	if facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: connectorName}); facts.ID != "" {
+		identity := AgentIdentityFromContext(ctx)
+		identity.IdentityID, identity.IdentityVerified = facts.ID, facts.Verified
+		ctx = ContextWithAgentIdentity(ctx, identity)
+	}
 	block := "call"
 	switch {
 	case strings.Contains(decision.Reason, "cannot verify this agent session's hook record"):

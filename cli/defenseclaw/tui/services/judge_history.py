@@ -92,7 +92,6 @@ def resolve_judge_history_paths(
 
     authoritative_value = _first_path_value(
         local.get("judge_bodies_path"),
-        raw.get("judge_bodies_db"),
         _nested_object_value(config, "observability", "local", "judge_bodies_path"),
         _object_value(config, "judge_bodies_db"),
     )
@@ -101,7 +100,6 @@ def resolve_judge_history_paths(
 
     legacy_value = _first_path_value(
         local.get("path"),
-        raw.get("audit_db"),
         _nested_object_value(config, "observability", "local", "path"),
         _object_value(config, "audit_db"),
     )

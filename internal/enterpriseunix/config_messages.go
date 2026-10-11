@@ -25,9 +25,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// settingsReferenceURL is the enterprise settings reference; the managed
-// packages ship no per-user CLI to print the schema with.
-const settingsReferenceURL = "https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/configuration/#settings-reference"
+// settingsReferenceURL is the enterprise settings reference.
+const settingsReferenceURL = config.EnterpriseSettingsReferenceURL
 
 var configHeaderPattern = regexp.MustCompile(`headers(?:\["([^"]+)"\]|\.([A-Za-z0-9_.-]+))$`)
 
@@ -41,6 +40,33 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 	if where == "" {
 		where = e.Layout.ConfigPath
 	}
+	if strings.Contains(err.Error(), "enterprise.profile=") && strings.Contains(err.Error(), "conflicts with immutable") {
+		return fmt.Sprintf("%s: enterprise.profile is fixed to standalone on this host; change the profile by reinstalling the deployment", where), true
+	}
+	var yamlErr *config.V8YAMLError
+	if errors.As(err, &yamlErr) {
+		field := configField(yamlErr.Path)
+		message := yamlErr.Summary
+		switch yamlErr.Code {
+		case config.V8YAMLErrorDuplicateKey:
+			message = field + " appears twice; merge the definitions into one"
+		case config.V8YAMLErrorInvalidUTF8:
+			message = "the file is not valid UTF-8; save it as UTF-8"
+		case config.V8YAMLErrorVersionUnsupported:
+			message = "config_version is not supported by this installation; use config_version 9 or install a matching enterprise package"
+		case config.V8YAMLErrorVersionRequired, config.V8YAMLErrorVersionInvalid:
+			message = "config_version is required; add `config_version: 9` as the first line of the file"
+		case config.V8YAMLErrorVersionUpgrade:
+			message = "the file uses an older config_version; write it in config_version 9 format"
+		case config.V8YAMLErrorLegacyKeyForbidden:
+			message = field + " is a retired key; remove or migrate it in the administrator's config"
+		default:
+			if yamlErr.Action != "" {
+				message += "; " + yamlErr.Action
+			}
+		}
+		return fmt.Sprintf("%s%s: %s", where, lineSuffix(yamlErr.Line), strings.TrimRight(message, ". ")), true
+	}
 	var schemaErr *config.V8SchemaError
 	if errors.As(err, &schemaErr) && schemaErr.Keyword == "enum" && strings.HasPrefix(schemaErr.Expected, "one of ") {
 		var choices []any
@@ -51,12 +77,48 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		for i, choice := range choices {
 			names[i] = fmt.Sprint(choice)
 		}
+		if schemaErr.Path == "$.deployment_mode" {
+			names = []string{"managed_enterprise"}
+		}
 		is := "is not an allowed value"
 		if value, ok := yamlScalarAt(raw, schemaErr.Line, schemaErr.Column); ok {
 			is = fmt.Sprintf("is %q", value)
 		}
 		return fmt.Sprintf("%s%s: %s %s; allowed values: %s. The settings reference: %s",
 			where, lineSuffix(schemaErr.Line), configField(schemaErr.Path), is, strings.Join(names, ", "), settingsReferenceURL), true
+	}
+	if errors.As(err, &schemaErr) {
+		field := configField(schemaErr.Path)
+		reason := "has an invalid value"
+		if schemaErr.Keyword == "additionalProperties" {
+			reason = "is an unknown setting"
+		} else if schemaErr.Keyword == "pattern" {
+			switch {
+			case strings.HasSuffix(field, ".rule_pack"), strings.Contains(field, ".custom_packs.") && !strings.HasSuffix(field, ".digest"):
+				reason = "must start with a lowercase letter or digit and use only lowercase letters, digits, - or _ (at most 64 characters)"
+			case strings.HasSuffix(field, ".digest"):
+				reason = "must be sha256: followed by 64 lowercase hexadecimal characters"
+			case strings.HasSuffix(field, ".block_at"), strings.HasSuffix(field, ".alert_at"):
+				reason = "must be one of CRITICAL, HIGH, MEDIUM, LOW"
+			case strings.HasPrefix(schemaErr.Expected, "an agent identity"):
+				// The assignment, the value and the form (GAP-0829).
+				reason = "must be " + schemaErr.Expected
+				if value, ok := yamlScalarAt(raw, schemaErr.Line, schemaErr.Column); ok {
+					reason = fmt.Sprintf("is %q; it must be %s", value, schemaErr.Expected)
+				}
+			default:
+				reason = "does not match the setting's required format"
+			}
+		} else if schemaErr.Keyword == "not" && strings.HasPrefix(schemaErr.Expected, "either ") {
+			// Two fields that exclude each other (GAP-0940).
+			if name, ok := yamlMappingNameAt(raw, schemaErr.Line, schemaErr.Column); ok {
+				field = fmt.Sprintf("%s (destination %q)", field, name)
+			}
+			reason = "sets both; set " + schemaErr.Expected
+		} else if schemaErr.Expected != "" {
+			reason = "must be " + schemaErr.Expected
+		}
+		return fmt.Sprintf("%s%s: %s %s. The settings reference: %s", where, lineSuffix(schemaErr.Line), field, reason, settingsReferenceURL), true
 	}
 	var secretErr *config.V8SecretReferenceError
 	var semanticErr *config.V8SemanticError
@@ -79,7 +141,31 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		return fmt.Sprintf("%s%s: %s uses protected credential %q, %s; store it with %s, or remove the reference",
 			where, lineSuffix(semanticErr.Line), subject, name, state, store), true
 	}
+	if errors.As(err, &semanticErr) {
+		reason := strings.TrimRight(semanticErr.Summary, ". ")
+		if semanticErr.Action != "" && !strings.Contains(semanticErr.Action, "defenseclaw config reference") {
+			reason += "; " + strings.TrimRight(semanticErr.Action, ". ")
+		}
+		return fmt.Sprintf("%s%s: %s: %s. The settings reference: %s", where, lineSuffix(semanticErr.Line), configField(semanticErr.Path), reason, settingsReferenceURL), true
+	}
 	return "", false
+}
+
+var errManagedEnvReference = errors.New("an observability destination reads a secret from an environment variable")
+
+// managedEnvReferenceProblem refuses a destination secret read from an
+// environment variable whether or not it is set: the lifecycle writes each
+// service environment itself, so the gateway never sees one. With the
+// variable set in the shell that ran ensure the config passed, was applied,
+// and the gateway failed to start into a rollback; unset, the refusal gave
+// per-user advice (GAP-0939).
+func (e *Env) managedEnvReferenceProblem(raw []byte, source string) (string, bool) {
+	where := source
+	if where == "" {
+		where = e.Layout.ConfigPath
+	}
+	store := "with `" + filepath.Join(e.Layout.BinDir, binGateway) + " enterprise secret set --name <name> --from-stdin`"
+	return config.ScanManagedEnvSecretReferences(raw).Refusal(where, store, settingsReferenceURL)
 }
 
 func lineSuffix(line int) string {
@@ -95,6 +181,46 @@ func configField(path string) string {
 		return "the document"
 	}
 	return field
+}
+
+// yamlMappingNameAt returns the name: of the mapping at line:column of raw
+// (a destination), at most 60 bytes.
+func yamlMappingNameAt(raw []byte, line, column int) (string, bool) {
+	if line <= 0 || column <= 0 {
+		return "", false
+	}
+	var doc yaml.Node
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return "", false
+	}
+	var name string
+	var walk func(*yaml.Node) bool
+	walk = func(node *yaml.Node) bool {
+		if node == nil {
+			return false
+		}
+		if node.Kind == yaml.MappingNode && node.Line == line && node.Column == column {
+			for index := 0; index+1 < len(node.Content); index += 2 {
+				if key, value := node.Content[index], node.Content[index+1]; key.Value == "name" && value.Kind == yaml.ScalarNode {
+					name = value.Value
+				}
+			}
+			return true
+		}
+		for _, child := range node.Content {
+			if walk(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if !walk(&doc) || name == "" {
+		return "", false
+	}
+	if len(name) > 60 {
+		name = strings.ToValidUTF8(name[:57], "") + "..."
+	}
+	return name, true
 }
 
 // yamlScalarAt returns the scalar at line:column of raw, at most 60 bytes.

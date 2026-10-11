@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
@@ -257,17 +258,13 @@ func TestEndpointForDisplayRemovesAllCredentialCarriers(t *testing.T) {
 // DEFENSECLAW_ALLOW_CGNAT — operator escape hatch for Tailscale and other
 // 100.64.0.0/10 overlay deployments.
 //
-// extraReservedCIDRs is computed once at package init() time, so the
-// opt-in path can only be observed in a sub-process that boots with
-// the env var set. The default path (CGNAT blocked) is already covered
-// by TestIsPrivateOrReserved above.
+// The default path (CGNAT blocked) is covered by
+// TestIsPrivateOrReserved above.
 // ---------------------------------------------------------------------------
 
 func TestCgnatAllowed_RespectsEnv(t *testing.T) {
-	// cgnatAllowed reads the env at call time and is the same
-	// predicate consulted by init(). Verifying it pins the
-	// contract so a refactor that drops the env check would
-	// flip this assertion immediately.
+	// cgnatAllowed reads the effective env at call time, so managed
+	// mode can ignore an inherited opt-in.
 	t.Setenv("DEFENSECLAW_ALLOW_CGNAT", "")
 	if cgnatAllowed() {
 		t.Errorf("cgnatAllowed()=true with env unset; default must block CGNAT")
@@ -289,7 +286,7 @@ func TestCgnatAllowed_RespectsEnv(t *testing.T) {
 func TestExtraReservedCIDRs_DefaultIncludesCGNAT(t *testing.T) {
 	// Sanity check: 100.64.0.0/10 must be in the default deny-list.
 	// Pair this with the subprocess test below that verifies it's
-	// dropped when DEFENSECLAW_ALLOW_CGNAT=1 is set before init().
+	// exempted when DEFENSECLAW_ALLOW_CGNAT=1 in unmanaged mode.
 	cgnat := net.ParseIP("100.64.0.1")
 	if !IsPrivateOrReserved(cgnat) {
 		t.Errorf("default build: 100.64.0.1 must be reserved (CGNAT default-deny)")
@@ -297,8 +294,7 @@ func TestExtraReservedCIDRs_DefaultIncludesCGNAT(t *testing.T) {
 }
 
 // TestAllowCgnatOptIn_SubprocessFlipsClassification verifies the opt-in
-// path by re-executing this binary with DEFENSECLAW_ALLOW_CGNAT=1 so
-// the init-time decision actually takes effect.
+// path by re-executing this binary with DEFENSECLAW_ALLOW_CGNAT=1.
 func TestAllowCgnatOptIn_SubprocessFlipsClassification(t *testing.T) {
 	if os.Getenv("DC_NETGUARD_CGNAT_CHILD") == "1" {
 		// Child process: classify 100.64.0.1 and report.
@@ -324,5 +320,24 @@ func TestAllowCgnatOptIn_SubprocessFlipsClassification(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "ALLOWED") {
 		t.Errorf("expected child to classify 100.64.0.1 as ALLOWED under DEFENSECLAW_ALLOW_CGNAT=1; got %q", out)
+	}
+}
+
+func TestManagedStandaloneIgnoresInheritedCGNATOptIn(t *testing.T) {
+	if os.Getenv("DC_NETGUARD_MANAGED_CHILD") == "1" {
+		envvars.SetManagedStandalone(true)
+		if !IsPrivateOrReserved(net.ParseIP("100.64.0.1")) {
+			t.Fatal("managed standalone must reserve CGNAT despite inherited opt-in")
+		}
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "-test.run=^TestManagedStandaloneIgnoresInheritedCGNATOptIn$", "-test.v=false")
+	cmd.Env = append(os.Environ(), "DC_NETGUARD_MANAGED_CHILD=1", "DEFENSECLAW_ALLOW_CGNAT=1")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("managed child failed: %v\n%s", err, out)
 	}
 }

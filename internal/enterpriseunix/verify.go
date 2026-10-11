@@ -19,20 +19,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
 
-// ledgerFreshness mirrors the gateway's guardian authorization window.
-const ledgerFreshness = 5 * time.Minute
-
 // codeUnitFailed names a DefenseClaw oneshot unit systemd reports failed.
 const codeUnitFailed = "unit_failed"
+
+// codeNotStarted names a deployment installed with --no-start.
+const codeNotStarted = "not_started"
 
 // readOnly handles status and verify.
 func (l *lifecycle) readOnly(ctx context.Context) int {
@@ -41,10 +44,31 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	// run stops and starts the services (GAP-2246). It still reports the
 	// recorded deployment below, so detection sees it installed.
 	statusBusy := false
-	if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
+	busyMessage := ""
+	if env.waitForApplyTrigger(ctx) {
+		// The apply trigger is applying a changed config.yaml, secret or
+		// policy file: until it commits, the files differ from the record and
+		// the gateway may not read the new file yet. status and verify said
+		// "modified after install ... run repair" for those seconds, and a
+		// repair then fought the apply for the lock (GAP-0919).
+		if l.opts.Action == ActionVerify {
+			r.AddError(codeBusy, applyingConfigChange(ActionVerify))
+			return enterprisestatus.BusyExitCode(env.GOOS)
+		}
+		statusBusy, busyMessage = true, applyingConfigChange(ActionStatus)
+	} else if l.opts.Action == ActionStatus && env.Geteuid() == 0 {
 		lock, err := env.acquireLock(ctx)
 		statusBusy = errors.Is(err, errLockBusy)
 		lock.release()
+	}
+	if l.opts.Action == ActionVerify && env.packageTransactionInProgress() {
+		// The package scripts are replacing the deployment: its own ensure
+		// applies and verifies the new package. A check now compares the new
+		// package with the deployment the old one applied, and its failure
+		// left the daily verify unit failed after a healthy upgrade
+		// (GAP-0585).
+		r.AddError(codeBusy, "a DefenseClaw package install or upgrade is in progress, and its own lifecycle run applies and verifies the new package; this verify run skipped its checks")
+		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if l.opts.Action == ActionVerify {
 		// The daily verify can start while another run changes the
@@ -71,7 +95,8 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		r.AddError(codeState, err.Error())
 		return 0
 	}
-	if pending, _ := env.loadPending(); pending != nil {
+	pending, _ := env.loadPending()
+	if pending != nil {
 		r.TransactionPending = true
 	}
 	if statusBusy {
@@ -79,7 +104,10 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			r.Installed = true
 			r.InstalledVersion = record.ProductVersion
 		}
-		r.AddError(codeBusy, errLockBusy.Error()+"; "+readOnlyBusyNextStep(env.LockTimeout, ActionStatus))
+		if busyMessage == "" {
+			busyMessage = errLockBusy.Error() + "; " + readOnlyBusyNextStep(env.LockTimeout, ActionStatus)
+		}
+		r.AddError(codeBusy, busyMessage)
 		return enterprisestatus.BusyExitCode(env.GOOS)
 	}
 	if record == nil {
@@ -100,10 +128,28 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	}
 	r.Installed = true
 	r.InstalledVersion = record.ProductVersion
+	if failure := env.lastPackageInstallFailure(); failure != "" {
+		// A package reinstall or upgrade the lifecycle refused (a full disk,
+		// a config it rejected) printed Complete and left status and verify
+		// green; only last-package-result.json said so (GAP-0469). The
+		// result stays until a later run succeeds.
+		r.AddWarning(codePackageInstallFailed, "the last package install, reinstall or upgrade did not apply: "+failure+
+			"; the deployment keeps running as it was. Fix that, then apply the package with `"+env.lifecycleCommand(ActionEnsure)+" --from-package`")
+	}
 	strict := l.opts.Action == ActionVerify
 	problems := l.verifyInstalled(ctx, record, strict)
+	l.warnLowDiskSpace()
+	dropInProblems, dropIns := l.unitDropIns(ctx, record)
+	problems = append(problems, dropInProblems...)
+	if len(dropIns) > 0 {
+		r.AddWarning(codeUnitDropIn, "local drop-ins change DefenseClaw units: "+strings.Join(dropIns, ", ")+"; they keep the units' account, sandbox and config")
+	}
 	l.describe(ctx, record, true)
+	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
+	if machinePolicyIncomplete(r) {
+		r.SecurityComplete = false
+	}
 	if strict {
 		l.warnUnprivilegedUserNamespaces()
 	}
@@ -112,30 +158,193 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// account (an unverified hook contract, an agent it could not enroll)
 		// stays a warning for that account: the rest of the host is
 		// compliant, as on Windows.
-		// Machine-policy gaps (a removed vendor policy) fail verify only;
+		// Machine-policy gaps (a removed vendor policy) and a config that
+		// enables no connector for the eligible users fail verify only;
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
-			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected {
+			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected ||
+				warning.Code == codeNoConnectorsEnabled {
 				problems = append(problems, warning.Message)
 			}
 		}
 	}
+	if pending != nil {
+		// Mid-transaction files differ from the record because the run was
+		// interrupted, not because someone edited them (GAP-0468).
+		problems = append([]string{env.interruptedTransactionProblem(pending)}, withoutTransactionDrift(problems)...)
+	}
 	// A problem either action finds makes the deployment unhealthy, and
 	// both exit 1 for it; status leaves out verify's stricter checks.
+	reported := map[string]bool{}
 	for _, problem := range problems {
-		r.AddError(codeVerify, problem)
+		if !reported[problem] {
+			reported[problem] = true
+			r.AddError(codeVerify, problem)
+		}
+	}
+	if len(problems) > 0 {
+		// security_complete requires no errors; describe set it before
+		// these were added, so a missing hook binary read complete
+		// (GAP-1217).
+		r.SecurityComplete = false
+	}
+	if record.NoStart {
+		// Nothing runs, so no agent is protected; ensure reported it as a
+		// warning, and status and verify read ok with every service
+		// not_loaded (GAP-0542).
+		r.AddError(codeNotStarted, "the deployment was installed with --no-start, so its services are not running and agents are not protected; run `"+
+			env.lifecycleCommand(ActionRepair)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to start them")
+	}
+	if !record.NoStart && !r.Readiness.Gateway {
+		// A gateway that is down because the installed binary refuses the
+		// installed config is not helped by repair, which applies the same
+		// config again: say why and what to fix.
+		if refusal := l.configRefusal(ctx); refusal != "" {
+			r.AddError(codeConfigRefused, env.configRefusedMessage(refusal))
+		}
 	}
 	if strict && r.TransactionPending {
-		r.AddError(codeVerify, "a lifecycle transaction is pending; the next mutating run recovers it")
+		r.AddError(codeVerify, "a lifecycle transaction is pending; "+l.recoverPendingFromVerify(ctx))
 	}
 	return 0
+}
+
+// applyTriggerRunning reports whether the apply trigger (the run the path
+// unit or launchd job starts after config.yaml, a secret or a policy file
+// changed) is running now.
+func (e *Env) applyTriggerRunning(ctx context.Context) bool {
+	name := unitApplyService
+	if e.GOOS == "darwin" {
+		name = labelApply
+	}
+	if e.SelfUnit == name {
+		return false
+	}
+	status, err := e.Services.Status(ctx, Unit{Name: name})
+	if err != nil {
+		return false
+	}
+	if e.GOOS == "darwin" {
+		return status.State == "running"
+	}
+	return strings.HasPrefix(status.State, "activating")
+}
+
+// waitForApplyTrigger waits up to LockTimeout for a running apply trigger to
+// finish, the way status and verify wait for the lifecycle lock, and reports
+// whether it is still running. A no-op apply launchd started a few seconds
+// after an ensure --config made detect.sh --require-healthy print busy on a
+// healthy host when verify did not wait for it.
+func (e *Env) waitForApplyTrigger(ctx context.Context) bool {
+	deadline := e.Now().Add(e.LockTimeout)
+	for e.applyTriggerRunning(ctx) {
+		if !e.Now().Before(deadline) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return true
+		case <-time.After(e.PollInterval):
+		}
+	}
+	return false
+}
+
+// applyingConfigChange is the lifecycle_busy message of a status or verify
+// that ran while the apply trigger applied a configuration change.
+func applyingConfigChange(action string) string {
+	return "a configuration change is being applied (the apply trigger runs ensure after config.yaml, a secret or a policy file changed), so " +
+		action + " checked nothing but the installed version; this is not a failure and needs no repair: wait for it to finish (usually under a minute), then rerun " + action
+}
+
+// clearSupersededUnitFailures clears the failed state an earlier lifecycle
+// run left on the apply or daily verify oneshot once this run has left the
+// deployment healthy (committed, or found up to date). Left in place, every
+// verify kept warning unit_failed after a refused package upgrade was
+// recovered, or after a package upgrade interrupted the daily verify, until
+// an administrator ran systemctl reset-failed (GAP-0423, GAP-0585).
+func (l *lifecycle) clearSupersededUnitFailures(ctx context.Context) {
+	env := l.env
+	resetter, ok := env.Services.(failedResetter)
+	if !ok {
+		return
+	}
+	for _, unit := range env.Services.Units() {
+		if unit.Name != unitApplyService && unit.Name != unitVerifyService {
+			continue
+		}
+		if status, err := env.Services.Status(ctx, unit); err == nil && strings.HasPrefix(status.State, "failed") {
+			if resetter.ResetFailed(ctx, unit) == nil {
+				l.noteChange("cleared the failed state an earlier run left on %s", unit.Name)
+			}
+		}
+	}
+}
+
+// interruptedTransactionProblem names a transaction a reset or a killed run
+// left pending, and the commands that finish it.
+func (e *Env) interruptedTransactionProblem(pending *Pending) string {
+	action, phase, started := pending.Action, pending.Phase, pending.StartedAt
+	if action == "" {
+		action = "change"
+	}
+	if phase == "" {
+		phase = "unknown"
+	}
+	if started == "" {
+		started = "an unknown time"
+	}
+	return fmt.Sprintf("a lifecycle %s that started at %s was interrupted in its %s phase (a reset or a killed run), so files differ from the deployment record; "+
+		"`%s` rolls it back to the last committed deployment, and to apply the config it was applying run `%s --config <file>` again",
+		action, started, phase, e.lifecycleCommand("repair"), e.lifecycleCommand(ActionEnsure))
+}
+
+// withoutTransactionDrift drops the file and config drift an interrupted
+// transaction explains.
+func withoutTransactionDrift(problems []string) []string {
+	kept := problems[:0:0]
+	for _, problem := range problems {
+		if strings.HasSuffix(problem, " was modified after install") || strings.Contains(problem, "changed since it was applied") {
+			continue
+		}
+		kept = append(kept, problem)
+	}
+	return kept
+}
+
+// recoverPendingFromVerify starts the apply trigger for a transaction a
+// killed run left pending (an MDM timeout or a power loss during quiesce).
+// verify held the lifecycle lock a moment ago, so no run is applying it, and
+// the services that run stopped stay stopped until a mutating run rolls it
+// back; nothing started one on its own (GAP-0428). The apply trigger runs
+// ensure, which recovers the transaction first. It returns the next step.
+func (l *lifecycle) recoverPendingFromVerify(ctx context.Context) string {
+	env := l.env
+	if env.Geteuid() != 0 {
+		return "the next mutating run recovers it"
+	}
+	var err error
+	if env.GOOS == "darwin" {
+		_, err = env.Runner.Run(ctx, "launchctl", "kickstart", "system/"+labelApply)
+	} else {
+		_, err = env.Runner.Run(ctx, "systemctl", "start", "--no-block", unitApplyService)
+	}
+	if err != nil {
+		return "run `" + env.lifecycleCommand("repair") + "` to roll it back"
+	}
+	return "started the apply trigger, which rolls it back and starts the stopped services again"
 }
 
 // verifyInstalled compares the host with record. strict adds the checks
 // that only make sense on a settled deployment (ledger freshness, sandbox
 // properties). It returns human-readable problems.
 func (l *lifecycle) verifyInstalled(ctx context.Context, record *Deployment, strict bool) []string {
-	return l.verifyDeployment(ctx, record, strict, false)
+	problems := l.verifyDeployment(ctx, record, strict, false)
+	// Not part of the check after activation: a guardian or gateway writing
+	// its state at that moment is not drift.
+	account := Account{Name: record.ServiceUser, UID: record.ServiceUID, GID: record.ServiceGID}
+	problems = append(problems, l.env.stateModeProblems(account)...)
+	return append(problems, l.env.aclProblems(ctx, record)...)
 }
 
 // verifyDeployment is verifyInstalled; with inputsChanged the checks of
@@ -151,25 +360,56 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	case err != nil:
 		add("service account %s: %v", record.ServiceUser, err)
 	case !ok:
-		add("service account %s is missing", record.ServiceUser)
+		add("service account %s is missing, so the gateway cannot start; `%s` recreates it and restores the owners of its folders", record.ServiceUser, env.lifecycleCommand("repair"))
 	case account.UID != record.ServiceUID || account.GID != record.ServiceGID:
 		add("service account %s is %d:%d, deployment recorded %d:%d", record.ServiceUser, account.UID, account.GID, record.ServiceUID, record.ServiceGID)
+	case account.LoginShell != "":
+		add("%v", loginAccountError(account, env.lifecycleCommand("ensure"), env.GOOS))
 	}
 
+	packageDrift, packageDriftChecked := "", false
+	hookDamage := env.inspectHookBinary(record)
 	for _, path := range sortedKeys(record.Files) {
 		if inputsChanged && path == env.Layout.ConfigPath {
 			continue
 		}
+		if hookDamage != nil && path == env.installedHookPath() {
+			add("%s", env.hookBinaryProblem(record, hookDamage))
+			continue
+		}
 		got, err := sha256File(env.P(path))
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) && filepath.Dir(path) == env.Layout.BinDir {
+				add("%s", env.missingBinaryProblem(record, path))
+				continue
+			}
 			add("%s: %v", path, err)
 			continue
 		}
 		if got != record.Files[path] {
+			if record.Channel == ChannelPackage && filepath.Dir(path) == env.Layout.BinDir {
+				if !packageDriftChecked {
+					packageDrift, packageDriftChecked = l.packageVersionDrift(ctx, record), true
+				}
+				if packageDrift != "" {
+					continue // one message below, not one per binary
+				}
+			}
+			if record.Channel == ChannelPackage && filepath.Dir(path) == env.Layout.BinDir {
+				add("%s was modified after install; %s", path, env.packageReinstallStep(record.ProductVersion))
+				continue
+			}
 			add("%s was modified after install", path)
 		}
 	}
-	problems = append(problems, env.installedModeProblems(record, inputsChanged)...)
+	if packageDrift != "" {
+		add("%s", packageDrift)
+	}
+	skip := ""
+	if hookDamage != nil {
+		skip = env.installedHookPath() // named above
+	}
+	problems = append(problems, env.installedModeProblems(record, inputsChanged, skip)...)
 	loadCredential := env.GOOS == "linux" && env.Services.Version(ctx) >= loadCredentialSystemd
 	for _, dir := range env.managedDirs(Account{Name: record.ServiceUser, UID: record.ServiceUID, GID: record.ServiceGID}, loadCredential) {
 		if dir.External {
@@ -196,10 +436,36 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	if err := env.Trust(env.P(env.Layout.ConfigPath), TrustAdminFile); err != nil {
 		add("config trust: %v", err)
 	}
+	// A pack file a standard user came to own (or that turned writable)
+	// changes enforcement at the next restart with no trace (GAP-0552).
+	for _, label := range config.RulePackCheckOrder(record.RulePacks) {
+		dir := record.RulePacks[label]
+		if err := env.Trust(env.P(dir), TrustRulePack); err != nil && !errors.Is(err, os.ErrNotExist) {
+			add("%s %q is not administrator-controlled: %v; %s", label, dir, err, rulePackTrustAdvice)
+		}
+	}
 	if raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes); err != nil {
 		add("config: %v", err)
 	} else if sha256Bytes(raw) != record.ConfigSHA256 && !inputsChanged {
 		add("config.yaml changed since it was applied; run ensure")
+	} else if env.GOOS == "darwin" && !inputsChanged {
+		// Custom JSONL files are not in record.Files or the managed ACL walk.
+		// Check the destinations of the applied config on every status/verify.
+		compiled, err := config.ParseCompileObservabilityV8(env.Layout.ConfigPath, raw, config.ObservabilityV8CompileOptions{
+			DefaultDataDir: env.Layout.DataDir, CredentialsDir: env.P(env.Layout.SecretsDir),
+		})
+		if err == nil && compiled != nil && compiled.Plan != nil {
+			for _, destination := range compiled.Plan.Destinations() {
+				if destination.Kind != config.ObservabilityV8DestinationJSONL || !destination.Enabled || destination.Generated {
+					continue
+				}
+				if problem, err := env.jsonlACLProblem(ctx, filepath.Clean(destination.Transport.Path)); err != nil {
+					add("inspect macOS ACL of observability destination %q: %v", destination.Name, err)
+				} else if problem != "" {
+					add("observability destination %q writes %s, which %s", destination.Name, filepath.Clean(destination.Transport.Path), problem)
+				}
+			}
+		}
 	}
 	if err := env.Trust(env.P(env.Layout.DescriptorPath), TrustAdminFile); err != nil {
 		add("runtime descriptor trust: %v", err)
@@ -218,6 +484,10 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		// deployment left in /etc/systemd/system over a packaged unit, say)
 		// replaces the definition this deployment installed.
 		for _, unit := range env.Services.Units() {
+			if unitMasked(ctx, env.Services, unit) {
+				add("%s is masked, so it cannot start; `%s` unmasks it (or run `systemctl unmask %s`)", unit.Name, env.lifecycleCommand("repair"), unit.Name)
+				continue
+			}
 			want := env.Services.DefinitionPath(unit, record.Channel)
 			if got := fragments.FragmentPath(ctx, unit); got != "" && !sameUnitFile(env, got, want) {
 				add("%s is loaded from %s instead of %s; remove the other unit file and run ensure", unit.Name, got, want)
@@ -237,6 +507,20 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 		for _, unit := range env.Services.Units() {
 			if unit.Required && !env.Services.Active(ctx, unit) && !l.backFromRestart(ctx, unit) {
 				add("%s is not active", unit.Name)
+			}
+		}
+		// The launchd apply and daily verify jobs are not readiness checks
+		// (a loaded job waits for its trigger), but launchd runs neither
+		// once it is booted out: status and verify read ok while nothing
+		// would apply the next config push (GAP-0956).
+		for _, unit := range env.Services.Units() {
+			if !unit.Required && unit.Activate && unit.Name != env.SelfUnit && !env.Services.Active(ctx, unit) {
+				switch unit.Kind {
+				case "path":
+					add("%s is not loaded, so nothing applies the next change to config.yaml, a secret or a policy file; run `%s` to load it", unit.Name, env.lifecycleCommand(ActionRepair))
+				case "timer":
+					add("%s is not loaded, so the daily verify does not run; run `%s` to load it", unit.Name, env.lifecycleCommand(ActionRepair))
+				}
 			}
 		}
 		for _, unit := range env.Services.Units() {
@@ -286,6 +570,28 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 	return problems
 }
 
+// packageVersionDrift explains package-owned binaries that differ from the
+// record when the package on disk is another version than the deployment
+// applied: the package manager replaced the binaries and the package's own
+// install run did not finish (it failed and rolled back, or an older package
+// was refused). The lifecycle cannot put the previous package's binaries back,
+// so the state is named instead of read as a modified file (GAP-0111). ""
+// when the versions agree, which leaves a real modification to its own message.
+func (l *lifecycle) packageVersionDrift(ctx context.Context, record *Deployment) string {
+	env := l.env
+	version, err := env.binaryVersion(ctx, filepath.Join(env.P(env.Layout.BinDir), binGateway))
+	if err != nil || version == "" || version == record.ProductVersion {
+		return ""
+	}
+	cause := ""
+	if failure := env.lastPackageInstallFailure(); failure != "" {
+		cause = " (" + failure + ")"
+	}
+	return fmt.Sprintf("the installed package is version %s but the deployment applied %s: the package's install run did not finish%s; "+
+		"fix that and run `%s --from-package` to apply it (add --allow-downgrade when %s is the older package you meant to go back to)",
+		version, record.ProductVersion, cause, env.lifecycleCommand(ActionEnsure), version)
+}
+
 // restartSettle bounds the wait for a unit its service manager is about to
 // start again. The sensor helper exits on purpose when the guardian manifest
 // changes (an account was enrolled or revoked), and systemd (RestartSec=5s)
@@ -323,10 +629,10 @@ func (l *lifecycle) backFromRestart(ctx context.Context, unit Unit) bool {
 // group- or other-writable. Repair restores the modes of the files it
 // writes; it refuses to adopt a replaceable binary, so that problem names
 // the command that restores it.
-func (e *Env) installedModeProblems(record *Deployment, skipConfig bool) []string {
+func (e *Env) installedModeProblems(record *Deployment, skipConfig bool, skip string) []string {
 	var problems []string
 	for _, path := range sortedKeys(record.Files) {
-		if skipConfig && path == e.Layout.ConfigPath {
+		if (skipConfig && path == e.Layout.ConfigPath) || path == skip {
 			continue
 		}
 		_, _, mode, err := statOwnerMode(e.P(path))
@@ -371,6 +677,38 @@ func (e *Env) lifecycleCommand(action string) string {
 	return filepath.Join(e.Layout.BinDir, binGateway) + " enterprise " + group + " " + action
 }
 
+// hookBinaryProblem names a damaged hook binary, what it means for the
+// agents and the command that puts it back (GAP-1217, GAP-0680).
+func (e *Env) hookBinaryProblem(record *Deployment, damage *hookBinaryDamage) string {
+	text := e.installedHookPath() + " is " + damage.String() + ", so "
+	switch damage.state {
+	case hookBinaryEmpty:
+		text += "agents run their DefenseClaw hook as an empty script that allows every tool call"
+	case hookBinaryNotRootOwned:
+		text += "that account could replace the hook every agent runs"
+	case hookBinaryHashMismatch, hookBinaryNotRegular:
+		text += "agents run a hook DefenseClaw did not install"
+	default:
+		text += "no agent's DefenseClaw hook can start; Claude Code, Codex and the other agents treat that as a non-blocking error and run tool calls without DefenseClaw"
+	}
+	if e.sealedHookValid(record) {
+		return text + ". The hook guardian starts its restore within seconds; to restore it now, run `" + e.lifecycleCommand(ActionRepair) + "`, which puts it back from the copy the lifecycle sealed"
+	}
+	if record.Channel == ChannelPackage {
+		return text + "; " + e.packageReinstallStep(record.ProductVersion)
+	}
+	return text + "; run `" + e.lifecycleCommand(ActionRepair) + " --payload <staged payload directory>`"
+}
+
+// missingBinaryProblem names a recorded binary other than the hook that is
+// gone and the command that puts it back.
+func (e *Env) missingBinaryProblem(record *Deployment, path string) string {
+	if record.Channel == ChannelPackage {
+		return path + " is missing; " + e.packageReinstallStep(record.ProductVersion)
+	}
+	return path + " is missing; run `" + e.lifecycleCommand(ActionRepair) + " --payload <staged payload directory>`"
+}
+
 // codePackageInstallFailed names the failed ensure of the package's own
 // postinstall when no deployment is committed (GAP-1744).
 const codePackageInstallFailed = "package_install_failed"
@@ -378,6 +716,28 @@ const codePackageInstallFailed = "package_install_failed"
 // lastPackageResultFile is the result the deb/rpm and the macOS pkg
 // postinstall keep of their own `ensure --from-package` run.
 const lastPackageResultFile = "last-package-result.json"
+
+// lastPackageLogFile is the standard error of the same run.
+const lastPackageLogFile = "last-package-result.log"
+
+// clearSupersededFailures removes what an earlier failed run left once a
+// later run has committed a deployment: the gateway output kept by a failed
+// activation, and the failed result of the package's own install run. Left in
+// place, an upgrade whose activation was rolled back keeps reporting ok:false
+// and the previous version to MDM detection and to administrators after
+// ensure recovered the host, and a healthy host keeps the old failure details.
+// The package's own run leaves its result alone: its shell holds the result
+// file open and the run writes the document after the lifecycle returns.
+func (l *lifecycle) clearSupersededFailures() {
+	dir := l.env.P(l.env.Layout.LifecycleDir)
+	_ = os.Remove(filepath.Join(dir, activationFailureFileName))
+	if l.opts.Reason == "package" || l.env.lastPackageInstallFailure() == "" {
+		return
+	}
+	for _, name := range []string{lastPackageResultFile, lastPackageLogFile} {
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+}
 
 // lastPackageInstallFailure returns "code: message" of the first error of the
 // package postinstall's failed install run, or "" when there is none. dnf
@@ -519,6 +879,15 @@ func (l *lifecycle) ledgerProblem() string {
 			}
 		}
 		problem, torn := env.attestationProblem(data)
+		if torn && attempt == 5 && problem == guardianManifestNotReconciled && l.manifestJustChanged() {
+			// An apply, ensure or enumerator cycle has just rewritten
+			// targets.yaml, and the guardian reconciles it within about a
+			// minute while it keeps enforcing the targets it last reconciled.
+			// Keep the wait guidance (GAP-0691), but report incomplete
+			// coverage until the guardian attests the new roster.
+			l.noteGuardianCatchingUp()
+			return problem
+		}
 		if !torn || attempt == 5 {
 			return problem
 		}
@@ -526,11 +895,57 @@ func (l *lifecycle) ledgerProblem() string {
 	}
 }
 
+// packageTransactionMarker is what the Linux package preinstall leaves while
+// it holds the config-apply trigger for the transaction; the postinstall
+// removes it after its ensure.
+const packageTransactionMarker = "/run/defenseclaw-enterprise-apply-path.held"
+
+// packageTransactionInProgress reports a package transaction that started
+// less than half an hour ago (an older marker is from an interrupted one).
+func (e *Env) packageTransactionInProgress() bool {
+	if e.GOOS != "linux" {
+		return false
+	}
+	info, err := os.Lstat(e.P(packageTransactionMarker))
+	return err == nil && e.Now().Sub(info.ModTime()) < 30*time.Minute
+}
+
+// guardianCatchUpWindow is how long after targets.yaml changed a guardian
+// that has not reconciled it yet is waited for rather than failed: it
+// reconciles each minute.
+const guardianCatchUpWindow = 3 * time.Minute
+
+// codeGuardianReconcilePending warns that the guardian has not reconciled
+// a targets.yaml that changed moments ago without declaring coverage complete.
+const codeGuardianReconcilePending = "guardian_reconcile_pending"
+
+// manifestJustChanged reports a targets.yaml written within
+// guardianCatchUpWindow.
+func (l *lifecycle) manifestJustChanged() bool {
+	info, err := os.Stat(l.env.P(l.env.Layout.ManifestPath))
+	if err != nil {
+		return false
+	}
+	age := l.env.Now().Sub(info.ModTime())
+	return age >= -time.Minute && age < guardianCatchUpWindow
+}
+
+// noteGuardianCatchingUp adds the guardian_reconcile_pending warning once.
+func (l *lifecycle) noteGuardianCatchingUp() {
+	for _, warning := range l.result.Warnings {
+		if warning.Code == codeGuardianReconcilePending {
+			return
+		}
+	}
+	l.result.AddWarning(codeGuardianReconcilePending, "targets.yaml changed moments ago and the hook guardian has not reconciled it yet; "+
+		"it does within about a minute and until then enforces the targets it last reconciled. No repair is needed: run verify again in a minute to confirm the new targets")
+}
+
 // describe fills the result's services, readiness and enrollment.
 func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
-	reportedPolicy := ""
+	reportedPolicy, reloadError := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
 		r.Services = append(r.Services, status)
@@ -550,8 +965,8 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 				}
 				if body, err := l.gatewayHealth(ctx, unit, serviceUID); err == nil {
 					r.Readiness.Gateway = true
-					l.readInspection(body)
-					reportedPolicy = gatewayPolicyDigest(body)
+					l.readGatewayPosture(body)
+					reportedPolicy, reloadError = gatewayPolicyHealth(body)
 				}
 			}
 		case "guardian":
@@ -565,22 +980,29 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	sort.SliceStable(r.Services, func(i, j int) bool { return r.Services[i].Name < r.Services[j].Name })
 	if record != nil {
 		r.InstalledVersion = record.ProductVersion
+		if (r.Action == "status" || r.Action == "verify") && slices.Contains(record.MachinePolicyConnectors, "cursor") {
+			r.AddWarning("cursor_agent_prompt_hook_unavailable", "Cursor Agent CLI 2026.10.01 does not send beforeSubmitPrompt; prompt text is not inspected. Check hook_decision rows for actual coverage")
+		}
 	}
 	r.Enrollment = l.enrollmentCounts()
-	l.describePolicy(ctx, reportedPolicy)
+	l.describePolicy(ctx, reportedPolicy, reloadError)
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
 		// record, and ensure must stay a no-op until config.yaml changes.
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeGuardianCleanups()
 	l.describeDeletedEnrolledAccounts()
+	l.describeDiscoveryHomeDirs()
+	l.describeIdentityRecords()
+	l.describeDestinations()
 	if record != nil {
 		l.describePerUserGateways(ctx)
+		l.describeAgentSessionsBeforeActivation(ctx, record)
 	}
 	if exists(env.rotationIntentPath()) {
 		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")
@@ -604,19 +1026,173 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 // failing (for example a rejected key).
 const codeAIDefenseUnavailable = "ai_defense_unavailable"
 
-// readInspection copies the gateway's inspection posture from /health when
-// the gateway publishes it.
-func (l *lifecycle) readInspection(body []byte) {
+// codeDirectoryLookups warns that the gateway cannot resolve some accounts in
+// the directory (a domain controller or SSSD that does not answer).
+const codeDirectoryLookups = "directory_lookups_failing"
+
+const codeProfileAssignments = "profile_assignment_unmatched"
+const codeOptionalDestination = "optional_destination_failing"
+
+// codeJudgeFailing names an LLM judge whose recent calls all failed, or that
+// could not start.
+const codeJudgeFailing = enterprisestatus.CodeJudgeFailing
+
+// readGatewayPosture copies the gateway's inspection posture from /health
+// when the gateway publishes it, and warns when it reports directory lookups
+// that fail: the accounts without cached facts then run under the default
+// guardrail profile, and nothing else in status or verify showed it (GAP-0216).
+func (l *lifecycle) readGatewayPosture(body []byte) {
 	var health struct {
+		ProfileAssignmentWarnings []string `json:"profile_assignment_warnings"`
+		// The number of the warnings /health lists only to root on the
+		// hook socket, because they name configured groups and accounts
+		// (GAP-1268).
+		ProfileAssignmentWarningCount int `json:"profile_assignment_warning_count"`
+		ProfileWarningCount           int `json:"profile_warning_count"`
+		Telemetry                     struct {
+			Details struct {
+				OptionalState  string `json:"optional_destination_state"`
+				FailureSummary string `json:"optional_destination_failure_summary"`
+			} `json:"details"`
+		} `json:"telemetry"`
 		Inspection *struct {
 			Local     string `json:"local"`
 			AIDefense string `json:"ai_defense"`
 		} `json:"inspection"`
+		Directory *struct {
+			Failing  int      `json:"failing"`
+			Since    string   `json:"since"`
+			Stale    int      `json:"stale"`
+			Accounts []string `json:"accounts"`
+		} `json:"directory"`
+		ProfileWarnings []string `json:"profile_warnings"`
+		Guardrail       *struct {
+			Details enterprisestatus.JudgeHealth `json:"details"`
+		} `json:"guardrail"`
 	}
-	if json.Unmarshal(body, &health) == nil && health.Inspection != nil {
+	if json.Unmarshal(body, &health) != nil {
+		return
+	}
+	// A judge that stops answering silently downgrades detection to the
+	// static rules; only /health and the journal said so (GAP-0626).
+	if g := health.Guardrail; g != nil {
+		if message, failing := g.Details.Warning(); failing {
+			l.result.AddWarning(codeJudgeFailing, message)
+		}
+	}
+	if health.Inspection != nil {
 		l.result.Inspection.Local = health.Inspection.Local
 		l.result.Inspection.AIDefense = health.Inspection.AIDefense
 	}
+	for _, warning := range health.ProfileAssignmentWarnings {
+		l.result.AddWarning(codeProfileAssignments, warning)
+	}
+	if withheld := max(health.ProfileAssignmentWarningCount, health.ProfileWarningCount); withheld > 0 &&
+		len(health.ProfileAssignmentWarnings)+len(health.ProfileWarnings) == 0 {
+		// Fail closed: a /health read other than root on the hook socket
+		// (the TCP fallback) carries only their number.
+		l.result.AddWarning(codeProfileAssignments, fmt.Sprintf("%d guardrail profile assignment warning(s) are not listed: the gateway "+
+			"lists them only to root on its hook socket, because they name the configured groups and accounts; `%s` shows them",
+			withheld, l.env.lifecycleCommand("profile-explain --user <account>")))
+	}
+	if health.Telemetry.Details.OptionalState == "degraded" {
+		l.result.AddWarning(codeOptionalDestination, "optional telemetry destination failing: "+health.Telemetry.Details.FailureSummary+
+			"; inspect `defenseclaw-gateway status` or the gateway /health telemetry details")
+	}
+	if d := health.Directory; d != nil && d.Failing > 0 {
+		which := ""
+		if ids := directoryLookupAccounts(d.Accounts); ids != "" {
+			which = " (" + ids + ")"
+		}
+		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; accounts without cached facts get the "+
+			"default guardrail profile (default_lookup_failed)", d.Failing, which, d.Since)
+		if d.Stale > 0 {
+			message += fmt.Sprintf(", and %d account(s) are served older facts that are dropped after an hour", d.Stale)
+		}
+		check := "Check SSSD or the domain controller"
+		if l.env.GOOS == "darwin" {
+			check = "Check the directory binding of this Mac (dsconfigad -show) or the domain controller; once it answers, " +
+				"sudo dscacheutil -flushcache; sudo dsmemberutil flushcache makes Open Directory list the domain groups again " +
+				"(it can keep answering without them for 15 minutes or more)"
+		}
+		l.result.AddWarning(codeDirectoryLookups, message+". "+check+"; `"+
+			l.env.lifecycleCommand("profile-explain --user <account>")+"` shows the reason")
+	}
+	// profile_warnings repeats the group warnings profile_assignment_warnings
+	// already lists; each is listed once (GAP-0928).
+	health.ProfileWarnings = slices.DeleteFunc(health.ProfileWarnings, func(warning string) bool {
+		return slices.Contains(health.ProfileAssignmentWarnings, warning)
+	})
+	for i, warning := range health.ProfileWarnings {
+		if i == profileWarningsMax {
+			l.result.AddWarning(codeProfileAssignment, fmt.Sprintf("%d more guardrail profile assignment warnings", len(health.ProfileWarnings)-i))
+			break
+		}
+		if warning = strings.TrimSpace(warning); warning != "" && len(warning) <= 1024 {
+			l.result.AddWarning(codeProfileAssignment, "guardrail profile "+warning)
+		}
+	}
+}
+
+// codeIdentityRecordsStale warns that the guardian identity records look
+// older than the guardian keeps them by the wall clock (GAP-0921).
+const codeIdentityRecordsStale = "identity_records_stale"
+
+// identityRecordsFreshFor is how old any guardian identity record may
+// look: the guardian rewrites them every 15 minutes, and within about a
+// minute after a clock step.
+const identityRecordsFreshFor = 30 * time.Minute
+
+// describeIdentityRecords warns while the guardian identity records look
+// stale or are dated in the future: the gateway then ignores those over an
+// hour old, and the accounts a profile assignment selects by UPN get the
+// default profile.
+func (l *lifecycle) describeIdentityRecords() {
+	env := l.env
+	dir := enterprisehooks.IdentitySpoolDir(env.P(env.Layout.GuardianAuthDir))
+	oldest, key, stale := enterprisehooks.IdentitySpoolStale(dir, env.Now(), identityRecordsFreshFor)
+	if !stale {
+		return
+	}
+	// The guardian removes the record of an account it no longer publishes
+	// (GAP-1113), so a stale record is one it still publishes and could not
+	// refresh: name the account and where the guardian says why.
+	l.result.AddWarning(codeIdentityRecordsStale, fmt.Sprintf("the hook guardian's oldest identity record, of uid %s, was last written at %s by "+
+		"this host's clock: the clock was stepped, the directory lookup for that account keeps failing, or the guardian is not "+
+		"running; records over an hour old are ignored, and accounts a guardrail profile assignment selects by UPN then get "+
+		"the default profile. The guardian rewrites them within about a minute of a clock step; if this persists, fix the "+
+		"lookup failure its log names for that uid (%s), or restart the hook guardian if it is not running",
+		key, oldest.UTC().Format(time.RFC3339), env.guardianLogHint()))
+}
+
+// guardianLogHint names where the hook guardian logs.
+func (e *Env) guardianLogHint() string {
+	if e.GOOS == "darwin" {
+		return filepath.Join(e.Layout.LogDir, "hook-guardian.err.log")
+	}
+	return "journalctl -u " + unitGuardian
+}
+
+// codeProfileAssignment warns that a guardrail profile assignment selects
+// nobody: a group the host does not know (renamed, deleted, or spelled
+// another way after an SSSD naming switch), so its members get the default
+// profile (GAP-0704).
+const codeProfileAssignment = "profile_assignment_unmatched"
+
+// profileWarningsMax bounds the assignment warnings status and verify list.
+const profileWarningsMax = 20
+
+// directoryLookupAccounts names the failing accounts the gateway reported by
+// uid ("uid 1001, uid 1002"); anything that is not a plain uid is dropped.
+func directoryLookupAccounts(ids []string) string {
+	named := []string{}
+	for _, id := range ids {
+		if id == "" || len(id) > 10 || strings.Trim(id, "0123456789") != "" {
+			continue
+		}
+		named = append(named, "uid "+id)
+	}
+	return strings.Join(named, ", ")
 }
 
 // enrollmentCounts summarizes the guardian authorization ledger; detailed

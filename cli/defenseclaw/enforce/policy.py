@@ -38,6 +38,34 @@ if TYPE_CHECKING:
     from defenseclaw.db import Store
 
 
+def _tool_policy_entries(tools: Any) -> list[ActionEntry]:
+    """asset_policy.tool rules as ActionEntry rows. config.yaml stores no
+    time for a rule, so ``updated_at`` is None (shown as "-"), never the
+    time of the read."""
+    out: list[ActionEntry] = []
+    for decision, rules in (("block", getattr(tools, "denied", [])), ("allow", getattr(tools, "allowed", []))):
+        for rule in rules or []:
+            target = f"@{rule.connector}/{rule.name}" if rule.connector else rule.name
+            out.append(ActionEntry(
+                id=f"asset_policy:tool:{target}", target_type="tool", target_name=target,
+                actions=ActionState(install=decision), reason=rule.reason, updated_at=None,
+            ))
+    return out
+
+
+def tool_rule_entries(cfg: Any | None, store: Store | None) -> list[ActionEntry]:
+    """The tool rules ``defenseclaw tool list`` shows, as config.yaml holds them now.
+
+    For a long-running reader such as the TUI: the CLI it runs writes
+    ``asset_policy.tool`` to config.yaml, so the config loaded at start would
+    miss every later rule. Secure Client (and a reader with no config) keeps
+    the audit.db rows.
+    """
+    if cfg is None or asset_lists.is_secure_client(cfg):
+        return store.list_actions_by_type("tool") if store else []
+    return _tool_policy_entries(asset_lists.tool_policy_on_disk(cfg))
+
+
 class PolicyEngine:
     def __init__(self, store: Store | None, cfg: Any | None = None) -> None:
         self.store = store
@@ -62,13 +90,27 @@ class PolicyEngine:
     def is_allowed(self, target_type: str, name: str) -> bool:
         return self.is_allowed_for_connector(target_type, name, "")
 
-    def is_blocked_for_connector(self, target_type: str, name: str, connector: str = "") -> bool:
+    def is_blocked_for_connector(
+        self, target_type: str, name: str, connector: str = "", *,
+        source_path: str = "", url: str = "", command: str = "",
+        args: list[str] | None = None, transport: str = "",
+    ) -> bool:
         if self._legacy_rows():
+            if target_type == "tool":
+                return self._legacy_tool_install_is(name, connector, "block")
             return self._journal_install_is(target_type, name, connector, "block")
-        return self._operator_decision(target_type, name, connector) == asset_lists.LIST_DENY
+        if target_type == "tool":
+            return self._operator_decision(target_type, name, connector) == asset_lists.LIST_DENY
+        return asset_lists.list_decision(
+            self._asset_policy(), target_type, name, connector,
+            source_path=source_path, url=url, command=command, args=args or [],
+            transport=transport,
+        )[0] == asset_lists.LIST_DENY
 
     def is_allowed_for_connector(self, target_type: str, name: str, connector: str = "") -> bool:
         if self._legacy_rows():
+            if target_type == "tool":
+                return self._legacy_tool_install_is(name, connector, "allow")
             return self._journal_install_is(target_type, name, connector, "allow")
         return self._operator_decision(target_type, name, connector) == asset_lists.LIST_ALLOW
 
@@ -93,8 +135,9 @@ class PolicyEngine:
 
     def allow(
         self, target_type: str, name: str, reason: str, source_path: str = "", *, clear_journal: bool = True,
+        pins: list[dict[str, Any]] | None = None,
     ) -> None:
-        self.allow_for_connector(target_type, name, "", reason, source_path, clear_journal=clear_journal)
+        self.allow_for_connector(target_type, name, "", reason, source_path, clear_journal=clear_journal, pins=pins)
 
     def allow_for_connector(
         self,
@@ -105,9 +148,11 @@ class PolicyEngine:
         source_path: str = "",
         *,
         clear_journal: bool = True,
+        pins: list[dict[str, Any]] | None = None,
     ) -> None:
         """Add an operator allow (asset_policy.<type>.allowed, pinned to
-        ``source_path`` when given) and, with ``clear_journal``, clear the
+        ``source_path`` when given, and an MCP allow to each server
+        definition in ``pins``) and, with ``clear_journal``, clear the
         residual quarantine and runtime-disable journal state so the allow
         takes full effect."""
         if self._legacy_rows():
@@ -116,7 +161,7 @@ class PolicyEngine:
         else:
             asset_lists.write_operator_decision(
                 self.cfg, op=asset_lists.OP_ALLOW, target_type=target_type, name=name,
-                connector=connector, reason=reason, source_path=source_path,
+                connector=connector, reason=reason, source_path=source_path, pins=pins,
             )
         if self.store and clear_journal:
             self.store.clear_action_field(target_type, name, "file", connector)
@@ -141,20 +186,32 @@ class PolicyEngine:
     def _drop_operator_entries(self, target_type: str, name: str, connector: str, op: str) -> None:
         if self._legacy_rows():
             return
-        decisions = ("block",) if op == asset_lists.OP_UNBLOCK else ("block", "allow")
-        if any(asset_lists.has_entry(self.cfg, self.store, target_type, name, connector, d) for d in decisions):
-            asset_lists.write_operator_decision(
-                self.cfg, op=op, target_type=target_type, name=name, connector=connector,
-            )
+        # The writer reloads the lists under its lock; the caller snapshot may
+        # predate a concurrent block or allow.
+        asset_lists.write_operator_decision(
+            self.cfg, op=op, target_type=target_type, name=name, connector=connector,
+        )
 
     # Tool rules (asset_policy.tool) are presented as ActionEntry rows keyed
     # "@<connector>/<tool>" (scoped) or "<tool>" (unscoped), the shape the
     # tool commands render.
 
     def block_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
+        if self._legacy_rows():
+            if self.store:
+                target = f"@{connector}/{tool_name}" if connector else tool_name
+                self.store.set_action_field("tool", target, "install", "block", reason)
+            return
         self.block_for_connector("tool", tool_name, connector, reason)
 
     def allow_tool_for_connector(self, tool_name: str, connector: str, reason: str) -> None:
+        if self._legacy_rows():
+            if self.store:
+                target = f"@{connector}/{tool_name}" if connector else tool_name
+                self.store.set_action_field("tool", target, "install", "allow", reason)
+                self.store.clear_action_field("tool", target, "file")
+                self.store.clear_action_field("tool", target, "runtime")
+            return
         self.allow_for_connector("tool", tool_name, connector, reason)
 
     def unblock_tool_for_connector(self, tool_name: str, connector: str = "") -> None:
@@ -176,16 +233,7 @@ class PolicyEngine:
     def _tool_entries(self) -> list[ActionEntry]:
         if self._legacy_rows():
             return self.store.list_actions_by_type("tool") if self.store else []
-        tools = getattr(self._asset_policy(), "tool", None)
-        out: list[ActionEntry] = []
-        for decision, rules in (("block", getattr(tools, "denied", [])), ("allow", getattr(tools, "allowed", []))):
-            for rule in rules or []:
-                target = f"@{rule.connector}/{rule.name}" if rule.connector else rule.name
-                out.append(ActionEntry(
-                    id=f"asset_policy:tool:{target}", target_type="tool", target_name=target,
-                    actions=ActionState(install=decision), reason=rule.reason,
-                ))
-        return out
+        return _tool_policy_entries(getattr(self._asset_policy(), "tool", None))
 
     # ------------------------------------------------------------------
     # Enforcement journal (audit.db actions)
@@ -198,6 +246,15 @@ class PolicyEngine:
         """Journal a scan verdict's install block (never operator policy)."""
         if self.store:
             self.store.set_action_field(target_type, name, "install", "block", reason, connector)
+
+    def _legacy_tool_install_is(self, name: str, connector: str, want: str) -> bool:
+        if not self.store:
+            return False
+        if connector:
+            scoped = self.store.get_action("tool", f"@{connector}/{name}")
+            if scoped is not None and scoped.actions.install:
+                return scoped.actions.install == want
+        return self.store.has_action("tool", name, "install", want)
 
     def _journal_install_is(self, target_type: str, name: str, connector: str, want: str) -> bool:
         if not self.store:

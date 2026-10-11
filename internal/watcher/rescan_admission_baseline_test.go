@@ -55,6 +55,7 @@ func TestLiveAdmissionRecordsRescanBaseline(t *testing.T) {
 	}
 	w.pending[live] = time.Now().Add(-time.Hour)
 	w.processPending(context.Background())
+	w.waitAdmissions()
 	if len(admitted) != 1 || admitted[0].Event.Path != live || admitted[0].ScanID == "" {
 		t.Fatalf("live admission = %#v, want warn8 with a scan id", admitted)
 	}

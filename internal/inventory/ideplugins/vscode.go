@@ -87,7 +87,7 @@ func (s *scanner) scanVSCodeLocal(product vscodeProduct, extDir string) {
 			continue
 		}
 		pd, pstate := s.readVSCodeDisabled(filepath.Join(profileDir, "globalStorage", "state.vscdb"))
-		entries := s.readVSCodeManifest(manifest, extDir, "profile:"+clean(profile), &vscodeState{disabled: pd, known: pstate}, false)
+		entries := s.readVSCodeManifest(manifest, extDir, clean("profile:"+profile), &vscodeState{disabled: pd, known: pstate}, false)
 		inst.Plugins = append(inst.Plugins, entries...)
 	}
 	s.add(inst)
@@ -316,6 +316,7 @@ func (s *scanner) fillVSCodePackage(p *Plugin) {
 		Publisher   string `json:"publisher"`
 		Version     string `json:"version"`
 		DisplayName string `json:"displayName"`
+		Description string `json:"description"`
 	}
 	if json.Unmarshal(data, &pkg) != nil {
 		return
@@ -334,6 +335,7 @@ func (s *scanner) fillVSCodePackage(p *Plugin) {
 		display = pkg.Name
 	}
 	p.DisplayName = clean(display)
+	p.Description = clean(pkg.Description)
 }
 
 // vscodeNLS resolves a %key% display name from package.nls.json.

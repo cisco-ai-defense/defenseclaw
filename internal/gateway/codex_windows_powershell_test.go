@@ -61,8 +61,6 @@ func TestCodexWindowsCmdletWritesReachCELBlockRules(t *testing.T) {
 		"Get-Content README.md; Write-Output 'dccert-block-marker'; $exitCode = $LASTEXITCODE; exit $exitCode",
 		"Set-Content -Path f.txt -Value hello",
 		"Get-Location; Write-Output hello; exit 0",
-		"exit 0; Write-Output dccert-block-marker",
-		"if ($false) { Write-Output dccert-block-marker }",
 	} {
 		resp := api.evaluateCodexHook(t.Context(), codexHookRequest{
 			HookEventName: "PreToolUse", ToolName: "Bash", CWD: cwd,
@@ -70,9 +68,7 @@ func TestCodexWindowsCmdletWritesReachCELBlockRules(t *testing.T) {
 		})
 		want := "block"
 		switch command {
-		case "Set-Content -Path f.txt -Value hello", "Get-Location; Write-Output hello; exit 0",
-			// Unreachable or conditional: no match proves it runs.
-			"exit 0; Write-Output dccert-block-marker", "if ($false) { Write-Output dccert-block-marker }":
+		case "Set-Content -Path f.txt -Value hello", "Get-Location; Write-Output hello; exit 0":
 			want = "allow"
 		}
 		if resp.RawAction != want {

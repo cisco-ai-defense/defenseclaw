@@ -13,6 +13,7 @@
 package enterprisepolicy
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -165,6 +166,30 @@ func requireProtected(t *testing.T, path string) {
 	}
 	if err := validateTrustedDir(path); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWindowsPublicDirDenyReadIsDrift(t *testing.T) {
+	dir := filepath.Join(windowsTestOptions(t).WindowsProgramData, "public-summary")
+	if err := createProtectedDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := applySDDL(dir, "D:P(D;;0x1;;;BU)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)"); err != nil {
+		t.Fatal(err)
+	}
+	drift, err := InspectWindowsPublicDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drift.Denied[usersSIDStr] == 0 || !drift.Drifted() {
+		t.Fatalf("a Users deny-read ACE must report drift: %+v", drift)
+	}
+	if err := RepairWindowsPublicDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	drift, err = InspectWindowsPublicDir(dir)
+	if err != nil || drift.Drifted() {
+		t.Fatalf("repair must restore public read access: %+v, %v", drift, err)
 	}
 }
 
@@ -741,5 +766,61 @@ func TestPublishWindowsGoOwnedHoldsTheAmpMachineFolder(t *testing.T) {
 	}
 	if problems := InspectWindowsAmpMachineFolder(opts); len(problems) != 0 {
 		t.Fatalf("a held Amp machine folder must not be reported: %v", problems)
+	}
+}
+
+// A standard user who created the Codex vendor folder first, with a
+// requirements file in it, no longer stops the first delivery: the folder
+// and its OpenAI parent are taken back and her file is moved aside to a
+// hidden name, as for the Copilot and OpenCode folders (GAP-0565).
+func TestWindowsTakeBackVendorPolicyFolderTakesBackAUserCreatedCodexFolder(t *testing.T) {
+	opts := windowsTestOptions(t)
+	openAI := filepath.Join(opts.WindowsProgramData, "OpenAI")
+	codex := filepath.Join(openAI, "Codex")
+	plantAsUser(t, openAI, "empty directory")
+	plantAsUser(t, codex, "empty directory")
+	planted := filepath.Join(codex, "requirements.toml")
+	if err := os.WriteFile(planted, []byte("# user marker"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ownAs(t, planted, wellKnownSID(t, windows.WinBuiltinUsersSid))
+	notes, err := TakeBackVendorPolicyFolder(opts, codex)
+	if err != nil {
+		t.Fatalf("a user-created Codex folder must be taken back: %v (%v)", err, notes)
+	}
+	requireProtected(t, openAI)
+	requireProtected(t, codex)
+	if _, err := os.Lstat(planted); !errors.Is(err, os.ErrNotExist) || len(displacedEntries(t, codex)) != 1 {
+		t.Fatalf("the user's requirements file was not moved aside: %v %v", err, displacedEntries(t, codex))
+	}
+	missing := filepath.Join(opts.WindowsProgramData, "Cursor")
+	if notes, err := TakeBackVendorPolicyFolder(opts, missing); err != nil || len(notes) != 0 {
+		t.Fatalf("a missing folder: %v %v", notes, err)
+	}
+	if _, err := os.Lstat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a missing folder was created: %v", err)
+	}
+}
+
+// GAP-0898: the uninstall takes back a Copilot policy.d a standard user
+// created first, as the install does, instead of failing on its owner.
+func TestWindowsCopilotRemovalTakesBackAUserCreatedPolicyDir(t *testing.T) {
+	opts := windowsTestOptions(t)
+	github := filepath.Join(opts.WindowsProgramData, "GitHub")
+	dir := filepath.Join(github, "Copilot", "policy.d")
+	for _, path := range []string{github, filepath.Dir(dir), dir} {
+		userCreatedDir(t, path)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "50-user.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := takeBackWindowsGoOwnedForRemoval(opts, copilotTarget{}); err != nil {
+		t.Fatalf("a user-created policy.d must not block the uninstall: %v", err)
+	}
+	for _, path := range []string{github, filepath.Dir(dir), dir} {
+		requireProtected(t, path)
+	}
+	if _, err := (copilotTarget{}).RemoveOwned(opts); err != nil {
+		t.Fatalf("remove after the take-back: %v", err)
 	}
 }

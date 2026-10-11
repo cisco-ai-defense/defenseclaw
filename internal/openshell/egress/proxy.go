@@ -30,7 +30,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -497,42 +496,6 @@ func (p *Proxy) isClosing() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.closing
-}
-
-// TunnelStats is a live snapshot of one open tunnel or forwarded request.
-type TunnelStats struct {
-	ID          string
-	BindingID   string
-	SandboxID   string
-	SandboxName string
-	Method      string
-	Host        string
-	Port        int
-	Started     time.Time
-	BytesUp     int64
-	BytesDown   int64
-}
-
-// Tunnels returns the open tunnels and in-flight forwarded requests, oldest
-// first.
-func (p *Proxy) Tunnels() []TunnelStats {
-	p.mu.Lock()
-	out := make([]TunnelStats, 0, len(p.tunnels))
-	for t := range p.tunnels {
-		out = append(out, TunnelStats{
-			ID: t.id, BindingID: t.principal.BindingID, SandboxID: t.principal.SandboxID,
-			SandboxName: t.principal.SandboxName, Method: t.method, Host: t.dec.Host, Port: t.dec.Port,
-			Started: t.started, BytesUp: t.flow.up.Load(), BytesDown: t.flow.down.Load(),
-		})
-	}
-	p.mu.Unlock()
-	slices.SortFunc(out, func(a, b TunnelStats) int {
-		if c := a.Started.Compare(b.Started); c != 0 {
-			return c
-		}
-		return strings.Compare(a.ID, b.ID)
-	})
-	return out
 }
 
 // BindingActivity reports a binding's open tunnels and in-flight forwarded

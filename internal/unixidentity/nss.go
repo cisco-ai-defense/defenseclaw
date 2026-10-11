@@ -14,6 +14,7 @@ package unixidentity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -55,6 +56,9 @@ func (r *NSSResolver) query(database string, keys ...string) (commandResult, err
 		}
 	}
 	args := append([]string{database}, keys...)
+	if database == "group" {
+		return r.runner(r.context(), r.path, args, withoutGroupMembers)
+	}
 	return r.runner(r.context(), r.path, args)
 }
 
@@ -96,6 +100,30 @@ func (r *NSSResolver) LookupUIDInService(service string, uid int) (Account, erro
 		return Account{}, fmt.Errorf("unixidentity: getent -s %s passwd %d answered for uid %d", service, uid, account.UID)
 	}
 	return account, nil
+}
+
+// LookupUserInService asks one NSS service, and only that one, for an
+// account by name (getent -s <service> passwd <name>).
+func (r *NSSResolver) LookupUserInService(service, name string) (Account, error) {
+	if !validServiceName(service) || validName(name) != nil || strings.HasPrefix(name, "-") {
+		return Account{}, fmt.Errorf("unixidentity: invalid service lookup %q %q", service, name)
+	}
+	result, err := r.runner(r.context(), r.path, []string{"-s", service, "passwd", name})
+	if err != nil {
+		return Account{}, err
+	}
+	switch result.exitCode {
+	case getentExitOK:
+	case getentExitNotFound:
+		return Account{}, ErrNotFound
+	default:
+		return Account{}, fmt.Errorf("unixidentity: getent -s %s passwd %s exited %d", service, name, result.exitCode)
+	}
+	lines := nonEmptyLines(string(result.stdout))
+	if len(lines) != 1 {
+		return Account{}, ErrNotFound
+	}
+	return ParsePasswdLine(lines[0])
 }
 
 func validServiceName(name string) bool {
@@ -142,9 +170,22 @@ func (r *NSSResolver) LookupUser(name string) (Account, error) {
 		return Account{}, err
 	}
 	if !strings.EqualFold(account.Name, name) {
-		return Account{}, fmt.Errorf("unixidentity: getent passwd %s answered for %q", name, account.Name)
+		return Account{}, &NameMismatchError{Key: name, Answered: account}
 	}
 	return account, nil
+}
+
+// NameMismatchError is a getent passwd answer for an account whose name is
+// not the one asked: the same account in another spelling (CORP\alice for
+// alice@corp.example.com on a winbind host) or another account (an SSSD UPN or
+// e-mail search across domains). LookupAccountSpelling tells them apart.
+type NameMismatchError struct {
+	Key      string
+	Answered Account
+}
+
+func (e *NameMismatchError) Error() string {
+	return fmt.Sprintf("unixidentity: getent passwd %s answered for %q", e.Key, e.Answered.Name)
 }
 
 // LookupUID resolves an account by uid.
@@ -183,7 +224,7 @@ func (r *NSSResolver) lookupGroupKey(key string) (Group, error) {
 
 // LookupGroup resolves a group by name.
 func (r *NSSResolver) LookupGroup(name string) (Group, error) {
-	if err := validName(name); err != nil {
+	if err := validGroupName(name); err != nil {
 		return Group{}, err
 	}
 	group, err := r.lookupGroupKey(name)
@@ -191,9 +232,38 @@ func (r *NSSResolver) LookupGroup(name string) (Group, error) {
 		return Group{}, err
 	}
 	if group.Name != name {
-		return Group{}, fmt.Errorf("unixidentity: getent group %s answered for %q", name, group.Name)
+		return Group{}, &GroupNameMismatchError{Key: name, Answered: group}
 	}
 	return group, nil
+}
+
+// GroupNameMismatchError is a getent group answer for a group whose name is
+// not the one asked: the same group in another case, or under the spelling
+// the host lists it by (SSSD with use_fully_qualified_names = False answers
+// dc-ml@corp.example.com with dc-ml).
+type GroupNameMismatchError struct {
+	Key      string
+	Answered Group
+}
+
+func (e *GroupNameMismatchError) Error() string {
+	return fmt.Sprintf("unixidentity: getent group %s answered for %q", e.Key, e.Answered.Name)
+}
+
+// GroupSpelling returns the name the host lists the group name under: name
+// itself, the canonical spelling of an answer that differs from it in case
+// only (SSSD answers "Domain Users@corp.example.com" with "domain
+// users@corp.example.com"), or "" when the host does not know it by that name.
+func GroupSpelling(r Resolver, name string) string {
+	group, err := r.LookupGroup(name)
+	var respelled *GroupNameMismatchError
+	switch {
+	case err == nil:
+		return group.Name
+	case errors.As(err, &respelled) && strings.EqualFold(respelled.Answered.Name, name):
+		return respelled.Answered.Name
+	}
+	return ""
 }
 
 // LookupGroupID resolves a group by gid.

@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -43,6 +44,11 @@ type PatternRule struct {
 	Severity     string
 	Confidence   float64
 	Tags         []string
+	// migratedLiteral is set by the generation compile for a migrated 0.8.x
+	// literal rule (guardrail.MigratedLiteralRule): a content scan runs its
+	// pattern over prompt and result text whatever its category, as 0.8.x
+	// did (GAP-1480).
+	migratedLiteral bool
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -272,8 +278,8 @@ func compileRulePackGenerationWithCompiler(
 	claimed := make(map[string]string)
 	semanticRulePositions := make(map[string]int)
 	var staticCost uint64
-	for _, category := range ownedCategories {
-		for _, rule := range category.Rules {
+	for categoryIndex, category := range ownedCategories {
+		for ruleIndex, rule := range category.Rules {
 			ruleID := strings.ToUpper(strings.TrimSpace(rule.ID))
 			title := strings.TrimSpace(rule.Title)
 			if ruleID != "" && title != "" {
@@ -294,6 +300,7 @@ func compileRulePackGenerationWithCompiler(
 			if expression == "" {
 				continue
 			}
+			ownedCategories[categoryIndex].Rules[ruleIndex].migratedLiteral = migratedLiteralRule(rule)
 			program, code := compiler.Compile(expression)
 			if code != semantic.CompileOK {
 				return nil, fmt.Errorf("semantic rule %q failed admission (%s)", rule.ID, code)
@@ -316,6 +323,7 @@ func compileRulePackGenerationWithCompiler(
 				}
 				compiled.semanticRules[position] = compiledSemanticRule{
 					rule: rule, program: program, owner: semanticOwnerForRule(rule.ID),
+					migratedLiteral: migratedLiteralRule(rule),
 				}
 				continue
 			}
@@ -339,14 +347,21 @@ func compileRulePackGenerationWithCompiler(
 				claimed[claimedID] = rule.ID
 			}
 			compiled.semanticRules = append(compiled.semanticRules, compiledSemanticRule{
-				rule:    rule,
-				program: program,
-				owner:   owner,
+				rule:            rule,
+				program:         program,
+				owner:           owner,
+				migratedLiteral: migratedLiteralRule(rule),
 			})
 			semanticRulePositions[ruleID] = len(compiled.semanticRules) - 1
 		}
 	}
 	return compiled, nil
+}
+
+// migratedLiteralRule reports whether rule is a 0.8.x literal rule the
+// upgrade gave an expression from its literal (GAP-1469, GAP-1478).
+func migratedLiteralRule(rule PatternRule) bool {
+	return rule.Pattern != nil && guardrail.MigratedLiteralRule(rule.Pattern.String(), rule.Expression)
 }
 
 func cloneRuleCategories(categories []ruleCategory) []ruleCategory {
@@ -415,6 +430,9 @@ func publishConnectorRulePackOverrides(connector string, compiled *compiledRuleP
 	ruleCategoriesMu.Lock()
 	connectorRuleGenerations[connector] = compiled
 	connectorRuleCategories[connector] = compiled.categories
+	if liveRegisteredRules != nil {
+		liveRegisteredRules[connector] = compiled
+	}
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
 		connector, compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
@@ -423,6 +441,8 @@ func publishConnectorRulePackOverrides(connector string, compiled *compiledRuleP
 // publishConnectorRulePackGeneration replaces the manual connector portion of
 // the current generation under one lock. Dynamically protected connectors are
 // left intact unless they also appeared in the previous manual connector set.
+// A reload calls it before it publishes the next generation, which binds the
+// result; the generation still live keeps its own set.
 func publishConnectorRulePackGeneration(
 	previousManual []string,
 	next map[string]*compiledRulePackCategories,
@@ -466,7 +486,38 @@ func RemoveConnectorRulePackOverrides(connector string) {
 	ruleCategoriesMu.Lock()
 	delete(connectorRuleGenerations, connector)
 	delete(connectorRuleCategories, connector)
+	delete(liveRegisteredRules, connector)
 	ruleCategoriesMu.Unlock()
+}
+
+// liveRegisteredRules is the registeredRules of the live generation: a
+// connector registered or removed outside the configuration (connector
+// setup or teardown) changes the live generation, never one a request
+// pinned before it. Guarded by ruleCategoriesMu.
+var liveRegisteredRules map[string]*compiledRulePackCategories
+
+// bindRegisteredConnectorRules binds the connector rules registered outside
+// the configuration to g as it is published (GAP-1466).
+func bindRegisteredConnectorRules(g *Generation) {
+	ruleCategoriesMu.Lock()
+	defer ruleCategoriesMu.Unlock()
+	g.registeredRules = make(map[string]*compiledRulePackCategories, len(connectorRuleGenerations))
+	for name, compiled := range connectorRuleGenerations {
+		g.registeredRules[name] = compiled
+	}
+	liveRegisteredRules = g.registeredRules
+}
+
+// registeredRuleGenerationOf is the rule set registered for connector name
+// outside the configuration under g: the one bound to g, or for a
+// generation never published, the process-wide one.
+func registeredRuleGenerationOf(g *Generation, name string) *compiledRulePackCategories {
+	ruleCategoriesMu.RLock()
+	defer ruleCategoriesMu.RUnlock()
+	if g.registeredRules != nil {
+		return g.registeredRules[name]
+	}
+	return connectorRuleGenerations[name]
 }
 
 // mergeRulePackCategories builds a full rule-category slice by merging the
@@ -540,9 +591,7 @@ func mergeRulePackCategories(
 				Tags:         append([]string(nil), r.Tags...),
 			})
 		}
-		if len(compiled) == 0 {
-			continue
-		}
+		// An explicitly disabled category replaces defaults with zero rules.
 		if i, ok := idx[rf.Category]; ok {
 			merged[i].Rules = compiled
 			overridden++
@@ -664,6 +713,43 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 	return scanRuleGeneration(generation, text, toolName, ruleScanOptions{})
 }
 
+// maxEntityMatchesPerRule bounds the matches counted for one rule in one result.
+const maxEntityMatchesPerRule = 1000
+
+// countRuleEntitiesFor counts distinct sensitive values matched by the
+// selected profile's entity rules in text. A value matched by two rules
+// or twice by one rule counts once. A findings list holds one entry
+// per rule, so it cannot say how many values a result carries.
+func countRuleEntitiesFor(ctx context.Context, connector, text string) int {
+	if text == "" || ManagedEnterpriseActive() {
+		return 0
+	}
+	generation := snapshotRulePackGenerationFor(ctx, connector)
+	if generation == nil {
+		return 0
+	}
+	options := ruleScanOptions{contentScope: ruleContentScopeUntrusted}
+	seen := make(map[string]struct{})
+	for categoryIndex := range generation.categories {
+		cat := &generation.categories[categoryIndex]
+		if cat.Name != "secret" && cat.Name != "enterprise-data" && cat.Name != "pii" {
+			continue
+		}
+		for ruleIndex := range cat.Rules {
+			rule := &cat.Rules[ruleIndex]
+			if rule.Pattern == nil || !options.allows(rule.ID, rule.ToolCallOnly) {
+				continue
+			}
+			for _, loc := range rule.Pattern.FindAllStringIndex(text, maxEntityMatchesPerRule) {
+				if match := text[loc[0]:loc[1]]; acceptedRuleMatchAt(rule.ID, text, match, loc[0], loc[1]) {
+					seen[match] = struct{}{}
+				}
+			}
+		}
+	}
+	return len(seen)
+}
+
 // scanContentRulesForConnector applies the content-only rule boundary used by
 // connector prompts and tool results. Concrete actions (commands, paths,
 // cognitive-file mutations, and C2 operations) belong to the trusted tool-call
@@ -764,9 +850,10 @@ func (o ruleScanOptions) allowsCategory(category string) bool {
 	if o.contentScope == ruleContentScopeAll {
 		return true
 	}
-	switch category {
-	case "command", "sensitive-path", "cognitive-file", "c2":
+	if ruleActionCategory(category) {
 		return false
+	}
+	switch category {
 	case "trust-exploit":
 		// Source-scope matches are retained and downgraded after matching rather
 		// than suppressed here, so telemetry still records the literal.
@@ -777,6 +864,30 @@ func (o ruleScanOptions) allowsCategory(category string) bool {
 	default:
 		return true
 	}
+}
+
+// ruleActionCategory reports whether category holds rules about what a tool
+// call does (a command, a path, a cognitive-file change, a C2 operation),
+// which a content scan leaves to the trusted tool-call dispatcher.
+func ruleActionCategory(category string) bool {
+	switch category {
+	case "command", "sensitive-path", "cognitive-file", "c2":
+		return true
+	}
+	return false
+}
+
+// allowsMigratedLiteralRule reports whether a content scan runs the migrated
+// 0.8.x literal rules (guardrail.MigratedLiteralRule) of an action category
+// that allowsCategory leaves out. 0.8.x ran every rule over prompt and result
+// text, so a rule the operator gave a literal of their own, such as a marker
+// in commands.yaml, blocked a prompt that held it. The literal is all such a
+// rule means; built-in action rules stay out of content scans (GAP-1480).
+func (o ruleScanOptions) allowsMigratedLiteralRule(category string) bool {
+	if o.onlyCategory != "" && category != o.onlyCategory {
+		return false
+	}
+	return o.contentScope != ruleContentScopeAll && ruleActionCategory(category)
 }
 
 // neutralizeKnownFixtureDataLiterals removes only canonical public examples.
@@ -878,11 +989,15 @@ func scanRuleCategoriesWithOptions(
 	// Scan raw text first
 	for categoryIndex := range generation.categories {
 		cat := &generation.categories[categoryIndex]
-		if !options.allowsCategory(cat.Name) {
+		categoryAllowed := options.allowsCategory(cat.Name)
+		if !categoryAllowed && !options.allowsMigratedLiteralRule(cat.Name) {
 			continue
 		}
 		for ruleIndex := range cat.Rules {
 			rule := &cat.Rules[ruleIndex]
+			if !categoryAllowed && !rule.migratedLiteral {
+				continue
+			}
 			if !options.allows(rule.ID, rule.ToolCallOnly) {
 				continue
 			}
@@ -921,11 +1036,15 @@ func scanRuleCategoriesWithOptions(
 	if normalized != text {
 		for categoryIndex := range generation.categories {
 			cat := &generation.categories[categoryIndex]
-			if !options.allowsCategory(cat.Name) {
+			categoryAllowed := options.allowsCategory(cat.Name)
+			if !categoryAllowed && !options.allowsMigratedLiteralRule(cat.Name) {
 				continue
 			}
 			for ruleIndex := range cat.Rules {
 				rule := &cat.Rules[ruleIndex]
+				if !categoryAllowed && !rule.migratedLiteral {
+					continue
+				}
 				if !options.allows(rule.ID, rule.ToolCallOnly) {
 					continue
 				}

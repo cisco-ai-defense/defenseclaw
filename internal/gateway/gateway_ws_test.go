@@ -486,6 +486,27 @@ func TestReadLoopDisconnect(t *testing.T) {
 	}
 }
 
+// Reconnecting as soon as Disconnected() fires must not reset the
+// per-connection state while the previous reader is still unwinding.
+func TestClientReconnectAfterDisconnectJoinsPreviousReader(t *testing.T) {
+	srv := startMockGW(t, nil) // the server drops each connection after the handshake
+	client := clientForServer(t, srv)
+	t.Cleanup(func() { client.Close() })
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := client.Connect(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("Connect #%d: %v", i, err)
+		}
+		select {
+		case <-client.Disconnected():
+		case <-time.After(2 * time.Second):
+			t.Fatalf("connection #%d: disconnect was not signalled", i)
+		}
+	}
+}
+
 func TestClientRequestTimeout(t *testing.T) {
 	srv := startMockGW(t, func(t *testing.T, conn *websocket.Conn) {
 		// Read but never respond
@@ -651,6 +672,22 @@ func TestGetToolsCatalogRPC(t *testing.T) {
 	rpc := drainRPC(t, received)
 	if rpc.Method != "tools.catalog" {
 		t.Errorf("Method = %q, want tools.catalog", rpc.Method)
+	}
+}
+
+// OpenClaw 2026.9 validates sessions.subscribe params as sessions.list params
+// and rejects a sessionId; empty params subscribe the connection (GAP-0224).
+func TestSessionsSubscribeRPC(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	client := connectToMockGW(t, srv)
+
+	if err := client.SessionsSubscribe(context.Background()); err != nil {
+		t.Fatalf("SessionsSubscribe: %v", err)
+	}
+	rpc := drainRPC(t, received)
+	if rpc.Method != "sessions.subscribe" || string(rpc.Params) != "{}" {
+		t.Errorf("request = %s %s, want sessions.subscribe {}", rpc.Method, rpc.Params)
 	}
 }
 

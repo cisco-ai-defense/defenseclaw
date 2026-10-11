@@ -109,8 +109,8 @@ YAML_ANNOTATIONS = {
         "  # bounded and non-secret; credentials belong in environment references.",
     ),
     "  trace_policy:": (
-        "  # Process-wide trace sampling, semantic-convention profile, compatibility",
-        "  # aliases, and hard payload limits. Bucket collection runs before sampling.",
+        "  # Process-wide trace sampling, semantic-convention profile, and hard",
+        "  # payload limits. Bucket collection runs before sampling.",
     ),
     "    sampler: parentbased_traceidratio": (
         "    # Samplers: always_on/off, traceidratio, or their parentbased variants.",
@@ -119,9 +119,6 @@ YAML_ANNOTATIONS = {
     "    semantic_profile: defenseclaw-genai-rich-v1": (
         "    # Immutable registry profile combining OTel GenAI portability with",
         "    # DefenseClaw lifecycle, guardrail, evidence, and security attributes.",
-    ),
-    "    compatibility_aliases: true": (
-        "    # Temporarily emit documented legacy aliases from the same redacted value.",
     ),
     "    limits:": ("    # Hard per-span/event/message limits; truncation stays deterministic.",),
     "  metric_policy:": ("  # Process-wide metric reader interval and aggregation temporality.",),
@@ -250,14 +247,13 @@ def _reference_document() -> dict[str, Any]:
             "resource": {
                 "attributes": {
                     "service.name": "defenseclaw-gateway",
-                    "deployment.environment": "production",
+                    "deployment.environment.name": "production",
                 }
             },
             "trace_policy": {
                 "sampler": "parentbased_traceidratio",
                 "sampler_arg": "0.10",
                 "semantic_profile": "defenseclaw-genai-rich-v1",
-                "compatibility_aliases": True,
                 "limits": {
                     "max_attributes_per_span": 128,
                     "max_events_per_span": 64,
@@ -613,6 +609,8 @@ def _field_rows(
         for name, child in properties.items():
             if not isinstance(child, Mapping):
                 continue
+            if child.get("x-defenseclaw-removed-in") is not None:
+                continue
             child_resolved = _resolve(schema, child)
             path = f"{prefix}.{name}" if prefix else str(name)
             key = (path, _schema_type(schema, child))
@@ -770,7 +768,7 @@ def _schema_paths(schema: Mapping[str, Any], node: Mapping[str, Any], prefix: st
     properties = node.get("properties")
     if isinstance(properties, Mapping):
         for name, child in properties.items():
-            if not isinstance(child, Mapping):
+            if not isinstance(child, Mapping) or child.get("x-defenseclaw-removed-in") is not None:
                 continue
             path = f"{prefix}.{name}" if prefix else str(name)
             paths.add(path)

@@ -58,8 +58,17 @@ type trustedActionRequest struct {
 	// PowerShell cmdlets are not runtime-attested, so Action-mode adapters must
 	// leave this false even when the argv shape is a static reader.
 	DowngradeReadOnlyDataArgs bool
-	record                    func(actionfacts.Facts, []RuleFinding)
-	recordTelemetry           func(trustedActionTelemetry)
+	// A sandbox action may execute in a filesystem the gateway cannot see.
+	SkipLocalFilesystemResolution bool
+	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
+	// Its gateway cannot inspect the caller's home when ProtectHome is active.
+	ProtectedHomeHook bool
+	// ResolvedWriteTargets comes from the hook running as the real user.
+	// A present empty map means the client inspected the action and found no
+	// static write target; nil denotes missing or invalid client evidence.
+	ResolvedWriteTargets map[string]string
+	record               func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry      func(trustedActionTelemetry)
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -91,6 +100,9 @@ func dispatchTrustedAction(
 	if ManagedEnterpriseActive() {
 		return nil
 	}
+	if _, ok := managedHookPeerFromContext(parent); ok {
+		request.ProtectedHomeHook = true
+	}
 	var (
 		facts     actionfacts.Facts
 		analyzed  bool
@@ -120,6 +132,10 @@ func dispatchTrustedAction(
 	ctx := parent
 
 	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
+	// After every lane below, on what it returns (GAP-1469, GAP-1478).
+	defer func() {
+		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
+	}()
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
@@ -192,6 +208,11 @@ func dispatchTrustedAction(
 			if partialArgv {
 				viewCandidate = argvSubsetReductionCandidate
 			}
+		} else if view, ok := actionfacts.UnmodeledProgramArgvReduction(request.Input, facts); ok {
+			// A program with no modeled operand grammar (hostname) left the
+			// action partial, so a custom argv rule about it never ran
+			// (GAP-0912). Only a monotone argv rule's match counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
 		} else if powerShellView != nil {
 			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
 			powerShellView = nil
@@ -482,6 +503,124 @@ func dispatchTrustedAction(
 		append(append([]RuleFinding(nil), semanticFindings...), twinLegacy...),
 	)
 	return withTwinProvenBlocks(finalized, twinFindings)
+}
+
+// withMigratedLiteralRuleFindings blocks a tool call that a migrated 0.8.x
+// literal rule (guardrail.MigratedLiteralRule) matches as 0.8.x did: 0.8.x
+// ran the rule pattern over the text of the tool call, so the literal
+// anywhere in it blocked. The rule pattern runs, with its own case handling,
+// over that text (the raw arguments, their decoded strings, the command and
+// argv) and over the words the parse took from it (an argument with its
+// quotes or escapes removed, a redirect target, a wrapper argument, a path, a
+// network host). That covers a call parsed only in part or in another
+// dialect ([System.IO.File]::WriteAllText(path, "LITERAL") read as POSIX,
+// GAP-1478), a here-string or variable, and text a tool writes, such as file
+// content. The expression of such a rule matches only an argument that
+// starts or ends with the literal (a CEL substring test over every argument
+// does not fit the cost budget), and stays as it is. The literal is all such
+// a rule means, so the match is its proof. A match only adds: an already
+// enforcing finding is left alone, and a call the adapter cannot enforce
+// keeps the finding detection-only.
+func withMigratedLiteralRuleFindings(
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+	findings []RuleFinding,
+) []RuleFinding {
+	if generation == nil {
+		return findings
+	}
+	var texts []string
+	collected := false
+	for _, candidate := range generation.semanticRules {
+		owner := candidate.owner
+		if !candidate.migratedLiteral || owner.prerequisite != nil || owner.detectionOnly || owner.alertOnly {
+			continue
+		}
+		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
+			return finding.RuleID == candidate.rule.ID
+		})
+		if index >= 0 && findings[index].contributesToEnforcement() {
+			continue
+		}
+		if !collected {
+			texts, collected = trustedActionTexts(request, facts), true
+		}
+		if !slices.ContainsFunc(texts, candidate.rule.Pattern.MatchString) {
+			continue
+		}
+		finding := RuleFinding{
+			RuleID:     candidate.rule.ID,
+			Title:      candidate.rule.Title,
+			Severity:   candidate.rule.Severity,
+			Confidence: candidate.rule.Confidence,
+			Tags:       append([]string(nil), candidate.rule.Tags...),
+		}
+		if index >= 0 {
+			finding = findings[index]
+		} else {
+			finding = adjustConfidence(request.Input.Tool, finding)
+		}
+		finding.enforcement = findingEnforcementDetectionOnly
+		if request.EnforcementCapable {
+			finding.enforcement = findingEnforcementAllowed
+		}
+		finding = finding.withTrustedActionProof(newActionFactsSubgraphFindingProof(candidate.rule.ID, true, true))
+		if index >= 0 {
+			findings[index] = finding
+		} else {
+			findings = append(findings, finding)
+		}
+	}
+	return findings
+}
+
+// trustedActionTexts returns the text of a tool call that 0.8.x scanned, its
+// raw arguments with their decoded strings, command and argv, and the words
+// the parse of its commands took from it, with its path values and network
+// hosts.
+func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) []string {
+	texts := []string{request.LegacyText, request.Input.Command, string(request.Input.Args)}
+	texts = append(texts, request.Input.Argv...)
+	texts = appendJSONStrings(texts, request.Input.Args)
+	for _, command := range facts.Commands {
+		texts = append(texts, command.Argv...)
+		for _, argument := range command.Arguments {
+			texts = append(texts, argument.Value)
+		}
+		for _, redirect := range command.Redirects {
+			texts = append(texts, redirect.Target)
+		}
+		for _, wrapper := range command.Wrappers {
+			texts = append(texts, wrapper.Argv...)
+		}
+	}
+	for _, path := range facts.Paths {
+		texts = append(texts, path.Value)
+	}
+	for _, network := range facts.Network {
+		texts = append(texts, network.Host)
+	}
+	return texts
+}
+
+// appendJSONStrings appends every string of the JSON value raw, object keys
+// included, decoded, so a literal a JSON escape spells (\u003c for <) matches
+// too. Text that is not JSON adds nothing; the raw text is matched as it is.
+func appendJSONStrings(texts []string, raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return texts
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return texts
+		}
+		if text, ok := token.(string); ok {
+			texts = append(texts, text)
+		}
+	}
 }
 
 // withTwinProvenBlocks returns findings, the finalized findings of a
@@ -1106,7 +1245,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return curlDownloadExecPrerequisite(facts) ||
 				powerShellDownloadExecPrerequisite(facts)
 		},
-		detectionOnly: true,
+		alertOnly: true,
 	},
 	"secrets.cloud_secret_manager_read": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -4893,26 +5032,6 @@ func trustedSemanticOwnerClaimingRule(ruleID string) (semanticOwner, bool) {
 	return owner, ok
 }
 
-// trustedNetworkFindingProof requires a command-owned network fact from a
-// complete executing command. The rule pattern classifies the typed endpoint;
-// it is never allowed to turn a URL-shaped literal in source or test data into
-// an action. Nested endpoints remain bounded by the complete outer action.
-func trustedNetworkFindingProof(
-	generation *compiledRulePackCategories,
-	ruleID string,
-	input actionfacts.Input,
-	toolName string,
-	facts actionfacts.Facts,
-) (findingProof, bool) {
-	return trustedNetworkFindingProofFromActions(
-		generation,
-		ruleID,
-		toolName,
-		facts,
-		trustedNestedExecutionActions(input, facts),
-	)
-}
-
 func trustedNetworkFindingProofFromActions(
 	generation *compiledRulePackCategories,
 	ruleID string,
@@ -5364,24 +5483,6 @@ func appendTrustedWindowsPathFactFindings(
 		}
 	}
 	return findings
-}
-
-func argvHasOption(argv []string, option string) bool {
-	for _, argument := range argv[1:] {
-		if argument == option || strings.HasPrefix(argument, option+"=") {
-			return true
-		}
-	}
-	return false
-}
-
-func argvHasAnyOption(argv []string, options ...string) bool {
-	for _, option := range options {
-		if argvHasOption(argv, option) {
-			return true
-		}
-	}
-	return false
 }
 
 func awkInvocationExecutes(argv []string) bool {
@@ -5851,7 +5952,20 @@ func trustedUnresolvedReadRuleMatches(
 	facts actionfacts.Facts,
 ) map[string]struct{} {
 	matchesByID := make(map[string]struct{})
+	literalTildeOperands := make(map[string]struct{})
+	if facts.Authoritative() {
+		for _, candidate := range facts.Paths {
+			if strings.HasPrefix(candidate.Value, "~/") &&
+				strings.Contains(candidate.Resolved, "/~/") &&
+				!matchesActiveSensitivePath(facts, candidate) {
+				literalTildeOperands[candidate.Value] = struct{}{}
+			}
+		}
+	}
 	collect := func(value string) {
+		if _, literal := literalTildeOperands[value]; literal {
+			return
+		}
 		if !trustedUnresolvedHomePath(value) {
 			return
 		}
@@ -5936,19 +6050,6 @@ func trustedPathReadingCommand(program string) bool {
 	default:
 		return false
 	}
-}
-
-func applyBoundaryEnforcement(
-	findings []RuleFinding,
-	enforcementCapable bool,
-) []RuleFinding {
-	if enforcementCapable {
-		return findings
-	}
-	for index := range findings {
-		findings[index].enforcement = findingEnforcementDetectionOnly
-	}
-	return findings
 }
 
 func enforceableRuleFindings(findings []RuleFinding) []RuleFinding {

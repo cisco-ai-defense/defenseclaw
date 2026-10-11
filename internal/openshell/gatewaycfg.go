@@ -27,7 +27,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -231,6 +230,39 @@ func gatewayExecutable(lookPath func(string) (string, error), cli string) string
 	return GatewayBinary
 }
 
+// brewPrefixOfCLI is the Homebrew prefix that holds the OpenShell CLI cli
+// (openshell.binary): a per-user Homebrew whose brew is not on PATH is still
+// the one the CLI was installed by (GAP-0286). "" when cli is not a formula
+// link of a prefix.
+func brewPrefixOfCLI(lookPath func(string) (string, error), cli string) string {
+	found, err := lookPath(cli)
+	if err != nil || !filepath.IsAbs(found) {
+		return ""
+	}
+	candidates := []string{found}
+	if real, err := filepath.EvalSymlinks(found); err == nil {
+		candidates = append(candidates, real)
+	}
+	for _, c := range candidates {
+		if prefix := filepath.Dir(filepath.Dir(c)); formulaKegInstalled(prefix) {
+			return prefix
+		}
+	}
+	return ""
+}
+
+// BrewCommand uses the Homebrew installation that holds the configured
+// OpenShell CLI, even when another brew is on PATH.
+func (g *GatewayConfigurator) BrewCommand() string {
+	if g.BrewPrefix != "" {
+		own := filepath.Join(g.BrewPrefix, "bin", "brew")
+		if info, err := os.Stat(own); err == nil && info.Mode().IsRegular() {
+			return own
+		}
+	}
+	return "brew"
+}
+
 func (g *GatewayConfigurator) defaults() error {
 	dir := g.Dir
 	if dir == "" {
@@ -274,11 +306,15 @@ func (g *GatewayConfigurator) defaults() error {
 	if g.Now == nil {
 		g.Now = time.Now
 	}
-	if g.BrewFormulaInstalled == nil {
-		g.BrewFormulaInstalled = brewFormulaInstalled
-	}
 	if g.BrewPrefix == "" && g.GOOS == "darwin" {
-		g.BrewPrefix = homebrewPrefix()
+		if g.BrewPrefix = brewPrefixOfCLI(g.LookPath, g.CLI); g.BrewPrefix == "" {
+			g.BrewPrefix = homebrewPrefix()
+		}
+	}
+	if g.BrewFormulaInstalled == nil {
+		g.BrewFormulaInstalled = func() bool {
+			return brewFormulaInstalled() || (g.BrewPrefix != "" && formulaKegInstalled(g.BrewPrefix))
+		}
 	}
 	if g.RunningDriver == nil {
 		g.RunningDriver = func(ctx context.Context) (Driver, error) { return runningDriver(ctx, g.Discover) }
@@ -1489,7 +1525,7 @@ func (c serviceCommand) argv() []string { return append([]string{c.name}, c.args
 
 func (g *GatewayConfigurator) restartCommand() serviceCommand {
 	if g.GOOS == "darwin" {
-		return serviceCommand{"brew", []string{"services", "restart", GatewayFormula}}
+		return serviceCommand{g.BrewCommand(), []string{"services", "restart", GatewayFormula}}
 	}
 	return serviceCommand{"systemctl", []string{"--user", "restart", GatewayService}}
 }
@@ -1884,7 +1920,7 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	if !g.BrewFormulaInstalled() {
 		return st, nil
 	}
-	out, err := g.Runner.Output(ctx, Command{Name: "brew", Args: []string{"services", "info", GatewayFormula, "--json"}, Timeout: time.Minute})
+	out, err := g.Runner.Output(ctx, Command{Name: g.BrewCommand(), Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
 	if err != nil {
 		return nil, brewServicesError(err, out)
 	}
@@ -1911,6 +1947,11 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 // session that has no access to the account's macOS login session (a tmux
 // server started over ssh, for one): Homebrew checks that with pbpaste.
 var ErrBrewServicesTmux = errors.New("`brew services` refuses to run in a tmux session that has no access to this account's macOS login session")
+
+// brewQuietEnv turns off the warning Homebrew prints before the JSON of
+// `brew services info --json` when it runs through sudo (an administrator
+// who switched to the user with sudo -u) and its environment hints.
+var brewQuietEnv = []string{"HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1", "HOMEBREW_NO_ENV_HINTS=1"}
 
 // brewServicesError is a failed `brew services info` in one line:
 // Homebrew's own "Error:" line, not the usage text it prints first
@@ -1969,15 +2010,9 @@ func brewFormulaInstalled() bool {
 			prefixes = append(prefixes, filepath.Dir(filepath.Dir(real)))
 		}
 	}
-	name := path.Base(GatewayFormula)
 	for _, p := range prefixes {
-		if !filepath.IsAbs(p) {
-			continue
-		}
-		for _, keg := range []string{filepath.Join(p, "opt", name), filepath.Join(p, "Cellar", name)} {
-			if info, err := os.Stat(keg); err == nil && info.IsDir() {
-				return true
-			}
+		if filepath.IsAbs(p) && formulaKegInstalled(p) {
+			return true
 		}
 	}
 	return false
@@ -1987,24 +2022,7 @@ func brewFormulaInstalled() bool {
 // without running brew: HOMEBREW_PREFIX (which `brew shellenv` sets),
 // else the prefix of the brew on PATH (the one holding a Cellar, through
 // its link when it has none), else /opt/homebrew, Apple silicon's.
-var homebrewPrefix = sync.OnceValue(func() string {
-	if p := os.Getenv("HOMEBREW_PREFIX"); filepath.IsAbs(p) {
-		return filepath.Clean(p)
-	}
-	if brew, err := exec.LookPath("brew"); err == nil && filepath.IsAbs(brew) {
-		candidates := []string{brew}
-		if real, err := filepath.EvalSymlinks(brew); err == nil {
-			candidates = append(candidates, real)
-		}
-		for _, c := range candidates {
-			prefix := filepath.Dir(filepath.Dir(c))
-			if info, err := os.Stat(filepath.Join(prefix, "Cellar")); err == nil && info.IsDir() {
-				return prefix
-			}
-		}
-	}
-	return "/opt/homebrew"
-})
+var homebrewPrefix = sync.OnceValue(func() string { return findHomebrewPrefix(os.Getenv, exec.LookPath) })
 
 // runningDriver asks the gateway of opts which compute driver it runs.
 func runningDriver(ctx context.Context, opts DiscoverOptions) (Driver, error) {

@@ -693,6 +693,68 @@ func TestSetupSaysWhatToDoWhenHomebrewFails(t *testing.T) {
 		}
 		has(t, ta.output(), tc.hint)
 	}
+
+	// A Homebrew that belongs to another account (GAP-0109) failed with a
+	// permission error and the Xcode hint above: the installer refuses it
+	// first, and setup names the owner, the folder and the way on.
+	ta = setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	inst = &fakeInstaller{err: &openshell.HomebrewNotWritableError{Prefix: "/opt/homebrew", Dir: "/opt/homebrew/Library/Taps", Owner: "admin", User: "alice"}}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err = ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	if !errors.As(err, &silent) || !errors.Is(err, openshell.ErrHomebrewNotWritable) {
+		t.Fatalf("Setup = %v, want the Homebrew permission failure, already printed", err)
+	}
+	has(t, ta.output(), "✗ install OpenShell: Homebrew at /opt/homebrew belongs to admin, and you (alice) cannot write to /opt/homebrew/Library/Taps",
+		"→ ask admin (or an administrator) to make /opt/homebrew writable for you, or use a Homebrew of your own")
+	lacks(t, ta.output(), "Xcode")
+}
+
+// TestSetupNamesTheStepAfterTheFormulaInstalled: NVIDIA's script failed
+// registering the gateway after Homebrew had installed the formula and
+// started the service, and setup blamed Homebrew and Xcode (GAP-0110). It
+// says the formula is installed, then shows the check that still fails,
+// with its fix.
+func TestSetupNamesTheStepAfterTheFormulaInstalled(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.GOOS = "darwin"
+	missing := hostReport(func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	const register = "OPENSHELL_LOCAL_TLS_DIR=/Users/a/homebrew/var/openshell/tls openshell gateway add https://127.0.0.1:17670 --local --name openshell"
+	unregistered := hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDRegistration)
+		c.Status, c.Detail = openshell.StatusFail, "no gateway registration"
+		c.Fix = &openshell.Fix{Summary: "register the local gateway", Command: register}
+	})
+	calls := 0
+	ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+		if calls++; calls == 1 {
+			return missing(ctx, d)
+		}
+		return unregistered(ctx, d)
+	}
+	inst := &fakeInstaller{err: &openshell.HomebrewInstallError{Err: errors.New("/bin/sh: exit status 1"), FormulaInstalled: true}}
+	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+		inst.consent = consent
+		return inst
+	}
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
+	var silent *Silent
+	if !errors.As(err, &silent) {
+		t.Fatalf("Setup = %v, want the failing check, already printed", err)
+	}
+	has(t, ta.output(), "the nvidia/openshell formula is installed, but NVIDIA's installer failed after it",
+		"✗ Gateway registration: no gateway registration", register)
+	lacks(t, ta.output(), "Xcode", "Homebrew could not install")
 }
 
 // TestSetupInstallQuestionSaysHowItInstalls: NVIDIA's installer uses sudo
@@ -1019,8 +1081,8 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	if c.OpenShell.Workdir.Mode != "copy" || !slices.Equal(c.OpenShell.Harnesses, []string{"codex"}) {
 		t.Fatalf("config = %+v", c.OpenShell)
 	}
-	// Setup again, allowing the mounts this time: the copy mode the first
-	// setup recorded goes, so the answer takes effect.
+	// Setup again, allowing mounts this time: copy remains selected until
+	// the operator explicitly changes it.
 	ta.Cfg.OpenShell.Workdir.Mode = c.OpenShell.Workdir.Mode
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 	again := SetupOptions{NonInteractive: true, Yes: true, SkipImages: true, Harnesses: []string{"codex"}}
@@ -1028,8 +1090,8 @@ func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	if len(ta.gateway.planned) != 1 || !ta.gateway.planned[0].EnableBindMounts {
 		t.Fatalf("gateway plans = %+v", ta.gateway.planned)
 	}
-	if c := loadConfig(t, ta); c.OpenShell.Workdir.Mode != "" {
-		t.Fatalf("workdir.mode after allowing mounts = %q, want the pack's", c.OpenShell.Workdir.Mode)
+	if c := loadConfig(t, ta); c.OpenShell.Workdir.Mode != config.OpenShellWorkdirCopy {
+		t.Fatalf("workdir.mode after allowing mounts = %q, want copy", c.OpenShell.Workdir.Mode)
 	}
 	// Mounts already on and a copy mode in the config: setup says why runs
 	// still copy.
@@ -1405,6 +1467,53 @@ func TestSetupInstallsWhatTheMicroVMDriverNeeds(t *testing.T) {
 	lacks(t, ta.output(), resign)
 	if inst.resigned != 0 || len(ta.gateway.planned) != 0 {
 		t.Fatalf("resigned %d, plans %+v", inst.resigned, ta.gateway.planned)
+	}
+
+	// The driver searches only the kegs under /opt/homebrew and /usr/local
+	// (GAP-0112): an e2fsprogs built in a Homebrew of your own is never
+	// found, so setup builds nothing there, and says where it goes.
+	ta, inst = setup(t, "")
+	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) {
+		r.MicroVM.E2fsprogs, r.MicroVM.OwnBrewPrefix = "", "/Users/a/homebrew"
+	})
+	wantErr(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true}), "the OpenShell MicroVM driver needs e2fsprogs where it looks for it")
+	has(t, ta.output(), "✗ MicroVM driver: the MicroVM driver looks for e2fsprogs only in the Homebrew kegs under /opt/homebrew and /usr/local, "+
+		"not in your Homebrew at /Users/a/homebrew: have an administrator install it with a Homebrew there (brew install e2fsprogs)")
+	if inst.e2fsprogs != 0 || len(ta.gateway.planned) != 0 {
+		t.Fatalf("installed %d, plans %+v", inst.e2fsprogs, ta.gateway.planned)
+	}
+}
+
+// TestSetupRecordsACLIThePathOfTheDaemonMayNotHave: the daemon keeps the
+// PATH it started with, so after setup put a per-user Homebrew's openshell
+// on the shell's PATH the first sandbox failed with "openshell: executable
+// file not found in $PATH" until the daemon restarted (GAP-0112). Setup
+// records the CLI's path as openshell.binary unless it lies where every
+// package and NVIDIA's installer put it, or the user chose a binary.
+func TestSetupRecordsACLIThePathOfTheDaemonMayNotHave(t *testing.T) {
+	for _, tc := range []struct {
+		found, configured, want string
+	}{
+		{"/Users/a/homebrew/bin/openshell", "", "/Users/a/homebrew/bin/openshell"},
+		{"/Users/a/homebrew/bin/openshell", "openshell", "/Users/a/homebrew/bin/openshell"},
+		{"/opt/homebrew/bin/openshell", "", ""},
+		{"/usr/local/bin/openshell", "", ""},
+		{"/usr/bin/openshell", "", ""},
+		{"/Users/a/homebrew/bin/openshell", "/opt/custom/openshell", ""},
+		{"", "", ""},
+	} {
+		if got := cliBinaryToRecord(tc.configured, tc.found); got != tc.want {
+			t.Errorf("cliBinaryToRecord(%q, %q) = %q, want %q", tc.configured, tc.found, got, tc.want)
+		}
+	}
+	ta := setupApp(t, "", "", true)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = macReport(openshell.DriverVM, func(r *openshell.DoctorReport) { r.CLIPath = "/Users/a/homebrew/bin/openshell" })
+	useGateway(ta)
+	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, SkipImages: true, NoWrappers: true}))
+	has(t, ta.output(), "openshell.binary is /Users/a/homebrew/bin/openshell: the daemon runs the OpenShell CLI from there")
+	if cfg, _ := os.ReadFile(ta.ConfigPath); !strings.Contains(string(cfg), "binary: /Users/a/homebrew/bin/openshell") {
+		t.Fatalf("config.yaml:\n%s", cfg)
 	}
 }
 
@@ -1823,8 +1932,8 @@ func TestDoctorFixNamesChecksAsItAsked(t *testing.T) {
 
 // TestDoctorFixRecordsItsGatewayEdit: the bind-mount fix's gateway.toml
 // edit goes in setup's receipt, so teardown restores the file from setup's
-// first backup instead of leaving it as someone else's change, and the copy
-// mode setup recorded without bind mounts goes (GAP-0089).
+// first backup instead of leaving it as someone else's change. An explicitly
+// selected copy mode stays in force after bind mounts become available.
 func TestDoctorFixRecordsItsGatewayEdit(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "  workdir:\n    mode: copy\n")
@@ -1847,7 +1956,7 @@ func TestDoctorFixRecordsItsGatewayEdit(t *testing.T) {
 	if r, rerr := ta.loadReceipt(); err != nil || rerr != nil || len(r.GatewayFiles) != 1 || r.GatewayFiles[0].Backup != toml+".first.bak" || r.GatewayFiles[0].SHA256 != sum {
 		t.Fatalf("receipt = %+v, %v, %v", r, rerr, err)
 	}
-	if mode := loadConfig(t, ta).OpenShell.Workdir.Mode; mode != "" {
+	if mode := loadConfig(t, ta).OpenShell.Workdir.Mode; mode != config.OpenShellWorkdirCopy {
 		t.Fatalf("openshell.workdir.mode = %q after the bind-mount fix", mode)
 	}
 }
@@ -2068,6 +2177,30 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if c := loadConfig(t, ta); c.OpenShell.Enabled || len(c.OpenShell.Wrappers) != 0 {
 		t.Fatalf("config after teardown = %+v", c.OpenShell)
 	}
+}
+
+// With Docker stopped, teardown used to undo the sandboxes, providers,
+// profiles and gateway files and only then fail on the image removal, with no
+// reason shown (GAP-0282). It now stops before it changes anything, and
+// --keep-images goes on without Docker.
+func TestTeardownWithDockerStoppedChangesNothing(t *testing.T) {
+	ta := newTestApp(t, "")
+	writeConfig(t, ta, "")
+	useGateway(ta)
+	ta.daemon.add(sampleSandbox("dc-claude-live"))
+	ta.images.recs = []image.Record{{Tag: "defenseclaw/sandbox:claudecode-1"}}
+	ta.images.goneIDsErr = errors.New("Cannot connect to the Docker daemon")
+
+	if err := ta.Teardown(bg, TeardownOptions{Yes: true}); err == nil {
+		t.Fatal("teardown went on without Docker")
+	}
+	has(t, ta.output(), "Docker: Cannot connect to the Docker daemon", "--keep-images", "nothing was changed")
+	if ta.calls("DELETE", "dc-claude-live") != 0 || len(ta.images.removed) != 0 || !loadConfig(t, ta).OpenShell.Enabled {
+		t.Fatal("the refused teardown changed something")
+	}
+
+	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
+	ta.wantCalls(t, 1, "DELETE", "dc-claude-live")
 }
 
 // TestTeardownDryRunListsEveryStep pins the dry run a newcomer reads: every

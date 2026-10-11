@@ -75,7 +75,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 		result = "panic"
 	}
 	effectiveAction := normalizeHookActionLabel(resp.Action)
-	sandboxID, sandboxName := hookDecisionV8Sandbox(audit.EnvelopeFromContext(ctx))
+	sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
 		RawSeverity: string(severity.Severity), Enforced: env.Enforced,
@@ -127,9 +127,10 @@ func (a *APIServer) emitHookDecisionLogV8(
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		identityInput := observability.LogCompatHookDecisionInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
-			Envelope: envelope, Severity: observability.Present(severity.Severity),
+			DefenseClawUserEnrollment: enterpriseEnrollmentV8(ctx),
+			Envelope:                  envelope, Severity: observability.Present(severity.Severity),
 			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),
 			DefenseClawRequestID:                hookV8OptionalIdentifier(meta.RequestID),
 			DefenseClawTurnID:                   hookV8OptionalIdentifier(meta.TurnID),
@@ -137,7 +138,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawRunID:                    hookV8OptionalIdentifier(meta.RunID),
 			UserID:                              hookV8OptionalIdentifier(meta.UserID),
 			DefenseClawUserIDKind:               v8UserIDKind(meta.UserIDKind),
-			DefenseClawUserName:                 hookV8OptionalIdentifier(meta.UserName),
+			DefenseClawUserName:                 v8UserName(meta.UserName, hookV8OptionalIdentifier),
 			DefenseClawUserEmail:                v8UserEmail(meta.UserEmail),
 			DefenseClawAgentIdentityID:          agentIdentityV8FromContext(ctx),
 			DefenseClawPolicyID:                 hookV8OptionalIdentifier(meta.PolicyID),
@@ -420,19 +421,20 @@ func hookDecisionMetricMeta(ctx context.Context, connectorName string) llmEventM
 	}
 }
 
-// maxHookDecisionV8SandboxName is the registered max_utf8_bytes override of
+// maxHookV8SandboxName is the registered max_utf8_bytes override of
 // defenseclaw.sandbox.name.
-const maxHookDecisionV8SandboxName = 128
+const maxHookV8SandboxName = 128
 
-// hookDecisionV8Sandbox projects the sandbox binding that authenticated the
-// hook, stamped on the audit envelope, onto the decision's correlation.sandbox
-// attributes. A value that does not fit the registered identifier shape is
-// omitted rather than rewritten, so the decision itself is never lost. The
-// hook decision metrics never read these: sandbox identities are not labels.
-func hookDecisionV8Sandbox(envelope audit.CorrelationEnvelope) (observability.Optional[string], observability.Optional[string]) {
+// hookV8Sandbox projects the sandbox binding that authenticated the hook,
+// stamped on the audit envelope, onto the correlation.sandbox id and name of
+// the hook decision, model and agent lifecycle records. A value that does not
+// fit the registered identifier shape is omitted rather than rewritten, so the
+// record itself is never lost. The hook decision metrics never read these:
+// sandbox identities are not labels.
+func hookV8Sandbox(envelope audit.CorrelationEnvelope) (observability.Optional[string], observability.Optional[string]) {
 	id := hookV8OptionalIdentifier(envelope.SandboxID)
 	name := hookV8OptionalIdentifier(envelope.SandboxName)
-	if value, ok := name.Get(); ok && len(value) > maxHookDecisionV8SandboxName {
+	if value, ok := name.Get(); ok && len(value) > maxHookV8SandboxName {
 		name = observability.Absent[string]()
 	}
 	return id, name

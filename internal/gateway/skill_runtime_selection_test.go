@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -321,17 +323,11 @@ func TestClaudeNativePromptExpansionCorrelatesRuntimeDisableFromProductionIdenti
 			if response.Action != "block" || response.RawAction != "block" {
 				t.Fatalf("action=%q raw=%q reason=%q", response.Action, response.RawAction, response.Reason)
 			}
-			for _, want := range []string{
-				"reason_code=runtime-disable",
-				"source=runtime-disable",
-				"asset_type=" + tc.targetType,
-				"asset_name=" + tc.targetName,
-				"connector=claudecode",
-				"surface=prompt_expansion",
-			} {
-				if !strings.Contains(response.Reason, want) {
-					t.Fatalf("reason %q missing %q", response.Reason, want)
-				}
+			// GAP-0362: the agent reads one plain sentence; the audit record
+			// below keeps the structured reason.
+			if !strings.Contains(response.Reason, tc.targetName+" is disabled by security policy") ||
+				strings.Contains(response.Reason, "reason_code=") {
+				t.Fatalf("agent reason %q, want a plain sentence naming %s", response.Reason, tc.targetName)
 			}
 
 			hookIndexes := make([]int, 0, 1)
@@ -378,8 +374,17 @@ func TestClaudeNativePromptExpansionCorrelatesRuntimeDisableFromProductionIdenti
 				t.Fatalf("audit action=%v raw_action=%v", structured["action"], structured["raw_action"])
 			}
 			auditReason, _ := structured["reason"].(string)
-			if !strings.Contains(auditReason, "reason_code=runtime-disable") {
-				t.Fatalf("audit reason=%q, want runtime-disable provenance", auditReason)
+			for _, want := range []string{
+				"reason_code=runtime-disable",
+				"source=runtime-disable",
+				"asset_type=" + tc.targetType,
+				"asset_name=" + tc.targetName,
+				"connector=claudecode",
+				"surface=prompt_expansion",
+			} {
+				if !strings.Contains(auditReason, want) {
+					t.Fatalf("audit reason %q missing %q", auditReason, want)
+				}
 			}
 		})
 	}
@@ -414,6 +419,76 @@ func TestClaudeFilesystemSkillProvenanceMapsToRuntimeDisableSkillNamespace(t *te
 		if got := slashCommandAssetType(source); got != "" {
 			t.Fatalf("slashCommandAssetType(%q)=%q, want ambiguous/unattributed", source, got)
 		}
+	}
+}
+
+// GAP-0968: a user or project skill typed as /name arrives with a settings
+// command_source; when a skill folder of that name exists it is held to
+// asset_policy.skill.denied like the Skill tool call.
+func TestClaudeSettingsOriginSlashSkillOnDeniedListIsRefused(t *testing.T) {
+	for _, source := range []string{"userSettings", "projectSettings"} {
+		t.Run(source, func(t *testing.T) {
+			store, logger := newNativeSkillRuntimeTestStore(t)
+			project := t.TempDir()
+			skill := filepath.Join(project, ".claude", "skills", "dcmain-marker")
+			if err := os.MkdirAll(skill, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: dcmain-marker\n---\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Guardrail.Mode = "action"
+			cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "dcmain-marker"}}
+			api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+			payload, err := json.Marshal(map[string]interface{}{
+				"hook_event_name": "UserPromptExpansion",
+				"session_id":      "settings-skill-" + strings.ToLower(source),
+				"prompt":          "/dcmain-marker",
+				"expansion_type":  "slash_command",
+				"command_name":    "dcmain-marker",
+				"command_source":  source,
+				"cwd":             project,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response := invokeNativeSkillHook(t, api, "claudecode", string(payload)); response.Action != "block" {
+				t.Fatalf("action=%q reason=%q, want the denied skill refused", response.Action, response.Reason)
+			}
+		})
+	}
+}
+
+// GAP-1104: "skill block <name>" stops the same-named skill a plugin
+// bundles, both at the Skill tool call and at /<plugin>:<skill>.
+func TestDeniedSkillNameRefusesPluginBundledCopy(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.Mode = "action"
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "usm-kitok-notes", Reason: "bundled"}}
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	if decision, matched := api.claudeCodeSkillAssetDecision(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PreToolUse", ToolName: "Skill",
+		ToolInput: map[string]interface{}{"skill": "usm-kit-ok:usm-kitok-notes"},
+	}); !matched || decision.Action != "block" {
+		t.Fatalf("Skill tool = %+v, matched=%v; want the denied bundled skill refused", decision, matched)
+	}
+	payload, err := json.Marshal(map[string]interface{}{
+		"hook_event_name": "UserPromptExpansion",
+		"session_id":      "plugin-bundled-skill",
+		"prompt":          "/usm-kit-ok:usm-kitok-notes",
+		"expansion_type":  "slash_command",
+		"command_name":    "usm-kit-ok:usm-kitok-notes",
+		"command_source":  "plugin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := invokeNativeSkillHook(t, api, "claudecode", string(payload)); response.Action != "block" {
+		t.Fatalf("slash command action=%q reason=%q, want refused", response.Action, response.Reason)
 	}
 }
 

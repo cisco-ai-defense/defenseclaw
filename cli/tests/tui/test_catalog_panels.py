@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from defenseclaw import connector_paths
@@ -503,6 +504,21 @@ def test_tools_refresh_key_defers_store_read_to_shell_worker() -> None:
     assert action.handled is True
     assert action.reload_requested is True
     assert calls == []
+
+
+def test_tools_refresh_lists_asset_policy_tool_rules_from_config_yaml(tmp_path, monkeypatch) -> None:
+    # GAP-0306: tool block/allow writes asset_policy.tool in config.yaml, and no audit.db rows.
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\nasset_policy:\n  tool:\n    denied:\n"
+        "      - {name: write_file, connector: codex, reason: no writes}\n",
+        encoding="utf-8",
+    )
+    panel = ToolsPanelModel(FakeToolStore([]), config=SimpleNamespace(data_dir=str(tmp_path)))
+    panel.refresh()
+    assert [(row.name, row.status, row.connector, row.reason) for row in panel.items] == [
+        ("write_file", "blocked", "codex", "no writes")
+    ]
 
 
 def test_tools_connector_filter_shows_selected_connector_plus_global_fallback() -> None:

@@ -1410,6 +1410,16 @@ class TestPluginBlock(PluginCommandTestBase):
 
 
 class TestPluginAllow(PluginCommandTestBase):
+    def test_allow_quarantined_copy_requires_restore(self):
+        self._install_plugin("held-copy")
+        self.assertEqual(self.invoke(["quarantine", "held-copy", "--connector", "openclaw"]).exit_code, 0)
+
+        result = self.invoke(["allow", "held-copy", "--connector", "openclaw"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("restore it before allowing", result.output)
+        self.assertFalse(self.app.cfg.asset_policy.plugin.allowed)
+        self.assertEqual(self.invoke(["restore", "held-copy"]).exit_code, 0)
+
     def test_allow_happy_path(self):
         result = self.invoke(["allow", "allowed-one"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -2755,14 +2765,14 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         result = self._invoke_install(["install", "--action", "danger-pkg"])
 
         self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("added to block list", result.output)
+        self.assertIn("install blocked by this scan", result.output)
         self.assertIn("quarantined", result.output)
         self.assertFalse(os.path.exists(os.path.join(self.app.cfg.plugin_dir, "danger-pkg")))
 
     @patch("defenseclaw.gateway.OrchestratorClient.disable_plugin")
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
-    def test_install_action_strict_config_quarantines_critical(self, mock_fetch, mock_scan, mock_disable):
+    def test_install_action_critical_records_the_install_block(self, mock_fetch, mock_scan, mock_disable):
         """--action on CRITICAL quarantines (admission default) and records the scan block."""
         mock_scan.return_value = self._critical_scan_result()
         src = self._create_plugin_dir("strict-danger-pkg")
@@ -2773,7 +2783,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
         self.assertEqual(result.exit_code, 1)
         self.assertIn("quarantined", result.output)
-        self.assertIn("block list", result.output)
+        self.assertIn("install blocked by this scan", result.output)
         # A scan verdict's install block is enforcement journal, not policy.
         journal = self.app.store.get_action("plugin", "strict-danger-pkg", "openclaw")
         self.assertEqual(journal.actions.install if journal else None, "block")

@@ -43,12 +43,21 @@ const IdentitySpoolDirName = "identity"
 // IdentitySpoolRecordVersion is the record schema version.
 const IdentitySpoolRecordVersion = 1
 
+// IdentitySpoolMaxAge is how long the gateway trusts a record (four times the
+// 15 minute identity cache lifetime) and how long the guardian keeps the
+// record of an account it no longer lists.
+const IdentitySpoolMaxAge = time.Hour
+
 // maxIdentitySpoolRecordBytes bounds one record.
 const maxIdentitySpoolRecordBytes = 256 << 10
 
 // UPN sources recorded in IdentitySpoolRecord.UPNSource.
 const (
-	UPNSourceInfoPipe      = "infopipe"
+	UPNSourceInfoPipe = "infopipe"
+	// UPNSourceInfoPipeKept is a UPN an earlier pass read from InfoPipe,
+	// kept because the latest InfoPipe answer for the same account listed no
+	// userPrincipalName (KeepVerifiedInfoPipeUPN).
+	UPNSourceInfoPipeKept  = "infopipe_kept"
 	UPNSourceDerived       = "derived"
 	UPNSourceIdentityStore = "identity_store"
 	UPNSourceTranslateName = "translate_name"
@@ -65,8 +74,64 @@ type IdentitySpoolRecord struct {
 	// UPNSource says where Facts.UPN, or the derived Facts.Principal, came
 	// from: infopipe, identity_store, translate_name, or derived (the
 	// sAMAccountName@REALM fallback; Facts.UPN is then empty).
-	UPNSource string                      `json:"upn_source,omitempty"`
-	Facts     useridentity.DirectoryFacts `json:"facts"`
+	UPNSource string `json:"upn_source,omitempty"`
+	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
+	// Users.FindByID (Linux): the gateway drops a domain, realm and
+	// principal of its own that name another domain (mergeSpoolFacts).
+	SSSDDomain string `json:"sssd_domain,omitempty"`
+	// AccountDomain is the account's DOMAIN\user namespace (its NetBIOS
+	// domain, macOS), which DirectoryFacts never serializes: profile
+	// matching alone reads it (GAP-0635).
+	AccountDomain string                      `json:"account_domain,omitempty"`
+	Facts         useridentity.DirectoryFacts `json:"facts"`
+	// ConnectorEmails maps "claudecode" and "codex" to the account address
+	// the SYSTEM enumerator read from that connector's file in the
+	// account's own profile, while ai_discovery.include_user_email is on
+	// (Windows). The gateway service cannot read Claude Code's file, which
+	// lives in the profile root (GAP-1025).
+	ConnectorEmails map[string]string `json:"connector_emails,omitempty"`
+}
+
+// identitySpoolClockSlack is how far in the future a record may be dated
+// before the wall clock counts as stepped back.
+const identitySpoolClockSlack = time.Minute
+
+// IdentitySpoolStale reports whether the records in dir look older than
+// fresh to a reader of the wall clock: any record is older than fresh, or
+// dated more than a minute in the future. The gateway trusts a
+// record by its wall-clock age, so after a clock step (an NTP correction, a
+// resume from suspend) every record looked over an hour old, or the records
+// written under a slow clock did once it was corrected, and the accounts
+// assigned by UPN fell to the default profile until the guardian's next
+// interval (GAP-0921). oldest is the time of the oldest record, zero for
+// none, and key its uid or SID.
+func IdentitySpoolStale(dir string, now time.Time, fresh time.Duration) (oldest time.Time, key string, stale bool) {
+	if dir == "" {
+		return time.Time{}, "", false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return time.Time{}, "", false
+	}
+	future := false
+	for _, entry := range entries {
+		name, ok := strings.CutSuffix(entry.Name(), ".json")
+		if entry.IsDir() || !ok {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		written := info.ModTime()
+		if oldest.IsZero() || written.Before(oldest) {
+			oldest, key = written, name
+		}
+		if written.Sub(now) > identitySpoolClockSlack {
+			future = true
+		}
+	}
+	return oldest, key, !oldest.IsZero() && (future || now.Sub(oldest) > fresh)
 }
 
 // IdentitySpoolDir is the spool directory for a guardian authorization
@@ -129,8 +194,80 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 	if !strings.EqualFold(record.Key, key) {
 		return record, errors.New("identity spool record names another account")
 	}
+	for connector, email := range record.ConnectorEmails {
+		if (connector != "claudecode" && connector != "codex") || !useridentity.ValidEmail(email) {
+			return record, errors.New("identity spool record names an invalid connector address")
+		}
+	}
 	record.Facts.Assurance = useridentity.AssuranceVerified
 	return record, nil
+}
+
+// KeepLastKnownUPN carries the UPN of the account's previous record into a
+// fresh record that resolved none, with the principal it gave. Windows
+// resolves a UPN only while the user is signed in, so without it a signed-out
+// account's record fell back to account@REALM and the account showed two
+// principals (GAP-0284). The SID or uid is the record key, so the previous
+// record is the same account.
+func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord {
+	if record.Facts.UPN != "" || previous.Facts.UPN == "" || !strings.EqualFold(record.Key, previous.Key) {
+		return record
+	}
+	record.Facts.UPN = previous.Facts.UPN
+	record.Facts.Principal = previous.Facts.UPN
+	record.UPNSource = previous.UPNSource
+	if record.Facts.Domain == "" {
+		record.Facts.Domain = previous.Facts.Domain
+	}
+	return record
+}
+
+// KeepVerifiedInfoPipeUPN carries the UPN an earlier pass read from SSSD
+// InfoPipe into a fresh record whose InfoPipe answer listed no
+// userPrincipalName. An answer without the attribute is not a verified
+// change: it is what InfoPipe says once the [ifp] user_attributes of
+// sssd.conf lose userPrincipalName (a hand edit, or a repair that rewrites
+// the file). Rewriting the record as derived sent every account a users
+// assignment selects by UPN to the default profile within one guardian pass
+// (GAP-1114). It keeps the UPN only for the same account in the same SSSD
+// domain, and marks it infopipe_kept so status and verify can say why.
+func KeepVerifiedInfoPipeUPN(record, previous IdentitySpoolRecord) (IdentitySpoolRecord, bool) {
+	if record.Facts.UPN != "" || previous.Facts.UPN == "" ||
+		(previous.UPNSource != UPNSourceInfoPipe && previous.UPNSource != UPNSourceInfoPipeKept) ||
+		!strings.EqualFold(record.Key, previous.Key) || record.User == "" || !strings.EqualFold(record.User, previous.User) ||
+		record.SSSDDomain == "" || !strings.EqualFold(record.SSSDDomain, previous.SSSDDomain) {
+		return record, false
+	}
+	record.Facts.UPN = previous.Facts.UPN
+	record.Facts.Principal = previous.Facts.UPN
+	record.Facts.Source = previous.Facts.Source
+	record.UPNSource = UPNSourceInfoPipeKept
+	return record, true
+}
+
+// ReadIdentitySpoolRecords reads at most limit records of dir, in file name
+// order, skipping any that do not parse or that trust refuses.
+func ReadIdentitySpoolRecords(dir string, trust func(path, label string) error, limit int) []IdentitySpoolRecord {
+	if dir == "" || limit <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var records []IdentitySpoolRecord
+	for _, entry := range entries {
+		key, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || entry.IsDir() || !validIdentitySpoolKey(key) {
+			continue
+		}
+		if record, err := ReadIdentitySpoolRecord(dir, key, trust); err == nil {
+			if records = append(records, record); len(records) == limit {
+				break
+			}
+		}
+	}
+	return records
 }
 
 // MarshalIdentitySpoolRecord serializes a record.
@@ -160,86 +297,6 @@ func validIdentitySpoolKey(key string) bool {
 	return true
 }
 
-// RealmEntry is one realm `realm list` reports.
-type RealmEntry struct {
-	Domain         string
-	Realm          string
-	ServerSoftware string
-	ClientSoftware string
-	Configured     string
-}
-
-// ParseRealmList parses `realm list` output: an unindented domain line
-// followed by indented "key: value" lines.
-func ParseRealmList(output string) []RealmEntry {
-	var entries []RealmEntry
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if line[0] != ' ' && line[0] != '\t' {
-			entries = append(entries, RealmEntry{Domain: strings.TrimSpace(line)})
-			continue
-		}
-		if len(entries) == 0 {
-			continue
-		}
-		key, value, found := strings.Cut(strings.TrimSpace(line), ":")
-		if !found {
-			continue
-		}
-		entry := &entries[len(entries)-1]
-		value = strings.TrimSpace(value)
-		switch strings.TrimSpace(key) {
-		case "realm-name":
-			entry.Realm = value
-		case "domain-name":
-			entry.Domain = value
-		case "server-software":
-			entry.ServerSoftware = value
-		case "client-software":
-			entry.ClientSoftware = value
-		case "configured":
-			entry.Configured = value
-		}
-	}
-	return entries
-}
-
-// applyRealm fills the realm, domain and directory of facts from the realm
-// the account's domain belongs to (or the only joined realm).
-func applyRealm(facts *useridentity.DirectoryFacts, realms []RealmEntry) {
-	var match *RealmEntry
-	for i := range realms {
-		if realms[i].Configured == "no" {
-			continue
-		}
-		if facts.Domain != "" && strings.EqualFold(realms[i].Domain, facts.Domain) {
-			match = &realms[i]
-			break
-		}
-		if match == nil {
-			match = &realms[i]
-		}
-	}
-	if match == nil {
-		return
-	}
-	if facts.Domain == "" {
-		facts.Domain = strings.ToLower(match.Domain)
-	}
-	if facts.Realm == "" && match.Realm != "" {
-		facts.Realm = strings.ToUpper(match.Realm)
-	}
-	switch strings.ToLower(match.ServerSoftware) {
-	case "active-directory":
-		facts.Directory = useridentity.DirectoryActiveDirectory
-	case "ipa":
-		facts.Directory = useridentity.DirectoryLDAP
-	}
-}
-
 // writeIdentitySpoolFile replaces dir/name atomically with its final mode
 // and ownership set before the rename.
 func writeIdentitySpoolFile(dir, name string, record IdentitySpoolRecord, setOwnership func(string) error) error {
@@ -247,7 +304,13 @@ func writeIdentitySpoolFile(dir, name string, record IdentitySpoolRecord, setOwn
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".identity-*")
+	return writeSpoolBytes(dir, name, ".identity-*", data, setOwnership)
+}
+
+// writeSpoolBytes replaces dir/name with data atomically, with its final
+// mode and ownership set before the rename.
+func writeSpoolBytes(dir, name, pattern string, data []byte, setOwnership func(string) error) error {
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return err
 	}

@@ -15,6 +15,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,6 +172,18 @@ func TestWindowsSecretRefusals(t *testing.T) {
 	windowsSecretIsElevated = func() bool { return false }
 	if _, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, ""); err == nil || commandExitCode(err) != windowsSecretExitFailure {
 		t.Fatalf("a non-elevated token must be refused, got %v", err)
+	}
+	// GAP-0931: on a managed computer a standard account gets exit 5
+	// elevation_required and the command to ask for, like every other
+	// enterprise refusal there.
+	restoreManaged := managedHostWindowsStandalone
+	t.Cleanup(func() { managedHostWindowsStandalone = restoreManaged })
+	managedHostWindowsStandalone = func() (string, bool) { return `HKLM\` + WindowsEnterpriseMarkerKey, true }
+	_, err := runWindowsSecretCommand(t, "status", enterpriseSecretOptions{}, "")
+	var refusal *managedViewRefusal
+	if err == nil || commandExitCode(err) != 5 || !errors.As(err, &refusal) || refusal.code != "elevation_required" ||
+		!strings.Contains(err.Error(), "enterprise secret status") {
+		t.Fatalf("a standard account on a managed computer: %v (exit %d)", err, commandExitCode(err))
 	}
 }
 

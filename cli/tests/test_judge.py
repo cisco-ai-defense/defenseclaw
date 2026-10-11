@@ -183,7 +183,7 @@ class TestCLIFlagParsing(unittest.TestCase):
             "detection_strategy_completion": "regex_only",
             "detection_strategy_tool_call": "",
             "judge_sweep": True,
-            "rule_pack_dir": "/opt/defenseclaw/policies/strict",
+            "rule_pack": "strict",
         }
         gc = _merge_guardrail(raw, "/tmp/test")
         self.assertEqual(gc.detection_strategy, "judge_first")
@@ -191,7 +191,7 @@ class TestCLIFlagParsing(unittest.TestCase):
         self.assertEqual(gc.detection_strategy_completion, "regex_only")
         self.assertEqual(gc.detection_strategy_tool_call, "")
         self.assertTrue(gc.judge_sweep)
-        self.assertEqual(gc.rule_pack_dir, "/opt/defenseclaw/policies/strict")
+        self.assertEqual(gc.rule_pack, "strict")
 
     def test_guardrail_detection_strategy_defaults(self):
         from defenseclaw.config import _merge_guardrail
@@ -206,7 +206,7 @@ class TestCLIFlagParsing(unittest.TestCase):
         # the reasoning (semantic-only evasions dominate the regex-only
         # false-negative rate). Operators opt out explicitly.
         self.assertTrue(gc.judge_sweep)
-        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(gc.rule_pack, "")
 
     def test_guardrail_full_yaml_roundtrip(self):
         """All guardrail + judge fields survive load→asdict→reload cycle."""
@@ -227,7 +227,7 @@ class TestCLIFlagParsing(unittest.TestCase):
             "detection_strategy": "regex_judge",
             "detection_strategy_prompt": "judge_first",
             "judge_sweep": True,
-            "rule_pack_dir": "/etc/defenseclaw/policies/strict",
+            "rule_pack": "strict",
             "judge": {
                 "enabled": True,
                 "injection": True,
@@ -248,7 +248,7 @@ class TestCLIFlagParsing(unittest.TestCase):
         self.assertEqual(gc2.detection_strategy, "regex_judge")
         self.assertEqual(gc2.detection_strategy_prompt, "judge_first")
         self.assertTrue(gc2.judge_sweep)
-        self.assertEqual(gc2.rule_pack_dir, "/etc/defenseclaw/policies/strict")
+        self.assertEqual(gc2.rule_pack, "strict")
         self.assertFalse(gc2.judge.pii_prompt)
         self.assertFalse(gc2.judge.tool_injection)
         self.assertEqual(gc2.judge.fallbacks, ["anthropic/claude-sonnet-4-20250514"])

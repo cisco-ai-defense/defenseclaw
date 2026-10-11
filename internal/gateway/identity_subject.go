@@ -6,13 +6,16 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -92,7 +95,10 @@ func withVerifiedSubject(ctx context.Context, s VerifiedSubject) context.Context
 // flags by NewSidecar and applyConfigReload.
 var identityFactsEnabled atomic.Bool
 
-func setIdentityFactsEnabled(v bool) { identityFactsEnabled.Store(v) }
+func setIdentityFactsEnabled(v bool) {
+	identityFactsEnabled.Store(v)
+	observability.SetUnicodeUserNames(v)
+}
 
 // identityLookupBlocking makes every request for an account whose directory
 // lookup has not resolved yet wait for it (up to its budget), not only the
@@ -250,8 +256,8 @@ func (id *llmEventIdentity) v8() v8IdentityAttrs {
 	attrs.Directory = v8IdentityEnum(string(dir.Directory),
 		useridentity.DirectoryLocal, useridentity.DirectoryLDAP, useridentity.DirectoryActiveDirectory,
 		useridentity.DirectoryEntraID, useridentity.DirectoryOkta, useridentity.DirectoryOther)
-	attrs.TenantID = v8IdentityToken(dir.TenantID, 128, false)
-	attrs.Source = v8IdentityToken(dir.Source, 64, true)
+	attrs.TenantID = v8IdentityToken(dir.TenantID, 128, false, false)
+	attrs.Source = v8IdentityToken(dir.Source, 64, true, false)
 	// Session kind and client address ride the record's assurance: report
 	// them when they are as trustworthy as the directory facts, or when there
 	// are no directory facts and the record is claimed as a whole.
@@ -262,7 +268,7 @@ func (id *llmEventIdentity) v8() v8IdentityAttrs {
 	if session.Assurance == assurance && assurance != "" {
 		attrs.SessionKind = v8IdentityEnum(string(session.Kind),
 			useridentity.SessionLocal, useridentity.SessionSSH, useridentity.SessionRDP, useridentity.SessionConsole)
-		attrs.ClientAddress = v8IdentityToken(session.ClientAddr, 256, false)
+		attrs.ClientAddress = v8IdentityToken(session.ClientAddr, 256, false, true)
 	}
 	if assurance == useridentity.AssuranceVerified || assurance == useridentity.AssuranceClaimed {
 		if attrs.Principal.IsPresent() || attrs.Domain.IsPresent() || attrs.Directory.IsPresent() ||
@@ -288,10 +294,12 @@ func v8IdentityText(value string, limit int) observability.Optional[string] {
 	return observability.Present(value)
 }
 
-// v8IdentityToken accepts ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ (client.address)
-// or ^[A-Za-z0-9][A-Za-z0-9._-]*$ (tenant), or the source token
+// v8IdentityToken accepts ^(::|[A-Za-z0-9])[A-Za-z0-9._:/-]*$ (client.address,
+// when address is set: a compressed IPv6 address may start with "::", as
+// the loopback ::1 and an IPv4-mapped ::ffff:a.b.c.d do) or
+// ^[A-Za-z0-9][A-Za-z0-9._-]*$ (tenant), or the source token
 // ^[a-z][a-z0-9_]{0,63}$ when lowerSource is set.
-func v8IdentityToken(value string, limit int, lowerSource bool) observability.Optional[string] {
+func v8IdentityToken(value string, limit int, lowerSource, address bool) observability.Optional[string] {
 	value = strings.TrimSpace(value)
 	if value == "" || len(value) > limit {
 		return observability.Absent[string]()
@@ -304,7 +312,7 @@ func v8IdentityToken(value string, limit int, lowerSource bool) observability.Op
 			if !(c >= 'a' && c <= 'z' || i > 0 && (c >= '0' && c <= '9' || c == '_')) {
 				return observability.Absent[string]()
 			}
-		case i == 0 && !alnum:
+		case i == 0 && !alnum && !(address && strings.HasPrefix(value, "::")):
 			return observability.Absent[string]()
 		case !alnum && c != '.' && c != '_' && c != '-' && c != ':' && c != '/':
 			return observability.Absent[string]()
@@ -390,11 +398,38 @@ func applyIdentityPosture(cfg *config.Config) {
 	enabled := !cfg.SecureClientIntegration()
 	setIdentityFactsEnabled(enabled)
 	SetUserPrincipalCollectionEnabled(enabled && cfg.AIDiscovery.IncludeUserPrincipal)
+	// An account of a child AD domain is verified only when
+	// ai_discovery.trusted_ad_child_domains lists its domain (GAP-1255). A
+	// changed list drops the cached facts, so a reload applies it at the
+	// next lookup instead of after the cache lifetime.
+	var trustedChildren []string
+	if enabled {
+		trustedChildren = cfg.AIDiscovery.TrustedADChildDomains
+	}
+	if useridentity.SetTrustedADChildDomains(trustedChildren) {
+		peerDirectoryCache().forgetAll()
+	}
 	spool := ""
 	if enabled && cfg.StandaloneEnterprise() {
 		spool = enterprisehooks.IdentitySpoolDir(managed.HookGuardianAuthorizationDir(cfg.DataDir))
 	}
 	setIdentitySpoolDir(spool)
+	// A managed Windows scan takes each profile owner's Claude Code and
+	// Codex address from the owner's identity record, which the SYSTEM
+	// enumerator writes (GAP-1025).
+	if spool != "" && runtime.GOOS == "windows" {
+		inventory.SetOwnerEmailLookup(identitySpoolConnectorEmail)
+	} else {
+		inventory.SetOwnerEmailLookup(nil)
+	}
+	// A managed gateway keeps the last home of each uid across restarts, so
+	// one that starts during a directory outage keeps the agent identities
+	// (GAP-0314). Secure Client persists nothing new.
+	homes := ""
+	if enabled && managed.IsManagedEnterprise(cfg.DeploymentMode) && strings.TrimSpace(cfg.DataDir) != "" {
+		homes = filepath.Join(cfg.DataDir, "managed_peer_homes.json")
+	}
+	setManagedHookPeerHomeStore(homes)
 	blocking := false
 	for _, assignment := range cfg.Guardrail.ProfileAssignments {
 		if len(assignment.Match.Groups) > 0 || len(assignment.Match.Users) > 0 {

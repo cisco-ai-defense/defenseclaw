@@ -88,6 +88,20 @@ The 239 enabled balanced/default rules are generated from
 The generated Go catalog is checked against the YAML in CI. Edit the YAML
 sources, not `internal/gateway/rules_catalog_generated.go`.
 
+### Download piped into a shell
+
+`CMD-PIPE-CURL` is off in the default and permissive profiles, so a command such
+as `curl ... | bash` is not recorded as a finding there. Many legitimate
+installers use that pattern. The strict profile enables the rule at `CRITICAL`.
+`wget ... | sh` (`CMD-PIPE-WGET`) and PowerShell `iwr ... | iex`
+(`CMD-WIN-IWR-IEX`) are still reported in every profile.
+
+To get the finding for `curl` pipelines, switch to the strict pack with
+`defenseclaw guardrail use-pack strict`, or add your own rule in a pack of your
+own. [Authoring CEL rules](/docs/policies/cel/authoring) shows the rule format,
+and [Rules and custom packs](/docs/policies/rules#add-your-own-pack) shows how to
+activate it.
+
 ## ActionFacts
 
 ActionFacts is the typed, bounded representation of one tool action. It parses
@@ -371,8 +385,9 @@ operator-owned policy directory. `guardrail protection enable` adds the pack's
 name to `guardrail.rules.protections` for the scope (global, one connector, or a
 profile with `--profile`). The gateway layers the pack's rules on the scope's
 rule pack in memory, replacing base rules with the same ID, and writes no
-directory to disk. `guardrail protection disable NAME` takes it out again and
-`guardrail protection list` shows which scope has which pack on. The staged SSH
+directory to disk. `guardrail protection disable NAME` takes it out of that
+scope. If a wider scope enables the pack, disable it there; a narrower scope
+cannot turn it off. `guardrail protection list` shows which scope has which pack on. The staged SSH
 contract is refused. None of this adds another value to `defenseclaw setup guardrail
 --rule-pack`, which accepts only `default`, `permissive`, and `strict`. For a
 Policy Creator export, validate the pack, review the declared trust boundary,
@@ -404,8 +419,8 @@ data-exfiltration category. See [Layer 3 — LLM judge](/docs/policies#layer-3--
 
 ### OPA/Rego
 
-OPA/Rego owns admission, firewall, audit, skill-action, and final
-guardrail policy-domain decisions. It does not replace ActionFacts/CEL parsing;
+OPA/Rego owns admission and final guardrail policy-domain
+decisions. It does not replace ActionFacts/CEL parsing;
 instead, it maps accepted findings and deployment context to policy outcomes.
 
 ## Source of truth and validation

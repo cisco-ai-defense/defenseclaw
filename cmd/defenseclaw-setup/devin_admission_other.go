@@ -7,6 +7,4 @@ package main
 
 import "errors"
 
-const devinPinnedCLIVersion = "3000.4.25"
-
 func verifyDevinExecutableAdmission(string) error { return errors.New("windows-only operation") }

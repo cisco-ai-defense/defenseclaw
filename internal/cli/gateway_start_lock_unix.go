@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const hookColdStartSupported = true
+func hookColdStartSupported() bool { return true }
 
 // acquireGatewayStartLock takes the per-data-directory start lock so a hook
 // cold start, a manual start and a restart cannot launch two gateways at

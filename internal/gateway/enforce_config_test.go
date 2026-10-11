@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,7 +31,9 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"gopkg.in/yaml.v3"
 )
 
 // enforceTestAPI is an APIServer over a temp config.yaml holding body, with
@@ -92,10 +95,80 @@ func TestEnforceBlockWritesAssetPolicy(t *testing.T) {
 		t.Fatalf("GET /enforce/allowed = %v %s", err, w.Body.String())
 	}
 
+	// Skill names match case-insensitively, so an unblock in another case
+	// removes the rule that still blocked it (GAP-0319).
+	cased, casedRecorded := enforceTestAPI(t, "asset_policy:\n  skill:\n    denied:\n      - {name: MySkill}\n")
+	if code, out := enforceRequest(t, cased.handleEnforceBlock, http.MethodDelete, `{"target_type":"skill","target_name":"myskill"}`); code != http.StatusOK ||
+		!reflect.DeepEqual(*casedRecorded, []configwrite.Change{{Path: "asset_policy.skill.denied", Value: []map[string]any{}}}) {
+		t.Fatalf("unblock in another case = %d %v %#v", code, out, *casedRecorded)
+	}
+
 	*recorded = nil
-	code, _ = enforceRequest(t, api.handleEnforceBlock, http.MethodDelete, `{"target_type":"skill","target_name":"s1"}`)
-	if code != http.StatusOK || !reflect.DeepEqual(*recorded, []configwrite.Change{{Path: "asset_policy.skill.denied", Value: []map[string]any{}}}) {
-		t.Fatalf("unblock = %d %#v", code, *recorded)
+	// A reload the gateway refused is reported, not the old digest.
+	api.configReloader = func(context.Context, string) error { return errors.New("requires gateway restart for: data_dir") }
+	code, out = enforceRequest(t, api.handleEnforceBlock, http.MethodDelete, `{"target_type":"skill","target_name":"s1"}`)
+	if code != http.StatusOK || !reflect.DeepEqual(*recorded, []configwrite.Change{{Path: "asset_policy.skill.denied", Value: []map[string]any{}}}) ||
+		out["applied"] != false || out["effective_policy_digest"] != nil {
+		t.Fatalf("unblock = %d %v %#v", code, out, *recorded)
+	}
+}
+
+// A watcher block belongs to the connector that owns the scanned copy.
+func TestEnforceUnblockClearsConnectorWatcherBlock(t *testing.T) {
+	api, _ := enforceTestAPI(t, "asset_policy:\n  skill:\n    denied:\n      - {name: shared-skill, connector: codex}\n")
+	for _, connector := range []string{"", "codex", "claudecode"} {
+		if err := api.store.SetActionFieldForConnector("skill", "shared-skill", connector, "install", "block", "watcher"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := api.store.SetActionFieldForConnector("skill", "shared-skill", "codex", "runtime", "disable", "watcher"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := enforceRequest(t, api.handleEnforceBlock, http.MethodDelete,
+		`{"target_type":"skill","target_name":"shared-skill","connector":"codex"}`)
+	if code != http.StatusOK || out["status"] != "unblocked" {
+		t.Fatalf("unblock = %d %v", code, out)
+	}
+	codex, err := api.store.GetActionForConnector("skill", "shared-skill", "codex")
+	if err != nil || codex == nil || codex.Actions.Install != "" || codex.Actions.Runtime != "disable" {
+		t.Fatalf("codex journal = %+v, %v; want install cleared and runtime retained", codex, err)
+	}
+	global, err := api.store.GetAction("skill", "shared-skill")
+	if err != nil || global != nil && global.Actions.Install != "" {
+		t.Fatalf("older global journal = %+v, %v; want install cleared", global, err)
+	}
+	claude, err := api.store.GetActionForConnector("skill", "shared-skill", "claudecode")
+	if err != nil || claude == nil || claude.Actions.Install != "block" {
+		t.Fatalf("other connector journal = %+v, %v; want install block retained", claude, err)
+	}
+}
+
+func TestEnforceAllowWriterFailureDoesNotEnableRuntime(t *testing.T) {
+	received := make(chan receivedRequest, 1)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	api, _ := enforceTestAPI(t, "{}\n")
+	api.client = connectToMockGW(t, srv)
+	api.configApply = func(context.Context, string, []configwrite.Change, configwrite.Options) (configwrite.Result, error) {
+		return configwrite.Result{}, errors.New("writer rejected edit")
+	}
+	pe := enforce.NewPolicyEngine(api.store)
+	if err := pe.Disable("skill", "blocked-skill", "runtime blocked"); err != nil {
+		t.Fatal(err)
+	}
+
+	code, _ := enforceRequest(t, api.handleEnforceAllow, http.MethodPost, `{"target_type":"skill","target_name":"blocked-skill"}`)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("allow status = %d, want 500", code)
+	}
+	select {
+	case rpc := <-received:
+		t.Fatalf("runtime enabled before config edit: %s", rpc.Method)
+	default:
+	}
+	disabled, err := api.store.HasAction("skill", "blocked-skill", "runtime", "disable")
+	if err != nil || !disabled {
+		t.Fatalf("runtime journal disabled = %t, %v; want true", disabled, err)
 	}
 }
 
@@ -121,4 +194,89 @@ func TestEnforceRefusedOnManagedStandalone(t *testing.T) {
 		}
 	}
 	t.Fatalf("no refused api-enforce-allow audit event in %d events", len(events))
+}
+
+// A URL-only rule is listed under its URL and must be removable by that key.
+func TestEnforceUnblockListedURLRule(t *testing.T) {
+	url := "https://example.invalid/mcp"
+	api, recorded := enforceTestAPI(t, "asset_policy:\n  mcp:\n    denied:\n      - {url: https://example.invalid/mcp, reason: blocked}\n")
+	api.scannerCfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: url, Reason: "blocked"}}
+
+	w := httptest.NewRecorder()
+	api.handleEnforceBlocked(w, httptest.NewRequest(http.MethodGet, "/enforce/blocked", nil))
+	var entries []enforcementEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil || len(entries) != 1 {
+		t.Fatalf("listed rules = %v %s", err, w.Body.String())
+	}
+	code, out := enforceRequest(t, api.handleEnforceBlock, http.MethodDelete,
+		`{"target_type":"mcp","target_name":"`+entries[0].TargetName+`"}`)
+	want := []configwrite.Change{{Path: "asset_policy.mcp.denied", Value: []map[string]any{}}}
+	if code != http.StatusOK || !reflect.DeepEqual(*recorded, want) {
+		t.Fatalf("unblock = %d %v, changes %#v; want %#v", code, out, *recorded, want)
+	}
+}
+
+// A listed URL is a selector, not the MCP server name.
+func TestEnforceBlockListedMCPURLKeepsSelector(t *testing.T) {
+	url := "https://example.invalid/mcp"
+	api, recorded := enforceTestAPI(t, "asset_policy:\n  mcp:\n    allowed:\n      - {url: https://example.invalid/mcp}\n")
+	api.scannerCfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{URL: url}}
+	w := httptest.NewRecorder()
+	api.handleEnforceAllowed(w, httptest.NewRequest(http.MethodGet, "/enforce/allowed", nil))
+	var entries []enforcementEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil || len(entries) != 1 {
+		t.Fatalf("listed rules = %v %s", err, w.Body.String())
+	}
+	code, out := enforceRequest(t, api.handleEnforceBlock, http.MethodPost,
+		`{"target_type":"mcp","target_name":"`+entries[0].TargetName+`"}`)
+	if code != http.StatusOK || out["status"] != "blocked" {
+		t.Fatalf("block = %d %v", code, out)
+	}
+	raw, err := yaml.Marshal((*recorded)[0].Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rules []config.AssetPolicyRule
+	if err := yaml.Unmarshal(raw, &rules); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Denied = rules
+	verdict, _ := cfg.AssetListDecision(config.AssetPolicyInput{TargetType: "mcp", Name: "notes", URL: url})
+	if verdict != config.AssetListDeny || len(rules) != 1 || rules[0].Name != "" || rules[0].URL != url {
+		t.Fatalf("denied=%+v verdict=%q, want URL-only deny", rules, verdict)
+	}
+}
+
+// A listed deny URL must become an allow for that URL, independent of name.
+func TestEnforceAllowListedMCPURLKeepsSelector(t *testing.T) {
+	url := "https://example.invalid/mcp"
+	api, recorded := enforceTestAPI(t, "asset_policy:\n  mcp:\n    denied:\n      - {url: https://example.invalid/mcp}\n")
+	api.scannerCfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: url}}
+	w := httptest.NewRecorder()
+	api.handleEnforceBlocked(w, httptest.NewRequest(http.MethodGet, "/enforce/blocked", nil))
+	var entries []enforcementEntry
+	if err := json.Unmarshal(w.Body.Bytes(), &entries); err != nil || len(entries) != 1 {
+		t.Fatalf("listed rules = %v %s", err, w.Body.String())
+	}
+	code, out := enforceRequest(t, api.handleEnforceAllow, http.MethodPost,
+		`{"target_type":"mcp","target_name":"`+entries[0].TargetName+`"}`)
+	if code != http.StatusOK || out["status"] != "allowed" {
+		t.Fatalf("allow = %d %v", code, out)
+	}
+	raw, err := yaml.Marshal((*recorded)[1].Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rules []config.AssetPolicyRule
+	if err := yaml.Unmarshal(raw, &rules); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Default = "deny"
+	cfg.AssetPolicy.MCP.Allowed = rules
+	verdict, _ := cfg.AssetListDecision(config.AssetPolicyInput{TargetType: "mcp", Name: "notes", URL: url})
+	if verdict != config.AssetListAllow || len(rules) != 1 || rules[0].Name != "" || rules[0].URL != url {
+		t.Fatalf("allowed=%+v verdict=%q, want URL-only allow", rules, verdict)
+	}
 }

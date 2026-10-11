@@ -11,7 +11,7 @@ keywords:
   - first-party allow list
 ---
 
-DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, or `block`—for guardrail events. Connector adapters then map that action onto the host's actual response vocabulary, such as allow/ask/deny. Admission, firewall, and asset-policy evaluations have their own domain-specific outputs.
+DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, or `block`—for guardrail events. Connector adapters then map that action onto the host's actual response vocabulary, such as allow/ask/deny. Admission and asset-policy evaluations have their own domain-specific outputs.
 
 <DefenseClawDemo scenario="policy-decision-trace" />
 
@@ -104,7 +104,7 @@ patterns such as the lethal trifecta. Separately, fixed ordered tool-call
 chains join exact authenticated hook events before the verdict; only an
 enforcement-safe synchronous pre-tool final step can deny, and only when the
 active profile maps the chain's severity to `block`. OPA/Rego continues to
-power admission, firewall, audit, and direct guardrail-policy evaluation.
+power admission and direct guardrail-policy evaluation.
 
 ## Layer 1 — Admission policy and the OPA engine
 
@@ -233,7 +233,7 @@ What activation copies, and where it goes:
 
 The preset's `hilt`, `patterns`, `severity_mappings`, `firewall`, `enforcement` and `audit` sections are not copied: HITL has its own command ([HITL](/docs/hitl)), and the rule pack carries the patterns. Activation **replaces the whole `admission:` section**, so re-apply any hand-tuned admission entries afterwards, or edit the live policy with `defenseclaw policy edit` or `defenseclaw config set` instead of activating again. The `admission` keys are described on the [admission policy](/docs/policies/admission) page.
 
-The running gateway applies the new policy without a restart. If the preset also changes `watch` or `cisco_ai_defense` settings, `policy activate` restarts the gateway itself.
+The running gateway applies the new policy without a restart, `watch` and `cisco_ai_defense` settings included. Only a preset that changes a key the gateway reads at start (a listener, `guardrail.enabled`, `guardrail.scanner_mode`) makes `policy activate` restart it. On a Secure Client computer `policy activate` still restarts the gateway when the preset changes `watch` or `cisco_ai_defense`.
 
 `config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input. There is no `data.json` since `config_version: 9`; a leftover one is ignored and reported by `defenseclaw doctor`. Each package exposes domain-specific results rather than one universal decision object:
 
@@ -241,10 +241,8 @@ The running gateway applies the new policy without a restart. If the preset also
 | --- | --- |
 | `defenseclaw.admission` | `verdict`, `reason` |
 | `defenseclaw.guardrail` | `action`, `severity`, `reason`, `scanner_sources` |
-| `defenseclaw.firewall` | `action`, `rule_name` |
-| `defenseclaw.audit` | `retain`, `retain_reason`, `export_to` |
 
-You can hand-edit the Rego — the engine is just OPA — but most operators stay in `config.yaml` because the bundled Rego covers the common cases.
+You can hand-edit the Rego — the engine is just OPA — but most operators stay in `config.yaml` because the bundled Rego covers the common cases. An upgrade replaces the shipped `admission.rego` and `guardrail.rego` and saves your edited copy in `~/.defenseclaw/backups/rego-<time>/`, so keep your own rules in a file of another name in `policies/rego` ([Shipped policy files](/docs/get-started/upgrade#shipped-policy-files)).
 
 ### How the engine evaluates
 
@@ -316,7 +314,7 @@ defenseclaw guardrail use-pack strict --connector codex  # one connector
 defenseclaw guardrail list-packs                         # presets, custom packs, and who uses which
 ```
 
-`use-pack` accepts a bundled profile (`default`, `strict`, `permissive`), the name of a pack under `~/.defenseclaw/policies/guardrail/`, or a directory path. It writes `guardrail.rule_pack`; a custom directory is also pinned in `guardrail.custom_packs` by its content digest, and a pin that no connector or profile selects after the switch is removed. A global switch removes per-connector overrides; `--clear --connector X` returns one connector to the global pack. `defenseclaw setup guardrail --rule-pack` still works at setup time. See [Authoring custom rule packs](#authoring-custom-rule-packs) below for the custom-pack workflow, and [Rules and custom packs](/docs/policies/rules) for `guardrail.rules`, which turns rules off, changes severities and adds suppressions without copying a pack.
+`use-pack` accepts a bundled profile (`default`, `strict`, `permissive`), a key of `guardrail.custom_packs` you already registered, the name of a pack under `~/.defenseclaw/policies/guardrail/`, or a directory path. It writes `guardrail.rule_pack`; a custom directory is also pinned in `guardrail.custom_packs` by its content digest, and a registered key keeps its pinned digest (an edited pack is refused until you pin the new digest with `defenseclaw config set guardrail.custom_packs.NAME.digest`). A pin that no connector or profile selects after the switch is removed. A global switch removes per-connector overrides; `--clear --connector X` returns one connector to the global pack. `defenseclaw setup guardrail --rule-pack` still works at setup time. See [Authoring custom rule packs](#authoring-custom-rule-packs) below for the custom-pack workflow, and [Rules and custom packs](/docs/policies/rules) for `guardrail.rules`, which turns rules off, changes severities and adds suppressions without copying a pack.
 
 ### Rule shape
 

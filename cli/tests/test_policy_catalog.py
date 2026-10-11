@@ -19,6 +19,8 @@ import pytest
 from defenseclaw import policy_catalog as pc
 from defenseclaw.config import PerConnectorGuardrailConfig, default_config
 
+from tests.helpers import select_pack
+
 
 @pytest.fixture
 def policy_dir(tmp_path: Path) -> Path:
@@ -77,7 +79,20 @@ def test_active_policy_is_the_preset_the_config_holds(policy_dir: Path) -> None:
     strict = pc.load_policy_yaml(pc.policy_file("strict", policy_dir))
     cfg.admission = _admission_from_policy(strict)
     _apply_policy_guardrail(cfg, strict)
+    # `policy activate` also writes the preset watch settings.
+    cfg.watch.rescan_enabled = strict["watch"]["rescan_enabled"]
+    cfg.watch.rescan_interval_min = strict["watch"]["rescan_interval_min"]
     assert [p.name for p in pc.list_named_policies(policy_dir, cfg) if p.active] == ["strict"]
+    # GAP-0903: the v8 -> v9 migration spells the same preset as per-type
+    # shorthand and leaves built-in-equal values unset; it is still strict.
+    from defenseclaw.config import AdmissionConfig
+
+    migrated = AdmissionConfig()
+    migrated.defaults.allow_list_bypass_scan = False
+    migrated.skill.actions = {"critical": "quarantine", "high": "quarantine", "medium": "quarantine",
+                              "low": "warn", "info": "warn"}
+    cfg.admission = migrated
+    assert pc.active_policy_name(policy_dir, cfg) == "strict"
     cfg.guardrail.block_at = "LOW"
     assert pc.active_policy_name(policy_dir, cfg) == ""
 
@@ -138,10 +153,10 @@ def _cfg(tmp_path: Path, *, connectors: dict[str, str] | None = None, global_dir
     cfg = default_config()
     cfg.data_dir = str(tmp_path)
     cfg.policy_dir = str(tmp_path / "policies")
-    cfg.guardrail.rule_pack_dir = global_dir
-    cfg.guardrail.connectors = {
-        name: PerConnectorGuardrailConfig(rule_pack_dir=path) for name, path in (connectors or {}).items()
-    }
+    select_pack(cfg, cfg.guardrail, global_dir)
+    cfg.guardrail.connectors = {name: PerConnectorGuardrailConfig() for name in (connectors or {})}
+    for name, path in (connectors or {}).items():
+        select_pack(cfg, cfg.guardrail.connectors[name], path)
     return cfg
 
 

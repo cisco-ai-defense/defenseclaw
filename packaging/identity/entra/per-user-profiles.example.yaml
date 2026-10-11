@@ -1,0 +1,31 @@
+# Guardrail profiles for a per-user DefenseClaw install on a computer where users sign
+# in with Microsoft Entra ID: an Entra-joined Windows computer, or an Azure Linux VM
+# with Entra SSH sign-in (the aad module).
+#
+# Merge the guardrail: and ai_discovery: keys into the user's own config:
+#   Windows  %USERPROFILE%\.defenseclaw\config.yaml
+#   Linux    ~/.defenseclaw/config.yaml
+# then run:  defenseclaw config validate
+#            defenseclaw guardrail profile explain --connector claudecode
+#
+# A per-user install has no group list on Windows and the aad module gives no Entra
+# groups on Linux, so only users: assignments can match here. Name the user by UPN.
+#
+# The user owns this file and can edit it. To enforce a policy the user cannot change,
+# use the standalone enterprise profile (admin-config.windows.example.yaml).
+ai_discovery:
+  include_user_principal: true   # put the UPN in records; off by default
+guardrail:
+  profiles:
+    strict:
+      description: Everyone who matches nothing else
+      mode: action
+      block_at: MEDIUM
+    ml-team:
+      description: The ML team stays in observe mode
+      mode: observe
+  profile_assignments:
+    - profile: ml-team
+      match:
+        users: ["alice@contoso.onmicrosoft.com"]
+  default_profile: strict

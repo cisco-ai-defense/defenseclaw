@@ -104,6 +104,8 @@ func TestGuardrailRuntimeActionPerConnectorPosture(t *testing.T) {
 // block message (per-connector override → global) replaces the user-facing
 // reason on block verdicts only, while non-block actions, the no-config case,
 // and the no-message case pass the original verdict reason through unchanged.
+// A block after the tool ran says so instead of claiming the call was stopped
+// (GAP-1344).
 func TestResolveHookBlockReason(t *testing.T) {
 	gc := &config.GuardrailConfig{BlockMessage: "global msg"}
 	gc.Connectors = map[string]config.PerConnectorGuardrailConfig{
@@ -117,24 +119,42 @@ func TestResolveHookBlockReason(t *testing.T) {
 		action    string
 		reason    string
 		want      string
+		event     string
 	}{
-		{"per-connector override on block", gc, "codex", "block", "rule X matched", "codex msg"},
-		{"global block message when no override", gc, "claudecode", "block", "rule Y matched", "global msg"},
-		{"empty connector uses global", gc, "", "block", "rule Z", "global msg"},
-		{"non-block action keeps verdict reason", gc, "codex", "confirm", "needs approval", "needs approval"},
-		{"alert keeps verdict reason", gc, "codex", "alert", "flagged", "flagged"},
-		{"nil config passes reason through", nil, "codex", "block", "rule X", "rule X"},
+		{"per-connector override on block", gc, "codex", "block", "rule X matched", "codex msg", ""},
+		{"global block message when no override", gc, "claudecode", "block", "rule Y matched", "global msg", ""},
+		{"empty connector uses global", gc, "", "block", "rule Z", "global msg", ""},
+		{"non-block action keeps verdict reason", gc, "codex", "confirm", "needs approval", "needs approval", ""},
+		{"alert keeps verdict reason", gc, "codex", "alert", "flagged", "flagged", ""},
+		{"nil config passes reason through", nil, "codex", "block", "rule X", "rule X", ""},
 		{
 			"no configured message keeps verdict reason",
-			&config.GuardrailConfig{}, "codex", "block", "rule X", "rule X",
+			&config.GuardrailConfig{}, "codex", "block", "rule X", "rule X", "",
 		},
+		{
+			"PreToolUse block keeps the block message", gc, "codex", "block", "matched: CERT-1", "codex msg",
+			"PreToolUse",
+		},
+		{
+			"PostToolUse block after an allowed call", gc, "codex", "block", "matched: CERT-1",
+			"DefenseClaw flagged the result of this tool call after it ran (rule CERT-1). " +
+				"The call itself was not stopped; check what it did.", "PostToolUse",
+		},
+		{
+			"PostToolBatch block without a block message", &config.GuardrailConfig{}, "claudecode", "block", "x",
+			"DefenseClaw flagged the result of this tool call after it ran (rule CERT-1). " +
+				"The call itself was not stopped; check what it did.", "PostToolBatch",
+		},
+		{"PostToolUse alert keeps the verdict reason", gc, "codex", "alert", "flagged", "flagged", "PostToolUse"},
 	}
 	for _, tc := range cases {
 		var cfg *config.Config
 		if tc.gc != nil {
 			cfg = &config.Config{Guardrail: *tc.gc}
 		}
-		if got, _ := resolveHookBlockReasonForConfig(cfg, tc.connector, tc.action, tc.reason, redaction.SinkPolicyDefault); got != tc.want {
+		got, _ := resolveHookBlockReasonForConfig(cfg, tc.connector, tc.event, tc.action, tc.reason,
+			[]string{"CERT-1"}, redaction.SinkPolicyDefault)
+		if got != tc.want {
 			t.Errorf("%s: resolveHookBlockReasonForConfig(%q,%q,%q)=%q want %q",
 				tc.name, tc.connector, tc.action, tc.reason, got, tc.want)
 		}

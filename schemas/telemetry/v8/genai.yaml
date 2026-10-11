@@ -784,6 +784,8 @@ attributes:
   cardinality: high
   normalization:
     id: identifier-v1
+    overrides:
+      pattern: '^([A-Za-z0-9]|[^\x00-\x7f])([A-Za-z0-9._:/@-]|[^\x00-\x7f])*$'
     notes: NFC bounded
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.user.email
@@ -928,6 +930,23 @@ attributes:
       - verified
       - claimed
     notes: verified only when the gateway or root enumerator resolved the facts for a kernel- or credential-verified uid or SID; anything the hook reports is claimed
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.enrollment
+  type: string
+  brief: How the enterprise enrollment rules treat the account a hook call came from
+  examples:
+  - exempt
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - exempt
+    notes: exempt for an account enterprise.enrollment.exempt_users lists (allowed and inspected, not enrolled); absent for every other account
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.user.group_count
   type: int64
@@ -2871,6 +2890,8 @@ groups:
   - correlation.model.identity
   - correlation.tool.identity
   - cost.agent.reported
+  - correlation.identity
+  - correlation.sandbox
   attributes: []
   body_fields:
   - ref: defenseclaw.agent.lifecycle.event
@@ -2892,6 +2913,8 @@ groups:
   - content.input
   - content.output
   - genai.model
+  - correlation.identity
+  - correlation.sandbox
   attributes: []
   body_fields:
   - ref: defenseclaw.telemetry.input.reported
@@ -2909,6 +2932,7 @@ groups:
   - correlation.interaction
   - correlation.agent
   - correlation.identity
+  - correlation.sandbox
   - genai.tool
   attributes: []
   body_fields:
@@ -5081,7 +5105,9 @@ attribute_extensions:
   cardinality: high
   normalization:
     id: identifier-v1
-    notes: remote address of the login session (for example the SSH client); never a metric label
+    overrides:
+      pattern: '^(::|[A-Za-z0-9])[A-Za-z0-9._:/-]*$'
+    notes: remote address of the login session (for example the SSH client); an IPv6 address can start with a double colon (loopback, IPv4-mapped); never a metric label
 - ref: db.collection.name
   field_class: identifier
   sensitivity: sensitive

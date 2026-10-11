@@ -18,7 +18,7 @@
 
 Checks the latest release at most once a day and stays silent unless both
 stdout and stderr are terminals. Disabled by ``DEFENSECLAW_NO_UPDATE_CHECK=1``,
-by ``CI``, by ``update_check: false`` in config.yaml, on Windows by the
+by ``CI``, by ``update.check: false`` in config.yaml, on Windows by the
 ``DisableSelfUpdate`` enterprise policy that also stops install.ps1, and on
 any computer whose DefenseClaw is managed by the organization, where
 ``defenseclaw upgrade`` always refuses. Never raises.

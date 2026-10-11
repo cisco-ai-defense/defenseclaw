@@ -37,10 +37,16 @@ func EvaluateAdmissionFallback(input AdmissionInput) *AdmissionOutput {
 		return noScan
 	}
 	allowListed := listMatches(input.AllowList, input)
-	bypass := allowListed || (adm != nil && adm.AllowListBypassScan && firstPartyMatches(adm.FirstPartyAllowList, input))
-	if bypass {
+	firstPartyReason, firstPartyListed := "", false
+	if adm != nil && adm.AllowListBypassScan {
+		firstPartyReason, firstPartyListed = firstPartyMatch(adm.FirstPartyAllowList, input)
+	}
+	if allowListed || firstPartyListed {
 		noScan.Verdict = "allowed"
 		noScan.Reason = fmt.Sprintf("%s '%s' is on the allow list — scan skipped", input.TargetType, input.TargetName)
+		if !allowListed && firstPartyReason != "" {
+			noScan.Reason = firstPartyReason
+		}
 		return noScan
 	}
 
@@ -82,7 +88,7 @@ func EvaluateAdmissionFallback(input AdmissionInput) *AdmissionOutput {
 	action := effectiveAction(adm, scan)
 	out := &AdmissionOutput{FileAction: action.File, InstallAction: action.Install, RuntimeAction: action.Runtime}
 	switch {
-	case action.Runtime == "block" || action.Install == "block":
+	case action.Runtime == "block" || action.Install == "block" || action.File == "quarantine":
 		out.Verdict = "rejected"
 		out.Reason = fmt.Sprintf("max severity %s triggers block per policy", scan.MaxSeverity)
 	case action.Verdict == "allowed":
@@ -130,18 +136,18 @@ func listMatches(entries []ListEntry, input AdmissionInput) bool {
 	return false
 }
 
-func firstPartyMatches(entries []CompiledFirstParty, input AdmissionInput) bool {
+func firstPartyMatch(entries []CompiledFirstParty, input AdmissionInput) (string, bool) {
 	for _, entry := range entries {
 		if entry.Name != input.TargetName {
 			continue
 		}
 		for _, marker := range entry.SourcePathContains {
 			if config.PathHasComponents(input.Path, marker) {
-				return true
+				return entry.Reason, true
 			}
 		}
 	}
-	return false
+	return "", false
 }
 
 func coalesceAction(value, fallback string) string {

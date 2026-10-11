@@ -138,10 +138,15 @@ func TestRecheckEndsTunnelsThePolicyNoLongerAllows(t *testing.T) {
 			t.Errorf("closed event = %+v, want terminated with the recheck's reason", e)
 		}
 	}
+	// A tunnel stays tracked until its handler has reported it closed, a
+	// moment after Recheck closes its connections.
+	eventually(t, "the ended tunnels to be untracked", func() bool { return h.proxy.activeTunnels() == 2 })
 	var open []string
-	for _, tn := range h.proxy.Tunnels() {
-		open = append(open, tn.BindingID+" "+tn.Host)
+	h.proxy.mu.Lock()
+	for tn := range h.proxy.tunnels {
+		open = append(open, tn.principal.BindingID+" "+tn.dec.Host)
 	}
+	h.proxy.mu.Unlock()
 	slices.Sort(open)
 	if !slices.Equal(open, []string{"b-a api.example.net", "binding-one example.com"}) || h.proxy.Recheck("") != 0 {
 		t.Errorf("open tunnels after the recheck = %q", open)
@@ -268,7 +273,7 @@ func TestRecheckEndsInFlightForwardedRequests(t *testing.T) {
 			if r := <-streamed; r.err == nil || r.body != "first chunk" {
 				t.Errorf("streamed response = %d %q, %v; want it cut after the first chunk", r.status, r.body, r.err)
 			}
-			eventually(t, "both requests to finish", func() bool { return len(h.proxy.Tunnels()) == 0 })
+			eventually(t, "both requests to finish", func() bool { return h.proxy.activeTunnels() == 0 })
 			if e := h.sink.wait(t, EventClosed, 1)[0]; !e.Terminated {
 				t.Errorf("closed event of the streamed response = %+v, want terminated", e)
 			}

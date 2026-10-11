@@ -99,6 +99,9 @@ type DirectoryFacts struct {
 	// Domain is the account's domain in lower case, by its DNS name where
 	// the OS knows it, else its NetBIOS name (defenseclaw.user.domain).
 	Domain string `json:"domain,omitempty"`
+	// AccountDomain is the verified account namespace (NetBIOS or local
+	// computer name). It is only used for profile matching, never emitted.
+	AccountDomain string `json:"-"`
 	// Realm is the Kerberos realm, usually the upper-case DNS domain.
 	Realm string `json:"realm,omitempty"`
 	// Directory is the directory that owns the account.
@@ -109,6 +112,12 @@ type DirectoryFacts struct {
 	// Groups are the account's group identifiers (SIDs on Windows, group
 	// names or gids elsewhere). Telemetry carries only their count.
 	Groups []string `json:"groups,omitempty"`
+	// GroupsPartial marks Windows group membership as unknown because the
+	// SYSTEM enumerator found no active desktop session. Older spool records
+	// can still contain last-session groups; profile matching must ignore them.
+	// The gateway refreshes these facts soon and uses the default profile
+	// for group-dependent decisions (GAP-0243).
+	GroupsPartial bool `json:"groups_partial,omitempty"`
 	// Source is the OS facility that resolved these facts, one of the
 	// Source* constants (defenseclaw.user.identity.source).
 	Source string `json:"source,omitempty"`

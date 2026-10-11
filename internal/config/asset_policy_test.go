@@ -10,7 +10,31 @@
 
 package config
 
-import "testing"
+import (
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+)
+
+func TestAssetPolicyLoaderRejectsAliasDuplicateConnectors(t *testing.T) {
+	raw := []byte(`config_version: 9
+asset_policy:
+  enabled: true
+  skill:
+    default: deny
+  connectors:
+    open-hands:
+      mode: action
+    open_hands:
+      mode: observe
+`)
+	_, err := LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), raw)
+	if err == nil || !strings.Contains(err.Error(), "asset_policy.connectors") ||
+		!strings.Contains(err.Error(), "same connector") {
+		t.Fatalf("duplicate connector alias load error = %v", err)
+	}
+}
 
 func TestEvaluateAssetPolicyDisabledAllows(t *testing.T) {
 	cfg := &Config{}
@@ -84,6 +108,19 @@ func TestAssetPolicyListsMatchConnectorAliases(t *testing.T) {
 	}
 	if verdict, _ := cfg.AssetListDecision(AssetPolicyInput{TargetType: "skill", Name: "evil", Connector: "claudecode"}); verdict != AssetListDeny {
 		t.Fatalf("AssetListDecision = %q, want %q", verdict, AssetListDeny)
+	}
+}
+
+// GAP-0432: a rule in the composed (NFC) spelling of a name matches the
+// decomposed (NFD) spelling of the same visible name, and the reverse.
+func TestAssetListDecisionMatchesNamesAfterNFC(t *testing.T) {
+	const composed, decomposed = "epa-caf\u00e9", "epa-cafe\u0301"
+	for _, tc := range []struct{ rule, name string }{{composed, decomposed}, {decomposed, composed}} {
+		cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+		cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: tc.rule}}
+		if verdict, _ := cfg.AssetListDecision(AssetPolicyInput{TargetType: "skill", Name: tc.name}); verdict != AssetListDeny {
+			t.Fatalf("rule %+q, name %+q: verdict %q, want deny", tc.rule, tc.name, verdict)
+		}
 	}
 }
 
@@ -448,6 +485,86 @@ func TestEvaluateAssetPolicyRegistryHTTPTransportAliases(t *testing.T) {
 		})
 		if decision.Action != want {
 			t.Fatalf("transport %q: action=%q, want %q", transport, decision.Action, want)
+		}
+	}
+}
+
+func TestSecureClientAssetPolicyDeniedRespectsMode(t *testing.T) {
+	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client"}, AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: "marker-skill"}}
+	in := AssetPolicyInput{TargetType: "skill", Name: "marker-skill"}
+
+	disabled := cfg.EvaluateAssetPolicy(in)
+	if disabled.Action != "allow" || disabled.WouldBlock || disabled.Enabled {
+		t.Fatalf("disabled Secure Client decision = %+v, want disabled allow", disabled)
+	}
+
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
+	observed := cfg.EvaluateAssetPolicy(in)
+	if observed.Action != "allow" || !observed.WouldBlock || observed.RawAction != "block" || observed.Mode != AssetPolicyModeObserve {
+		t.Fatalf("observe Secure Client decision = %+v, want would-block", observed)
+	}
+}
+
+func TestSecureClientAssetRuleConnectorKeepsLegacyNames(t *testing.T) {
+	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "secure_client"}, AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeAction
+	cfg.AssetPolicy.Skill.Denied = []AssetPolicyRule{{Name: "reviewed", Connector: "claude-code"}}
+	in := AssetPolicyInput{TargetType: "skill", Name: "reviewed", Connector: "claudecode"}
+	if got := cfg.EvaluateAssetPolicy(in); got.Action != "allow" || got.Source != "default-allow" {
+		t.Fatalf("alias-scoped denial changed Secure Client decision: %+v", got)
+	}
+
+	cfg.AssetPolicy.Skill.Denied = nil
+	cfg.AssetPolicy.Skill.Allowed = []AssetPolicyRule{{Name: "reviewed", Connector: "claude-code"}}
+	cfg.AssetPolicy.Skill.Default = "deny"
+	if got := cfg.EvaluateAssetPolicy(in); got.Action != "block" || got.Source != "default-deny" {
+		t.Fatalf("alias-scoped allow changed Secure Client decision: %+v", got)
+	}
+
+	in.Connector = " CLAUDE-CODE "
+	if got := cfg.EvaluateAssetPolicy(in); got.Action != "allow" || got.Source != "admin-allow" {
+		t.Fatalf("legacy case and whitespace match lost: %+v", got)
+	}
+}
+
+func TestAllowPinCaseSibling(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Allowed = []AssetPolicyRule{{
+		Name: "Good", SourcePathContains: []string{"/home/u/.claude/skills/Good"},
+	}}
+	verdict, _ := cfg.AssetListDecision(AssetPolicyInput{
+		TargetType: "skill", Name: "Good", SourcePath: "/home/u/.claude/skills/good",
+	})
+	if runtime.GOOS != "windows" && verdict != "" {
+		t.Fatalf("case-distinct skill inherited allow: %q", verdict)
+	}
+	if runtime.GOOS == "windows" && verdict != AssetListAllow {
+		t.Fatalf("Windows case-insensitive pin did not match: %q", verdict)
+	}
+}
+
+func TestMCPAllowBindsCompleteCommandLine(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.MCP.Allowed = []AssetPolicyRule{{
+		Name: "reviewed", Command: "npx", ArgsPrefix: []string{"-y", "reviewed-server"},
+	}}
+	for _, tc := range []struct {
+		command string
+		args    []string
+		want    string
+	}{
+		{"npx", []string{"-y", "reviewed-server"}, AssetListAllow},
+		{"/tmp/npx", []string{"-y", "reviewed-server"}, ""},
+		{"npx", []string{"-y", "reviewed-server", "--extra"}, ""},
+	} {
+		verdict, _ := cfg.AssetListDecision(AssetPolicyInput{
+			TargetType: "mcp", Name: "reviewed", Command: tc.command, Args: tc.args,
+		})
+		if verdict != tc.want {
+			t.Fatalf("%q %v: verdict = %q, want %q", tc.command, tc.args, verdict, tc.want)
 		}
 	}
 }

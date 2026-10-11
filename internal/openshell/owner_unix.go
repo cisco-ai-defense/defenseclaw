@@ -28,6 +28,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// writableByCaller reports whether the caller can create entries in dir.
+func writableByCaller(dir string) bool { return unix.Access(dir, unix.W_OK|unix.X_OK) == nil }
+
 // ownedByCaller reports whether info belongs to the effective user.
 func ownedByCaller(info fs.FileInfo) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)

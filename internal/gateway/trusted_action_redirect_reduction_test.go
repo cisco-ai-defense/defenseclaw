@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -337,6 +338,7 @@ func TestTrustedActionBlocksCommandRuleWithRuntimeExpandedRedirectTarget(t *test
 			}
 		})
 	}
+
 }
 
 // A rule that negates over commands or operations must decide on the facts
@@ -568,5 +570,51 @@ func TestInspectToolBlockAttributesOpenClawFinding(t *testing.T) {
 	}
 	if !finding || !block {
 		t.Fatalf("finding=%t block=%t, want both rows", finding, block)
+	}
+}
+
+// GAP-0912: a program with no modeled operand grammar (hostname) kept the
+// action partial, so a custom CEL rule about its program and argv never ran
+// and the command ran with no finding on every connector. A monotone argv
+// rule now blocks it; a rule about another program stays quiet.
+func TestTrustedActionCustomArgvRuleMatchesUnmodeledProgram(t *testing.T) {
+	const connector = "unmodeled-program-argv"
+	installRedirectReductionRules(t, connector, redirectReductionRule(
+		"TEST-HOSTNAME-BLOCK",
+		redirectReductionMarker,
+		`f.commands.exists(c, c.argv_complete && c.program in ["hostname", "hostname.exe"])`,
+	))
+	tests := []struct {
+		tool, command string
+		block         bool
+	}{
+		{"Bash", "hostname", true},
+		{"Bash", "hostname.exe", true},
+		{"Bash", "hostname -f > /tmp/dc-host.txt", true},
+		{"powershell", "hostname", true},
+		{"Bash", "hostname $SUFFIX", false},
+		{"Bash", "echo hostname", false},
+	}
+	for _, test := range tests {
+		args := []byte(`{"command":` + strconv.Quote(test.command) + `}`)
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input:              actionfacts.Input{Tool: test.tool, Args: args, CWD: "/home/alice/project", ActiveHome: "/home/alice"},
+			LegacyText:         string(args),
+			Connector:          connector,
+			EnforcementCapable: true,
+		})
+		finding := findingWithID(findings, "TEST-HOSTNAME-BLOCK")
+		if got := finding != nil && finding.contributesToEnforcement(); got != test.block {
+			t.Errorf("%s %q: blocks = %t, want %t; findings=%v", test.tool, test.command, got, test.block, FindingStrings(findings))
+		}
+	}
+	args := []byte(`{"command":"hostname"}`)
+	windows := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: actionfacts.Input{Tool: "Bash", Args: args, CWD: `C:/Users/alice/project`,
+			ActiveHome: `C:/Users/alice`, DialectHint: actionfacts.DialectPowerShell},
+		Connector: connector, EnforcementCapable: true,
+	})
+	if finding := findingWithID(windows, "TEST-HOSTNAME-BLOCK"); finding == nil || !finding.contributesToEnforcement() {
+		t.Fatalf("PowerShell Bash shape lost custom argv rule: %v", FindingStrings(windows))
 	}
 }

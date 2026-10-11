@@ -1,0 +1,494 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookpaths
+
+import (
+	"encoding/json"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+)
+
+const (
+	patchBeginMarker = "*** Begin Patch"
+	patchEndMarker   = "*** End Patch"
+)
+
+// patchTargetDirectives name the files an apply_patch envelope writes.
+// Delete File and the source of a move remove a file, which also changes the
+// protected file, so they count as write targets too.
+var patchTargetDirectives = []string{
+	"*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:",
+}
+
+// ApplyPatchWriteTargets lists the files that the apply_patch edits in one
+// tool call write, as absolute, cleaned paths. Codex sends apply_patch as its
+// own tool (the envelope in tool_input.command, or a path field), or as a
+// shell command that carries the envelope in a heredoc, a here-string, a
+// quoted argument, a bash -c / sh -c script or a PowerShell @' '@ string.
+// The envelope lines appear verbatim in each of those texts, so the text is
+// scanned for envelopes and not parsed as one shell dialect.
+//
+// ok is false when the call carries an apply_patch edit whose targets are
+// unknown: an envelope without "*** End Patch", an unknown "***" header, an
+// empty path, a path with an unexpanded variable, a relative path without an
+// absolute cwd, or an apply_patch tool call with no envelope and no path. The
+// caller must then treat the protected file as a possible target. There is
+// no bound on the number of targets.
+func ApplyPatchWriteTargets(tool string, args json.RawMessage, command, cwd, home string) (targets []string, ok bool) {
+	var fields map[string]json.RawMessage
+	if len(args) != 0 {
+		_ = json.Unmarshal(args, &fields)
+	}
+	patchTool := isApplyPatchToolName(tool)
+	texts := []string{command}
+	keys := []string{"command", "cmd"}
+	if patchTool {
+		keys = append(keys, "patch", "patchText", "patch_text", "input")
+	}
+	for _, key := range keys {
+		texts = append(texts, patchTextField(fields[key]))
+	}
+	found := false
+	for _, text := range texts {
+		if text == "" {
+			continue
+		}
+		paths, envelopes, parsed := patchEnvelopePaths(text)
+		if !parsed || !patchTool && !patchShellInvocationsKnown(text) {
+			return nil, false
+		}
+		found = found || envelopes > 0
+		for _, path := range paths {
+			resolved, known := patchTargetPaths(path, cwd, home)
+			if !known {
+				return nil, false
+			}
+			targets = append(targets, resolved...)
+		}
+	}
+	if patchTool {
+		for _, key := range []string{"path", "file_path", "filePath"} {
+			var path string
+			if json.Unmarshal(fields[key], &path) != nil || path == "" {
+				continue
+			}
+			resolved, known := patchTargetPaths(path, cwd, home)
+			if !known {
+				return nil, false
+			}
+			targets = append(targets, resolved...)
+			found = true
+		}
+		if !found {
+			return nil, false
+		}
+	}
+	return targets, true
+}
+
+func isApplyPatchToolName(tool string) bool {
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "apply_patch", "applypatch", "apply-patch":
+		return true
+	}
+	return false
+}
+
+// patchTextField reads a string field, or an argv array (["apply_patch",
+// "<envelope>"], ["bash", "-lc", "<script>"]) joined by newlines.
+func patchTextField(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var argv []string
+	if json.Unmarshal(raw, &argv) == nil {
+		return strings.Join(argv, "\n")
+	}
+	return ""
+}
+
+// patchEnvelopePaths returns the directive paths of every envelope in text.
+// An envelope starts on a line that ends with "*** Begin Patch" (any prefix:
+// "apply_patch '", "@'", a quote) and ends on a line that starts with
+// "*** End Patch". Added and removed lines (+, -) are content. Any other
+// "***" line inside an envelope must be a known directive or "*** End of
+// File". A Begin marker followed by a directive on the same line is an
+// envelope with escaped newlines (printf, echo -e, $'...'), which is unknown.
+func patchEnvelopePaths(text string) (paths []string, envelopes int, ok bool) {
+	inside := false
+	for _, raw := range strings.Split(text, "\n") {
+		line := strings.TrimSpace(raw)
+		if !inside {
+			index := strings.Index(line, patchBeginMarker)
+			if index < 0 {
+				continue
+			}
+			rest := line[index+len(patchBeginMarker):]
+			if rest == "" {
+				inside = true
+				envelopes++
+				continue
+			}
+			for _, directive := range patchTargetDirectives {
+				if strings.Contains(rest, directive) {
+					return nil, envelopes, false
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(line, patchEndMarker) {
+			inside = false
+			continue
+		}
+		raw = strings.TrimLeft(raw, "\t")
+		if strings.HasPrefix(raw, "+") || strings.HasPrefix(raw, "-") || !strings.HasPrefix(line, "***") {
+			continue
+		}
+		if line == "*** End of File" {
+			continue
+		}
+		known := false
+		for _, directive := range patchTargetDirectives {
+			if strings.HasPrefix(line, directive) {
+				path := strings.TrimSpace(line[len(directive):])
+				if path == "" {
+					return nil, envelopes, false
+				}
+				paths = append(paths, path)
+				known = true
+				break
+			}
+		}
+		if !known {
+			return nil, envelopes, false
+		}
+	}
+	if inside {
+		return nil, envelopes, false
+	}
+	return paths, envelopes, true
+}
+
+// A patch envelope only explains a shell invocation when it is actually
+// supplied to that invocation. In particular, a quoted envelope printed by
+// another command cannot explain a later file-fed apply_patch.
+var (
+	patchProgramWord  = regexp.MustCompile(`(?i)\b(?:apply_patch|applypatch|apply-patch)\b`)
+	patchDirectInput  = regexp.MustCompile(`\b(?:apply_patch|applypatch|apply-patch)\s*(?:<<<\s*|<<\s*|@)?['"]`)
+	patchHeredocInput = regexp.MustCompile(`\b(?:apply_patch|applypatch|apply-patch)\s*<<-?\s*[A-Za-z_][A-Za-z0-9_]*\s*$`)
+	patchPipedHeredoc = regexp.MustCompile(`\bcat\s+<<[^\n|]*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
+	patchPipeCall     = regexp.MustCompile(`^\s*['"]?@?\s*\|\s*(?:apply_patch|applypatch|apply-patch)\b`)
+	patchPrinter      = regexp.MustCompile(`(?i)\b(?:echo|printf|write-output)\b|@['"]`)
+	heredocOperator   = regexp.MustCompile(`<<(-?)\s*(?:'([^'\s]+)'|"([^"\s]+)"|([A-Za-z_][A-Za-z0-9_]*))(?:[\s|;&)>]|$)`)
+)
+
+// patchShellInvocationsKnown reports whether every apply_patch that a shell
+// text may run reads an envelope in that text. Lines of an envelope body are
+// patch data, not shell, while the quote or here-document that feeds the
+// envelope is still open. That state is tracked from the top of the text: it
+// is known only while every line before the envelope's opener is plain shell
+// and every earlier envelope closed its feed on its End line (or the line
+// after it). A body line that may close or expand the feed, a body line that
+// is not a patch line, or any doubt about the state makes the rest of the
+// text shell, so an apply_patch in it counts as a call of its own, and the
+// envelope binds no call.
+func patchShellInvocationsKnown(text string) bool {
+	lines := strings.Split(text, "\n")
+	bound := make([]int, len(lines))
+	body := make([]bool, len(lines))
+	inert := make([]bool, len(lines))
+	known, cursor := true, 0
+	for start := 0; start < len(lines); start++ {
+		begin := strings.Index(lines[start], patchBeginMarker)
+		if begin < 0 || strings.TrimSpace(lines[start][begin+len(patchBeginMarker):]) != "" {
+			continue
+		}
+		end := start + 1
+		for end < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[end]), patchEndMarker) {
+			end++
+		}
+		if end == len(lines) {
+			continue // patchEnvelopePaths already rejects an open envelope
+		}
+		inputLine, opener := start, lines[start][:begin]
+		if strings.TrimSpace(opener) == "" && start > 0 {
+			inputLine, opener = start-1, lines[start-1]
+		}
+		for j := cursor; j < inputLine; j++ {
+			known = known && plainShellText(lines[j])
+		}
+		feed, fed := patchOpenerFeed(opener, inputLine < start)
+		fed = fed && known && inputLine >= cursor
+		for i := start + 1; i < end; i++ {
+			body[i] = true
+			line := strings.TrimRight(strings.TrimLeft(lines[i], "\t"), "\r")
+			fed = fed && patchBodyShape(line) && !feed.ends(line) && !feed.expands(line)
+			inert[i] = fed
+		}
+		cursor, known = feed.closeAfter(lines, end)
+		known = known && fed
+		if !fed {
+			// An expanding or malformed feed may hand apply_patch other
+			// directives than the text shows, so it binds no call: the
+			// apply_patch that reads it stays unknown (GAP-1506).
+			start = end
+			continue
+		}
+		close := strings.TrimSpace(lines[end])
+		if index := strings.Index(close, patchEndMarker); index >= 0 {
+			close = close[index+len(patchEndMarker):]
+		}
+		direct := patchDirectInput.FindStringIndex(opener)
+		if direct == nil {
+			direct = patchHeredocInput.FindStringIndex(opener)
+		}
+		if direct == nil {
+			direct = patchPipedHeredoc.FindStringIndex(opener)
+		}
+		if direct != nil && !strings.Contains(opener[direct[1]:], "<") && !strings.Contains(close, "<") {
+			bound[inputLine]++
+		} else if patchPrinter.MatchString(opener) {
+			pipeLine := end
+			if patchPipeCall.MatchString(close) && !strings.Contains(close, "<") {
+				bound[pipeLine]++
+			} else if end+1 < len(lines) {
+				// A pipe on the next line must continue the quoted printer.
+				next := strings.TrimSpace(lines[end+1])
+				if strings.HasPrefix(next, "'") || strings.HasPrefix(next, "\"") {
+					if patchPipeCall.MatchString(next) {
+						bound[end+1]++
+					}
+				}
+			}
+		}
+		start = end
+	}
+	calls := 0
+	for i, line := range lines {
+		if inert[i] ||
+			!body[i] && !invokesApplyPatch(line) && bound[i] == 0 && !strings.ContainsAny(line, ";|&") {
+			continue
+		}
+		count := len(patchProgramWord.FindAllString(line, -1))
+		calls += count
+		if count > bound[i] {
+			return false
+		}
+	}
+	// The whole-text parser also sees scripts that a line scan might miss.
+	return calls > 0 || !invokesApplyPatch(text)
+}
+
+// patchFeed is the quote, here-document or PowerShell here-string that carries
+// an envelope to the command that reads it.
+type patchFeed struct {
+	quote      byte   // ' or " of a quoted argument or here-string
+	delim      string // here-document delimiter, or '@ / "@
+	powershell bool
+	expand     bool // $, ` and \ may run commands or join lines inside the feed
+}
+
+// patchOpenerFeed reads the feed that an envelope's opener leaves open: the
+// text before "*** Begin Patch" on its line, or the line before it (ownLine).
+// It fails for an opener whose quoting is unclear (escapes, several or nested
+// quotes and here-documents, PowerShell block comments).
+func patchOpenerFeed(opener string, ownLine bool) (patchFeed, bool) {
+	if ownLine {
+		trimmed := strings.TrimSpace(opener)
+		for _, open := range []string{"@'", `@"`} {
+			if head, found := strings.CutSuffix(trimmed, open); found {
+				feed := patchFeed{delim: open[1:] + "@", powershell: true, expand: open[1] == '"'}
+				return feed, plainShellText(head)
+			}
+		}
+		if strings.Count(opener, "<<") == 1 && !strings.Contains(opener, "<<<") {
+			match := heredocOperator.FindStringSubmatchIndex(opener)
+			if match == nil {
+				return patchFeed{}, false
+			}
+			feed := patchFeed{expand: match[8] >= 0}
+			for group := 2; group <= 4; group++ {
+				if match[2*group] >= 0 {
+					feed.delim = opener[match[2*group]:match[2*group+1]]
+					tail := match[2*group+1]
+					if group < 4 {
+						tail++ // the closing quote of a quoted delimiter
+					}
+					return feed, plainShellText(opener[:match[0]]) && plainShellText(opener[tail:])
+				}
+			}
+		}
+	}
+	head := strings.ReplaceAll(opener, "<<<", "")
+	if shellNesting(head) {
+		return patchFeed{}, false
+	}
+	quote := openQuote(head)
+	return patchFeed{quote: quote, expand: quote == '"'}, quote != 0
+}
+
+// ends reports a body line that may close the feed.
+func (f patchFeed) ends(line string) bool {
+	if f.quote != 0 {
+		return strings.IndexByte(line, f.quote) >= 0
+	}
+	line = strings.TrimSpace(line)
+	if f.powershell {
+		return strings.HasPrefix(line, f.delim)
+	}
+	return line == f.delim
+}
+
+// expands reports a body line that the shell may expand or join with the next.
+func (f patchFeed) expands(line string) bool {
+	return f.expand && strings.ContainsAny(line, "$`\\")
+}
+
+// closeAfter checks that the feed closes right after the envelope, on its End
+// line or the next line, and that the shell text after the close is plain. It
+// returns the first line after the close.
+func (f patchFeed) closeAfter(lines []string, end int) (int, bool) {
+	rest := strings.TrimSpace(strings.TrimSpace(lines[end])[len(patchEndMarker):])
+	if f.quote != 0 && rest != "" {
+		return end + 1, rest[0] == f.quote && plainShellText(rest[1:])
+	}
+	if rest != "" || end+1 >= len(lines) {
+		return end + 1, false
+	}
+	next := strings.TrimSpace(lines[end+1])
+	switch {
+	case f.quote != 0:
+		return end + 2, next != "" && next[0] == f.quote && plainShellText(next[1:])
+	case f.powershell:
+		tail, found := strings.CutPrefix(next, f.delim)
+		return end + 2, found && plainShellText(tail)
+	default:
+		return end + 2, f.delim != "" && next == f.delim
+	}
+}
+
+// patchBodyShape reports a line that apply_patch reads as patch text: an
+// added, removed or context line, a hunk or a "***" header, or an empty line.
+func patchBodyShape(line string) bool {
+	return line == "" || strings.HasPrefix(line, "+") || strings.HasPrefix(line, "-") ||
+		strings.HasPrefix(line, " ") || strings.HasPrefix(line, "@@") || strings.HasPrefix(line, "***")
+}
+
+// plainShellText reports shell text that leaves no quote open and has no
+// construct that nests quoting or reads later lines.
+func plainShellText(text string) bool {
+	return !shellNesting(text) && openQuote(text) == 0
+}
+
+// shellNesting reports an escape, a line continuation, a here-document or
+// here-string, a command or parameter substitution, a PowerShell block comment
+// or a stop-parsing token, in sh or PowerShell. Quotes inside or after those
+// do not follow the plain quote rules of openQuote.
+func shellNesting(text string) bool {
+	if strings.ContainsAny(text, "\\`") {
+		return true
+	}
+	for _, token := range []string{"<<", "<#", "@'", `@"`, "$(", "${", "--%"} {
+		if strings.Contains(text, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// openQuote returns the quote character still open at the end of text, which
+// has no escapes, or 0.
+func openQuote(text string) byte {
+	var quote byte
+	for i := 0; i < len(text); i++ {
+		switch c := text[i]; {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		}
+	}
+	return quote
+}
+
+// invokesApplyPatch reports a shell text that may run apply_patch as a
+// command, also behind a wrapper (env, sudo, nice, nohup, time, exec,
+// command) or in a sh -c script. Its patch then comes from a file or a pipe
+// the hook cannot read. Each line is also read on its own, so a script fed
+// to a shell on stdin (a here-document body) counts too.
+func invokesApplyPatch(text string) bool {
+	names := []string{"apply_patch", "applypatch", "apply-patch"}
+	if tactics.RunsProgram(text, names...) {
+		return true
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if tactics.RunsProgram(line, names...) {
+			return true
+		}
+	}
+	return false
+}
+
+// patchTargetPaths makes a directive path absolute. apply_patch does not
+// expand ~ or variables, but a shell or PowerShell wrapper may, so a home
+// form yields both the home path and the literal path under cwd.
+func patchTargetPaths(path, cwd, home string) ([]string, bool) {
+	if len(path) >= 2 && (path[0] == '"' || path[0] == '\'') && path[len(path)-1] == path[0] {
+		path = path[1 : len(path)-1]
+	}
+	if path == "" || len(path) > MaxWriteTargetPathBytes {
+		return nil, false
+	}
+	var paths []string
+	literal := path
+	if rest, homeForm := trimHomePrefix(path); homeForm {
+		if !filepath.IsAbs(home) {
+			return nil, false
+		}
+		paths = append(paths, filepath.Clean(filepath.Join(home, rest)))
+	} else if strings.ContainsAny(path, "$`") {
+		return nil, false
+	}
+	if !filepath.IsAbs(literal) {
+		if !filepath.IsAbs(cwd) || runtime.GOOS == "windows" && filepath.VolumeName(literal) != "" {
+			return nil, false
+		}
+		if runtime.GOOS == "windows" && (strings.HasPrefix(literal, "/") || strings.HasPrefix(literal, "\\")) {
+			// A rooted path uses the current drive or UNC share on Windows.
+			literal = filepath.VolumeName(cwd) + literal
+		} else {
+			literal = filepath.Join(cwd, literal)
+		}
+	}
+	return append(paths, filepath.Clean(literal)), true
+}
+
+// trimHomePrefix strips a leading home form: ~, $HOME, ${HOME}, $env:HOME,
+// $env:USERPROFILE or %USERPROFILE%, alone or followed by a separator.
+func trimHomePrefix(path string) (string, bool) {
+	lower := strings.ToLower(path)
+	for _, prefix := range []string{"~", "${home}", "$home", "$env:userprofile", "$env:home", "%userprofile%"} {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		rest := path[len(prefix):]
+		if rest == "" {
+			return "", true
+		}
+		if rest[0] == '/' || rest[0] == '\\' {
+			return strings.TrimLeft(rest, `/\`), true
+		}
+	}
+	return "", false
+}

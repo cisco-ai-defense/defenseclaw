@@ -87,8 +87,8 @@ def test_policy_rows_fit_80_columns_and_widen_at_120() -> None:
     widest = [max(len(c), *(len(r[i]) for r in compact)) for i, c in enumerate(columns)]
     assert sum(widest) + 2 * len(widest) <= 74
     wide = model.data_table_rows(120)
-    assert len(model.data_table_columns(120)) == len(wide[0]) == 8
-    assert wide[1][6] == "allow"
+    assert len(model.data_table_columns(120)) == len(wide[0]) == 7
+    assert wide[1][1] == "permissive"
 
 
 def test_rule_pack_rows_put_global_first_and_name_the_source() -> None:
@@ -157,10 +157,10 @@ def test_keys_hint_fits_one_line_at_80_columns() -> None:
         assert len(model.keys_hint(view)) <= 78
 
 
-def test_weakening_covers_thresholds_firewall_and_approval() -> None:
+def test_weakening_covers_thresholds_and_approval() -> None:
     assert policy_weakenings(DEFAULT, STRICT) == ()
     reasons = policy_weakenings(DEFAULT, PERMISSIVE)
-    assert len(reasons) == 3  # alert, install, firewall
+    assert len(reasons) == 2  # alert, install; the preset's firewall default is not enforced, so not compared
     assert policy_weakenings(STRICT, DEFAULT)  # block MEDIUM+ -> CRITICAL
     assert policy_weakenings(policy("a", hilt=True), policy("b", hilt=False)) == ("human approval is turned off",)
     assert policy_weakenings(None, PERMISSIVE) == ()

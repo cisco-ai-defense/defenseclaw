@@ -4695,8 +4695,8 @@ attributes:
     id: identifier-v1
     overrides:
       max_utf8_bytes: 256
-      pattern: '^[A-Za-z0-9@][A-Za-z0-9._@/:+-]*$'
-    notes: marketplace or manifest identifier as the IDE records it; never a metric label
+      pattern: '^[^\x00-\x1f\x7f-\x9f]+$'
+    notes: marketplace or manifest identifier as the IDE records it (including printable Unicode and spaces); never a metric label
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.ide.plugin.version
   type: string
@@ -4825,10 +4825,13 @@ groups:
       - workdir
       reserved_keys:
       - defenseclaw.claw.home_dir
+      - defenseclaw.device.id
       - defenseclaw.gateway.host
       - defenseclaw.gateway.port
       - defenseclaw.preset
       - defenseclaw.preset_name
+      - deployment.environment
+      - deployment.mode
       - discovery.source
       - telemetry.sdk.language
       - telemetry.sdk.name
@@ -4836,13 +4839,6 @@ groups:
       forbidden_value_classes:
       - filesystem_path
       - credential_material
-    compatibility_aliases:
-    - alias: deployment.environment
-      canonical: deployment.environment.name
-    - alias: deployment.mode
-      canonical: defenseclaw.deployment.mode
-    - alias: defenseclaw.device.id
-      canonical: defenseclaw.device.public_key_fingerprint
     legacy_bindings:
     - source: schemas/otel/resource.schema.json
       disposition: preserved
@@ -5238,6 +5234,14 @@ groups:
   - ref: defenseclaw.user.name
     requirement_level: recommended
   - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  - ref: defenseclaw.user.domain
+    requirement_level: recommended
+  - ref: defenseclaw.user.directory
+    requirement_level: recommended
+  - ref: defenseclaw.user.identity.source
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal.assurance
     requirement_level: recommended
 - id: body.identity.observed
   type: body_group
@@ -8139,11 +8143,11 @@ groups:
     - profile: local-observability-v1
       mappings:
       - ref: defenseclaw.ide.product
-        label: ide
+        label: defenseclaw_ide_product
       - ref: defenseclaw.ide.plugin.ai
-        label: ai
+        label: defenseclaw_ide_plugin_ai
       - ref: defenseclaw.ide.plugin.enabled
-        label: enabled
+        label: defenseclaw_ide_plugin_enabled
   x-defenseclaw:
     bucket: ai.discovery
     family_schema_version: 1
@@ -10558,6 +10562,7 @@ groups:
   introduced_in: telemetry-registry-v2
   extends:
   - body.compliance.activity
+  - correlation.policy.effective
   - correlation.sandbox
   attributes: []
   body_fields: []
@@ -10578,7 +10583,13 @@ groups:
   introduced_in: telemetry-registry-v2
   extends:
   - correlation.sandbox
-  attributes: []
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
   body_fields:
   - ref: defenseclaw.sandbox.name
     requirement_level: required
@@ -11221,6 +11232,9 @@ producer_identity_sets:
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.doctor
+    bucket: compliance.activity
+    compatibility_only: true
+  - event_name: legacy.audit.enterprise.exempt.user
     bucket: compliance.activity
     compatibility_only: true
   - event_name: legacy.audit.gateway.approval.denied
@@ -13902,6 +13916,26 @@ producer_mappings:
     disposition: translate_to_v8
   default_identity:
     event_name: legacy.audit.connector.hook.repaired
+    bucket: compliance.activity
+    compatibility_only: true
+- producer: audit_action
+  key: enterprise-exempt-user
+  source: internal/audit/actions.go
+  event_name_policy: context_optional
+  allowed_context_identity_set: identity_set.compliance_activity
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
+  - approval_resolution
+  - alert_mutation
+  - protected_boundary_auth_failure
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    legacy_event_prefix: legacy.audit.
+    disposition: translate_to_v8
+  default_identity:
+    event_name: legacy.audit.enterprise.exempt.user
     bucket: compliance.activity
     compatibility_only: true
 - producer: audit_action

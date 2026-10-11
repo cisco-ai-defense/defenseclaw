@@ -193,6 +193,12 @@
       ]
     },
     {
+      "id": "JUDGE-TOOL-SENSITIVE-READ",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
       "id": "OBFUSC-UNICODE-ZWSP",
       "axes": [
         "ingress_untrusted"

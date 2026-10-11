@@ -590,8 +590,7 @@ def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:
     assert "name: windows native required" in native_workflow
 
 
-def test_omnigent_required_ci_claims_remain_degraded_and_non_live() -> None:
-    live_workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(encoding="utf-8")
+def test_native_windows_required_ci_covers_nine_connector_lanes_and_omnigent_stays_non_live() -> None:
     native_workflow = yaml.safe_load((ROOT / ".github/workflows/windows-native.yml").read_text(encoding="utf-8"))
     validated = json.loads((ROOT / "cli/defenseclaw/inventory/validated_versions.json").read_text(encoding="utf-8"))[
         "connectors"
@@ -603,7 +602,7 @@ def test_omnigent_required_ci_claims_remain_degraded_and_non_live() -> None:
 
     jobs = native_workflow["jobs"]
     generic_connectors = set(jobs["connector-contract"]["strategy"]["matrix"]["connector"])
-    required_connectors = generic_connectors | {"omnigent"}
+    required_connectors = generic_connectors
     assert required_connectors == {
         "amp",
         "antigravity",
@@ -613,23 +612,15 @@ def test_omnigent_required_ci_claims_remain_degraded_and_non_live() -> None:
         "cursor",
         "devin",
         "hermes",
-        "omnigent",
         "opencode",
     }
-    assert required_connectors.isdisjoint({"openhands", "openclaw", "zeptoclaw"})
-    omnigent_job = jobs["omnigent-native-degraded"]
-    assert omnigent_job["name"] == "Windows x64 OmniGent native degraded"
-    assert "if" not in omnigent_job
-    assert "continue-on-error" not in omnigent_job
-    assert {
-        "connector-contract",
-        "omnigent-native-degraded",
-    }.issubset(set(jobs["windows-native-required"]["needs"]))
-
-    assert "separate required packaged native-degraded cell" in live_workflow
-    assert "remains outside green live certification" in live_workflow
-    assert "claims no authentication/HITL evidence" in live_workflow
-    assert "separate advisory packaged native-degraded cell" not in live_workflow
+    assert required_connectors.isdisjoint({"openhands", "omnigent", "openclaw", "zeptoclaw"})
+    # OpenHands and OmniGent CI jobs were retired; the aggregate waits only on
+    # jobs that still exist.
+    assert "omnigent-native-degraded" not in jobs
+    needs = set(jobs["windows-native-required"]["needs"])
+    assert "connector-contract" in needs
+    assert needs.issubset(set(jobs))
 
     assert validated["live"] is False
     assert validated["os"]["windows"] == {

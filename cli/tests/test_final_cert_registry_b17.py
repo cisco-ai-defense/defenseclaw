@@ -45,15 +45,22 @@ def _run(app, *args: str):
     return CliRunner().invoke(cmd_registry.registry, list(args), obj=app)
 
 
-def test_require_enforce_restarts_a_running_gateway(registry_app, gateway) -> None:
-    # GAP-2422: the gateway refuses an asset_policy reload, so the CLI restarts it.
+def test_require_enforce_restarts_only_a_secure_client_gateway(registry_app, gateway, monkeypatch) -> None:
+    # The gateway reloads asset_policy hot (GAP-0056); a Secure Client gateway
+    # reads it at start, so there the CLI restarts it (GAP-2422).
     result = _run(registry_app, "require", "--type", "mcp", "--enabled", "--enforce")
+    assert result.exit_code == 0, result.output
+    gateway.assert_not_called()
+    assert "applies the new asset policy now, without a restart" in result.output
+
+    monkeypatch.setattr("defenseclaw.enforce.asset_lists.is_secure_client", lambda _cfg: True)
+    result = _run(registry_app, "require", "--type", "mcp", "--disabled", "--no-enforce")
     assert result.exit_code == 0, result.output
     gateway.assert_called_once_with(registry_app.cfg.data_dir, start_if_stopped=False)
     assert "Restarted the gateway; agent hooks use the new asset policy now." in result.output
 
     gateway.reset_mock()
-    result = _run(registry_app, "require", "--type", "mcp", "--disabled", "--no-enforce", "--json")
+    result = _run(registry_app, "require", "--type", "mcp", "--enabled", "--enforce", "--json")
     assert result.exit_code == 0, result.output
     gateway.assert_called_once()
     assert json.loads(result.stdout)["status"] == "ok"
@@ -64,7 +71,8 @@ def test_unchanged_asset_policy_does_not_restart(registry_app, gateway) -> None:
     gateway.assert_not_called()
 
 
-def test_failed_restart_says_how_to_apply(registry_app, gateway) -> None:
+def test_failed_restart_says_how_to_apply(registry_app, gateway, monkeypatch) -> None:
+    monkeypatch.setattr("defenseclaw.enforce.asset_lists.is_secure_client", lambda _cfg: True)
     gateway.return_value = False
     result = _run(registry_app, "require", "--type", "skill", "--enabled", "--enforce")
     assert "the gateway restart failed" in result.stderr

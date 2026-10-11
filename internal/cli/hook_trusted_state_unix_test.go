@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -24,12 +25,16 @@ func withStandaloneHookRuntime(
 ) {
 	t.Helper()
 	oldGOOS, oldLoad, oldPolicy, oldSC := standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir
+	oldUserNamespace, oldReport := standaloneHookInUserNamespace, reportStandaloneHookRefusal
+	standaloneHookInUserNamespace = func() bool { return false }
+	reportStandaloneHookRefusal = func(string, string, string) {}
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
 	standaloneMachinePolicyOptions = policy
 	standaloneSecureClientInstallDir = secureClientDir
 	t.Cleanup(func() {
 		standaloneHookGOOS, standaloneRuntimeDescriptorLoad, standaloneMachinePolicyOptions, standaloneSecureClientInstallDir = oldGOOS, oldLoad, oldPolicy, oldSC
+		standaloneHookInUserNamespace, reportStandaloneHookRefusal = oldUserNamespace, oldReport
 		standaloneHookRuntime.Lock()
 		standaloneHookRuntime.prepared = false
 		standaloneHookRuntime.descriptor = nil
@@ -172,13 +177,21 @@ func TestStandaloneHookRuntimeFailsClosed(t *testing.T) {
 		load        func(string) (*managed.RuntimeDescriptor, error)
 		reason      string
 		forceClosed bool
+		userns      bool
 	}{
-		{"untrusted descriptor", "linux", untrusted, standaloneRuntimeReasonInvalid, false},
-		{"no hook socket on linux", "linux", noSocket, standaloneRuntimeReasonHookSocketMissing, true},
-		{"no hook socket on darwin", "darwin", noSocket, standaloneRuntimeReasonHookSocketMissing, true},
+		{"untrusted descriptor", "linux", untrusted, standaloneRuntimeReasonInvalid, false, false},
+		// Inside a user namespace the root-owned descriptor reads as owned
+		// by the overflow uid; the hook says why it refuses and reports it
+		// to the gateway (GAP-0923).
+		{"user namespace", "linux", untrusted, hookexec.ManagedUserNamespaceReason, false, true},
+		{"no hook socket on linux", "linux", noSocket, standaloneRuntimeReasonHookSocketMissing, true, false},
+		{"no hook socket on darwin", "darwin", noSocket, standaloneRuntimeReasonHookSocketMissing, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			withStandaloneHookRuntime(t, tc.goos, tc.load, noMarkers, "/nonexistent-secure-client")
+			reported := ""
+			standaloneHookInUserNamespace = func() bool { return tc.userns }
+			reportStandaloneHookRefusal = func(_, connectorName, reason string) { reported = connectorName + " " + reason }
 			if enterpriseManagedHookRuntimeNoop("claudecode") {
 				t.Fatal("a failed standalone runtime is never a no-op")
 			}
@@ -199,6 +212,9 @@ func TestStandaloneHookRuntimeFailsClosed(t *testing.T) {
 			}
 			if other := buildHookOptionsForRuntime("codex", "Stop", "", "", true); other.ManagedStandalone {
 				t.Fatal("the runtime prepared for claudecode must not mark a codex invocation")
+			}
+			if want := map[bool]string{true: "claudecode " + hookexec.ManagedUserNamespaceReason}[tc.userns]; reported != want {
+				t.Fatalf("refusal reported to the gateway = %q, want %q", reported, want)
 			}
 		})
 	}

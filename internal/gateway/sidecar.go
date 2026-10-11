@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -41,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -55,6 +57,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/notify"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
@@ -80,6 +83,13 @@ type modelRouterHealthChecker interface {
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
+	// installWatcher is the running install watcher, nil while none runs;
+	// a reload that changes a denied list asks it to rescan (GAP-0627).
+	installWatcher atomic.Pointer[watcher.InstallWatcher]
+	// projectSkills are the project skill folders the hooks report, which
+	// the install watcher watches next to the connectors' (GAP-1063).
+	projectSkills projectSkillRoots
+
 	startedAt  time.Time
 	cfg        *config.Config
 	cfgCurrent atomic.Pointer[config.Config]
@@ -115,6 +125,7 @@ type Sidecar struct {
 	aiRuntimeMu       sync.RWMutex
 	apiMu             sync.RWMutex
 	apiServer         *APIServer
+	apiProfilesReady  chan struct{}
 	hookGuardsMu      sync.RWMutex
 	hookGuards        map[*HookConfigGuard]struct{}
 	hookGuardsChanged chan struct{}
@@ -122,11 +133,17 @@ type Sidecar struct {
 	// complete verification/Setup transaction. Config publication takes the
 	// write side, so an older fail-mode Setup cannot finish after a newer
 	// runtime policy becomes authoritative.
-	hookPolicyMu             sync.RWMutex
-	proxyMu                  sync.RWMutex
-	guardrailProxy           *GuardrailProxy
-	apiRestartCh             chan struct{}
-	watcherRestartCh         chan struct{}
+	hookPolicyMu     sync.RWMutex
+	proxyMu          sync.RWMutex
+	guardrailProxy   *GuardrailProxy
+	apiRestartCh     chan struct{}
+	fleetReloadCh    chan struct{}
+	watcherRestartCh chan struct{}
+	// enrolledWatchRoots are the enrolled user folders the previous
+	// watcher of this process watched (runWatcher only); nil before the
+	// first.
+	enrolledWatchRoots       map[string]struct{}
+	guardrailRestartCh       chan struct{}
 	aiRestartCh              chan struct{}
 	aiRuntimeRestartCh       chan struct{}
 	runCancelMu              sync.Mutex
@@ -138,6 +155,18 @@ type Sidecar struct {
 	// shutdown from republishing capabilities for the retiring owned runtime.
 	observabilityV8ConsumersDetached bool
 	observabilityV8Run               bool
+	// observabilityV8ShutdownLosses keeps what the closed runtime dropped or
+	// left unsent, for the shutdown warning (GAP-1096).
+	observabilityV8ShutdownLosses      []observabilityruntime.ShutdownLoss
+	observabilityV8ShutdownLossesNoted bool
+	// localWriteGapV8Mu serializes the sqlite.write_failed loss reports
+	// (GAP-1129).
+	localWriteGapV8Mu sync.Mutex
+	// bootConfigSourceName and bootConfigSource are the config.yaml bytes
+	// the observability runtime was bootstrapped from, the source the
+	// gateway runs (GAP-0264).
+	bootConfigSourceName string
+	bootConfigSource     []byte
 	// exporterHealthMetric* retains only monotonic, content-free delivery
 	// counters for the active graph generation. It converts runtime health
 	// snapshots into delta exporter-error metrics without resurrecting a global
@@ -145,6 +174,7 @@ type Sidecar struct {
 	exporterHealthMetricMu         sync.Mutex
 	exporterHealthMetricGeneration uint64
 	exporterHealthMetricCounters   map[exporterHealthMetricKey]uint64
+	destinationLossMetricCounters  map[exporterHealthMetricKey]destinationLossMetricCounters
 	// destinationCircuit* retains only the last-observed circuit state per
 	// destination for the active graph generation. It exists so a durable
 	// health log is emitted exactly once per state transition instead of once
@@ -226,12 +256,12 @@ func osToastSenderFor(cfg *config.Config) func(notify.Notification) error {
 // NewSidecar creates a sidecar instance ready to connect.
 func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*Sidecar, error) {
 	if cfg == nil || !config.CurrentSchemaVersion(cfg.ConfigVersion) {
-		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw upgrade' first")
+		return nil, fmt.Errorf("sidecar: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	// Rule-pack integrity is a construction precondition. Load both the global
 	// pack and the effective pack for an enabled single-connector deployment
 	// before creating a client or returning any runnable sidecar state.
-	globalPack, rp, err := loadInitialSidecarRulePack(cfg)
+	globalPack, rp, startRulePacks, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -248,14 +278,14 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	// was: multi-connector packs stay isolated to their setup, a profile
 	// pack that fails scans with the base rules, and Rego that fails to
 	// load leaves the guardrail on the resolved thresholds.
-	bootProfiles, profileErr := newGuardrailProfileSet(cfg, false)
+	bootProfiles, profileErr := newGuardrailProfileSet(cfg, startRulePacks, false)
 	if profileErr != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail profiles unavailable: %v\n", profileErr)
 	}
 	// The connector packs a reload would compose are digested too, so the
 	// boot digest equals the one a reload or `policy digest` computes.
-	bootPacks := &sidecarRulePackCandidate{global: globalPack, active: rp}
-	if preflight, preflightErr := preflightSidecarRulePacks(cfg); preflightErr == nil {
+	bootPacks := &sidecarRulePackCandidate{cache: startRulePacks, global: globalPack, active: rp}
+	if preflight, preflightErr := preflightSidecarRulePacksWithCacheMode(startRulePacks, cfg, true); preflightErr == nil {
 		bootPacks.connectors = preflight.connectors
 	}
 	bootGen, err := buildGeneration(context.Background(), generationInputs{
@@ -266,13 +296,19 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	if err != nil {
 		return nil, fmt.Errorf("sidecar: build configuration generation: %w", err)
 	}
+	bootGen.activeRules = initialRules
+	bootGen.activePatterns = initialPatterns
+	if bootGen.scannerPinError != "" {
+		fmt.Fprintf(os.Stderr, "[sidecar] scanner file pin: %s (scans that load the file fail closed until it matches)\n", bootGen.scannerPinError)
+	}
 	// The boot judge and proxy read the provider registry before the
 	// generation is published.
 	applyGenerationProviders(bootGen.Providers)
 	// A hook-only topology (managed standalone, no OpenClaw fleet) never
 	// dials gateway.host:port, so only announce the fleet client when the
 	// gateway loop will actually use it; the device identity still loads.
-	if RequiresFleetGateway(cfg) {
+	// Secure Client keeps the line of its service log (issue #1092).
+	if RequiresFleetGateway(cfg) || cfg.SecureClientIntegration() {
 		fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 			cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 	}
@@ -494,7 +530,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 		aiDiscovery:             aiDiscovery,
 		osNotifier:              osNotifier,
 		apiRestartCh:            make(chan struct{}, 1),
+		fleetReloadCh:           make(chan struct{}, 1),
 		watcherRestartCh:        make(chan struct{}, 1),
+		guardrailRestartCh:      make(chan struct{}, 1),
 		aiRestartCh:             make(chan struct{}, 1),
 		aiRuntimeRestartCh:      make(chan struct{}, 1),
 		alertCtx:                alertCtx,
@@ -514,8 +552,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger) (*
 	for name, compiled := range initialHarnessRules {
 		publishConnectorRulePackOverrides(name, compiled)
 	}
-	router.SetRulePack(rp)
+	router.SetHealth(sidecar.health)
 	sidecar.setEventRouter(router)
+	// The boot generation carries the enforcement inputs just published to
+	// the process-wide scanners, so a request reads them with its digest.
+	bootGen.activeRules = initialRules
+	bootGen.activePatterns = initialPatterns
+	bootGen.judge = hookJudge
 	bootGen.Config = sidecar.publishConfig(cfg)
 	sidecar.publishGeneration(bootGen)
 	// Publish the process-global managed carve-out only after every fallible
@@ -573,12 +616,24 @@ func (s *Sidecar) Generation() *Generation {
 	return s.generation.Load()
 }
 
+// activeRulePack is the active rule pack of the published generation, else
+// the one the event router reads.
+func (s *Sidecar) activeRulePack() *guardrail.RulePack {
+	if g := s.Generation(); g != nil && g.active != nil {
+		return g.active
+	}
+	return s.router.rulePack()
+}
+
 func (s *Sidecar) publishGeneration(g *Generation) {
 	if s == nil || g == nil {
 		return
 	}
 	publishGeneration(g)
 	s.generation.Store(g)
+	// Sandbox and security-action records need the applied policy stamp even
+	// when the install watcher is disabled or has no directories to watch.
+	audit.SetPolicyStamp(livePolicyStampV8)
 }
 
 // activeRulePackKey is the composed-pack key of the pack the shared scanners
@@ -604,6 +659,41 @@ func (s *Sidecar) currentConfig() *config.Config {
 		return cfg
 	}
 	return s.cfg
+}
+
+// liveGuardrailMode returns name's guardrail mode, "action" or "observe",
+// from the configuration generation in force. The Guardrail status block
+// reads it at every publication, so it agrees with the Connector Mode
+// section after a hot guardrail.mode change (GAP-0905).
+func (s *Sidecar) liveGuardrailMode(name string) string {
+	if strings.EqualFold(strings.TrimSpace(s.currentConfig().EffectiveGuardrailModeForConnector(name)), "action") {
+		return "action"
+	}
+	return "observe"
+}
+
+// guardrailHealthRefreshInterval is how often a direct-upstream guardrail
+// checks the live mode its status block describes.
+var guardrailHealthRefreshInterval = 5 * time.Second
+
+// republishGuardrailOnModeChange calls publish whenever key, the live mode a
+// direct-upstream Guardrail status block describes, changes after a hot
+// reload. It returns when ctx ends (GAP-0905).
+func (s *Sidecar) republishGuardrailOnModeChange(ctx context.Context, key func() string, publish func()) {
+	last := key()
+	ticker := time.NewTicker(guardrailHealthRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if current := key(); current != last {
+				last = current
+				publish()
+			}
+		}
+	}
 }
 
 func (s *Sidecar) sharedJudge() *LLMJudge {
@@ -870,10 +960,32 @@ func (s *Sidecar) claimAIDiscoveryRun() (*inventory.ContinuousDiscoveryService, 
 // accompanying test fails if the two drift.
 const sidecarWorkerCount = 8
 
+// logSecureClientPolicyEngine prints the policy engine start-up line of
+// main on a Secure Client host (issue #1092).
+func (s *Sidecar) logSecureClientPolicyEngine() {
+	cfg := s.currentConfig()
+	if cfg == nil || !cfg.SecureClientIntegration() || cfg.PolicyDir == "" {
+		return
+	}
+	g := s.Generation()
+	switch err := policy.SecureClientPolicyLoadError(cfg.PolicyDir); {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
+	case g != nil && g.OPA != nil:
+		fmt.Fprintf(os.Stderr, "[sidecar] OPA policy engine loaded from %s\n", cfg.PolicyDir)
+	case g != nil && g.opaError != "":
+		fmt.Fprintf(os.Stderr, "[sidecar] OPA compile error (falling back to built-in): %s\n", g.opaError)
+	}
+}
+
 func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.beginObservabilityV8Run(); err != nil {
 		return err
 	}
+	s.carryObservabilityV8ShutdownDrops()
+	// Report the records an earlier run lost from the local history; the loss
+	// journal kept them across the restart (GAP-1129).
+	go s.recordLocalWriteGapV8()
 	// Bootstrap-owned workers must retire on every return path, including
 	// failures before the normal shutdown block is reached. The explicit normal
 	// close below preserves close-before-store ordering; this deferred call is
@@ -885,7 +997,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		// instead of returning an "Error:" that reads as a startup failure
 		// (GAP-2166).
 		if err := s.closeOwnedObservabilityV8Runtime(); err != nil && runErr == nil && !shutdownFlushWarned {
-			fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
+			fmt.Fprint(os.Stderr, s.observabilityV8ShutdownFlushWarning())
 		}
 	}()
 	runCtx, runCancel := context.WithCancel(ctx)
@@ -911,7 +1023,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 
 	runID := gatewaylog.ProcessRunID()
 	fmt.Fprintf(os.Stderr, "[sidecar] starting subsystems (auto_approve=%v watcher=%v api_port=%d guardrail=%v run_id=%s)\n",
-		s.currentConfig().Gateway.AutoApprove, WatcherWatchesDirs(s.currentConfig()), s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
+		s.currentConfig().Gateway.AutoApprove, watcherStartupEnabled(s.currentConfig()), s.currentConfig().Gateway.APIPort, s.currentConfig().Guardrail.Enabled, runID)
 	if err := s.recordSidecarLifecycle(runCtx, audit.ActionSidecarStart); err != nil {
 		return err
 	}
@@ -988,6 +1100,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
+	s.logSecureClientPolicyEngine()
+
 	// ("Redacted AI discovery events expose reversible
 	// path fingerprints"): the AI-discovery service runs in goroutine 5
 	// below and calls runScan(..., "startup") immediately, so it can
@@ -1038,18 +1152,8 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.applyConfigReloadSnapshot,
 	)
 	s.configMgr.bindInitialObservabilityV8Plan(s.observabilityV8ActivePlan())
-	s.configMgr.assetDirs = func() []string {
-		if g := s.Generation(); g != nil {
-			return g.assetDirs
-		}
-		return nil
-	}
-	s.configMgr.assetFiles = func() []string {
-		if g := s.Generation(); g != nil {
-			return g.assetFiles
-		}
-		return nil
-	}
+	s.watchGenerationAssets()
+	s.configMgr.setStartupSource(s.bootConfigSourceName, s.bootConfigSource)
 	metricRuntime, _ := s.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	s.configMgr.bindObservabilityV8(metricRuntime)
 	// managed_enterprise: wire the AVC-authored env_config.json so the
@@ -1102,6 +1206,22 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		s.runCapacityObservabilityV8(runCtx, sidecarCapacityInterval)
 	}()
 
+	// The audit write-ahead log is checkpointed once it passes a size limit, so
+	// sustained hook traffic cannot grow it without bound.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runAuditWALGuard(runCtx)
+	}()
+
+	// Query-planner statistics are taken as the audit history grows, so ledger
+	// lookups stay index seeks.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.runAuditPlannerStats(runCtx)
+	}()
+
 	// Agent identities seen on the hook path are written to inventory.db in
 	// one batch per flush interval, never per hook.
 	agentIdentityStoreToken := sharedAgentIdentities.setStoreSource(func() *inventory.InventoryStore {
@@ -1114,6 +1234,12 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 			return cfg.DataDir
 		}
 		return ""
+	}, func() int {
+		// The audit retention window, as AI discovery's history uses.
+		if plan := s.observabilityV8ActivePlan(); plan != nil {
+			return plan.Snapshot().Local.RetentionDays
+		}
+		return config.ObservabilityV8DefaultRetentionDays
 	})
 	wg.Add(1)
 	go func() {
@@ -1147,6 +1273,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}()
 
+	// A proxy with configured profiles must not bind before the API worker
+	// publishes its initial profile set. Secure Client has no profiles.
+	if !s.currentConfig().SecureClientIntegration() && s.currentConfig().Guardrail.HasProfiles() {
+		s.apiMu.Lock()
+		s.apiProfilesReady = make(chan struct{})
+		s.apiMu.Unlock()
+	}
+
 	// Goroutine 3: REST API server (always runs)
 	wg.Add(1)
 	go func() {
@@ -1157,14 +1291,19 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		}
 	}()
 
-	// Goroutine 4: guardrail proxy (opt-in via config)
+	// Goroutine 4: guardrail (connector hooks and the proxy). A reload that
+	// changes the connector set runs it again in-process.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runActiveGuardrail(runCtx); err != nil && runCtx.Err() == nil {
+		reported := false
+		s.runGuardrailRestartable(runCtx, func(err error) {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
-			errCh <- err
-		}
+			if !reported {
+				reported = true
+				errCh <- err
+			}
+		})
 	}()
 
 	// Goroutine 5: continuous AI discovery (opt-in via config)
@@ -1288,7 +1427,7 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.closeOwnedObservabilityV8Runtime(); err != nil {
 		// Runtime.Close contract: the stores stay open until the deferred close
 		// above retries with a fresh context.
-		fmt.Fprint(os.Stderr, observabilityV8ShutdownFlushWarning())
+		fmt.Fprint(os.Stderr, s.observabilityV8ShutdownFlushWarning())
 		shutdownFlushWarned = true
 	} else {
 		s.logger.Close()
@@ -1360,6 +1499,9 @@ func (s *Sidecar) attachApplicationProtectionObserver(ctx context.Context, apiTo
 }
 
 func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
+	if err := s.waitForAPIProfilePublication(ctx); err != nil {
+		return err
+	}
 	runGuardrailFn := s.runGuardrail
 	if len(s.currentConfig().ActiveConnectors()) > 1 {
 		runGuardrailFn = s.runGuardrailMulti
@@ -1369,6 +1511,28 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 		s.health.SetGuardrail(StateError, err.Error(), guardrailFailureDetails(err))
 	}
 	return err
+}
+
+// runGuardrailRestartable runs the guardrail and runs it again when a reload
+// changes the connector set. A run that fails is passed to failed and then
+// waits for the next connector change, so a corrected connector set applies
+// without a gateway restart.
+func (s *Sidecar) runGuardrailRestartable(ctx context.Context, failed func(error)) {
+	for {
+		err := s.runRestartable(ctx, "guardrail", s.guardrailRestartCh, s.runActiveGuardrail)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
+			failed(err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.guardrailRestartCh:
+			fmt.Fprintf(os.Stderr, "[sidecar] restarting guardrail after config reload\n")
+		}
+	}
 }
 
 func (s *Sidecar) runRestartable(ctx context.Context, name string, restart <-chan struct{}, run func(context.Context) error) error {
@@ -1514,7 +1678,10 @@ type sidecarRulePackCandidate struct {
 	// global is the global scope's composed pack; active is the pack the
 	// shared scanners and judge use (the single enabled connector's, else
 	// global).
-	global         *guardrail.RulePack
+	global *guardrail.RulePack
+	// cache holds every pack of this candidate, for the profile set of the same
+	// transaction.
+	cache          *guardrail.RulePackCache
 	active         *guardrail.RulePack
 	activeRules    *compiledRulePackCategories
 	activePatterns *localPatternsActivation
@@ -1533,7 +1700,7 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 	if rp == nil {
 		return nil, fmt.Errorf("%s rule pack %q: loader returned no rule pack", scope, dir)
 	}
-	if err := rp.Validate(); err != nil {
+	if err := cache.Validate(rp); err != nil {
 		return nil, fmt.Errorf("%s rule pack %q: %w", scope, dir, err)
 	}
 	return rp, nil
@@ -1542,15 +1709,17 @@ func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*
 // loadInitialSidecarRulePack performs the cold-start contract. Multi-connector
 // packs remain isolated to their individual setup transactions, but the global
 // pack and an enabled single connector's effective pack must be valid before a
-// runnable Sidecar can be returned.
-func loadInitialSidecarRulePack(cfg *config.Config) (global, active *guardrail.RulePack, err error) {
+// runnable Sidecar can be returned. The cache that holds them is returned for
+// the start-time guardrail profile set, which resolves to the same packs and
+// need not load and validate them again (GAP-0264).
+func loadInitialSidecarRulePack(cfg *config.Config) (global, active *guardrail.RulePack, cache *guardrail.RulePackCache, err error) {
 	if cfg == nil {
-		return nil, nil, fmt.Errorf("sidecar: guardrail rule pack config is unavailable")
+		return nil, nil, nil, fmt.Errorf("sidecar: guardrail rule pack config is unavailable")
 	}
-	cache := guardrail.NewRulePackCache()
+	cache = guardrail.NewRulePackCache()
 	global, err = loadGlobalRulePack(cache, cfg, "global")
 	if err != nil {
-		return nil, nil, fmt.Errorf("sidecar: %w", err)
+		return nil, nil, nil, fmt.Errorf("sidecar: %w", err)
 	}
 	active = global
 	names := cfg.ActiveConnectors()
@@ -1559,12 +1728,12 @@ func loadInitialSidecarRulePack(cfg *config.Config) (global, active *guardrail.R
 		if name != "" && cfg.Guardrail.EffectiveEnabled(name) {
 			active, err = loadConnectorRulePack(cache, cfg, name, "connector "+name)
 			if err != nil {
-				return nil, nil, fmt.Errorf("sidecar: %w", err)
+				return nil, nil, nil, fmt.Errorf("sidecar: %w", err)
 			}
 		}
 	}
 	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", active)
-	return global, active, nil
+	return global, active, cache, nil
 }
 
 // preflightSidecarRulePacks loads a reload candidate through a fresh cache.
@@ -1572,16 +1741,30 @@ func loadInitialSidecarRulePack(cfg *config.Config) (global, active *guardrail.R
 // and all explicitly selectable application-protection packs, before any
 // runtime generation, restart helper, config snapshot, or scanner is changed.
 func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, error) {
+	return preflightSidecarRulePacksWithCache(guardrail.NewRulePackCache(), cfg)
+}
+
+// preflightSidecarRulePacksWithCache is preflightSidecarRulePacks over the
+// rule packs cache already holds: the boot generation shares the cache of the
+// cold-start load, which read the same files a moment before (GAP-0264).
+func preflightSidecarRulePacksWithCache(cache *guardrail.RulePackCache, cfg *config.Config) (*sidecarRulePackCandidate, error) {
+	return preflightSidecarRulePacksWithCacheMode(cache, cfg, false)
+}
+
+// Boot isolates invalid connector packs so valid peers remain available.
+// Reload remains atomic and rejects the entire candidate on any error.
+func preflightSidecarRulePacksWithCacheMode(cache *guardrail.RulePackCache, cfg *config.Config, boot bool) (*sidecarRulePackCandidate, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config reload rule pack candidate is unavailable")
 	}
-	cache := guardrail.NewRulePackCache()
+	boot = boot && !cfg.SecureClientIntegration()
 	global, err := loadGlobalRulePack(cache, cfg, "global")
 	if err != nil {
 		return nil, err
 	}
 	candidate := &sidecarRulePackCandidate{
 		global:         global,
+		cache:          cache,
 		active:         global,
 		connectors:     make(map[string]*guardrail.RulePack),
 		connectorRules: make(map[string]*compiledRulePackCategories),
@@ -1597,7 +1780,11 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 			}
 			rp, loadErr := loadConnectorRulePack(cache, cfg, name, "connector "+name)
 			if loadErr != nil {
-				return nil, loadErr
+				if !boot {
+					return nil, loadErr
+				}
+				fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid connector rule pack: %v\n", loadErr)
+				continue
 			}
 			candidate.connectors[name] = rp
 			enabledManual = append(enabledManual, name)
@@ -1611,7 +1798,11 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 	for _, name := range sandboxHarnessRulePackConnectors(cfg) {
 		rp, loadErr := loadSandboxHarnessRulePack(cache, cfg, name)
 		if loadErr != nil {
-			return nil, loadErr
+			if !boot {
+				return nil, loadErr
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid sandbox harness rule pack: %v\n", loadErr)
+			continue
 		}
 		candidate.connectors[name] = rp
 	}
@@ -1622,7 +1813,10 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 		// connector entry currently names it.
 		if overlay, ok := applicationProtectionRulePackScope(cfg); ok {
 			if _, loadErr := loadScopedRulePack(cache, cfg, overlay, "application protection"); loadErr != nil {
-				return nil, loadErr
+				if !boot {
+					return nil, loadErr
+				}
+				fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid application protection rule pack: %v\n", loadErr)
 			}
 		}
 		autoNames := make(map[string]struct{}, len(cfg.ApplicationProtection.Connectors)+len(cfg.ApplicationProtection.IncludeConnectors))
@@ -1643,7 +1837,10 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 				continue
 			}
 			if _, loadErr := loadConnectorRulePack(cache, cfg, name, "application protection connector "+name); loadErr != nil {
-				return nil, loadErr
+				if !boot {
+					return nil, loadErr
+				}
+				fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid application protection connector rule pack: %v\n", loadErr)
 			}
 		}
 	}
@@ -1658,7 +1855,12 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 	for name, rp := range candidate.connectors {
 		compiled, compileErr := compileRulePackCategories(rp)
 		if compileErr != nil {
-			return nil, fmt.Errorf("connector %s rule pack activation: %w", name, compileErr)
+			if !boot {
+				return nil, fmt.Errorf("connector %s rule pack activation: %w", name, compileErr)
+			}
+			fmt.Fprintf(os.Stderr, "[sidecar] skipping invalid connector rule pack activation for %s: %v\n", name, compileErr)
+			delete(candidate.connectors, name)
+			continue
 		}
 		candidate.connectorRules[name] = compiled
 	}
@@ -1667,12 +1869,12 @@ func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, e
 
 // buildSharedJudge builds the shared judge. providers is the candidate
 // generation's registry; nil uses the published one.
-func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *generationProviders) (*LLMJudge, error) {
+func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *generationProviders) (*LLMJudge, string, error) {
 	if cfg == nil || !cfg.Guardrail.Judge.Enabled {
-		return nil, nil
+		return nil, "", nil
 	}
 	if rp == nil {
-		return nil, fmt.Errorf("sidecar: guardrail judge requires a validated rule pack")
+		return nil, "", fmt.Errorf("sidecar: guardrail judge requires a validated rule pack")
 	}
 	dotenvPath := filepath.Join(cfg.DataDir, ".env")
 	judgeLLM := cfg.ResolveLLM("guardrail.judge")
@@ -1680,10 +1882,14 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 	if providers != nil {
 		registry = &configs.ProvidersConfig{Providers: providers.Providers, OllamaPorts: providers.OllamaPorts}
 	}
-	judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, registry)
+	judge, unavailable := newLLMJudgeWithReason(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, registry)
 	if judge == nil {
-		return nil, nil
+		if unavailable != "" {
+			fmt.Fprintf(os.Stderr, "[sidecar] LLM judge is enabled but not running: %s; the rules decide alone\n", unavailable)
+		}
+		return nil, unavailable, nil
 	}
+	judge.secureClient = cfg.SecureClientIntegration()
 
 	features := "tool-result-pii"
 	if cfg.Guardrail.Judge.ToolInjection {
@@ -1693,7 +1899,7 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack, providers *gen
 	if hooks := cfg.Guardrail.Judge.HookConnectors; len(hooks) > 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] LLM judge hook lane enabled for: %s\n", strings.Join(hooks, ", "))
 	}
-	return judge, nil
+	return judge, "", nil
 }
 
 // buildInitialSidecarJudge prepares the construction-time judge while the
@@ -1706,14 +1912,23 @@ func buildInitialSidecarJudge(
 	cfg *config.Config,
 	rp *guardrail.RulePack,
 ) (*LLMJudge, error) {
-	judge, err := buildSharedJudge(cfg, rp, nil)
+	judge, unavailable, err := buildSharedJudge(cfg, rp, nil)
 	if err != nil {
 		if client != nil {
 			_ = client.Close()
 		}
 		return nil, err
 	}
+	judgeHealth.applyJudge(judge, unavailable)
 	return judge, nil
+}
+
+// generationUnchanged reports a rebuild that matches the live generation: the
+// same effective digest and the same reason (if any) the Rego policy did not
+// load, so a new failure to load it is published, not swallowed.
+func generationUnchanged(live, next *Generation) bool {
+	return live != nil && next != nil && live.Digest == next.Digest && live.opaError == next.opaError &&
+		live.scannerPinError == next.scannerPinError
 }
 
 func (s *Sidecar) applyConfigReloadSnapshot(
@@ -1724,7 +1939,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 ) error {
 	if oldCfg == nil || newCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(newCfg.ConfigVersion) {
-		return fmt.Errorf("config reload requires schema v8; run 'defenseclaw upgrade' first")
+		return fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	v8PlanChanged := false
 	if strings.TrimSpace(source.sourceName) == "" || len(source.raw) == 0 ||
@@ -1757,7 +1972,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	// Identity-based guardrail profiles are derived, digested and their rule
 	// packs preloaded in the same candidate transaction.
-	profileCandidate, err := newGuardrailProfileSet(newCfg, true)
+	profileCandidate, err := newGuardrailProfileSet(newCfg, rulePackCandidate.cache, true)
 	if err != nil {
 		return fmt.Errorf("config reload guardrail profiles: %w", err)
 	}
@@ -1796,8 +2011,15 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	current := s.currentConfig()
 
 	apiRestart := apiNeedsRestart(oldCfg, newCfg)
-	watcherRestart := watcherNeedsRestart(oldCfg, newCfg)
-	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg)
+	fleetAccessChanged := gatewayShouldConnectForConfiguredConnector(oldCfg) != gatewayShouldConnectForConfiguredConnector(newCfg)
+	// A connector added, removed, enabled or disabled re-runs the connector
+	// setup in-process and restarts the install watcher, which watches the
+	// skill and plugin dirs of the connectors. Secure Client never gets here
+	// with such a change: diffConfigs keeps it restart-required. A hook fail
+	// mode change no hook guard rewrites re-runs the setup too.
+	guardrailRestart := connectorSetChanged(oldCfg, newCfg) || hookFailModeNeedsSetup(oldCfg, newCfg)
+	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || guardrailRestart
+	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || discoveryAssetsChanged(previousGen, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
 		oldCfg.Guardrail.AllowPrivateUpstreams,
 		newCfg.Guardrail.AllowPrivateUpstreams,
@@ -1829,21 +2051,26 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	// The candidate generation compiles everything a request reads: the
 	// composed rule packs, profiles, the prepared OPA queries and the
-	// resolved thresholds. A Rego module that worked in the previous
-	// generation and no longer loads rejects the reload.
+	// resolved thresholds. A Rego module that does not load rejects the
+	// reload and keeps the previous generation, so last_reload_error names it
+	// until it is fixed. A generation that already runs without Rego because
+	// its modules did not load (the boot fallback) keeps the lenient build,
+	// so a config change is not held back by a module it never used.
 	nextGen, err := buildGeneration(ctx, generationInputs{
 		cfg:       cloneConfig(&next),
 		raw:       source.raw,
 		rulePacks: rulePackCandidate,
 		profiles:  profileCandidate,
-		strictOPA: previousGen != nil && previousGen.OPA != nil,
+		strictOPA: previousGen != nil && previousGen.opaError == "",
+		// A scanner file edited away from its pin, or a pin that does not
+		// match, rejects the reload like a stale custom_packs pin (GAP-0664).
+		strictScannerPins: previousGen != nil && previousGen.scannerPinError == "",
 	})
 	if err != nil {
 		recordGenerationBuildError(err)
 		return fmt.Errorf("config reload generation: %w", err)
 	}
-	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets &&
-		previousGen != nil && previousGen.Digest == nextGen.Digest {
+	if len(diff.Changed) == 1 && diff.Changed[0] == configDiffAssets && generationUnchanged(previousGen, nextGen) {
 		return errGenerationUnchanged
 	}
 	// Rule packs and the judge (which embeds the active pack's judge
@@ -1852,16 +2079,25 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if previousGen != nil && previousGen.active != nil {
 		rulePackChanged = previousGen.active.Summary().Digest != rulePackCandidate.active.Summary().Digest
 	}
-	judgeChanged := rulePackChanged ||
-		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
-		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
+	var oldProviders *generationProviders
+	if previousGen != nil {
+		oldProviders = previousGen.Providers
+	}
+	judgeChanged := judgeNeedsRebuild(oldCfg, newCfg, rulePackChanged, oldProviders, nextGen.Providers)
 
 	var nextJudge *LLMJudge
+	var nextJudgeUnavailable string
 	if judgeChanged {
-		nextJudge, err = buildSharedJudge(&next, rulePackCandidate.active, nextGen.Providers)
+		nextJudge, nextJudgeUnavailable, err = buildSharedJudge(&next, rulePackCandidate.active, nextGen.Providers)
 		if err != nil {
 			return err
 		}
+	}
+
+	if judgeChanged {
+		nextGen.judge = nextJudge
+	} else {
+		nextGen.judge = s.sharedJudge()
 	}
 
 	// Application-protection observer attachment must be infallible after the
@@ -1913,12 +2149,63 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	setAgentIdentityConfig(&next)
 	applyIdentityPosture(&next)
 
+	// The judge is wired before the generation is published: a request
+	// that pins the next generation runs its judge, already bound to the
+	// trace runtime (GAP-0455). The router reads it from the generation.
+	if judgeChanged {
+		if nextJudge != nil {
+			s.observabilityV8Mu.Lock()
+			judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
+			if s.observabilityV8ConsumersDetached {
+				judgeRuntime = nil
+			}
+			nextJudge.bindJudgeTraceV8(judgeRuntime)
+			s.observabilityV8Mu.Unlock()
+		}
+		s.setSharedJudge(nextJudge)
+		judgeHealth.applyJudge(nextJudge, nextJudgeUnavailable)
+		if api := s.apiSnapshot(); api != nil {
+			api.SetHookJudge(nextJudge)
+		}
+		if proxy := s.proxySnapshot(); proxy != nil {
+			proxy.SetJudge(nextJudge)
+		}
+		nextGen.judge = nextJudge
+	} else if previousGen != nil {
+		nextGen.judge = previousGen.judge
+	} else {
+		nextGen.judge = s.sharedJudge()
+	}
+	if !rulePackChanged && previousGen != nil {
+		// The same pack stays: keep its compiled rules and patterns, which
+		// the process-wide scanners keep too.
+		nextGen.activeRules, nextGen.activePatterns = previousGen.activeRules, previousGen.activePatterns
+	}
+
 	appliedCfg := current
 	if !onlyReloadModeChange {
 		appliedCfg = s.publishConfig(&next)
 	}
 	nextGen.Config = appliedCfg
+	// The connector rule sets are replaced before the generation is
+	// published, which binds them; a request pinned to the previous
+	// generation keeps that generation's sets (GAP-1466).
+	publishConnectorRulePackGeneration(
+		ruleManagedConnectors(current),
+		rulePackCandidate.connectorRules,
+	)
 	s.publishGeneration(nextGen)
+	s.refreshHookGuardPolicies(oldCfg, appliedCfg)
+	if assetAdmissionListsChanged(oldCfg, appliedCfg) || mcpUnscannedAdmissionChanged(oldCfg, appliedCfg) {
+		// Installed skills, plugins and MCP servers affected by a list
+		// change are readmitted now, without waiting for content drift
+		// (GAP-0627, GAP-0993, GAP-1211), and an MCP server a new allow pin or scan_on_install
+		// false admits without a scan is admitted now, not at the next
+		// interval (GAP-0910).
+		if w := s.installWatcher.Load(); w != nil {
+			w.RequestRescan()
+		}
+	}
 	if privateUpstreamsReload {
 		// Replace, rather than merge, so removing the last entry takes effect.
 		// Drop pooled transports as well: an already-idle connection otherwise
@@ -1933,44 +2220,19 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		// Judge verdicts were rendered under the previous pack.
 		InvalidateJudgeVerdictCache()
 	}
-	publishConnectorRulePackGeneration(
-		ruleManagedConnectors(current),
-		rulePackCandidate.connectorRules,
-	)
 	if api := s.apiSnapshot(); api != nil {
 		previousProfiles := api.guardrailProfileSet()
 		api.setGuardrailProfiles(profileCandidate)
+		refreshDirectoryFactsOnProfileChange(oldCfg, newCfg)
 		auditGuardrailProfileChanges(s.logger, diffGuardrailProfileDigests(previousProfiles, profileCandidate))
+		if profileCandidate != nil {
+			profileCandidate.logProfileWarnings()
+		}
 	}
 	if s.router != nil {
-		if rulePackChanged {
-			s.router.SetRulePack(rulePackCandidate.active)
-		}
 		s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
 		s.router.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
 		s.router.SetDefaultPolicyID(appliedCfg.Guardrail.Mode)
-	}
-
-	if judgeChanged {
-		if nextJudge != nil {
-			s.observabilityV8Mu.Lock()
-			judgeRuntime, _ := s.observabilityV8.(judgeTraceV8Runtime)
-			if s.observabilityV8ConsumersDetached {
-				judgeRuntime = nil
-			}
-			nextJudge.bindJudgeTraceV8(judgeRuntime)
-			s.observabilityV8Mu.Unlock()
-		}
-		s.setSharedJudge(nextJudge)
-		if s.router != nil {
-			s.router.SetJudge(nextJudge)
-		}
-		if api := s.apiSnapshot(); api != nil {
-			api.SetHookJudge(nextJudge)
-		}
-		if proxy := s.proxySnapshot(); proxy != nil {
-			proxy.SetJudge(nextJudge)
-		}
 	}
 
 	if notifierChanged(oldCfg, newCfg) {
@@ -2097,8 +2359,14 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	if watcherRestart {
 		signalRestart(s.watcherRestartCh)
 	}
+	if guardrailRestart {
+		signalRestart(s.guardrailRestartCh)
+	}
 	if apiRestart {
 		signalRestart(s.apiRestartCh)
+	}
+	if fleetAccessChanged {
+		signalRestart(s.fleetReloadCh)
 	}
 	if aiRestart {
 		signalRestart(s.aiRestartCh)
@@ -2106,6 +2374,31 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	preparedCommitted = true
 	return nil
+}
+
+// assetAdmissionListsChanged reports a reload that changes skill or plugin
+// allow/deny lists or the MCP denied list outside Secure Client, whose
+// watcher keeps main's cycle (issue #1092).
+func assetAdmissionListsChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || newCfg.SecureClientIntegration() {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Denied, newCfg.AssetPolicy.Skill.Denied) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Denied, newCfg.AssetPolicy.Plugin.Denied) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.MCP.Denied, newCfg.AssetPolicy.MCP.Denied) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.Skill.Allowed, newCfg.AssetPolicy.Skill.Allowed) ||
+		!reflect.DeepEqual(oldCfg.AssetPolicy.Plugin.Allowed, newCfg.AssetPolicy.Plugin.Allowed)
+}
+
+// mcpUnscannedAdmissionChanged reports a reload that changes what admits an
+// MCP server without a scan, asset_policy.mcp.allowed or admission:, outside
+// Secure Client, whose watcher keeps the cycle of main (issue #1092).
+func mcpUnscannedAdmissionChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || newCfg.SecureClientIntegration() {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.AssetPolicy.MCP.Allowed, newCfg.AssetPolicy.MCP.Allowed) ||
+		!reflect.DeepEqual(oldCfg.Admission, newCfg.Admission)
 }
 
 // inspectorNeedsRebuild reports whether any field on
@@ -2133,33 +2426,106 @@ func inspectorNeedsRebuild(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.Enterprise.Network, newCfg.Enterprise.Network)
 }
 
+// watchGenerationAssets points the config watcher at the policy assets of
+// the live generation. Secure Client watches only its config and
+// env_config.json, as before the configuration generation (issue #1092).
+func (s *Sidecar) watchGenerationAssets() {
+	if s.currentConfig().SecureClientIntegration() {
+		return
+	}
+	s.configMgr.assetDirs = func() []string {
+		if g := s.Generation(); g != nil {
+			return g.assetDirs
+		}
+		return nil
+	}
+	s.configMgr.assetFiles = func() []string {
+		if g := s.Generation(); g != nil {
+			return g.assetFiles
+		}
+		return nil
+	}
+}
+
 // guardrailNeedsRestart reports a guardrail change that only a new gateway
 // process applies: the proxy listener, the guardrail and connector
-// enablement and the hook settings that setup bakes into the installed
-// hooks, and judge-body retention (its store opens at startup). Policy keys
-// (levels, packs, rules, profiles, judge, mode, HILT, trust level) reload
-// through the generation.
+// enablement and the hook self-heal settings, and judge-body retention (its
+// store opens at startup). Policy keys (levels, packs, rules, profiles,
+// judge, mode, hook fail mode, HILT, trust level) reload through the
+// generation: the hook guard reads the fail mode from the live config.
 func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
+	if oldCfg.SecureClientIntegration() || newCfg.SecureClientIntegration() {
+		// Secure Client keeps the restart set it had before the configuration
+		// generation (issue #1092): its hook decisions read the start-time
+		// configuration, so the levels, the LLM, the connectors, the rule
+		// pack and the judge restart with the listeners.
+		return oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
+			oldG.Connector != newG.Connector ||
+			oldG.BlockAt != newG.BlockAt || oldG.AlertAt != newG.AlertAt ||
+			oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
+			!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
+			!reflect.DeepEqual(oldG.Connectors, newG.Connectors) ||
+			oldG.RulePackDir != newG.RulePackDir || oldG.HookSelfHeal != newG.HookSelfHeal ||
+			oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
+			!reflect.DeepEqual(oldG.Judge, newG.Judge)
+	}
 	return oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
 		oldG.Connector != newG.Connector || oldG.ScannerMode != newG.ScannerMode ||
 		oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
-		oldG.HookFailMode != newG.HookFailMode || oldG.HookSelfHeal != newG.HookSelfHeal ||
-		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs ||
-		!reflect.DeepEqual(connectorHookSettings(oldG.Connectors), connectorHookSettings(newG.Connectors))
+		oldG.HookSelfHeal != newG.HookSelfHeal ||
+		oldG.HookSelfHealDebounceMs != newG.HookSelfHealDebounceMs
 }
 
-// connectorHookSettings keeps, per connector, only what setup bakes into
-// its hooks (membership, enablement and hook fail mode).
+// connectorSetChanged reports a change to the set of connectors whose hooks
+// are installed: a connector added, removed, enabled or disabled. Off Secure
+// Client it applies in-process (guardrailRestartCh, spec section 4).
+func connectorSetChanged(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
+}
+
+// hookFailModeNeedsSetup reports a hook fail mode change that no hook guard
+// applies: with hook self-heal off (refreshHookGuardPolicies has no guard to
+// refresh) the connector setup runs again, so the generated hooks carry the
+// new fail mode without a gateway restart. The enterprise hook guardian owns
+// managed hooks, and Secure Client keeps its behaviour.
+func hookFailModeNeedsSetup(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || newCfg.Guardrail.HookSelfHeal ||
+		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
+		return false
+	}
+	for _, name := range newCfg.ActiveConnectors() {
+		if oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) {
+			return true
+		}
+	}
+	return false
+}
+
+// connectorHookSettings keeps, per connector, only whether its hooks are
+// installed (membership and enablement).
 func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailConfig) map[string]config.PerConnectorGuardrailConfig {
 	out := make(map[string]config.PerConnectorGuardrailConfig, len(connectors))
 	for name, pc := range connectors {
-		out[name] = config.PerConnectorGuardrailConfig{Enabled: pc.Enabled, HookFailMode: pc.HookFailMode}
+		// An unset enabled is enabled, so enabled: true is not a change.
+		enabled := pc.Enabled == nil || *pc.Enabled
+		out[name] = config.PerConnectorGuardrailConfig{Enabled: &enabled}
 	}
 	return out
+}
+
+func judgeNeedsRebuild(oldCfg, newCfg *config.Config, rulePackChanged bool, oldProviders, newProviders *generationProviders) bool {
+	return rulePackChanged ||
+		oldProviders.digest() != newProviders.digest() ||
+		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
+		!reflect.DeepEqual(oldCfg.LLMProviders, newCfg.LLMProviders) ||
+		!reflect.DeepEqual(oldCfg.Guardrail.Judge, newCfg.Guardrail.Judge)
 }
 
 func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
@@ -2171,6 +2537,7 @@ func apiNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	return oldCfg.Gateway.APIPort != newCfg.Gateway.APIPort ||
 		oldCfg.Gateway.APIBind != newCfg.Gateway.APIBind ||
 		oldCfg.Guardrail.Host != newCfg.Guardrail.Host ||
+		(!newCfg.SecureClientIntegration() && slices.Contains(oldCfg.ActiveConnectors(), "openclaw") != slices.Contains(newCfg.ActiveConnectors(), "openclaw")) ||
 		openShellListenersChanged(oldCfg, newCfg)
 }
 
@@ -2186,6 +2553,12 @@ func openShellListenersChanged(oldCfg, newCfg *config.Config) bool {
 		oldCfg.OpenShellEgressPort() != newCfg.OpenShellEgressPort()
 }
 
+// watcherNeedsRestart reports whether a reload must rebuild the install
+// watcher. admission and asset_policy are not in the list: the watcher reads
+// them from the published config on every decision (SetConfigSource), and a
+// restart cancels the scans in flight, which fail closed. Every operator
+// block/allow writes asset_policy, so restarting for it blocked clean assets
+// whose scan was running (GAP-0315).
 func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
@@ -2194,9 +2567,8 @@ func watcherNeedsRestart(oldCfg, newCfg *config.Config) bool {
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
 		!reflect.DeepEqual(oldCfg.Watch, newCfg.Watch) ||
 		!reflect.DeepEqual(oldCfg.Scanners, newCfg.Scanners) ||
-		!reflect.DeepEqual(oldCfg.Admission, newCfg.Admission) ||
-		!reflect.DeepEqual(oldCfg.AssetPolicy, newCfg.AssetPolicy) ||
-		oldCfg.Claw != newCfg.Claw
+		oldCfg.Claw != newCfg.Claw ||
+		(!newCfg.SecureClientIntegration() && oldCfg.QuarantineDir != newCfg.QuarantineDir)
 }
 
 func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
@@ -2207,7 +2579,21 @@ func aiDiscoveryNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	// service's first report applies an edit at once.
 	return !reflect.DeepEqual(oldCfg.AIDiscovery, newCfg.AIDiscovery) ||
 		!reflect.DeepEqual(oldCfg.ApplicationProtection, newCfg.ApplicationProtection) ||
-		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode)
+		managed.IsManagedEnterprise(oldCfg.DeploymentMode) != managed.IsManagedEnterprise(newCfg.DeploymentMode) ||
+		!slices.Equal(discoveryExcludeUsers(oldCfg), discoveryExcludeUsers(newCfg))
+}
+
+// discoveryExcludeUsers is the enterprise.enrollment.exclude_users list the
+// standalone profile's AI Discovery scan leaves out. The scan reads it when
+// it starts, so a hot apply that changes it rebuilds the scan: an excluded
+// account otherwise kept the components the gateway could still see (a
+// Copilot CLI package folder it may list) and sent their removal only after
+// a restart (GAP-1024).
+func discoveryExcludeUsers(cfg *config.Config) []string {
+	if !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	return cfg.Enterprise.Enrollment.ExcludeUsers
 }
 
 func notifierChanged(oldCfg, newCfg *config.Config) bool {
@@ -2223,6 +2609,23 @@ func webhooksChanged(oldCfg, newCfg *config.Config) bool {
 	}
 	return !reflect.DeepEqual(oldCfg.Webhooks, newCfg.Webhooks) ||
 		!reflect.DeepEqual(oldCfg.Observability, newCfg.Observability)
+}
+
+// waitForAPIProfilePublication keeps the proxy listener closed until the API
+// worker has installed the initial profile set used by proxy requests.
+func (s *Sidecar) waitForAPIProfilePublication(ctx context.Context) error {
+	s.apiMu.RLock()
+	ready := s.apiProfilesReady
+	s.apiMu.RUnlock()
+	if ready == nil {
+		return nil
+	}
+	select {
+	case <-ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Sidecar) setAPIServer(api *APIServer) {
@@ -2243,6 +2646,10 @@ func (s *Sidecar) setAPIServer(api *APIServer) {
 		api.SetHookRegistrationRepair(s.ensureActiveHookRegistration)
 	}
 	s.apiServer = api
+	if api != nil && s.apiProfilesReady != nil {
+		close(s.apiProfilesReady)
+		s.apiProfilesReady = nil
+	}
 	s.apiMu.Unlock()
 	s.observabilityV8Mu.Unlock()
 }
@@ -2279,6 +2686,37 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
 	})
+}
+
+// refreshHookGuardPolicies re-renders the hooks of every hook-only connector
+// whose effective hook fail mode the published config changed. The fail mode is
+// baked into the generated hook scripts and the agent's registration, and it
+// follows the guardrail mode (action uses the global fail mode, observe is
+// open), so a mode change through any writer must reach them without a
+// restart. It runs off the reload path: Setup rewrites agent config files.
+func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
+	if s == nil || oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || !newCfg.Guardrail.HookSelfHeal ||
+		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
+		return
+	}
+	s.hookGuardsMu.RLock()
+	guards := make([]*HookConfigGuard, 0, len(s.hookGuards))
+	for guard := range s.hookGuards {
+		guards = append(guards, guard)
+	}
+	s.hookGuardsMu.RUnlock()
+	for _, guard := range guards {
+		conn := guard.activeConnector()
+		if conn == nil || proxyShouldBindForConnector(conn, &newCfg.Guardrail) ||
+			oldCfg.EffectiveHookFailModeForConnector(conn.Name()) == newCfg.EffectiveHookFailModeForConnector(conn.Name()) {
+			continue
+		}
+		go func() {
+			if err := guard.RefreshPolicy(context.Background()); err != nil {
+				fmt.Fprintf(os.Stderr, "[hook-guard] hook fail mode refresh for %s: %v\n", conn.Name(), err)
+			}
+		}()
+	}
 }
 
 func (s *Sidecar) unregisterHookConfigGuard(guard *HookConfigGuard) {
@@ -2781,6 +3219,7 @@ func (s *Sidecar) setGuardrailProxy(proxy *GuardrailProxy) {
 			lifecycle = nil
 		}
 		proxy.bindObservabilityV8TraceMode(lifecycle, true)
+		proxy.generationSource = s.Generation
 	}
 	s.guardrailProxy = proxy
 	s.proxyMu.Unlock()
@@ -2807,6 +3246,7 @@ func (s *Sidecar) setEventRouter(router *EventRouter) {
 			lifecycle = nil
 		}
 		router.bindObservabilityV8Capabilities(emitter, lifecycle)
+		router.generationSource = s.Generation
 		// Operator tool and MCP blocks come from the live config.
 		if router.policy != nil {
 			router.policy = router.policy.WithConfig(s.currentConfig)
@@ -2830,8 +3270,8 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 // codex/claudecode + loopback gateway.host, unknown connector, or an
 // openclaw connector implied only by claw.mode on a machine without
 // OpenClaw, reported as "OpenClaw is not installed"), we publish
-// StateDisabled with an explanatory hint and park on ctx.Done()
-// instead of looping ConnectWithRetry. This mirrors the
+// StateDisabled with an explanatory hint and park until config enables
+// fleet integration or ctx is cancelled instead of looping ConnectWithRetry. This mirrors the
 // observability-only branch in runGuardrail (sidecar.go::1283-1294)
 // and closes the historical "Gateway: RECONNECTING forever" symptom
 // on hook-only dev boxes where nothing is listening on
@@ -2840,62 +3280,96 @@ func (s *Sidecar) proxySnapshot() *GuardrailProxy {
 // a real upstream, or set gateway.fleet_mode=enabled — those cases fall
 // through to the dial loop below.
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
-	if !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
-		connName := configuredConnectorName(s.currentConfig())
-		details := map[string]interface{}{
-			"summary": "no OpenClaw fleet configured (standalone mode)",
-			"host":    s.currentConfig().Gateway.Host,
-			"port":    s.currentConfig().Gateway.Port,
-			"hint":    "telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream and restart to enable fleet integration",
-		}
-		// The fleet uplink is a single process-global WebSocket dial
-		// (gateway.host:port / gateway.fleet_mode) — NOT a per-connector
-		// setting. Every active connector runs hook-only against its own
-		// native upstream and shares this one uplink decision, so we state
-		// the global scope by count for EVERY install — one connector or N
-		// — rather than naming an arbitrary connector when there is exactly
-		// one. The wording is identical regardless of count so operators
-		// never see a "single vs multi" distinction. The authoritative
-		// per-connector roster is the status command's "Agents" section, so
-		// we deliberately do NOT re-enumerate connector names here.
-		details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.currentConfig().ActiveConnectors()))
-		why := "no OpenClaw fleet to dial"
-		if s.currentConfig().StandaloneEnterprise() {
-			details["summary"] = "no OpenClaw fleet (managed standalone deployment)"
-			details["hint"] = "hooks and the local audit continue; a managed standalone gateway dials a fleet only with gateway.fleet_mode: enabled and a gateway.host on another machine"
-			connName = "managed standalone"
-		} else if openClawImpliedButNotInstalled(s.currentConfig()) {
-			details["summary"] = fleetOffSummaryOpenClawNotInstalled
-			details["hint"] = fleetOffHintOpenClawNotInstalled
-			details["reason"] = fleetOffReasonOpenClawNotInstalled
-			why = "OpenClaw is not installed (claw.mode defaults to openclaw, no openclaw.json or openclaw binary found)"
-		} else if connName == "openclaw" && openClawNotInstalledLocally(s.currentConfig()) {
-			details["summary"] = "OpenClaw is not installed (standalone mode)"
-			details["hint"] = "hooks and the local audit continue; after installing OpenClaw, run 'defenseclaw setup openclaw' to connect to its gateway"
-		}
-		s.health.SetGateway(StateDisabled, "", details)
-		fmt.Fprintf(os.Stderr,
-			"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — %s. Hooks + local audit continue normally.\n",
-			connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode, why)
-		<-ctx.Done()
-		s.health.SetGateway(StateStopped, "", nil)
-		return nil
-	}
-	// Initial connect is the process-boot path, not a reconnect. Only
-	// subsequent successful connects should increment the reconnection
-	// counter so `defenseclaw.watcher.restarts` reflects true recoveries
-	// (transient WS drops, upstream gateway restarts) and not boot churn.
+	// Keep the boot-versus-reconnect distinction across fleet disable/enable.
 	firstConnect := true
 	for {
+		for !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
+			connName := configuredConnectorName(s.currentConfig())
+			details := map[string]interface{}{
+				"summary": "no OpenClaw fleet configured (standalone mode)",
+				"host":    s.currentConfig().Gateway.Host,
+				"port":    s.currentConfig().Gateway.Port,
+				"hint":    "telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream and restart to enable fleet integration",
+			}
+			// The fleet uplink is a single process-global WebSocket dial
+			// (gateway.host:port / gateway.fleet_mode) — NOT a per-connector
+			// setting. Every active connector runs hook-only against its own
+			// native upstream and shares this one uplink decision, so we state
+			// the global scope by count for EVERY install — one connector or N
+			// — rather than naming an arbitrary connector when there is exactly
+			// one. The wording is identical regardless of count so operators
+			// never see a "single vs multi" distinction. The authoritative
+			// per-connector roster is the status command's "Agents" section, so
+			// we deliberately do NOT re-enumerate connector names here.
+			details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.currentConfig().ActiveConnectors()))
+			why := "no OpenClaw fleet to dial"
+			if s.currentConfig().StandaloneEnterprise() {
+				details["summary"] = "no OpenClaw fleet (managed standalone deployment)"
+				details["hint"] = "hooks and the local audit continue; a managed standalone gateway dials a fleet only with gateway.fleet_mode: enabled and a gateway.host on another machine"
+				connName = "managed standalone"
+			} else if openClawImpliedButNotInstalled(s.currentConfig()) {
+				details["summary"] = fleetOffSummaryOpenClawNotInstalled
+				details["hint"] = fleetOffHintOpenClawNotInstalled
+				details["reason"] = fleetOffReasonOpenClawNotInstalled
+				why = "OpenClaw is not installed (claw.mode defaults to openclaw, no openclaw.json or openclaw binary found)"
+			} else if connName == "openclaw" && openClawNotInstalledLocally(s.currentConfig()) {
+				details["summary"] = "OpenClaw is not installed (standalone mode)"
+				details["hint"] = "hooks and the local audit continue; after installing OpenClaw, run 'defenseclaw setup openclaw' to connect to its gateway"
+			}
+			s.health.SetGateway(StateDisabled, "", details)
+			fmt.Fprintf(os.Stderr,
+				"[sidecar] gateway client disabled: connector=%q gateway.host=%q gateway.fleet_mode=%q — %s. Hooks + local audit continue normally.\n",
+				connName, s.currentConfig().Gateway.Host, s.currentConfig().Gateway.FleetMode, why)
+			select {
+			case <-ctx.Done():
+				s.health.SetGateway(StateStopped, "", nil)
+				return nil
+			case <-s.fleetReloadCh:
+				continue
+			}
+		}
+		// Initial connect is the process-boot path, not a reconnect. Only
+		// subsequent successful connects should increment the reconnection
+		// counter so `defenseclaw.watcher.restarts` reflects true recoveries
+		// (transient WS drops, upstream gateway restarts) and not boot churn.
 		s.health.SetGateway(StateReconnecting, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] connecting to %s:%d ...\n", s.currentConfig().Gateway.Host, s.currentConfig().Gateway.Port)
 
-		err := s.client.ConnectWithRetry(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				s.health.SetGateway(StateStopped, "", nil)
-				return nil
+		// A reload can disable the fleet while ConnectWithRetry is in its
+		// backoff loop. Cancel that attempt promptly and recheck the live
+		// configuration before recording a connection or trying again.
+		connectCtx, cancelConnect := context.WithCancel(ctx)
+		connectDone := make(chan struct{})
+		watcherDone := make(chan struct{})
+		go func() {
+			defer close(watcherDone)
+			select {
+			case <-s.fleetReloadCh:
+				cancelConnect()
+			case <-connectDone:
+			case <-ctx.Done():
+				cancelConnect()
 			}
+		}()
+		err := s.client.ConnectWithRetry(connectCtx)
+		close(connectDone)
+		<-watcherDone
+		cancelConnect()
+		if ctx.Err() != nil {
+			s.health.SetGateway(StateStopped, "", nil)
+			return nil
+		}
+		if !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
+			if err == nil {
+				select {
+				case <-s.client.disconnectForReload():
+				case <-ctx.Done():
+					return nil
+				}
+			}
+			continue
+		}
+		if err != nil {
 			s.health.SetGateway(StateError, err.Error(), nil)
 			fmt.Fprintf(os.Stderr, "[sidecar] connect failed: %v (will keep retrying)\n", err)
 			continue
@@ -2937,19 +3411,32 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 
 		fmt.Fprintf(os.Stderr, "[sidecar] event loop running, waiting for events ...\n")
 
-		select {
-		case <-ctx.Done():
-			s.health.SetGateway(StateStopped, "", nil)
-			return nil
-		case <-s.client.Disconnected():
-			fmt.Fprintf(os.Stderr, "[sidecar] gateway connection lost, reconnecting ...\n")
-			_ = s.logger.LogAction(string(audit.ActionSidecarDisconnected), "", "connection lost, reconnecting")
-			s.health.SetGateway(StateReconnecting, "connection lost", nil)
-			if s.osNotifier != nil {
-				s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
-					State:  notifier.ServiceStateDisconnected,
-					Reason: "connection lost, reconnecting",
-				})
+	connectedLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				s.health.SetGateway(StateStopped, "", nil)
+				return nil
+			case <-s.fleetReloadCh:
+				if !gatewayShouldConnectForConfiguredConnector(s.currentConfig()) {
+					select {
+					case <-s.client.disconnectForReload():
+					case <-ctx.Done():
+						return nil
+					}
+					break connectedLoop
+				}
+			case <-s.client.Disconnected():
+				fmt.Fprintf(os.Stderr, "[sidecar] gateway connection lost, reconnecting ...\n")
+				_ = s.logger.LogAction(string(audit.ActionSidecarDisconnected), "", "connection lost, reconnecting")
+				s.health.SetGateway(StateReconnecting, "connection lost", nil)
+				if s.osNotifier != nil {
+					s.osNotifier.OnServiceState(notifier.ServiceStateEvent{
+						State:  notifier.ServiceStateDisconnected,
+						Reason: "connection lost, reconnecting",
+					})
+				}
+				break connectedLoop
 			}
 		}
 	}
@@ -3033,7 +3520,7 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 			skillDirs = append([]string(nil), compTargets["skill"]...)
 			src.Skill = watcherDirsFromConnector
 		default:
-			skillDirs = cfg.SkillDirs()
+			skillDirs = watcherDefaultSkillDirs(cfg, conn)
 			src.Skill = watcherDirsFromDefault
 		}
 	} else {
@@ -3053,7 +3540,7 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 			pluginDirs = append([]string(nil), connectorPluginDirs...)
 			src.Plugin = watcherDirsFromConnector
 		default:
-			pluginDirs = cfg.PluginDirs()
+			pluginDirs = watcherDefaultPluginDirs(cfg, conn)
 			src.Plugin = watcherDirsFromDefault
 		}
 	} else {
@@ -3061,6 +3548,90 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 	}
 
 	return skillDirs, pluginDirs, src
+}
+
+// watcherDefaultSkillDirs is the config layout of conn's skill folders, or
+// of the active connector's without one.
+func watcherDefaultSkillDirs(cfg *config.Config, conn connector.Connector) []string {
+	if conn != nil {
+		return cfg.SkillDirsForConnector(conn.Name())
+	}
+	return cfg.SkillDirs()
+}
+
+// watcherDefaultPluginDirs is the config layout of conn's plugin folders, or
+// of the active connector's without one.
+func watcherDefaultPluginDirs(cfg *config.Config, conn connector.Connector) []string {
+	if conn != nil {
+		return cfg.PluginDirsForConnector(conn.Name())
+	}
+	return cfg.PluginDirs()
+}
+
+// watcherConnectors resolves every configured connector, owners of a shared
+// folder layout first (enrolledRootPrecedence). A per-user watcher watches
+// the skill and plugin folders of each one, not only the first connector's
+// (GAP-0392). With no connector configured it resolves the default, as before.
+func watcherConnectors(reg *connector.Registry, cfg *config.Config) []connector.Connector {
+	names := cfg.ActiveConnectors()
+	if len(names) == 0 {
+		names = []string{configuredConnectorName(cfg)}
+	}
+	sort.SliceStable(names, func(i, j int) bool {
+		if pi, pj := enrolledRootPrecedence(names[i]), enrolledRootPrecedence(names[j]); pi != pj {
+			return pi < pj
+		}
+		return names[i] < names[j]
+	})
+	conns := make([]connector.Connector, 0, len(names))
+	for _, name := range names {
+		conn, err := resolveActiveConnector(reg, name, "watcher")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
+			continue
+		}
+		conns = append(conns, conn)
+	}
+	return conns
+}
+
+// resolveWatcherDirsForConnectors is resolveWatcherDirs over every connector:
+// the union of their folders, each discovered folder tagged with the first
+// connector that lists it (roots). Explicit gateway.watcher dirs apply once
+// and are not tagged.
+func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs, pluginDirs []string, roots map[string]string, src watcherDirSources) {
+	if len(conns) == 0 {
+		skillDirs, pluginDirs, src = resolveWatcherDirs(cfg, nil, wcfg)
+		return skillDirs, pluginDirs, nil, src
+	}
+	roots = map[string]string{}
+	seenSkill, seenPlugin := map[string]bool{}, map[string]bool{}
+	add := func(out *[]string, seen map[string]bool, dirs []string, owner string, tag bool) {
+		for _, dir := range dirs {
+			key := filepath.Clean(dir)
+			if runtime.GOOS == "windows" {
+				key = strings.ToLower(key)
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			*out = append(*out, dir)
+			if tag {
+				roots[dir] = owner
+			}
+		}
+	}
+	for i, conn := range conns {
+		skills, plugins, connSrc := resolveWatcherDirs(cfg, conn, wcfg)
+		if i == 0 {
+			src = connSrc
+		}
+		owner := strings.ToLower(strings.TrimSpace(conn.Name()))
+		add(&skillDirs, seenSkill, skills, owner, connSrc.Skill != watcherDirsFromConfig)
+		add(&pluginDirs, seenPlugin, plugins, owner, connSrc.Plugin != watcherDirsFromConfig)
+	}
+	return skillDirs, pluginDirs, roots, src
 }
 
 // absoluteDirs returns dirs without its relative entries.
@@ -3126,40 +3697,106 @@ func opencodeWatcherDirs(dirs []string, activeRoot string) []string {
 	return filtered
 }
 
-// runWatcher starts the skill/MCP install watcher if enabled in config.
 // watcherUsesConnectorDirs reports whether the watcher may watch the
 // connector's (or the OpenClaw default's) folders in the gateway's own home.
 // Not when no connector is configured (init --connector none, or setup remove
 // of the last one): the empty name resolves to the OpenClaw default and
 // watching its folders would create ~/.openclaw (GAP-1056). Not on a managed
 // enterprise service either: its home is the service profile, which never
-// holds a user's skills or plugins (GAP-0026). Explicit gateway.watcher dirs
-// apply in both cases.
+// holds a user's skills or plugins (GAP-0026). Secure Client keeps the
+// pre-1.0 connector directories; explicit gateway.watcher dirs apply in all
+// profiles.
 func watcherUsesConnectorDirs(cfg *config.Config) bool {
-	return cfg.HasConnectorConfigured() && !managed.IsManagedEnterprise(cfg.DeploymentMode)
+	return cfg.HasConnectorConfigured() &&
+		(!managed.IsManagedEnterprise(cfg.DeploymentMode) || cfg.SecureClientIntegration())
 }
 
-// WatcherWatchesDirs reports whether the watcher is enabled and may watch a
-// folder: the connector's, or explicit gateway.watcher dirs. The start
-// banner and the subsystems line report the watcher off otherwise, as
-// runWatcher idles with "no directories to watch" (GAP-0077).
+// watcherStartupEnabled keeps Secure Client's pre-1.0 startup value, which
+// reports the configured switch even when no directories are resolved.
+func watcherStartupEnabled(cfg *config.Config) bool {
+	if cfg.SecureClientIntegration() {
+		return cfg.Gateway.Watcher.Enabled
+	}
+	return WatcherWatchesDirs(cfg)
+}
+
+// WatcherWatchesDirs reports whether the watcher is enabled and has a
+// connector MCP source, enrolled users, or a folder to watch. The start
+// banner and subsystems line report it idle only when none applies.
 func WatcherWatchesDirs(cfg *config.Config) bool {
 	w := cfg.Gateway.Watcher
 	if !w.Enabled {
 		return false
 	}
-	return watcherUsesConnectorDirs(cfg) ||
+	return watcherUsesConnectorDirs(cfg) || watcherUsesEnrolledUserDirs(cfg) ||
 		(w.Skill.Enabled && len(w.Skill.Dirs) > 0) || (w.Plugin.Enabled && len(w.Plugin.Dirs) > 0)
 }
 
+// warnUnenforcedAssetPolicy logs, at each watcher start, an asset_policy
+// default deny or registry_required that nothing on this host applies: no
+// watched folder admits the type and its runtime_detection is off, so the
+// hooks apply only the denied list (GAP-0957). mcpAdmitted reports whether
+// the watcher admits the agents' MCP servers here.
+func warnUnenforcedAssetPolicy(cfg *config.Config, skillDirs, pluginDirs []string, mcpAdmitted bool) {
+	watched := func(targetType string) bool {
+		switch targetType {
+		case "skill":
+			return len(skillDirs) > 0
+		case "plugin":
+			return len(pluginDirs) > 0
+		default:
+			return mcpAdmitted
+		}
+	}
+	for _, message := range cfg.UnenforcedAssetPolicyRules(watched) {
+		fmt.Fprintf(os.Stderr, "[sidecar] warning: %s\n", message)
+	}
+}
+
+// watcherHealthDetails adds to details the project skill folders that could
+// not be verified, which a watcher restart keeps refusing (GAP-1356).
+func (s *Sidecar) watcherHealthDetails(details map[string]interface{}) map[string]interface{} {
+	if unverified := len(s.projectSkills.unverifiedFolders()); unverified > 0 {
+		details[projectSkillRootsUnverifiedDetail] = unverified
+	}
+	return details
+}
+
+// runWatcher starts the skill/MCP install watcher if enabled in config,
+// and restarts it when a managed gateway's enrolled folders change.
 func (s *Sidecar) runWatcher(ctx context.Context) error {
+	for {
+		restart, err := s.runWatcherOnce(ctx)
+		if !restart || ctx.Err() != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "[sidecar] watcher: the watched folders changed; restarting the watcher\n")
+	}
+}
+
+// guardianQuarantineRemovalTimeout bounds the wait for the hook guardian to
+// remove a quarantined source in an enrolled user's folder.
+const guardianQuarantineRemovalTimeout = 30 * time.Second
+
+// guardianReadGrantTimeout bounds the wait for the hook guardian to let the
+// gateway read a skill or plugin folder moved into a watched folder.
+const guardianReadGrantTimeout = 15 * time.Second
+
+// runWatcherOnce runs one watcher until ctx ends, or until a managed
+// gateway's set of enrolled users' folders changes (restart is then true).
+func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) {
 	wcfg := s.currentConfig().Gateway.Watcher
 
 	if !wcfg.Enabled {
+		// No watcher admits a project skill folder now, so hooks stop
+		// registering them and holding their skills, as at a cold start
+		// with this config (GAP-1377).
+		s.projectSkills.start(false)
 		s.health.SetWatcher(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher disabled (set gateway.watcher.enabled=true to enable)\n")
+		warnUnenforcedAssetPolicy(s.currentConfig(), nil, nil, false)
 		<-ctx.Done()
-		return nil
+		return false, nil
 	}
 
 	// Resolve the active connector to get connector-specific component
@@ -3172,12 +3809,9 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	// the watcher useful for the OpenClaw default flow even while a
 	// freshly-broken connector name is being debugged.
 	reg := connector.NewDefaultRegistry()
-	conn, err := resolveActiveConnector(reg, configuredConnectorName(s.currentConfig()), "watcher")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] watcher: connector resolution: %v\n", err)
-	}
-
-	skillDirs, pluginDirs, src := resolveWatcherDirs(s.currentConfig(), conn, wcfg)
+	conns := watcherConnectors(reg, s.currentConfig())
+	skillDirs, pluginDirs, roots, src := resolveWatcherDirsForConnectors(s.currentConfig(), conns, wcfg)
+	var enrolled *enrolledWatchSet
 	if cfg := s.currentConfig(); cfg != nil && !watcherUsesConnectorDirs(cfg) {
 		if src.Skill != watcherDirsFromConfig {
 			skillDirs = nil
@@ -3185,6 +3819,93 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		if src.Plugin != watcherDirsFromConfig {
 			pluginDirs = nil
 		}
+		if watcherUsesEnrolledUserDirs(cfg) {
+			set := resolveEnrolledWatchSet(cfg, reg, wcfg, serviceHomeDir())
+			publishMCPStatesUnreadable(set.mcpUnreadable)
+			enrolled = &set
+			// The service reads the users' folders but may not delete in
+			// them: the hook guardian removes a quarantined source (GAP-0202).
+			channel := enforce.QuarantineRemovalChannelFor(cfg.DataDir, managed.HookGuardianAuthorizationDir(cfg.DataDir))
+			enforce.SetQuarantineSourceRemover(channel.Remover(guardianQuarantineRemovalTimeout))
+			if runtime.GOOS == "windows" {
+				// It also gives the service read access to a folder moved
+				// in with an access list of its own (GAP-0825), and removes
+				// a skill or plugin link the service may not delete
+				// (GAP-1188).
+				enforce.SetAssetReadGranter(channel.ReadGranter(guardianReadGrantTimeout))
+				// And to a project skill folder a hook registers (GAP-1356).
+				s.projectSkills.setReadGranter(channel.ReadGranter(projectSkillRootGrantTimeout))
+				enforce.SetLinkedAssetRemover(channel.LinkRemover(guardianQuarantineRemovalTimeout))
+			}
+			if src.Skill != watcherDirsFromConfig {
+				skillDirs = set.skillDirs
+			}
+			if src.Plugin != watcherDirsFromConfig {
+				pluginDirs = set.pluginDirs
+			}
+		}
+	}
+	// The skill folders of the projects the agents run in are watched too,
+	// unless explicit gateway.watcher.skill.dirs name the folders; a new
+	// one restarts the watcher, which admits it at its start (GAP-1063).
+	// Secure Client keeps main's folders (issue #1092).
+	cfgNow := s.currentConfig()
+	projectActive := wcfg.Skill.Enabled && src.Skill != watcherDirsFromConfig && cfgNow != nil &&
+		cfgNow.Watch.RescanEnabled && !cfgNow.SecureClientIntegration()
+	baseSkillDirs := skillDirs
+	projectRoots, freshProjectRoots := s.projectSkills.start(projectActive)
+	var enrolledProjectRoots []projectSkillRoot
+	for _, root := range projectRoots {
+		if slices.ContainsFunc(skillDirs, func(dir string) bool { return projectRootKey(dir) == projectRootKey(root.Path) }) {
+			continue
+		}
+		skillDirs = append(append([]string(nil), skillDirs...), root.Path)
+		if enrolled != nil {
+			enrolledProjectRoots = append(enrolledProjectRoots, root)
+			continue
+		}
+		if roots == nil {
+			roots = map[string]string{}
+		}
+		roots[root.Path] = root.Connector
+	}
+	if enrolled != nil {
+		enrolled.addProjectRoots(enrolledProjectRoots)
+	}
+	watchCtx := ctx
+	changed := make(chan struct{})
+	if enrolled != nil || projectActive {
+		var cancel context.CancelFunc
+		watchCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		var projectChanged <-chan struct{}
+		if projectActive {
+			projectChanged = s.projectSkills.changeSignal()
+		}
+		restartWanted := make(chan struct{})
+		go func() {
+			select {
+			case <-changed:
+			case <-projectChanged:
+				// A burst of new project folders restarts the watcher once.
+				select {
+				case <-time.After(projectSkillRootsSettle):
+				case <-watchCtx.Done():
+					return
+				}
+			case <-watchCtx.Done():
+				return
+			}
+			close(restartWanted)
+			cancel()
+		}()
+		defer func() {
+			select {
+			case <-restartWanted:
+				restart = ctx.Err() == nil
+			default:
+			}
+		}()
 	}
 
 	if !wcfg.Skill.Enabled {
@@ -3198,29 +3919,44 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin dirs: %v\n", pluginDirs)
 	}
 
-	if len(skillDirs) == 0 && len(pluginDirs) == 0 {
+	warnUnenforcedAssetPolicy(s.currentConfig(), skillDirs, pluginDirs,
+		watcherUsesConnectorDirs(s.currentConfig()) || enrolled != nil)
+	// A per-user connector can have only MCP servers (Kiro has no asset
+	// directories). Its discovery poll still needs a running watcher.
+	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil &&
+		!(watcherUsesConnectorDirs(s.currentConfig()) && !s.currentConfig().SecureClientIntegration()) {
 		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
 			"skill_dirs":  0,
 			"plugin_dirs": 0,
 			"idle":        "no directories configured",
 		})
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: no directories to watch\n")
-		<-ctx.Done()
-		return nil
+		<-watchCtx.Done()
+		return false, nil
 	}
 
-	s.health.SetWatcher(StateStarting, "", map[string]interface{}{
+	s.health.SetWatcher(StateStarting, "", s.watcherHealthDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
 		"plugin_dirs":        len(pluginDirs),
 		"skill_take_action":  wcfg.Skill.TakeAction,
 		"plugin_take_action": wcfg.Plugin.TakeAction,
 		"mcp_take_action":    wcfg.MCP.TakeAction,
-	})
+	}))
 
 	w := watcher.New(s.currentConfig(), skillDirs, pluginDirs, s.store, s.logger, nil, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
+	if enrolled != nil {
+		// A folder that appeared since the previous watcher (a user made
+		// ~/.claude/skills, or a user was enrolled) holds what was added
+		// meanwhile: admit it at startup (GAP-0571).
+		w.AdmitNewRootsAtStartup(append(s.newEnrolledWatchRoots(enrolled.readable(append(append([]string(nil), baseSkillDirs...), pluginDirs...))),
+			freshProjectRoots...))
+	} else if len(freshProjectRoots) > 0 {
+		w.AdmitNewRootsAtStartup(freshProjectRoots)
+	}
 	w.SetConfigSource(s.currentConfig)
+	w.SetRulePackSource(installScanRulePack)
 	// Admission evaluates the live generation's prepared OPA, which the
 	// config manager rebuilds when a watched Rego module changes.
 	w.SetPolicySource(func() *policy.Prepared {
@@ -3229,21 +3965,61 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 		}
 		return nil
 	})
-	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
-		return livePolicyDigestV8(), livePolicyGenerationV8()
+	w.SetPolicyStamp(livePolicyStampV8)
+	// Admission reads config, prepared policy and stamp from one generation
+	// (GAP-0457).
+	w.SetAdmissionPolicySource(func() watcher.AdmissionPolicySnapshot {
+		g := s.Generation()
+		if g == nil {
+			return watcher.AdmissionPolicySnapshot{Config: s.currentConfig()}
+		}
+		snapshot := watcher.AdmissionPolicySnapshot{Config: g.Config, Prepared: g.OPA}
+		if !g.Config.SecureClientIntegration() {
+			snapshot.Digest = observability.Present(g.Digest)
+			snapshot.Generation = observability.Present(int64(g.N))
+		}
+		return snapshot
 	})
-	audit.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
-		return livePolicyDigestV8(), livePolicyGenerationV8()
-	})
-	if conn != nil {
-		w.SetManagedArtifacts(connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
+	if enrolled != nil {
+		w.SetRootConnectors(enrolled.roots)
+		w.SetAssetOwners(enrolled.owners)
+		w.SetMCPServerSource(enrolled.live.list)
+		// Retries a server whose admission could not run at the poll.
+		w.SetMCPDiscoveryPoll(true)
+	} else {
+		if len(conns) > 1 || len(projectRoots) > 0 {
+			// Each folder belongs to the connector that lists it, so its
+			// events, rule pack and enforcement are that connector's
+			// (GAP-0392).
+			w.SetRootConnectors(roots)
+		}
+		if cfg := s.currentConfig(); watcherUsesConnectorDirs(cfg) && !cfg.SecureClientIntegration() {
+			// Every connector's servers in every scope, admitted when they
+			// appear: claude mcp add and .mcp.json servers were never
+			// scanned (GAP-0405).
+			names := make([]string, 0, len(conns))
+			for _, conn := range conns {
+				names = append(names, conn.Name())
+			}
+			w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+				return s.currentConfig().ReadWatchedMCPServers(names)
+			})
+			w.SetMCPDiscoveryPoll(true)
+		}
+	}
+	var artifacts []string
+	bundledSet := false
+	for _, conn := range conns {
+		artifacts = append(artifacts, connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
-		}))
-		if bundled, ok := conn.(connector.BundledPluginChecker); ok {
+		})...)
+		if bundled, ok := conn.(connector.BundledPluginChecker); ok && !bundledSet {
+			bundledSet = true
 			w.SetBundledPluginCheck(bundled.IsBundledPlugin)
 			w.SetBundledPluginDir(bundled.BundledPluginDir())
 		}
 	}
+	w.SetManagedArtifacts(artifacts)
 	watcherRuntime, _ := s.observabilityV8LifecycleRuntime().(watcher.ObservabilityV8Runtime)
 	w.BindObservabilityV8(watcherRuntime)
 	if webhooks := s.webhooksSnapshot(); webhooks != nil {
@@ -3253,17 +4029,25 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
 		len(skillDirs), len(pluginDirs), wcfg.Skill.TakeAction, wcfg.Plugin.TakeAction)
 
-	s.health.SetWatcher(StateRunning, "", map[string]interface{}{
+	s.health.SetWatcher(StateRunning, "", s.watcherHealthDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
 		"plugin_dirs":        len(pluginDirs),
 		"skill_take_action":  wcfg.Skill.TakeAction,
 		"plugin_take_action": wcfg.Plugin.TakeAction,
 		"mcp_take_action":    wcfg.MCP.TakeAction,
-	})
+	}))
 
-	runErr := w.Run(ctx)
+	if enrolled != nil {
+		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, enrolledProjectRoots, w, changed)
+	}
+	s.installWatcher.Store(w)
+	runErr := w.Run(watchCtx)
+	s.installWatcher.CompareAndSwap(w, nil)
 	s.health.SetWatcher(StateStopped, "", nil)
-	return runErr
+	if errors.Is(runErr, context.Canceled) && ctx.Err() == nil {
+		runErr = nil
+	}
+	return false, runErr
 }
 
 // handleAdmissionResult processes watcher verdicts. It only forwards runtime
@@ -3598,7 +4382,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// NewSidecar strictly loaded and published the effective single-connector
 	// pack before returning. Runtime startup consumes that immutable candidate
 	// and never performs an implicit second disk load.
-	rp := s.router.rulePack()
+	rp := s.activeRulePack()
 	if rp == nil {
 		return fmt.Errorf("guardrail: validated cold-start rule pack is unavailable")
 	}
@@ -3626,7 +4410,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
-	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
+	s.reportUnrebasedRulePacks(ctx)
+	conn, err := resolveActiveConnector(registry, guardrailConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
 		// not exist. Returning here aborts sidecar boot so the operator
@@ -3774,7 +4559,13 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
-	if !s.currentConfig().Guardrail.Enabled {
+	// `guardrail disable --connector X` on the only configured connector:
+	// the multi-connector boot drops X from its active set and tears it down,
+	// but a single-connector boot set X up again, so its hooks kept calling
+	// the gateway after the CLI said they were removed (GAP-0369).
+	connectorOff := s.currentConfig().Guardrail.Enabled && !guardianManagedLifecycle &&
+		!s.currentConfig().Guardrail.EffectiveEnabled(conn.Name())
+	if !s.currentConfig().Guardrail.Enabled || connectorOff {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
 		if err := conn.Teardown(ctx, setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
@@ -3792,6 +4583,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		connector.ClearActiveConnector(s.currentConfig().DataDir)
 		RemoveConnectorRulePackOverrides(conn.Name())
+		if connectorOff {
+			s.health.SetGuardrail(StateDisabled, fmt.Sprintf("connector %s disabled; its hooks were removed", conn.Name()), nil)
+			fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — hooks removed\n", conn.Name(), conn.Name())
+			<-ctx.Done()
+			return nil
+		}
 	} else if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: skipping connector setup/teardown for %s; hooks are installed and repaired by the enterprise hook guardian\n", conn.Name())
 	} else {
@@ -3881,6 +4678,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		publishConnectorRulePackOverrides(conn.Name(), compiledConnectorRules)
 	}
 
+	s.health.RetainConnectors(conn.Name())
 	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
 
 	proxy, err := NewGuardrailProxy(
@@ -3900,6 +4698,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetWebhookDispatcher(webhooks)
 	}
 	if err == nil && proxy != nil {
+		proxy.SetSecureClientIntegration(s.currentConfig().SecureClientIntegration())
 		proxy.SetModelRouter(s.modelRouter)
 		s.setGuardrailProxy(proxy)
 		defer s.setGuardrailProxy(nil)
@@ -3975,24 +4774,30 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// goroutine alive until shutdown, mirroring the existing
 	// !cfg.Guardrail.Enabled path in proxy.go (lines 313-318).
 	if !proxyShouldBindForConnector(conn, &s.currentConfig().Guardrail) {
-		policyMode := strings.ToLower(strings.TrimSpace(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name())))
-		if policyMode != "action" {
-			policyMode = "observe"
-		}
-		enforcementEnabled := policyMode == "action"
-		summary := "observability-only (no proxy binding)"
-		surface := "agent_lifecycle_hooks"
-		if enforcementEnabled {
-			summary = "hook enforcement (no proxy binding)"
-		}
-		if conn.Name() == "omnigent" {
-			surface = "omnigent_policy_api"
+		// The mode, enforcement and summary come from the live configuration
+		// generation at every publication, so the Guardrail status block
+		// follows a hot guardrail.mode change like the Connector Mode section
+		// does instead of keeping the boot-time mode (GAP-0905).
+		modeDetails := func() (policyMode string, enforcementEnabled bool, summary, surface string) {
+			policyMode = s.liveGuardrailMode(conn.Name())
+			enforcementEnabled = policyMode == "action"
+			summary = "observability-only (no proxy binding)"
+			surface = "agent_lifecycle_hooks"
 			if enforcementEnabled {
-				summary = "policy enforcement (no proxy binding)"
+				summary = "hook enforcement (no proxy binding)"
 			}
+			if conn.Name() == "omnigent" {
+				surface = "omnigent_policy_api"
+				if enforcementEnabled {
+					summary = "policy enforcement (no proxy binding)"
+				}
+			}
+			return policyMode, enforcementEnabled, summary, surface
 		}
+		policyMode, enforcementEnabled, _, _ := modeDetails()
 		if guardianManagedLifecycle {
 			publishHealth := func() {
+				policyMode, enforcementEnabled, summary, surface := modeDetails()
 				covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, []string{conn.Name()})
 				if s.currentConfig().StandaloneEnterprise() {
 					covered, status = managedGuardianStandaloneCoverage(s.currentConfig().DataDir)
@@ -4023,7 +4828,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			}
 			publishHealth()
 			fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — awaiting enterprise hook guardian verification\n", conn.Name(), policyMode, enforcementEnabled)
-			ticker := time.NewTicker(5 * time.Second)
+			ticker := time.NewTicker(guardrailHealthRefreshInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -4034,20 +4839,24 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 				}
 			}
 		}
-		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
-			"summary":             summary,
-			"connector":           conn.Name(),
-			"mode":                policyMode,
-			"data_path":           "direct-to-upstream",
-			"policy_mode":         policyMode,
-			"enforcement_enabled": enforcementEnabled,
-			"enforcement_surface": surface,
-			"proxy_port":          "closed",
-			"hint":                "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
-			"lifecycle_manager":   lifecycleManagerForConnector(s.currentConfig(), conn),
-		})
+		publishHealth := func() {
+			policyMode, enforcementEnabled, summary, surface := modeDetails()
+			s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
+				"summary":             summary,
+				"connector":           conn.Name(),
+				"mode":                policyMode,
+				"data_path":           "direct-to-upstream",
+				"policy_mode":         policyMode,
+				"enforcement_enabled": enforcementEnabled,
+				"enforcement_surface": surface,
+				"proxy_port":          "closed",
+				"hint":                "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
+				"lifecycle_manager":   lifecycleManagerForConnector(s.currentConfig(), conn),
+			})
+		}
+		publishHealth()
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — proxy port intentionally not bound\n", conn.Name(), policyMode, enforcementEnabled)
-		<-ctx.Done()
+		s.republishGuardrailOnModeChange(ctx, func() string { return s.liveGuardrailMode(conn.Name()) }, publishHealth)
 		return nil
 	}
 	return proxy.Run(ctx)
@@ -4153,7 +4962,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 
 	// NewSidecar has already strictly loaded and published the global pack.
 	// Per-connector candidates are loaded only by the isolated setup loop.
-	if s.router == nil || s.router.rulePack() == nil {
+	if s.activeRulePack() == nil {
 		return fmt.Errorf("multi-connector boot: validated global rule pack is unavailable")
 	}
 
@@ -4168,6 +4977,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 	}
 	s.migrateRetiredConnectorState(ctx, registry)
+	s.reportUnrebasedRulePacks(ctx)
 
 	// configured is every connector in guardrail.connectors. names is the
 	// ENABLED subset: a connector explicitly disabled via
@@ -4333,6 +5143,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
 			return teardownErr
 		}
+		s.health.RetainConnectors()
 		s.health.SetGuardrail(StateDisabled, "", nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — tore down %d configured connector(s)\n", len(conns))
 		<-ctx.Done()
@@ -4365,6 +5176,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
 			return teardownErr
 		}
+		s.health.RetainConnectors()
 		s.health.SetGuardrail(StateDisabled, "all configured connectors are individually disabled", nil)
 		fmt.Fprintf(os.Stderr, "[guardrail] all %d configured connector(s) disabled per-connector — none active; idle until shutdown\n", len(configured))
 		<-ctx.Done()
@@ -4421,6 +5233,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// Health: register every connector that came up so each appears in the
 	// roster with its own live counters, then mark the first (sorted) as the
 	// primary surfaced in the back-compat singular Connector field.
+	s.health.RetainConnectors(succeeded...)
 	for _, name := range succeeded {
 		if c, ok := registry.Get(name); ok {
 			s.health.RegisterConnector(c.Name(), c.ToolInspectionMode(), c.SubprocessPolicy())
@@ -4429,33 +5242,43 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	if primary, ok := registry.Get(succeeded[0]); ok {
 		s.health.SetConnector(primary.Name(), primary.ToolInspectionMode(), primary.SubprocessPolicy())
 	}
-	connectorModes := make(map[string]string, len(succeeded))
-	anyEnforcement := false
-	for _, name := range succeeded {
-		mode := strings.ToLower(strings.TrimSpace(s.currentConfig().EffectiveGuardrailModeForConnector(name)))
-		if mode != "action" {
-			mode = "observe"
+	notStarted := connectorsNotStarted(conns, succeeded)
+	// Modes come from the live configuration generation at every
+	// publication so a hot guardrail.mode change reaches status (GAP-0905).
+	liveModes := func() (map[string]string, bool) {
+		connectorModes := make(map[string]string, len(succeeded))
+		anyEnforcement := false
+		for _, name := range succeeded {
+			mode := s.liveGuardrailMode(name)
+			connectorModes[name] = mode
+			anyEnforcement = anyEnforcement || mode == "action"
 		}
-		connectorModes[name] = mode
-		anyEnforcement = anyEnforcement || mode == "action"
+		return connectorModes, anyEnforcement
 	}
-	guardrailDetails := map[string]interface{}{
-		"summary":             fmt.Sprintf("multi-connector direct-upstream mode (%d active)", len(succeeded)),
-		"connectors":          succeeded,
-		"connector_modes":     connectorModes,
-		"enforcement_enabled": anyEnforcement,
-		"proxy_port":          "closed",
-		"hint":                "hook/policy connectors enforce through agent-native lifecycle surfaces; the local guardrail proxy is not in the LLM data path",
+	publishHealth := func() {
+		connectorModes, anyEnforcement := liveModes()
+		guardrailDetails := map[string]interface{}{
+			"summary":             fmt.Sprintf("multi-connector direct-upstream mode (%d active)", len(succeeded)),
+			"connectors":          succeeded,
+			"connector_modes":     connectorModes,
+			"enforcement_enabled": anyEnforcement,
+			"proxy_port":          "closed",
+			"hint":                "hook/policy connectors enforce through agent-native lifecycle surfaces; the local guardrail proxy is not in the LLM data path",
+		}
+		// A configured connector whose setup failed is not enforced until the
+		// next start; status says so instead of only leaving it out (GAP-1714).
+		if len(notStarted) > 0 {
+			guardrailDetails["connectors_not_started"] = notStarted
+		}
+		s.health.SetGuardrail(StateRunning, "", guardrailDetails)
 	}
-	// A configured connector whose setup failed is not enforced until the
-	// next start; status says so instead of only leaving it out (GAP-1714).
-	if notStarted := connectorsNotStarted(conns, succeeded); len(notStarted) > 0 {
-		guardrailDetails["connectors_not_started"] = notStarted
-	}
-	s.health.SetGuardrail(StateRunning, "", guardrailDetails)
+	publishHealth()
+	_, anyEnforcement := liveModes()
 	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector direct-upstream mode: %d active connector(s): %s; enforcement=%t — proxy port intentionally not bound\n", len(succeeded), strings.Join(succeeded, ", "), anyEnforcement)
-
-	<-ctx.Done()
+	s.republishGuardrailOnModeChange(ctx, func() string {
+		connectorModes, _ := liveModes()
+		return fmt.Sprint(connectorModes)
+	}, publishHealth)
 	return nil
 }
 
@@ -4557,18 +5380,20 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	if primary, ok := registry.Get(succeeded[0]); ok {
 		s.health.SetConnector(primary.Name(), primary.ToolInspectionMode(), primary.SubprocessPolicy())
 	}
-	hookEnforcement := false
-	for _, name := range succeeded {
-		if strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(name), "action") {
-			hookEnforcement = true
-			break
-		}
-	}
-	summary := fmt.Sprintf("managed enterprise hook telemetry (%d guardian-managed)", len(succeeded))
-	if hookEnforcement {
-		summary = fmt.Sprintf("managed enterprise hook enforcement (%d guardian-managed)", len(succeeded))
-	}
 	publishHealth := func() {
+		// Read the mode from the live configuration generation at every
+		// publication so a hot guardrail.mode change reaches status (GAP-0905).
+		hookEnforcement := false
+		for _, name := range succeeded {
+			if s.liveGuardrailMode(name) == "action" {
+				hookEnforcement = true
+				break
+			}
+		}
+		summary := fmt.Sprintf("managed enterprise hook telemetry (%d guardian-managed)", len(succeeded))
+		if hookEnforcement {
+			summary = fmt.Sprintf("managed enterprise hook enforcement (%d guardian-managed)", len(succeeded))
+		}
 		covered, status := managedGuardianCoversConnectors(s.currentConfig().DataDir, succeeded)
 		if s.currentConfig().StandaloneEnterprise() {
 			covered, status = managedGuardianStandaloneCoverage(s.currentConfig().DataDir)
@@ -4610,7 +5435,7 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	publishHealth()
 	fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise multi-connector hook mode: %d connector(s): %s — proxy port closed; enterprise hook guardian owns hook files\n", len(succeeded), strings.Join(succeeded, ", "))
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(guardrailHealthRefreshInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -4664,34 +5489,44 @@ func managedGuardianStandaloneCoverage(dataDir string) (bool, string) {
 }
 
 func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []string, isolateTargets bool) (bool, string) {
+	authorization, reason := readManagedGuardianAuthorization(dataDir)
+	if authorization == nil {
+		return false, reason
+	}
+	return managedGuardianAuthorizationCovers(*authorization, connectorNames, isolateTargets)
+}
+
+// readManagedGuardianAuthorization reads the trusted, fresh guardian
+// authorization record, or returns why it cannot.
+func readManagedGuardianAuthorization(dataDir string) (*managedGuardianAuthorization, string) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
 	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
-		return false, err.Error()
+		return nil, err.Error()
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return false, fmt.Sprintf("open hook guardian authorization: %v", err)
+		return nil, fmt.Sprintf("open hook guardian authorization: %v", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return false, fmt.Sprintf("inspect hook guardian authorization: %v", err)
+		return nil, fmt.Sprintf("inspect hook guardian authorization: %v", err)
 	}
 	if !info.Mode().IsRegular() {
-		return false, "hook guardian authorization is not a regular file"
+		return nil, "hook guardian authorization is not a regular file"
 	}
 	if info.Size() > managedGuardianAuthorizationMaxBytes {
-		return false, fmt.Sprintf(
+		return nil, fmt.Sprintf(
 			"hook guardian authorization exceeds %d bytes",
 			managedGuardianAuthorizationMaxBytes,
 		)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, managedGuardianAuthorizationMaxBytes+1))
 	if err != nil {
-		return false, fmt.Sprintf("read hook guardian authorization: %v", err)
+		return nil, fmt.Sprintf("read hook guardian authorization: %v", err)
 	}
 	if int64(len(data)) > managedGuardianAuthorizationMaxBytes {
-		return false, fmt.Sprintf(
+		return nil, fmt.Sprintf(
 			"hook guardian authorization exceeds %d bytes",
 			managedGuardianAuthorizationMaxBytes,
 		)
@@ -4724,11 +5559,11 @@ func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []strin
 		decoder.DisallowUnknownFields()
 	}
 	if err := decoder.Decode(&authorization); err != nil {
-		return false, fmt.Sprintf("parse hook guardian authorization: %v", err)
+		return nil, fmt.Sprintf("parse hook guardian authorization: %v", err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return false, "parse hook guardian authorization: trailing content"
+		return nil, "parse hook guardian authorization: trailing content"
 	}
 	// Accept version==0 (pre-spec-005 files that omit the `version`
 	// key — JSON decode leaves the int zero) and any version >= 1: on a
@@ -4736,11 +5571,17 @@ func managedGuardianAuthorizationCoverage(dataDir string, connectorNames []strin
 	// consumed the fields we know. Negative versions are the only
 	// unsupported case (malformed producer).
 	if authorization.Version < 0 {
-		return false, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
+		return nil, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
 	}
 	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
-		return false, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
+		return nil, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
 	}
+	return &authorization, ""
+}
+
+// managedGuardianAuthorizationCovers checks a read record against the
+// connectors the gateway serves.
+func managedGuardianAuthorizationCovers(authorization managedGuardianAuthorization, connectorNames []string, isolateTargets bool) (bool, string) {
 	if isolateTargets {
 		// A target whose current repair failed keeps its last successful
 		// row (so a user cannot unenroll by breaking their own home), so
@@ -5825,6 +6666,30 @@ func configuredConnectorName(cfg *config.Config) string {
 	return strings.ToLower(strings.TrimSpace(string(cfg.Claw.Mode)))
 }
 
+// guardrailConnectorName is the connector a single-connector guardrail boot
+// sets up. guardrail.connectors without guardrail.connector (an
+// administrator config) names it; the claw.mode default does not: the
+// gateway set up an openclaw connector nobody configured at every start and
+// the guardrail exited on its missing extension (GAP-0361). claw.mode still
+// picks among the listed connectors, and decides alone without the map.
+// Secure Client keeps the historical connector selection from claw.mode.
+func guardrailConnectorName(cfg *config.Config) string {
+	name := configuredConnectorName(cfg)
+	if cfg == nil || cfg.SecureClientIntegration() || strings.TrimSpace(cfg.Guardrail.Connector) != "" || len(cfg.Guardrail.Connectors) == 0 {
+		return name
+	}
+	roster := cfg.ActiveConnectors()
+	for _, listed := range roster {
+		if listed == name {
+			return name
+		}
+	}
+	if len(roster) > 0 {
+		return roster[0]
+	}
+	return name
+}
+
 func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 	if cfg == nil {
 		return true
@@ -5920,6 +6785,9 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	case "disabled", "off", "false":
 		return false
 	}
+	if !cfg.SecureClientIntegration() && slices.Contains(cfg.ActiveConnectors(), "openclaw") {
+		return !openClawImpliedButNotInstalled(cfg) && !openClawNotInstalledLocally(cfg)
+	}
 	switch configuredConnectorName(cfg) {
 	case "openclaw":
 		// Skip when claw.mode alone implies OpenClaw and nothing on this
@@ -5927,7 +6795,10 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		// when discovery found no OpenClaw behind a loopback host.
 		return !openClawImpliedButNotInstalled(cfg) && !openClawNotInstalledLocally(cfg)
 	case "zeptoclaw":
-		return true
+		// Like OpenClaw, skip the loopback fleet address on a machine where
+		// discovery found no ZeptoClaw: it would dial ws://127.0.0.1:18789
+		// every 15 s for ever (GAP-0185).
+		return !(isLoopbackGatewayHost(cfg.Gateway.Host) && connector.CachedAgentNotFound(cfg.DataDir, "zeptoclaw"))
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
 	default:
@@ -6770,6 +7641,9 @@ func rollbackFailedConnectorSetup(conn connector.Connector, opts connector.Setup
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] rolling back partial %s setup\n", conn.Name())
+	// Per-user installs only: managed and Secure Client rollbacks keep the
+	// tombstone they have always written.
+	opts.FailedSetupFailClosed = !opts.ManagedEnterprise && connector.HookFailClosed(opts, conn)
 	var rollbackErrors []error
 	if err := conn.Teardown(ctx, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s: %v\n", conn.Name(), err)
@@ -6796,6 +7670,14 @@ func restoreSingleConnectorSetupPoint(
 	transaction multiConnectorSetupTransaction,
 	cause error,
 ) error {
+	if errors.Is(cause, connector.ErrSetupRefusedUnchanged) {
+		// Setup refused before it changed anything, so the connector keeps
+		// the registration it had. Re-applying that registration needs the
+		// posture a 0.8.x lock never recorded, and re-ran the Setup that had
+		// just refused (GAP-1241). Connectors a switch removed are still put
+		// back below.
+		transaction.applied = nil
+	}
 	rollbackErr := rollbackMultiConnectorPublication(ctx, transaction)
 	if rollbackErr == nil {
 		return cause
@@ -6874,14 +7756,25 @@ func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := apiListenAddr(s.currentConfig())
-	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
+	api := newAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
 	api.SetShutdownRequester(s.requestProcessShutdown)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)
 		api.SetGenerationSource(s.Generation)
 	}
+	// The API scans with the profile set of the current generation; deriving
+	// it again here doubled the profile work of every start (GAP-0276).
+	if g := s.Generation(); g != nil {
+		api.setGuardrailProfiles(g.Profiles)
+	} else {
+		api.initGuardrailProfiles(api.scannerCfg)
+	}
+	api.projectSkills = &s.projectSkills
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)
+	if set := api.guardrailProfileSet(); set != nil {
+		set.logProfileWarnings()
+	}
 	api.SetHILTApprovalManager(s.hilt)
 	// Wire the Cisco AI Defense inspector onto the API server so the
 	// hook lane (inspectToolPolicy / inspectMessageContent) can forward
@@ -6917,9 +7810,6 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api.SetAIRuntimeService(s.aiRuntimeSnapshot())
 	api.SetNotifier(s.osNotifier)
 	api.SetWebhookSource(s.webhooksSnapshot)
-	if g := s.Generation(); g != nil {
-		api.setGuardrailProfiles(g.Profiles)
-	}
 	// /policy/reload rebuilds the generation now (Rego and rule packs are
 	// also watched, so this is a hint for scripts); the watcher's admission
 	// reads the rebuilt generation.
@@ -6960,55 +7850,18 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	return api.Run(ctx)
 }
 
-// subscribeToSessions lists active sessions and subscribes to each one
-// so we receive session.tool events for tool call/result tracing.
+// subscribeToSessions subscribes the connection to the session events of the
+// gateway (session.message and session.tool for tool call/result tracing).
+// One connection-level subscription covers every session, also those that
+// start after this call (GAP-0224).
 func (s *Sidecar) subscribeToSessions(ctx context.Context) {
 	subCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
-	raw, err := s.client.SessionsList(subCtx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] sessions.list failed (will still receive agent events): %v\n", err)
+	if err := s.client.SessionsSubscribe(subCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] subscribe to session events failed (will still receive agent events): %v\n", err)
 		return
 	}
-
-	// The gateway returns sessions as either an array or an object keyed by
-	// session ID. Try both formats.
-	type sessionEntry struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	var sessions []sessionEntry
-
-	if err := json.Unmarshal(raw, &sessions); err != nil {
-		// Try object format: {"sessionId": {id, name, ...}, ...}
-		var sessMap map[string]json.RawMessage
-		if err2 := json.Unmarshal(raw, &sessMap); err2 != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] parse sessions list: %v\n", err)
-			return
-		}
-		for k, v := range sessMap {
-			var entry sessionEntry
-			if json.Unmarshal(v, &entry) == nil {
-				if entry.ID == "" {
-					entry.ID = k
-				}
-				sessions = append(sessions, entry)
-			}
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "[sidecar] found %d active sessions, subscribing for tool events...\n", len(sessions))
-
-	for _, sess := range sessions {
-		subCtx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
-		if err := s.client.SessionsSubscribe(subCtx2, sess.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] subscribe to session %s failed: %v\n", sess.ID, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "[sidecar] subscribed to session %s (%s)\n", sess.ID, sess.Name)
-		}
-		cancel2()
-	}
+	fmt.Fprintf(os.Stderr, "[sidecar] subscribed to session events\n")
 }
 
 func (s *Sidecar) logHello(h *HelloOK) {

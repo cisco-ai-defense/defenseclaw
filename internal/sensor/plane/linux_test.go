@@ -234,3 +234,18 @@ func TestLinuxListenMessageIsWellFormed(t *testing.T) {
 		t.Errorf("op = %d, want PROC_CN_MCAST_LISTEN", got)
 	}
 }
+
+// GAP-1418: the sensor helper serves each gateway subscription from its own
+// source, and a gateway that reconnects subscribes before the helper has
+// closed the old one. Two process connectors in one process must both bind.
+func TestProcessConnectorAllowsTwoSubscriptionsInOneProcess(t *testing.T) {
+	first, second := &linuxSource{}, &linuxSource{}
+	if err := first.startProcessConnector(); err != nil {
+		t.Skipf("cn_proc needs CAP_NET_ADMIN here: %v", err)
+	}
+	defer unix.Close(first.procFD)
+	if err := second.startProcessConnector(); err != nil {
+		t.Fatalf("second process connector: %v", err)
+	}
+	_ = unix.Close(second.procFD)
+}

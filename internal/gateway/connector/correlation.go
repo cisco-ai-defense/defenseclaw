@@ -38,7 +38,6 @@ const (
 	CorrelationProfileOpenClawV1    CorrelationProfileVersion = "openclaw-correlation-v1"
 	CorrelationProfileZeptoClawV1   CorrelationProfileVersion = "zeptoclaw-correlation-v1"
 	CorrelationProfileClaudeCodeV1  CorrelationProfileVersion = "claudecode-correlation-v1"
-	CorrelationProfileCodexV1       CorrelationProfileVersion = "codex-correlation-v1"
 	CorrelationProfileCodexV2       CorrelationProfileVersion = "codex-correlation-v2"
 	CorrelationProfileHermesV1      CorrelationProfileVersion = "hermes-correlation-v1"
 	CorrelationProfileCursorV1      CorrelationProfileVersion = "cursor-correlation-v1"

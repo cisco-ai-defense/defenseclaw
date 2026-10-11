@@ -22,6 +22,9 @@ and invalid-response failures.
 | `DEFENSECLAW_STRICT_AVAILABILITY=1` | Forces transport and missing-token failures closed. It cannot force an otherwise closed connector open. | Unset. Per agent process; compatibility/managed-deployment override. |
 | `DEFENSECLAW_FAIL_MODE` | Temporary process-level replacement for the persisted mode. | Unset. Use only for bounded diagnosis; persist normal posture with the CLI. |
 
+On a managed standalone host, gateway peer verification remains fail-closed
+when the gateway is unavailable, even if `hook_fail_mode: open` is set.
+
 On a managed standalone host both variables are *tighten-only*: a value that
 makes hooks stricter is honored, and one that would loosen the administrator's
 posture is ignored. See [Environment variables](/docs/reference/env-vars).
@@ -45,6 +48,10 @@ Each connector's effective fail mode resolves in this order:
    fail mode.
 3. Otherwise, the global `guardrail.hook_fail_mode`.
 
+When rule 2 keeps a connector open although the global value is `closed`,
+`defenseclaw status` and the `Mode` row of `defenseclaw doctor` say so next to
+`fail-mode=open`, so it does not read as drift.
+
 Hermes, GitHub Copilot CLI, and Antigravity have no fail-closed hook surface:
 their generated hooks stay open even when the effective mode is `closed`. See
 [Connector response shapes](#connector-response-shapes).
@@ -60,6 +67,30 @@ their generated hooks stay open even when the effective mode is `closed`. See
 | Valid gateway verdict | Honor the connector/event mapping. | Honor the same mapping. Fail mode does not turn an observation-only event into a blocking surface. |
 | Internal policy evaluator panic | Allow with `would_block`, warning, and telemetry. | The same fail-open boundary; no authoritative verdict was produced. |
 | Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
+
+Fail mode applies only to a hook the agent can start. A hook script that is
+missing, cannot be read or is not executable (an antivirus quarantine, a
+restored backup with the wrong mode, an account rename or home move that left
+the agent hooks pointing at the old home) makes the shell exit 126 or 127,
+which Claude Code and the other agents treat as a non-blocking hook error: the
+tool call runs unguarded whatever the fail mode. `defenseclaw guardrail
+status`, `defenseclaw status` and `defenseclaw doctor` say that the connector
+is not guarded and name the repair (`defenseclaw doctor --fix` restores the
+script mode; `defenseclaw setup <connector>` or `defenseclaw-gateway restart`
+renders the scripts and re-points the hooks after a home move).
+
+On a managed Linux or macOS host the hook is the administrator-owned
+`defenseclaw-hook` binary. When it is missing, empty (agents run an empty
+file as a script that allows every call), not executable, not owned by root
+or not the binary the deployment installed (hash mismatch),
+`enterprise linux status` (or `macos`) and `verify` fail with the path, the
+state and `security_complete: false`, and the hook guardian starts the
+lifecycle's config-apply job within seconds, which puts the binary back from
+the copy the lifecycle sealed when it committed the deployment (checked
+against its recorded SHA-256 before it is made executable, then renamed into
+place as root with mode 0755). `enterprise linux repair` does the same at
+once. On Windows the standalone guardian puts a missing, empty or different
+`defenseclaw-hook.exe` back from its protected copy within seconds.
 
 The final row is intentional and important. Hook fail mode governs delivery,
 authentication, parsing, and response availability. It does not fabricate a
@@ -115,12 +146,11 @@ The fail mode is written to `guardrail.hook_fail_mode` (or the connector's own
 `hook_fail_mode`) in `config.yaml`, and it is also baked into the generated hook
 scripts: each carries a `# defenseclaw-derived: sha256=... fail_mode=closed`
 header. The scripts are derived files, so the command restarts the gateway by
-default to render them again and reconcile native hook state. A gateway
-restart is the one step a running gateway cannot do by hot reload for this
-key; it is on the list of
-[restart-required keys](/docs/reference/cli#restart-required-keys).
-`--no-restart` saves the value but leaves the running hooks on the prior mode
-until the next restart. `guardrail status` reports configured and runtime
+default to render them again and reconcile native hook state. The key is
+not one of the
+[restart-required keys](/docs/reference/cli#restart-required-keys): with
+`--no-restart` the running gateway still reloads the new mode and, with hook
+self-heal on, renders the hook scripts again itself. `guardrail status` reports configured and runtime
 values so that drift is visible, and `defenseclaw doctor` warns with `stale
 generated script (... bakes hook fail mode open; config.yaml says closed)` and
 names the command that renders the scripts again.

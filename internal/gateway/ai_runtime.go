@@ -127,6 +127,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		// managed_enterprise the hook-enumerator already populates it from the
 		// eligible-users enumeration that renders targets.yaml.
 		HomeDirs: activeConfig.AIDiscovery.HomeDirs,
+		Owners:   s.aiRuntimeOwnerLookups(activeConfig),
 	})
 	if err != nil {
 		// A platform with no backend is a hard stop rather than a degraded
@@ -312,6 +313,29 @@ func (s *Sidecar) aiRuntimeSnapshot() *sensor.Service {
 // the sensor helper, which reads every process's token. The managed Windows
 // gateway's own restricted token sees neither the token nor the session
 // user of another account's process (GAP-2043).
+// aiRuntimeOwnerLookups attributes a runtime finding whose process owner
+// the gateway service cannot read (GAP-1250): the managed Windows service
+// account holds only SeChangeNotifyPrivilege, so another user's token is
+// often closed to it. The session's signed-in user and the enrolled-user
+// table of the AI Discovery scan come next. Secure Client keeps main's
+// process-owner-only attribution (issue #1092).
+func (s *Sidecar) aiRuntimeOwnerLookups(activeConfig *config.Config) sensor.OwnerLookups {
+	if activeConfig.SecureClientIntegration() {
+		return sensor.OwnerLookups{}
+	}
+	return sensor.OwnerLookups{
+		SessionUser: procprobe.SessionUser,
+		Accounts: func() []sensor.Account {
+			enrolled := s.aiDiscoverySnapshot().EnrolledAccounts()
+			accounts := make([]sensor.Account, 0, len(enrolled))
+			for _, account := range enrolled {
+				accounts = append(accounts, sensor.Account{Name: account.Name, SID: account.SID, Home: account.Home})
+			}
+			return accounts
+		},
+	}
+}
+
 func brokeredProcessAccounts(ctx context.Context, acquirer acquire.Acquirer) func() map[int]inventory.ProcessAccount {
 	return func() map[int]inventory.ProcessAccount {
 		readCtx, cancel := context.WithTimeout(ctx, 30*time.Second)

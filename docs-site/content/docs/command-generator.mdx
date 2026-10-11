@@ -29,7 +29,7 @@ Generated commands are display-only. Nothing on this page runs against your mach
   <Card title="Judge provider & auth" description="When a judge runs: --judge-provider / --judge-region / --judge-instance-name, --llm-role, --inherit-from / --inherit-llm, and the full Bedrock / Vertex / Azure judge-auth families (region, auth-mode, credential env vars, profile, inference profile, repeatable deployment aliases), plus --judge-tls-ca-cert-file / --judge-insecure-skip-verify. Only the auth block for the selected provider is emitted, and credential env vars get placeholder export lines." />
   <Card title="Rule pack" description="--rule-pack (default / strict / permissive). Emitted in both modes: in observe mode the pack decides what gets logged, and in action mode it also decides what blocks." />
   <Card title="HITL" description="--human-approval + --hilt-min-severity (critical / high / medium / low). Disabled in observe mode. The connector card explains whether the event can ask natively or takes a non-pausing connector fallback." />
-  <Card title="Advanced knobs" description="--port, --block-message, --workspace, --restart / --no-restart, --verify / --no-verify, plus --disable (teardown). Redaction is configured separately with the v8 policy editor; --disable collapses the command to the guardrail-off verb." />
+  <Card title="Advanced knobs" description="--port, --block-message, --workspace, --restart / --no-restart, plus --disable (teardown). Redaction is configured separately with the v8 policy editor; --disable collapses the command to the guardrail-off verb." />
 </Cards>
 
 <Callout title="Redaction has a separate v8 policy editor">

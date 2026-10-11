@@ -101,11 +101,14 @@ const (
 	ActionOTelIngestTraces    Action = "otel.ingest.traces"
 	ActionOTelIngestMalformed Action = "otel.ingest.malformed"
 	ActionConnectorHook       Action = "connector-hook"
-	// ActionConnectorHookSynthetic is the hook audit row earlier
-	// releases synthesized from a Codex agent-turn-complete notify. The
-	// gateway no longer writes it (the native Codex Stop hook records the
-	// turn end); it stays registered so rows already in an audit store
-	// still validate and export.
+	// ActionConnectorHookSynthetic is the hook audit row 0.8.x synthesized
+	// from a Codex agent-turn-complete notify. Nothing writes it now (the
+	// native Codex Stop hook records the turn end), and audit migration 33
+	// purges the rows 0.x stored. It stays registered for the 0.8.x config
+	// migration: an audit_sinks[].actions filter may name it, and the v7
+	// exporter selection generated from this registry must map it, or a
+	// filter naming only this action fails to migrate. Remove it with the
+	// config_version 7 migration.
 	ActionConnectorHookSynthetic Action = "connector-hook-synthetic"
 	ActionAssetPolicy            Action = "asset-policy"
 
@@ -118,6 +121,12 @@ const (
 	// records the successful re-install.
 	ActionConnectorHookTampered Action = "connector-hook-tampered"
 	ActionConnectorHookRepaired Action = "connector-hook-repaired"
+
+	// ActionEnterpriseExemptUser records that a standalone enterprise hook
+	// call came from an account enterprise.enrollment.exempt_users lists: it
+	// is allowed and inspected but not enrolled. At most one row per account
+	// and connector each ten minutes (GAP-0832).
+	ActionEnterpriseExemptUser Action = "enterprise-exempt-user"
 
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
@@ -384,6 +393,7 @@ func AllActions() []Action {
 		ActionAssetPolicy,
 		ActionConnectorHookTampered,
 		ActionConnectorHookRepaired,
+		ActionEnterpriseExemptUser,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,

@@ -91,6 +91,9 @@ const (
 	DefaultStateDBTimeout = 2 * time.Second
 
 	maxFieldLen = 256
+	// maxProductLen bounds an installation's product token, as the
+	// inventory's per-user report check does.
+	maxProductLen = 64
 )
 
 // Limits bounds one Scan. Zero values take the defaults.
@@ -158,6 +161,7 @@ type Install struct {
 type Plugin struct {
 	ID            string
 	DisplayName   string
+	Description   string
 	Publisher     string
 	Version       string
 	Enabled       string
@@ -199,14 +203,13 @@ func ScanMachine(goos string, limits Limits) []Install {
 }
 
 type scanner struct {
-	goos    string
-	limits  Limits
-	layout  layout
-	files   int
-	bytes   int64
-	plugins int
-	full    bool
-	out     []Install
+	goos   string
+	limits Limits
+	layout layout
+	files  int
+	bytes  int64
+	full   bool
+	out    []Install
 }
 
 func newScanner(goos string, limits Limits) *scanner {
@@ -230,10 +233,8 @@ func (s *scanner) result() []Install {
 
 // add records an installation, keeping plugins within MaxPlugins.
 func (s *scanner) add(inst Install) {
-	room := s.limits.MaxPlugins - s.plugins
-	if room < 0 {
-		room = 0
-	}
+	// Bound each installation independently so an earlier IDE cannot hide a later one.
+	room := s.limits.MaxPlugins
 	if len(inst.Plugins) > room {
 		inst.Plugins = inst.Plugins[:room]
 		inst.Partial = true
@@ -243,8 +244,10 @@ func (s *scanner) add(inst Install) {
 		// A budget ran out while this installation was read.
 		inst.Partial = true
 	}
-	s.plugins += len(inst.Plugins)
 	s.out = append(s.out, inst)
+	// The next installation starts with its own work budget. In particular,
+	// a large VS Code family must not make later JetBrains plugins vanish.
+	s.files, s.bytes, s.full = 0, 0, false
 }
 
 // charge takes one file (or directory listing) from the budget.
@@ -258,33 +261,65 @@ func (s *scanner) charge(bytes int64) bool {
 	return true
 }
 
-// isDir reports whether path is a directory, without following a final
-// link unless the scan may.
+// isDir reports whether path is a directory, without following a link
+// unless the scan may.
 func (s *scanner) isDir(path string) bool {
-	var (
-		info os.FileInfo
-		err  error
-	)
-	if s.limits.FollowSymlinks {
-		info, err = os.Stat(path)
-	} else {
-		info, err = os.Lstat(path)
-	}
+	info, err := s.stat(path)
 	return err == nil && info.IsDir()
 }
 
 // isFile reports whether path is a regular file, with the same link rule.
 func (s *scanner) isFile(path string) bool {
-	var (
-		info os.FileInfo
-		err  error
-	)
-	if s.limits.FollowSymlinks {
-		info, err = os.Stat(path)
-	} else {
-		info, err = os.Lstat(path)
-	}
+	info, err := s.stat(path)
 	return err == nil && info.Mode().IsRegular()
+}
+
+var errLinkAbove = errors.New("a link or junction above the path")
+
+// stat follows links only when the scan may. Lstat and O_NOFOLLOW see only
+// the last element, so a scan that must not follow links first checks
+// every directory between the home and path: a link or junction there
+// (%USERPROFILE%\.vscode pointing at another profile's) would put another
+// account's plugins in this one's inventory.
+func (s *scanner) stat(path string) (os.FileInfo, error) {
+	if s.limits.FollowSymlinks {
+		return os.Stat(path)
+	}
+	if !s.plainDirsAbove(path) {
+		return nil, errLinkAbove
+	}
+	return os.Lstat(path)
+}
+
+// plainDirsAbove reports whether every directory between the home and path
+// is a plain directory; Lstat reports a link, and a Windows junction, as
+// no directory. The machine-wide scan has no home: Program Files is the
+// administrator's.
+func (s *scanner) plainDirsAbove(path string) bool {
+	home := s.layout.home
+	if home == "" || path == home {
+		return true
+	}
+	var dirs []string
+	for dir := filepath.Dir(path); dir != home; dir = filepath.Dir(dir) {
+		if filepath.Dir(dir) == dir {
+			return false // not inside the home
+		}
+		dirs = append(dirs, dir)
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		info, err := os.Lstat(dirs[i])
+		if err == nil && info.IsDir() {
+			continue
+		}
+		// A managed gateway may read a folder without the right to read
+		// the attributes of a folder above it: the guardian keeps the .kiro
+		// folder of a user enrolled for Kiro at its exact DACL (GAP-0897).
+		// The path is then plain when it resolves to itself, because a link
+		// or junction above it would resolve elsewhere.
+		return errors.Is(err, os.ErrPermission) && resolvesToItself(path)
+	}
+	return true
 }
 
 // listDir returns up to limit entries of dir, sorted by name. Entries
@@ -295,12 +330,19 @@ func (s *scanner) listDir(dir string, limit int) []os.DirEntry {
 	}
 	f, err := os.Open(dir)
 	if err != nil {
+		s.full = true
 		return nil
 	}
 	defer f.Close()
-	entries, err := f.ReadDir(limit)
+	// Read one extra entry so hitting the cap cannot look like a full listing.
+	entries, err := f.ReadDir(limit + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
+		s.full = true
 		return nil
+	}
+	if len(entries) > limit {
+		s.full = true
+		entries = entries[:limit]
 	}
 	out := entries[:0]
 	for _, e := range entries {
@@ -355,23 +397,36 @@ func (s *scanner) readFileLimit(path string, limit int64) ([]byte, bool) {
 }
 
 // clean bounds a metadata value: printable, single line, at most
-// maxFieldLen bytes.
+// maxFieldLen bytes. Format characters (Unicode Cf: the bidi overrides and
+// isolates, zero-width characters) are dropped, so a display name such as
+// "safe <U+202E>gnp.exe" cannot render reversed in a table or a board, and
+// every other control character (a newline, a tab, ESC) becomes one space
+// (GAP-0670).
 func clean(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
 	var b strings.Builder
+	space := false
 	for _, r := range value {
-		if r == utf8.RuneError || unicode.IsControl(r) {
+		if r == utf8.RuneError || unicode.Is(unicode.Cf, r) {
 			continue
 		}
-		if b.Len()+utf8.RuneLen(r) > maxFieldLen {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			space = b.Len() > 0
+			continue
+		}
+		width := utf8.RuneLen(r)
+		if space {
+			width++
+		}
+		if b.Len()+width > maxFieldLen {
 			break
+		}
+		if space {
+			b.WriteByte(' ')
+			space = false
 		}
 		b.WriteRune(r)
 	}
-	return strings.TrimSpace(b.String())
+	return b.String()
 }
 
 // safeName reports whether name is a single path element.

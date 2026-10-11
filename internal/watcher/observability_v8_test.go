@@ -5,12 +5,15 @@ package watcher
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -172,6 +175,51 @@ func TestWatcherAdmissionTraceUsesGeneratedFamilyAndJoinsScanEvaluation(t *testi
 	}
 }
 
+type admissionSwapScanner struct {
+	countingScanner
+	swap func()
+}
+
+func (s *admissionSwapScanner) Scan(ctx context.Context, target string) (*scanner.ScanResult, error) {
+	s.swap()
+	return s.countingScanner.Scan(ctx, target)
+}
+
+func TestWatcherAdmissionUsesPostScanPolicySnapshot(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	path := filepath.Join(skillDir, "changed-policy")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	next := *cfg
+	next.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "changed-policy", Reason: "new policy"}}
+	oldSnapshot := AdmissionPolicySnapshot{
+		Config: cfg, Digest: observability.Present("sha256:old"), Generation: observability.Present(int64(7)),
+	}
+	newSnapshot := AdmissionPolicySnapshot{
+		Config: &next, Digest: observability.Present("sha256:new"), Generation: observability.Present(int64(8)),
+	}
+	current := oldSnapshot
+	reads := 0
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.SetAdmissionPolicySource(func() AdmissionPolicySnapshot { reads++; return current })
+	w.SetPolicyStamp(func() (observability.Optional[string], observability.Optional[int64]) {
+		t.Fatal("separate stamp callback must not be read")
+		return observability.Absent[string](), observability.Absent[int64]()
+	})
+	capture := &watcherAdmissionTraceCapture{}
+	w.BindObservabilityV8(capture)
+	fake := &admissionSwapScanner{countingScanner: countingScanner{name: "skill-scanner"}, swap: func() { current = newSnapshot }}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return fake }
+	result := w.runAdmission(t.Context(), InstallEvent{Type: InstallSkill, Name: "changed-policy", Path: path})
+	if result.Verdict != VerdictBlocked || reads != 2 || fake.calls != 1 {
+		t.Fatalf("verdict=%s snapshot reads=%d scans=%d, want blocked, 2, 1", result.Verdict, reads, fake.calls)
+	}
+	if got, ok := capture.input.DefenseClawPolicyGeneration.Get(); !ok || got != 7 {
+		t.Fatalf("attempted trace generation=%d present=%t, want 7", got, ok)
+	}
+}
+
 func TestWatcherMetricsNeverReachLegacyProvider(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	runtime := &watcherTestRuntime{}
@@ -182,15 +230,20 @@ func TestWatcherMetricsNeverReachLegacyProvider(t *testing.T) {
 	w.recordWatcherError(ctx)
 	w.recordAdmission(ctx, "blocked", "skill")
 	w.recordScanError(ctx, "skill-scanner", "skill", "timeout")
-	w.emitQuarantineFailure(ctx, "/skills/example", context.DeadlineExceeded)
+	w.emitQuarantineFailure(ctx, InstallEvent{Type: InstallSkill, Path: "/skills/example"}, context.DeadlineExceeded)
 	w.recordBlockSLO(ctx, "skill", 12)
 	if err := logger.RecordProvenanceBumpMetric(ctx, "policy_files"); err != nil {
 		t.Fatal(err)
 	}
 
-	_, generated := runtime.snapshot()
-	if len(generated) != 7 {
-		t.Fatalf("generated watcher metrics = %d, want 7", len(generated))
+	logs, generated := runtime.snapshot()
+	// GAP-0133: the failed move is an audit event, not only a log line.
+	if len(logs) != 1 {
+		t.Fatalf("audit records for the asset that could not be quarantined = %d, want 1", len(logs))
+	}
+	// Seven watcher metrics and the counter of the quarantine failure's audit record.
+	if len(generated) != 8 {
+		t.Fatalf("generated watcher metrics = %d, want 8", len(generated))
 	}
 }
 

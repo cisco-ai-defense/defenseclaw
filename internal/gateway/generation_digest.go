@@ -30,6 +30,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
@@ -69,11 +71,94 @@ func configDigest(cfg *config.Config) (string, error) {
 	if err := yaml.Unmarshal(raw, &doc); err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
+	doc = materializeConfigDefaults(cfg, doc)
 	canonical, err := json.Marshal(canonicalConfigValue("", doc, dataDirOf(cfg)))
 	if err != nil {
 		return "", fmt.Errorf("config digest: %w", err)
 	}
 	return sha256Digest(canonical), nil
+}
+
+// materializeConfigDefaults makes the config document digest what is
+// enforced, not how it was written (spec section 5, defaults materialised):
+// admission: becomes the compiled admission policy, so an explicit empty
+// first_party_allow_list (which YAML omits) differs from the built-in list and
+// a value equal to its default digests like the unset key; a connector's
+// enabled: true is the default and is dropped; a block_at or alert_at level is
+// upper-cased (the schema takes it in any case and enforcement reads it so, so
+// high and HIGH are one policy, GAP-0329). A Secure Client host keeps its
+// document as written.
+func materializeConfigDefaults(cfg *config.Config, doc any) any {
+	root, ok := doc.(map[string]any)
+	if !ok || cfg == nil || cfg.SecureClientIntegration() {
+		return doc
+	}
+	if raw, err := json.Marshal(policy.CompileAdmission(cfg)); err == nil {
+		var compiled any
+		if json.Unmarshal(raw, &compiled) == nil {
+			root["admission"] = compiled
+		}
+	}
+	if guardrail, ok := root["guardrail"].(map[string]any); ok {
+		canonicalizeGuardrailLevels(guardrail)
+		if overrides, ok := guardrail["connectors"].(map[string]any); ok {
+			for _, override := range overrides {
+				if fields, ok := override.(map[string]any); ok && fields["enabled"] == true {
+					delete(fields, "enabled")
+				}
+			}
+		}
+	}
+	return root
+}
+
+// canonicalizeGuardrailLevels upper-cases every block_at and alert_at string
+// in value (the guardrail section: global, connectors and profiles).
+func canonicalizeGuardrailLevels(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if level, ok := child.(string); ok && (key == "block_at" || key == "alert_at") {
+				v[key] = strings.ToUpper(strings.TrimSpace(level))
+				continue
+			}
+			canonicalizeGuardrailLevels(child)
+		}
+	case []any:
+		for _, child := range v {
+			canonicalizeGuardrailLevels(child)
+		}
+	}
+}
+
+// observabilityDigest digests the observability section of config.yaml
+// (local retention, destinations, redaction profiles) the way configDigest
+// digests the rest. The typed Config carries only per-connector overrides of
+// that section, so configDigest alone never saw a retention or redaction
+// change (GAP-0007). raw is the file's bytes; nil reads cfg.ConfigFilePath. A
+// config with no readable file has no observability component.
+func observabilityDigest(cfg *config.Config, raw []byte) string {
+	if raw == nil {
+		path := strings.TrimSpace(cfg.ConfigFilePath)
+		if path == "" {
+			return ""
+		}
+		var err error
+		if raw, err = os.ReadFile(path); err != nil { // #nosec G304 -- the loaded config file.
+			return ""
+		}
+	}
+	var doc struct {
+		Observability any `yaml:"observability"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return ""
+	}
+	canonical, err := json.Marshal(canonicalConfigValue("observability", doc.Observability, dataDirOf(cfg)))
+	if err != nil {
+		return ""
+	}
+	return sha256Digest(canonical)
 }
 
 func canonicalConfigValue(path string, value any, dataDir string) any {
@@ -146,15 +231,11 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 	if digest := strings.TrimSpace(cfg.OpenShell.Admin.RequiredPackDigest); digest != "" {
 		out["sandbox_pack"] = digest
 	}
-	for _, path := range cfg.AIDiscovery.SignaturePacks {
-		if path = strings.TrimSpace(path); path != "" {
-			out["signature_pack:"+rewriteDataDir(path, dataDir)] = fileDigest(path)
-		}
+	for key, digest := range signaturePackDigests(cfg) {
+		out[key] = digest
 	}
-	if path := strings.TrimSpace(cfg.AIDiscovery.ConfidencePolicyPath); path != "" {
-		if digest := fileDigest(path); digest != "missing" {
-			out["confidence_policy"] = digest
-		}
+	if digest := confidencePolicyDigest(cfg); digest != "" {
+		out[confidencePolicyComponent] = digest
 	}
 	if ref := cfg.Scanners.SkillScanner.PolicyFile; strings.TrimSpace(ref.Path) != "" {
 		out["scanner_policy:skill"] = assetRefDigest(ref)
@@ -176,6 +257,68 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 		out["builtin"] = digest
 	}
 	return out
+}
+
+// signaturePackDigests digests each ai_discovery.signature_packs entry, keyed
+// "signature_pack:<entry>". An entry that is a directory or a glob is digested
+// over the pack files it names now, so adding, removing or editing one changes
+// the digest.
+func signaturePackDigests(cfg *config.Config) map[string]string {
+	out := map[string]string{}
+	dataDir := dataDirOf(cfg)
+	for _, entry := range cfg.AIDiscovery.SignaturePacks {
+		if entry = strings.TrimSpace(entry); entry == "" {
+			continue
+		}
+		files, _ := inventory.SignaturePackEntry(entry)
+		digest := "missing"
+		if len(files) > 0 {
+			parts := make([]string, 0, len(files))
+			for _, file := range files {
+				parts = append(parts, rewriteDataDir(file, dataDir)+"="+fileDigest(file))
+			}
+			sort.Strings(parts)
+			digest = sha256Digest([]byte(strings.Join(parts, "\n")))
+		}
+		out["signature_pack:"+rewriteDataDir(entry, dataDir)] = digest
+	}
+	return out
+}
+
+// confidencePolicyComponent is the generation component of the discovery
+// confidence policy file.
+const confidencePolicyComponent = "confidence_policy"
+
+// confidencePolicyDigest digests ai_discovery.confidence_policy_path, or is
+// "" when no path is set or the file does not exist (the built-in policy).
+func confidencePolicyDigest(cfg *config.Config) string {
+	path := strings.TrimSpace(cfg.AIDiscovery.ConfidencePolicyPath)
+	if path == "" {
+		return ""
+	}
+	if digest := fileDigest(path); digest != "missing" {
+		return digest
+	}
+	return ""
+}
+
+// discoveryAssetsChanged reports whether a file AI discovery loads once, when
+// its service is built, changed on disk since the live generation was built: a
+// signature pack or the confidence policy. Such a file edited, created or
+// removed in place only takes effect (or is refused, under its pin) when the
+// service is rebuilt; without the rebuild the reported digest named a
+// confidence policy discovery did not apply (GAP-0316). Secure Client keeps the
+// discovery service of main, which a confidence policy edit never rebuilt.
+func discoveryAssetsChanged(live *Generation, cfg *config.Config) bool {
+	if live == nil || cfg == nil || !cfg.AIDiscovery.Enabled {
+		return false
+	}
+	for key, digest := range signaturePackDigests(cfg) {
+		if live.Components[key] != digest {
+			return true
+		}
+	}
+	return !cfg.SecureClientIntegration() && live.Components[confidencePolicyComponent] != confidencePolicyDigest(cfg)
 }
 
 // assetRefDigest is a reference's pinned digest, else the file's.
@@ -239,7 +382,7 @@ func ComputeEffectivePolicy(ctx context.Context, cfg *config.Config) (EffectiveP
 	if err != nil {
 		return EffectivePolicy{}, err
 	}
-	profiles, err := newGuardrailProfileSet(cfg, false)
+	profiles, err := newGuardrailProfileSet(cfg, rulePacks.cache, false)
 	if err != nil {
 		profiles = nil
 	}
@@ -257,15 +400,18 @@ func ComputeEffectivePolicy(ctx context.Context, cfg *config.Config) (EffectiveP
 
 // generationRulePacks is the rule-pack set a generation digests: the reload
 // preflight's (global, every enabled connector's and sandbox harness's
-// pack), else the boot set (global and the active pack) when a connector
-// pack fails, as boot tolerates.
+// pack), else the boot set with valid connector packs retained when one
+// connector pack fails, as boot tolerates.
 func generationRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, error) {
 	if candidate, err := preflightSidecarRulePacks(cfg); err == nil {
 		return candidate, nil
 	}
-	global, active, err := loadInitialSidecarRulePack(cfg)
+	global, active, cache, err := loadInitialSidecarRulePack(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return &sidecarRulePackCandidate{global: global, active: active}, nil
+	if candidate, err := preflightSidecarRulePacksWithCacheMode(cache, cfg, true); err == nil {
+		return candidate, nil
+	}
+	return &sidecarRulePackCandidate{cache: cache, global: global, active: active}, nil
 }

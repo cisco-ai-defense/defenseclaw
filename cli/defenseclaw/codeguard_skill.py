@@ -161,17 +161,6 @@ def install_codeguard_skill(cfg, connector: str | None = None, replace: bool = F
     return install_codeguard_asset(cfg, connector=connector, target="skill", replace=replace)
 
 
-def ensure_codeguard_skill(claw_home: str, openclaw_config: str, connector: str = "") -> None:
-    """Deprecated no-op retained for older callers.
-
-    Native CodeGuard assets are fully opt-in; CLI startup, init, sandbox setup,
-    and sidecar setup must not call through to an implicit installer.
-    """
-    _ = claw_home
-    _ = openclaw_config
-    _ = connector
-
-
 def _resolve_connector(cfg, connector: str | None) -> str:
     if connector:
         return connector_paths.normalize(connector)
@@ -401,6 +390,23 @@ _PRIOR_SKILL_SIGNATURES = frozenset(
         "596b1fd2fbfbf050af7a679d80d6151ad53c16df44a975859a43cf591b8e42d9",
     }
 )
+
+
+def is_shipped_codeguard_skill(path: str) -> bool:
+    """True when *path* is an exact copy of a CodeGuard skill DefenseClaw shipped.
+
+    Admission trusts the codeguard first-party entry only for this content
+    (GAP-0419); without the packaged source only earlier releases match.
+    """
+    if not path or os.path.islink(path):
+        return False
+    signature = _dir_signature(path, skip_bytecode=True)
+    if signature is None:
+        return False
+    source = _find_skill_source()
+    if source is not None and signature == _dir_signature(source, skip_bytecode=True):
+        return True
+    return signature in _PRIOR_SKILL_SIGNATURES
 
 
 def _is_prior_codeguard_skill_dir(path: str) -> bool:

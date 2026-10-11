@@ -37,7 +37,7 @@ func trustedBuiltInMatchReason(reason string) bool {
 	if !ok || body == "" {
 		return false
 	}
-	labels := strings.Split(body, ", ")
+	labels := splitMatchLabels(body)
 	if len(labels) == 0 || len(labels) > 5 {
 		return false
 	}
@@ -47,6 +47,27 @@ func trustedBuiltInMatchReason(reason string) bool {
 		}
 	}
 	return true
+}
+
+// matchLabelStart opens every "<rule-id>:<title>" label of a matched reason.
+var matchLabelStart = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:`)
+
+// splitMatchLabels splits the body of a "matched: " reason into its labels.
+// Labels are joined with ", ", and a rule title may hold ", " too ("P0 marker,
+// off by default (high)"), so a piece that does not open with a rule ID and a
+// colon continues the label before it. A title that happens to look like a
+// label start splits early; its label then matches no known rule and the
+// message keeps the bare rule ID.
+func splitMatchLabels(body string) []string {
+	var labels []string
+	for _, piece := range strings.Split(body, ", ") {
+		if n := len(labels); n > 0 && !matchLabelStart.MatchString(piece) {
+			labels[n-1] += ", " + piece
+			continue
+		}
+		labels = append(labels, piece)
+	}
+	return labels
 }
 
 func trustedBuiltInFindingLabel(label string) bool {
@@ -161,6 +182,9 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 	subject := agentBlockListSubject(sourceReason)
 	if subject == "" {
 		subject = agentAssetPolicySubject(sourceReason)
+	}
+	if subject == "" {
+		subject = agentMCPAdmissionSubject(sourceReason)
 	}
 	if subject == "" {
 		subject = agentJudgeSubject(sourceReason)
@@ -326,6 +350,36 @@ var agentAssetPolicyKeys = []string{
 // may show the agent: the asset name the agent itself asked for, or an enum.
 var agentAssetPolicyValuePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$`)
 
+// agentAssetPolicyNamePattern is the shape of an asset_name the agent may be
+// shown: the plain shape, with letters, marks and digits of any script, so a
+// denied skill named "epa-café" reads as a sentence like an ASCII one instead
+// of the redacted key=value reason (GAP-0572). Spaces, quotes, controls and
+// format characters still fail the match and stay redacted.
+var agentAssetPolicyNamePattern = regexp.MustCompile(`^[\p{L}\p{N}][\p{L}\p{M}\p{N}._:@/-]{0,127}$`)
+
+// Only the fixed runtime-disable template and known admission verdict kinds
+// may become an agent sentence. Scanner errors and finding titles can contain
+// untrusted text, so the subject names their category without copying them.
+var agentMCPAdmissionPattern = regexp.MustCompile(`^mcp server "([A-Za-z0-9][A-Za-z0-9._:@/-]{0,127})" is disabled because its install admission rejected it \(([^\r\n]{1,512})\); asset_policy\.mode does not apply to admission verdicts$`)
+var agentMCPFindingPattern = regexp.MustCompile(`^auto-block: watch detected (LOW|MEDIUM|HIGH|CRITICAL) findings \(scanner=[A-Za-z0-9._-]{1,64}\)(?:: [^\r\n]{1,512})?(?:; rescan retained block)?$`)
+
+func agentMCPAdmissionSubject(reason string) string {
+	m := agentMCPAdmissionPattern.FindStringSubmatch(reason)
+	if m == nil {
+		return ""
+	}
+	var verdict string
+	switch {
+	case strings.HasPrefix(m[2], "scanner failure (fail-closed): ") && len(m[2]) > len("scanner failure (fail-closed): "):
+		verdict = "scanner failure (fail-closed)"
+	case agentMCPFindingPattern.MatchString(m[2]):
+		verdict = "blocking scan findings"
+	default:
+		return ""
+	}
+	return "MCP server " + m[1] + " is disabled because its install admission rejected it (" + verdict + ")"
+}
+
 // agentAssetPolicySubject words an asset-policy block reason
 // (assetPolicyResponseReason: "ASSET-POLICY reason_code=... asset_name=...")
 // for the agent ("MCP server github is not in the approved registry"), or
@@ -340,7 +394,11 @@ func agentAssetPolicySubject(reason string) string {
 	values := make(map[string]string, len(fields)-1)
 	for _, field := range fields[1:] {
 		key, value, ok := strings.Cut(field, "=")
-		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !agentAssetPolicyValuePattern.MatchString(value) {
+		pattern := agentAssetPolicyValuePattern
+		if key == "asset_name" {
+			pattern = agentAssetPolicyNamePattern
+		}
+		if !ok || !slices.Contains(agentAssetPolicyKeys, key) || !pattern.MatchString(value) {
 			return ""
 		}
 		values[key] = value
@@ -358,6 +416,13 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is denied by the default asset policy"
 	case "admin-deny":
 		return kind + " " + name + " is denied by asset policy"
+	case "runtime-disable":
+		// A disabled or quarantined asset: say so in words, not with the
+		// registry fields of the record (GAP-0362).
+		if values["asset_type"] == "skill" {
+			return "skill " + name + " is disabled by security policy; `defenseclaw skill info " + name + "` shows why"
+		}
+		return kind + " " + name + " is disabled by security policy"
 	}
 	return ""
 }
@@ -427,7 +492,7 @@ func agentMatchedRules(reason string) string {
 	for i, part := range strings.Split(reason, "; ") {
 		switch {
 		case i == 0 && strings.HasPrefix(part, builtInMatchReasonPrefix):
-			for _, label := range strings.Split(strings.TrimPrefix(part, builtInMatchReasonPrefix), ", ") {
+			for _, label := range splitMatchLabels(strings.TrimPrefix(part, builtInMatchReasonPrefix)) {
 				id, title, found := strings.Cut(label, ":")
 				if !found {
 					continue

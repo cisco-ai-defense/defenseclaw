@@ -365,6 +365,21 @@ def test_a_writable_folder_names_the_folder_for_the_device_key_too(tmp_path) -> 
     )
 
 
+def test_full_disk_audit_db_names_space_cause(tmp_path) -> None:
+    from defenseclaw.doctor_recovery import AuditDBHealthStatus
+
+    health = mock.MagicMock(status=AuditDBHealthStatus.INVALID, reason_code="audit-db-integrity-unavailable")
+    cfg = mock.MagicMock(audit_db=str(tmp_path / "audit.db"), data_dir=str(tmp_path))
+    r = _DoctorResult()
+    with (
+        mock.patch("defenseclaw.doctor_recovery.inspect_audit_db", return_value=health),
+        mock.patch("defenseclaw.commands.cmd_doctor.shutil.disk_usage", return_value=mock.MagicMock(free=0)),
+    ):
+        cmd_doctor._check_audit_db_store(cfg, r)
+    assert "disk holding" in r.checks[-1]["detail"]
+    assert "free space" in r.checks[-1]["remediation"]
+
+
 def _bedrock_judge_cfg(tmp_path, auth_mode: str):
     from defenseclaw.config import (
         BedrockKeyConfig,
@@ -405,12 +420,12 @@ def test_bedrock_instance_role_judge_needs_no_api_key(tmp_path, monkeypatch) -> 
     assert "auth_mode=instance_role" in r.checks[-1]["detail"]
 
 
-def test_bedrock_api_key_judge_without_key_fails_with_next_step(tmp_path, monkeypatch) -> None:
+def test_bedrock_judge_without_bearer_key_uses_aws_credentials(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("DEFENSECLAW_LLM_KEY", raising=False)
     r = _DoctorResult()
     cmd_doctor._check_llm_api_key(_bedrock_judge_cfg(tmp_path, "api_key"), r)
-    assert r.checks[-1]["status"] == "fail"
-    assert "defenseclaw setup llm" in r.checks[-1]["remediation"]
+    assert r.checks[-1]["status"] == "skip"
+    assert "AWS credential chain" in r.checks[-1]["detail"]
 
 
 def test_setup_llm_summary_says_why_no_key_is_needed() -> None:
@@ -553,6 +568,11 @@ def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
     }
     assert "disk holding the audit database is full" in cmd_doctor._telemetry_error_reason(details)
     assert cmd_doctor._telemetry_error_reason({"event_history_failure": ""}) == ""
+    # GAP-1129: a loss journal the gateway cannot write is named too.
+    journal = {"local_write_loss_journal": "failing", "local_write_loss_journal_failed_writes": 2}
+    assert "audit loss journal" in cmd_doctor._telemetry_error_reason({**details, **journal})
+    reason, next_step, _ = cmd_doctor._audit_write_failure({"telemetry": {"state": "error", "details": journal}})
+    assert "audit loss journal" in reason and "data directory" in next_step
 
     from types import SimpleNamespace
 
@@ -960,3 +980,34 @@ def test_unattributed_otlp_credentials_name_window_and_age() -> None:
     fresh = row("2026-10-03T06:21:55Z")
     assert "last under a minute ago" in fresh["detail"]
     assert "0 min" not in fresh["detail"]
+
+
+def test_hermes_bootstrap_process_is_a_running_host() -> None:
+    assert cmd_doctor._hermes_argv_verdict(
+        ["python3", "/home/user/.hermes/tools/hermes_bootstrap.py"]
+    ) is True
+
+
+def test_network_scanner_and_settings_errors_name_the_cause(tmp_path) -> None:
+    import socket
+    import urllib.error
+    from types import SimpleNamespace
+
+    from defenseclaw.webhooks import network_error_text
+
+    dns = urllib.error.URLError(socket.gaierror(-2, "Name or service not known"))
+    assert network_error_text(dns, "https://hooks.invalid.example/private-token") == (
+        "could not resolve host hooks.invalid.example"
+    )
+
+    launcher = tmp_path / "skill-scanner"
+    launcher.write_text("#!/missing/python\n")
+    assert cmd_doctor._missing_launcher_interpreter(str(launcher)) == "/missing/python"
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}\n{ broken")
+    result = _DoctorResult(passive=True, quiet=True)
+    cmd_doctor._check_claudecode_hooks(SimpleNamespace(), result, platform_name="posix", config_path=str(settings))
+    row = next(row for row in result.checks if row.get("label") == "Claude Code hooks")
+    assert "not valid JSON at line 2" in row["detail"]
+    assert "restore the settings.json backup" in row["remediation"]

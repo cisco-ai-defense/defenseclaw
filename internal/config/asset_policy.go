@@ -13,6 +13,8 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 )
 
@@ -138,6 +140,21 @@ type AssetPolicyInput struct {
 	Args           []string
 	Transport      string
 	RuntimeSurface string
+
+	// DeclaredNames are other names the asset gives itself, such as the
+	// name in a skill's SKILL.md frontmatter. A denied rule matches Name
+	// or any of them, so a copy of a denied skill in a folder with another
+	// name is still denied (GAP-0570); allowed and registry rules match Name
+	// only, so a declared name never admits an asset.
+	DeclaredNames []string
+
+	// unicodeNames compares names after Unicode NFC normalisation
+	// (NormalizeAssetName, GAP-0432). EvaluateAssetPolicy and
+	// AssetListDecision set it outside Secure Client.
+	unicodeNames bool
+	// Secure Client keeps the pre-v9 trimmed, case-insensitive connector
+	// comparison instead of matching connector aliases.
+	legacyConnectorMatch bool
 }
 
 type AssetPolicyDecision struct {
@@ -206,21 +223,25 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 	if c == nil {
 		return out
 	}
-	// The explicit operator lists apply in every mode, as the audit.db
-	// actions rows they replace did (config_version 9).
-	switch verdict, rule := c.AssetListDecision(in); verdict {
-	case AssetListDeny:
-		out.Enabled, out.Mode = true, AssetPolicyModeAction
-		return assetPolicyViolation(out, AssetPolicyModeAction, ruleReason(rule, fmt.Sprintf("%s %q is denied by asset policy", targetType, name)), "admin-deny")
-	case AssetListAllow:
-		out.Enabled, out.Source = true, "admin-allow"
-		out.Mode = normalizeAssetMode(c.EffectiveAssetPolicyModeForConnector(in.Connector))
-		out.Reason = ruleReason(rule, fmt.Sprintf("%s %q is explicitly allowed", targetType, name))
-		if p, ok := c.assetPolicyFor(in.Connector, targetType); ok {
-			out.RegistryStatus = registryStatus(p.Registry, in)
-			out.RegistryConfigured = assetRegistryConfigured(p.Registry)
+	in.unicodeNames = !c.SecureClientIntegration()
+	in.legacyConnectorMatch = c.SecureClientIntegration()
+	// The v9 lists replace audit.db operator actions and apply in every mode.
+	// Secure Client keeps the v8 evaluator's enabled and observe gates.
+	if !c.SecureClientIntegration() {
+		switch verdict, rule := c.AssetListDecision(in); verdict {
+		case AssetListDeny:
+			out.Enabled, out.Mode = true, AssetPolicyModeAction
+			return assetPolicyViolation(out, AssetPolicyModeAction, ruleReason(rule, fmt.Sprintf("%s %q is denied by asset policy", targetType, name)), "admin-deny")
+		case AssetListAllow:
+			out.Enabled, out.Source = true, "admin-allow"
+			out.Mode = normalizeAssetMode(c.EffectiveAssetPolicyModeForConnector(in.Connector))
+			out.Reason = ruleReason(rule, fmt.Sprintf("%s %q is explicitly allowed", targetType, name))
+			if p, ok := c.assetPolicyFor(in.Connector, targetType); ok {
+				out.RegistryStatus = registryStatus(p.Registry, in)
+				out.RegistryConfigured = assetRegistryConfigured(p.Registry)
+			}
+			return out
 		}
-		return out
 	}
 	if !c.AssetPolicy.Enabled {
 		return out
@@ -239,6 +260,18 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 	out.Mode = mode
 	out.Source = "asset-policy"
 	out.RegistryConfigured = registryConfigured
+
+	if c.SecureClientIntegration() {
+		if rule, ok := findAssetRule(p.Denied, in); ok {
+			return assetPolicyViolation(out, mode, ruleReason(rule, fmt.Sprintf("%s %q is denied by asset policy", targetType, name)), "admin-deny")
+		}
+		if rule, ok := findAssetRule(p.Allowed, in); ok {
+			out.Source = "admin-allow"
+			out.RegistryStatus = registryStatus(p.Registry, in)
+			out.Reason = ruleReason(rule, fmt.Sprintf("%s %q is explicitly allowed", targetType, name))
+			return out
+		}
+	}
 
 	regStatus := registryStatus(p.Registry, in)
 	out.RegistryStatus = regStatus
@@ -313,6 +346,31 @@ func (c *Config) assetPolicyFor(connector, targetType string) (AssetTypePolicy, 
 // downgrade guard.
 func (c *Config) EffectiveAssetTypePolicy(connector, targetType string) (AssetTypePolicy, bool) {
 	return c.assetPolicyFor(connector, targetType)
+}
+
+// Validate rejects ambiguous per-connector keys before runtime policy
+// resolution. Alias collisions otherwise make enforcement depend on map order.
+func (c *AssetPolicyConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+	names := make([]string, 0, len(c.Connectors))
+	for name := range c.Connectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	seen := make(map[string]string, len(names))
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("asset_policy.connectors: empty connector name is not allowed")
+		}
+		norm := normalizeConnectorKey(name)
+		if prev, ok := seen[norm]; ok {
+			return fmt.Errorf("asset_policy.connectors: %q and %q refer to the same connector %q; keep only one", prev, name, norm)
+		}
+		seen[norm] = name
+	}
+	return nil
 }
 
 // connectorOverride returns the per-connector override block for the named
@@ -407,6 +465,52 @@ func (c *Config) AssetRuntimeDetectionFor(targetType string) (AssetRuntimeDetect
 	return p.RuntimeDetection, true
 }
 
+// UnenforcedAssetPolicyRules describes, per asset type, a default deny or
+// registry_required that nothing on this host applies: with the type's
+// runtime_detection.enabled false the agent hooks apply only its denied
+// list, and watched reports whether an install watcher admits the type here.
+// Such a policy reads as deny-by-default and blocks nothing, so ensure,
+// status, verify and the gateway log say so (GAP-0957). Secure Client keeps
+// main (issue #1092).
+func (c *Config) UnenforcedAssetPolicyRules(watched func(targetType string) bool) []string {
+	if c == nil || !c.AssetPolicy.Enabled || c.SecureClientIntegration() {
+		return nil
+	}
+	connectors := []string{""}
+	for name := range c.AssetPolicy.Connectors {
+		connectors = append(connectors, name)
+	}
+	sort.Strings(connectors[1:])
+	var out []string
+	for _, targetType := range []string{"skill", "plugin", "mcp"} {
+		detection, ok := c.AssetRuntimeDetectionFor(targetType)
+		if !ok || detection.Enabled || (watched != nil && watched(targetType)) {
+			continue
+		}
+		var rules []string
+		for _, connector := range connectors {
+			p, ok := c.assetPolicyFor(connector, targetType)
+			if !ok {
+				continue
+			}
+			if normalizeAssetDefault(p.Default) == "deny" && !slices.Contains(rules, "default: deny") {
+				rules = append(rules, "default: deny")
+			}
+			if p.RegistryRequired && !slices.Contains(rules, "registry_required") {
+				rules = append(rules, "registry_required")
+			}
+		}
+		if len(rules) == 0 {
+			continue
+		}
+		out = append(out, fmt.Sprintf("asset_policy.%[1]s %[2]s is not enforced on this host: no install watcher "+
+			"admits %[1]ss here, and with asset_policy.%[1]s.runtime_detection.enabled false the agent hooks apply only "+
+			"the asset_policy.%[1]s.denied list, so an unapproved %[1]s runs; set asset_policy.%[1]s.runtime_detection."+
+			"enabled: true so the hooks refuse it when the agent selects it", targetType, strings.Join(rules, " and ")))
+	}
+	return out
+}
+
 func (p AssetTypePolicy) withDefaults(runtime bool) AssetTypePolicy {
 	if strings.TrimSpace(p.Default) == "" {
 		p.Default = "allow"
@@ -483,13 +587,17 @@ func assetRuleMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
 	hasConstraint := false
 	if rule.Name != "" {
 		hasConstraint = true
-		if !strings.EqualFold(strings.TrimSpace(rule.Name), strings.TrimSpace(in.Name)) {
+		if !sameRuleName(rule.Name, in.Name, in.unicodeNames) {
 			return false
 		}
 	}
 	if rule.Connector != "" {
 		hasConstraint = true
-		if !SameConnector(rule.Connector, in.Connector) {
+		if in.legacyConnectorMatch {
+			if !strings.EqualFold(strings.TrimSpace(rule.Connector), strings.TrimSpace(in.Connector)) {
+				return false
+			}
+		} else if !SameConnector(rule.Connector, in.Connector) {
 			return false
 		}
 	}

@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,8 @@ import (
 
 	"github.com/open-policy-agent/opa/ast"  //nolint:staticcheck // v0 compat; migrate to opa/v1 later
 	"github.com/open-policy-agent/opa/rego" //nolint:staticcheck // v0 compat; migrate to opa/v1 later
+
+	"github.com/defenseclaw/defenseclaw/internal/policy/regodata"
 )
 
 const (
@@ -110,6 +113,11 @@ func resolveRegoDir(dir string) string {
 	}
 	return dir
 }
+
+// ErrNoModules is returned when the Rego directory holds no .rego file. The
+// managed packages ship none and decide from the config-driven fallback, so
+// the gateway treats it as "no OPA", not as a failed load.
+var ErrNoModules = errors.New("policy: no .rego files found")
 
 func hasRegoFiles(dir string) bool {
 	entries, err := os.ReadDir(dir)
@@ -372,7 +380,7 @@ func readModules(regoDir string, eng *Engine) (map[string]string, error) {
 		modules[base] = string(raw)
 	}
 	if len(modules) == 0 {
-		return nil, fmt.Errorf("policy: no .rego files found in %s", regoDir)
+		return nil, fmt.Errorf("%w in %s", ErrNoModules, regoDir)
 	}
 	return modules, nil
 }
@@ -396,10 +404,10 @@ func compileModules(modules map[string]string) error {
 		if parseErr != nil {
 			return fmt.Errorf("policy: parse %s: %w", name, parseErr)
 		}
-		if err := checkNoLegacyData(name, mod); err != nil {
-			return err
-		}
 		parsed[name] = mod
+	}
+	if err := checkNoLegacyData(parsed); err != nil {
+		return err
 	}
 
 	compiler := ast.NewCompiler()
@@ -410,36 +418,21 @@ func compileModules(modules map[string]string) error {
 	return nil
 }
 
-// checkNoLegacyData refuses an admission or guardrail module that reads
-// data.* outside data.defenseclaw: a pre-9 module that still expects
-// data.json (data.config, data.actions, data.guardrail, ...). Since 9 every
-// such value is evaluation input, so a stale module would see none of them
-// and fail open (admission "warning", guardrail "allow"); refusing it sends
-// the gateway to the config-driven fallback instead.
-func checkNoLegacyData(name string, mod *ast.Module) error {
-	if mod == nil || mod.Package == nil {
+// checkNoLegacyData refuses the bundle when the admission or guardrail
+// module, or a module they reach through a data.defenseclaw reference, reads
+// data.* outside data.defenseclaw: a pre-9 module or helper that still
+// expects data.json (data.config, data.actions, data.guardrail, ...). Since 9
+// every such value is evaluation input, so a stale read sees nothing and can
+// fail open; refusing the bundle selects the config-driven fallback. Modules
+// neither query reaches, such as policy tests or the firewall and audit
+// modules an upgraded 0.8 install keeps, cannot change a verdict.
+func checkNoLegacyData(modules map[string]*ast.Module) error {
+	reads := regodata.OutsideReads(modules, admissionQuery, guardrailQuery)
+	if len(reads) == 0 {
 		return nil
 	}
-	pkg := mod.Package.Path.String()
-	if pkg != admissionQuery && pkg != guardrailQuery {
-		return nil
-	}
-	var legacy string
-	ast.WalkRefs(mod, func(ref ast.Ref) bool {
-		if legacy != "" || len(ref) < 2 || !ref[0].Equal(ast.DefaultRootDocument) {
-			return legacy != ""
-		}
-		if key, ok := ref[1].Value.(ast.String); ok && string(key) != "defenseclaw" {
-			legacy = "data." + string(key)
-		}
-		return legacy != ""
-	})
-	if legacy != "" {
-		return fmt.Errorf("policy: %s reads %s, which config_version 9 no longer provides "+
-			"(the data.json values moved into config.yaml); replace it with the shipped module "+
-			"(defenseclaw-gateway config migrate --to 9 refreshes it)", name, legacy)
-	}
-	return nil
+	return fmt.Errorf("policy: %s reads %s, which config_version 9 no longer provides "+
+		"(the data.json values moved into config.yaml); replace it with this release's module", reads[0].Module, reads[0].Docs[0])
 }
 
 func toMap(v interface{}) (map[string]interface{}, error) {

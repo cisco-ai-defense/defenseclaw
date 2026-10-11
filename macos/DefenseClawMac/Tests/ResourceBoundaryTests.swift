@@ -445,8 +445,6 @@ struct ResourceBoundaryTests {
             url: "",
             authEnv: "",
             enabled: true,
-            autoSync: false,
-            syncIntervalHours: 24,
             lastSync: "",
             lastStatus: ""
         )

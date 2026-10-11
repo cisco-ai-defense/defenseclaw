@@ -45,9 +45,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -85,7 +87,7 @@ const (
 
 var (
 	// ErrConflict means config.yaml changed after the caller read it.
-	ErrConflict = errors.New("configwrite: config.yaml changed since it was read")
+	ErrConflict = cfgtxn.ErrConflict
 	// ErrLockBusy means another writer held the lock past the timeout.
 	ErrLockBusy = cfgtxn.ErrLockBusy
 	// ErrManaged means the host is managed and the actor may not write.
@@ -250,6 +252,15 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	if strings.TrimSpace(path) == "" {
 		path = config.ConfigPath()
 	}
+	// Refuse a managed host before the lock opens: taking it creates the
+	// lock file and, on a read-only or admin-owned directory, would fail
+	// with a permission error that hides the managed refusal. The check is
+	// repeated under the lock below.
+	if unlocked, readErr := os.ReadFile(path); readErr == nil || os.IsNotExist(readErr) {
+		if managedRefuses(unlocked, opt.Actor) {
+			return Result{}, ErrManaged
+		}
+	}
 	txn, err := cfgtxn.Begin(ctx, path, opt.Timeout)
 	if err != nil {
 		return Result{}, err
@@ -289,7 +300,7 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	state, err := txn.Commit(candidate, mode, opt.Actor, opt.Reason)
+	state, err := txn.Commit(current, candidate, exists, mode, opt.Actor, opt.Reason)
 	if err != nil {
 		return Result{}, err
 	}
@@ -305,11 +316,14 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 // the process-level keys of spec section 4, plus what its reload still
 // treats as restart-required (internal/gateway diffConfigs and
 // guardrailNeedsRestart): claw, agent and routing (paths, identity and the
-// model router process captured at start), the guardrail listener and
-// enablement, and the hook settings setup bakes into the installed hooks.
+// model router process captured at start), plugin_dir (the connector plugins
+// discovered at start), the guardrail listener and enablement, and the hook
+// self-heal settings. The connector set (guardrail.connectors.<c>.enabled)
+// applies in-process.
 // "*" matches one segment. Everything else is hot; a
 // running gateway keeps a restart-required value at its running value and
-// applies the rest of the change.
+// applies the rest of the change, except for the storage paths and
+// deployment_mode, which fail the reload until a restart.
 var restartKeys = []string{
 	"data_dir",
 	"observability.local.path",
@@ -317,11 +331,36 @@ var restartKeys = []string{
 	"gateway",
 	"guardrail.host", "guardrail.port", "guardrail.enabled", "guardrail.connector",
 	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
-	"guardrail.hook_fail_mode", "guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
-	"guardrail.connectors.*.enabled", "guardrail.connectors.*.hook_fail_mode",
-	"claw", "agent", "routing",
+	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
+	"claw", "agent", "routing", "plugin_dir",
 	"deployment_mode", "enterprise.profile", "enterprise.network",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
+}
+
+// ManagedRestartRequired is RestartRequired for a managed standalone host. It
+// also counts the enterprise block outside enterprise.inspection: the
+// gateway reads enrollment and the hook-socket authorizer built from it once,
+// at start, and its reload refuses such a change. A connector enabled flip
+// also goes through the lifecycle transaction there: the enterprise hook
+// guardian, not the gateway, installs and removes the hooks.
+func ManagedRestartRequired(changed []string) []string {
+	out := RestartRequired(changed)
+	for _, path := range changed {
+		if restartKeyMatches(restartSegments(path), []string{"guardrail", "connectors", "*", "enabled"}) && !slices.Contains(out, path) {
+			out = append(out, path)
+			continue
+		}
+		if path != "enterprise" && !strings.HasPrefix(path, "enterprise.") {
+			continue
+		}
+		if path == "enterprise.inspection" || strings.HasPrefix(path, "enterprise.inspection.") {
+			continue
+		}
+		if !slices.Contains(out, path) {
+			out = append(out, path)
+		}
+	}
+	return out
 }
 
 // RestartRequired returns the paths in changed that need a gateway restart.
@@ -447,11 +486,21 @@ func parsePath(path string) ([]pathPart, error) {
 	return parts, nil
 }
 
+// ErrMultipleDocuments refuses a config.yaml that holds more than one YAML
+// document. DefenseClaw reads only the first, and a patch re-encodes only
+// that one, so writing would silently delete the rest (GAP-1400).
+var ErrMultipleDocuments = errors.New("configwrite: config.yaml holds more than one YAML document (a --- line " +
+	"starts another); DefenseClaw reads only the first and does not rewrite the file. Merge the documents into one " +
+	"or remove the later one, then try again")
+
 func parseDocument(current []byte) (*yaml.Node, error) {
 	var doc yaml.Node
 	if len(bytes.TrimSpace(current)) > 0 {
 		if err := yaml.Unmarshal(current, &doc); err != nil {
 			return nil, fmt.Errorf("configwrite: parse config.yaml: %w", err)
+		}
+		if err := singleDocument(current); err != nil {
+			return nil, err
 		}
 	}
 	if doc.Kind == 0 {
@@ -464,6 +513,27 @@ func parseDocument(current []byte) (*yaml.Node, error) {
 		return nil, errors.New("configwrite: config.yaml root must be a mapping")
 	}
 	return &doc, nil
+}
+
+// singleDocument fails with ErrMultipleDocuments when a document with content
+// follows the first. An empty one (a trailing --- or ...) holds nothing to
+// lose.
+func singleDocument(current []byte) error {
+	dec := yaml.NewDecoder(bytes.NewReader(current))
+	for first := true; ; first = false {
+		var next yaml.Node
+		err := dec.Decode(&next)
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("configwrite: parse config.yaml: %w", err)
+		}
+		empty := len(next.Content) == 0 || (len(next.Content) == 1 && next.Content[0].Tag == "!!null" && len(next.Content[0].Content) == 0)
+		if !first && !empty {
+			return ErrMultipleDocuments
+		}
+	}
 }
 
 func encodeDocument(doc *yaml.Node) ([]byte, error) {
@@ -641,6 +711,13 @@ func newContainer(parts []pathPart, nextIndex int, value *yaml.Node, last bool) 
 }
 
 func keepComments(dst, src *yaml.Node) {
+	keepNodeComments(dst, src)
+	if dst.Kind == yaml.SequenceNode && src.Kind == yaml.SequenceNode {
+		keepRetainedListComments(dst, src)
+	}
+}
+
+func keepNodeComments(dst, src *yaml.Node) {
 	if dst.HeadComment == "" {
 		dst.HeadComment = src.HeadComment
 	}
@@ -649,6 +726,39 @@ func keepComments(dst, src *yaml.Node) {
 	}
 	if dst.FootComment == "" {
 		dst.FootComment = src.FootComment
+	}
+}
+
+// Match retained items by value, not index: list edits can insert, remove, or
+// reorder items, and comments must follow the item they describe.
+func keepRetainedListComments(dst, src *yaml.Node) {
+	used := make([]bool, len(src.Content))
+	for _, item := range dst.Content {
+		for i, old := range src.Content {
+			if used[i] || !sameValue(item, old) {
+				continue
+			}
+			keepItemComments(item, old)
+			used[i] = true
+			break
+		}
+	}
+}
+
+func keepItemComments(dst, src *yaml.Node) {
+	keepNodeComments(dst, src)
+	switch {
+	case dst.Kind == yaml.MappingNode && src.Kind == yaml.MappingNode:
+		for i := 0; i+1 < len(dst.Content); i += 2 {
+			j, oldValue := mapLookup(src, dst.Content[i].Value)
+			if oldValue == nil {
+				continue
+			}
+			keepNodeComments(dst.Content[i], src.Content[j])
+			keepItemComments(dst.Content[i+1], oldValue)
+		}
+	case dst.Kind == yaml.SequenceNode && src.Kind == yaml.SequenceNode:
+		keepRetainedListComments(dst, src)
 	}
 }
 
@@ -676,6 +786,11 @@ func unsetPath(root *yaml.Node, parts []pathPart) error {
 	return nil
 }
 
+// ChangedPaths lists the leaf paths whose values differ between two config
+// documents (what Result.Changed carries), for a caller that installs the
+// document itself and still needs to know what it changed.
+func ChangedPaths(before, after []byte) ([]string, error) { return diffDocuments(before, after) }
+
 // diffDocuments lists the leaf paths whose values differ between two
 // documents. Lists compare as a whole.
 func diffDocuments(before, after []byte) ([]string, error) {
@@ -698,6 +813,14 @@ func diffDocuments(before, after []byte) ([]string, error) {
 func diffValues(prefix string, left, right any, out *[]string) {
 	lm, lok := left.(map[string]any)
 	rm, rok := right.(map[string]any)
+	// A block added or removed whole (a first enterprise.enrollment, for
+	// example) is compared with an empty one, so its leaves are named and
+	// a caller that classifies by key sees enterprise.enrollment.exclude_users
+	// and not the block (GAP-0887). An empty block has no leaf to name: it
+	// stays a change of the block itself (guardrail.connectors.cursor: {}).
+	if (lok && len(lm) > 0 && right == nil) || (rok && len(rm) > 0 && left == nil) {
+		lok, rok = true, true
+	}
 	if lok && rok {
 		keys := map[string]struct{}{}
 		for k := range lm {

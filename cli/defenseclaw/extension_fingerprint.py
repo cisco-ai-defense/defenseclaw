@@ -44,7 +44,7 @@ REFERENCE_PACKAGE_PATH: Final = "_data/plugin/extension-runtime-fingerprint.json
 
 _TOP_LEVEL_FILES: Final = frozenset({"package.json", "openclaw.plugin.json"})
 _RUNTIME_DIRECTORIES: Final = frozenset({"dist"})
-_RUNTIME_NODE_PACKAGES: Final = frozenset({"argparse", "js-yaml"})
+_RUNTIME_NODE_PACKAGES: Final = frozenset({"argparse", "js-yaml", "undici"})
 _MAX_FILES: Final = 1024
 _MAX_DIRECTORIES: Final = 1024
 _MAX_BYTES: Final = 64 * 1024 * 1024

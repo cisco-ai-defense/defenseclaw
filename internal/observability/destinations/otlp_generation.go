@@ -28,7 +28,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
-	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -195,8 +194,8 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 			if adapterErr != nil {
 				return fail(newError(ErrorAdapterPrepare))
 			}
-			dispatcher, valid := observabilityruntime.CompiledDispatcherConfig(
-				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver,
+			dispatcher, valid := observabilityruntime.CompiledDispatcherConfigForProfile(
+				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver, factory.secureClient,
 			)
 			if !valid {
 				_ = closeGalileoAdapter(adapter)
@@ -238,8 +237,8 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 			if adapterErr != nil {
 				return fail(newError(ErrorAdapterPrepare))
 			}
-			dispatcher, valid := observabilityruntime.CompiledDispatcherConfig(
-				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver,
+			dispatcher, valid := observabilityruntime.CompiledDispatcherConfigForProfile(
+				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver, factory.secureClient,
 			)
 			if !valid {
 				_ = closeOTLPCanonicalAdapter(adapter)
@@ -279,8 +278,8 @@ func (factory *Factory) PrepareOTLPGenerationPipelines(
 			if adapterErr != nil {
 				return fail(newError(ErrorAdapterPrepare))
 			}
-			dispatcher, valid := observabilityruntime.CompiledDispatcherConfig(
-				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver,
+			dispatcher, valid := observabilityruntime.CompiledDispatcherConfigForProfile(
+				candidate.destination, generation, observability.SignalTraces, factory.deliveryObserver, factory.secureClient,
 			)
 			if !valid {
 				_ = closeOTLPCanonicalAdapter(adapter)
@@ -494,39 +493,6 @@ func containsSignal(signals []observability.Signal, expected observability.Signa
 	return false
 }
 
-func compileOTLPTraceFilter(destination config.ObservabilityV8EffectiveDestination) (otlp.SpanFilter, error) {
-	if destination.Preset == "galileo" || destination.PresetProfile != "" {
-		return nil, newError(ErrorUnsupportedPolicy)
-	}
-	matcher, err := compileOTLPBucketMatcher(destination, observability.SignalTraces, true)
-	if err != nil {
-		return nil, err
-	}
-	destinationName := destination.Name
-	return func(span sdktrace.ReadOnlySpan) bool {
-		if span == nil {
-			return false
-		}
-		var bucket observability.Bucket
-		var canaryDestination string
-		for _, item := range span.Attributes() {
-			if item.Value.Type() != attribute.STRING {
-				continue
-			}
-			switch string(item.Key) {
-			case "defenseclaw.bucket":
-				bucket = observability.Bucket(item.Value.AsString())
-			case "defenseclaw.telemetry.canary.destination":
-				canaryDestination = item.Value.AsString()
-			}
-		}
-		if canaryDestination != "" && canaryDestination != destinationName {
-			return false
-		}
-		return observability.IsBucket(bucket) && matcher(bucket)
-	}, nil
-}
-
 func compileOTLPMetricSelection(destination config.ObservabilityV8EffectiveDestination) (map[string]struct{}, error) {
 	routes := make([]config.ObservabilityV8EffectiveRoute, 0, len(destination.Routes))
 	for _, route := range destination.Routes {
@@ -577,50 +543,6 @@ func selectorMatchesMetric(
 		}
 	}
 	return false
-}
-
-func compileOTLPBucketMatcher(
-	destination config.ObservabilityV8EffectiveDestination,
-	signal observability.Signal,
-	requireNoRedaction bool,
-) (func(observability.Bucket) bool, error) {
-	routes := make([]config.ObservabilityV8EffectiveRoute, 0, len(destination.Routes))
-	for _, route := range destination.Routes {
-		if !containsSignal(route.Signals, signal) {
-			continue
-		}
-		selector := route.Selector
-		if len(selector.Sources) != 0 || len(selector.Connectors) != 0 || len(selector.Actions) != 0 ||
-			len(selector.EventNames) != 0 || selector.MinSeverity != "" {
-			return nil, newError(ErrorUnsupportedPolicy)
-		}
-		if requireNoRedaction && route.Action == config.ObservabilityV8RouteSend {
-			if len(route.RedactionProfileByBucket) == 0 {
-				return nil, newError(ErrorUnsupportedPolicy)
-			}
-			for _, profile := range route.RedactionProfileByBucket {
-				if profile != "none" {
-					return nil, newError(ErrorUnsupportedPolicy)
-				}
-			}
-		}
-		if route.Action != config.ObservabilityV8RouteSend && route.Action != config.ObservabilityV8RouteDrop {
-			return nil, newError(ErrorUnsupportedPolicy)
-		}
-		routes = append(routes, route)
-	}
-	if len(routes) == 0 {
-		return nil, newError(ErrorUnsupportedPolicy)
-	}
-	return func(bucket observability.Bucket) bool {
-		for _, route := range routes {
-			if !selectorMatchesBucket(route.Selector, bucket) {
-				continue
-			}
-			return route.Action == config.ObservabilityV8RouteSend
-		}
-		return false
-	}, nil
 }
 
 func selectorMatchesBucket(selector config.ObservabilityV8EffectiveSelector, bucket observability.Bucket) bool {

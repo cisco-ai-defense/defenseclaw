@@ -308,7 +308,7 @@
       {
         "name": "user",
         "label": "User regex",
-        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows the Loki panels whose records carry user.id; metric panels have no per-user label and stay fleet-wide.",
+        "description": "Regex over user.id (uid or SID), the account name or the directory principal (case-insensitive). Narrows every Loki panel except AI discovery summary log and AI components inside sandboxes: discovery summaries and sandbox scans carry no user. Prometheus metric panels have no per-user label and stay fleet-wide.",
         "type": "textbox",
         "query": ".*",
         "current": {
@@ -1054,13 +1054,13 @@
               "service_name": true,
               "service": true,
               "service_version": true,
-              "deployment_environment": true,
+              "deployment_environment_name": true,
               "host_name": true,
               "host_arch": true,
               "os_type": true,
               "defenseclaw_claw_home_dir": true,
               "defenseclaw_claw_mode": true,
-              "defenseclaw_device_id": true,
+              "defenseclaw_device_public_key_fingerprint": true,
               "defenseclaw_gateway_host": true,
               "defenseclaw_gateway_port": true,
               "defenseclaw_instance_id": true,
@@ -1123,13 +1123,13 @@
               "service_name": true,
               "service": true,
               "service_version": true,
-              "deployment_environment": true,
+              "deployment_environment_name": true,
               "host_name": true,
               "host_arch": true,
               "os_type": true,
               "defenseclaw_claw_home_dir": true,
               "defenseclaw_claw_mode": true,
-              "defenseclaw_device_id": true,
+              "defenseclaw_device_public_key_fingerprint": true,
               "defenseclaw_gateway_host": true,
               "defenseclaw_gateway_port": true,
               "defenseclaw_instance_id": true,
@@ -1239,7 +1239,7 @@
     {
       "type": "stat",
       "title": "IDE plugins installed",
-      "description": "Current count of IDE extensions and plugins across every inventoried user, from the newest `defenseclaw.inventory.ide_plugins` sample per gateway. `ai_discovery.ide_inventory: ai_only` narrows this to AI plugins; `off` reports nothing.",
+      "description": "Current count of IDE extensions and plugins across every inventoried user, from the latest completed scan per gateway. `ai_discovery.ide_inventory: ai_only` narrows this to AI plugins; `off` reports zero after a completed scan.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1252,7 +1252,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\"})",
+          "expr": "sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"})",
           "refId": "A",
           "instant": true
         }
@@ -1285,7 +1285,7 @@
     {
       "type": "stat",
       "title": "AI plugins",
-      "description": "Plugins flagged as AI assistants or agents (`ai=\"true\"`).",
+      "description": "Plugins flagged as AI assistants or agents (`defenseclaw_ide_plugin_ai=\"true\"`).",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1298,7 +1298,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\", ai=\"true\"}) or on() (sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\"}) * 0)",
+          "expr": "sum((defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_plugin_ai=\"true\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"} > 0))) or on() (sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"}) * 0)",
           "refId": "A",
           "instant": true
         }
@@ -1344,7 +1344,7 @@
       },
       "targets": [
         {
-          "expr": "sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\", enabled=\"disabled\"}) or on() (sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\"}) * 0)",
+          "expr": "sum((defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_plugin_enabled=\"disabled\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"} > 0))) or on() (sum(defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"}) * 0)",
           "refId": "A",
           "instant": true
         }
@@ -1377,7 +1377,7 @@
     {
       "type": "bargauge",
       "title": "Plugins by IDE",
-      "description": "Current plugin count per IDE product (`ide` label: vscode, cursor, kiro, jetbrains products, visualstudio, zed, eclipse, neovim, ...).",
+      "description": "Current plugin count per IDE product (`defenseclaw_ide_product` label: vscode, cursor, kiro, jetbrains products, visualstudio, zed, eclipse, neovim, ...).",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1390,8 +1390,8 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (ide) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\"}))",
-          "legendFormat": "{{ide}}",
+          "expr": "sort_desc(sum by (defenseclaw_ide_product) ((defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product!=\"\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"} > 0))))",
+          "legendFormat": "{{defenseclaw_ide_product}}",
           "refId": "A",
           "instant": true
         }
@@ -1433,7 +1433,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (ide, ai, enabled) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\"}))",
+          "expr": "sort_desc(sum by (defenseclaw_ide_product, defenseclaw_ide_plugin_ai, defenseclaw_ide_plugin_enabled) ((defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product!=\"\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"} > 0))))",
           "format": "table",
           "refId": "A",
           "instant": true
@@ -1453,21 +1453,21 @@
               "service_name": true,
               "service": true,
               "service_version": true,
-              "deployment_environment": true,
+              "deployment_environment_name": true,
               "host_name": true,
               "host_arch": true,
               "os_type": true
             },
             "indexByName": {
-              "ide": 0,
-              "ai": 1,
-              "enabled": 2,
+              "defenseclaw_ide_product": 0,
+              "defenseclaw_ide_plugin_ai": 1,
+              "defenseclaw_ide_plugin_enabled": 2,
               "Value": 3
             },
             "renameByName": {
-              "ide": "IDE",
-              "ai": "AI",
-              "enabled": "Enabled",
+              "defenseclaw_ide_product": "IDE",
+              "defenseclaw_ide_plugin_ai": "AI",
+              "defenseclaw_ide_plugin_enabled": "Enabled",
               "Value": "Plugins"
             }
           }
@@ -1498,8 +1498,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (ai) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\"})",
-          "legendFormat": "ai={{ai}}",
+          "expr": "sum by (defenseclaw_ide_plugin_ai) ((defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product!=\"\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"} > 0)))",
+          "legendFormat": "ai={{defenseclaw_ide_plugin_ai}}",
           "refId": "A",
           "instant": true
         }
@@ -1552,8 +1552,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (enabled) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\"})",
-          "legendFormat": "{{enabled}}",
+          "expr": "sum by (defenseclaw_ide_plugin_enabled) ((defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product!=\"\"} and on(service_instance_id) (defenseclaw_inventory_ide_plugins{host_name=~\"$host\", defenseclaw_ide_product=\"\"} > 0)))",
+          "legendFormat": "{{defenseclaw_ide_plugin_enabled}}",
           "refId": "A",
           "instant": true
         }
@@ -1606,7 +1606,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
+          "expr": "sum by (user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -1978,7 +1978,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
+          "expr": "{service_name=\"defenseclaw\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai_component[.](discovered|changed|confidence[.]changed|removed)\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
@@ -2009,7 +2009,7 @@
       },
       "targets": [
         {
-          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
+          "expr": "{service_name=~\"defenseclaw|defenseclaw-audit\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ai[.]discovery[.]completed|ai_component[.](discovered|changed|confidence[.]changed|removed)\" | line_format \"{{.severity}} | scan={{.body_defenseclaw_ai_discovery_scan_id}} signal={{.body_defenseclaw_ai_discovery_signal_id}} detector={{.body_defenseclaw_ai_discovery_signal}} component={{.body_defenseclaw_ai_component_type}} vendor={{.body_defenseclaw_ai_component_vendor}} product={{.body_defenseclaw_ai_component_product}} user={{.body_defenseclaw_user_name}}\"",
           "refId": "A"
         }
       ],

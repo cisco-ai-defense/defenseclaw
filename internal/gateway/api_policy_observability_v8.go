@@ -216,7 +216,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
 		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(operation.signalCtx), DefenseClawPolicyGeneration: policyGenerationV8(operation.signalCtx),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityInfo),
 			LogLevel:                            observability.Present(observability.LogLevelInfo),
@@ -258,7 +258,13 @@ func (operation *apiPolicyEvaluationV8Operation) emitCompleted(
 			DefenseClawGuardrailReason:          hookV8OptionalText(reason, 65536),
 			ConditionSecuritySeverityAvailable:  severity.IsPresent(),
 		}
-		auditCallerIdentity(operation.signalCtx).Identity.applyTo(&input)
+		caller := auditCallerIdentity(operation.signalCtx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+		}
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
@@ -295,7 +301,7 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 		profileTelemetry := guardrailProfileTelemetryFor(operation.signalCtx)
 		input := observability.LogGuardrailEvaluationFailedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(operation.signalCtx), DefenseClawPolicyGeneration: policyGenerationV8(operation.signalCtx),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(observability.SeverityHigh),
 			LogLevel: observability.Present(observability.LogLevelError), Outcome: observability.OutcomeFailed,
@@ -326,7 +332,13 @@ func (operation *apiPolicyEvaluationV8Operation) emitFailed(
 			DefenseClawGuardrailReason:         hookV8OptionalText(reason, 65536),
 			ConditionSecuritySeverityAvailable: severity.IsPresent(),
 		}
-		auditCallerIdentity(operation.signalCtx).Identity.applyTo(&input)
+		caller := auditCallerIdentity(operation.signalCtx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+		}
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationFailed(input)
 	})
 	return err
@@ -425,7 +437,7 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-		DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+		DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(completedAt), Source: observability.SourceGateway,
@@ -479,7 +491,13 @@ func (operation *apiPolicyEvaluationV8Operation) traceInput(
 		ConditionOperationTerminal:          outcome != observability.OutcomeAttempted,
 		ConditionTechnicalFailure:           technicalErr != nil,
 	}
-	auditCallerIdentity(ctx).Identity.applyTo(&input)
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	}
+	caller.Identity.applyTo(&input)
 	return input
 }
 

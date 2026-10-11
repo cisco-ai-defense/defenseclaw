@@ -42,6 +42,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.config import LLMConfig, MCPScannerConfig, MCPServerEntry  # noqa: E402
+from defenseclaw.scanner import _llm_env  # noqa: E402
 from defenseclaw.scanner.mcp import (  # noqa: E402
     MCPScannerWrapper,
     _is_llm_backend_error,
@@ -108,8 +109,26 @@ class AutoAnalyzerSelectionTests(unittest.TestCase):
         self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
 
     def test_auto_with_bedrock_model_uses_aws_credential_chain(self):
+        """Linux/macOS rely on the AWS chain; Windows fails closed without a source (GAP-1444)."""
         s = _wrapper("auto", model=True, credential=False, provider="bedrock")
-        self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
+        if sys.platform != "win32":
+            self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
+            return
+        with patch.dict(os.environ, {"DEFENSECLAW_LLM_KEY": "", "AWS_BEARER_TOKEN_BEDROCK": ""}), \
+                patch.object(_llm_env, "_aws_credential_chain_found", return_value=False), \
+                patch("sys.stderr", io.StringIO()):
+            self.assertEqual(self._values(s._parse_analyzers(_FakeAnalyzerEnum)), ["yara"])
+
+    def test_auto_with_stored_bedrock_key_passes_the_windows_gate(self):
+        """GAP-1449: on the Windows gate a stored Bedrock key selects the LLM lane, none does not."""
+        with patch.object(_llm_env, "_bedrock_needs_credential_source", return_value=True), \
+                patch.object(_llm_env, "_aws_credential_chain_found", return_value=False), \
+                patch.dict(os.environ, {"DEFENSECLAW_LLM_KEY": "", "AWS_BEARER_TOKEN_BEDROCK": ""}), \
+                patch("sys.stderr", io.StringIO()):
+            keyed = _wrapper("auto", model=True, credential=True, provider="bedrock")
+            self.assertEqual(self._values(keyed._parse_analyzers(_FakeAnalyzerEnum)), ["yara", "llm"])
+            keyless = _wrapper("auto", model=True, credential=False, provider="bedrock")
+            self.assertEqual(self._values(keyless._parse_analyzers(_FakeAnalyzerEnum)), ["yara"])
 
     def test_auto_is_case_insensitive(self):
         s = _wrapper("AUTO", model=True)

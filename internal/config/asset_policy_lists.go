@@ -16,7 +16,10 @@
 
 package config
 
-import "strings"
+import (
+	"runtime"
+	"strings"
+)
 
 // Explicit list verdicts returned by AssetListDecision and ToolListDecision.
 const (
@@ -35,6 +38,8 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 	if c == nil {
 		return "", AssetPolicyRule{}
 	}
+	in.unicodeNames = !c.SecureClientIntegration()
+	in.legacyConnectorMatch = c.SecureClientIntegration()
 	var p AssetTypePolicy
 	switch normalizeAssetToken(in.TargetType) {
 	case "mcp":
@@ -52,10 +57,20 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 			rules   []AssetPolicyRule
 		}{{AssetListDeny, p.Denied}, {AssetListAllow, p.Allowed}} {
 			for _, rule := range list.rules {
-				if (strings.TrimSpace(rule.Connector) != "") != scoped || !assetRuleMatches(rule, in) {
+				if (strings.TrimSpace(rule.Connector) != "") != scoped {
+					continue
+				}
+				if list.verdict == AssetListDeny && !assetRuleMatchesAnyName(rule, in) {
+					continue
+				}
+				if list.verdict == AssetListAllow && !assetRuleMatches(rule, in) {
 					continue
 				}
 				if list.verdict == AssetListAllow && !allowPinMatches(rule.SourcePathContains, in.SourcePath) {
+					continue
+				}
+				if list.verdict == AssetListAllow && normalizeAssetToken(in.TargetType) == "mcp" &&
+					rule.Command != "" && !mcpAllowCommandMatches(rule, in) {
 					continue
 				}
 				return list.verdict, rule
@@ -63,6 +78,21 @@ func (c *Config) AssetListDecision(in AssetPolicyInput) (string, AssetPolicyRule
 		}
 	}
 	return "", AssetPolicyRule{}
+}
+
+// mcpAllowCommandMatches binds an operator allow to the reviewed launcher and
+// complete argument list. Denied rules retain their broad basename/prefix scope.
+func mcpAllowCommandMatches(rule AssetPolicyRule, in AssetPolicyInput) bool {
+	if strings.TrimSpace(rule.Command) != strings.TrimSpace(in.Command) ||
+		len(rule.ArgsPrefix) != len(in.Args) {
+		return false
+	}
+	for i, want := range rule.ArgsPrefix {
+		if strings.TrimSpace(want) != strings.TrimSpace(in.Args[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // ToolListDecision matches asset_policy.tool.denied and .allowed for a tool
@@ -98,11 +128,31 @@ func (c *Config) ToolListDecision(tool, connector string) (string, AssetPolicyTo
 	return "", AssetPolicyToolRule{}
 }
 
+// assetRuleMatchesAnyName is assetRuleMatches for a denied rule: the asset
+// matches under its name or any name it declares (DeclaredNames).
+func assetRuleMatchesAnyName(rule AssetPolicyRule, in AssetPolicyInput) bool {
+	if assetRuleMatches(rule, in) {
+		return true
+	}
+	for _, name := range in.DeclaredNames {
+		if strings.TrimSpace(name) == "" {
+			continue
+		}
+		alias := in
+		alias.Name = name
+		if assetRuleMatches(rule, alias) {
+			return true
+		}
+	}
+	return false
+}
+
 // SameConnector reports whether two connector names name the same connector
 // once aliases are normalized (claude-code and claude_code are claudecode,
 // open-hands and open_hands are openhands). asset_policy rules compare
 // connectors this way, as the Python lists do (connector_paths.normalize):
-// the runtime always passes the canonical name.
+// the runtime always passes the canonical name. Secure Client asset rules
+// keep their pre-v9 trimmed, case-insensitive comparison.
 func SameConnector(a, b string) bool {
 	return normalizeConnectorKey(a) == normalizeConnectorKey(b)
 }
@@ -115,7 +165,41 @@ func allowPinMatches(pins []string, path string) bool {
 		return true
 	}
 	for _, pin := range pins {
-		if PathHasComponents(path, pin) {
+		if (runtime.GOOS == "windows" && PathHasComponents(path, pin)) ||
+			(runtime.GOOS != "windows" && pathHasComponentsExact(path, pin)) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathHasComponentsExact preserves case for allow pins on case-sensitive hosts.
+func pathHasComponentsExact(path, marker string) bool {
+	parts := strings.Split(strings.ReplaceAll(path, "\\", "/"), "/")
+	pins := strings.Split(strings.ReplaceAll(marker, "\\", "/"), "/")
+	pathParts, pinParts := make([]string, 0, len(parts)), make([]string, 0, len(pins))
+	for _, part := range parts {
+		if part != "" {
+			pathParts = append(pathParts, part)
+		}
+	}
+	for _, part := range pins {
+		if part != "" {
+			pinParts = append(pinParts, part)
+		}
+	}
+	if len(pinParts) == 0 {
+		return false
+	}
+	for i := 0; i+len(pinParts) <= len(pathParts); i++ {
+		matched := true
+		for j := range pinParts {
+			if pathParts[i+j] != pinParts[j] {
+				matched = false
+				break
+			}
+		}
+		if matched {
 			return true
 		}
 	}

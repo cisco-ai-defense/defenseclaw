@@ -107,9 +107,16 @@ def mutate_v8_config(
             installed_backup = ""
             if backup_path is not None:
                 installed_backup = _write_private_backup(path, os.fspath(backup_path), original)
-            replace_file_durable(candidate_path, path)
-            candidate_path = ""
-            config_writer.record_generation(path, prepared.candidate_sha256, writer_actor, "observability policy edit")
+            original_mode = stat.S_IMODE(os.stat(path).st_mode)
+            try:
+                replace_file_durable(candidate_path, path)
+                candidate_path = ""
+                config_writer.record_generation(
+                    path, prepared.candidate_sha256, writer_actor, "observability policy edit"
+                )
+            except Exception:
+                config_writer._undo_failed_commit(path, prepared.candidate, original, original_mode, True)
+                raise
         finally:
             if candidate_path:
                 try:
@@ -127,14 +134,14 @@ def mutate_v8_config(
 def _validate_candidate(path: str, data_dir: str | None) -> None:
     result = inspect_v8_config("validate", config_path=path, data_dir=data_dir)
     if result.valid is not True:
-        raise RuntimeError("canonical v8 configuration validator rejected the candidate")
+        raise RuntimeError("the configuration validator rejected the candidate")
 
 
 def _assert_safe_target(path: str) -> None:
     try:
         metadata = os.lstat(path)
     except FileNotFoundError as exc:
-        raise FileNotFoundError("config.yaml does not exist; initialize DefenseClaw before editing v8 policy") from exc
+        raise FileNotFoundError("config.yaml does not exist; initialize DefenseClaw before editing its policy") from exc
     if stat.S_ISLNK(metadata.st_mode):
         raise OSError("refusing to edit config.yaml through a symbolic link")
     if not stat.S_ISREG(metadata.st_mode):

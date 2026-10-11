@@ -411,6 +411,17 @@ func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	return owner
 }
 
+// discoveryUserEmail is the connector account address of a discovery
+// signal's owner, read from that owner's own profile, while
+// ai_discovery.include_user_email is on. A signal without an owner never
+// carries one: the address would then name nobody on this endpoint.
+func discoveryUserEmail(signal inventory.AISignal) string {
+	if signal.UserID == "" || !UserEmailCollectionEnabled() {
+		return ""
+	}
+	return signal.UserEmail
+}
+
 // discoveryUserIDKind is the id namespace of the account a signal belongs
 // to: a uid from a Unix per-user scan, or the profile's SID from a managed
 // Windows scan.
@@ -472,6 +483,7 @@ func hasNativeMCPReader(connectorName string) bool {
 		"zeptoclaw",
 		"hermes",
 		"cursor",
+		"kiro",
 		"devin",
 		"copilot",
 		"openhands",
@@ -518,17 +530,21 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		// their servers. `.mcp.json` at the project root is unaffected because
 		// it's the workspace-scope file the CLI reads regardless.
 		if _, hasEnv := os.LookupEnv("CLAUDE_CONFIG_DIR"); !hasEnv {
-			tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
 			// ~/.claude.json holds both user-scope (top-level `mcpServers`)
 			// and per-project local-scope (`projects.<path>.mcpServers`)
 			// entries. Read the file once and take the union instead of
 			// decoding the (often multi-megabyte) conversation-state file
-			// twice.
+			// twice. It comes before the settings.json block DefenseClaw
+			// 0.8.x wrote: the first source wins a name, and Claude Code
+			// reads ~/.claude.json (GAP-1340).
 			tryFile(config.ReadMCPFromClaudeJSONBothScopes, ".claude.json")
+			tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
 		}
 		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
 	case "cursor":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".cursor/mcp.json")
+	case "kiro":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".kiro/settings/mcp.json")
 	case "devin":
 		if strings.EqualFold(strings.TrimSpace(goos), "windows") {
 			tryFile(config.ReadMCPFromDevinConfig, "AppData/Roaming/devin/mcp_config.json")
@@ -986,7 +1002,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
 			UserID:                                          aiDiscoveryV8OptionalText(component.userID),
 			DefenseClawUserIDKind:                           v8UserIDKind(component.userIDKind),
-			DefenseClawUserName:                             aiDiscoveryV8OptionalText(component.userName),
+			DefenseClawUserName:                             v8UserName(component.userName, aiDiscoveryV8OptionalText),
 			DefenseClawUserEmail:                            v8UserEmail(component.userEmail),
 			DefenseClawInventoryConnectorSource:             aiDiscoveryV8OptionalText(component.connectorSource),
 			DefenseClawInventoryConnectorToolInspectionMode: aiDiscoveryV8OptionalText(component.connectorToolInspectionMode),
@@ -1007,7 +1023,7 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryVersion:                aiDiscoveryV8OptionalText(component.agentVersion),
 			DefenseClawAgentDiscoveryProbeStatus:            aiDiscoveryV8OptionalText(component.agentProbeStatus),
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
-			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID)),
+			DefenseClawAgentIdentityID:                      agentIdentityV8(inventoryAgentIdentityID(component.agentConnector, component.userID, component.userName)),
 		}
 		inventoryIdentity(component.userID).applyTo(&input)
 		return builder.BuildLogAIComponentObserved(input)
@@ -1290,6 +1306,7 @@ func discoveredEntriesFromReport(
 				userID:          signal.UserID,
 				userIDKind:      discoveryUserIDKind(signal.UserID),
 				userName:        signal.UserName,
+				userEmail:       discoveryUserEmail(signal),
 				// agent.discovery.config_path_hash requires sha256:<64hex>.
 				// Our evidence.PathHash uses hmac-sha256:... which fails
 				// that pattern, so leave it empty rather than fail record
@@ -1342,6 +1359,7 @@ func discoveredMCPEntriesFromReport(
 				userID:         signal.UserID,
 				userIDKind:     discoveryUserIDKind(signal.UserID),
 				userName:       signal.UserName,
+				userEmail:      discoveryUserEmail(signal),
 			})
 		}
 	}

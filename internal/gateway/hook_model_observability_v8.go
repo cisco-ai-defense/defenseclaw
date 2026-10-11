@@ -430,7 +430,7 @@ func applyHookModelV8AgentFacts(
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.UserID = hookModelV8OptionalID(meta.UserID)
 	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
-	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
+	input.DefenseClawUserName = v8UserName(meta.UserName, hookModelV8OptionalID)
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
 	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
 	meta.Identity.applyTo(input)
@@ -485,7 +485,7 @@ func applyHookModelV8ModelFacts(input *observability.SpanModelChatInput, observa
 	input.DefenseClawTurnID = hookModelV8OptionalID(meta.TurnID)
 	input.UserID = hookModelV8OptionalID(meta.UserID)
 	input.DefenseClawUserIDKind = v8UserIDKind(meta.UserIDKind)
-	input.DefenseClawUserName = hookModelV8OptionalID(meta.UserName)
+	input.DefenseClawUserName = v8UserName(meta.UserName, hookModelV8OptionalID)
 	input.DefenseClawUserEmail = v8UserEmail(meta.UserEmail)
 	input.DefenseClawAgentIdentityID = agentIdentityV8(meta.AgentIdentityID)
 	meta.Identity.applyTo(input)
@@ -842,18 +842,6 @@ type hookV8MetricRecordBuilder func(
 	*observability.FamilyBuilder,
 	observability.FamilyEnvelopeInput,
 ) (observability.Record, error)
-
-func newHookV8MetricBatchItem(
-	ctx context.Context,
-	observedAt time.Time,
-	meta llmEventMeta,
-	family observability.EventName,
-	buildRecord hookV8MetricRecordBuilder,
-) observabilityruntime.GeneratedMetricBatchItem {
-	return newHookV8MetricBatchItemForProducer(
-		ctx, observedAt, meta, hookModelV8Producer, family, buildRecord,
-	)
-}
 
 func newHookV8MetricBatchItemForProducer(
 	ctx context.Context,

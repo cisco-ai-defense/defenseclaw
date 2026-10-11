@@ -109,6 +109,20 @@ immediately reinstall the configuration being deliberately torn down.`,
 	RunE:        runConnectorTeardown,
 }
 
+var connectorPrepareRollbackCmd = &cobra.Command{
+	Use:   "prepare-rollback",
+	Short: "Rewrite hook entries in the form an earlier release removes (run by the installers)",
+	Long: `Rewrite the hook entries this release writes in a shape an earlier release
+does not recognise into the shape it does, so that release's uninstall still
+removes them after a rollback (GAP-1284). The installers run it before
+'defenseclaw rollback' restores the previous install. Without --connector it
+covers every connector that has such entries. Setup writes the current form
+again when you roll forward.`,
+	Hidden:      true,
+	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	RunE:        runConnectorPrepareRollback,
+}
+
 var connectorVerifyCmd = &cobra.Command{
 	Use:   "verify",
 	Short: "Verify that the connector left no residual state behind",
@@ -224,6 +238,7 @@ func init() {
 	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-transaction")
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
+	connectorCmd.AddCommand(connectorPrepareRollbackCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
 	connectorCmd.AddCommand(connectorReconcileCmd)
 	connectorCmd.AddCommand(connectorLaunchCmd)
@@ -512,6 +527,9 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector reconcile: no data directory configured")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector reconcile: %w", err)
@@ -863,6 +881,9 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector teardown: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector teardown: %w", err)
@@ -927,12 +948,81 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+func runConnectorPrepareRollback(cmd *cobra.Command, _ []string) error {
+	dataDir := resolveConnectorDataDir()
+	if dataDir == "" {
+		return fmt.Errorf("connector prepare-rollback: no data directory configured (set --data-dir)")
+	}
+	reg := newConnectorRegistryWithPlugins()
+	names := reg.Names()
+	if connectorFlagName != "" {
+		if _, ok := reg.Get(connectorFlagName); !ok {
+			return fmt.Errorf("connector prepare-rollback: unknown connector %q (known: %s)",
+				connectorFlagName, strings.Join(names, ", "))
+		}
+		names = []string{connectorFlagName}
+	}
+	opts := resolveConnectorOpts(dataDir)
+	converted := map[string]int{}
+	failed := map[string]string{}
+	for _, name := range names {
+		conn, _ := reg.Get(name)
+		converter, ok := conn.(connector.HookRollbackConverter)
+		if !ok {
+			continue
+		}
+		count, err := converter.ConvertHooksForRollback(opts)
+		if err != nil {
+			failed[name] = err.Error()
+			continue
+		}
+		if count > 0 {
+			converted[name] = count
+		}
+	}
+	if connectorFlagJSON {
+		payload := map[string]any{
+			"action":    "prepare-rollback",
+			"ok":        len(failed) == 0,
+			"converted": converted,
+			"failed":    failed,
+		}
+		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
+			return err
+		}
+	} else {
+		for _, name := range names {
+			if count := converted[name]; count > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: rewrote %d hook entries in the form earlier releases remove\n",
+					Style("✓", "fg=green", "bold"), name, count)
+			}
+			if reason, ok := failed[name]; ok {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %s: %s\n", name, reason)
+			}
+		}
+	}
+	if len(failed) > 0 {
+		failedNames := make([]string, 0, len(failed))
+		for _, name := range names {
+			if _, ok := failed[name]; ok {
+				failedNames = append(failedNames, name)
+			}
+		}
+		return fmt.Errorf("connector prepare-rollback: could not rewrite the hook entries of %s",
+			strings.Join(failedNames, ", "))
+	}
+	return nil
+}
+
 func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 	dataDir := resolveConnectorDataDir()
 	if dataDir == "" {
 		return fmt.Errorf("connector verify: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	if name == "codex" && connectorFlagConfigHome == "" {
+		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
+	}
 	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
 	if err != nil {
 		return fmt.Errorf("connector verify: %w", err)

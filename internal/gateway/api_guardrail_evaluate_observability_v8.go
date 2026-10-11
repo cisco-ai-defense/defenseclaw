@@ -295,7 +295,7 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		input := observability.LogGuardrailEvaluationCompletedInput{
 			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-			DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 			Envelope: envelope, Severity: observability.Present(facts.severity),
 			LogLevel: observability.Present(facts.logLevel), Outcome: facts.outcome,
@@ -342,7 +342,13 @@ func (facts apiGuardrailEvaluateV8Facts) emitLog(
 			GenAIRequestModel:                   facts.model,
 			ConditionSecuritySeverityAvailable:  true,
 		}
-		auditCallerIdentity(ctx).Identity.applyTo(&input)
+		caller := auditCallerIdentity(ctx)
+		if !ManagedEnterpriseActive() {
+			input.UserID = hookV8OptionalIdentifier(caller.ID)
+			input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+			input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+		}
+		caller.Identity.applyTo(&input)
 		return builder.BuildLogGuardrailEvaluationCompleted(input)
 	})
 	return err
@@ -394,25 +400,26 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 	correlation := gatewayGeneratedCorrelation(ctx, facts.routeConnector())
 	correlation.EvaluationID = facts.request.EvaluationID
 	events := make([]observability.TraceEventInput, 0, 1)
+	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	decisionEvent, err := observability.NewSpanGuardrailApplyGuardrailDecisionEvent(
 		observability.SpanGuardrailApplyGuardrailDecisionEventInput{
 			TimeUnixNano:                        uint64(facts.completedAt.UnixNano()),
+			DefenseClawGuardrailProfileName:     profileTelemetry.Name,
 			DefenseClawEvaluationID:             observability.Present(facts.request.EvaluationID),
 			DefenseClawGuardrailDecision:        observability.Present(facts.decision),
 			DefenseClawGuardrailEffectiveAction: observability.Present(facts.effectiveAction),
 			DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
-			DefenseClawPolicyEffectiveDigest:    livePolicyDigestV8(),
-			DefenseClawPolicyGeneration:         livePolicyGenerationV8(),
+			DefenseClawPolicyEffectiveDigest:    policyDigestV8(ctx),
+			DefenseClawPolicyGeneration:         policyGenerationV8(ctx),
 		},
 	)
 	if err != nil {
 		return observability.SpanGuardrailApplyInput{}, false
 	}
 	events = append(events, decisionEvent)
-	profileTelemetry := guardrailProfileTelemetryFor(ctx)
 	input := observability.SpanGuardrailApplyInput{
 		DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
-		DefenseClawPolicyEffectiveDigest: livePolicyDigestV8(), DefenseClawPolicyGeneration: livePolicyGenerationV8(),
+		DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
 		DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
 		Envelope: observability.FamilyEnvelopeInput{
 			ObservedAt: observability.Present(facts.completedAt),
@@ -473,6 +480,12 @@ func (facts apiGuardrailEvaluateV8Facts) traceInput(
 		ConditionConnectorKnown:             facts.routeConnector() != "",
 		ConditionOperationTerminal:          true,
 	}
-	auditCallerIdentity(ctx).Identity.applyTo(&input)
+	caller := auditCallerIdentity(ctx)
+	if !ManagedEnterpriseActive() {
+		input.UserID = hookV8OptionalIdentifier(caller.ID)
+		input.DefenseClawUserIDKind = v8UserIDKind(caller.IDKind)
+		input.DefenseClawUserName = v8UserName(caller.Name, hookV8OptionalIdentifier)
+	}
+	caller.Identity.applyTo(&input)
 	return input, true
 }

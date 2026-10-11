@@ -27,20 +27,18 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 	toml "github.com/pelletier/go-toml/v2"
 	yaml "gopkg.in/yaml.v3"
 )
 
-// tomlUnmarshal is a thin alias kept private to this package — it
-// lets us swap the TOML implementation later without touching every
-// call site, and keeps the import surface minimal at the top of the
-// file.
 func tomlUnmarshal(data []byte, v any) error { return toml.Unmarshal(data, v) }
 
 // openclawConfig represents the structure of openclaw.json.
@@ -75,6 +73,25 @@ type MCPServerEntry struct {
 	SourceScope      string            `json:"source_scope,omitempty"`
 	TrustRequired    bool              `json:"trust_required,omitempty"`
 	Bundled          bool              `json:"bundled,omitempty"`
+	// Connector is the connector whose registry listed the server when a
+	// managed gateway reads several users' registries (never serialized).
+	Connector string `json:"-"`
+	// Home is the user home a managed gateway read the server from (never
+	// serialized). Two users, or two connectors of one user, may each list a
+	// server under the same name.
+	Home string `json:"-"`
+	// Project is the project folder whose local or .mcp.json scope lists
+	// the server (never serialized); empty for a user-scope server.
+	Project string `json:"-"`
+	// WorkDir is the folder the server starts in, as the managed Windows
+	// enumerator checked it where the user profile is readable (GAP-1317):
+	// absolute, inside Project or the user home, no link or reparse point
+	// on the way, re-resolved after the check. WorkDirRefused is the folder
+	// it did not accept and why ("<folder>: <reason>"). Only the
+	// enumerator spool record sets them (never serialized), so no
+	// configuration file a user writes can name a vetted folder.
+	WorkDir        string `json:"-"`
+	WorkDirRefused string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never
@@ -238,6 +255,158 @@ func (c *Config) LookupMCPServerForConnector(connector, workspaceDir, name strin
 	return MCPServerEntry{}, false
 }
 
+// LookupMCPServerUnderHome is LookupMCPServerForConnector for a user whose
+// home is not this process's: a standalone gateway runs as a service
+// account and answers the hooks of every user, so the server a hook names
+// is the one that user's agent configures (GAP-0576). Claude Code and
+// Codex are read; for other connectors ok is false.
+func LookupMCPServerUnderHome(connector, home, workspaceDir, name string) (MCPServerEntry, bool) {
+	name, home = strings.TrimSpace(name), strings.TrimSpace(home)
+	if name == "" || !filepath.IsAbs(home) {
+		return MCPServerEntry{}, false
+	}
+	var entries []MCPServerEntry
+	switch normalizeConnectorKey(connector) {
+	case "claudecode":
+		entries = readMCPServersClaudeCodeAt(filepath.Join(home, ".claude.json"),
+			filepath.Join(home, ".claude", "settings.json"), workspaceDir)
+		if entry, ok := lookupMCPToolServer(connector, entries, name); ok {
+			return entry, true
+		}
+		return lookupClaudePluginMCPServer(filepath.Join(home, ".claude"), name)
+	case "codex":
+		entries = readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
+	default:
+		return MCPServerEntry{}, false
+	}
+	return lookupMCPToolServer(connector, entries, name)
+}
+
+// LookupMCPToolServerForConnector is LookupMCPServerForConnector for the
+// server name a tool call carries, which an agent may have rewritten from
+// the configured name (MCPToolServerName). The standalone hooks and gateway
+// use it; Secure Client keeps the exact lookup of main (issue #1092).
+func (c *Config) LookupMCPToolServerForConnector(connector, workspaceDir, name string) (MCPServerEntry, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return MCPServerEntry{}, false
+	}
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" && c != nil {
+		workspaceDir = c.ConnectorWorkspaceDir()
+	}
+	entries, err := c.readMCPServersForConnectorIn(connector, workspaceDir)
+	if err != nil {
+		return MCPServerEntry{}, false
+	}
+	if entry, ok := lookupMCPToolServer(connector, entries, name); ok {
+		return entry, true
+	}
+	if normalizeConnectorKey(connector) == "claudecode" && (c == nil || !c.SecureClientIntegration()) {
+		// A server a plugin bundles (GAP-1191).
+		return lookupClaudePluginMCPServer(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), name)
+	}
+	return MCPServerEntry{}, false
+}
+
+// CodexMCPToolServerAmbiguous reports whether the caller's effective Codex
+// configuration has distinct server names that produce the same hook tool
+// segment. A hook without an explicit server name cannot distinguish them.
+func (c *Config) CodexMCPToolServerAmbiguous(workspaceDir, toolServer string) bool {
+	workspaceDir = strings.TrimSpace(workspaceDir)
+	if workspaceDir == "" && c != nil {
+		workspaceDir = c.ConnectorWorkspaceDir()
+	}
+	entries, err := c.readMCPServersForConnectorIn("codex", workspaceDir)
+	return err == nil && codexMCPToolServerAmbiguous(entries, toolServer)
+}
+
+// CodexMCPToolServerAmbiguousUnderHome uses the managed caller's Codex
+// configuration instead of the gateway service account's configuration.
+func CodexMCPToolServerAmbiguousUnderHome(home, workspaceDir, toolServer string) bool {
+	home = strings.TrimSpace(home)
+	if !filepath.IsAbs(home) {
+		return false
+	}
+	entries := readMCPServersCodexAt(filepath.Join(home, ".codex", "config.toml"), workspaceDir)
+	return codexMCPToolServerAmbiguous(entries, toolServer)
+}
+
+func codexMCPToolServerAmbiguous(entries []MCPServerEntry, toolServer string) bool {
+	toolServer = strings.TrimSpace(toolServer)
+	if toolServer == "" {
+		return false
+	}
+	first := ""
+	for _, entry := range entries {
+		if MCPToolServerName("codex", entry.Name) != toolServer {
+			continue
+		}
+		if first != "" && first != entry.Name {
+			return true
+		}
+		first = entry.Name
+	}
+	return false
+}
+
+// MCPToolServerName is the server segment an agent puts in the MCP tool
+// names its hooks see (mcp__<server>__<tool>). Codex turns every character
+// other than an ASCII letter, digit or underscore into "_", so a server
+// configured as acme-notes reaches the hook as acme_notes (GAP-0939); Claude
+// Code keeps "-" as well. Other connectors keep the name.
+func MCPToolServerName(connector, name string) string {
+	var keepDash bool
+	switch normalizeConnectorKey(connector) {
+	case "codex":
+	case "claudecode":
+		keepDash = true
+	default:
+		return name
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || keepDash && r == '-' {
+			return r
+		}
+		return '_'
+	}, name)
+}
+
+// SameMCPToolServer reports whether a tool call's server name, as the
+// connector's hook sees it, names the configured server.
+func SameMCPToolServer(connector, configured, toolServer string) bool {
+	configured, toolServer = strings.TrimSpace(configured), strings.TrimSpace(toolServer)
+	if configured == "" || toolServer == "" {
+		return false
+	}
+	return configured == toolServer || MCPToolServerName(connector, configured) == toolServer
+}
+
+// lookupMCPToolServer finds the entry a tool call's server name names: the
+// exact name, or else the one configured name whose tool-name form it is.
+// Two names with the same form are ambiguous and match neither, so the call
+// keeps the name it came with and an approval never moves between them.
+func lookupMCPToolServer(connector string, entries []MCPServerEntry, name string) (MCPServerEntry, bool) {
+	for _, entry := range entries {
+		if entry.Name == name {
+			return entry, true
+		}
+	}
+	var found MCPServerEntry
+	for _, entry := range entries {
+		if !SameMCPToolServer(connector, entry.Name, name) {
+			continue
+		}
+		if found.Name != "" && found.Name != entry.Name {
+			return MCPServerEntry{}, false
+		}
+		if found.Name == "" {
+			found = entry
+		}
+	}
+	return found, found.Name != ""
+}
+
 func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {
 	switch normalizeConnectorKey(connector) {
 	case "claudecode":
@@ -250,6 +419,8 @@ func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([
 		return readMCPServersHermes()
 	case "cursor":
 		return readMCPServersCursor(workspaceDir)
+	case "kiro":
+		return readMCPServersKiro(workspaceDir)
 	case "devin":
 		return readMCPServersDevin(workspaceDir)
 	case "copilot":
@@ -270,6 +441,107 @@ func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([
 		}
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
 	}
+}
+
+// ReadWatchedMCPServers returns the MCP servers the install watcher admits
+// and rescans: every scope of each connector, tagged with the connector. For
+// Claude Code that adds every project ~/.claude.json knows, with the servers
+// 'claude mcp add' stored for it (local scope) and its .mcp.json (project
+// scope), each tagged with the project: the gateway has no working folder,
+// so these were never scanned (GAP-0405).
+func (c *Config) ReadWatchedMCPServers(connectors []string) ([]MCPServerEntry, error) {
+	var out []MCPServerEntry
+	var firstErr error
+	for _, name := range connectors {
+		entries, err := c.ReadMCPServersForConnector(name)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		for _, entry := range entries {
+			entry.Connector = normalizeConnectorKey(name)
+			out = append(out, entry)
+		}
+		if normalizeConnectorKey(name) == "claudecode" {
+			out = append(out, claudeCodeProjectMCPServers()...)
+		}
+	}
+	if len(out) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
+// claudeCodeProjectMCPServers lists, for each project in the Claude Code
+// state file, the local-scope servers stored there and the project .mcp.json.
+func claudeCodeProjectMCPServers() []MCPServerEntry {
+	data, err := os.ReadFile(claudeCodeMCPStatePath())
+	if err != nil {
+		return nil
+	}
+	var state map[string]any
+	if json.Unmarshal(data, &state) != nil {
+		return nil
+	}
+	return claudeStateProjectServers(state, func(project string) ([]byte, error) {
+		return os.ReadFile(filepath.Join(project, ".mcp.json"))
+	})
+}
+
+// ClaudeStateMCPServers lists the MCP servers a Claude Code state file
+// (~/.claude.json) names: the user scope, the local scope of each project,
+// and the .mcp.json of each project, which readProjectMCP returns (nil skips
+// them). Entries are tagged claudecode; project servers carry their project.
+// The managed Windows enumerator, which runs as LocalSystem, reads the state
+// file for the gateway service, whose account cannot read it (GAP-0424).
+func ClaudeStateMCPServers(data []byte, readProjectMCP func(project string) ([]byte, error)) ([]MCPServerEntry, error) {
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	user, _ := readMCPFromAnyPaths(state, []string{"mcpServers"})
+	out := make([]MCPServerEntry, 0, len(user))
+	for _, entry := range dedupMCPEntries(user) {
+		entry.Connector = "claudecode"
+		out = append(out, entry)
+	}
+	return append(out, claudeStateProjectServers(state, readProjectMCP)...), nil
+}
+
+// claudeStateProjectServers lists the local-scope and .mcp.json servers of
+// every project in a decoded Claude Code state file.
+func claudeStateProjectServers(state map[string]any, readProjectMCP func(project string) ([]byte, error)) []MCPServerEntry {
+	projectStates, _ := state["projects"].(map[string]any)
+	projects := make([]string, 0, len(projectStates))
+	for project := range projectStates {
+		if filepath.IsAbs(project) {
+			projects = append(projects, project)
+		}
+	}
+	sort.Strings(projects)
+	var out []MCPServerEntry
+	for _, project := range projects {
+		if raw, ok := projectStates[project].(map[string]any); ok {
+			local, _ := readMCPFromAnyPaths(raw, []string{"mcpServers"})
+			for _, entry := range local {
+				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "local"
+				out = append(out, entry)
+			}
+		}
+		if readProjectMCP == nil {
+			continue
+		}
+		data, err := readProjectMCP(project)
+		if err != nil {
+			continue
+		}
+		if shared, err := parseDotMCPJSON(data); err == nil {
+			for _, entry := range shared {
+				entry.Connector, entry.Project, entry.SourceScope = "claudecode", filepath.Clean(project), "project"
+				out = append(out, entry)
+			}
+		}
+	}
+	return out
 }
 
 // ReadUserMCPServersForConnector returns a sandbox harness's user-scope MCP
@@ -472,12 +744,20 @@ func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	return readMCPFromClaudeSettings(path)
 }
 
-// ReadMCPFromClaudeJSONProjects is the exported wrapper around the
-// per-project local-scope Claude Code MCP reader; input is a path to
-// ~/.claude.json, and the returned entries flatten every
-// projects.<path>.mcpServers subtree.
-func ReadMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
-	return readMCPFromClaudeJSONProjects(path)
+// ReadMCPFromJSONCPaths reads the MCP servers found at each key chain of
+// paths in a JSON or JSONC file (union). AI discovery uses it for the agent
+// files whose servers are not a top-level mcpServers map: Amp's
+// amp.mcpServers and OpenClaw's and ZeptoClaw's mcp.servers (GAP-1062).
+func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(jsonc.Strip(data), &doc); err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, paths...)
 }
 
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
@@ -692,6 +972,12 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 			return expandPath(configHome)
 		}
 		return filepath.Join(home, ".omnigent")
+	case "kiro":
+		// Kiro IDE and Kiro CLI share ~/.kiro; matches
+		// connector_paths.connector_home("kiro") on the Python side. It used to
+		// fall through to OpenClaw's home_dir, so Kiro's agent identity was
+		// keyed on ~/.openclaw.
+		return filepath.Join(home, ".kiro")
 	default:
 		if c == nil {
 			return expandPath("~/.openclaw")
@@ -923,10 +1209,16 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 // --- Connector-specific MCP readers ---
 
 func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
+	return readMCPServersClaudeCodeAt(claudeCodeMCPStatePath(),
+		filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json"), workspaceDir), nil
+}
+
+// readMCPServersClaudeCodeAt reads Claude Code's servers from its state
+// file and settings.json at the given paths and the project .mcp.json.
+func readMCPServersClaudeCodeAt(statePath, settingsPath, workspaceDir string) []MCPServerEntry {
 	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
-	statePath := claudeCodeMCPStatePath()
 	local, user, stateErr := readMCPFromClaudeState(statePath, cwd)
 	if stateErr == nil {
 		// Claude's documented precedence is local, project, then user.
@@ -947,15 +1239,14 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 		entries = append(entries, user...)
 	}
 
-	// Some Claude installations also carry a top-level user registry in
-	// settings.json. Keep it as the final user layer so the CLI state registry
-	// retains precedence while this additional source still fills missing names.
-	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
+	// DefenseClaw 0.8.x wrote `mcp set` entries into settings.json. Keep that
+	// block as the final, legacy layer: the state file Claude Code reads wins
+	// a name, and the legacy block still fills names only it has (GAP-1340).
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
 	}
 
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries)
 }
 
 func claudeCodeMCPStatePath() string {
@@ -1007,22 +1298,6 @@ func sameClaudeWorkspace(left, right string) bool {
 		return strings.EqualFold(left, right)
 	}
 	return left == right
-}
-
-// readMCPFromClaudeJSONProjects extracts per-project local-scope MCP servers
-// from the projects.<path>.mcpServers subtrees of ~/.claude.json. Each
-// project's servers ship as a single flat list — the parent-path prefix is
-// intentionally not appended so downstream de-dup by name works across scopes.
-func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	_, projectEntries, err := parseClaudeJSONScopes(data)
-	if err != nil {
-		return nil, err
-	}
-	return projectEntries, nil
 }
 
 // claudeJSONScopes is the union shape of ~/.claude.json we care about: the
@@ -1087,7 +1362,7 @@ func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err er
 // ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
 // each read and decode the (often multi-megabyte) conversation-state file.
 func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxClaudeJSONConfigBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1099,6 +1374,12 @@ func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
+	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir), nil
+}
+
+// readMCPServersCodexAt reads Codex's servers from the user config.toml at
+// userPath and the project layers of workspaceDir.
+func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
 	// their entries take precedence, then the user layer fills remaining names.
@@ -1113,11 +1394,10 @@ func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 			entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
 		}
 	}
-	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
 	if e, err := ReadMCPFromCodexUserConfigTOML(userPath); err == nil {
 		entries = append(entries, e...)
 	}
-	return dedupMCPEntries(entries), nil
+	return dedupMCPEntries(entries)
 }
 
 func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, trustRequired bool) []MCPServerEntry {
@@ -1125,6 +1405,49 @@ func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, tru
 		entries[index].Source = source
 		entries[index].SourceScope = scope
 		entries[index].TrustRequired = trustRequired
+	}
+	return entries
+}
+
+// ReadUserMCPServersForHome reads the user-scope MCP registries that
+// connectorName keeps under home, for a managed gateway that watches every
+// enrolled user: Codex's config.toml, Claude Code's .claude.json and
+// settings.json, Devin's mcp_config.json in that user's roaming AppData
+// (GAP-1237) and Kiro's ~/.kiro/settings/mcp.json (GAP-1233). Unreadable
+// files are skipped; each entry carries the connector. Other connectors list
+// none.
+func ReadUserMCPServersForHome(connectorName, home string) []MCPServerEntry {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return nil
+	}
+	var entries []MCPServerEntry
+	switch normalizeConnectorKey(connectorName) {
+	case "codex":
+		if e, err := ReadMCPFromCodexUserConfigTOML(filepath.Join(home, ".codex", "config.toml")); err == nil {
+			entries = append(entries, e...)
+		}
+	case "claudecode":
+		if _, user, err := readMCPFromClaudeState(filepath.Join(home, ".claude.json"), ""); err == nil {
+			entries = append(entries, user...)
+		}
+		if e, err := readMCPFromClaudeSettings(filepath.Join(home, ".claude", "settings.json")); err == nil {
+			entries = append(entries, e...)
+		}
+	case "devin":
+		// The service's own %APPDATA% is not the user's: resolve the
+		// enrolled profile's.
+		if e, err := ReadMCPFromDevinConfig(filepath.Join(devinConfigHomeFor(home), "mcp_config.json")); err == nil {
+			entries = append(entries, e...)
+		}
+	case "kiro":
+		entries = readMCPServersKiroAt(home, "")
+	default:
+		return nil
+	}
+	entries = dedupMCPEntries(entries)
+	for index := range entries {
+		entries[index].Connector = normalizeConnectorKey(connectorName)
 	}
 	return entries
 }
@@ -1146,6 +1469,44 @@ func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 }
 
 const maxCodexInventoryConfigBytes = 1 << 20
+
+// Bounds of one MCP config read. Claude Code's ~/.claude.json carries its
+// conversation state and runs to tens of MiB; the other files are small.
+const (
+	maxMCPConfigFileBytes    = 16 << 20
+	maxClaudeJSONConfigBytes = 256 << 20
+)
+
+// readMCPConfigFile reads one agent MCP config. A link is followed, as
+// dotfile managers link these files, but only a regular file within limit is
+// read and a FIFO never blocks the open: AI discovery reads these files in
+// every user's home, and a config linked to /dev/zero would grow the scan
+// until the host ran out of memory (GAP-0694).
+func readMCPConfigFile(path string, limit int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- agent MCP config path
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("MCP config %s is not a regular file", path)
+	}
+	if info.Size() > limit {
+		return nil, fmt.Errorf("MCP config %s exceeds %d bytes", path, limit)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("MCP config %s exceeds %d bytes", path, limit)
+	}
+	return data, nil
+}
 
 // readMCPFromCodexConfigTOML parses the [mcp_servers] table out of
 // ~/.codex/config.toml. Codex's documented schema is:
@@ -1172,13 +1533,13 @@ func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
 			Transport string            `toml:"transport"`
 		} `toml:"mcp_servers"`
 	}
-	if err := tomlUnmarshal(data, &doc); err != nil {
+	if err := gatewayconnector.ParseCodexTOML(data, &doc); err != nil {
 		return nil, err
 	}
 	var rawDoc struct {
 		MCPServers map[string]map[string]any `toml:"mcp_servers"`
 	}
-	if err := tomlUnmarshal(data, &rawDoc); err != nil {
+	if err := gatewayconnector.ParseCodexTOML(data, &rawDoc); err != nil {
 		return nil, err
 	}
 	out := make([]MCPServerEntry, 0, len(doc.MCPServers))
@@ -1249,6 +1610,64 @@ func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {
 	return dedupMCPEntries(entries), nil
 }
 
+// Kiro keeps global and workspace MCP registrations in separate mcp.json
+// files. Keep both scopes, including same-name entries, so admission can
+// evaluate each registration independently.
+func readMCPServersKiro(workspaceDir string) ([]MCPServerEntry, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	return readMCPServersKiroAt(home, workspaceDir), nil
+}
+
+func readMCPServersKiroAt(home, workspaceDir string) []MCPServerEntry {
+	userPath := filepath.Join(home, ".kiro", "settings", "mcp.json")
+	paths := []struct{ path, scope, project string }{}
+	if workspace := strings.TrimSpace(workspaceDir); workspace != "" {
+		projectPath := filepath.Join(workspace, ".kiro", "settings", "mcp.json")
+		if projectReal, err := filepath.EvalSymlinks(projectPath); err == nil {
+			if userReal, err := filepath.EvalSymlinks(userPath); err == nil && projectReal == userReal {
+				projectPath = ""
+			}
+		} else if filepath.Clean(projectPath) == filepath.Clean(userPath) {
+			projectPath = ""
+		}
+		if projectPath != "" {
+			paths = append(paths, struct{ path, scope, project string }{projectPath, "project", filepath.Clean(workspace)})
+		}
+	}
+	paths = append(paths, struct{ path, scope, project string }{userPath, "user", ""})
+	var entries []MCPServerEntry
+	for _, source := range paths {
+		found, err := readMCPFromDotMCPJSON(source.path)
+		if err != nil {
+			continue
+		}
+		for _, entry := range found {
+			entry.Source = source.path
+			entry.SourceScope = source.scope
+			entry.Project = source.project
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+// ParseKiroUserMCPServers parses the Kiro user MCP file at path, which the
+// caller read: the managed Windows enumerator reads it as LocalSystem, since
+// the gateway service cannot read a protected .kiro (GAP-1468).
+func ParseKiroUserMCPServers(data []byte, path string) ([]MCPServerEntry, error) {
+	found, err := parseDotMCPJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	for index := range found {
+		found[index].Source, found[index].SourceScope = path, "user"
+	}
+	return dedupMCPEntries(found), nil
+}
+
 const maxDevinInventoryConfigBytes int64 = 4 << 20
 
 // readMCPServersDevin reads Devin's canonical MCP registries in effective
@@ -1298,9 +1717,16 @@ func devinConfigHome() (string, error) {
 		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
 			return filepath.Join(filepath.Clean(appData), "devin"), nil
 		}
-		return filepath.Join(home, "AppData", "Roaming", "devin"), nil
 	}
-	return filepath.Join(home, ".config", "devin"), nil
+	return devinConfigHomeFor(home), nil
+}
+
+// devinConfigHomeFor is Devin's default user configuration root in home.
+func devinConfigHomeFor(home string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(home, "AppData", "Roaming", "devin")
+	}
+	return filepath.Join(home, ".config", "devin")
 }
 
 // ReadMCPFromDevinConfig reads one canonical Devin mcp_config.json file using
@@ -1381,7 +1807,7 @@ func readMCPFromJSONPath(path string, paths ...[]string) ([]MCPServerEntry, erro
 }
 
 func readMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1435,11 +1861,15 @@ func readMCPFromAnyPaths(doc any, paths ...[]string) ([]MCPServerEntry, error) {
 }
 
 func readMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
+	return parseDotMCPJSON(data)
+}
 
+// parseDotMCPJSON reads the servers of an .mcp.json document.
+func parseDotMCPJSON(data []byte) ([]MCPServerEntry, error) {
 	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
@@ -1678,8 +2108,7 @@ func readJSONObjectJSONC(path string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	data = stripJSONCComments(data)
-	data = stripJSONCTrailingCommas(data)
+	data = jsonc.Strip(data)
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, err
@@ -1688,7 +2117,7 @@ func readJSONObjectJSONC(path string) (map[string]any, error) {
 }
 
 func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -1711,52 +2140,6 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 			Command: s.Command,
 			Args:    s.Args,
 			Env:     s.Env,
-		})
-	}
-	return entries, nil
-}
-
-func readMCPFromOpenCodeConfig(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var doc struct {
-		MCP map[string]struct {
-			Type        string            `json:"type"`
-			Command     []string          `json:"command"`
-			Environment map[string]string `json:"environment"`
-			URL         string            `json:"url"`
-		} `json:"mcp"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, err
-	}
-	entries := make([]MCPServerEntry, 0, len(doc.MCP))
-	for name, cfg := range doc.MCP {
-		kind := strings.ToLower(strings.TrimSpace(cfg.Type))
-		if kind == "remote" || (kind == "" && cfg.URL != "" && len(cfg.Command) == 0) {
-			entries = append(entries, MCPServerEntry{
-				Name:      name,
-				URL:       cfg.URL,
-				Transport: "remote",
-			})
-			continue
-		}
-		command := ""
-		var args []string
-		if len(cfg.Command) > 0 {
-			command = cfg.Command[0]
-			if len(cfg.Command) > 1 {
-				args = cfg.Command[1:]
-			}
-		}
-		entries = append(entries, MCPServerEntry{
-			Name:      name,
-			Command:   command,
-			Args:      args,
-			Env:       cfg.Environment,
-			Transport: "local",
 		})
 	}
 	return entries, nil
@@ -1787,6 +2170,19 @@ func ReadMCPServersAMPUnderHome(home string) ([]MCPServerEntry, error) {
 		ampUserSettingsPaths(home, "", true),
 		ampUserSettingsPaths(home, "", false),
 	)
+}
+
+// ReadMCPFromAmpSettings reads the MCP servers of one Amp settings file
+// (settings.json, settings.jsonc or managed-settings.json). Amp keeps them
+// under the flat key amp.mcpServers, where `amp mcp add` writes them; AI
+// Discovery read these files with the Claude Code reader, which looks for a
+// top-level mcpServers, and so listed none of them (GAP-1062).
+func ReadMCPFromAmpSettings(path string) ([]MCPServerEntry, error) {
+	doc, err := readJSONObjectJSONC(path)
+	if err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, []string{"amp.mcpServers"})
 }
 
 func readMCPServersAMPFromHome(home, workspace string, settingsPaths, skillSettingsPaths []string) ([]MCPServerEntry, error) {
@@ -1859,89 +2255,6 @@ func readStableAMPSettingsFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("Amp settings source changed during inspection")
 	}
 	return data, nil
-}
-
-func stripJSONCComments(data []byte) []byte {
-	out := make([]byte, 0, len(data))
-	inString := false
-	escaped := false
-	for i := 0; i < len(data); {
-		b := data[i]
-		if inString {
-			out = append(out, b)
-			if escaped {
-				escaped = false
-			} else if b == '\\' {
-				escaped = true
-			} else if b == '"' {
-				inString = false
-			}
-			i++
-			continue
-		}
-		if b == '"' {
-			inString = true
-			out = append(out, b)
-			i++
-			continue
-		}
-		if b == '/' && i+1 < len(data) && data[i+1] == '/' {
-			i += 2
-			for i < len(data) && data[i] != '\n' && data[i] != '\r' {
-				i++
-			}
-			continue
-		}
-		if b == '/' && i+1 < len(data) && data[i+1] == '*' {
-			i += 2
-			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
-				i++
-			}
-			if i+1 < len(data) {
-				i += 2
-			}
-			continue
-		}
-		out = append(out, b)
-		i++
-	}
-	return out
-}
-
-func stripJSONCTrailingCommas(data []byte) []byte {
-	out := make([]byte, 0, len(data))
-	inString := false
-	escaped := false
-	for i := 0; i < len(data); i++ {
-		b := data[i]
-		if inString {
-			out = append(out, b)
-			if escaped {
-				escaped = false
-			} else if b == '\\' {
-				escaped = true
-			} else if b == '"' {
-				inString = false
-			}
-			continue
-		}
-		if b == '"' {
-			inString = true
-			out = append(out, b)
-			continue
-		}
-		if b == ',' {
-			j := i + 1
-			for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\n' || data[j] == '\r') {
-				j++
-			}
-			if j < len(data) && (data[j] == '}' || data[j] == ']') {
-				continue
-			}
-		}
-		out = append(out, b)
-	}
-	return out
 }
 
 func dedupMCPEntries(entries []MCPServerEntry) []MCPServerEntry {

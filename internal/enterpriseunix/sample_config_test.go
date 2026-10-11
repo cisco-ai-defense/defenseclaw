@@ -166,6 +166,44 @@ func TestEnsureAcceptsThePreviousDefaultConfig(t *testing.T) {
 	}
 }
 
+// After a rollback an earlier release records its own version and the v8
+// config it was given. Upgrading again migrates that config again, instead of
+// treating it as a v8 file configuration management put back and leaving the
+// old migration-v9.json as the only record (GAP-0113).
+func TestReUpgradeAfterARollbackMigratesTheConfigAgain(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireNoHostInstall(t, h.env.Layout)
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	previous := previousDefaultConfig(h.env.Layout)
+	configPath := h.env.P(h.env.Layout.ConfigPath)
+	if err := os.WriteFile(configPath, previous, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if config.NeedsMigrationV9([]byte(h.read(h.env.Layout.ConfigPath))) {
+		t.Fatal("premise: the first upgrade migrates the v8 config")
+	}
+	// The rollback put the v8 bytes back and recorded the older release.
+	if err := os.WriteFile(configPath, previous, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.ProductVersion, record.ConfigSHA256 = "0.9.0", sha256Bytes(previous)
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if installed := h.read(h.env.Layout.ConfigPath); config.NeedsMigrationV9([]byte(installed)) {
+		t.Fatalf("the re-upgrade left the config at config_version 8:\n%s", installed)
+	}
+	if h.read(h.env.Layout.ConfigPath+config.ConfigV8BackupSuffix) != string(previous) {
+		t.Fatal("config.yaml.v8.bak does not hold the config the re-upgrade migrated")
+	}
+}
+
 // The layout fixes data_dir and ships the default rule pack, so a config may
 // leave data_dir, policy_dir and rule_pack_dir out. An explicit wrong value
 // is still refused before any change.

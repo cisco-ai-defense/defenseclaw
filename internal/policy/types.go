@@ -116,17 +116,3 @@ type GuardrailOutput struct {
 	Reason         string   `json:"reason"`
 	ScannerSources []string `json:"scanner_sources"`
 }
-
-// FirewallInput is the structured input passed to the OPA firewall policy.
-type FirewallInput struct {
-	TargetType  string `json:"target_type"`
-	Destination string `json:"destination"`
-	Port        int    `json:"port"`
-	Protocol    string `json:"protocol"`
-}
-
-// FirewallOutput is the structured output from the OPA firewall policy.
-type FirewallOutput struct {
-	Action   string `json:"action"`
-	RuleName string `json:"rule_name"`
-}

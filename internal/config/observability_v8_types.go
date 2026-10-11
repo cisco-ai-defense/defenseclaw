@@ -100,9 +100,13 @@ type ObservabilityV8ResourceSource struct {
 }
 
 type ObservabilityV8TracePolicySource struct {
-	Sampler              string                           `json:"sampler,omitempty" mapstructure:"sampler" yaml:"sampler,omitempty"`
-	SamplerArg           string                           `json:"sampler_arg,omitempty" mapstructure:"sampler_arg" yaml:"sampler_arg,omitempty"`
-	SemanticProfile      string                           `json:"semantic_profile,omitempty" mapstructure:"semantic_profile" yaml:"semantic_profile,omitempty"`
+	Sampler         string `json:"sampler,omitempty" mapstructure:"sampler" yaml:"sampler,omitempty"`
+	SamplerArg      string `json:"sampler_arg,omitempty" mapstructure:"sampler_arg" yaml:"sampler_arg,omitempty"`
+	SemanticProfile string `json:"semantic_profile,omitempty" mapstructure:"semantic_profile" yaml:"semantic_profile,omitempty"`
+	// CompatibilityAliases is the legacy Secure Client alias switch. A
+	// config_version 8 source may still hold it, and only a Secure Client
+	// plan retains it for the main-compatible digest and resource aliases.
+	// A config_version 9 source may not hold it (the schema forbids it).
 	CompatibilityAliases *bool                            `json:"compatibility_aliases,omitempty" mapstructure:"compatibility_aliases" yaml:"compatibility_aliases,omitempty"`
 	Limits               ObservabilityV8TraceLimitsSource `json:"limits,omitempty" mapstructure:"limits" yaml:"limits,omitempty"`
 }

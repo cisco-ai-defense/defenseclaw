@@ -93,7 +93,9 @@ def redaction(app: AppContext) -> None:
                  evidence and errors
       content    like sensitive, but replaces content, reasons, evidence
                  and errors whole
-      strict     keeps only metadata and identifiers; removes everything else
+      strict     keeps only metadata and join identifiers; removes everything
+                 else, including the user principal, Kerberos principal,
+                 client address, tenant ID and email
 
     With no subcommand it starts an interactive editor. 'status' shows what
     is in effect now.
@@ -440,8 +442,9 @@ _BUILT_IN_PROFILE_SUMMARIES = {
     "none": "no redaction: everything is sent as recorded (the default)",
     "sensitive": "removes credentials, hashes paths, masks PII/secrets found in content",
     "content": "like sensitive, but replaces content, reasons, evidence and errors whole",
-    "strict": "keeps only metadata and identifiers",
+    "strict": "keeps only metadata and join identifiers (drops principals, client address, tenant, email)",
 }
+_PERSONAL_IDENTIFIERS = "user principal, Kerberos principal, client address, tenant ID, email"
 
 
 @redaction.group("profile")
@@ -496,6 +499,10 @@ def profile_show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
     for field_class in FIELD_CLASSES:
         mode = (found.get("field_classes") or {}).get(field_class, "-")
         click.echo(f"  {field_class}: {mode}")
+    # GAP-0257: the identifier class reads "preserve" for strict too; strict
+    # (and a custom profile that extends it) still removes the five personal ones.
+    removes = name == "strict" or found.get("extends") == "strict"
+    click.echo(f"  Personal identifiers: {'removed' if removes else 'kept as recorded'} ({_PERSONAL_IDENTIFIERS})")
 
 
 @profile_group.command("set")
@@ -930,7 +937,6 @@ def _interactive_wizard(app: AppContext) -> None:
     raw, source = _load_source(app)
     click.echo("\nDefenseClaw redaction policy")
     click.echo(f"Config: {path}")
-    click.echo("Schema: v8")
     _render_status(_operator_status(app), compact=True)
     draft = _WizardDraft(raw, source, str(path))
 
@@ -1355,6 +1361,10 @@ def _execute_mutations(
     emit_json: bool,
     restart: bool,
 ) -> None:
+    from defenseclaw.enforce.asset_lists import refuse_config_writer_on_managed_device
+
+    # A managed device refuses before the preview, with exit 3 (GAP-0052).
+    refuse_config_writer_on_managed_device(app.cfg, f"setup redaction {action.split()[0]}", "redaction")
     mutation_tuple = tuple(mutations)
     if not mutation_tuple:
         raise click.UsageError("no redaction policy changes were selected")

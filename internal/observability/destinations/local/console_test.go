@@ -107,7 +107,7 @@ func TestConsoleFailureOutcomesAreBoundedAndRetryable(t *testing.T) {
 	dispatcher := newTestDispatcher(t, "console-failure", adapter, 8*1024*1024, 1)
 	enqueue(t, dispatcher, "write-failure", `{"message":"content must not enter errors"}`)
 	drainAndCloseDispatcher(t, dispatcher)
-	if got := dispatcher.Counters(); got.Retried != 2 || got.Rejected != 1 || got.Delivered != 0 {
+	if got := dispatcher.Counters(); got.Retried != 2 || got.Dropped != 1 || got.Delivered != 0 {
 		t.Fatalf("failure counters = %+v", got)
 	}
 	if writer.calls.Load() != 3 {

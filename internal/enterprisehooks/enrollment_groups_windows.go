@@ -28,10 +28,11 @@ import (
 
 // enterprise.enrollment.include_groups and exclude_groups on Windows.
 //
-// A signed-in user's session token lists every group the user belongs to:
-// local groups, Active Directory groups and the Microsoft Entra ID groups a
-// cloud sign-in carries. The enumerator reads the token of each active
-// session and caches its group SIDs, so a signed-out user is decided from
+// A signed-in user's session token lists the user's local and Active
+// Directory groups, and only those Microsoft Entra ID groups that a built-in
+// local group (Administrators, Users, Remote Desktop Users, ...) lists:
+// Windows leaves every other Entra group out of the token. The enumerator
+// reads the token of each active session and caches its group SIDs, so a signed-out user is decided from
 // the membership seen at their last sign-in. Local groups are also read from
 // the local account database, which lists the direct members of a local
 // group at any time; it decides local accounts completely (a local account
@@ -68,6 +69,10 @@ type WindowsEnrollmentGroupCache struct {
 	Version int                 `json:"version"`
 	Users   map[string][]string `json:"users,omitempty"`
 	Names   map[string]string   `json:"names,omitempty"`
+	// SignedIn names the users whose groups came from an active session
+	// token this cycle; the others keep their last session groups. It is not
+	// saved.
+	SignedIn map[string]bool `json:"-"`
 }
 
 // WindowsEnrollmentGroupsCachePath is the membership cache for manifestPath.
@@ -180,6 +185,44 @@ func canonicalWindowsGroupSIDs(values []string) []string {
 	return out
 }
 
+// RefreshWindowsManifestIdentityGroups keeps group facts for administrator
+// enrolled users without changing their targets manifest. The cache is
+// filtered to the current manifest before it is published to the gateway.
+func RefreshWindowsManifestIdentityGroups(manifest Manifest, cache *WindowsEnrollmentGroupCache) (*WindowsEnrollmentGroupCache, error) {
+	if cache == nil {
+		cache = NewWindowsEnrollmentGroupCache()
+	}
+	allowed := map[string]bool{}
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() {
+			if sid := canonicalManifestTargetSID(target.SID); sid != "" {
+				allowed[sid] = true
+			}
+		}
+	}
+	fresh := NewWindowsEnrollmentGroupCache()
+	fresh.SignedIn = map[string]bool{}
+	for sid := range allowed {
+		fresh.Users[sid] = []string{}
+	}
+	for sid, groups := range cache.Users {
+		if canon := canonicalManifestTargetSID(sid); allowed[canon] {
+			fresh.Users[canon] = canonicalWindowsGroupSIDs(groups)
+		}
+	}
+	sessions, err := windowsActiveSessionGroups()
+	if err != nil {
+		return fresh, err
+	}
+	for sid, groups := range sessions {
+		if canon := canonicalManifestTargetSID(sid); allowed[canon] {
+			fresh.Users[canon] = canonicalWindowsGroupSIDs(groups)
+			fresh.SignedIn[canon] = true
+		}
+	}
+	return fresh, nil
+}
+
 // windowsGroupMembership is one user's membership of one configured group.
 type windowsGroupMembership int
 
@@ -266,10 +309,12 @@ func newWindowsEnrollmentGroups(
 		cache.Names = map[string]string{}
 	}
 	signedIn := make(map[string][]string, len(sessions))
+	cache.SignedIn = make(map[string]bool, len(sessions))
 	for sid, groups := range sessions {
 		canon := canonicalManifestTargetSID(sid)
 		signedIn[canon] = canonicalWindowsGroupSIDs(groups)
 		cache.Users[canon] = signedIn[canon]
+		cache.SignedIn[canon] = true
 	}
 	groups := &windowsEnrollmentGroups{sessions: signedIn, cache: cache}
 	if len(include) == 0 && len(exclude) == 0 {

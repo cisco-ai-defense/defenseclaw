@@ -9,7 +9,7 @@ keywords:
   - Apple silicon
 ---
 
-<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not been run in a live tenant.</Callout>
+<Callout title="Template">This recipe is a template, validated by simulating the MDM execution context. It has not delivered DefenseClaw in a live tenant yet. The tenant setup and the Apple push certificate it depends on were run on a test tenant: see [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant).</Callout>
 
 <Callout title="At a glance">
 - **You upload:** one shell script that runs as root: your copy of
@@ -31,6 +31,10 @@ detection and logs.
 
 ## Before you start
 
+- **Tenant**: the Apple push certificate, device groups and licences are in place, and the Macs
+  are enrolled; see [Prepare your Intune tenant](/docs/enterprise/mdm/intune-tenant). A Mac has been
+  enrolled in the test tenant with Company Portal; DefenseClaw was installed on it by hand, not
+  through this recipe.
 - **Macs**: Apple silicon on macOS 13.0 or later. The package
   `defenseclaw-enterprise-<version>-darwin-arm64.pkg` refuses other hosts, and
   its package identifier is `com.cisco.defenseclaw.enterprise`.
@@ -45,6 +49,12 @@ detection and logs.
   AI Defense key out of it.
 
 ## Choose a route
+
+For a first Platform SSO sign-in, macOS may show the full Setup Assistant and
+an AutoUpdate notice before the desktop. Prepare each demonstration account by
+signing it in once before a timed test, or deploy an approved Setup Assistant
+skip payload. Allow the user to finish Setup Assistant; logout shortcuts may
+not work while it is open.
 
 | Route | Install | Detect | Use it when |
 | --- | --- | --- | --- |
@@ -110,6 +120,8 @@ guardrail:
   connectors:
     claudecode: {}
     codex: {}
+ai_discovery:
+  enabled: true
 DEFENSECLAW_CONFIG
 }
 ```
@@ -191,6 +203,19 @@ Or, from tooling that can drop a root-only file, run the wrapper with
 Delete the source file afterwards. Storing the key re-runs `ensure`, which
 applies it.
 
+## Entra users and groups
+
+With Platform SSO (the Microsoft Enterprise SSO plug-in in Company Portal),
+Entra users sign in at the macOS login window, and the standalone enterprise
+profile records a registered account as directory `entra_id` with its UPN, so
+a `users` assignment by UPN works. Platform SSO puts no Entra group into the
+macOS group database, so a `groups` assignment that names an Entra group
+matches no one until a local group carries the membership. The settings
+catalog policy that was used live, the bridge script that adds a user to the
+local group, and the measured results are in
+[Deploy with Microsoft Entra ID](/docs/enterprise/identity-entra-id#4-macos-platform-sso).
+Delivering the bridge script through Intune was not tested.
+
 ## Change the config, upgrade and roll back
 
 - **Change the config**: edit the config in your script and save it. Intune
@@ -214,9 +239,28 @@ requirement (`codesign -dr - /opt/cisco/defenseclaw/bin/defenseclaw-gateway`
 prints it). This works only for a Developer ID-signed release: an unsigned
 release's code requirement is a hash that changes with every release.
 
+## Deliver a custom macOS rule pack
+
+When using `DC_SOURCE_URL`, use a direct HTTPS file URL. A GitHub release
+link may answer HTTP 302; the wrapper refuses redirects and reports that
+status instead of treating the empty response as a hash mismatch.
+
+Before the first pkg install, add a root **stage-pack** script that copies the
+pack into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with
+`root:wheel` ownership, `0755` directories and `0644` files. Use the exact
+[stage-pack script and pin example](/docs/enterprise/mdm#stage-a-custom-macos-rule-pack).
+Run it before the config and pkg steps. In `config.yaml`, set
+`guardrail.rule_pack` to the pack name and
+`guardrail.custom_packs.<name>` to that absolute path and its
+`sha256:<digest>` pin. Stage the pack again before reinstalling after purge.
+
 ## Remove DefenseClaw
 
-First remove the Macs from the install script's assignment. Then assign a root
+First remove the Macs from the install script's assignment. Wait until
+each device has checked in and no longer reports the install script as assigned before assigning uninstall. The Intune agent can run a
+cached recurring install script after unassignment and reinstall the pkg
+after uninstall. Confirm the install script has stopped running on the device
+and that removal stays in effect at the next check-in. Then assign a root
 shell script, set to run once, with `packaging/mdm/macos/uninstall.sh`. It
 stops and removes the LaunchDaemons, removes DefenseClaw's hooks and
 machine-policy entries (administrator entries stay), removes the binaries and
@@ -231,7 +275,7 @@ it exits `0`.
 | --- | --- |
 | **Scripts** > your script > **Device status** | Intune's run status per Mac (Success for exit `0`) |
 | `/Library/Logs/Microsoft/Intune` | The Intune agent's logs, including script runs |
-| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | The wrapper's steps and every result document (root, `0600`) |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure results (root, `0600`); uninstall removes this log, so use the Intune script output for its result |
 | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The pkg's own `ensure` result |
 | `/Library/Logs/Cisco/DefenseClaw/lifecycle.log`, `verify.log` | Config-change runs and the daily `verify` |
 

@@ -21,6 +21,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -547,5 +549,38 @@ func TestEnrichCodexNotifySpan_SanitizesAttributes(t *testing.T) {
 	}
 	if !utf8.ValidString(modelAttr) {
 		t.Fatalf("model attr is invalid UTF-8: %q", modelAttr)
+	}
+}
+
+// A Secure Client gateway still folds a Codex notify into the hook collector
+// (GAP-0142, issue #1092): the notify writes its codex.notify row, without
+// an agent, and a connector-hook-synthetic row.
+func TestCodexNotify_SecureClientKeepsTheSyntheticStopRow(t *testing.T) {
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger, scannerCfg: &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(
+		`{"type":"agent-turn-complete","thread-id":"thread-sc","turn-id":"turn-sc","status":"success"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	a.handleCodexNotify(w, req)
+	logger.Close()
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	time.Sleep(50 * time.Millisecond)
+	rows, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byAction := map[string]audit.Event{}
+	for _, row := range rows {
+		byAction[row.Action] = row
+	}
+	notify, ok := byAction["codex.notify.agent-turn-complete"]
+	if !ok || notify.AgentID != "" {
+		t.Fatalf("codex.notify row = %+v (present %v), want one without an agent", notify, ok)
+	}
+	if _, ok := byAction[string(audit.ActionConnectorHookSynthetic)]; !ok {
+		t.Fatalf("no connector-hook-synthetic row in %d rows", len(rows))
 	}
 }

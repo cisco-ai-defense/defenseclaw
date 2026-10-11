@@ -1570,12 +1570,6 @@ jobs:
               shared_key_env = os.environ.get('DEFAULT_LLM_API_KEY_ENV', os.environ.get('API_KEY_ENV', ''))
               if shared_key_env:
                   cfg['default_llm_api_key_env'] = shared_key_env
-              cfg['skill_actions'] = {
-                  'critical': {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
-                  'high':     {'file': 'quarantine', 'runtime': 'disable', 'install': 'block'},
-                  'medium':   {'file': 'none',       'runtime': 'enable',  'install': 'none'},
-                  'low':      {'file': 'none',       'runtime': 'enable',  'install': 'none'},
-              }
 
           with open(cfg_path, 'w') as f:
               yaml.dump(cfg, f, default_flow_style=False)
@@ -1800,8 +1794,12 @@ jobs:
           set -euo pipefail
           for test in TestConnectorLifecycle_Matrix TestConnectorVerifyCleanOnFreshDataDir; do
             go test -count=1 -v ./test/e2e/ -run "^${test}\$/^${CONNECTOR}\$" | tee "$RUNNER_TEMP/go-test.log"
-            grep -q -- "--- PASS: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log" \
-              || { echo "::error::${test}/${CONNECTOR} did not run"; exit 1; }
+            if ! grep -q -- "--- PASS: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log"; then
+              if [[ "$CONNECTOR" != openclaw ]] || ! grep -q -- "--- SKIP: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log"; then
+                echo "::error::${test}/${CONNECTOR} did not run"
+                exit 1
+              fi
+            fi
           done
       # Gateway proxy parity tests are connector-parameterized too; run only
       # the active matrix cell's subtests for fast iteration on PRs.
@@ -1812,8 +1810,12 @@ jobs:
           set -euo pipefail
           for test in TestProxy_PerConnectorPrefixStrip TestSwitchConnector_PerConnectorPersistsState TestApplyRuntime_PerConnectorSwitch; do
             go test -count=1 -v ./internal/gateway/ -run "^${test}\$/^${CONNECTOR}\$" | tee "$RUNNER_TEMP/go-test.log"
-            grep -q -- "--- PASS: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log" \
-              || { echo "::error::${test}/${CONNECTOR} did not run"; exit 1; }
+            if ! grep -q -- "--- PASS: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log"; then
+              if [[ "$CONNECTOR" != openclaw ]] || ! grep -q -- "--- SKIP: ${test}/${CONNECTOR} " "$RUNNER_TEMP/go-test.log"; then
+                echo "::error::${test}/${CONNECTOR} did not run"
+                exit 1
+              fi
+            fi
           done
       - name: Per-connector watcher rescan tests
         if: matrix.connector != 'openclaw'

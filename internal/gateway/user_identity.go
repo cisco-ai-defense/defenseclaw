@@ -84,12 +84,11 @@ func gatewayRunsAsServiceAccount() bool {
 // by any local process.
 func resolveHookUserIdentity(ctx context.Context, connector string, payload map[string]interface{}) llmEventUser {
 	user := resolveHookUser(ctx, payload)
-	if isSandboxHookRequest(ctx) {
-		// A sandbox payload is agent-controlled end to end; the binding's
+	if !isSandboxHookRequest(ctx) {
+		// A sandbox payload is agent-controlled end to end: the binding's
 		// host user is the only attribution, and no address is inferred.
-		return user
+		user.Email = hookUserEmail(connector, payload)
 	}
-	user.Email = hookUserEmail(connector, payload)
 	user.Identity = requestIdentityFor(ctx, user.ID)
 	return user
 }
@@ -121,12 +120,11 @@ func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEve
 // OTLP ingest traffic, where the caller is a library rather than a connector
 // with a local credential file to read.
 func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
+	var user llmEventUser
 	if binding, ok := sandboxauth.FromContext(r.Context()); ok {
 		userID, _, userName := sandboxBindingUser(binding)
-		return newLLMEventUser(userID, userName, userID != "")
-	}
-	var user llmEventUser
-	if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
+		user = newLLMEventUser(userID, userName, userID != "")
+	} else if subject, ok := verifiedSubjectFromContext(r.Context()); ok {
 		// An authenticated caller's headers and body are claims; the
 		// verified subject is who it is.
 		user = newTrustedLLMEventUser(subject.UserID, subject.UserName)
@@ -188,9 +186,10 @@ func newUntrustedLLMEventUser(userID, userName string) llmEventUser {
 func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	userID = sanitizeLLMEventUser(userID)
 	userName = sanitizeLLMEventUser(userName)
-	if trustedID {
-		// An OS-derived name may be fully qualified (SSSD's alice@realm).
-		userName = useridentity.BareAccountName(userName)
+	if trustedID && identityFactsEnabled.Load() {
+		// New identity records use a bare account name. Secure Client keeps
+		// the qualified passwd name that main reports.
+		userName = verifiedAccountName(userID, userName)
 	}
 	if userID == "" && userName == "" {
 		userID, userName = localProcessUser()
@@ -205,6 +204,25 @@ func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 		IDKind: idKind,
 		Name:   userName,
 	}
+}
+
+func localAccountName(name string) string {
+	if identityFactsEnabled.Load() {
+		return useridentity.BareAccountName(name)
+	}
+	return name
+}
+
+func processAccountName(name string) string {
+	if identityFactsEnabled.Load() {
+		return useridentity.BareAccountName(name)
+	}
+	// main strips only a Windows-style domain prefix here.
+	name = strings.TrimSpace(name)
+	if idx := strings.LastIndexByte(name, '\\'); idx >= 0 && idx+1 < len(name) {
+		return name[idx+1:]
+	}
+	return name
 }
 
 // localProcessUser reports the gateway's own OS user, and only when that is
@@ -225,7 +243,7 @@ func localProcessUser() (string, string) {
 		return "", ""
 	}
 	return sanitizeLLMEventUser(firstNonEmpty(current.Uid, current.Username)),
-		sanitizeLLMEventUser(firstNonEmpty(useridentity.BareAccountName(current.Username), current.Name, current.Uid))
+		sanitizeLLMEventUser(firstNonEmpty(processAccountName(current.Username), current.Name, current.Uid))
 }
 
 // userFieldsFromHookPayload pulls the user fields a connector may report in
@@ -312,6 +330,14 @@ func v8UserEmail(email string) observability.Optional[string] {
 		return observability.Absent[string]()
 	}
 	return observability.Present(email)
+}
+
+// v8UserName renders the account name for defenseclaw.user.name through the
+// shared normaliser (observability.UserName): a name in any script is kept
+// when the gateway collects identity facts, and an ASCII name, and every name
+// under Secure Client, keeps the rule of the producer.
+func v8UserName(name string, ascii func(string) observability.Optional[string]) observability.Optional[string] {
+	return observability.UserName(name, ascii)
 }
 
 // v8UserIDKind renders the id namespace for a v8 builder input. The attribute

@@ -90,7 +90,11 @@ type Event struct {
 	Detail string
 	// User is the owning username, when cheaply available.
 	User string
-	At   time.Time
+	// UserSID is the SID of the account the event itself names as the
+	// process's: the writer's token for a file access, the new process's
+	// account for a process creation. Empty when the event names none.
+	UserSID string
+	At      time.Time
 }
 
 // Coverage describes what a running source can and cannot see.

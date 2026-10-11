@@ -31,8 +31,12 @@ defenseclaw setup copilot
 defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-DefenseClaw writes the global hook by default. Pass `--workspace` only when the
-repository should carry its own `.github/hooks/defenseclaw.json` file.
+DefenseClaw writes the global hook by default. `--workspace` pins the workspace
+for the whole install. Setup refuses it once another connector is configured,
+because it would move that connector's hooks. To scope all connectors together,
+run `defenseclaw setup guardrail --workspace /path/to/repo`. Use
+`setup copilot --workspace` only on a Copilot-only install whose repository
+should carry `.github/hooks/defenseclaw.json`.
 
   </Tab>
   <Tab value="Windows">
@@ -101,7 +105,7 @@ that inventory path to install, enable, disable, or remove Copilot plugins.
 
 The table highlights convenience options rather than the complete alias
 surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
-approval, block-message, add/replace, and rule-pack-directory options. See the
+approval, block-message, and add/replace options. See the
 [quick-alias reference](/docs/guardrail/aliases); use
 [full guardrail setup](/docs/guardrail) for scanner, detection-strategy,
 and judge-provider configuration.
@@ -132,7 +136,7 @@ Global setup is the default because DefenseClaw is intended to govern the operat
 defenseclaw setup copilot
 ```
 
-Confirms once, writes `~/.copilot/hooks/defenseclaw.json`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. It writes `~/.copilot/hooks/defenseclaw.json` and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. For scripted setup, pass `--yes --mode observe` (or `--mode action`).
 
 </Tab>
 
@@ -231,6 +235,11 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 
 <HookEventsList connector="copilot" />
 
+Copilot CLI has no hook that can stop a prompt, so a prompt rule doesn't block
+here: a matching prompt reaches the model, in observe and action mode alike, and its
+alert reads `detected in the prompt (cannot block)`. Tool-call rules still block
+([capability matrix](/docs/connectors/capability-matrix)).
+
 <Callout type="info">
 Copilot CLI supports native ask on documented `preToolUse` hooks. The approval prompt surfaces inside the agent UI, not the DefenseClaw TUI.
 </Callout>
@@ -318,16 +327,30 @@ Copilot machine policy is not `ownership: off` and `local_harness` is
 every enrolled user. It binds `SessionStart`, `UserPromptSubmit`,
 `PreToolUse`, `PostToolUse` and `Stop` to the administrator's hook binary with
 `--hook-surface vscode-local`. With `managed_hooks_only: enforce` it also
-places the same hooks as a plugin under
-`~/.copilot/installed-plugins/defenseclaw/defenseclaw/`, enables
-`ChatPluginsEnabled`, and adds `enabledPlugins["defenseclaw@defenseclaw"]` to
-Copilot's managed settings. DefenseClaw writes these files as the user.
+enables `ChatPluginsEnabled` and, only while every VS Code found on the host
+is 1.139.x (the version whose plugin store DefenseClaw writes), places the
+same hooks as a plugin under
+`~/.copilot/installed-plugins/defenseclaw/defenseclaw/` and adds
+`enabledPlugins["defenseclaw@defenseclaw"]` to Copilot's managed settings.
+Copilot CLI reads the same settings file, and from 1.0.92 it warns at every
+start and prompt about an enabled plugin whose marketplace it does not know
+(`Marketplace "defenseclaw" not found`), so a host without such a VS Code
+gets neither the key nor the plugin folder (status says why). The key is
+DefenseClaw's whenever it holds `true`, recorded or not (a build before
+1.0.0 wrote it without a record): the guardian removes it from a host where
+it is not wanted, and uninstall, with or without `PURGE=1`, removes it, then
+the settings file and the folder DefenseClaw created for it once nothing
+else is in them. DefenseClaw writes the files as the user.
 The Local hook file is DefenseClaw's own: the hook guardian rewrites it when a
 user deletes or edits it (a directory or link at that name is replaced too),
 status and verify fail while it is missing or modified, and uninstall removes
 whatever is at that name. For the plugin files, DefenseClaw rewrites only
-files it rendered and keeps any other file at those paths, reporting it;
-verify reports their drift, and uninstall removes only DefenseClaw's copies.
+files it rendered, including an earlier release's render, so an upgrade
+replaces them. It keeps any other file at those paths: the foreign-hook guard
+then denies that user's Copilot calls, so status and verify fail and name the
+file. Move it aside, and the guardian writes DefenseClaw's plugin on its next
+pass. Status and verify also fail while DefenseClaw's plugin is missing or
+out of date, and uninstall removes only DefenseClaw's copies.
 
 Copilot CLI also reads `~/.copilot/hooks` and runs the file's `command`, and
 VS Code runs both the file and the plugin. When the Copilot CLI runs the

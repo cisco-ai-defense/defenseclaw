@@ -124,6 +124,12 @@ func ValidatePrivateFileOwnership(path string) error {
 	return validatePrivateOwnership(path, false, false)
 }
 
+// ValidatePrivateFileOwnershipAllowingAdministrators is the file counterpart
+// to ValidatePrivateDirectoryOwnershipAllowingAdministrators.
+func ValidatePrivateFileOwnershipAllowingAdministrators(path string) error {
+	return validatePrivateOwnership(path, false, true)
+}
+
 // ValidatePrivateHandle verifies that handle names an object owned by the
 // current user with the same fail-closed private DACL required by
 // ValidatePrivateDirectory and ValidatePrivateFile. Callers that already hold

@@ -93,7 +93,7 @@ differs from its expected result. Severity:
 | Foreign-hook cleanup of user-level hook files | About every five minutes; allow up to about 5.5 minutes. The hook-time guard blocks affected calls in the meantime |
 | Enumerator cycle (new account, agent install or version change) | Every five minutes, and once at service start |
 | Revocation of a deleted account (Linux, macOS) | The third consecutive definitive miss, 10 to 15 minutes; `enterprise <os> repair` removes it at once |
-| Lifecycle lock wait | Linux and macOS: 5 s by default (`--lock-wait` up to 15 m), then exit `75`; package scripts and the config-apply trigger wait up to 10 minutes. Windows: about 30 s, then exit `1618` |
+| Lifecycle lock wait | Linux and macOS: 5 s by default (`--lock-wait` up to 15 m), then exit `75`; package scripts wait up to 8 minutes and the config-apply trigger up to 10. Windows: about 30 s, then exit `1618` |
 | Config apply after an in-place edit | Linux path unit: within about 10 s. macOS apply daemon: at most once every 30 s |
 | Daily verify | Linux timer: daily with up to one hour of random delay. macOS: 03:17 local time |
 | Windows per-user writes | Only while that user has an active session (R17). Signed-out users are handled at their next sign-in |
@@ -655,7 +655,7 @@ failure drills). The Windows result is for Setup `/ensure CONFIG=<file>`:
 | `enterprise.trust.mode: ""` | Accepted (empty means not set) | Accepted |
 | `guardrail.rule_pack_dir: /nonexistent` in a `config_version: 8` file (`ensure` migrates it) | Exit `1`, refused | Exit `1639` |
 | `guardrail.rule_pack: x` with `guardrail.custom_packs.x.path: /nonexistent` in a `config_version: 9` file | Exit `1`, refused; record the code | Refused; record the exit code |
-| No `config_version` | Refused; the error names the file passed with `--config` and says to add `config_version: 8` (it does not suggest `defenseclaw migrate`, which the enterprise package does not ship) | Refused (`1639`) |
+| No `config_version` | Refused; the error names the file passed with `--config` and says to add `config_version: 9` (it does not suggest `defenseclaw migrate`, which the enterprise package does not ship) | Refused (`1639`) |
 | No `guardrail.connectors` | Installs; `status` warns `no_connectors_enabled` when there are eligible users; `security_complete: false` | Installs; `security_complete: false` |
 
 ### Linux install
@@ -1173,6 +1173,7 @@ sudo $G enterprise secret remove --name ai-defense-api-key --json
 # CLI-09, Windows: the key file lives in an admin-only folder
 New-Item -ItemType Directory -Path C:\Admin -Force | Out-Null
 icacls C:\Admin /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+icacls C:\Admin /remove:g "*S-1-5-11" "*S-1-5-32-545" /T /C
 $key = Read-Host -AsSecureString -Prompt 'Disposable test API key'
 [IO.File]::WriteAllText('C:\Admin\ai-defense-api-key.txt', (ConvertFrom-SecureString -SecureString $key -AsPlainText))
 & $Cli enterprise secret set --name ai-defense-api-key --from-file C:\Admin\ai-defense-api-key.txt --json
@@ -1225,7 +1226,7 @@ old key after `status` shows the new digest.
 | `detect.sh` | `0` detected | `1` not detected | `2` | - | Formats `value` and `jamf` always exit `0` |
 | `detect.ps1` | `0` detected (one stdout line) | `1` (reason on stderr) | - | - | |
 | `Remediate-Detect.ps1` | `0` healthy or not installed | `1` | - | - | |
-| Linux package scripts | postinstall always `0` | preremove `1` only when the lock stays busy for 10 minutes | - | - | |
+| Linux package scripts | postinstall always `0` | preremove `1` when the lock stays busy for 8 minutes or hook-removal precheck refuses | - | - | |
 | macOS pkg postinstall | `0` | The lifecycle's code (fails `installer`) | - | - | preinstall `1` on a Secure Client host or a refused downgrade |
 
 ## Standard-account rows
@@ -1446,14 +1447,12 @@ prompt literal; accept no model prose as evidence of a tool result.
 | Hermes (`hermes`) | Per-user hook and guard | Same | Per-user hook, no guard | Tool block; confirm cannot ask and blocks |
 | OpenHands (`openhands`) | Per-user hook, no guard | Same | Unsupported | Tool and prompt block; confirm cannot ask and blocks |
 | OmniGent (`omnigent`) | Per-user policy bridge, no guard | Same | Unsupported | Tool and prompt block; native confirm |
-| Kiro (`kiro`) | Per-user global hook and CLI agent; ACP optional | Same | ACP route only | Tool block; v3 prompt veto unavailable (R22); confirm alerts |
+| Kiro (`kiro`) | Per-user global hook and CLI agent | Same | Same | Tool block; v3 prompt veto unavailable (R22); confirm alerts |
 
 `openclaw` and `zeptoclaw` require the separate guardrail proxy and are
 refused here. `windsurf` is a retired id migrated to Devin; `geminicli` is
 removed. Record their migration or refusal under CON-14 and CON-15.
-Windows must refuse guardian rows for OpenHands and OmniGent. Kiro ACP
-is a separate route and needs its own UI and [ACP guard](https://cisco-ai-defense.github.io/defenseclaw/docs/acp-guard)
-evidence if deployed.
+Windows must refuse guardian rows for OpenHands and OmniGent. ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
 
 ### Marker rule pack
 
@@ -1574,7 +1573,6 @@ For each row, install the verified version listed under [Agent CLIs and model ac
 | CON-10 | OpenHands (Linux/macOS): `cd ~/dc-test-proj && openhands`; quit from the TUI | C1 edit `~/.openhands/hooks.json` or own script; repaired. C2 `openhands --always-approve` or `--yolo` still inspects. C3 and C3b alternate `HOME` may have no hooks (R1). C4 `uvx --from openhands==1.11.0 openhands` is R15. C5 killed/stalled hook can run after the user's native confirmation (R18). C6 project `.openhands/hooks.json` replaces global hooks (R30); user extra hooks are not guarded (R24). Windows `N/A` |
 | CON-11 | OmniGent (Linux/macOS): start `omnigent server --config ~/.omnigent/config.yaml`; if the team has no documented interactive client command, mark tool-call cases `NOT_RUN` with that reason | C1 change the `policy_modules` entry or bridge, restart, then wait for repair. C2 `omnigent server` without its managed config can be R1. C3 and C3b `OMNIGENT_CONFIG`/`OMNIGENT_CONFIG_HOME` alternate root is R1. C4 0.14+ is unverified. C5 no hook process exists; simulate gateway unavailability and record the policy decision. C6 no foreign-policy guard (R24). Windows `N/A` |
 | CON-12 | Kiro (Linux/macOS): `cd ~/dc-test-proj && kiro-cli` for CLI 2.x; separately `kiro-cli --v3`; use the DefenseClaw agent (`/agent swap defenseclaw` if necessary) | C1 change own `~/.kiro/hooks/defenseclaw.json`, `~/.kiro/agents/defenseclaw.json`, default-agent setting or `kiro-hook.sh`; guardian repairs. C2 `/agent swap` to an own agent or `kiro-cli chat --agent <own-agent>` bypasses the CLI 2.x hook (R22). C3 and C3b alternate `KIRO_HOME` is R22. C4 below 2.24.1 not enrolled. C5 a non-2 hook failure may let the call run. C6 project `.kiro/hooks` merges with global hooks on v3; no foreign guard. The v3 prompt marker reaches the model with a DefenseClaw result attached (R22). Windows guardian `N/A`; test the separate ACP route if configured |
-| CON-12W | Windows Kiro ACP route; managed `acp:` profile `kiro-only` and a supported editor | Admin: `enterprise acp enroll --user std1 --client zed --agent kiro --profile kiro-only --json`; record `token_file` and `next`, never the token. Run `next` in std1's editor session; verify and run allowed and blocked calls; revoke, retry a copied bearer, and re-enroll. Expected: allow and block are audited, revoke immediately rejects the old bearer, re-enroll mints a new one, and enroll without `--profile` fails. |
 | CON-13 | Windows managed config copies with `openhands: {}` and `omnigent: {}` | Apply each unsupported connector separately with `ensure`, recording its exact `not supported on Windows managed_enterprise` refusal; after the two cycles `policy show` and targets contain neither of them. ACP is tested in CON-12W. |
 | CON-14 | Disposable config using retired `windsurf` ID | Apply with `ensure`; `policy show` and `hooks status` name Devin after migration and publish no `windsurf` target. Record the migration notice. |
 | CON-15 | Disposable config using removed `geminicli` ID | Run `ensure` and `policy show`; record the explicit unsupported-connector refusal and verify no target is published. |
@@ -1625,7 +1623,7 @@ and `audit export` row. Rule-pack edits in place need a gateway restart.
 | FM6 | Disposable new account | Run F1 and F2 | Timed enrollment/revocation as documented |
 | FM7 | Directory-backed account available | Sign in, run C0a/C0b, then interrupt directory lookup under admin control | Lookup outage defers changes; no false revocation. If no directory fixture, `N/A` |
 | FM8 | Windows directory fixture available | Run repository identity tests and a controlled profile-list simulation | SID/profile binding stays eligible and isolated; do not label a simulation a real directory sign-in |
-| FM9 | Distinct desktop, IDE or ACP route available | Open that UI and repeat C0a/C0b | Same visible side effect and attributed audit, or named residual / `NOT_RUN` |
+| FM9 | Distinct desktop or IDE route available | Open that UI and repeat C0a/C0b | Same visible side effect and attributed audit, or named residual / `NOT_RUN` |
 
 The expected block message names DefenseClaw, the rule id and title, and tells the agent not to retry in another form. `~/`, `$HOME/` and wildcard redirect targets block for custom and built-in rules on POSIX shells (#925); PowerShell and cmd commands are not reduced this way. A command after `&&` or `||`, a variable target such as `$OUT`, and command substitution have documented detection limits (#923); record the exact form and audit decision. Never classify a model's alternate command as the original marker call.
 
@@ -1712,7 +1710,7 @@ All changes in this section are administrator actions on disposable hosts. Use V
 | UPG-L-03 | Linux payload V1 | `sudo "$G" enterprise linux upgrade --payload <root-owned-v2-dir> --json` | V2; a package-owned install refuses this channel with `package_owned_binaries` |
 | UPG-M-01 | macOS pkg V1 | `sudo installer -pkg ./defenseclaw-enterprise-9.9.10-darwin-arm64.pkg -target /` | V2 and healthy launchd jobs; failed apply fails installer |
 | UPG-W-01 | Windows V1, V2 Setup staged | `& $SetupV2 /ensure JSON=1` | Action `ensure`, warning `ensure_upgrade`, event 112, marker V2. Guardian re-renders signed-in users' hooks before the new gateway starts; signed-out users at sign-in. Claude attestation becomes stale; repeat CLI-12 |
-| UPG-02a | Ubuntu package V2, V1 staged | `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<v1>-linux-<arch>.deb`; inspect `last-package-result.json`, then run V1 `ensure --from-package --allow-downgrade` | Package manager may install V1 but lifecycle records `downgrade_refused`; explicit allowance applies V1; verify afterward |
+| UPG-02a | Ubuntu package V2, V1 staged | `sudo apt install --allow-downgrades ./defenseclaw-enterprise-<v1>-linux-<arch>.deb`; then `sudo touch /var/lib/defenseclaw-enterprise/allow-downgrade` and repeat, then run V1 `ensure --from-package --allow-downgrade --config config.yaml.v8.bak` | The first install is refused by the apt hook before any file changes and the services keep running; with the marker V1 installs, the marker is used up, and the explicit allowance applies V1; verify afterward |
 | UPG-02b | RHEL package V2, V1 staged | Try `sudo rpm -U ./defenseclaw-enterprise-<v1>-linux-amd64.rpm`; then `sudo dnf downgrade` and V1 `ensure --from-package --allow-downgrade` | First downgrade refused; explicit channel applies V1 and verifies |
 | UPG-02c | macOS pkg V2, V1 staged | Try the V1 pkg; then create the one-use `/opt/cisco/defenseclaw/lifecycle/allow-downgrade` marker as described in the [lifecycle guide](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/lifecycle) and retry | Preinstall first refuses; marker permits one intentional downgrade; verify afterward |
 | UPG-02d | Windows V2, V1 Setup staged | Try `& $SetupV1 /ensure JSON=1`, then explicit `& $SetupV1 /upgrade JSON=1` | Ensure refuses downgrade; explicit upgrade applies the approved V1 rollback; verify afterward |
@@ -1849,7 +1847,7 @@ has found a regression.
   `authenticode|hash_pinned`). Live: macOS, Windows.
 - **REG-1-1-03** **[U] Missing `config_version`.** Run ensure with a config that has no `config_version`.
   Expect: the error names the file you passed with `--config` (not the installed path) and
-  says to add `config_version: 8`; it does not tell you to run `defenseclaw migrate` (not
+  says to add `config_version: 9`; it does not tell you to run `defenseclaw migrate` (not
   shipped in the enterprise package). Live: RHEL, macOS.
 - **REG-1-1-04** **[U] Layout-fixed keys default.** Omit `data_dir` and `guardrail.rule_pack`. Expect:
   `data_dir` defaults to the layout's data directory (`/var/lib/defenseclaw`,
@@ -1888,7 +1886,7 @@ has found a regression.
   follow-up run (`input_changed`), not overwritten by the older bytes or dropped; a config put
   back after a rejected edit supersedes the rejection. Code.
 - **REG-1-1-14** **[L] Package steps wait for the lock.** Remove or upgrade the package while an apply run
-  holds the lock. Expect: the package scripts wait (`--lock-wait 10m`); the removal fails on a
+  holds the lock. Expect: the package scripts wait (`--lock-wait 8m`); the removal fails on a
   busy lock instead of deleting files under a live deployment. Code.
 - **REG-1-1-15** **[U] Non-purge uninstall can be retried.** Make an uninstall hit one error, then retry and
   reinstall. Expect: the deployment record is kept until an uninstall fully succeeds, so the

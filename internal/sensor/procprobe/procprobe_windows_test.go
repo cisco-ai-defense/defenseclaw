@@ -12,7 +12,84 @@
 
 package procprobe
 
-import "testing"
+import (
+	"os"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/windows"
+)
+
+func TestWMIProcessOwnerForCurrentProcess(t *testing.T) {
+	pid := uint32(os.Getpid())
+	owner, ok := lookupWMIProcessOwners(map[uint32]int{pid: 0})[pid]
+	if !ok || owner.name == "" || owner.sid == "" {
+		t.Fatalf("Win32_Process.GetOwnerSid returned no owner for pid %d: %+v", pid, owner)
+	}
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &creation, &exit, &kernel, &user); err != nil {
+		t.Fatalf("GetProcessTimes: %v", err)
+	}
+	if delta := owner.created.Sub(time.Unix(0, creation.Nanoseconds())).Abs(); delta > wmiCreationTolerance {
+		t.Fatalf("WMI creation time %s is %s off the kernel creation time", owner.created, delta)
+	}
+}
+
+// GAP-1403: WMI is asked about a pid after the Toolhelp snapshot, so the
+// process it answers for can be a later one on the same pid. Its owner must
+// not be copied into the earlier row.
+func TestWMIOwnerIsAdoptedOnlyForTheSameProcessInstance(t *testing.T) {
+	started := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	rows := []Process{
+		{PID: 7708, Name: "uvx.exe", StartedAt: started},
+		{PID: 9152, Name: "python.exe", StartedAt: started},
+	}
+	missing := map[uint32]int{7708: 0, 9152: 1}
+	adoptWMIOwners(rows, missing, func(map[uint32]int) map[uint32]processOwner {
+		return map[uint32]processOwner{
+			7708: {name: `EXAMPLE\bob`, sid: "S-1-5-21-1-2-3-1002", created: started.Add(4 * time.Second)},
+			9152: {name: `EXAMPLE\alice`, sid: "S-1-5-21-1-2-3-1001", created: started},
+		}
+	})
+	if rows[0].UserSID != "" || rows[0].User != "" {
+		t.Fatalf("the owner of a later process on pid 7708 was copied into the snapshot row: %+v", rows[0])
+	}
+	if rows[1].UserSID != "S-1-5-21-1-2-3-1001" {
+		t.Fatalf("the owner of the same process instance was not adopted: %+v", rows[1])
+	}
+}
+
+// GAP-1250: the kernel's process list names each process's session without
+// a handle to it, and it agrees with ProcessIdToSessionId for this process.
+// GAP-1372: it also carries the creation time GetProcessTimes reports, which
+// the snapshot row keeps as the start half of the process's ProcKey.
+func TestProcessSessionsNamesTheSessionOfThisProcess(t *testing.T) {
+	pid := uint32(os.Getpid())
+	var want uint32
+	if err := windows.ProcessIdToSessionId(pid, &want); err != nil {
+		t.Skipf("ProcessIdToSessionId: %v", err)
+	}
+	fact, ok := processFacts()[pid]
+	if !ok || fact.session != want {
+		t.Fatalf("processFacts()[%d] = %+v (%v), want session %d", pid, fact, ok, want)
+	}
+	var creation, exit, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(windows.CurrentProcess(), &creation, &exit, &kernel, &user); err != nil {
+		t.Fatal(err)
+	}
+	if !fact.created.Equal(time.Unix(0, creation.Nanoseconds())) {
+		t.Fatalf("processFacts()[%d].created = %s, want %s", pid, fact.created, time.Unix(0, creation.Nanoseconds()))
+	}
+	rows, _, err := snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.PID == int(pid) && (row.SessionID != want || !row.StartedAt.Equal(fact.created)) {
+			t.Fatalf("snapshot row session = %d start = %s, want %d %s", row.SessionID, row.StartedAt, want, fact.created)
+		}
+	}
+}
 
 // TestUsableCmdlineBytesRejectsLengthsThatCannotBeIndexed pins the guard on a
 // value read out of another process's PEB.

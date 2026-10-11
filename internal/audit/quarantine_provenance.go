@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -58,6 +59,10 @@ type CreateQuarantineRecordInput struct {
 	OwnershipJSON  string
 	Connectors     []string
 }
+
+// ErrQuarantinePathTaken is CreateQuarantineRecord refusing a quarantine path
+// that a different asset (another source path or content) already holds.
+var ErrQuarantinePathTaken = errors.New("audit: quarantine path already belongs to a different asset")
 
 // CreateQuarantineRecord atomically records physical identity and connector
 // ownership. Re-registering the same quarantine path is idempotent, but it
@@ -108,9 +113,7 @@ func (s *Store) CreateQuarantineRecord(
 		}
 	} else {
 		if !sameQuarantineIdentity(record, normalized) {
-			return QuarantineRecord{}, fmt.Errorf(
-				"audit: quarantine path already belongs to a different asset",
-			)
+			return QuarantineRecord{}, ErrQuarantinePathTaken
 		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE quarantine_records
@@ -229,6 +232,20 @@ func (s *Store) GetQuarantineRecord(
 func (s *Store) ListQuarantineRecordsForConnector(
 	ctx context.Context, targetType, targetName, connector string,
 ) ([]QuarantineRecord, error) {
+	return s.listQuarantineRecordsForConnector(ctx, targetType, targetName, connector, true)
+}
+
+// ListQuarantineRecordsForConnectorExact preserves a Windows trailing-space
+// asset identity after the watcher has bound it to an exact source path.
+func (s *Store) ListQuarantineRecordsForConnectorExact(
+	ctx context.Context, targetType, targetName, connector string,
+) ([]QuarantineRecord, error) {
+	return s.listQuarantineRecordsForConnector(ctx, targetType, targetName, connector, false)
+}
+
+func (s *Store) listQuarantineRecordsForConnector(
+	ctx context.Context, targetType, targetName, connector string, trimName bool,
+) ([]QuarantineRecord, error) {
 	if s == nil || s.db == nil {
 		return nil, fmt.Errorf("audit: quarantine provenance store is unavailable")
 	}
@@ -236,9 +253,11 @@ func (s *Store) ListQuarantineRecordsForConnector(
 		return nil, fmt.Errorf("audit: quarantine provenance context is required")
 	}
 	targetType = strings.TrimSpace(targetType)
-	targetName = strings.TrimSpace(targetName)
+	if trimName {
+		targetName = strings.TrimSpace(targetName)
+	}
 	connector = strings.TrimSpace(connector)
-	if targetType == "" || targetName == "" {
+	if targetType == "" || strings.TrimSpace(targetName) == "" {
 		return nil, fmt.Errorf("audit: quarantine target identity is incomplete")
 	}
 	rows, err := s.db.QueryContext(ctx, `
@@ -477,7 +496,9 @@ func normalizeCreateQuarantineRecord(
 	input CreateQuarantineRecordInput,
 ) (CreateQuarantineRecordInput, error) {
 	input.TargetType = strings.TrimSpace(input.TargetType)
-	input.TargetName = strings.TrimSpace(input.TargetName)
+	if !extendedTrailingSpacePath(input.OriginalPath) {
+		input.TargetName = strings.TrimSpace(input.TargetName)
+	}
 	input.ContentHash = strings.ToLower(strings.TrimSpace(input.ContentHash))
 	input.Reason = strings.TrimSpace(input.Reason)
 	input.State = strings.TrimSpace(input.State)
@@ -546,12 +567,21 @@ func normalizeQuarantineConnectors(connectors []string) ([]string, error) {
 	return normalized, nil
 }
 
+func extendedTrailingSpacePath(path string) bool {
+	return runtime.GOOS == "windows" && strings.HasPrefix(path, `\\?\`) && strings.HasSuffix(path, " ")
+}
+
 func normalizeAbsolutePath(label, path string) (string, error) {
-	path = strings.TrimSpace(path)
+	if !extendedTrailingSpacePath(path) {
+		path = strings.TrimSpace(path)
+	}
 	if path == "" || !filepath.IsAbs(path) {
 		return "", fmt.Errorf("audit: quarantine %s path must be absolute", label)
 	}
-	cleaned := filepath.Clean(path)
+	cleaned := path
+	if !extendedTrailingSpacePath(path) {
+		cleaned = filepath.Clean(path)
+	}
 	if len(cleaned) > 4096 {
 		return "", fmt.Errorf("audit: quarantine %s path exceeds 4096 bytes", label)
 	}
@@ -577,8 +607,12 @@ func sameQuarantineIdentity(
 }
 
 func samePath(left, right string) bool {
-	left = filepath.Clean(left)
-	right = filepath.Clean(right)
+	if !extendedTrailingSpacePath(left) {
+		left = filepath.Clean(left)
+	}
+	if !extendedTrailingSpacePath(right) {
+		right = filepath.Clean(right)
+	}
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(left, right)
 	}

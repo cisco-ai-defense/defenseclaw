@@ -13,7 +13,9 @@
 package managed
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -104,6 +106,69 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 // not trusted" error instead of silently allowing any owner.
 func ValidateTrustedServiceRuntimeDir(path, label, _ string) error {
 	return ValidateTrustedRuntimeDir(path, label)
+}
+
+// serviceRuntimeTreeMaxEntries bounds the walk of a managed policy tree.
+const serviceRuntimeTreeMaxEntries = 20000
+
+var errServiceRuntimeTreeTooLarge = errors.New("too many entries")
+
+// ValidateTrustedServiceRuntimeTree is ValidateTrustedServiceRuntimeDir for
+// a folder whose contents are policy as well (policy_dir and its Rego
+// modules), and then every folder and file below it, without following
+// links: no symlink, not writable by group or others, no ACL entry that
+// grants write, and owned by root or the service account. The folder check
+// alone passed a trusted policy_dir whose rego folder or a module in it a
+// standard user could write, and the gateway loaded the edits of that user
+// as enforcement policy for every user (GAP-1499).
+func ValidateTrustedServiceRuntimeTree(path, label, serviceAccount string) error {
+	if err := ValidateTrustedServiceRuntimeDir(path, label, serviceAccount); err != nil {
+		return err
+	}
+	root, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	return validateServiceRuntimeTreeEntries(root, label)
+}
+
+// validateServiceRuntimeTreeEntries checks every folder and file below root
+// (root itself excluded: the caller checks it with its parents).
+func validateServiceRuntimeTreeEntries(root, label string) error {
+	entries := 0
+	err := filepath.WalkDir(root, func(cur string, _ fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if cur == root {
+			return nil
+		}
+		if entries++; entries > serviceRuntimeTreeMaxEntries {
+			return errServiceRuntimeTreeTooLarge
+		}
+		info, err := os.Lstat(cur)
+		if err != nil {
+			return fmt.Errorf("%s: %w", cur, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s: symlinks are not allowed in %s", cur, label)
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("%s: group/other writable permissions %04o are not trusted", cur, info.Mode().Perm())
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("%s: cannot inspect file owner", cur)
+		}
+		if !trustedRuntimeOwner(st.Uid) {
+			return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", cur, st.Uid, label)
+		}
+		return validateTrustedPathACL(cur)
+	})
+	if errors.Is(err, errServiceRuntimeTreeTooLarge) {
+		return fmt.Errorf("%s has more than %d entries", root, serviceRuntimeTreeMaxEntries)
+	}
+	return err
 }
 
 // ValidateTrustedServiceRuntimeFilePath validates a service-owned runtime

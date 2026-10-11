@@ -22,8 +22,9 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+import codecs
 import copy
-import json
+import locale
 import logging
 import ntpath
 import os
@@ -32,6 +33,7 @@ import re
 import stat
 import subprocess
 import sys
+import urllib.parse
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -76,6 +78,64 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_valid,
     read_regular_file_no_follow,
 )
+
+# libyaml parses a 150 KB policy config in tens of milliseconds where the
+# pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
+# than once (100 profiles and 2,000 assignments made each command take 7 to
+# 10 s). PyYAML builds without libyaml fall back to the pure-Python loader.
+YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+_YAML_BOOL_TAG = "tag:yaml.org,2002:bool"
+
+
+class _GatewayBooleanLoader(YAML_LOADER):  # type: ignore[misc, valid-type]
+    """YAML_LOADER that reads only true/false as booleans, as the gateway does."""
+
+
+_GatewayBooleanLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != _YAML_BOOL_TAG]
+    for first, resolvers in YAML_LOADER.yaml_implicit_resolvers.items()
+}
+_GatewayBooleanLoader.add_implicit_resolver(
+    _YAML_BOOL_TAG, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF")
+)
+
+
+def read_config_text(path: str | os.PathLike[str]) -> str:
+    """Read config.yaml as text: UTF-8, a leading byte order mark dropped.
+
+    Windows editors (Notepad "UTF-8 with BOM", PowerShell 5 Set-Content
+    -Encoding UTF8) start the file with a BOM. Read with the locale
+    encoding (cp1252 on Windows) it became a ``\u00ef\u00bb\u00bf`` prefix on
+    the first key, so that key went missing and a save wrote the bogus key
+    back, which the validator refused (GAP-0386). The gateway reads the
+    file as UTF-8 and skips the mark; a file that is not UTF-8 is decoded
+    with the locale encoding, as before.
+    """
+    with open(path, "rb") as handle:
+        data = handle.read()
+    data = data.removeprefix(codecs.BOM_UTF8)
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode(locale.getpreferredencoding(False))
+
+
+def parse_config_yaml(text: str) -> Any:
+    """Parse config.yaml text the way the gateway reads it.
+
+    The gateway (yaml.v3, YAML 1.2 core schema) and the v8 source validator
+    read only true/false as booleans. PyYAML follows YAML 1.1, where yes, no,
+    on and off are booleans too, so a hand-written ``ide_inventory: off`` came
+    back as False: the CLI read it as ``all`` and a save wrote back a boolean
+    the v8 schema rejects. A pre-v8 document keeps the YAML 1.1 reading, the
+    one the v7 upgrade converter uses; v8 and v9 read the gateway's way.
+    """
+    raw = yaml.load(text, Loader=_GatewayBooleanLoader)
+    if not isinstance(raw, dict) or _exact_config_version(raw.get("config_version")) >= FIRST_CURRENT_CONFIG_VERSION:
+        return raw
+    return yaml.load(text, Loader=YAML_LOADER)
+
 
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
@@ -126,6 +186,46 @@ VALID_DEPLOYMENT_MODES = {
 class ConfigVersionError(RuntimeError):
     """A bounded schema preflight could not establish a usable config version."""
 
+    #: Process exit code when this error stops a command.
+    exit_code = 1
+
+
+class ManagedNotInitializedError(ConfigVersionError):
+    """No per-user config on a managed device: the administrator's config rules."""
+
+    exit_code = 3  # as a refused write on a managed device
+
+
+def not_initialized_error() -> ConfigVersionError:
+    """The error for a missing config.yaml. On a managed standalone device
+    nothing is initialized per user, so it says the device is managed instead
+    of sending the user to ``defenseclaw init``."""
+    from defenseclaw.config_writer import MANAGED_NOT_INITIALIZED, machine_managed_standalone
+
+    if machine_managed_standalone():
+        return ManagedNotInitializedError(MANAGED_NOT_INITIALIZED)
+    return ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
+
+
+def first_run_hint() -> str:
+    """What to tell an account that has no config.yaml: run init, except on a
+    managed standalone device, where the admin config rules and there is no
+    per-user setup."""
+    from defenseclaw.config_writer import machine_managed_standalone
+
+    if machine_managed_standalone():
+        return "this device is managed, so DefenseClaw is configured in the admin config, not per user"
+    return "run 'defenseclaw init' or 'defenseclaw quickstart'"
+
+
+class ConfigSaveError(OSError):
+    """An atomic config.yaml save failed before replacing the prior file."""
+
+    def __init__(self, path: str, cause: OSError) -> None:
+        super().__init__(cause.errno, cause.strerror or str(cause), path)
+        self.path = path
+
+
 
 # The ``config_version`` this build reads and writes. Raise it only together
 # with a ``defenseclaw.migrations.CONFIG_MIGRATIONS`` step and the Go
@@ -135,11 +235,6 @@ CURRENT_CONFIG_VERSION = 9
 #: loads (the gateway migrates it in memory) until ``defenseclaw migrate``
 #: rewrites it as 9.
 FIRST_CURRENT_CONFIG_VERSION = 8
-#: The config_version a brand-new config.yaml is written with. It stays 8
-#: until the setup commands write the v9 keys (rule_pack, admission,
-#: scanner analyzers) themselves; ``defenseclaw migrate`` then moves the
-#: file to 9, and the gateway reads either.
-FRESH_CONFIG_VERSION = 8
 
 
 def is_current_schema(version: Any) -> bool:
@@ -164,7 +259,7 @@ def source_config_version(*, path: str | None = None) -> int | None:
     cfg_file = path or str(config_path())
     try:
         with open(cfg_file, encoding="utf-8") as stream:
-            root = yaml.compose(stream)
+            root = yaml.compose(stream, Loader=YAML_LOADER)
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -182,6 +277,29 @@ def source_config_version(*, path: str | None = None) -> int | None:
     return _exact_config_version(node.value)
 
 
+def _foreign_owner_fix(cfg_file: str) -> tuple[str, str] | None:
+    """(detail, fix) for a config.yaml another account owns, else None."""
+
+    try:
+        owner_uid = os.stat(cfg_file).st_uid
+        current_uid = os.geteuid()  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return None
+    if owner_uid == current_uid:
+        return None
+    try:
+        import pwd
+
+        owner = pwd.getpwuid(owner_uid).pw_name
+        user = pwd.getpwuid(current_uid).pw_name
+    except (ImportError, KeyError):
+        owner, user = str(owner_uid), str(current_uid)
+    return (
+        f"it is owned by {owner}, not by this account (as after a sudo defenseclaw run)",
+        f"Give it back to this account: sudo chown {user} {cfg_file}",
+    )
+
+
 def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
     """Name the file, the problem and its position, and the next step."""
 
@@ -197,7 +315,10 @@ def _unreadable_config_message(cfg_file: str, exc: BaseException) -> str:
         detail = "the file is not valid UTF-8 text"
     else:
         detail = getattr(exc, "strerror", None) or type(exc).__name__
-    if not isinstance(exc, yaml.YAMLError):
+    if isinstance(exc, PermissionError) and (owned := _foreign_owner_fix(cfg_file)):
+        # A stray sudo defenseclaw run leaves it root-owned (GAP-0398).
+        detail, fix = owned
+    elif not isinstance(exc, yaml.YAMLError):
         fix = "Fix the file"
     return (
         f"Cannot read the DefenseClaw configuration {cfg_file}: {detail}. "
@@ -237,6 +358,16 @@ def empty_config_message(path: str | None = None) -> str:
         f"{_previous_config_hint(home)}, "
         "or remove the empty file and run 'defenseclaw init'."
     )
+
+
+def config_damage_message(path: str | None = None) -> str:
+    """The repair text for an empty config.yaml, or "" for any other file."""
+
+    if config_is_empty(path):
+        return empty_config_message(path)
+    # source_config_version handles malformed YAML. A valid legacy config
+    # need not end with a newline, even if DefenseClaw's writer adds one.
+    return ""
 
 
 def _newest_config_backup(home: str) -> tuple[str, float] | None:
@@ -303,6 +434,13 @@ def _previous_config_hint(home: str) -> str:
     )
 
 
+def newer_config_message(version: int) -> str:
+    return (
+        f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
+        "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
+    )
+
+
 def require_current_config(*, path: str | None = None, allow_missing: bool = False) -> None:
     """Fail before full config loading unless the source is the current schema."""
 
@@ -310,16 +448,16 @@ def require_current_config(*, path: str | None = None, allow_missing: bool = Fal
     if version is None and allow_missing:
         return
     if version is None:
-        raise ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
+        raise not_initialized_error()
     if version > CURRENT_CONFIG_VERSION:
-        raise ConfigVersionError(
-            f"Configuration was written by a newer DefenseClaw (config_version {version}) — "
-            "run 'defenseclaw upgrade', or 'defenseclaw rollback' to restore the previous install."
-        )
+        raise ConfigVersionError(newer_config_message(version))
     if not is_current_schema(version):
-        if version == 0 and config_is_empty(path):
-            raise ConfigVersionError(empty_config_message(path))
-        raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
+        if version == 0 and (damage := config_damage_message(path)):
+            raise ConfigVersionError(damage)
+        raise ConfigVersionError(
+            "This configuration was written by an older DefenseClaw"
+            " — run 'defenseclaw migrate' first."
+        )
 
 
 require_v8_config = require_current_config
@@ -424,6 +562,18 @@ def _expand(p: str) -> str:
     return p
 
 
+def _expand_home_policy_dir(doc: dict[str, Any]) -> str:
+    """Write a ``~/`` policy_dir as the folder it names; returns the new value
+    ("" when unchanged). The gateway reads policy_dir as written, so
+    ``~/team-policies`` named no folder and it refused every policy reload
+    with "read rego directory" (GAP-1033)."""
+    raw = doc.get("policy_dir")
+    if not isinstance(raw, str) or not raw.strip().startswith("~/"):
+        return ""
+    doc["policy_dir"] = _expand(raw.strip())
+    return doc["policy_dir"]
+
+
 # ---------------------------------------------------------------------------
 # Environment detection (mirrors config.DetectEnvironment)
 # ---------------------------------------------------------------------------
@@ -491,6 +641,47 @@ def _is_managed_enterprise_mode(value: str | None) -> bool:
         return _validate_deployment_mode(str(value or "")) == "managed_enterprise"
     except ValueError:
         return False
+
+
+_DEPLOYMENT_PIN_ENVS = (DEPLOYMENT_MODE_ENV, "DEFENSECLAW_ENTERPRISE_PROFILE")
+_DECLARES_MANAGED = re.compile(r"""(?m)^deployment_mode:\s*["']?managed_enterprise""")
+_ignored_deployment_pins: list[str] = []
+
+
+def ignore_unmanaged_deployment_pins() -> list[str]:
+    """Drop the machine-wide deployment pins from this process's environment
+    when it loads a per-user config.
+
+    A managed service always loads a machine-owned config, never one under a
+    user's home, so a pin seen here is a stray export. Left in place it made
+    ``config set`` refuse as a managed device (or, with an invalid mode such as
+    ``oss``, broke validate and doctor); a per-user config that itself declares
+    managed_enterprise keeps its pins. Mirrors Go ``managed.IgnoreUnmanagedPins``.
+    Returns the names dropped, never the values (GAP-0091).
+    """
+    names = [name for name in _DEPLOYMENT_PIN_ENVS if os.environ.get(name, "").strip()]
+    if not names:
+        return []
+    try:
+        path = config_path().resolve()
+        path.relative_to(_home().resolve())
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            declares_managed = bool(_DECLARES_MANAGED.search(handle.read(1 << 20)))
+    except FileNotFoundError:
+        declares_managed = False
+    except (OSError, RuntimeError, ValueError):  # no home, or a config outside it
+        return []
+    if declares_managed:
+        return []
+    for name in names:
+        os.environ.pop(name, None)
+    _ignored_deployment_pins.extend(name for name in names if name not in _ignored_deployment_pins)
+    return names
+
+
+def ignored_deployment_pins() -> list[str]:
+    """Names of the deployment pins this process dropped at startup."""
+    return list(_ignored_deployment_pins)
 
 
 def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None) -> None:
@@ -771,6 +962,12 @@ _RECOGNIZED_LLM_PROVIDERS = frozenset(
 
 _LOCAL_LLM_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio", "local"})
 
+# Providers that speak the OpenAI chat-completions route (<base>/v1/chat/completions).
+# Keep in step with openAIStyleLLMProviders in internal/config/config.go.
+_OPENAI_STYLE_LLM_PROVIDERS = frozenset(
+    {"openai", "openai-compatible", "custom-openai", "vllm", "lm_studio", "lmstudio", "local"}
+)
+
 _warned_llm_prefixes: set[tuple[str, str]] = set()
 
 
@@ -977,6 +1174,24 @@ class LLMConfig:
             return ""
         mode = (self.bedrock.auth_mode or "").strip().lower() or "api_key"
         return "" if mode == "api_key" else mode
+
+    def request_base_url(self) -> str:
+        """``base_url`` as LiteLLM and the Python scanners must send it.
+
+        The gateway's judge appends ``/v1/chat/completions`` to the host,
+        while LiteLLM appends only ``/chat/completions`` to what it is given,
+        so a bare host (``http://127.0.0.1:8000``) reached the two on
+        different paths. For an OpenAI-style provider a base URL with no path
+        gets ``/v1``; a URL with a path is used as written (GAP-0156). Mirrors
+        ``LLMConfig.RequestBaseURL`` in internal/config/config.go.
+        """
+        url = (self.base_url or "").strip()
+        if not url or self.provider_prefix() not in _OPENAI_STYLE_LLM_PROVIDERS:
+            return self.base_url
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme and parts.netloc and parts.path in ("", "/") and not parts.query and not parts.fragment:
+            return url.rstrip("/") + "/v1"
+        return self.base_url
 
     def is_local_provider(self) -> bool:
         """Return True when the resolved provider runs on-box and
@@ -1207,13 +1422,6 @@ class SkillScannerAnalyzers:
 @dataclass
 class SkillScannerTimeouts:
     scan_s: int = 0
-    llm_s: int = 0
-
-
-@dataclass
-class MCPScannerAPIConfig:
-    endpoint: str = ""
-    api_key_env: str = ""
 
 
 @dataclass
@@ -1223,23 +1431,13 @@ class MCPScannerYARAConfig:
 
 
 @dataclass
-class MCPScannerTimeouts:
-    stdio_s: int = 0
-    remote_s: int = 0
-    llm_s: int = 0
-
-
-@dataclass
 class SkillScannerConfig:
-    binary: str = "skill-scanner"
     # The recommended default: the quiet policy with the LLM judge (it runs
     # when the top-level llm: block resolves a model; see scanner/settings.py).
     use_llm: bool = True
     use_behavioral: bool = False
     enable_meta: bool = False
     use_trigger: bool = False
-    use_virustotal: bool = False
-    use_aidefense: bool = False
     llm_consensus_runs: int = 0
     policy: str = "quiet"
     lenient: bool = True
@@ -1247,11 +1445,11 @@ class SkillScannerConfig:
     # Unset fields inherit from ``Config.llm`` via
     # ``Config.resolve_llm("scanners.skill")``.
     llm: LLMConfig = field(default_factory=LLMConfig)
+    # config_version 9 scanner model (empty = unset; see the schema). The v8
+    # keys binary, use_virustotal, use_aidefense and virustotal_api_key_env
+    # are folded into ``analyzers`` for a version 8 source. Keep the literal
+    # v8 key for Secure Client scanning; version 9 never writes it.
     virustotal_api_key: str = ""
-    virustotal_api_key_env: str = ""
-    # config_version 9 scanner model (empty = unset; see the schema).
-    # binary, use_virustotal, use_aidefense and virustotal_api_key[_env] are
-    # v8 migration input.
     policy_file: AssetFileRef = field(default_factory=AssetFileRef)
     judge_source: str = ""
     fail_on_severity: str = ""
@@ -1260,21 +1458,17 @@ class SkillScannerConfig:
     timeouts: SkillScannerTimeouts = field(default_factory=SkillScannerTimeouts)
 
     def resolved_virustotal_api_key(self) -> str:
-        """Return VirusTotal key from env var (if set) or direct value.
-
-        An empty ``virustotal_api_key_env`` falls back to
-        ``VIRUSTOTAL_API_KEY``, the gateway's default and the name
-        ``defenseclaw keys set`` stores (GAP-1936).
-        """
-        val = os.environ.get(self.virustotal_api_key_env or "VIRUSTOTAL_API_KEY", "")
-        if val:
-            return val
-        return self.virustotal_api_key
+        """Return the VirusTotal key from the variable ``analyzers.virustotal.api_key_env``
+        names; an empty name falls back to ``VIRUSTOTAL_API_KEY``, the gateway's default
+        and the name ``defenseclaw keys set`` stores (GAP-1936)."""
+        return (
+            os.environ.get(self.analyzers.virustotal.api_key_env or "VIRUSTOTAL_API_KEY", "")
+            or self.virustotal_api_key
+        )
 
 
 @dataclass
 class MCPScannerConfig:
-    binary: str = "mcp-scanner"
     analyzers: str = "auto"
     scan_prompts: bool = False
     scan_resources: bool = False
@@ -1284,9 +1478,7 @@ class MCPScannerConfig:
     # config_version 9 keys (empty = unset). ``analyzers`` stays the v8
     # comma-separated string here; a v9 list loads joined with commas.
     judge_source: str = ""
-    api: MCPScannerAPIConfig = field(default_factory=MCPScannerAPIConfig)
     yara: MCPScannerYARAConfig = field(default_factory=MCPScannerYARAConfig)
-    timeouts: MCPScannerTimeouts = field(default_factory=MCPScannerTimeouts)
 
 
 @dataclass
@@ -1509,171 +1701,6 @@ class WatchConfig:
     auto_block: bool = True
     rescan_enabled: bool = True
     rescan_interval_min: int = 60
-
-
-@dataclass
-class SplunkConfig:
-    """Upgrade/credential-preview DTO for removed pre-v8 Splunk config.
-
-    Target commands must inspect canonical v8 destination status instead of
-    reading this projection. ``Config.save`` never writes it to an exact-v8
-    document.
-    """
-
-    hec_endpoint: str = "https://localhost:8088/services/collector/event"
-    hec_token: str = ""
-    hec_token_env: str = ""
-    index: str = "defenseclaw"
-    source: str = "defenseclaw"
-    sourcetype: str = "_json"
-    # (and parity with Go ): TLS verification is now ON by
-    # default. ``verify_tls`` is the LEGACY opt-in-to-security flag and
-    # is honoured when explicitly true (no-op against the new secure
-    # default); explicit false is silently IGNORED. Operators that
-    # genuinely need to bypass certificate validation (dev environments
-    # with self-signed HEC) must set ``insecure_skip_verify=True``.
-    verify_tls: bool = True
-    insecure_skip_verify: bool = False
-    enabled: bool = False
-    batch_size: int = 50
-    flush_interval_s: int = 5
-
-    def tls_verify_enabled(self) -> bool:
-        """Resolve effective TLS verification posture.
-
-        returns False only when ``insecure_skip_verify`` is
-        explicitly true. ``verify_tls=False`` no longer downgrades the
-        sink — operators must move the explicit opt-out to the new
-        ``insecure_skip_verify`` flag. Any other combination yields a
-        secure default of True so omitting the field never silently
-        leaks the HEC token to a MITM peer.
-
-        The flag is run through :func:`_coerce_bool` so a quoted
-        ``"false"`` persisted in ``config.yaml`` (a truthy non-empty
-        string under bare ``bool()``) cannot silently disable TLS
-        verification.
-        """
-        return not _coerce_bool(self.insecure_skip_verify)
-
-    def resolved_hec_token(self) -> str:
-        """Return HEC token from env var (if set) or direct value."""
-        if self.hec_token_env:
-            val = os.environ.get(self.hec_token_env, "")
-            if val:
-                return val
-        return self.hec_token
-
-
-@dataclass
-class OTelTLSConfig:
-    insecure: bool = False
-    ca_cert: str = ""
-
-
-@dataclass
-class OTelTracesConfig:
-    enabled: bool = True
-    sampler: str = "always_on"
-    sampler_arg: str = "1.0"
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelLogsConfig:
-    enabled: bool = True
-    emit_individual_findings: bool = False
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelMetricsConfig:
-    enabled: bool = True
-    export_interval_s: int = 60
-    temporality: str = "delta"
-    endpoint: str = ""
-    protocol: str = ""
-    url_path: str = ""
-
-
-@dataclass
-class OTelBatchConfig:
-    max_export_batch_size: int = 512
-    scheduled_delay_ms: int = 5000
-    max_queue_size: int = 2048
-
-
-@dataclass
-class OTelResourceConfig:
-    attributes: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class OTelSpanFilterOperationConfig:
-    name: str = ""
-    require_attributes: list[str] = field(default_factory=list)
-
-
-@dataclass
-class OTelSpanFilterConfig:
-    require_operation: str = ""
-    require_attributes: list[str] = field(default_factory=list)
-    operations: list[OTelSpanFilterOperationConfig] = field(default_factory=list)
-
-
-@dataclass
-class OTelDestinationConfig:
-    """Upgrade/credential-preview shape for a pre-v8 OTLP destination.
-
-    This is not the canonical v8 destination model. Target commands read the
-    validated observability graph through ``v8_status``/``v8_config``.
-    """
-
-    name: str = ""
-    preset: str = ""
-    enabled: bool = True
-    protocol: str = "grpc"
-    endpoint: str = ""
-    headers: dict[str, str] = field(default_factory=dict)
-    tls: OTelTLSConfig = field(default_factory=OTelTLSConfig)
-    traces: OTelTracesConfig = field(default_factory=OTelTracesConfig)
-    logs: OTelLogsConfig = field(default_factory=OTelLogsConfig)
-    metrics: OTelMetricsConfig = field(default_factory=OTelMetricsConfig)
-    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
-    span_filter: OTelSpanFilterConfig = field(default_factory=OTelSpanFilterConfig)
-
-
-@dataclass
-class OTelTracePolicyConfig:
-    sampler: str = "always_on"
-    sampler_arg: str = "1.0"
-
-
-@dataclass
-class OTelLogPolicyConfig:
-    emit_individual_findings: bool = False
-
-
-@dataclass
-class OTelMetricPolicyConfig:
-    export_interval_s: int = 60
-    temporality: str = "delta"
-
-
-@dataclass
-class OTelConfig:
-    """Upgrade/credential-preview DTO for the removed top-level ``otel`` block."""
-
-    enabled: bool = False
-    traces: OTelTracePolicyConfig = field(default_factory=OTelTracePolicyConfig)
-    logs: OTelLogPolicyConfig = field(default_factory=OTelLogPolicyConfig)
-    metrics: OTelMetricPolicyConfig = field(default_factory=OTelMetricPolicyConfig)
-    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
-    resource: OTelResourceConfig = field(default_factory=OTelResourceConfig)
-    destinations: list[OTelDestinationConfig] = field(default_factory=list)
 
 
 @dataclass
@@ -2059,16 +2086,6 @@ class RegistrySource:
                                 the literal token. Empty disables auth.
     * ``enabled``             — when False the source is preserved in
                                 config but skipped by ``sync --all``.
-    * ``auto_sync``           — RESERVED. Scheduled sync is not yet
-                                implemented; setting this to True today
-                                does NOT cause periodic ingest.
-                                Persisted so a v1 -> v2 operator config
-                                doesn't lose the bit. Run
-                                ``defenseclaw registry sync --all`` (or
-                                schedule it via cron) until the v2
-                                scheduler ships.
-    * ``sync_interval_hours`` — RESERVED. Paired with ``auto_sync``;
-                                ignored at runtime today.
     * ``last_sync``           — ISO-8601 UTC timestamp; populated by
                                 the sync command on success.
     * ``last_status``         — ``ok`` or ``error: <reason>``.
@@ -2080,8 +2097,6 @@ class RegistrySource:
     content: str = "skill"
     auth_env: str = ""
     enabled: bool = True
-    auto_sync: bool = False
-    sync_interval_hours: int = 24
     last_sync: str = ""
     last_status: str = ""
 
@@ -2288,7 +2303,6 @@ class PerConnectorGuardrailConfig:
     hilt: HILTConfig | None = None
     hook_fail_mode: str = ""
     block_message: str = ""
-    rule_pack_dir: str = ""  # v8 key; config_version 9 uses rule_pack
     rule_pack: str = ""
     rules: GuardrailRulesConfig | None = None
     # Per-connector on/off switch toggled by
@@ -2351,7 +2365,6 @@ class GuardrailProfile:
     block_at: str = ""
     alert_at: str = ""
     hilt: HILTConfig | None = None
-    rule_pack_dir: str = ""  # v8 key; config_version 9 uses rule_pack
     rule_pack: str = ""
     rules: GuardrailRulesConfig | None = None
     block_message: str = ""
@@ -2399,7 +2412,6 @@ class GuardrailConfig:
     # (the YAML parser below uses .get(key, <default>) so the presence
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
-    rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory (v8 key)
     # config_version 9: built-in pack name or a custom_packs key, the custom
     # packs pinned by digest, and the in-memory rule customisation.
     rule_pack: str = ""
@@ -2533,11 +2545,14 @@ class GuardrailConfig:
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Explicit connector posture > observe compatibility > global.
 
-        Existing observe-only installs remain fail-open when they only carry
-        the legacy global value. A connector-scoped value is an explicit
-        runtime response-integrity choice, however, and must not be collapsed
-        back to open merely because policy findings are being observed.
+        Cursor always follows its guardrail mode: action is closed and
+        observe is open. Other connector-scoped values remain explicit
+        runtime response-integrity choices in observe mode.
         """
+        # Cursor's native hook registration follows policy mode. A stored
+        # fail mode from an older setup cannot override that contract.
+        if str(connector).strip().lower() == "cursor":
+            return "closed" if self.effective_mode(connector).strip().lower() == "action" else "open"
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             if pc.hook_fail_mode.strip().lower() == "closed":
@@ -2566,10 +2581,9 @@ class GuardrailConfig:
     def effective_rule_pack_dir(self, connector: str = "") -> str:
         """Directory of the rule pack a connector enforces, "" for the built-in default.
 
-        A connector scope that selects a pack wins over the global one. At each
-        scope ``rule_pack`` (a preset under ``policy_dir`` or a
-        ``guardrail.custom_packs`` key) wins over the v8 ``rule_pack_dir``, as
-        in the gateway; the resolution is ``policy_catalog.configured_pack_dir``.
+        A connector scope that selects a pack wins over the global one. A scope
+        selects its ``rule_pack``: a preset under ``policy_dir`` or a
+        ``guardrail.custom_packs`` key (``policy_catalog.configured_pack_dir``).
         """
         from types import SimpleNamespace
 
@@ -2882,16 +2896,6 @@ class RoutingConfig:
 
 
 @dataclass
-class PrivacyConfig:
-    """Reserved, empty ``privacy:`` section. Mirrors internal/config.PrivacyConfig.
-
-    Redaction is configured by ``observability.redaction_profiles``; the v7
-    ``disable_redaction`` switch is rejected by the v8 loader and read only by
-    the 0.x migration.
-    """
-
-
-@dataclass
 class AIRuntimeConfig:
     """AI Discovery runtime planes -- what actually ran.
 
@@ -2982,6 +2986,8 @@ class AIDiscoveryConfig:
     process_interval_s: int = 60
     scan_roots: list[str] = field(default_factory=lambda: ["~"])
     signature_packs: list[str] = field(default_factory=list)
+    # sha256 pin of each signature pack by path; a pack that does not match is not loaded.
+    signature_pack_digests: dict[str, str] = field(default_factory=dict)
     allow_workspace_signatures: bool = False
     disabled_signature_ids: list[str] = field(default_factory=list)
     include_shell_history: bool = True
@@ -2996,6 +3002,9 @@ class AIDiscoveryConfig:
     # session's Kerberos principal identify a person. When on they ride every
     # identity-carrying record, not only inventory. Mirrors IncludeUserPrincipal.
     include_user_principal: bool = False
+    # Child domains of the joined AD realm whose SSSD accounts are verified;
+    # empty trusts the joined domain only. Mirrors TrustedADChildDomains.
+    trusted_ad_child_domains: list[str] = field(default_factory=list)
     # IDE plugin inventory scope: all | ai_only | off. Mirrors IDEInventory.
     ide_inventory: str = "all"
     lookup_model_provenance_online: bool = False
@@ -3212,10 +3221,8 @@ class Config:
     watch: WatchConfig = field(default_factory=WatchConfig)
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
-    splunk: SplunkConfig = field(default_factory=SplunkConfig)
-    otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
-    # config_version 9: admission replaces data.json and the *_actions keys.
+    # config_version 9: admission replaces data.json.
     admission: AdmissionConfig = field(default_factory=AdmissionConfig)
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
@@ -3224,7 +3231,6 @@ class Config:
     # legacy global-only behavior; resolution goes through
     # :class:`ObservabilityConfig` resolvers, never by reading the map directly.
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
-    privacy: PrivacyConfig = field(default_factory=PrivacyConfig)
     _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     # Loaded raw values of _OWNED_NESTED_KEYS paths (absent = key not in
     # the file at load). Lets the merge distinguish "this process loaded
@@ -3234,7 +3240,7 @@ class Config:
     # dict-shaped authoritative paths.
     _loaded_owned_nested_values: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     # Exact source version observed by load(). Ordinary saves of an already-v8
-    # document must never serialize the legacy audit_db/otel/privacy model over
+    # document must never serialize the legacy audit_db/otel model over
     # the canonical observability graph.
     _source_config_version: int = field(default=0, repr=False, compare=False)
     _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
@@ -3599,6 +3605,17 @@ class Config:
             llm.max_retries = base.effective_max_retries()
         return llm
 
+    def check_saveable(self) -> None:
+        """Raise ConfigUnparseableError when a save would be refused because
+        config.yaml on disk no longer parses (GAP-0370); a missing file is fine."""
+        path = str(config_path_for_data_dir(self.data_dir))
+        try:
+            with open(path, "rb") as handle:
+                current = handle.read()
+        except FileNotFoundError:
+            return
+        _existing_document_for_save(path, current)
+
     def save(self, *, actor: str | None = None, reason: str = "") -> Any:
         """Persist this :class:`Config` through the single config writer.
 
@@ -3612,7 +3629,16 @@ class Config:
         Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
         """
         path = str(config_path_for_data_dir(self.data_dir))
-        return self._write(path, actor=actor, reason=reason)
+        try:
+            return self._write(path, actor=actor, reason=reason)
+        except ConfigSaveError:
+            raise
+        except OSError as exc:
+            if exc.errno is None:
+                # A refusal (a managed_enterprise change without admin
+                # rights), not a failed write: keep its own error.
+                raise
+            raise ConfigSaveError(path, exc) from exc
 
     def save_verified(self, verify: Callable[[str], None], *, actor: str | None = None, reason: str = "") -> Any:
         """Persist, verify the exact written generation, and roll back on failure.
@@ -3648,7 +3674,10 @@ class Config:
         dataclass_data = _config_to_dict(self)
 
         def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
-            merged = self._merged_document(path, dataclass_data)
+            merged = self._merged_document(path, dataclass_data, current)
+            expanded = _expand_home_policy_dir(merged)
+            if expanded:
+                self.policy_dir = expanded
             _assert_config_write_allowed(path, merged)
             candidate = config_writer.render_document(current, merged, source_name)
             return candidate, config_writer.diff_documents(current, candidate)
@@ -3661,12 +3690,12 @@ class Config:
             verify=verify,
         )
         if self._source_config_version == 0:
-            self._source_config_version = FRESH_CONFIG_VERSION
+            self._source_config_version = CURRENT_CONFIG_VERSION
         self._loaded_v8_modeled_snapshot = copy.deepcopy(dataclass_data)
         return result
 
-    def _merged_document(self, path: str, dataclass_data: dict[str, Any]) -> dict[str, Any]:
-        """The on-disk document with this Config's changed modeled values."""
+    def _merged_document(self, path: str, dataclass_data: dict[str, Any], current: bytes) -> dict[str, Any]:
+        """The on-disk document (``current``) with this Config's changed modeled values."""
 
         version = self._source_config_version
         baseline = self._loaded_v8_modeled_snapshot
@@ -3676,18 +3705,36 @@ class Config:
             # canonical defaults as its structural baseline so explicit
             # caller choices are persisted while removed v7 fields remain
             # excluded. Existing unversioned/v7 files still fail closed below.
-            version = FRESH_CONFIG_VERSION
+            version = CURRENT_CONFIG_VERSION
             baseline = _config_to_dict(default_config())
         if not is_current_schema(version):
-            raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw migrate' first.")
-        existing = _load_existing_config_yaml(path)
+            raise ConfigVersionError(
+                "This configuration was written by an older DefenseClaw"
+                " — run 'defenseclaw migrate' first."
+            )
+        existing = _existing_document_for_save(path, current)
+        # Lists are replaced as a unit by the modeled delta. If another
+        # process changed registry sources after this Config was loaded, a
+        # whole-list save would silently discard that process's source.
+        from dataclasses import asdict
+
+        from defenseclaw.config_writer import ConfigConflictError
+
+        baseline_sources = baseline.get("registries", {}).get("sources", [])
+        edited_sources = dataclass_data.get("registries", {}).get("sources", [])
+        if edited_sources != baseline_sources:
+            disk_sources = asdict(_merge_registries(existing.get("registries")))["sources"]
+            if disk_sources != baseline_sources:
+                raise ConfigConflictError(
+                    "registries.sources changed since it was loaded; reload config.yaml and retry"
+                )
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
-            _baseline_keeping_migrated_llm_slots(dataclass_data, baseline),
+            _baseline_with_default_asset_policy(_baseline_keeping_migrated_llm_slots(dataclass_data, baseline)),
         )
         merged["config_version"] = version
         merged.setdefault("observability", {})
@@ -3701,7 +3748,7 @@ class Config:
                 raise ConfigVersionError("acp must be a mapping")
             acp_document["default_profile"] = self.acp.default_profile
         if version >= CONFIG_VERSION_V9:
-            _project_v9_modeled_keys(merged, self.policy_dir)
+            _project_v9_modeled_keys(merged)
         return merged
 
 
@@ -3720,6 +3767,7 @@ def locked_config_yaml(path: str):
     """
     from defenseclaw import config_writer
 
+    config_writer.refuse_when_managed(path)
     with config_writer.hold_lock(path, timeout_s=None):
         yield
 
@@ -3738,7 +3786,7 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
         document = data
         if not current.strip() and "config_version" not in document:
             # A writer creating config.yaml writes a current-schema document.
-            document = {"config_version": FRESH_CONFIG_VERSION, **document}
+            document = {"config_version": CURRENT_CONFIG_VERSION, **document}
             document.setdefault("observability", {})
         candidate = config_writer.render_document(current, document, source_name)
         return candidate, config_writer.diff_documents(current, candidate)
@@ -3751,103 +3799,19 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
     )
 
 
-_V9_PRESET_PACKS = ("default", "strict", "permissive")
-
-
-def _v9_same_dir(a: str, b: str) -> bool:
-    a, b = os.path.normpath(os.path.expanduser(a)), os.path.normpath(os.path.expanduser(b))
-    return os.path.normcase(a) == os.path.normcase(b)
-
-
-def _v9_rule_pack_for_dir(directory: str, policy_dir: str) -> tuple[str, list[str]]:
-    """Map a v8 rule_pack_dir to a v9 rule_pack name (and protections).
-
-    A preset name resolves to ``<policy_dir>/guardrail/<name>``, so only that
-    directory is the preset; an edited copy elsewhere is a custom pack.
-    """
-    clean = os.path.normpath(directory)
-    base = os.path.basename(clean).lower()
-    parent = os.path.basename(os.path.dirname(clean))
-    preset = "default" if base == "balanced" else base
-    if preset in _V9_PRESET_PACKS and policy_dir and _v9_same_dir(
-        clean, os.path.join(policy_dir, "guardrail", os.path.basename(clean))
-    ):
-        return preset, []
-    base = preset
-    if base in _V9_PRESET_PACKS and parent.startswith("protected-"):
-        try:
-            with open(os.path.join(clean, "defenseclaw-pack.json"), encoding="utf-8") as handle:
-                manifest = json.load(handle)
-            protections = [str(p) for p in manifest.get("protection", []) if str(p).strip()]
-        except (OSError, ValueError, AttributeError):
-            protections = []
-        return base, protections
-    raise ConfigVersionError(
-        f"guardrail rule pack folder {directory} is a custom pack; config_version 9 references custom packs by "
-        f"digest under guardrail.custom_packs: select it with 'defenseclaw guardrail use-pack {directory}'"
-    )
-
-
-def _project_v9_modeled_keys(merged: dict[str, Any], policy_dir: str = "") -> None:
+def _project_v9_modeled_keys(merged: dict[str, Any]) -> None:
     """Write v8-modeled fields a caller changed in their config_version 9 keys.
 
-    Setup commands that still set a v8 field (``rule_pack_dir``, the v8
-    scanner toggles, ``update_check``) would otherwise write a key
-    config_version 9 rejects. This maps them the way the Go migration does;
-    it goes away as each caller moves to the v9 key. The ``*_actions`` maps
-    are dropped: nothing edits them since 9 (the admission actions are
-    ``admission.<type>.actions``).
+    Setup commands that still set the v8 comma-separated
+    ``scanners.mcp_scanner.analyzers`` string would otherwise write a value
+    config_version 9 rejects. This maps it the way the Go migration does; it
+    goes away as each caller moves to the v9 list.
     """
-    for key in ("skill_actions", "mcp_actions", "plugin_actions", "update_check"):
-        value = merged.pop(key, None)
-        if key == "update_check" and isinstance(value, bool):
-            merged.setdefault("update", {})["check"] = value
-    watch = merged.get("watch")
-    if isinstance(watch, dict):
-        watch.pop("allow_list_bypass_scan", None)
-        if not watch:
-            merged.pop("watch")
-    guardrail = merged.get("guardrail")
-    if isinstance(guardrail, dict):
-        scopes = [guardrail]
-        scopes += [c for c in (guardrail.get("connectors") or {}).values() if isinstance(c, dict)]
-        for profile in (guardrail.get("profiles") or {}).values():
-            if isinstance(profile, dict):
-                scopes.append(profile)
-                scopes += [c for c in (profile.get("connectors") or {}).values() if isinstance(c, dict)]
-        for scope in scopes:
-            directory = scope.pop("rule_pack_dir", None)
-            if isinstance(directory, str) and directory.strip():
-                name, protections = _v9_rule_pack_for_dir(directory.strip(), policy_dir)
-                scope["rule_pack"] = name
-                if protections:
-                    scope.setdefault("rules", {})["protections"] = protections
     scanners = merged.get("scanners")
     if not isinstance(scanners, dict):
         return
-    skill = scanners.get("skill_scanner")
-    if isinstance(skill, dict):
-        skill.pop("binary", None)
-        if skill.pop("virustotal_api_key", None):
-            raise ConfigVersionError(
-                "config_version 9 does not store the VirusTotal key in config.yaml; "
-                "store it with 'defenseclaw keys set VIRUSTOTAL_API_KEY'"
-            )
-        analyzers = skill.setdefault("analyzers", {})
-        use_vt = skill.pop("use_virustotal", None)
-        key_env = skill.pop("virustotal_api_key_env", None)
-        if use_vt is not None:
-            analyzers.setdefault("virustotal", {})["enabled"] = bool(use_vt)
-        if key_env:
-            analyzers.setdefault("virustotal", {})["api_key_env"] = key_env
-        use_aid = skill.pop("use_aidefense", None)
-        if use_aid is not None:
-            analyzers.setdefault("aidefense", {})["enabled"] = bool(use_aid)
-        if not analyzers:
-            skill.pop("analyzers")
     mcp = scanners.get("mcp_scanner")
     if isinstance(mcp, dict):
-        mcp.pop("binary", None)
         if isinstance(mcp.get("analyzers"), str):
             items = [a.strip().lower() for a in mcp["analyzers"].split(",") if a.strip()]
             rest = [a for a in dict.fromkeys(items) if a != "auto"]
@@ -3968,33 +3932,6 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d.pop("_loaded_owned_nested_values", None)
     d.pop("_source_config_version", None)
     d.pop("_loaded_v8_modeled_snapshot", None)
-    otel = d.get("otel") or {}
-    destinations = otel.get("destinations") or []
-    for destination in destinations:
-        if not isinstance(destination, dict):
-            continue
-        span_filter = destination.get("span_filter")
-        if not isinstance(span_filter, dict):
-            continue
-        if span_filter.get("operations"):
-            span_filter.pop("require_operation", None)
-            span_filter.pop("require_attributes", None)
-        else:
-            span_filter.pop("operations", None)
-            if not span_filter.get("require_operation"):
-                span_filter.pop("require_operation", None)
-            if not span_filter.get("require_attributes"):
-                span_filter.pop("require_attributes", None)
-        if not span_filter:
-            destination.pop("span_filter", None)
-    # Named destinations are the only transport/signal source of truth.
-    # Serialize only process-wide policy outside destinations.
-    traces = otel.get("traces") or {}
-    otel["traces"] = {key: value for key, value in traces.items() if key in {"sampler", "sampler_arg"}}
-    logs = otel.get("logs") or {}
-    otel["logs"] = {key: value for key, value in logs.items() if key == "emit_individual_findings"}
-    metrics = otel.get("metrics") or {}
-    otel["metrics"] = {key: value for key, value in metrics.items() if key in {"export_interval_s", "temporality"}}
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -4032,6 +3969,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     _strip_empty_llm(scanners.get("skill_scanner"), "llm")
     _strip_empty_llm(scanners.get("mcp_scanner"), "llm")
     _serialize_v9_scanner_keys(scanners)
+    if cfg._source_config_version != FIRST_CURRENT_CONFIG_VERSION:
+        scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
@@ -4084,10 +4023,6 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 _strip_unset_levels(entry)
                 _serialize_v9_rules_scope(entry)
     _serialize_guardrail_profiles(cfg, guardrail)
-    # The compatibility dataclass can preview a retired ``splunk:`` source for
-    # upgrade/credential recovery, but exact-v8 serialization must never write
-    # it. Splunk forwarding is a canonical observability destination.
-    d.pop("splunk", None)
     # Mirror the Go `yaml:"cooldown_seconds,omitempty"` tag: when the
     # operator hasn't set a cooldown (tri-state None), drop the key so
     # the YAML stays minimal and the gateway falls back to
@@ -4118,6 +4053,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     else:
         _serialize_asset_policy_connectors(cfg, d.get("asset_policy"))
         _prune_v9_block(d["asset_policy"], "tool")
+        _prune_asset_policy_rules(d["asset_policy"])
     for key in ("admission", "llm_providers", "update"):
         _prune_v9_block(d, key)
     # Per-connector observability (D5b): drop the empty block (omitempty),
@@ -4147,6 +4083,9 @@ def _prune_unset(value: Any, *, drop_false: bool = False) -> Any:
             pruned = _prune_unset(item, drop_false=drop_false)
             if pruned is not _V8_MISSING:
                 out[key] = pruned
+            elif key == "first_party_allow_list" and item == []:
+                # An explicit empty list disables Go's built-in exemptions.
+                out[key] = []
         return out or _V8_MISSING
     if isinstance(value, list):
         items = [_prune_unset(item, drop_false=drop_false) for item in value]
@@ -4206,18 +4145,20 @@ def _serialize_v9_scanner_keys(scanners: Any) -> None:
     if isinstance(mcp, dict):
         if not mcp.get("judge_source"):
             mcp.pop("judge_source", None)
-        for key in ("api", "virustotal", "timeouts"):
-            _prune_v9_block(mcp, key, drop_false=True)
+        _prune_v9_block(mcp, "virustotal", drop_false=True)
         _prune_v9_block(mcp, "yara")
 
 
 def _strip_ai_discovery_omitempty(ai_discovery: Any) -> None:
-    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal`` and
-    ``ide_inventory`` so configs that never set them stay byte-identical."""
+    """Mirror Go's ``omitempty`` on ``ai_discovery.include_user_principal``,
+    ``trusted_ad_child_domains`` and ``ide_inventory`` so configs that never
+    set them stay byte-identical."""
     if not isinstance(ai_discovery, dict):
         return
     if not ai_discovery.get("include_user_principal"):
         ai_discovery.pop("include_user_principal", None)
+    if not ai_discovery.get("trusted_ad_child_domains"):
+        ai_discovery.pop("trusted_ad_child_domains", None)
     if ai_discovery.get("ide_inventory") in (None, "", "all"):
         ai_discovery.pop("ide_inventory", None)
 
@@ -4253,7 +4194,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 continue
             _strip_empty_keys(
                 profile,
-                ("description", "mode", "rule_pack_dir", "block_message", "hilt", "enabled", "hook_fail_mode"),
+                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode"),
             )
             _strip_unset_levels(profile)
             _serialize_v9_rules_scope(profile)
@@ -4264,7 +4205,7 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
             for entry in connectors.values():
                 if isinstance(entry, dict):
                     _strip_empty_keys(
-                        entry, ("mode", "hilt", "hook_fail_mode", "block_message", "rule_pack_dir", "enabled")
+                        entry, ("mode", "hilt", "hook_fail_mode", "block_message", "enabled")
                     )
                     _strip_unset_levels(entry)
                     _serialize_v9_rules_scope(entry)
@@ -4335,73 +4276,69 @@ def _serialize_routing(d: dict[str, Any]) -> None:
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
-    """Best-effort read of an existing ``config.yaml`` for round-trip save.
+    """Best-effort read of an existing ``config.yaml`` (the managed check).
 
-    Returns ``{}`` when the file is missing (first save), unreadable, or
-    malformed. On parse failure we log a warning but do NOT raise — the
-    operator's previous file may be partially corrupt and we still want
-    ``cfg.save()`` to succeed so the next setup wizard can rewrite it
-    cleanly. Worst-case the on-disk file is replaced with the
-    dataclass-only view, which is exactly the pre-fix behaviour, so we
-    cannot regress relative to the old serializer.
+    Returns ``{}`` when the file is missing, unreadable, malformed or not a
+    mapping, with a warning for the last three. A save never merges into
+    this: it reads the file with :func:`_existing_document_for_save`.
     """
     try:
-        with open(path) as f:
-            raw = yaml.safe_load(f) or {}
+        raw = parse_config_yaml(read_config_text(path)) or {}
     except FileNotFoundError:
         return {}
     except OSError as exc:
-        _log.warning(
-            "config.save: cannot read existing %s (%s); writing dataclass-only view (any unmodelled keys will be lost)",
-            path,
-            exc,
-        )
+        _log.warning("config: cannot read existing %s (%s)", path, exc)
         return {}
     except yaml.YAMLError as exc:
-        backup = _backup_unparseable_config(path)
-        _log.warning(
-            "config.save: existing %s failed to parse (%s); writing dataclass-only view (backup=%s)",
-            path,
-            exc,
-            backup or "unavailable",
-        )
+        _log.warning("config: existing %s failed to parse (%s)", path, exc)
         return {}
     if not isinstance(raw, dict):
-        _log.warning(
-            "config.save: existing %s is not a YAML mapping (got %s); writing dataclass-only view",
-            path,
-            type(raw).__name__,
-        )
+        _log.warning("config: existing %s is not a YAML mapping (got %s)", path, type(raw).__name__)
         return {}
+    from defenseclaw.observability.v8_config import drop_retired_scanner_keys
+
+    # A save leaves out the scanner keys no scan read (GAP-0295, GAP-0301).
+    drop_retired_scanner_keys(raw)
     return raw
 
 
-def _backup_unparseable_config(path: str) -> str:
+def _existing_document_for_save(path: str, current: bytes) -> dict[str, Any]:
+    """The on-disk document a save merges into; ``{}`` for an empty file.
+
+    A file that does not parse, or is not a mapping, is refused as the CLI
+    writer refuses it: a save used to fall back to a document of only the
+    changed fields and replace the file with it, which dropped every other
+    setting (listeners, connectors, pack pins) and the protection with them
+    (GAP-0370). Nothing is written, and the error names the line.
+    """
+    from defenseclaw.config_writer import ConfigUnparseableError
+
     try:
-        with open(path, "rb") as src:
-            data = src.read()
-    except OSError:
-        return ""
-    backup = f"{path}.bak"
-    try:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(backup, flags, 0o600)
-    except FileExistsError:
-        backup = f"{path}.bak.{os.getpid()}"
-        try:
-            fd = os.open(backup, flags, 0o600)
-        except OSError:
-            return ""
-    except OSError:
-        return ""
-    try:
-        with os.fdopen(fd, "wb") as dst:
-            dst.write(data)
-            dst.flush()
-            os.fsync(dst.fileno())
-    except OSError:
-        return ""
-    return backup
+        text = current.removeprefix(codecs.BOM_UTF8).decode("utf-8")
+        raw = parse_config_yaml(text) if text.strip() else {}
+    except UnicodeDecodeError as exc:
+        raise ConfigUnparseableError(
+            f"{path} is not UTF-8 text (byte {exc.start}); nothing was saved. "
+            "Save it as UTF-8, then run 'defenseclaw config validate'"
+        ) from exc
+    except yaml.YAMLError as exc:
+        from defenseclaw.observability.v8_config import yaml_error_mark
+
+        mark = yaml_error_mark(exc)
+        where = f"line {mark.line + 1}, column {mark.column + 1}: " if mark is not None else ""
+        problem = str(getattr(exc, "problem", "") or "") or "malformed YAML"
+        raise ConfigUnparseableError(
+            f"{path} is not valid YAML ({where}{problem}); nothing was saved. "
+            "Fix that line, then run 'defenseclaw config validate'"
+        ) from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigUnparseableError(
+            f"{path} is a YAML {type(raw).__name__}, not a mapping of settings; nothing was saved. "
+            "Fix the file, then run 'defenseclaw config validate'"
+        )
+    return raw
 
 
 # Dotted YAML paths whose VALUE is a dict[str, str]-style modeled
@@ -4414,9 +4351,8 @@ def _backup_unparseable_config(path: str) -> str:
 # dataclass introspection) because not every nested dataclass field
 # typed as ``dict[str, str]`` is dataclass-authoritative — some
 # carry user-supplied free-form keys we want to preserve. Any new
-# secret-bearing modeled dict added to ``OTelConfig`` (or
-# elsewhere) MUST be added here so a clear-on-save honours the
-# operator's intent.
+# secret-bearing modeled dict added to a config dataclass MUST be added
+# here so a clear-on-save honours the operator's intent.
 #
 # Format: dotted YAML path from the top-level config dict.
 _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
@@ -4485,13 +4421,12 @@ _OWNED_NESTED_KEYS: frozenset[str] = frozenset(
         "guardrail.default_profile",
         # AI discovery identity/IDE opt-ins: stripped at their defaults.
         "ai_discovery.include_user_principal",
+        "ai_discovery.trusted_ad_child_domains",
         "ai_discovery.ide_inventory",
     }
 )
 
-_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset(
-    {"audit_db", "audit_sinks", "otel", "privacy", "splunk", "observability"}
-)
+_V8_UNMODELED_OR_REMOVED_TOP_LEVEL = frozenset({"audit_db", "observability"})
 _V8_MISSING = object()
 
 # v4 LLM field -> the v5 slot that _migrate_llm_fields() copies it into.
@@ -4638,6 +4573,54 @@ def _default_asset_policy_dict() -> dict[str, Any]:
     from dataclasses import asdict
 
     return asdict(AssetPolicyConfig())
+
+
+def _prune_asset_policy_rules(asset_policy: Any) -> None:
+    """Drop the unset fields of every ``asset_policy.<type>`` rule (Go ``omitempty``).
+
+    A blocked skill is a name and a reason; the empty connector, url, command,
+    args_prefix, transport and source_path_contains of the dataclass are not
+    written (GAP-0060).
+    """
+    if not isinstance(asset_policy, dict):
+        return
+    for type_key in ("mcp", "plugin", "skill"):
+        block = asset_policy.get(type_key)
+        if not isinstance(block, dict):
+            continue
+        for list_key in ("registry", "allowed", "denied"):
+            rules = block.get(list_key)
+            if isinstance(rules, list):
+                block[list_key] = [
+                    {key: value for key, value in rule.items() if value not in ("", None, [])}
+                    if isinstance(rule, dict)
+                    else rule
+                    for rule in rules
+                ]
+
+
+def _baseline_with_default_asset_policy(baseline: dict[str, Any]) -> dict[str, Any]:
+    """The save baseline, with the default ``asset_policy`` a load leaves out.
+
+    A config with no ``asset_policy`` loads as the all-default block, which the
+    serializer omits, so the load snapshot has no such key. Without it the first
+    rule added (``skill block``) looked like a brand-new tree and the whole
+    default block was written to config.yaml. Taking the defaults as the baseline
+    writes only what changed (GAP-0060).
+    """
+    if "asset_policy" in baseline:
+        return baseline
+    return {**baseline, "asset_policy": default_asset_policy_baseline()}
+
+
+def default_asset_policy_baseline() -> dict[str, Any]:
+    """The all-default ``asset_policy`` in the form the serializer would write it."""
+    default = _default_asset_policy_dict()
+    if not default.get("connectors"):
+        default.pop("connectors", None)
+    _prune_v9_block(default, "tool")
+    _prune_asset_policy_rules(default)
+    return default
 
 
 def _serialize_asset_policy_connectors(cfg: Config, asset_policy: Any) -> None:
@@ -5273,11 +5256,6 @@ def _merge_registries(raw: Any) -> RegistriesConfig:
                 ", ".join(REGISTRY_CONTENT_TYPES),
             )
             content = "skill"
-        sync_interval = entry.get("sync_interval_hours", 24)
-        try:
-            sync_interval_int = max(0, int(sync_interval))
-        except (TypeError, ValueError):
-            sync_interval_int = 24
         sources.append(
             RegistrySource(
                 id=sid,
@@ -5286,8 +5264,6 @@ def _merge_registries(raw: Any) -> RegistriesConfig:
                 content=content,
                 auth_env=str(entry.get("auth_env", "") or ""),
                 enabled=bool(entry.get("enabled", True)),
-                auto_sync=bool(entry.get("auto_sync", False)),
-                sync_interval_hours=sync_interval_int,
                 last_sync=str(entry.get("last_sync", "") or ""),
                 last_status=str(entry.get("last_status", "") or ""),
             )
@@ -5363,8 +5339,6 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
     if not raw:
         return GuardrailConfig()
     hilt_raw = raw.get("hilt")
-    if hilt_raw is None:
-        hilt_raw = raw.get("hitl")
     private_upstreams_raw = raw.get("allow_private_upstreams", [])
     private_upstreams = (
         [str(value).strip() for value in private_upstreams_raw if str(value).strip()]
@@ -5391,7 +5365,6 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_completion=raw.get("detection_strategy_completion", ""),
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
-        rule_pack_dir=raw.get("rule_pack_dir", ""),
         rule_pack=str(raw.get("rule_pack", "") or ""),
         custom_packs=_merge_custom_rule_packs(raw.get("custom_packs")),
         rules=_merge_guardrail_rules(raw.get("rules")) or GuardrailRulesConfig(),
@@ -5410,7 +5383,7 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
 
 
 def _merge_guardrail_connectors(
-    raw: Any,
+    raw: Any, *, profile: bool = False,
 ) -> dict[str, PerConnectorGuardrailConfig]:
     """Parse the optional ``guardrail.connectors`` map.
 
@@ -5426,8 +5399,6 @@ def _merge_guardrail_connectors(
     for name, entry in raw.items():
         entry = entry if isinstance(entry, dict) else {}
         hilt_entry = entry.get("hilt")
-        if hilt_entry is None:
-            hilt_entry = entry.get("hitl")
         # ``enabled`` is parsed only when present so an absent key stays
         # ``None`` ("inherit default") rather than collapsing to a concrete
         # bool. A non-bool value is ignored (treated as unset) to match Go's
@@ -5436,10 +5407,9 @@ def _merge_guardrail_connectors(
         enabled = enabled_raw if isinstance(enabled_raw, bool) else None
         out[str(name)] = PerConnectorGuardrailConfig(
             mode=entry.get("mode", ""),
-            hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
+            hilt=_merge_hilt(hilt_entry) if hilt_entry is not None and (not profile or bool(hilt_entry)) else None,
             hook_fail_mode=entry.get("hook_fail_mode", ""),
             block_message=entry.get("block_message", ""),
-            rule_pack_dir=entry.get("rule_pack_dir", ""),
             rule_pack=str(entry.get("rule_pack", "") or ""),
             rules=_merge_guardrail_rules(entry.get("rules")),
             enabled=enabled,
@@ -5470,12 +5440,11 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
             mode=str(entry.get("mode", "") or ""),
             block_at=normalize_guardrail_level(entry.get("block_at")),
             alert_at=normalize_guardrail_level(entry.get("alert_at")),
-            hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) else None,
-            rule_pack_dir=str(entry.get("rule_pack_dir", "") or ""),
+            hilt=_merge_hilt(hilt_entry) if isinstance(hilt_entry, dict) and hilt_entry else None,
             rule_pack=str(entry.get("rule_pack", "") or ""),
             rules=_merge_guardrail_rules(entry.get("rules")),
             block_message=str(entry.get("block_message", "") or ""),
-            connectors=_merge_guardrail_connectors(entry.get("connectors")),
+            connectors=_merge_guardrail_connectors(entry.get("connectors"), profile=True),
             enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
             hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
         )
@@ -5544,23 +5513,16 @@ def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
 
 
 def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
-    """Parse mcp_scanner config with backward compat for bare-string values."""
-    if raw is None:
-        return MCPScannerConfig()
-    if isinstance(raw, str):
-        return MCPScannerConfig(binary=raw)
+    """Parse the mcp_scanner block."""
     if isinstance(raw, dict):
         return MCPScannerConfig(
-            binary=raw.get("binary", "mcp-scanner"),
             analyzers=_mcp_analyzers_text(raw.get("analyzers", "auto")),
             scan_prompts=raw.get("scan_prompts", False),
             scan_resources=raw.get("scan_resources", False),
             scan_instructions=raw.get("scan_instructions", False),
             llm=_merge_llm(raw.get("llm")),
             judge_source=str(raw.get("judge_source", "") or ""),
-            api=_merge_mcp_scanner_api(raw.get("api")),
             yara=_merge_mcp_scanner_yara(raw.get("yara")),
-            timeouts=_merge_mcp_scanner_timeouts(raw.get("timeouts")),
         )
     return MCPScannerConfig()
 
@@ -5741,23 +5703,32 @@ def _merge_update(raw: Any) -> UpdateConfig:
     )
 
 
-def _merge_skill_scanner_analyzers(raw: Any) -> SkillScannerAnalyzers:
-    raw = _mapping(raw)
+def _merge_skill_scanner_analyzers(skill_raw: Any) -> SkillScannerAnalyzers:
+    """``scanners.skill_scanner.analyzers``, with the v8 spellings a config_version 8
+    source still holds (``use_virustotal``, ``use_aidefense``, ``virustotal_api_key_env``)
+    folded in. Gateway-managed files are migrated on upgrade; a Secure Client document
+    stays version 8. An ``analyzers`` key that is written wins. A version 9 source cannot
+    carry the v8 keys."""
+    skill_raw = _mapping(skill_raw)
+    raw = _mapping(skill_raw.get("analyzers"))
     vt = _mapping(raw.get("virustotal"))
+    aid = _mapping(raw.get("aidefense"))
     return SkillScannerAnalyzers(
         virustotal=SkillScannerVirusTotal(
-            enabled=vt.get("enabled") is True,
-            api_key_env=str(vt.get("api_key_env", "") or ""),
+            enabled=(vt["enabled"] if "enabled" in vt else skill_raw.get("use_virustotal")) is True,
+            api_key_env=str(vt.get("api_key_env") or skill_raw.get("virustotal_api_key_env") or ""),
             upload_files=vt.get("upload_files") is True,
         ),
-        aidefense=ScannerAnalyzerToggle(enabled=_mapping(raw.get("aidefense")).get("enabled") is True),
+        aidefense=ScannerAnalyzerToggle(
+            enabled=(aid["enabled"] if "enabled" in aid else skill_raw.get("use_aidefense")) is True
+        ),
         osv=ScannerAnalyzerToggle(enabled=_mapping(raw.get("osv")).get("enabled") is True),
     )
 
 
 def _merge_skill_scanner_timeouts(raw: Any) -> SkillScannerTimeouts:
     raw = _mapping(raw)
-    return SkillScannerTimeouts(scan_s=_int_or_zero(raw.get("scan_s")), llm_s=_int_or_zero(raw.get("llm_s")))
+    return SkillScannerTimeouts(scan_s=_int_or_zero(raw.get("scan_s")))
 
 
 def _mcp_analyzers_text(raw: Any) -> str:
@@ -5767,137 +5738,12 @@ def _mcp_analyzers_text(raw: Any) -> str:
     return str(raw) if raw is not None else ""
 
 
-def _merge_mcp_scanner_api(raw: Any) -> MCPScannerAPIConfig:
-    raw = _mapping(raw)
-    return MCPScannerAPIConfig(
-        endpoint=str(raw.get("endpoint", "") or ""), api_key_env=str(raw.get("api_key_env", "") or "")
-    )
-
-
 def _merge_mcp_scanner_yara(raw: Any) -> MCPScannerYARAConfig:
     raw = _mapping(raw)
     return MCPScannerYARAConfig(
         include_bundled=_optional_bool(raw.get("include_bundled")),
         extra_rules=[_merge_asset_file_ref(entry) for entry in raw.get("extra_rules") or [] if isinstance(entry, dict)],
     )
-
-
-def _merge_mcp_scanner_timeouts(raw: Any) -> MCPScannerTimeouts:
-    raw = _mapping(raw)
-    return MCPScannerTimeouts(
-        stdio_s=_int_or_zero(raw.get("stdio_s")),
-        remote_s=_int_or_zero(raw.get("remote_s")),
-        llm_s=_int_or_zero(raw.get("llm_s")),
-    )
-
-
-def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
-    if not isinstance(raw, dict) or not raw:
-        return OTelConfig()
-    traces_raw = _as_mapping(raw.get("traces"))
-    logs_raw = _as_mapping(raw.get("logs"))
-    metrics_raw = _as_mapping(raw.get("metrics"))
-    batch_raw = _as_mapping(raw.get("batch"))
-    resource_raw = _as_mapping(raw.get("resource"))
-    destinations: list[OTelDestinationConfig] = []
-    for item in raw.get("destinations") or []:
-        if not isinstance(item, dict):
-            continue
-        dest_traces = _as_mapping(item.get("traces"))
-        dest_logs = _as_mapping(item.get("logs"))
-        dest_metrics = _as_mapping(item.get("metrics"))
-        dest_batch = _as_mapping(item.get("batch"))
-        dest_tls = _as_mapping(item.get("tls"))
-        dest_span_filter = _as_mapping(item.get("span_filter"))
-        required_filter_attrs = dest_span_filter.get("require_attributes", [])
-        if not isinstance(required_filter_attrs, (list, tuple)):
-            required_filter_attrs = []
-        filter_operations: list[OTelSpanFilterOperationConfig] = []
-        for operation in dest_span_filter.get("operations") or []:
-            if not isinstance(operation, dict):
-                continue
-            operation_attrs = operation.get("require_attributes", [])
-            if not isinstance(operation_attrs, (list, tuple)):
-                operation_attrs = []
-            filter_operations.append(
-                OTelSpanFilterOperationConfig(
-                    name=str(operation.get("name", "") or ""),
-                    require_attributes=[str(value) for value in operation_attrs if str(value).strip()],
-                )
-            )
-        destinations.append(
-            OTelDestinationConfig(
-                name=str(item.get("name", "") or ""),
-                preset=str(item.get("preset", "") or ""),
-                enabled=_coerce_bool(item.get("enabled", True), default=True),
-                protocol=str(item.get("protocol", "grpc") or "grpc"),
-                endpoint=str(item.get("endpoint", "") or ""),
-                headers={str(k): str(v) for k, v in _as_mapping(item.get("headers")).items()},
-                tls=OTelTLSConfig(
-                    insecure=_coerce_bool(dest_tls.get("insecure", False)),
-                    ca_cert=str(dest_tls.get("ca_cert", "") or ""),
-                ),
-                traces=OTelTracesConfig(
-                    enabled=_coerce_bool(dest_traces.get("enabled", False)),
-                    endpoint=str(dest_traces.get("endpoint", "") or ""),
-                    protocol=str(dest_traces.get("protocol", "") or ""),
-                    url_path=str(dest_traces.get("url_path", "") or ""),
-                ),
-                logs=OTelLogsConfig(
-                    enabled=_coerce_bool(dest_logs.get("enabled", False)),
-                    endpoint=str(dest_logs.get("endpoint", "") or ""),
-                    protocol=str(dest_logs.get("protocol", "") or ""),
-                    url_path=str(dest_logs.get("url_path", "") or ""),
-                ),
-                metrics=OTelMetricsConfig(
-                    enabled=_coerce_bool(dest_metrics.get("enabled", False)),
-                    export_interval_s=_as_int(dest_metrics.get("export_interval_s", 60), 60),
-                    temporality=str(dest_metrics.get("temporality", "delta") or "delta"),
-                    endpoint=str(dest_metrics.get("endpoint", "") or ""),
-                    protocol=str(dest_metrics.get("protocol", "") or ""),
-                    url_path=str(dest_metrics.get("url_path", "") or ""),
-                ),
-                batch=OTelBatchConfig(
-                    max_export_batch_size=_as_int(dest_batch.get("max_export_batch_size", 512), 512),
-                    scheduled_delay_ms=_as_int(dest_batch.get("scheduled_delay_ms", 5000), 5000),
-                    max_queue_size=_as_int(dest_batch.get("max_queue_size", 2048), 2048),
-                ),
-                span_filter=OTelSpanFilterConfig(
-                    require_operation=str(dest_span_filter.get("require_operation", "") or ""),
-                    require_attributes=[str(value) for value in required_filter_attrs if str(value).strip()],
-                    operations=filter_operations,
-                ),
-            )
-        )
-    return OTelConfig(
-        enabled=_coerce_bool(raw.get("enabled", False)),
-        traces=OTelTracePolicyConfig(
-            sampler=traces_raw.get("sampler", "always_on"),
-            sampler_arg=traces_raw.get("sampler_arg", "1.0"),
-        ),
-        logs=OTelLogPolicyConfig(
-            emit_individual_findings=_coerce_bool(logs_raw.get("emit_individual_findings", False)),
-        ),
-        metrics=OTelMetricPolicyConfig(
-            export_interval_s=_as_int(metrics_raw.get("export_interval_s", 60), 60),
-            temporality=metrics_raw.get("temporality", "delta"),
-        ),
-        batch=OTelBatchConfig(
-            max_export_batch_size=_as_int(batch_raw.get("max_export_batch_size", 512), 512),
-            scheduled_delay_ms=_as_int(batch_raw.get("scheduled_delay_ms", 5000), 5000),
-            max_queue_size=_as_int(batch_raw.get("max_queue_size", 2048), 2048),
-        ),
-        resource=OTelResourceConfig(
-            attributes=_as_mapping(resource_raw.get("attributes")),
-        ),
-        destinations=destinations,
-    )
-
-
-def _as_mapping(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    return {}
 
 
 def _snapshot_authoritative_dicts(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -6376,7 +6222,9 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 _log.warning("config: ignored malformed dotenv entry from %s", env_path)
                 continue
             if dotenv_key_is_process_control(key):
-                _log.warning("config: ignored unsafe process-control key %s from %s", key, env_path)
+                # Said on every command, with no fix, it was noise; doctor and
+                # the upgrade's migration name it with the replacement (GAP-0387).
+                _log.debug("config: ignored process-control key %s from %s", key, env_path)
                 continue
             # A managed standalone host skips what the registry ignores there.
             if envvars.managed_policy(key) == envvars.MANAGED_IGNORE:
@@ -6404,6 +6252,39 @@ def _load_dotenv_into_os(data_dir: str) -> None:
         _log.warning("config: ignoring unreadable or unsafe dotenv %s: %s", env_path, exc)
 
 
+def ignored_dotenv_control_keys(data_dir: str) -> list[str]:
+    """Each process-control key the data dir's .env sets, with what replaces it.
+
+    A .env never sets one of those (dotenv_key_is_process_control): a 0.8.x
+    workaround such as DEFENSECLAW_FAIL_MODE=open there is ignored, and
+    fail-open hooks became fail-closed without a word (GAP-0387).
+    """
+    try:
+        body = read_regular_file_no_follow(os.path.join(data_dir, ".env"), max_bytes=MAX_DOTENV_BYTES)
+    except OSError:
+        return []
+    found: dict[str, str] = {}
+    for raw_line in body.splitlines():
+        raw_key, separator, raw_value = raw_line.strip().partition(b"=")
+        try:
+            key = raw_key.strip().decode("ascii")
+            value = raw_value.strip().decode("utf-8").strip("\"'").strip().lower()
+        except UnicodeError:
+            continue
+        if not separator or not dotenv_key_is_valid(key) or not dotenv_key_is_process_control(key) or key in found:
+            continue
+        if key.upper() == "DEFENSECLAW_FAIL_MODE" and value in ("open", "closed"):
+            found[key] = f"set it in config.yaml instead: defenseclaw guardrail fail-mode {value}"
+        elif key.upper() == "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT":
+            found[key] = (
+                "to accept a newer agent, export it for one restart instead: "
+                "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 defenseclaw-gateway restart"
+            )
+        else:
+            found[key] = "export it in the shell of the command that needs it instead"
+    return [f"{key} ({fix})" for key, fix in found.items()]
+
+
 def _warn_plaintext_secrets(cfg: Config) -> None:
     """Emit deprecation warnings for plain-text secrets in config.yaml."""
 
@@ -6427,8 +6308,6 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("cisco_ai_defense", "api_key", "CISCO_AI_DEFENSE_API_KEY")
     if cfg.scanners.skill_scanner.virustotal_api_key:
         _warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
-    if not is_current_schema(cfg._source_config_version) and cfg.splunk.hec_token:
-        _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
 
 
 #: The Linux and macOS managed standalone layouts: config path -> the
@@ -6459,12 +6338,24 @@ def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
     return os.path.join(data_dir, "policies")
 
 
-def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
+def load(
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+    without_guardrail_profiles: bool = False,
+    parsed_source: dict[str, Any] | None = None,
+) -> Config:
     """Load config from the active config path, applying defaults.
 
     ``data_dir`` scopes transactional reloads (notably upgrades) to the
     installation that is actually being mutated.  ``DEFENSECLAW_CONFIG``
     remains authoritative when set, including for a scoped load.
+
+    ``without_guardrail_profiles`` leaves guardrail.profiles,
+    profile_assignments and default_profile out: a read-only view for a
+    command that reads a key outside them. Building and validating 1,000
+    profiles doubled ``config get`` (GAP-0276). Never save such a view.
+    ``parsed_source`` is config.yaml as the caller already parsed it (the v8
+    source loader), so the file is not parsed again; load may change it.
     """
     data_dir = str(Path(data_dir) if data_dir is not None else default_data_path())
     _load_dotenv_into_os(data_dir)
@@ -6472,56 +6363,26 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
 
     raw: dict[str, Any] = {}
     try:
-        with open(cfg_file) as f:
-            raw = yaml.safe_load(f) or {}
-    except OSError:
+        raw = parsed_source if parsed_source is not None else parse_config_yaml(read_config_text(cfg_file)) or {}
+    except (FileNotFoundError, NotADirectoryError):
         pass
+    except OSError as exc:
+        # An unreadable file (root-owned after a sudo run) is not a missing
+        # one: never judge the install against built-in defaults (GAP-0398).
+        raise ConfigVersionError(_unreadable_config_message(cfg_file, exc)) from exc
     _warn_untrusted_managed_config(cfg_file, raw)
     # Move the retired Desktop connector ID to devin before any connector key
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
+    if without_guardrail_profiles:
+        raw = _without_guardrail_profiles(raw)
 
     scanners_raw = raw.get("scanners", {})
     ss_raw = scanners_raw.get("skill_scanner", {})
     gw_raw = raw.get("gateway", {})
-    splunk_raw = raw.get("splunk", {}) or {}
     source_config_version = _exact_config_version(raw.get("config_version"))
-    audit_db = _audit_database_path(raw, data_dir, source_config_version)
-
-    # Upgrade/credential-preview compatibility: mirror the first enabled v7
-    # Splunk sink into the legacy DTO in memory. Target v8 commands must never
-    # use this projection; they read the canonical destination graph instead.
-    # The explicit upgrade converter owns translation, and Config.save never
-    # writes this block into an exact-v8 document.
-    if not splunk_raw:
-        for sink in raw.get("audit_sinks") or []:
-            if not isinstance(sink, dict):
-                continue
-            if sink.get("kind") != "splunk_hec":
-                continue
-            if sink.get("enabled") is False:
-                continue
-            hec = sink.get("splunk_hec") or {}
-            if not isinstance(hec, dict) or not hec.get("endpoint"):
-                continue
-            splunk_raw = {
-                "enabled": True,
-                "hec_endpoint": hec.get("endpoint", ""),
-                "hec_token": hec.get("token", ""),
-                "hec_token_env": hec.get("token_env", ""),
-                "index": hec.get("index", "defenseclaw"),
-                "source": hec.get("source", "defenseclaw"),
-                "sourcetype": hec.get("sourcetype", "_json"),
-                # default verify_tls to True so promoting an
-                # audit_sinks declaration into the legacy SplunkConfig
-                # block never silently downgrades verification. The
-                # explicit opt-out lives on the new
-                # ``insecure_skip_verify`` field.
-                "verify_tls": _coerce_bool(hec.get("verify_tls", True), default=True),
-                "insecure_skip_verify": _coerce_bool(hec.get("insecure_skip_verify", False)),
-            }
-            break
+    audit_db = _audit_database_path(raw, data_dir)
 
     cfg = Config(
         data_dir=raw.get("data_dir", data_dir),
@@ -6548,24 +6409,24 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
         scanners=ScannersConfig(
             skill_scanner=SkillScannerConfig(
-                binary=ss_raw.get("binary", "skill-scanner"),
-                use_llm=ss_raw.get("use_llm", True),
+                use_llm=ss_raw.get("use_llm", source_config_version != FIRST_CURRENT_CONFIG_VERSION),
                 use_behavioral=ss_raw.get("use_behavioral", False),
                 enable_meta=ss_raw.get("enable_meta", False),
                 use_trigger=ss_raw.get("use_trigger", False),
-                use_virustotal=ss_raw.get("use_virustotal", False),
-                use_aidefense=ss_raw.get("use_aidefense", False),
                 llm_consensus_runs=ss_raw.get("llm_consensus_runs", 0),
-                policy=ss_raw.get("policy", "quiet"),
+                policy=ss_raw.get(
+                    "policy",
+                    "permissive" if source_config_version == FIRST_CURRENT_CONFIG_VERSION else "quiet",
+                ),
                 lenient=ss_raw.get("lenient", True),
                 llm=_merge_llm(ss_raw.get("llm")),
-                virustotal_api_key=ss_raw.get("virustotal_api_key", ""),
-                virustotal_api_key_env=ss_raw.get("virustotal_api_key_env", ""),
+                virustotal_api_key=ss_raw.get("virustotal_api_key", "")
+                if source_config_version == FIRST_CURRENT_CONFIG_VERSION else "",
                 policy_file=_merge_asset_file_ref(ss_raw.get("policy_file")),
                 judge_source=str(ss_raw.get("judge_source", "") or ""),
                 fail_on_severity=str(ss_raw.get("fail_on_severity", "") or ""),
                 review_queue_min=str(ss_raw.get("review_queue_min", "") or ""),
-                analyzers=_merge_skill_scanner_analyzers(ss_raw.get("analyzers")),
+                analyzers=_merge_skill_scanner_analyzers(ss_raw),
                 timeouts=_merge_skill_scanner_timeouts(ss_raw.get("timeouts")),
             ),
             mcp_scanner=_merge_mcp_scanner(scanners_raw.get("mcp_scanner")),
@@ -6585,24 +6446,6 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             anchor_name=raw.get("firewall", {}).get("anchor_name", "com.defenseclaw"),
         ),
         guardrail=_merge_guardrail(raw.get("guardrail"), data_dir),
-        splunk=SplunkConfig(
-            hec_endpoint=splunk_raw.get("hec_endpoint", "https://localhost:8088/services/collector/event"),
-            hec_token=splunk_raw.get("hec_token", ""),
-            hec_token_env=splunk_raw.get("hec_token_env", ""),
-            index=splunk_raw.get("index", "defenseclaw"),
-            source=splunk_raw.get("source", "defenseclaw"),
-            sourcetype=splunk_raw.get("sourcetype", "_json"),
-            # default verify_tls to True so callers that load a
-            # legacy config without the new field still get certificate
-            # verification. The explicit dev-mode opt-out lives on
-            # ``insecure_skip_verify`` and is wired separately.
-            verify_tls=_coerce_bool(splunk_raw.get("verify_tls", True), default=True),
-            insecure_skip_verify=_coerce_bool(splunk_raw.get("insecure_skip_verify", False)),
-            enabled=splunk_raw.get("enabled", False),
-            batch_size=splunk_raw.get("batch_size", 50),
-            flush_interval_s=splunk_raw.get("flush_interval_s", 5),
-        ),
-        otel=_merge_otel(raw.get("otel")),
         gateway=GatewayConfig(
             host=gw_raw.get("host", "127.0.0.1"),
             port=gw_raw.get("port", 18789),
@@ -6663,6 +6506,18 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     return cfg
 
 
+_GUARDRAIL_PROFILE_KEYS = ("profiles", "profile_assignments", "default_profile")
+
+
+def _without_guardrail_profiles(raw: dict[str, Any]) -> dict[str, Any]:
+    """raw without the guardrail profile keys (a shallow copy when it has any)."""
+    guardrail = raw.get("guardrail")
+    if not isinstance(guardrail, dict) or not any(key in guardrail for key in _GUARDRAIL_PROFILE_KEYS):
+        return raw
+    trimmed = {key: value for key, value in guardrail.items() if key not in _GUARDRAIL_PROFILE_KEYS}
+    return {**raw, "guardrail": trimmed}
+
+
 def _exact_config_version(value: Any) -> int:
     if isinstance(value, bool):
         return 0
@@ -6673,23 +6528,18 @@ def _exact_config_version(value: Any) -> int:
     return 0
 
 
-def _audit_database_path(raw: dict[str, Any], data_dir: str, source_version: int) -> str:
+def _audit_database_path(raw: dict[str, Any], data_dir: str) -> str:
     """Resolve Python readers/writers to the same local store as config v8."""
 
-    if is_current_schema(source_version):
-        observability = raw.get("observability")
-        local = observability.get("local") if isinstance(observability, dict) else None
-        configured = local.get("path") if isinstance(local, dict) else None
-        path = configured.strip() if isinstance(configured, str) else ""
-        if not path:
-            path = os.path.join(data_dir, AUDIT_DB_NAME)
-        elif not os.path.isabs(path):
-            path = os.path.join(data_dir, path)
-        return os.path.normpath(os.path.expanduser(path))
-    configured = raw.get("audit_db")
-    if isinstance(configured, str) and configured.strip():
-        return configured
-    return os.path.join(data_dir, AUDIT_DB_NAME)
+    observability = raw.get("observability")
+    local = observability.get("local") if isinstance(observability, dict) else None
+    configured = local.get("path") if isinstance(local, dict) else None
+    path = configured.strip() if isinstance(configured, str) else ""
+    if not path:
+        path = os.path.join(data_dir, AUDIT_DB_NAME)
+    elif not os.path.isabs(path):
+        path = os.path.join(data_dir, path)
+    return os.path.normpath(os.path.expanduser(path))
 
 
 def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
@@ -6706,6 +6556,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         process_interval_s=int(raw.get("process_interval_s", 60) or 60),
         scan_roots=list(raw.get("scan_roots", ["~"]) or ["~"]),
         signature_packs=list(raw.get("signature_packs", []) or []),
+        signature_pack_digests={str(k): str(v) for k, v in (raw.get("signature_pack_digests") or {}).items()},
         allow_workspace_signatures=bool(raw.get("allow_workspace_signatures", False)),
         disabled_signature_ids=list(raw.get("disabled_signature_ids", []) or []),
         include_shell_history=bool(raw.get("include_shell_history", True)),
@@ -6714,6 +6565,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_network_domains=bool(raw.get("include_network_domains", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
         include_user_principal=_coerce_bool(raw.get("include_user_principal", False)),
+        trusted_ad_child_domains=[str(v) for v in (raw.get("trusted_ad_child_domains", []) or [])],
         ide_inventory=_normalize_ide_inventory(raw.get("ide_inventory")),
         lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
@@ -6811,15 +6663,12 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
     if not isinstance(raw, dict):
         return PerConnectorGuardrailConfig()
     hilt_entry = raw.get("hilt")
-    if hilt_entry is None:
-        hilt_entry = raw.get("hitl")
     enabled_raw = raw.get("enabled")
     return PerConnectorGuardrailConfig(
         mode=str(raw.get("mode", "") or ""),
         hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
         hook_fail_mode=str(raw.get("hook_fail_mode", "") or ""),
         block_message=str(raw.get("block_message", "") or ""),
-        rule_pack_dir=str(raw.get("rule_pack_dir", "") or ""),
         enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),
@@ -6951,15 +6800,16 @@ def default_config() -> Config:
 
 
 def prepare_fresh_v8_config(cfg: Config) -> Config:
-    """Mark a never-persisted default config as a canonical v8 source.
+    """Mark a never-persisted default config as a current-schema source.
 
-    Capturing dataclass defaults as the v8 baseline means the first save writes
-    only explicit first-run choices, plus ``config_version`` and the canonical
+    Capturing dataclass defaults as the baseline means the first save writes
+    only explicit first-run choices, plus ``config_version`` (the current one,
+    so a fresh install has nothing to migrate) and the canonical
     ``observability`` block.
     """
 
     if cfg is None or cfg._source_config_version != 0:
         raise ValueError("fresh v8 configuration requires an unversioned default")
-    cfg._source_config_version = FRESH_CONFIG_VERSION
+    cfg._source_config_version = CURRENT_CONFIG_VERSION
     cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg

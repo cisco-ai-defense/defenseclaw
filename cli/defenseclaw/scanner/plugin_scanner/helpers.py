@@ -241,33 +241,6 @@ def js_call_view(content: str) -> tuple[list[str], list[tuple[int, ...]]]:
     return lines, openers
 
 
-def python_code_lines(content: str, *, keep_strings: bool = False) -> list[str] | None:
-    """Return *content*'s lines with Python comments and docstrings blanked.
-
-    Source rules must not match words inside docstrings, warning prose or
-    regex data (GAP-1877). ``keep_strings=False`` blanks every string
-    literal too (for call-shaped rules); ``keep_strings=True`` keeps
-    non-docstring literals such as URLs and paths. Columns are kept, so
-    line numbers still match ``content.split("\n")``. Returns ``None``
-    when the file doesn't tokenize, so the caller can fall back.
-    """
-    views = python_code_views(content)
-    if views is None:
-        return None
-    return views[0] if keep_strings else views[1]
-
-
-def python_code_views(content: str) -> tuple[list[str], list[str]] | None:
-    """Return both :func:`python_code_lines` views from one tokenize pass.
-
-    The first view keeps non-docstring string literals, the second blanks
-    every string literal. Tokenizing is the costly part of a plugin scan
-    (GAP-2070), so callers that need both views should use this.
-    """
-    src = python_source(content)
-    return None if src is None else (src.code, src.calls)
-
-
 # Write/append/delete calls on a path in Python source (GAP-2124). A
 # cognitive file name counts as written only when the statement holding it,
 # or a name it is assigned to, reaches one of these. ``fh.write(...)`` is

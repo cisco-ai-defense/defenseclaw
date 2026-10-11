@@ -60,6 +60,67 @@ func writeClaudePolicyJSON(t *testing.T, path string, value interface{}) {
 	}
 }
 
+// GAP-1062: a dotfiles layout links ~/.claude/settings.json to a file in the
+// home folder. Setup writes the hooks through the link, so the effective-hook
+// check must follow it too; refusing it left the gateway unable to start
+// while fail-closed hooks blocked every Claude Code prompt.
+func TestClaudeSettingsLinkedIntoHomeIsInspected(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps refusing linked settings")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	target := filepath.Join(home, "dotfiles", "claude", "settings.json")
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	for _, dir := range []string{filepath.Dir(target), filepath.Dir(settingsPath), filepath.Join(root, "managed")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	restore, err := BindUserHomeDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restore)
+	previousSettings, previousManaged := ClaudeCodeSettingsPathOverride, ClaudeCodeManagedSettingsRootOverride
+	ClaudeCodeSettingsPathOverride, ClaudeCodeManagedSettingsRootOverride = settingsPath, filepath.Join(root, "managed")
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride, ClaudeCodeManagedSettingsRootOverride = previousSettings, previousManaged
+	})
+
+	conn := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: filepath.Join(home, ".defenseclaw"), APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Claude setup through a linked settings file: %v", err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("OwnedHooksPresent = %v, %v; want the hooks written through the link", present, err)
+	}
+	if info, err := os.Lstat(settingsPath); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("settings link was replaced: %v", err)
+	}
+
+	outside := filepath.Join(root, "elsewhere.json")
+	if err := os.WriteFile(outside, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claudeCodeUserSettingsReadPath(settingsPath); err == nil || !strings.Contains(err.Error(), "outside your home folder") {
+		t.Fatalf("link outside the home folder: err = %v", err)
+	}
+}
+
 func TestClaudeEffectivePolicyUsesWorkspacePrecedence(t *testing.T) {
 	conn, opts, _, _ := isolatedClaudePolicyFixture(t)
 	project := filepath.Join(opts.WorkspaceDir, ".claude", "settings.json")

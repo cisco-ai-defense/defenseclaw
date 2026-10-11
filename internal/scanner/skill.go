@@ -93,19 +93,14 @@ func extractJSON(data []byte) []byte {
 	return data
 }
 
-// SkillScanner shells out to the Python “cisco-ai-skill-scanner“ CLI.
-//
-// Everything the scanner does is derived from config: the policy, the judge
-// (the resolved “llm:“ block, Config.ResolveLLM("scanners.skill")), the
-// optional analyzers and the environment. The process environment is an
-// allowlist, so shell variables such as “SKILL_SCANNER_LLM_MODEL“ never
-// change a scan. DefenseClaw never passes “--fail-on-severity“: the gate is
-// applied to the JSON findings by admission (fail_on_severity), and any
-// non-zero exit is a scan error.
+// SkillScanner shells out to the Python skill scanner. V9 scans derive their
+// judge and environment from config. Secure Client v8 scans preserve the
+// inherited scanner environment and argument behavior of main.
 type SkillScanner struct {
 	Config         config.SkillScannerConfig
 	LLM            config.LLMConfig
 	CiscoAIDefense config.CiscoAIDefenseConfig
+	SecureClient   bool
 }
 
 // NewSkillScannerFromLLM constructs a scanner from the resolved judge LLM
@@ -114,6 +109,7 @@ func NewSkillScannerFromLLM(cfg config.SkillScannerConfig, llm config.LLMConfig,
 	if cfg.Binary == "" {
 		cfg.Binary = "skill-scanner"
 	}
+	cfg.Binary = resolveScannerRuntime(cfg.Binary, "skill-scanner", "skill-scanner.exe")
 	return &SkillScanner{
 		Config:         cfg,
 		LLM:            llm,
@@ -151,7 +147,7 @@ var openAICompatibleProviders = map[string]bool{
 // start, so an unusable judge is not requested.
 func (s *SkillScanner) judge() (skillJudge, bool) {
 	llm := s.LLM
-	j := skillJudge{model: liteLLMModel(llm), apiKey: llm.ResolvedAPIKey(), baseURL: strings.TrimSpace(llm.BaseURL)}
+	j := skillJudge{model: liteLLMModel(llm), apiKey: llm.ResolvedAPIKey(), baseURL: strings.TrimSpace(llm.RequestBaseURL())}
 	if j.model == "" {
 		return j, false
 	}
@@ -188,41 +184,61 @@ func (s *SkillScanner) judge() (skillJudge, bool) {
 	return j, true
 }
 
+// commandArgs is the scanner command line: buildArgs, led by the tool name
+// when the binary is the embedded scanner runtime.
+func (s *SkillScanner) commandArgs(target, policy string) []string {
+	args := s.buildArgs(target, policy)
+	if usesScannerRuntime(s.Config.Binary) {
+		return append([]string{"skill-scanner"}, args...)
+	}
+	return args
+}
+
 func (s *SkillScanner) buildArgs(target, policy string) []string {
 	args := []string{"scan", "--format", "json", "--policy", policy}
 
 	judged := false
 	if s.Config.UseLLM {
-		if j, ok := s.judge(); ok {
+		if s.SecureClient && skillScannerSupportsLLMProvider(s.LLM.ProviderPrefix()) {
 			judged = true
 			args = append(args, "--use-llm")
-			if j.provider != "" {
-				args = append(args, "--llm-provider", j.provider)
+			if s.LLM.Provider != "" {
+				args = append(args, "--llm-provider", s.LLM.Provider)
 			}
 			if s.Config.LLMConsensus > 0 {
 				args = append(args, "--llm-consensus-runs", strconv.Itoa(s.Config.LLMConsensus))
+			}
+		} else if !s.SecureClient {
+			if j, ok := s.judge(); ok {
+				judged = true
+				args = append(args, "--use-llm")
+				if j.provider != "" {
+					args = append(args, "--llm-provider", j.provider)
+				}
+				if s.Config.LLMConsensus > 0 {
+					args = append(args, "--llm-consensus-runs", strconv.Itoa(s.Config.LLMConsensus))
+				}
 			}
 		}
 	}
 	if s.Config.UseBehavioral {
 		args = append(args, "--use-behavioral")
 	}
-	// The meta-analyzer needs the judge: without one skill-scanner exits 2
-	// ("Meta-Analyzer LLM API key not configured"), which fails the scan
-	// closed. Python runs meta under the same condition.
-	if s.Config.EnableMeta && judged {
+	// The new path enables meta only with a resolved judge. Secure Client keeps
+	// main's inherited-judge behavior.
+	if s.Config.EnableMeta && (judged || s.SecureClient) {
 		args = append(args, "--enable-meta")
 	}
 	if s.Config.UseTrigger {
 		args = append(args, "--use-trigger")
 	}
-	if s.Config.VirusTotalEnabled() {
+	if s.Config.Analyzers.VirusTotal.Enabled {
 		args = append(args, "--use-virustotal")
 		if s.Config.Analyzers.VirusTotal.UploadFiles {
 			args = append(args, "--vt-upload-files")
 		}
 	}
-	if s.Config.AIDefenseEnabled() {
+	if s.Config.Analyzers.AIDefense.Enabled {
 		args = append(args, "--use-aidefense")
 	}
 	if s.Config.Analyzers.OSV.Enabled {
@@ -244,6 +260,9 @@ var skillScannerEnvPassthrough = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "USERPROFILE": true,
 	"TMPDIR": true, "TMP": true, "TEMP": true, "LANG": true, "LC_ALL": true, "LC_CTYPE": true, "TZ": true,
 	"SYSTEMROOT": true, "WINDIR": true, "COMSPEC": true, "PATHEXT": true, "SYSTEMDRIVE": true,
+	// Python's platform.machine() reads these on Windows; without them
+	// skill-scanner's CEL helper saw "win32/" and refused to start.
+	"PROCESSOR_ARCHITECTURE": true, "PROCESSOR_ARCHITEW6432": true, "NUMBER_OF_PROCESSORS": true, "OS": true,
 	"APPDATA": true, "LOCALAPPDATA": true, "PROGRAMDATA": true,
 	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true,
 	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "REQUESTS_CA_BUNDLE": true, "CURL_CA_BUNDLE": true,
@@ -253,13 +272,19 @@ var skillScannerEnvPassthrough = map[string]bool{
 
 var skillScannerEnvPassthroughPrefixes = []string{"AWS_", "AZURE_"}
 
-// scanEnv builds the scanner environment from config: the allowlisted
-// process variables plus the derived scanner settings. Nothing else from
-// the gateway's environment (SKILL_SCANNER_*, VIRUSTOTAL_*, AI_DEFENSE_*,
-// ENABLE_*_ANALYZER, ...) reaches the scanner.
+// Botocore reads endpoint_url from environment variables and shared AWS
+// profiles. Scans keep the credential chain but ignore both endpoint sources,
+// so only the resolved config judge can select a non-default endpoint.
+
+// scanEnv builds an allowlisted, config-derived environment for v9 scans.
+// Secure Client keeps the inherited v8 scanner environment.
 func (s *SkillScanner) scanEnv() []string {
+	if s.SecureClient {
+		return s.secureClientScanEnv()
+	}
 	env := make([]string, 0, 32)
-	derived := map[string]string{"NO_COLOR": "1", "TERM": "dumb"}
+	derived := map[string]string{"NO_COLOR": "1", "TERM": "dumb",
+		"AWS_IGNORE_CONFIGURED_ENDPOINT_URLS": "true"}
 	if s.Config.UseLLM {
 		if j, ok := s.judge(); ok {
 			derived["SKILL_SCANNER_LLM_MODEL"] = j.model
@@ -269,10 +294,10 @@ func (s *SkillScanner) scanEnv() []string {
 			derived["AWS_REGION"] = j.awsRegion
 		}
 	}
-	if s.Config.VirusTotalEnabled() {
+	if s.Config.Analyzers.VirusTotal.Enabled {
 		derived["VIRUSTOTAL_API_KEY"] = s.Config.ResolvedVirusTotalKey()
 	}
-	if s.Config.AIDefenseEnabled() {
+	if s.Config.Analyzers.AIDefense.Enabled {
 		derived["AI_DEFENSE_API_KEY"] = s.CiscoAIDefense.ResolvedAPIKey()
 		derived["AI_DEFENSE_API_URL"] = strings.TrimSpace(s.CiscoAIDefense.Endpoint)
 	}
@@ -282,6 +307,9 @@ func (s *SkillScanner) scanEnv() []string {
 			continue
 		}
 		upper := strings.ToUpper(name)
+		if strings.HasPrefix(upper, "AWS_ENDPOINT_URL") {
+			continue
+		}
 		if v, set := derived[upper]; set && v != "" {
 			continue // config wins over the inherited value
 		}
@@ -295,6 +323,41 @@ func (s *SkillScanner) scanEnv() []string {
 		}
 	}
 	return env
+}
+
+// secureClientScanEnv preserves the scanner environment inherited by main's
+// v8 Secure Client path. Config values fill missing variables only.
+func (s *SkillScanner) secureClientScanEnv() []string {
+	env := os.Environ()
+	existing := make(map[string]bool, len(env))
+	for _, kv := range env {
+		if name, _, ok := strings.Cut(kv, "="); ok {
+			existing[name] = true
+		}
+	}
+	inject := map[string]string{
+		"SKILL_SCANNER_LLM_API_KEY": s.LLM.ResolvedAPIKey(),
+		"SKILL_SCANNER_LLM_MODEL":   liteLLMModel(s.LLM),
+		"VIRUSTOTAL_API_KEY":        s.Config.ResolvedVirusTotalKey(),
+		"AI_DEFENSE_API_KEY":        s.CiscoAIDefense.ResolvedAPIKey(),
+		"NO_COLOR":                  "1",
+		"TERM":                      "dumb",
+	}
+	for name, value := range inject {
+		if value != "" && !existing[name] {
+			env = append(env, name+"="+value)
+		}
+	}
+	return env
+}
+
+func skillScannerSupportsLLMProvider(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "", "anthropic", "openai":
+		return true
+	default:
+		return false
+	}
 }
 
 func hasAnyPrefix(value string, prefixes []string) bool {
@@ -343,6 +406,17 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		TargetType: InferTargetType(s.Name()),
 	}
 
+	if err := scannerRuntimePreflight(s.Config.Binary, "skill-scanner", "skill-scanner.exe"); err != nil {
+		result.ScanError = err.Error()
+		result.ExitCode = -1
+		return result, err
+	}
+	if s.Config.UseLLM {
+		if j, ok := s.judge(); ok {
+			result.JudgeModel = j.model
+		}
+	}
+
 	policy, cleanup, err := s.policyArg()
 	defer cleanup()
 	if err != nil {
@@ -354,16 +428,25 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		return result, err
 	}
 
+	scanPath, unstage, err := stageUTF16Skill(target)
+	defer unstage()
+	if err != nil {
+		result.Duration = time.Since(start)
+		result.ScanError = err.Error()
+		result.ExitCode = -1
+		return result, err
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(s.Config.ScanTimeoutSeconds())*time.Second)
 	defer cancel()
-	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.buildArgs(target, policy)...)
+	cmd := processutil.CommandContext(ctx, s.Config.Binary, s.commandArgs(scanPath, policy)...)
 	cmd.Env = s.scanEnv()
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err = cmd.Run()
+	err = processutil.RunTree(cmd)
 	result.Duration = time.Since(start)
 	stderrStr := stderr.String()
 
@@ -373,11 +456,11 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = fmt.Errorf("scanner: %s not found at %q — repair the managed DefenseClaw installation; source checkouts: uv sync", s.Name(), s.Config.Binary)
+			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "repair the managed DefenseClaw installation; source checkouts: uv sync")
 			return nil, scanErr
 		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, scannerFailureText(stderrStr))
 			return nil, scanErr
 		}
 	}
@@ -388,7 +471,7 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	}
 
 	if stdout.Len() > 0 {
-		findings, parseErr := parseSkillOutput(stdout.Bytes(), target)
+		findings, parseErr := parseSkillOutput(stdout.Bytes(), scanPath)
 		if parseErr != nil {
 			scanErr = fmt.Errorf("scanner: failed to parse %s output: %w (stderr=%s)", s.Name(), parseErr, stderrStr)
 			return nil, scanErr
@@ -400,11 +483,53 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 	// an LLM/behavioral/meta configuration error, and DefenseClaw never
 	// passes --fail-on-severity, so there is no "findings" exit to accept.
 	if exitCode != 0 {
-		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, stderrStr)
+		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, scannerFailureText(stderrStr))
 		return result, scanErr
 	}
 
 	return result, nil
+}
+
+// RuleLLMAnalysisFailed is the INFO finding skill-scanner reports when its
+// LLM judge started but did not answer (an outage, blocked egress, a model
+// error); the scan then finished with the deterministic analyzers only.
+const RuleLLMAnalysisFailed = "LLM_ANALYSIS_FAILED"
+
+// RulePluginLLMScanError is the MEDIUM finding the plugin scanner reports
+// when its enabled LLM judge failed to run or gave no usable answer.
+const RulePluginLLMScanError = "LLM-SCAN-ERROR"
+
+// ErrJudgeDidNotRun marks a skill or plugin scan whose LLM judge did not run.
+var ErrJudgeDidNotRun = errors.New("the LLM judge did not run, so the scan is incomplete")
+
+// JudgeFailure returns an ErrJudgeDidNotRun error when result carries the
+// scanner's LLM_ANALYSIS_FAILED finding, or a plugin scan's LLM-SCAN-ERROR
+// finding from a configured judge (JudgeModel set), nil otherwise. The install
+// watcher fails such a scan closed, as skill-scanner.mdx promises for a judge
+// that cannot run (GAP-0376); the finding alone read as a clean scan or as a
+// MEDIUM warning (GAP-1444).
+func JudgeFailure(result *ScanResult) error {
+	if result == nil {
+		return nil
+	}
+	for _, f := range result.Findings {
+		pluginJudge := f.RuleID == RulePluginLLMScanError && result.JudgeModel != ""
+		if f.RuleID != RuleLLMAnalysisFailed && !pluginJudge {
+			continue
+		}
+		detail := strings.Join(strings.Fields(f.Description), " ")
+		if pluginJudge {
+			detail = strings.TrimSpace("judge " + result.JudgeModel + ": " + detail)
+		}
+		if len(detail) > 240 {
+			detail = detail[:240] + "..."
+		}
+		if detail == "" {
+			return ErrJudgeDidNotRun
+		}
+		return fmt.Errorf("%w: %s", ErrJudgeDidNotRun, detail)
+	}
+	return nil
 }
 
 type skillOutput struct {

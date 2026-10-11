@@ -61,7 +61,10 @@ skip() {
 }
 
 if [ -z "$version" ]; then
-    version=$(gh release view --repo "$repository" --json tagName -q .tagName 2>/dev/null || true)
+    if ! version=$(gh release list --repo "$repository" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // empty'); then
+        echo "::error::could not look up the latest published release" >&2
+        exit 1
+    fi
     [ -n "$version" ] || skip "no published release to upgrade from"
 fi
 case "$asset" in

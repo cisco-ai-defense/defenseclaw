@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -194,10 +194,12 @@ def _registry_path() -> Path:
     A module imported from ``<repo>/cli/defenseclaw`` uses the authoritative
     source registry. An installed package uses only its adjacent package-data
     mirror, even when its virtualenv happens to live below a source checkout.
-    DEFENSECLAW_REPO_ROOT remains an explicit override for CI sandboxes.
+    DEFENSECLAW_REPO_ROOT remains an explicit override for CI sandboxes and
+    per-user hosts. A managed standalone host ignores it: the registry decides
+    which variables that host ignores, so a standard user must not pick it.
     """
     env_root = os.environ.get("DEFENSECLAW_REPO_ROOT", "").strip()
-    if env_root:
+    if env_root and not managed_standalone():
         p = Path(env_root) / _REGISTRY_RELATIVE_PATH
         if p.is_file():
             return p
@@ -411,11 +413,15 @@ def active_security_overrides(
 
 
 def managed_policy(name: str) -> str:
-    """The registry's managed policy for ``name`` (``allow`` when undeclared)."""
+    """The registry's managed policy for ``name`` (``allow`` when undeclared).
+
+    A registry that cannot be loaded fails closed (``ignore``). Callers drop a
+    value only on a managed standalone host, so other hosts are unchanged.
+    """
     try:
         entry = load_registry().get(name)
-    except (OSError, ValueError):
-        return MANAGED_ALLOW
+    except (OSError, ValueError, KeyError, TypeError):
+        return MANAGED_IGNORE
     return entry.managed if entry is not None else MANAGED_ALLOW
 
 
@@ -435,6 +441,28 @@ def managed_standalone() -> bool:
     except (OSError, RuntimeError):  # RuntimeError: no home directory to look in
         raw = b""
     return standalone_managed(raw)
+
+
+#: Variables only a Secure Client host reads. Every other host ignores them;
+#: the registry purpose of each names the config key that replaces it.
+_SECURE_CLIENT_ONLY = ("DEFENSECLAW_JUDGE_TRACE",)
+
+
+def ignored_off_secure_client(env: Mapping[str, str] | None = None) -> list[str]:
+    """Names (never values) of set Secure-Client-only variables on a host that is not one."""
+    from defenseclaw.config import config_path
+    from defenseclaw.config_writer import secure_client_managed
+
+    environ = os.environ if env is None else env
+    set_names = sorted(name for name in _SECURE_CLIENT_ONLY if str(environ.get(name) or "").strip())
+    if not set_names:
+        return []
+    try:
+        with open(config_path(), "rb") as handle:
+            raw = handle.read(4 * 1024 * 1024)
+    except (OSError, RuntimeError):  # RuntimeError: no home directory to look in
+        raw = b""
+    return [] if secure_client_managed(raw) else set_names
 
 
 def lookup(name: str, env: Mapping[str, str] | None = None, *, managed: bool | None = None) -> str | None:
@@ -463,7 +491,3 @@ def ignored_in_managed_mode(env: Mapping[str, str] | None = None) -> list[str]:
         if entry.managed == MANAGED_IGNORE and environ.get(entry.name)
     )
 
-
-def iter_entries() -> Iterable[EnvVar]:
-    """Convenience iterator over every entry."""
-    return iter(load_registry().entries)

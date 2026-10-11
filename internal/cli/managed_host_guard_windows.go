@@ -43,6 +43,17 @@ import (
 // Secure Client hosts are unaffected: only the standalone profile writes the
 // marker, and their record lives under the Secure Client roots, which this
 // profile's inspection never reads.
+// secureClientHost reports a Secure Client DefenseClaw install: its state
+// root under ProgramData exists. A seam for tests.
+var secureClientHost = func() bool {
+	roots, err := winpath.EnterpriseRootsFor(winpath.EnterpriseProfileSecureClient, os.Getenv("ProgramFiles"), os.Getenv("ProgramData"))
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(roots.StateRoot)
+	return err == nil
+}
+
 var managedHostWindowsStandalone = func() (string, bool) {
 	if where, ok := managedHostStandaloneMarker(); ok {
 		return where, true

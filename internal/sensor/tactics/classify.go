@@ -92,26 +92,6 @@ var privilegeCommands = []struct {
 	{regexp.MustCompile(`(?i)\bvisudo\b`), "sudoers edited"},
 }
 
-// encodedPayloadCommands recognise an agent packaging data for transport. On
-// its own this is ordinary tooling; as a chain stage before an upload it is
-// the staging step.
-var encodedPayloadCommands = []struct {
-	pattern *regexp.Regexp
-	reason  string
-}{
-	{regexp.MustCompile(`(?i)\bbase64\b`), "base64 encoding"},
-	{regexp.MustCompile(`(?i)\btar\b.*\|\s*(gzip|bzip2|xz|base64)`), "archive piped to an encoder"},
-	{regexp.MustCompile(`(?i)\bzip\s+-r?\s*-?P?\b`), "archive created"},
-	{regexp.MustCompile(`(?i)\bopenssl\s+enc\b`), "openssl encryption"},
-	{regexp.MustCompile(`(?i)\bCompress-Archive\b`), "PowerShell archive created"},
-	{regexp.MustCompile(`(?i)\[Convert\]::ToBase64String`), "PowerShell base64 encoding"},
-	// certutil -encode is the standard Windows base64 tool and a long-known
-	// living-off-the-land staging step. -decode is included because an agent
-	// unpacking a payload it fetched is the same chain stage in reverse.
-	{regexp.MustCompile(`(?i)\bcertutil(\.exe)?\b.*\s-(encode|decode)(hex)?\b`), "certutil encoding"},
-	{regexp.MustCompile(`(?i)\bmakecab(\.exe)?\b`), "cabinet archive created"},
-}
-
 // exfilHosts are public drop points: paste services, anonymous file drops,
 // webhook relays, and tunnels.
 //
@@ -232,7 +212,7 @@ func classifyFileWrite(observation Observation, indicators IndicatorSet) (Match,
 }
 
 func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool) {
-	cmdline := strings.TrimSpace(observation.Cmdline)
+	cmdline := withoutAgentHarness(strings.TrimSpace(observation.Cmdline))
 	if cmdline == "" {
 		return Match{}, false
 	}
@@ -296,14 +276,15 @@ func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool
 			Detail: observation.Name, Confidence: 1.0,
 		}, true
 	}
-	for _, candidate := range encodedPayloadCommands {
-		if candidate.pattern.MatchString(cmdline) {
-			return Match{
-				Tactic: Exfiltration, SignalID: "agent_encoded_payload",
-				Title:  "agent encoded or packaged data",
-				Detail: candidate.reason, Confidence: 1.0,
-			}, true
-		}
+	// Packaging is read from the programs the command runs, not from its
+	// text. On its own it is ordinary tooling; as a chain stage before an
+	// upload it is the staging step.
+	if reason, ok := encodedPayload(cmdline); ok {
+		return Match{
+			Tactic: Exfiltration, SignalID: "agent_encoded_payload",
+			Title:  "agent encoded or packaged data",
+			Detail: reason, Confidence: 1.0,
+		}, true
 	}
 	return Match{}, false
 }
@@ -355,4 +336,158 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// encodedPayloadPrograms are the programs whose own execution packages data
+// for transport, keyed by lowercased basename without ".exe".
+//
+// They match the program a command runs -- an exec's argv[0], or a stage of
+// a pipeline, a command substitution, or the script handed to a shell, eval,
+// PowerShell or cmd -- and never a word anywhere in a command line. A regex
+// over the whole line fired on the agent's own shell bootstrap, whose script
+// names base64 in a comment, and on an `echo base64` that encodes nothing
+// (GAP-1419).
+var encodedPayloadPrograms = map[string]string{
+	"base64":           "base64 encoding",
+	"zip":              "archive created",
+	"compress-archive": "PowerShell archive created",
+	"makecab":          "cabinet archive created",
+}
+
+// archiveEncoders are the stages a tar archive is piped into to compress or
+// encode it for transport.
+var archiveEncoders = map[string]bool{"gzip": true, "bzip2": true, "xz": true, "base64": true}
+
+// encodedPayload reports the packaging step a command line runs, if any.
+func encodedPayload(cmdline string) (string, bool) {
+	commands := shellCommands(cmdline)
+	archived := make(map[int]bool)
+	for _, command := range commands {
+		program, _ := commandProgram(command.words)
+		if archived[command.pipeline] && archiveEncoders[program] {
+			return "archive piped to an encoder", true
+		}
+		if program == "tar" {
+			archived[command.pipeline] = true
+		}
+	}
+	for _, command := range commands {
+		if reason, ok := encodingCommand(command.words); ok {
+			return reason, true
+		}
+	}
+	return "", false
+}
+
+// encodingCommand reports whether one simple command encodes or packages
+// data.
+func encodingCommand(words []shellWord) (string, bool) {
+	program, args := commandProgram(words)
+	switch program {
+	case "openssl":
+		switch firstOperand(args) {
+		case "enc":
+			return "openssl encryption", true
+		case "base64":
+			return "base64 encoding", true
+		}
+	case "certutil":
+		// certutil -encode is the standard Windows base64 tool and a
+		// long-known living-off-the-land staging step. -decode is included
+		// because an agent unpacking a payload it fetched is the same chain
+		// stage in reverse.
+		for _, arg := range args {
+			flag := strings.ToLower(arg.text)
+			if !strings.HasPrefix(flag, "-") && !strings.HasPrefix(flag, "/") {
+				continue
+			}
+			switch strings.TrimLeft(flag, "-/") {
+			case "encode", "decode", "encodehex", "decodehex":
+				return "certutil encoding", true
+			}
+		}
+	}
+	if reason, ok := encodedPayloadPrograms[program]; ok {
+		return reason, true
+	}
+	// [Convert]::ToBase64String is a .NET call in PowerShell code, not a
+	// program, so it matches where it is code: in an unquoted word.
+	for _, word := range words {
+		if !word.quoted && strings.Contains(strings.ToLower(word.text), "[convert]::tobase64string") {
+			return "PowerShell base64 encoding", true
+		}
+	}
+	return "", false
+}
+
+// The agent harness's own shell bootstrap, as Claude Code runs it for every
+// Bash tool call (argv captured on RHEL with bash and on macOS with zsh,
+// Claude Code 2.1.29x). Once per session a shell writes the snapshot:
+//
+//	bash -c -l SNAPSHOT_FILE=~/.claude/shell-snapshots/snapshot-bash-<id>.sh <script>
+//
+// and each tool call then runs the command it was asked to run as:
+//
+//	bash -c source ~/.claude/shell-snapshots/snapshot-bash-<id>.sh ... && eval '<command>' < /dev/null && pwd -P >| /tmp/claude-<hex>-cwd
+var (
+	harnessShell          = `^(?:"[^"]*"|\S*)\s+(?:-\S*\s+)*["']?`
+	harnessSnapshotFile   = `["']?[^\s"']*[/\\]shell-snapshots[/\\]snapshot-[\w.-]+\.sh`
+	harnessSnapshotWriter = regexp.MustCompile(harnessShell + `SNAPSHOT_FILE=` + harnessSnapshotFile)
+	harnessToolCall       = regexp.MustCompile(harnessShell + `source\s+` + harnessSnapshotFile)
+	harnessEval           = regexp.MustCompile(
+		`(?s)&&\s*eval\s+(.+?)\s*<\s*/dev/null\s*&&\s*pwd\s+-P\s*>\|\s*\S*claude-[0-9a-f]+-cwd["']?\s*$`)
+)
+
+// withoutAgentHarness strips the agent harness's own shell bootstrap from a
+// command line and returns what the agent was asked to run: the eval payload
+// of a tool-call wrapper, or nothing for the snapshot writer, whose script is
+// the harness's own. Any other command line is returned unchanged.
+//
+// Dropping the bootstrap text hides no program: every program the payload or
+// the snapshot writer runs is its own exec, classified on its own argv.
+func withoutAgentHarness(cmdline string) string {
+	if harnessSnapshotWriter.MatchString(cmdline) {
+		return ""
+	}
+	if !harnessToolCall.MatchString(cmdline) {
+		return cmdline
+	}
+	match := harnessEval.FindStringSubmatch(cmdline)
+	if match == nil {
+		return cmdline
+	}
+	return shellUnquote(match[1])
+}
+
+// shellUnquote removes the quoting from one shell word, such as the
+// '...'"'"'...' form the harness quotes its eval payload in.
+func shellUnquote(word string) string {
+	var text strings.Builder
+	for index := 0; index < len(word); index++ {
+		switch c := word[index]; c {
+		case '\'':
+			closing := strings.IndexByte(word[index+1:], '\'')
+			if closing < 0 {
+				text.WriteString(word[index+1:])
+				return text.String()
+			}
+			text.WriteString(word[index+1 : index+1+closing])
+			index += closing + 1
+		case '"':
+			for index++; index < len(word) && word[index] != '"'; index++ {
+				if word[index] == '\\' && index+1 < len(word) && strings.IndexByte("\"\\$`\n", word[index+1]) >= 0 {
+					index++
+				}
+				text.WriteByte(word[index])
+			}
+		case '\\':
+			if index+1 < len(word) {
+				index++
+			}
+			text.WriteByte(word[index])
+		default:
+			text.WriteByte(c)
+		}
+	}
+	return text.String()
 }

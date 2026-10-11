@@ -393,7 +393,10 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		if gitUserEmailPlaceholder(text[:start], matchLower) {
 			return false
 		}
-		tail := strings.TrimLeft(text[end:], " \t\r\n\"'`")
+		// Only what is glued to the address can make it a locator: a
+		// following word and colon on the same or the next line is the next
+		// field of a label: value record (GAP-0234).
+		tail := strings.TrimLeft(text[end:], "\"'`")
 		if strings.HasPrefix(tail, ":") {
 			return false
 		}
@@ -401,7 +404,7 @@ func credibleEmailContext(text, match string, start, end int) bool {
 		// email regex may stop early at an apparent TLD in a locator such as
 		// git@github.com-work:cisco/repo.git. Treat a contiguous host suffix
 		// followed by ':' as a remote locator rather than a person address.
-		if colon := strings.IndexByte(tail, ':'); colon > 0 {
+		if colon := strings.IndexByte(tail, ':'); colon > 0 && (tail[0] == '.' || tail[0] == '-') {
 			hostSuffix := tail[:colon]
 			if strings.IndexFunc(hostSuffix, func(char rune) bool {
 				return !((char >= 'a' && char <= 'z') ||

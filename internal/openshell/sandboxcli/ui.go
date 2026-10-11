@@ -554,9 +554,3 @@ func plural(n int64, one, many string) string {
 	}
 	return fmt.Sprintf("%d %s", n, many)
 }
-
-// isTerminal reports whether f is a terminal.
-func isTerminal(f *os.File) bool {
-	info, err := f.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice != 0
-}

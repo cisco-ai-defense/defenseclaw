@@ -48,7 +48,7 @@ def test_catalog_exposes_native_only_connector_coverage():
     catalog = json.loads(result.output)
     assert catalog["protocol"]["release"] == "schema-v1.21.0"
     assert catalog["environment_variables"] == []
-    canonical = json.loads((Path(__file__).parents[2] / "internal" / "inventory" / "acp_registry.json").read_text())
+    canonical = json.loads((Path(__file__).parents[2] / "internal" / "inventory" / "acp_registry.json").read_text(encoding="utf-8"))
     assert catalog == canonical
     assert set(ACP_AGENT_ENTRY_POINTS) == {agent["id"] for agent in catalog["agents"]}
     assert any(agent["id"] == "devin" and agent["kind"] == "native" for agent in catalog["agents"])

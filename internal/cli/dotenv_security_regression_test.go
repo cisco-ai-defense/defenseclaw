@@ -46,6 +46,7 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 		"DEFENSECLAW_SANDBOX_ID",
 		"DEFENSECLAW_SANDBOX_NAME",
 		"DEFENSECLAW_SANDBOX_TOKEN",
+		"DEFENSECLAW_DEPLOYMENT_MODE",
 		"DEFENSECLAW_ENTERPRISE_PROFILE",
 		"CLAUDE_CONFIG_DIR",
 		"NODE_OPTIONS",
@@ -75,6 +76,7 @@ func TestLoadDotEnvIntoOSRejectsProcessControlAndMalformedEntries(t *testing.T) 
 			"DEFENSECLAW_SANDBOX_ID=planted\n" +
 			"DEFENSECLAW_SANDBOX_NAME=planted\n" +
 			"DEFENSECLAW_SANDBOX_TOKEN=planted\n" +
+			"DEFENSECLAW_DEPLOYMENT_MODE=oss\n" +
 			"DEFENSECLAW_ENTERPRISE_PROFILE=standalone\n" +
 			"CLAUDE_CONFIG_DIR=/tmp/attacker-claude-home\n" +
 			"NODE_OPTIONS=--require=/tmp/attacker.js\n" +

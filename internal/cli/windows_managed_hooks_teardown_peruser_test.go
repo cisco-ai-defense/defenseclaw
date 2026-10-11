@@ -192,7 +192,12 @@ func TestRemoveWindowsManagedHooksStandalonePerUserRegistrationsCoversEveryRecor
 // the standalone profile; Secure Client finalize never runs it.
 func TestCompleteWindowsManagedHooksTeardownUserCleanupIsStandaloneOnly(t *testing.T) {
 	original := windowsManagedHooksStandaloneUserRegistrationRemover
-	t.Cleanup(func() { windowsManagedHooksStandaloneUserRegistrationRemover = original })
+	originalACPCopies := windowsManagedHooksStandaloneACPUserCopies
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneUserRegistrationRemover = original
+		windowsManagedHooksStandaloneACPUserCopies = originalACPCopies
+	})
+	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) { return nil, nil }
 	calls, pendingSID := 0, userCleanupSIDB
 	windowsManagedHooksStandaloneUserRegistrationRemover = func(
 		_ context.Context,
@@ -439,5 +444,61 @@ func TestCompleteWindowsManagedHooksTeardownUserCleanupRevokesInventoryACEsFirst
 	if len(report.UserRegistrationsFailed) != 1 ||
 		!strings.Contains(report.UserRegistrationsFailed[0], "read access on users' agent folders: set DACL: access denied") {
 		t.Fatalf("failed = %v", report.UserRegistrationsFailed)
+	}
+}
+
+// A purge removes the managed ACP folder (token copies and editor contract
+// locks) of every account that still has one, whether it is signed out,
+// revoked or enrolled for ACP only, and names one it could not remove; an
+// uninstall without purge leaves them (GAP-0773).
+func TestWindowsManagedHooksTeardownPurgeRemovesEveryAccountsACPCopies(t *testing.T) {
+	originalRemover := windowsManagedHooksStandaloneUserRegistrationRemover
+	originalCopies, originalACPPurger := windowsManagedHooksStandaloneACPUserCopies, windowsManagedHooksStandaloneACPUserPurger
+	originalIdentity, originalCursor := enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneCursorTombstonePurger
+	originalFloor := windowsManagedHooksStandaloneFloorPurger
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneUserRegistrationRemover = originalRemover
+		windowsManagedHooksStandaloneACPUserCopies, windowsManagedHooksStandaloneACPUserPurger = originalCopies, originalACPPurger
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedHooksStandaloneCursorTombstonePurger = originalIdentity, originalCursor
+		windowsManagedHooksStandaloneFloorPurger = originalFloor
+	})
+	windowsManagedHooksStandaloneUserRegistrationRemover = func(context.Context, string, enterprisehooks.Manifest) enterpriseHookUserCleanupResult {
+		return enterpriseHookUserCleanupResult{}
+	}
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	windowsManagedHooksStandaloneCursorTombstonePurger = func() error { return nil }
+	windowsManagedHooksStandaloneFloorPurger = func() error { return nil }
+	const signedOut, acpOnly = "S-1-5-21-1-2-3-3908", "S-1-5-21-1-2-3-3911"
+	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) {
+		return []enterprisehooks.WindowsACPUserCopy{
+			{SID: signedOut, Home: `C:\Users\dcad-w2w1`},
+			{SID: acpOnly, Home: `C:\Users\odd`},
+		}, nil
+	}
+	var purged []string
+	windowsManagedHooksStandaloneACPUserPurger = func(home, sid string) error {
+		purged = append(purged, sid)
+		if sid == acpOnly {
+			return errors.New("access denied")
+		}
+		return nil
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	manifest := enterprisehooks.Manifest{Version: 1}
+	var report windowsManagedHooksTeardownReport
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if len(purged) != 0 {
+		t.Fatalf("an uninstall without purge removed ACP copies: %v", purged)
+	}
+	t.Setenv(windowsManagedHooksPurgeUserStateEnv, "1")
+	completeWindowsManagedHooksTeardownUserCleanup(&report, `C:\ProgramData\DefenseClaw\runtime`, manifest)
+	if strings.Join(purged, ",") != signedOut+","+acpOnly {
+		t.Fatalf("purge removed the ACP copies of %v", purged)
+	}
+	if len(report.UserStatePurged) != 1 || report.UserStatePurged[0] != signedOut+`: C:\Users\dcad-w2w1\.defenseclaw\acp` {
+		t.Fatalf("purged = %v", report.UserStatePurged)
+	}
+	if len(report.UserStateRemaining) != 1 || !strings.HasPrefix(report.UserStateRemaining[0], acpOnly+`: C:\Users\odd\.defenseclaw\acp: access denied`) {
+		t.Fatalf("remaining = %v", report.UserStateRemaining)
 	}
 }

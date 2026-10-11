@@ -1,7 +1,6 @@
 # Release-candidate gates compare these reviewed sources byte-for-byte across
 # Linux, macOS, and Windows runners. Keep their checkout representation stable.
 scripts/defenseclaw-upgrade.sh text eol=lf
-scripts/install-openshell-sandbox.sh text eol=lf
 scripts/install.sh text eol=lf
 scripts/install.ps1 text eol=lf
 cli/defenseclaw/install_publish.py text eol=lf
@@ -30,6 +29,12 @@ policies/guardrail/** text eol=lf
 packaging/mdm/**/*.sh text eol=lf
 packaging/mdm/**/*.ps1 text eol=lf
 
+# The identity kit (packaging/identity and the Intune tenant helper) is copied
+# to tenant consoles and hosts as committed, and cli/tests/test_identity_kit.py
+# checks it stays LF; keep it LF on Windows checkouts too.
+packaging/identity/** text eol=lf
+packaging/mdm/intune/tenant/** text eol=lf
+
 # These pinned upstream snapshots are authenticated by SHA256 over their exact
 # bytes. Disable checkout-time newline conversion so Windows materializes the
 # same payload that the dependency lock reviewed.
@@ -39,3 +44,7 @@ schemas/telemetry/v8/upstream/** -text
 # SHA-256 over exact bytes. They must survive a Windows checkout without CRLF
 # rewriting before the strict normalization gate reads them.
 benchmarks/fixtures/** -text
+
+# The Secure Client evaluation goldens are compared byte for byte, also on a
+# Windows checkout.
+internal/gateway/testdata/secure_client_evaluation/** text eol=lf

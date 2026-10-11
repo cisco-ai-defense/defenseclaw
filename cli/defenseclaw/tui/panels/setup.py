@@ -649,6 +649,9 @@ class SetupPanelModel:
         # or config-editor draft. The authoritative config/readiness state
         # still advances, but the draft remains intact until run/cancel/revert.
         self.disk_change_pending = False
+        # Draft keys another writer changed on disk while the draft was open,
+        # so Review can say the save replaces their value (GAP-0342).
+        self.disk_changed_keys: frozenset[str] = frozenset()
         # Goal-first entry layer: a contextual "what do you want to do?" menu
         # that sits in front of the wizard form. ``active_goal`` is carried
         # into the form so its preset filter survives dependent rebuilds.
@@ -676,7 +679,10 @@ class SetupPanelModel:
         self.config = cfg
         self.observability_status = None
         self.observability_status_error = ""
-        if not preserve_config_draft:
+        if preserve_config_draft:
+            self._rebase_config_draft(build_setup_sections(cfg, self.os_name, observability_status=None))
+        else:
+            self.disk_changed_keys = frozenset()
             self.sections = build_setup_sections(cfg, self.os_name, observability_status=None)
             if active_name:
                 for index, section in enumerate(self.sections):
@@ -694,6 +700,34 @@ class SetupPanelModel:
         # changes; otherwise we keep showing rows derived from the
         # snapshot captured at __init__ time even after `setup` runs.
         self.rebuild_readiness_checks()
+
+    def _rebase_config_draft(self, rebuilt: tuple[ConfigSection, ...]) -> None:
+        """Move the open config draft onto the new disk generation (GAP-0342).
+
+        Untouched fields show the value now on disk; an edited field keeps
+        the edit, with the on-disk value as its "before" in Review; an edited
+        field another writer changed meanwhile is recorded in
+        ``disk_changed_keys``, so Review says the save replaces it.
+        """
+
+        edits = {f.key: f for s in self.sections for f in s.fields if f.key and f.value != f.original}
+        changed = set(self.disk_changed_keys)
+        sections: list[ConfigSection] = []
+        for section in rebuilt:
+            fields = []
+            for current in section.fields:
+                draft = edits.get(current.key) if current.key else None
+                if draft is not None:
+                    if current.original != draft.original:
+                        changed.add(current.key)
+                    current = current.with_value(draft.value)
+                fields.append(current)
+            sections.append(replace(section, fields=tuple(fields)))
+        self.sections = tuple(sections)
+        self.disk_changed_keys = frozenset(key for key in changed if key in edits)
+        self.active_section = _clamp(self.active_section, 0, max(0, len(self.sections) - 1))
+        section = self.current_section()
+        self.active_line = _clamp(self.active_line, 0, max(0, len(section.fields) - 1) if section else 0)
 
     def set_observability_status(
         self,
@@ -999,7 +1033,12 @@ class SetupPanelModel:
         return False
 
     def config_diff(self) -> tuple[ConfigDiffEntry, ...]:
-        return config_diff(self.sections)
+        entries = config_diff(self.sections)
+        if not self.disk_changed_keys:
+            return entries
+        return tuple(
+            replace(entry, disk_changed=True) if entry.key in self.disk_changed_keys else entry for entry in entries
+        )
 
     def validation_errors(self) -> tuple[str, ...]:
         return validation_errors(self.sections)
@@ -1043,8 +1082,9 @@ class SetupPanelModel:
         elif field is not None and field.interactive:
             restart_hint = "Restart: queued on save when runtime settings change"
         saved_hint = ""
-        if self.last_saved_at is not None:
-            # "Saved 12:08 UTC", not a microsecond ISO stamp (GAP-1554).
+        if self.last_saved_at is not None and not changes:
+            # "Saved 12:08 UTC", not a microsecond ISO stamp (GAP-1554); an
+            # open draft is not saved, so it shows no earlier save (GAP-0342).
             saved_hint = "Saved " + self.last_saved_at.astimezone(timezone.utc).strftime("%H:%M UTC")
             actions.append(saved_hint)
         return SetupSaveRestartHints(
@@ -1158,13 +1198,19 @@ class SetupPanelModel:
             action=action,
         )
 
-    def apply_changes_to_config(self) -> None:
+    def apply_changes_to_config(self, *, mark_applied: bool = True) -> None:
         if self.config is None:
             raise RuntimeError("setup: no config loaded")
         for section in self.sections:
             for field in section.fields:
                 if field.value != field.original:
                     apply_config_field(self.config, field.key, field.value)
+        if mark_applied:
+            self.accept_applied_changes()
+
+    def accept_applied_changes(self) -> None:
+        """Clear the draft only after its config write succeeded."""
+        self.disk_changed_keys = frozenset()
         if self.disk_change_pending:
             # The draft was based on an older disk generation. Changed fields
             # were just merged into the latest authoritative object; rebuild
@@ -2039,17 +2085,27 @@ def admission_action_fields(asset_type: str, cfg: object | Mapping[str, Any] | N
             hint="block/quarantine reject the install; warn admits with a warning; allow admits; blank=default",
         ),
     ]
+    from defenseclaw.enforce.admission import triple_shorthand
+
+    options = ("", "block", "quarantine", "warn", "allow")
     for severity in ("critical", "high", "medium", "low", "info"):
-        out.append(
-            _field(
-                cfg,
-                severity[:1].upper() + severity[1:],
-                f"admission.{asset_type}.actions.{severity}",
-                "choice",
-                ("", "block", "quarantine", "warn", "allow"),
-                f"On a {severity.upper()} finding; blank=the default for this severity.",
-            )
+        key = f"admission.{asset_type}.actions.{severity}"
+        row = _field(
+            cfg,
+            severity[:1].upper() + severity[1:],
+            key,
+            "choice",
+            options,
+            f"On a {severity.upper()} finding; blank=the default for this severity.",
         )
+        # policy activate writes exact triples: show one as the shorthand it
+        # spells (as config get does), and keep a custom triple selectable.
+        shorthand = triple_shorthand(get_config_value(cfg, key, ""))
+        if shorthand:
+            row = _field_with_original(row, shorthand)
+        elif row.value not in options:
+            row = replace(row, options=(*options, row.value))
+        out.append(row)
     return tuple(out)
 
 
@@ -2135,7 +2191,6 @@ def _local_observability_wizard_fields() -> tuple[WizardFormField, ...]:
 def _token_rotation_wizard_fields() -> tuple[WizardFormField, ...]:
     return (
         WizardFormField("Connector", "choice", value="", default="", options=("", *CONNECTORS)),
-        WizardFormField("Refresh Hooks", "bool", value="yes", default="yes"),
     )
 
 
@@ -3399,6 +3454,7 @@ def _llm_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]
             "regional",
             "Use a regional provider (Bedrock / Vertex / Azure)",
             summary="Switch to a cloud-region provider; auth rows appear on pick.",
+            presets={"--provider": "bedrock"},
             fields=("Provider", "Model", *_LLM_PROVIDER_SECTIONS),
         ),
         WizardGoal(
@@ -3510,7 +3566,7 @@ def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wiza
             "Re-run setup for a connector",
             summary="Set up one connector again, for example to change its guardrail mode.",
             presets={"@Action": "setup"},
-            fields=("Connector", "Action", "Guardrail Mode", "Scanner Mode", "Verify After Setup"),
+            fields=("Connector", "Action", "Guardrail Mode", "Scanner Mode"),
         ),
         WizardGoal(
             "remove",
@@ -3618,13 +3674,7 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
             "auto",
             "Rotate the gateway token",
             summary="Make a new gateway token and update every protected agent's hooks; nothing changes if a step fails.",
-            fields=("Refresh Hooks",),
-        ),
-        WizardGoal(
-            "specific",
-            "Rotate the gateway token, refresh one agent",
-            summary="Same new token for every agent; only the chosen agent's hooks are rewritten now.",
-            fields=("Connector", "Refresh Hooks"),
+            fields=("Connector",),
         ),
     )
 
@@ -4735,8 +4785,6 @@ def _build_token_rotation_args(fields: Sequence[WizardFormField]) -> tuple[str, 
     args = ["setup", "rotate-token", "--yes"]
     if connector := wizard_field_value(fields, "Connector"):
         args.extend(("--connector", connector))
-    if wizard_bool_value(fields, "Refresh Hooks", "yes") == "no":
-        args.append("--no-restart")
     return tuple(args)
 
 
@@ -4890,7 +4938,6 @@ _GUARDRAIL_CONNECTOR_SETUP_FLAGS: frozenset[str] = frozenset(
         "--human-approval",
         "--hilt-min-severity",
         "--restart",
-        "--verify",
     }
 )
 
@@ -4941,7 +4988,7 @@ def _build_guardrail_setup_args(
             judge_dirty = judge_dirty or field.value != field.default
             continue
         if field.kind == "bool":
-            if field.flag in {"--human-approval", "--disable-redaction"}:
+            if field.flag == "--human-approval":
                 if field.value == "yes" and field.flag:
                     base.append(field.flag)
                 elif field.value == "no" and field.no_flag:
@@ -5883,6 +5930,8 @@ def render_wizard_value(field: WizardFormField, *, reveal: bool = False) -> str:
         return field.value
     if reveal:
         return field.value or "(empty)"
+    if field.label == "Secret Value":
+        return "********" if field.value else "(empty)"
     return mask_secret(field.value)
 
 
@@ -6125,13 +6174,6 @@ def connector_setup_wizard_fields(
             hint="Also start the local Prometheus/Loki/Tempo/Grafana stack.",
         ),
         WizardFormField(
-            "Verify After Setup",
-            "bool",
-            value="yes",
-            default="yes",
-            hint="Check that the connector reaches the guardrail once setup is done.",
-        ),
-        WizardFormField(
             "Force Last Connector Removal",
             "bool",
             value="no",
@@ -6140,13 +6182,13 @@ def connector_setup_wizard_fields(
         ),
     )
     if not is_guardrail_supporting(connector):
-        # Only the proxy connectors take --scanner-mode / --verify; the form
-        # offered them for Claude Code too, where they did nothing (GAP-2059).
+        # Only the proxy connectors take --scanner-mode; the form offered it for
+        # Claude Code too, where it did nothing (GAP-2059).
         fields = tuple(field for field in fields if field.label not in _PROXY_ONLY_CONNECTOR_FIELDS)
     return _overlay_field_overrides(fields, overrides)
 
 
-_PROXY_ONLY_CONNECTOR_FIELDS = frozenset({"Scanner Mode", "Verify After Setup"})
+_PROXY_ONLY_CONNECTOR_FIELDS = frozenset({"Scanner Mode"})
 
 
 # ---------------------------------------------------------------------------
@@ -6187,14 +6229,16 @@ def _llm_catalog_provider_choices() -> tuple[str, ...]:
     return tuple(dict.fromkeys(base))
 
 
-def llm_catalog_models(provider: str, instance_name: str = "", data_dir: str = "") -> tuple[str, ...]:
+def llm_catalog_models(
+    provider: str, instance_name: str = "", data_dir: str = "", cfg: object | None = None
+) -> tuple[str, ...]:
     """Curated model ids for ``provider`` (or a custom instance's models)."""
     try:
         from defenseclaw.commands import _llm_picker  # noqa: PLC0415
 
         models: list[str] = []
         if instance_name:
-            inst = _llm_picker.custom_instance(data_dir, instance_name)
+            inst = _llm_picker.custom_instance(data_dir, instance_name, cfg)
             if inst:
                 models = [str(m) for m in (inst.get("available_models") or []) if m]
         if not models:
@@ -6228,7 +6272,7 @@ def llm_model_candidates(
 
     provider = (wizard_field_value(fields, "Provider") or "anthropic").strip().lower()
     instance = (wizard_field_value(fields, "Instance Name") or "").strip()
-    return llm_catalog_models(provider, instance, _llm_data_dir(cfg))
+    return llm_catalog_models(provider, instance, _llm_data_dir(cfg), cfg)
 
 
 def _provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
@@ -6715,12 +6759,11 @@ def _guardrail_wizard_fields_for(
     mode = mode.strip().lower() or "observe"
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
-    # The pack the scope enforces: config_version 9 rule_pack, else the v8 dir.
-    rule_pack_dir = _effective_guardrail_value(
-        cfg, connector if connector_policy else "", "effective_rule_pack_dir", "guardrail.rule_pack_dir"
-    )
+    # The pack the scope enforces: its config_version 9 rule_pack.
+    pack_name = _effective_guardrail_value(
+        cfg, connector if connector_policy else "", "effective_rule_pack", "guardrail.rule_pack"
+    ).strip()
     rule_pack_options: tuple[str, ...] = ("default", "strict", "permissive")
-    pack_name = os.path.basename(rule_pack_dir.rstrip("/\\")).strip() if rule_pack_dir else ""
     rule_pack = pack_name.lower() or "default"
     if rule_pack not in rule_pack_options:
         # A custom pack is active. Show it as the untouched value so the form
@@ -7091,7 +7134,6 @@ def _guardrail_wizard_fields_for(
         ),
         WizardFormField("Post-Setup", "section"),
         WizardFormField("Restart After", "bool", "--restart", "--no-restart", value="yes", default="yes"),
-        WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         WizardFormField(
             "Disable Selected Connector",
             "bool",
@@ -7246,7 +7288,8 @@ def observability_wizard_fields(
                 WizardFormField("Index", "string", "--index", value="defenseclaw", default="defenseclaw"),
                 WizardFormField("Source", "string", "--source", value="defenseclaw", default="defenseclaw"),
                 WizardFormField("Sourcetype", "string", "--sourcetype", value="_json", default="_json"),
-                WizardFormField("Verify TLS", "bool", "--verify-tls", "--no-verify-tls", value="no", default="no"),
+                WizardFormField("Verify TLS", "bool", "--verify-tls", "--no-verify-tls", value="yes", default="yes"),
+                WizardFormField("Allow Private Networks", "bool", "--allow-private-networks", value="no", default="no"),
                 WizardFormField("HEC Token", "password", "--token"),
             ),
         )
@@ -7571,12 +7614,10 @@ def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str,
     if wizard_bool_value(fields, "Restart Gateway", "yes") == "no":
         out.append("--no-restart")
     if is_guardrail_supporting(connector):
-        # Only the proxy connectors take ``--scanner-mode`` /
-        # ``--verify``; hook connectors use ``--with-local-stack``.
+        # Only the proxy connectors take ``--scanner-mode``; hook connectors use
+        # ``--with-local-stack``.
         if scanner := wizard_field_value(fields, "Scanner Mode"):
             out.extend(("--scanner-mode", scanner))
-        if wizard_bool_value(fields, "Verify After Setup", "yes") == "no":
-            out.append("--no-verify")
         return tuple(out)
     if wizard_bool_value(fields, "Replace Existing", "no") == "yes":
         out.append("--replace")
@@ -7768,6 +7809,8 @@ def _effective_guardrail_value(
                 inspect_effective_policy=False,
             )
             detail = f"provenance: {report['provenance']}"
+            if report.get("note"):
+                detail += f"; {report['note']}"
             if report["drift"]:
                 detail += f"; status: {', '.join(report['drift'])}"
             return f"{report['effective']} ({detail})"
@@ -7783,7 +7826,7 @@ def _effective_guardrail_value(
         "effective_mode": "mode",
         "effective_hook_fail_mode": "hook_fail_mode",
         "effective_block_message": "block_message",
-        "effective_rule_pack_dir": "rule_pack_dir",
+        "effective_rule_pack": "rule_pack",
     }.get(method_name, "")
     overrides = get_config_value(cfg, "guardrail.connectors", None)
     if connector and leaf and isinstance(overrides, Mapping):
@@ -7881,21 +7924,11 @@ def _effective_judge_hook_state(cfg: object | Mapping[str, Any] | None, connecto
     return "false"
 
 
-def _judge_hook_connectors_wizard_value(cfg: object | Mapping[str, Any] | None) -> str:
-    gate = get_config_value(cfg, "guardrail.judge.hook_connectors", None)
-    if not isinstance(gate, (list, tuple)):
-        return ""
-    tokens = [str(entry or "").strip() for entry in gate if str(entry or "").strip()]
-    if tokens == ["*"]:
-        return "all"
-    return ",".join(tokens)
-
-
 def _per_connector_guardrail_fields(cfg: object | Mapping[str, Any] | None) -> list[ConfigField]:
     """Build per-connector guardrail override groups for the config editor (B4).
 
     One header + editable rows per active connector covering every per-connector
-    guardrail control: ``mode``, ``rule_pack_dir``, ``enabled`` (E4c),
+    guardrail control: ``mode``, ``rule_pack``, ``enabled`` (E4c),
     ``hook_fail_mode``, ``hilt`` enable + min-severity, ``block_message`` (E4d),
     and the hook-lane judge toggle (membership in
     ``guardrail.judge.hook_connectors``). Each row displays the *effective* value
@@ -8158,7 +8191,7 @@ def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             "guardrail.alert_at",
             "choice",
             ("", "CRITICAL", "HIGH", "MEDIUM", "LOW"),
-            "Lowest severity prompts, completions and tool calls alert at; blank=the rule pack's level.",
+            "Lowest alert level; blocking severities always alert too. Effective level cannot be above Block At.",
         ),
         _field(cfg, "Judge Sweep", "guardrail.judge_sweep", "bool", hint="Judge all requests in regex_only mode."),
         _header(".. LLM Judge .."),
@@ -9122,34 +9155,6 @@ def _connector_setup_alias(wire: str) -> str:
 
 def _connector_hook_label(name: str) -> str:
     return friendly_connector_name(name) if name else "Connector"
-
-
-def _bifrost_providers() -> tuple[str, ...]:
-    return (
-        "openai",
-        "azure",
-        "anthropic",
-        "bedrock",
-        "cohere",
-        "vertex",
-        "mistral",
-        "ollama",
-        "groq",
-        "sgl",
-        "parasail",
-        "perplexity",
-        "cerebras",
-        "gemini",
-        "openrouter",
-        "elevenlabs",
-        "huggingface",
-        "nebius",
-        "xai",
-        "replicate",
-        "vllm",
-        "runway",
-        "fireworks",
-    )
 
 
 def _mapping_or_attr(obj: object, name: str, default: Any = "") -> Any:

@@ -7,10 +7,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"time"
 )
 
@@ -59,6 +66,110 @@ func TestRemovedBindingAnswersInitializeWithPlainError(t *testing.T) {
 	}
 	if string(resp.ID) != "0" || resp.Error.Code != startupErrorCode || resp.Error.Message != startup.message {
 		t.Fatalf("unexpected response %s", out.String())
+	}
+}
+
+// A managed host has only the gateway binary; the guard told its users to
+// run the Python CLI commands of a per-user install (GAP-0270).
+func TestManagedGuardStartFailureNamesTheGatewaySetup(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	dir := t.TempDir()
+	gateway, want := filepath.Join(dir, "defenseclaw-gateway"), ""
+	if runtime.GOOS == "windows" {
+		gateway = filepath.Join(dir, "defenseclaw.exe")
+		want = "& \"" + gateway + "\" enterprise acp setup --client zed --agent hermes --profile ih3acp"
+	} else {
+		want = gateway + " enterprise acp setup --client zed --agent hermes --profile ih3acp"
+	}
+	lock := filepath.Join(dir, "zed-hermes.contract-lock.json")
+	for path, body := range map[string]string{gateway: "gateway\n", lock: `{"guard":{"managed_custody":true}}`} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous, previousLayout, previousLoad := guardExecutable, managedACPStandaloneLayout, loadACPStandaloneDescriptor
+	t.Cleanup(func() {
+		guardExecutable, managedACPStandaloneLayout, loadACPStandaloneDescriptor = previous, previousLayout, previousLoad
+	})
+	guardExecutable = func() (string, error) { return filepath.Join(dir, "defenseclaw-acp"), nil }
+	// Windows has no runtime descriptor: a guard in the standalone bin
+	// folder is managed (GAP-0902).
+	managedACPStandaloneLayout = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{DescriptorPath: filepath.Join(dir, "managed-runtime.json"), BinDir: dir}, nil
+	}
+	loadACPStandaloneDescriptor = func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor }
+	missing := &tokenCopyError{path: filepath.Join(dir, "zed-hermes.token"), err: errors.New("stat token file: no such file")}
+	var startup *startupError
+	if !errors.As(newStartupError(missing, "zed", "hermes", "ih3acp", "observe", lock), &startup) {
+		t.Fatal("want a startup error")
+	}
+	if !strings.Contains(startup.message, "enroll you again (enterprise acp enroll)") || !strings.Contains(startup.message, want) ||
+		!strings.Contains(startup.message, "setup cannot restore it") || strings.Contains(startup.message, "defenseclaw acp ") {
+		t.Fatalf("the managed remediation names commands this host lacks or sends the user to setup: %q", startup.message)
+	}
+}
+
+// An explicit Secure Client profile keeps main's available setup guidance
+// byte for byte, even with an old managed-custody lock and adjacent gateway.
+func TestSecureClientGuardStartupKeepsMainErrorBytes(t *testing.T) {
+	dir := t.TempDir()
+	gateway := filepath.Join(dir, "defenseclaw-gateway")
+	if runtime.GOOS == "windows" {
+		gateway = filepath.Join(dir, "defenseclaw.exe")
+	}
+	lock := filepath.Join(dir, "binding.json")
+	for path, body := range map[string]string{
+		gateway: "gateway", lock: `{"guard":{"managed_custody":true}}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileSecureClient)
+	previous := guardExecutable
+	t.Cleanup(func() { guardExecutable = previous })
+	guardExecutable = func() (string, error) { return filepath.Join(dir, "defenseclaw-acp"), nil }
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{acp.ErrRuntimeContractMissing,
+			"DefenseClaw ACP guard is not set up for zed/hermes (the binding was removed). Run 'defenseclaw acp setup --client zed --agent hermes --profile locked', or delete this editor entry."},
+		{errors.New("stat token file: no such file"),
+			"DefenseClaw ACP guard could not start for zed/hermes: stat token file: no such file. Run 'defenseclaw acp verify', then 'defenseclaw acp setup --client zed --agent hermes --profile locked', or delete this editor entry."},
+	} {
+		startup := newStartupError(test.err, "zed", "hermes", "locked", "observe", lock)
+		if startup.Error() != test.want {
+			t.Fatalf("startup error = %q, want %q", startup, test.want)
+		}
+		in := strings.NewReader(`{"jsonrpc":"2.0","id":0,"method":"initialize"}` + "\n")
+		var out bytes.Buffer
+		if !answerFirstRequest(in, &out, startup.Error(), time.Second) {
+			t.Fatal("no JSON-RPC response")
+		}
+		wantResponse := fmt.Sprintf(`{"jsonrpc":"2.0","id":0,"error":{"code":%d,"message":%q}}`+"\n", startupErrorCode, test.want)
+		if out.String() != wantResponse {
+			t.Fatalf("JSON-RPC bytes = %q, want %q", out.String(), wantResponse)
+		}
+	}
+}
+
+// A guard that cannot start stays to answer: Zed showed only "Server exited
+// with status exit code: 1" when the guard exited right after its answer
+// (GAP-0901).
+func TestStartupRefusalAnswersUntilTheEditorCloses(t *testing.T) {
+	reader, writer := io.Pipe()
+	var out bytes.Buffer
+	done := make(chan bool, 1)
+	go func() { done <- answerUntilClosed(reader, &out, "refused", time.Second, 5*time.Second) }()
+	for id := 0; id < 2; id++ {
+		if _, err := fmt.Fprintf(writer, `{"jsonrpc":"2.0","id":%d,"method":"session/new"}`+"\n", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = writer.Close()
+	if !<-done || strings.Count(out.String(), `"message":"refused"`) != 2 {
+		t.Fatalf("the editor did not get the refusal for every request: %q", out.String())
 	}
 }
 

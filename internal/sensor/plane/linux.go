@@ -251,8 +251,12 @@ func (s *linuxSource) startProcessConnector() error {
 	if err != nil {
 		return fmt.Errorf("socket: %w", err)
 	}
+	// Pid 0 lets the kernel assign the port. The sensor helper opens one
+	// source per gateway subscription in one process, and a second bind to
+	// the process id failed with "address already in use", leaving a
+	// reconnected gateway on fanotify alone (GAP-1418).
 	if err := unix.Bind(fd, &unix.SockaddrNetlink{
-		Family: unix.AF_NETLINK, Groups: cnIdxProc, Pid: uint32(os.Getpid()),
+		Family: unix.AF_NETLINK, Groups: cnIdxProc,
 	}); err != nil {
 		_ = unix.Close(fd)
 		return fmt.Errorf("bind: %w", err)

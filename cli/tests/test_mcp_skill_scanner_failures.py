@@ -247,7 +247,7 @@ def test_mcp_list_drops_stale_severity_after_failed_scan(tmp_path):
             "disallowed address 127.0.0.1 (use --allow-private to opt in)",
             "defenseclaw mcp scan loop --connector codex --allow-private",
         ),
-        ("command is not an allowlisted stdio launcher (allowed: npx, uvx)", "not an npx or uvx launcher"),
+        ("command is not an allowlisted stdio launcher (allowed: npx, uvx)", "scan it again"),
         ("scan failed: Connection to MCP server was cancelled", "fix reachability, then scan again"),
     ],
 )
@@ -265,6 +265,7 @@ def test_failed_scan_next_step_follows_error(error, expected):
 def test_path_command_refusal_says_paths_are_refused():
     """GAP-2640: an absolute npx path is refused with the real reason and the fix."""
     from defenseclaw.commands.cmd_mcp import _failed_scan_next_step
+    from defenseclaw.config import MCPServerEntry
     from defenseclaw.scanner import mcp
 
     error = mcp._stdio_scan_command_error("/opt/homebrew/bin/npx", ["-y", "pkg"])
@@ -273,6 +274,7 @@ def test_path_command_refusal_says_paths_are_refused():
     assert "is a path" in error
     assert "set the command to the bare name 'npx'" in error
     assert mcp._stdio_scan_command_error("npx", ["-y", "pkg"]) is None
-    hint = _failed_scan_next_step("fs", "cursor", error)
-    assert "never a command path" in hint
-    assert "not an npx or uvx launcher" not in hint
+    entry = MCPServerEntry(name="fs", command="/opt/homebrew/bin/npx", args=["-y", "pkg"])
+    hint = _failed_scan_next_step("fs", "cursor", error, entry=entry)
+    assert "is a path" in hint
+    assert "fix: defenseclaw mcp set fs --command npx --args" in hint

@@ -55,7 +55,7 @@ A preset (`policies/<name>.yaml`) sets admission decisions: what happens to a fi
 | `guardrail.cisco_trust_level` | `advisory` | `full` | `full` |
 | `watch.rescan_interval_min` | `120` | `60` | `30` |
 
-Severity ranks in a preset are the rego convention from `policies/rego/guardrail.rego`: `1 = LOW`, `2 = MEDIUM`, `3 = HIGH`, `4 = CRITICAL`. Activation turns them into the level names `block_at` and `alert_at`, and writes a level only when it differs from the default of the selected rule pack, so activating `default` on the default pack leaves both unset. `cisco_trust_level: advisory` means a Cisco AI Defense verdict alone raises an alert but is not escalated to a block; see [Thresholds](/docs/policies/thresholds#cisco-ai-defense-trust-level). HITL is not part of a preset: turn it on with `defenseclaw guardrail hilt` ([HITL](/docs/hitl)).
+Severity ranks in a preset are the rego convention from `policies/rego/guardrail.rego`: `1 = LOW`, `2 = MEDIUM`, `3 = HIGH`, `4 = CRITICAL`. Activation turns them into the level names `block_at` and `alert_at`, and writes a level only when it differs from the default of the selected rule pack, so activating `default` on the default pack leaves both unset. Activation replaces a level you set with `guardrail block-at` or `alert-at` too. It prints each level it changes, old and new; when the new level blocks or alerts on fewer severities, the line is a warning with the command that sets your level again (for example `guardrail.block_at: HIGH -> CRITICAL ... defenseclaw guardrail block-at HIGH`). `cisco_trust_level: advisory` means a Cisco AI Defense verdict alone raises an alert but is not escalated to a block; see [Thresholds](/docs/policies/thresholds#cisco-ai-defense-trust-level). HITL is not part of a preset: turn it on with `defenseclaw guardrail hilt` ([HITL](/docs/hitl)).
 
 The columns are deliberately conservative. We'd rather you opt *into* stricter behaviour than have an upgrade silently start blocking your traffic.
 
@@ -82,6 +82,16 @@ The rule pack directory (`policies/guardrail/<name>/`) holds the regex YAMLs, ju
 | `strict` | 255 of 255 | same eight families; stricter variants where profiles differ | injection, pii, tool-injection (lower judge thresholds) | 4 entries: minimal structural suppressions; no tool suppressions | same six sensitive tool definitions as the other packs |
 
 The counts are what `defenseclaw guardrail validate-pack` reports for the packs shipped with this release. Each pack also sets its default [block and alert levels](/docs/policies/thresholds#rule-pack-default-posture) through its posture.
+
+In the default and permissive packs, a world-writable `chmod` and a Windows
+Run-key addition produce HIGH alerts; these findings do not block the tool call.
+Writes to the active user's `authorized_keys` file are blocked when a direct
+command, a file tool, or a supported literal interpreter form proves the target.
+Arbitrary computed interpreter paths are outside that proof. A symlink already
+present in the gateway's local filesystem is resolved for write targets; sandbox
+filesystems are evaluated without local symlink resolution.
+
+The `default` and `permissive` packs ship the `curl ... | bash` rule `CMD-PIPE-CURL` off; `strict` enables it. See [Download piped into a shell](/docs/policies/deterministic-detection#download-piped-into-a-shell).
 
 All three packs share the same [severity rubric](/docs/policies#shared-severity-rubric) and the same `signal_strength` output schema — only the per-category thresholds and suppression scope differ between packs. Switching the rule pack does *not* enable the LLM judge — that's a separate `guardrail.judge.enabled` toggle in your operator config (default: `false`). Flipping the rule pack only changes which prompt YAMLs the judge will run *if* you've enabled it.
 
@@ -276,9 +286,8 @@ for an unknown section. With `--effective`, `config get` resolves a guardrail le
 `admission.<type>` key to the value the gateway enforces and prints where it
 comes from. `config show` also takes `--source` for the masked source
 document as written, `--effective` for the resolved observability section
-alone, or `--effective --provenance` for explicit compiler annotations. V8
-rejects `--reveal`; neither source nor effective output resolves secret
-values.
+alone, or `--effective --provenance` for explicit compiler annotations. Secret
+values are always masked; neither source nor effective output resolves them.
 
 `policy show <name>` prints a normalized summary of the named file (`default`,
 `strict`, `permissive`, or any custom `policies/<name>.yaml` you've added).

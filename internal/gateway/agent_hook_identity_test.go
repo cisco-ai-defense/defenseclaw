@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -101,6 +102,92 @@ func TestNormalizeAgentHookRequest_AntigravityStepIsEvidenceNotTurn(t *testing.T
 	}
 	if req.TurnID != "" {
 		t.Fatalf("stepIdx became TurnID=%q", req.TurnID)
+	}
+}
+
+// Hermes sends transform_terminal_output with the task of the terminal call
+// but no session; it takes the session the pre_tool_call of that task named,
+// and never a task of another agent identity (GAP-0945).
+func TestHermesTerminalOutputTakesTheSessionOfItsTask(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+	hook := func(identity string, payload map[string]interface{}) agentHookRequest {
+		return normalizeAgentHookRequestWithRawProfileEvent("hermes", payload, nil, profile, "", identity)
+	}
+	var tasks hermesTaskSessions
+	pre := hook("agt-1", map[string]interface{}{
+		"hook_event_name": "pre_tool_call", "tool_name": "terminal", "session_id": "20261008_1",
+		"extra": map[string]interface{}{"task_id": "t1", "tool_call_id": "call_1"},
+	})
+	tasks.fill(&pre)
+	output := func() map[string]interface{} {
+		return map[string]interface{}{
+			"hook_event_name": "transform_terminal_output",
+			"extra":           map[string]interface{}{"task_id": "t1", "command": "ls"},
+		}
+	}
+	own := hook("agt-1", output())
+	tasks.fill(&own)
+	if own.SessionID != "20261008_1" || own.CorrelationValues[connector.CorrelationTargetSession].Value != "20261008_1" {
+		t.Fatalf("terminal output session = %q, want the session of task t1", own.SessionID)
+	}
+	other := hook("agt-2", output())
+	tasks.fill(&other)
+	if other.SessionID != "" {
+		t.Fatalf("another identity took session %q", other.SessionID)
+	}
+	// Hermes 0.21.5 names no task either: the output takes the session of the
+	// last pre_tool_call of its agent identity, never of another one.
+	bare := func(identity string) agentHookRequest {
+		return hook(identity, map[string]interface{}{"hook_event_name": "transform_terminal_output", "extra": map[string]interface{}{"command": "ls"}})
+	}
+	live := bare("agt-1")
+	tasks.fill(&live)
+	if live.SessionID != "20261008_1" {
+		t.Fatalf("a terminal output without a task got session %q, want the session of the last tool call", live.SessionID)
+	}
+	stranger := bare("agt-2")
+	tasks.fill(&stranger)
+	if stranger.SessionID != "" {
+		t.Fatalf("another identity took session %q", stranger.SessionID)
+	}
+}
+
+func TestHermesTaskSessionSkipsOversizeTaskID(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+
+	taskID := strings.Repeat(" ", 4*1024) + "x"
+	var tasks hermesTaskSessions
+	pre := agentHookRequest{
+		ConnectorName: "hermes", AgentIdentityID: "agt-1", SessionID: "session-1",
+		Payload: map[string]interface{}{"extra": map[string]interface{}{"task_id": taskID}},
+	}
+	tasks.fill(&pre)
+	if len(tasks.sessions) != 0 {
+		t.Fatalf("oversize task ID retained in %d cache entries", len(tasks.sessions))
+	}
+
+	output := agentHookRequest{
+		ConnectorName: "hermes", AgentIdentityID: "agt-1",
+		Payload: map[string]interface{}{"extra": map[string]interface{}{"task_id": taskID}},
+	}
+	tasks.fill(&output)
+	if output.SessionID != "" {
+		t.Fatalf("oversize task ID recovered session %q", output.SessionID)
+	}
+
+	longSession := agentHookRequest{
+		ConnectorName: "hermes", AgentIdentityID: "agt-1",
+		SessionID: strings.Repeat("s", 4*1024+1),
+		Payload:   map[string]interface{}{"extra": map[string]interface{}{"task_id": "task-2"}},
+	}
+	tasks.fill(&longSession)
+	if len(tasks.sessions) != 0 {
+		t.Fatalf("oversize session ID retained in %d cache entries", len(tasks.sessions))
 	}
 }
 

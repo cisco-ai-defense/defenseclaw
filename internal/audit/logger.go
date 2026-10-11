@@ -129,16 +129,6 @@ func (l *Logger) SetRuntimeV8Emitter(emitter RuntimeV8Emitter) {
 	}
 }
 
-func (l *Logger) runtimeV8Snapshot() RuntimeV8Emitter {
-	if l == nil {
-		return nil
-	}
-	l.mu.RLock()
-	emitter := l.runtimeV8
-	l.mu.RUnlock()
-	return emitter
-}
-
 type runtimeV8Binding struct {
 	emitter                     RuntimeV8Emitter
 	logBatch                    RuntimeV8LogBatchEmitter
@@ -215,6 +205,11 @@ type ScanCorrelation struct {
 	UserID     string
 	UserIDKind string
 	UserName   string
+
+	// JudgeModel names the LLM judge model on the scan summary row
+	// (scanner.ScanResult.JudgeModel). The install watcher sets it, so an
+	// auditor sees from the row that the judge ran (GAP-0575).
+	JudgeModel string
 }
 
 // LogScan persists the forensic scan rows and emits the canonical v8 finding,
@@ -655,10 +650,6 @@ func redactCredentialFindingValue(value string) string {
 	return redactFindingValueWithPrefix(value, sensitiveFindingRedactionPrefix)
 }
 
-func isSensitiveFindingRedactionPlaceholder(value string) bool {
-	return isFindingRedactionPlaceholder(value, sensitiveFindingRedactionPrefix)
-}
-
 func redactFindingValueWithPrefix(value, prefix string) string {
 	if strings.TrimSpace(value) == "" || isFindingRedactionPlaceholder(value, prefix) {
 		return value
@@ -747,10 +738,6 @@ func redactPIIFindingValue(value string) string {
 	return redactFindingValueWithPrefix(value, piiFindingRedactionPrefix)
 }
 
-func isPIIRedactionPlaceholder(value string) bool {
-	return isFindingRedactionPlaceholder(value, piiFindingRedactionPrefix)
-}
-
 func redactPIIFindingDecisionPath(finding *scanner.Finding) {
 	redactFindingDecisionPathWith(finding, piiFindingRedactionPrefix, piiFindingDecisionPathKey)
 }
@@ -831,6 +818,12 @@ func (l *Logger) LogAction(action, target, details string) error {
 // the zero value, which the auto-fill treats as "no override").
 func (l *Logger) LogActionCtx(ctx context.Context, action, target, details string) error {
 	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, "INFO")
+}
+
+// LogActionCtxSeverity is LogActionCtx with a caller-chosen severity, for an
+// action row that is an alert: the alert views list only rows above INFO.
+func (l *Logger) LogActionCtxSeverity(ctx context.Context, action, target, details, severity string) error {
+	return l.logActionWithEnvelopeContext(ctx, EnvelopeFromContext(ctx), action, target, details, severity)
 }
 
 // LogCLIAction is the canonical Python/operator CLI ingress. It retains the
@@ -1225,21 +1218,6 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 // sink resources in v8.
 func (l *Logger) Close() {
 	l.SetRuntimeV8Emitter(nil)
-}
-
-func inferTargetType(scannerName string) string {
-	switch scannerName {
-	case "mcp-scanner", "mcp_scanner":
-		return "mcp"
-	case "skill-scanner", "skill_scanner":
-		return "skill"
-	case "codeguard", "aibom", "aibom-claw",
-		"clawshield-vuln", "clawshield-secrets", "clawshield-pii",
-		"clawshield-malware", "clawshield-injection":
-		return "code"
-	default:
-		return "unknown"
-	}
 }
 
 func inferAssetTypeFromAction(action, details string) string {

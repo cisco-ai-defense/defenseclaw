@@ -36,6 +36,7 @@ var (
 	emailRE         = regexp.MustCompile(`[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_` + "`" + `{|}~-]+)*@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
 	telephoneRE     = regexp.MustCompile(`(?:\+1[ .-])?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[ .-][2-9][0-9]{2}[ .-][0-9]{4}`)
 	nationalIDRE    = regexp.MustCompile(`[0-9]{3}-[0-9]{2}-[0-9]{4}`)
+	uuidRE          = regexp.MustCompile(`[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}`)
 )
 
 var eligibleURLQueryKeys = map[string]struct{}{
@@ -914,7 +915,7 @@ func recognizePaymentCards(input string) []candidate {
 		value := strings.TrimRight(input[start:end], " -")
 		candidateEnd := start + len(value)
 		if digitsIn(value) >= 13 {
-			result = append(result, candidate{start: start, end: candidateEnd, accepted: digitBoundary(input, start, candidateEnd) && validPaymentCard(value)})
+			result = append(result, candidate{start: start, end: candidateEnd, accepted: paymentCardBoundary(input, start, candidateEnd) && validPaymentCard(value)})
 		}
 		start = maxInt(end, start+1)
 	}
@@ -1301,6 +1302,31 @@ func isEmailByte(value byte) bool {
 
 func digitBoundary(input string, start, end int) bool {
 	return (start == 0 || !isASCIIDigit(input[start-1])) && (end == len(input) || !isASCIIDigit(input[end]))
+}
+
+// paymentCardBoundary keeps generated ids whole (GAP-0255): a card number is
+// never glued to a preceding letter or adjacent digit, and a digit run
+// inside an 8-4-4-4-12 UUID (evaluation_id, request_id, occurrence ids) is
+// part of the id. A trailing currency code is allowed. A letter that ends
+// an escape (the n of a JSON-escaped line break) is a boundary.
+func paymentCardBoundary(input string, start, end int) bool {
+	gluedBefore := start > 0 && isASCIIAlphaNum(input[start-1]) && !(start > 1 && input[start-2] == '\\')
+	if gluedBefore || end < len(input) && isASCIIDigit(input[end]) {
+		return false
+	}
+	left, right := start, end
+	for left > 0 && (isASCIIHex(input[left-1]) || input[left-1] == '-') {
+		left--
+	}
+	for right < len(input) && (isASCIIHex(input[right]) || input[right] == '-') {
+		right++
+	}
+	for _, match := range uuidRE.FindAllStringIndex(input[left:right], -1) {
+		if left+match[0] < end && start < left+match[1] {
+			return false
+		}
+	}
+	return true
 }
 
 func ipBoundary(input string, start, end int) bool {

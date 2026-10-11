@@ -20,7 +20,9 @@ admission.rego and internal/policy), reading only config.yaml:
 
 from __future__ import annotations
 
+import json
 import os
+import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -54,6 +56,10 @@ class CompiledAdmission:
     scanner_overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = field(default_factory=dict)
     first_party_allow: dict[str, list[str]] = field(default_factory=dict)
     source: str = "builtin"
+    # Where each field came from ("config:admission.<layer>.<field>" or
+    # "builtin"), for ``config get --effective``; ``source`` stays the label
+    # of the actions.
+    field_sources: dict[str, str] = field(default_factory=dict)
 
 
 ADMISSION_SEVERITY_ORDER = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO")
@@ -69,6 +75,20 @@ _SHORTHANDS = {
     "warn": (_WARN, False),
     "allow": (_WARN, True),
 }
+
+
+def triple_shorthand(triple: Any) -> str:
+    """The shorthand a config ``{install, file, runtime}`` triple spells, or
+    "" when it matches none. ``allow`` shares ``warn``'s triple, so it reads
+    back as ``warn``, as :func:`action_label` does."""
+    if not isinstance(triple, dict):
+        return ""
+    for name, (action, _allow) in _SHORTHANDS.items():
+        if (triple.get("install"), triple.get("file"), triple.get("runtime")) == (
+            action.install, action.file, action.runtime,
+        ):
+            return name
+    return ""
 
 
 def action_label(action: tuple[SeverityAction, bool]) -> object:
@@ -187,6 +207,22 @@ def _data_json_action(raw: Any) -> tuple[SeverityAction, bool] | None:
     )
 
 
+def _read_policy_data(policy_dir: str) -> dict[str, Any] | None:
+    """Read the Secure Client policy data for legacy status output."""
+    for candidate in (
+        os.path.join(policy_dir, "rego", "data.json"),
+        os.path.join(policy_dir, "data.json"),
+    ) if policy_dir else ():
+        try:
+            with open(candidate, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
 def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmission:
     """The Secure Client admission, unchanged from 1.0 (Go
     ``policy.secureClientAdmission``): the actions, per-type scanner
@@ -225,7 +261,6 @@ def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmis
     actions, source = dict(out.actions), out.source
     raw_actions = data.get("actions")
     if isinstance(raw_actions, dict) and raw_actions:
-        actions = {}
         by_type = data.get("scanner_overrides")
         overrides = by_type.get(target_type) if isinstance(by_type, dict) else None
         for layer in (raw_actions, overrides if isinstance(overrides, dict) else {}):
@@ -268,10 +303,15 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     defaults = getattr(adm, "defaults", None)
     own = getattr(adm, target_type, None)
 
+    layers = ((target_type, own), ("defaults", defaults))
+    sources: dict[str, str] = {}
+
     def first_bool(name: str, fallback: bool) -> bool:
-        for layer in (own, defaults):
+        sources[name] = "builtin"
+        for label, layer in layers:
             value = getattr(layer, name, None) if layer is not None else None
             if value is not None:
+                sources[name] = f"config:admission.{label}.{name}"
                 return bool(value)
         return fallback
 
@@ -300,23 +340,30 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     elif "defaults" in used:
         source = "config:admission.defaults.actions"
 
+    sources["actions"] = source
     overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = {}
-    for layer in (defaults, own):
+    sources["scanner_overrides"] = "builtin"
+    for label, layer in reversed(layers):
         for scanner, raw in (getattr(layer, "scanner_overrides", None) or {}).items() if layer is not None else ():
             compiled = _compile_action_map(raw)
             if compiled:
                 overrides.setdefault(str(scanner).strip(), {}).update(compiled)
+                sources["scanner_overrides"] = f"config:admission.{label}.scanner_overrides"
 
     first_party = dict(out.first_party_allow)
-    for layer in (own, defaults):
+    sources["first_party_allow_list"] = "builtin"
+    for label, layer in layers:
         entries = getattr(layer, "first_party_allow_list", None) if layer is not None else None
         # An explicit empty list allows nothing first party (Go firstParty
         # treats a non-nil empty list the same way); None inherits.
         if entries is not None:
-            first_party = {
-                str(getattr(e, "name", "")): list(getattr(e, "source_path_contains", []) or [])
-                for e in entries
-            }
+            # Entries that share a name all apply (Go and Rego match any of
+            # them), so their markers are merged, not replaced.
+            first_party = {}
+            for e in entries:
+                markers = first_party.setdefault(str(getattr(e, "name", "")), [])
+                markers.extend(m for m in (getattr(e, "source_path_contains", []) or []) if m not in markers)
+            sources["first_party_allow_list"] = f"config:admission.{label}.first_party_allow_list"
             break
     return CompiledAdmission(
         scan_on_install=scan_on_install,
@@ -325,6 +372,7 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
         scanner_overrides=overrides,
         first_party_allow=first_party,
         source=source,
+        field_sources=sources,
     )
 
 
@@ -362,11 +410,14 @@ def evaluate_admission(
     legacy = getattr(pe, "_legacy_rows", lambda: False)()
 
     blocked_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the block list")
-    if (
-        pe.is_blocked_for_connector(target_type, name, connector)
-        if connector
-        else pe.is_blocked(target_type, name)
-    ):
+    if hasattr(pe, "is_blocked_for_connector"):
+        blocked = pe.is_blocked_for_connector(
+            target_type, name, connector, source_path=source_path, url=url,
+            command=command, args=args or [], transport=transport,
+        )
+    else:
+        blocked = pe.is_blocked(target_type, name)
+    if blocked:
         return AdmissionDecision("blocked", blocked_reason, source="manual-block")
 
     asset_decision = evaluate_asset_policy(
@@ -380,6 +431,7 @@ def evaluate_admission(
         args=args or [],
         transport=transport,
         runtime_surface=runtime_surface,
+        secure_client=legacy,
     )
     if asset_decision.verdict == "blocked":
         return asset_decision
@@ -422,8 +474,15 @@ def evaluate_admission(
     # first-party allow list cannot bless an operator/third-party asset that
     # merely lands under a first-party provenance directory.
     fp_constraints = policy.first_party_allow.get(name)
-    if allow_first_party and fp_constraints and policy.allow_list_bypass_scan:
-        if _matches_provenance(fp_constraints, source_path):
+    if allow_first_party and fp_constraints is not None and policy.allow_list_bypass_scan:
+        from defenseclaw.enforce.asset_lists import path_has_components
+
+        configured = policy.field_sources.get("first_party_allow_list", "").startswith("config:")
+        path_matches = (
+            any(path_has_components(source_path, marker) for marker in fp_constraints)
+            if configured else _matches_provenance(fp_constraints, source_path)
+        )
+        if path_matches and (legacy or _own_first_party_content(target_type, name, source_path)):
             return _done(AdmissionDecision(
                 "allowed", f"{target_type} '{name}' is on the allow list — scan skipped", source="policy-allow",
             ))
@@ -498,10 +557,14 @@ def evaluate_asset_policy(
     args: list[str] | None = None,
     transport: str = "",
     runtime_surface: str = "cli",
+    secure_client: bool = False,
 ) -> AdmissionDecision:
-    # The explicit operator lists apply in every mode, as the audit.db
-    # actions rows they replace did (config_version 9).
+    # Version 9 operator lists enforce in every mode. Secure Client keeps
+    # the v8 enabled/mode behavior for these asset-policy rules.
     from defenseclaw.enforce import asset_lists
+
+    if secure_client and not getattr(asset_policy, "enabled", False):
+        return AdmissionDecision("allowed", "asset policy disabled", source="asset-policy-disabled")
 
     verdict, rule = asset_lists.list_decision(
         asset_policy, target_type, name, connector,
@@ -509,6 +572,10 @@ def evaluate_asset_policy(
     )
     if verdict == asset_lists.LIST_DENY:
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
+        if secure_client:
+            mode_resolver = getattr(asset_policy, "effective_mode", None)
+            mode = mode_resolver(connector) if callable(mode_resolver) else getattr(asset_policy, "mode", "observe")
+            return _asset_policy_block_or_observe(mode, reason, "asset-policy-deny")
         return AdmissionDecision("blocked", reason, source="asset-policy-deny")
     if verdict == asset_lists.LIST_ALLOW:
         reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
@@ -707,6 +774,14 @@ def _canonical_mcp_transport(transport: Any, url: str = "", command: str = "") -
     return value
 
 
+def asset_name_key(name: Any) -> str:
+    """The form asset_policy compares skill, MCP and plugin names in: trimmed,
+    Unicode NFC and lower-cased (Go ``config.SameAssetName``). A rule written
+    in the composed spelling of a name like "café" matches the decomposed
+    spelling another tool wrote (GAP-0432)."""
+    return unicodedata.normalize("NFC", str(name or "").strip()).lower()
+
+
 def _asset_rule_matches(
     rule: Any,
     name: str,
@@ -722,7 +797,7 @@ def _asset_rule_matches(
     constrained = False
     if getattr(rule, "name", ""):
         constrained = True
-        if str(rule.name).strip().lower() != name.strip().lower():
+        if asset_name_key(rule.name) != asset_name_key(name):
             return False
     if getattr(rule, "connector", ""):
         constrained = True
@@ -858,6 +933,26 @@ def _matches_amp_user_home(
     if os.path.normcase(common_path) != os.path.normcase(resolved_home):
         return False
     return os.path.normcase(resolved_source) == os.path.normcase(expected_source)
+
+
+def _own_first_party_content(target_type: str, name: str, source_path: str) -> bool:
+    """Whether a first-party entry may trust the asset at *source_path* (GAP-0419).
+
+    A skills or plugins folder holds whatever the user installs, so the names
+    of DefenseClaw's own assets never switch the scan off by themselves: an
+    entry named ``codeguard`` trusts only an exact copy of the shipped
+    CodeGuard skill, and an entry named ``defenseclaw`` trusts no plugin here
+    (the gateway recognizes DefenseClaw's own plugin by its bytes). Other
+    first-party entries keep their name and location match. Mirrors Go
+    ``AdmissionInput.VerifyFirstParty``.
+    """
+    if target_type == "skill" and name == "codeguard":
+        from defenseclaw.codeguard_skill import is_shipped_codeguard_skill
+
+        return is_shipped_codeguard_skill(source_path)
+    if target_type == "plugin" and name == "defenseclaw":
+        return False
+    return True
 
 
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:

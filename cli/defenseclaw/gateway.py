@@ -66,7 +66,7 @@ def alert_disposition_timeout_seconds(target_count: int) -> int:
     )
 
 
-def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str, Any] | None:
+def current_user_guardrail_profile(cfg: Any, *, connector: str = "", timeout: float = 3) -> dict[str, Any] | None:
     """Ask the gateway which guardrail profile applies to the account running this.
 
     The gateway resolves the account through the OS the way it does for live
@@ -77,12 +77,9 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
     """
     if not getattr(getattr(cfg, "guardrail", None), "profiles", None):
         return None
-    import getpass
+    from defenseclaw.commands.cmd_status import _enterprise_profile
 
-    try:
-        user = getpass.getuser()
-    except Exception:  # noqa: BLE001 - no login name means no answer, not a crash.
-        user = ""
+    user, label = current_profile_account(secure_client=_enterprise_profile(cfg) == "secure_client")
     if not user:
         return {"user": "", "error": "the account name is unknown"}
     try:
@@ -93,16 +90,144 @@ def current_user_guardrail_profile(cfg: Any, *, timeout: float = 3) -> dict[str,
             timeout=timeout,
         )
         try:
-            result = client.guardrail_profile_resolve(user=user)
-            overrides = _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
+            result = client.guardrail_profile_resolve(user=user, connector=connector)
+            overrides = (
+                _scoped_profile_overrides(cfg, client, user, str(result.get("profile") or ""))
+                if not connector else []
+            )
         finally:
             client.close()
+    except requests.exceptions.ReadTimeout as exc:
+        # The gateway took the connection and was still resolving the user.
+        return {"user": label, "error": str(exc), "timed_out": True}
     except Exception as exc:  # noqa: BLE001 - any transport or HTTP failure.
-        return {"user": user, "error": str(exc)}
-    return {**result, "user": user, "overrides": overrides}
+        return {"user": label, "error": str(exc)}
+    return {**result, "user": label, "overrides": overrides}
 
 
-_PROFILE_OVERRIDE_PROBES = 16
+def policy_reload_rejection(policy: dict) -> str:
+    """``policy.last_reload_error`` when the gateway rejected a reload, or "".
+
+    A generation built without its Rego modules (``policy.opa_unavailable``)
+    was applied, with config.yaml deciding admission and levels; the gateway
+    reports it as ``last_reload_error`` "opa: ..." too, but no change was
+    rejected (GAP-1033).
+    """
+    error = str(policy.get("last_reload_error") or "").strip()
+    fallback = str(policy.get("opa_unavailable") or "").strip()
+    return "" if fallback and error == f"opa: {fallback}" else error
+
+
+def gateway_reload_notice(cfg: Any, *, timeout: float = 3) -> str:
+    """Say when the running gateway has not applied config.yaml as written, or "".
+
+    ``config validate``, ``guardrail status`` and ``guardrail profile explain``
+    describe the file, but the gateway may still run an earlier generation: it
+    rejected the last reload (``policy.last_reload_error``), some changed keys
+    apply only after a restart (``policy.pending_restart``), or a moved
+    ``gateway.api_port`` left it on its previous port until it restarts
+    (GAP-0352, GAP-0363). "" when it applied the file or cannot be asked.
+    """
+    try:
+        return _gateway_reload_notice(cfg, timeout)
+    except Exception:  # noqa: BLE001 - a notice never fails the command.
+        return ""
+
+
+def _gateway_reload_notice(cfg: Any, timeout: float) -> str:
+    gateway = getattr(cfg, "gateway", None)
+    port = getattr(gateway, "api_port", 0)
+    if gateway is None or not port:
+        return ""
+    host = gateway_api_client_host(cfg)
+    # /health takes no token, so check the holder first: another account's
+    # gateway must not answer for this one.
+    foreign = foreign_loopback_listener(host, int(port))
+    if foreign:
+        return f"The gateway this config.yaml names is not this account's: {foreign}."
+    client = OrchestratorClient(host=host, port=port, timeout=timeout)
+    try:
+        health = client.health()
+    except requests.exceptions.ConnectionError:
+        return _gateway_off_configured_port_notice(host, int(port))
+    finally:
+        client.close()
+    policy = health.get("policy") if isinstance(health, dict) else None
+    if not isinstance(policy, dict):
+        return ""
+    error = policy_reload_rejection(policy)
+    if error:
+        return (
+            f"The running gateway has NOT applied this config.yaml: it rejected the last reload ({error}) "
+            f"and still enforces generation {policy.get('generation')}. Fix the file; the gateway reloads it "
+            "when it is saved."
+        )
+    pending = [str(key) for key in policy.get("pending_restart") or [] if str(key).strip()]
+    if pending:
+        return (
+            f"The running gateway applied this config.yaml except {', '.join(pending)}, which takes effect "
+            "after `defenseclaw-gateway restart`."
+        )
+    return ""
+
+
+def current_gateway_reload_notice() -> str:
+    """gateway_reload_notice for the config.yaml in use, or "" when it does not load."""
+    try:
+        from defenseclaw import config as config_module
+
+        return gateway_reload_notice(config_module.load())
+    except Exception:  # noqa: BLE001 - a file that does not load has no gateway to ask about.
+        return ""
+
+
+def _gateway_off_configured_port_notice(host: str, port: int) -> str:
+    """This account's gateway is running but not on the configured port, or ""."""
+    from defenseclaw.config import default_data_path
+    from defenseclaw.doctor_gateway import read_pid_record
+    from defenseclaw.process_liveness import pid_alive
+
+    record = read_pid_record(os.path.join(str(default_data_path()), "gateway.pid"))
+    if record.status != "ok" or record.pid <= 0 or not pid_alive(record.pid):
+        return ""
+    return (
+        f"This account's gateway (PID {record.pid}) is running but does not answer on "
+        f"{_url_host(host)}:{port}, the port config.yaml names: a gateway.api_port change takes effect "
+        "after `defenseclaw-gateway restart`, and until then it enforces the configuration it last applied."
+    )
+
+
+def current_profile_account(*, secure_client: bool = False) -> tuple[str, str]:
+    """The account the gateway resolves for "you", and the name to show for it.
+
+    On Unix the effective UID identifies the process account; LOGNAME and USER
+    can name another account. On Windows the process token SID is authoritative
+    because an Entra ID login name may not be resolvable by Windows.
+    """
+    if os.name != "nt" and not secure_client:
+        import pwd
+
+        uid = os.geteuid()
+        try:
+            label = pwd.getpwuid(uid).pw_name
+        except (KeyError, OSError):
+            label = str(uid)
+        return str(uid), label
+
+    import getpass
+
+    try:
+        label = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name means no answer, not a crash.
+        label = ""
+    if os.name == "nt":
+        from defenseclaw.file_permissions import _windows_current_user_sid
+
+        try:
+            return _windows_current_user_sid(), label
+        except OSError:
+            pass
+    return label, label
 
 
 def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) -> list[dict[str, str]]:
@@ -114,7 +239,7 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
     applies the assignment order; an agent is attributed to its connector
     through the user's agent identities, and agents of other users are skipped.
     """
-    from defenseclaw.connector_paths import normalize
+    from defenseclaw.connector_paths import KNOWN_CONNECTORS, normalize
 
     assignments = getattr(cfg.guardrail, "profile_assignments", None) or []
     scoped = [a for a in assignments if a.match.connectors or a.match.agents]
@@ -123,13 +248,19 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
     owners: dict[str, str] | None = None
     if any(a.match.agents for a in scoped):
         try:
-            rows = client.agent_identities(user=user).get("identities") or []
+            rows = client.agent_identities_all(user=user).get("identities") or []
             owners = {str(r.get("agent_id")): normalize(str(r.get("connector") or "")) for r in rows}
         except Exception:  # noqa: BLE001 - unknown owners: probe without a connector.
             owners = None
     probes: list[tuple[str, str]] = []
     for assignment in scoped:
-        connectors = [normalize(c) for c in assignment.match.connectors]
+        configured = getattr(cfg.guardrail, "connectors", {}) or {}
+        connectors = [
+            normalized for name in assignment.match.connectors
+            if (normalized := normalize(name)) in KNOWN_CONNECTORS or normalized in configured
+        ]
+        if assignment.match.connectors and not connectors:
+            continue
         for agent in assignment.match.agents or [""]:
             if agent and owners is not None and agent not in owners:
                 continue
@@ -137,7 +268,7 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
                 if (connector, agent) not in probes:
                     probes.append((connector, agent))
     overrides: list[dict[str, str]] = []
-    for connector, agent in probes[:_PROFILE_OVERRIDE_PROBES]:
+    for connector, agent in probes:
         try:
             answer = client.guardrail_profile_resolve(user=user, connector=connector, agent=agent)
         except Exception:  # noqa: BLE001 - the user-level answer still stands.
@@ -145,7 +276,9 @@ def _scoped_profile_overrides(cfg: Any, client: Any, user: str, profile: str) ->
         name = str(answer.get("profile") or "")
         if name and name != profile:
             match = str(answer.get("match") or "")
-            overrides.append({"connector": connector, "agent": agent, "profile": name, "match": match})
+            effective = answer.get("effective")
+            mode = str(effective.get("mode") or "") if isinstance(effective, dict) else ""
+            overrides.append({"connector": connector, "agent": agent, "profile": name, "match": match, "mode": mode})
     return overrides
 
 
@@ -750,16 +883,18 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
-    def scan_skill(self, target: str, name: str = "") -> dict[str, Any]:
+    def scan_skill(self, target: str, name: str = "", timeout: float = 120) -> dict[str, Any]:
         """Request a skill scan on the remote sidecar host.
 
         The sidecar runs the skill-scanner locally against the target path
-        on that machine and returns the ScanResult JSON.
+        on that machine and returns the ScanResult JSON. The gateway bounds
+        the scan by scanners.skill_scanner.timeouts.scan_s, so the caller
+        passes a timeout a little longer than that.
         """
         resp = self._session.post(
             f"{self.base_url}/v1/skill/scan",
             json={"target": target, "name": name},
-            timeout=120,
+            timeout=timeout,
             allow_redirects=False,
         )
         resp.raise_for_status()
@@ -782,11 +917,15 @@ class OrchestratorClient:
         return resp.json()
 
     def agent_identities(
-        self, *, user: str | None = None, connector: str | None = None,
+        self, *, user: str | None = None, connector: str | None = None, cursor: str = "", limit: int = 0,
     ) -> dict[str, Any]:
-        """Fetch agent identities (``GET /api/v1/agents/identities``),
+        """Fetch one page of agent identities (``GET /api/v1/agents/identities``),
         optionally narrowed to one user or one connector."""
-        params = {key: value for key, value in (("user", user), ("connector", connector)) if value}
+        params = {
+            key: value for key, value in (("user", user), ("connector", connector), ("cursor", cursor)) if value
+        }
+        if limit > 0:
+            params["limit"] = str(limit)
         resp = self._session.get(
             f"{self.base_url}/api/v1/agents/identities",
             params=params,
@@ -795,6 +934,42 @@ class OrchestratorClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    def agent_identities_all(
+        self, *, user: str | None = None, connector: str | None = None, limit: int = 0, max_pages: int = 64,
+    ) -> dict[str, Any]:
+        """Fetch every page of agent identities, or the ``limit`` most recently
+        seen, into one payload.
+
+        Rows can move up between pages when an agent is seen again, so a row
+        already listed is not listed twice. A repeated or missing cursor ends
+        the walk, and ``max_pages`` bounds it. ``next_cursor`` stays set when
+        rows were left out, and ``total`` says how many there are.
+        """
+        rows: list[dict[str, Any]] = []
+        listed: set[str] = set()
+        seen: set[str] = set()
+        cursor = ""
+        pages = 0
+        while True:
+            extra: dict[str, Any] = {"cursor": cursor} if cursor else {}
+            if limit > 0:
+                extra["limit"] = limit - len(rows)
+            payload = self.agent_identities(user=user, connector=connector, **extra)
+            pages += 1
+            for row in payload.get("identities") or []:
+                agent_id = str(row.get("agent_id") or "") if isinstance(row, dict) else ""
+                if agent_id and agent_id not in listed:
+                    listed.add(agent_id)
+                    rows.append(row)
+            seen.add(cursor)
+            cursor = str(payload.get("next_cursor") or "")
+            if not cursor or cursor in seen or pages >= max_pages or 0 < limit <= len(rows):
+                break
+        out = dict(payload)
+        out["identities"] = rows
+        out["next_cursor"] = "" if cursor in seen else cursor
+        return out
 
     def ai_usage(self) -> dict[str, Any]:
         resp = self._session.get(
@@ -1357,6 +1532,7 @@ def resolve_gateway_binary() -> str | None:
     5. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
+    5. The enterprise package's gateway on a managed Linux or macOS host.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
@@ -1386,7 +1562,27 @@ def resolve_gateway_binary() -> str | None:
     if _is_runnable_file(canonical):
         return canonical
 
-    return None
+    return _managed_gateway_binary()
+
+
+#: The gateway each managed runtime descriptor's package installs.
+_MANAGED_GATEWAY_BINARIES = {
+    "/etc/defenseclaw/managed-runtime.json": "/opt/defenseclaw/bin/defenseclaw-gateway",
+    "/opt/cisco/defenseclaw/etc/managed-runtime.json": "/opt/cisco/defenseclaw/bin/defenseclaw-gateway",
+}
+
+
+def _managed_gateway_binary() -> str | None:
+    """The enterprise package's gateway on a managed Linux or macOS host.
+
+    An administrator's shell has it on no PATH, and the answer to "gateway
+    not found" there must not be ``defenseclaw upgrade``, which a managed
+    device refuses (GAP-0168).
+    """
+    from defenseclaw.upgrade_shim import managed_descriptor
+
+    binary = _MANAGED_GATEWAY_BINARIES.get(managed_descriptor() or "")
+    return binary if binary and _is_runnable_file(binary) else None
 
 
 # What the CLI stubs say when no gateway binary resolves: not found is not
@@ -1489,7 +1685,10 @@ def _is_runnable_file(path: str) -> bool:
 def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
     """Compute effective_policy_digest from disk with the installed gateway
     (``defenseclaw-gateway policy digest --json``); None when it cannot."""
-    binary = resolve_gateway_binary()
+    try:
+        binary = resolve_trusted_gateway_binary()
+    except OSError:
+        return None
     if not binary:
         return None
     env = dict(os.environ)
@@ -1514,3 +1713,4 @@ def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
     except ValueError:
         return None
     return report if isinstance(report, dict) and report.get("effective_digest") else None
+

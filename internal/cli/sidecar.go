@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -93,7 +94,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Println(fleetBannerLine(cfg))
 	fmt.Printf("  Auto-approve: %v\n", cfg.Gateway.AutoApprove)
-	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg.Gateway.Token))
+	fmt.Printf("  Auth:         %s\n", tokenStatus(cfg))
 	fmt.Printf("  API port:     %d\n", cfg.Gateway.APIPort)
 	for _, line := range watcherBannerLines(cfg) {
 		fmt.Println(line)
@@ -102,6 +103,15 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		fmt.Println(line)
 	}
 	fmt.Println()
+
+	// A per-user gateway keeps the connector config roots its setup bound,
+	// whatever the shell that started it has set (GAP-0433). A managed
+	// gateway sets up no user hooks.
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		for _, note := range connector.PinConnectorConfigRootsToSetup(cfg.DataDir) {
+			fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+note)
+		}
+	}
 
 	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog)
 	if err != nil {
@@ -302,7 +312,7 @@ func bootstrapConfiguredObservabilityRuntime(
 		return fmt.Errorf("sidecar: observability bootstrap: config is unavailable")
 	}
 	if !config.CurrentSchemaVersion(c.ConfigVersion) {
-		return fmt.Errorf("sidecar: observability bootstrap requires schema v8; run 'defenseclaw upgrade' first")
+		return fmt.Errorf("sidecar: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	if ctx == nil || startup == nil || strings.TrimSpace(startup.sourceName) == "" || len(startup.raw) == 0 || bootstrapper == nil {
 		return fmt.Errorf("sidecar: observability v8 bootstrap state is incomplete")
@@ -329,9 +339,17 @@ func sidecarDiagEnabled() bool {
 	return false
 }
 
-func tokenStatus(token string) string {
+// tokenStatus says whether the gateway has a token, never any part of it: the
+// banner reaches the service journal and the lifecycle copies journal lines
+// into the package manager's log. Secure Client keeps the banner of main, the
+// token masked to its first and last 4 characters (GAP-0105, issue #1092).
+func tokenStatus(cfg *config.Config) string {
+	token := cfg.Gateway.Token
 	if token == "" {
 		return "none (will use device identity only)"
+	}
+	if !cfg.SecureClientIntegration() {
+		return "set"
 	}
 	if len(token) > 8 {
 		return token[:4] + "..." + token[len(token)-4:]
@@ -343,7 +361,8 @@ func tokenStatus(token string) string {
 // dials none: a hook-only or managed install never connects to
 // gateway.host:port, so the default 127.0.0.1:18789 misled (GAP-0077).
 func fleetBannerLine(cfg *config.Config) string {
-	if !gateway.RequiresFleetGateway(cfg) {
+	// Secure Client keeps the banner of its service log (issue #1092).
+	if !cfg.SecureClientIntegration() && !gateway.RequiresFleetGateway(cfg) {
 		return "  Gateway:      none (no OpenClaw fleet to connect to)"
 	}
 	return fmt.Sprintf("  Gateway:      %s:%d", cfg.Gateway.Host, cfg.Gateway.Port)
@@ -354,16 +373,27 @@ func fleetBannerLine(cfg *config.Config) string {
 // its own profile's agent folders (GAP-0026, GAP-0077).
 func watcherBannerLines(cfg *config.Config) []string {
 	w := cfg.Gateway.Watcher
+	secureClient := cfg.SecureClientIntegration()
+	var lines []string
 	switch {
+	case secureClient:
+		// Secure Client keeps the banner of its service log (issue #1092).
+		if lines = []string{fmt.Sprintf("  Watcher:      %v", w.Enabled)}; !w.Enabled {
+			return lines
+		}
 	case !w.Enabled:
 		return []string{"  Watcher:      disabled"}
 	case !gateway.WatcherWatchesDirs(cfg):
 		return []string{"  Watcher:      idle (no directories to watch)"}
+	default:
+		lines = []string{"  Watcher:      enabled"}
 	}
-	lines := []string{"  Watcher:      enabled",
-		fmt.Sprintf("    Skill:      enabled=%v take_action=%v", w.Skill.Enabled, w.Skill.TakeAction)}
+	lines = append(lines, fmt.Sprintf("    Skill:      enabled=%v take_action=%v", w.Skill.Enabled, w.Skill.TakeAction))
 	if len(w.Skill.Dirs) > 0 {
 		return append(lines, fmt.Sprintf("    Skill dirs: %v", w.Skill.Dirs))
+	}
+	if secureClient {
+		return append(lines, "    Skill dirs: autodiscover (from claw mode)")
 	}
 	return append(lines, "    Skill dirs: autodiscover (from the connector)")
 }

@@ -18,6 +18,7 @@ for each residual connector.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -45,6 +46,17 @@ def _cfg(data_dir: str, *, openclaw_config_file: str = "") -> SimpleNamespace:
 
 
 class CheckConnectorResidueTests(unittest.TestCase):
+    def test_inactive_antigravity_owned_hook_keys_are_residue(self):
+        with tempfile.TemporaryDirectory() as root:
+            hooks = os.path.join(root, "hooks.json")
+            with open(hooks, "w", encoding="utf-8") as stream:
+                json.dump({"defenseclaw-antigravity-pretooluse": {}, "operator-hook": {}}, stream)
+            with patch.object(cmd_doctor, "connector_home", return_value=root):
+                result = _DoctorResult()
+                _check_connector_residue(_cfg(root), "codex", result)
+            self.assertEqual(result.checks[-1]["status"], "warn")
+            self.assertIn(hooks, result.checks[-1]["detail"])
+
     def test_passes_when_no_residue(self):
         with tempfile.TemporaryDirectory() as data_dir:
             r = _DoctorResult()

@@ -446,6 +446,7 @@ def test_local_and_remote_splunk_tokens_remain_independent(tmp_path: Path) -> No
             name="local-splunk",
             secret_value="local-" + "a" * 32,
             secret_env_name=LOCAL_TOKEN_ENV,
+            allow_private_networks=True,
         )
         cmd_setup._apply_v8_observability_preset(
             app,
