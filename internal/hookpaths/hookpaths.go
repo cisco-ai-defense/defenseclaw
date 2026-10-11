@@ -226,6 +226,18 @@ func AuthorizedKeysPaths(home string) []string {
 	return paths
 }
 
+// ProtectedAuthorizedKeysPaths also includes sshd's Windows administrator
+// key file, which may live outside the invoking user's home.
+func ProtectedAuthorizedKeysPaths(home string) []string {
+	paths := AuthorizedKeysPaths(home)
+	if runtime.GOOS == "windows" {
+		if programData := os.Getenv("ProgramData"); filepath.IsAbs(programData) {
+			paths = append(paths, filepath.Join(programData, "ssh", "administrators_authorized_keys"))
+		}
+	}
+	return paths
+}
+
 // ResolveWriteTarget resolves an absolute write operand the way the hook
 // client does: links are followed, including one whose final file does not
 // exist yet. ok is false when the target cannot be resolved.
@@ -247,7 +259,7 @@ type protectedFiles []protectedFile
 
 func newProtectedFiles(home string) protectedFiles {
 	files := make(protectedFiles, 0, len(AuthorizedKeysFiles))
-	for _, path := range AuthorizedKeysPaths(home) {
+	for _, path := range ProtectedAuthorizedKeysPaths(home) {
 		protected := protectedFile{path: path}
 		info, err := os.Stat(path)
 		switch {
@@ -347,7 +359,7 @@ func Resolve(payload []byte) string {
 	// A connector can name the shell text "cmd" while ActionFacts requires
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
-	var operands []string
+	var operands, literalOperands []string
 	links := shellLinks{known: true}
 	var safeRedirects map[string]bool
 	var toolArgs map[string]json.RawMessage
@@ -364,6 +376,7 @@ func Resolve(payload []byte) string {
 				// the gateway still checks each literal redirect operand.
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
+				literalOperands = LiteralWriteOperands(command, cwd, home)
 				truncated = truncated || !parsed
 				safeRedirects = SafeShellRedirects(command, cwd, home)
 				// A link the command creates can make a later write a write
@@ -424,6 +437,9 @@ func Resolve(payload []byte) string {
 	// early-redirect exemption must not cover a later command writer.
 	for _, operand := range operands {
 		add(operand, true, true)
+	}
+	for _, operand := range literalOperands {
+		add(operand, true, false)
 	}
 	for _, candidate := range facts.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
