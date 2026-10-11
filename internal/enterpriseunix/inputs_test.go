@@ -267,6 +267,87 @@ func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
 			})
 		}
 	}
+	// GAP-1553: the ACL is already present when the run plans. A --config
+	// ensure reaches replaceWritableConfig, while an in-place edit is
+	// refused by buildPlan. Neither path may leave the edited bytes for
+	// the next ensure to record as administrator policy.
+	for _, failure := range []string{"chmod-config", "chmod-etc", "ls-recheck"} {
+		for _, configFlag := range []bool{true, false} {
+			t.Run(fmt.Sprintf("plan-time-%s-config-flag-%v", failure, configFlag), func(t *testing.T) {
+				h := newTestHost(t, "darwin")
+				pushed := machinePolicyConfig(t, h, "claudecode")
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: pushed}))
+				installed := h.read(h.env.Layout.ConfigPath)
+				config := h.env.P(h.env.Layout.ConfigPath)
+				etc := h.env.P(h.env.Layout.ConfigDir)
+				edited := []byte(strings.Replace(installed, "mode: observe", "mode: action", 1))
+				if err := os.WriteFile(config, edited, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				h.runner.acls = map[string][]string{
+					etc:    {"user:standard allow add_file"},
+					config: {"user:standard allow write"},
+				}
+				h.runner.replies = map[string]fakeReply{}
+				opts := Options{Action: ActionEnsure}
+				if configFlag {
+					opts.ConfigFile = pushed
+				}
+				switch failure {
+				case "chmod-config":
+					h.runner.replies["chmod -h -N "+config] = denied
+				case "chmod-etc":
+					h.runner.replies["chmod -h -N "+etc] = denied
+				case "ls-recheck":
+					h.env.Runner = &failingACLRecheckRunner{Runner: h.runner, path: config}
+				}
+				requireError(t, h.run(opts), codeConfig)
+
+				if configFlag {
+					if failure == "ls-recheck" {
+						if !h.env.Runner.(*failingACLRecheckRunner).failed {
+							t.Fatal("the ACL ls re-check did not fail")
+						}
+					} else {
+						target := map[string]string{"chmod-config": config, "chmod-etc": etc}[failure]
+						if !strings.Contains(strings.Join(h.runner.calls, " "), "chmod -h -N "+target) {
+							t.Fatal("the intended chmod -N failure was not reached")
+						}
+					}
+				}
+
+				if got := h.read(h.env.Layout.ConfigPath); got != installed {
+					t.Fatalf("after rejected plan-time ACL cleanup, config.yaml holds edited bytes: %v", got == string(edited))
+				}
+				h.env.Runner, h.runner.acls, h.runner.replies = h.runner, nil, nil
+				requireOK(t, h.run(Options{Action: ActionEnsure}))
+				record, _ := h.env.loadDeployment()
+				if got := h.read(h.env.Layout.ConfigPath); got == string(edited) || record.ConfigSHA256 == sha256Bytes(edited) {
+					t.Fatal("the next ensure kept or applied config written through a macOS ACL")
+				}
+			})
+		}
+	}
+}
+
+// failingACLRecheckRunner fails the first ls of config.yaml after chmod -N.
+type failingACLRecheckRunner struct {
+	Runner
+	path    string
+	removed bool
+	failed  bool
+}
+
+func (r *failingACLRecheckRunner) Run(ctx context.Context, name string, args ...string) (CommandResult, error) {
+	if name == "ls" && r.removed && !r.failed && strings.Contains(strings.Join(args, "\x00"), r.path) {
+		r.failed = true
+		return CommandResult{ExitCode: 1}, errors.New("ls: permission denied")
+	}
+	result, err := r.Runner.Run(ctx, name, args...)
+	if name == "chmod" && err == nil && len(args) >= 2 && args[1] == "-N" {
+		r.removed = true
+	}
+	return result, err
 }
 
 // A protected credential written during a transaction is applied the same

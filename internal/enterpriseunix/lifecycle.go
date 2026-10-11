@@ -1147,20 +1147,36 @@ func (l *lifecycle) replaceWritableConfig(ctx context.Context, record *Deploymen
 	if err := env.ensureDir(env.P(env.Layout.ConfigDir), 0o755, rootOwner()); err != nil {
 		return nil, &codedError{code: codeApply, err: err}
 	}
+	path := env.P(env.Layout.ConfigPath)
+	var trusted []byte
+	if record != nil {
+		committed, err := readBounded(env.committedConfigPath(), maxInputBytes)
+		if err == nil && sha256Bytes(committed) == record.ConfigSHA256 {
+			trusted = committed
+		}
+	}
 	if err := l.removeConfigACLs(ctx); err != nil {
+		// A --config run has no in-place edit to revert. Give the caller
+		// verified applied bytes so it still replaces the ACL-written file.
+		if record != nil {
+			if trusted == nil {
+				current, readErr := readBounded(path, maxInputBytes)
+				if readErr == nil && sha256Bytes(current) == record.ConfigSHA256 {
+					trusted = current
+				}
+			}
+			if trusted != nil {
+				return trusted, &codedError{code: codeConfig, err: err}
+			}
+		}
 		return nil, &codedError{code: codeApply, err: err}
 	}
-	path := env.P(env.Layout.ConfigPath)
 	if record == nil {
 		// No applied config to put there (an installed one was refused). A
 		// --config install writes its own bytes over whatever another
 		// account put there before it lost access.
 		p.installedConfigSHA, _ = sha256File(path)
 		return nil, nil
-	}
-	trusted, err := readBounded(env.committedConfigPath(), maxInputBytes)
-	if err != nil || sha256Bytes(trusted) != record.ConfigSHA256 {
-		trusted = nil
 	}
 	current, readErr := readBounded(path, maxInputBytes)
 	if trusted == nil && readErr == nil && sha256Bytes(current) == record.ConfigSHA256 {
