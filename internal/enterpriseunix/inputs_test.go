@@ -186,6 +186,89 @@ func TestConfigMadeWritableAfterPlanningIsRefused(t *testing.T) {
 	}
 }
 
+// GAP-1535: removing the ACL entries can fail before the transaction gets
+// to the entry on config.yaml: chmod -N fails on config.yaml or on a path
+// listed before it, ls fails, or an entry on a folder above a vendor
+// machine-policy folder refuses the run first. Bytes written through the
+// entry on config.yaml are still not kept for a follow-up, for a --config
+// run and for an in-place edit. Without a write entry on config.yaml the
+// newer config is kept as before.
+func TestConfigWrittenThroughAnACLIsRefusedWhenRemovingACLsFails(t *testing.T) {
+	denied := fakeReply{result: CommandResult{ExitCode: 1}, err: errors.New("chmod: Operation not permitted")}
+	for _, tc := range []struct {
+		name  string
+		entry string // the entry on config.yaml
+		fail  func(h *testHost, config, binDir string)
+		kept  bool
+	}{
+		{"chmod-config", "user:standard allow write", func(h *testHost, config, _ string) {
+			h.runner.replies["chmod -h -N "+config] = denied
+		}, false},
+		{"chmod-earlier", "user:standard allow write", func(h *testHost, _, binDir string) {
+			h.runner.replies["chmod -h -N "+binDir] = denied
+		}, false},
+		{"ls", "user:standard allow write", func(h *testHost, config, _ string) {
+			h.env.Runner = failingLsRunner{Runner: h.runner, path: config}
+		}, false},
+		{"ancestor", "user:standard allow write", func(h *testHost, _, _ string) {
+			h.runner.acls[h.env.P("/Library/Application Support")] = []string{"user:developer allow add_subdirectory"}
+		}, false},
+		{"read-entry", "user:standard allow read", func(h *testHost, config, _ string) {
+			h.runner.replies["chmod -h -N "+config] = denied
+		}, true},
+	} {
+		for _, configFlag := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s-config-flag-%v", tc.name, configFlag), func(t *testing.T) {
+				h := newTestHost(t, "darwin")
+				pushed := machinePolicyConfig(t, h, "claudecode")
+				requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: pushed}))
+				installed := h.read(h.env.Layout.ConfigPath)
+				path := h.env.P(h.env.Layout.ConfigPath)
+				binDir := h.env.P(h.env.Layout.BinDir)
+				admin := []byte(installed + "# pushed\n")
+				opts := Options{Action: ActionEnsure}
+				if configFlag {
+					opts.ConfigFile = pushed
+					if err := os.WriteFile(pushed, admin, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(path, admin, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				edited := []byte(strings.Replace(string(admin), "mode: observe", "mode: action", 1))
+				done := false
+				h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(name string) {
+					if name != unitOf("darwin", "enumerator") || done {
+						return
+					}
+					done = true
+					h.runner.mu.Lock()
+					h.runner.acls = map[string][]string{path: {tc.entry}, binDir: {"user:standard allow add_file"}}
+					h.runner.replies = map[string]fakeReply{}
+					h.runner.mu.Unlock()
+					tc.fail(h, path, binDir)
+					if err := os.WriteFile(path, edited, 0o640); err != nil {
+						t.Error(err)
+					}
+				}}
+				requireError(t, h.run(opts), codeApply)
+				// A new file stands for config.yaml from here on.
+				h.env.Services, h.env.Runner, h.runner.acls, h.runner.replies = h.services, h.runner, nil, nil
+				if got := h.read(h.env.Layout.ConfigPath); (got == string(edited)) != tc.kept {
+					t.Fatalf("after the rollback config.yaml holds the edit: %v, want %v", got == string(edited), tc.kept)
+				}
+				if tc.kept {
+					return
+				}
+				_ = h.run(Options{Action: ActionEnsure})
+				if record, _ := h.env.loadDeployment(); h.read(h.env.Layout.ConfigPath) == string(edited) || record.ConfigSHA256 == sha256Bytes(edited) {
+					t.Fatal("the edit written through a macOS ACL entry was kept or applied")
+				}
+			})
+		}
+	}
+}
+
 // A protected credential written during a transaction is applied the same
 // way.
 func TestSecretWrittenDuringATransactionIsApplied(t *testing.T) {

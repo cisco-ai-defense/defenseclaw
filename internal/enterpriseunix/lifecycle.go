@@ -170,9 +170,10 @@ type lifecycle struct {
 	// other bytes after the restart was written by another writer since and
 	// is never overwritten (restoreNewerConfig, GAP-1379).
 	rollbackConfigSHA string
-	// configACLWritable is set when a transaction removed a macOS ACL entry
-	// that let another account write config.yaml after the plan checked it:
-	// bytes that changed since are not applied (GAP-1501).
+	// configACLWritable is set when a transaction found a macOS ACL entry
+	// that let another account write config.yaml after the plan checked it,
+	// or could not read the ACLs: bytes that changed since are not applied,
+	// also when removing the entry failed (GAP-1501, GAP-1535).
 	configACLWritable bool
 	// machinePolicyPublished is set once a transaction of this run wrote
 	// vendor machine policy for its config, which a rollback then undoes.

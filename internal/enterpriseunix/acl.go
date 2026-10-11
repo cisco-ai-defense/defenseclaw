@@ -396,6 +396,17 @@ func (l *lifecycle) removeConfigACLs(ctx context.Context) error {
 func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) error {
 	env := l.env
 	findings, err := env.aclFindings(ctx, targets)
+	// Set before anything below can fail: a run that stops before chmod -N
+	// cleared config.yaml (or could not list its ACL) must not keep bytes
+	// written through the entry as a newer config (GAP-1518, GAP-1535).
+	if err != nil && env.GOOS == "darwin" {
+		l.configACLWritable = true
+	}
+	for _, finding := range findings {
+		if finding.write && finding.path == env.Layout.ConfigPath {
+			l.configACLWritable = true
+		}
+	}
 	if err != nil {
 		return fmt.Errorf("read the macOS ACLs of the deployment: %w", err)
 	}
@@ -418,9 +429,6 @@ func (l *lifecycle) removeACLTargets(ctx context.Context, targets []aclTarget) e
 				finding.path, err, finding.path, env.lifecycleCommand(l.opts.Action))
 		}
 		removed = append(removed, finding.path)
-		if finding.write && finding.path == env.Layout.ConfigPath {
-			l.configACLWritable = true
-		}
 	}
 	left, err := env.aclFindings(ctx, targets)
 	if err != nil {
