@@ -2350,7 +2350,8 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     assert "$expectedPrivileges = if ($gateway -or $broker)" in token_probe
     assert "integrity $($token.IntegritySid), want $expectedIntegrityName" in token_probe
     assert "expected_integrity_sid = $expectedIntegritySID" in token_probe
-    assert "if ($serviceGroups.Count -ne 1 -or [bool]$serviceGroups[0].DenyOnly)" in token_probe
+    assert "-not [bool]$serviceGroups[0].Enabled -or" in token_probe
+    assert "[bool]$serviceGroups[0].DenyOnly) {" in token_probe
     assert "if (-not $gateway -and -not $broker)" in token_probe
     assert "service_sid_group_required = $true" in token_probe
     assert "service_sid_group_count = $serviceGroups.Count" in token_probe

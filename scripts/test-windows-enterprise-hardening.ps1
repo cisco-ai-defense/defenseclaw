@@ -14404,11 +14404,13 @@ function Get-CertificationServiceTokenSnapshot {
                 Where-Object { [string]$_.Sid -eq $serviceSID }
         )
         # Every service runs as LocalSystem, so its TokenUser is S-1-5-18 and
-        # its own service SID must appear exactly once as a non-deny-only
-        # group. For the gateway this group is what Go-side identity checks
-        # use to recognize the gateway process.
-        if ($serviceGroups.Count -ne 1 -or [bool]$serviceGroups[0].DenyOnly) {
-            throw "$serviceName PID $($process.process_id) lacks its non-deny-only service SID group $serviceSID"
+        # its own service SID must appear exactly once as an enabled,
+        # non-deny-only group. For the gateway this group is what Go-side
+        # identity checks use to recognize the gateway process.
+        if ($serviceGroups.Count -ne 1 -or
+            -not [bool]$serviceGroups[0].Enabled -or
+            [bool]$serviceGroups[0].DenyOnly) {
+            throw "$serviceName PID $($process.process_id) lacks its enabled, non-deny-only service SID group $serviceSID"
         }
         $restrictedSIDs = @(
             $token.RestrictedSids |

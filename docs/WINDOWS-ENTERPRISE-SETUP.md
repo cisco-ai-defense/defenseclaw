@@ -135,9 +135,13 @@ credential broker, the hook guardian, and the hook enumerator.
 
 The gateway still runs with its own restricted service SID
 (`NT SERVICE\DefenseClawGateway`) and only `SeChangeNotifyPrivilege`. Its
-token is write-restricted, so it can write only the runtime and log paths
-whose ACLs grant that service SID. Configuration, the target manifest, the
-authorization ledger, binaries, and service definitions stay read-only to it.
+token is write-restricted: every write must also pass a check against its
+restricting SIDs (the gateway service SID, Everyone and WRITE_RESTRICTED).
+Among DefenseClaw's managed paths, only the runtime and log ACLs grant one of
+those, so configuration, the target manifest, the authorization ledger,
+binaries, and service definitions stay read-only to it. A host path outside
+DefenseClaw that grants write to Everyone stays writable to the gateway, as
+it was under the virtual account.
 
 Because LocalSystem holds the service logon right by design:
 

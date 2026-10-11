@@ -771,14 +771,15 @@ Get-Acl 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-stat
   Format-List Owner, Sddl
 ```
 
-Acceptance requires the exact virtual-account/LocalSystem identities, automatic
+Acceptance requires the LocalSystem identity for every service, automatic
 start, approved absolute image paths and arguments, the managed-mode
 environment pin, protected DACLs with no standard-user write ACE, and a healthy
 JSON `verify`. Do not stop at the configured SCM `RequiredPrivileges` values:
 the current broker-focused certification opens the gateway, broker, and
 guardian live process tokens read-only and records
 `TokenUser`, integrity, privileges, groups, and restricted SIDs. The gateway
-must have the exact `NT SERVICE\<gateway>` TokenUser, high integrity, a
+must have the LocalSystem TokenUser, system integrity, its
+`NT SERVICE\<gateway>` service SID as an enabled non-deny-only group, a
 restricted token containing its service SID, World, service-logon, and
 write-restricted SIDs, and only `SeChangeNotifyPrivilege`. The broker must have
 the LocalSystem TokenUser, system integrity, an unrestricted token with its

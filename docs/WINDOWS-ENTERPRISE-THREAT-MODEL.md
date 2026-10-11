@@ -85,7 +85,8 @@ Windows enterprise lifecycle transaction
   |-- SCM: gateway service + guardian service
   |
   +--> Gateway service
-  |      identity: NT SERVICE\<gateway>, restricted service SID
+  |      logon: LocalSystem, only ChangeNotify
+  |      token: write-restricted by NT SERVICE\<gateway> service SID
   |      reads: protected config and guardian authorization
   |      writes: runtime tokens/state and its own log only
   |

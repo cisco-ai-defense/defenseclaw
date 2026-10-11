@@ -167,11 +167,13 @@ deterministic-build, Docs).
 
 - If the change breaks an existing test, fix it in the same PR. Do not
   defer it to a follow-up.
-- A test that asserts the gateway's old identity
-  (`NT SERVICE\<GatewayServiceName>`, the virtual service SID as the
-  gateway's process token or SCM account, or the old
-  `DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT` value) is updated to
-  `LocalSystem` / `S-1-5-18`, keeping the rest of the assertion.
+- A test that asserts the gateway's old logon identity
+  (`NT SERVICE\<GatewayServiceName>` as its SCM account, or the virtual
+  service SID as its process TokenUser) is updated to `LocalSystem` /
+  `S-1-5-18`, keeping the rest of the assertion.
+- Tests of `DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT` stay unchanged. Its value
+  is still `NT SERVICE\<GatewayServiceName>` because it pins the service
+  SID, not the logon account.
 - A test that breaks for any other reason is fixed in the product code
   if the change caused a real regression, or in the test if the test
   encoded the old identity indirectly.
