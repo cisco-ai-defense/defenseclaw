@@ -39,14 +39,16 @@ func TestWindowsManagedInstallDefaultsOpenAndClaudeVersionCanBeMissing(t *testin
 		fixture := newWindowsGenericCodexFixture(t)
 		opts := fixture.opts
 		opts.HookFailMode = ""
-		if _, err := Install(context.Background(), opts); err != nil {
+		// The generic fixture tests per-user contract/rendering policy. The
+		// public Codex installer additionally requires protected machine state.
+		if _, err := installWindowsGenericManagedResult(context.Background(), opts); err != nil {
 			t.Fatal(err)
 		}
 		lock := connector.LoadHookContractLockEntry(filepath.Join(fixture.home, ".defenseclaw"), "codex")
 		if lock.HookFailMode != "open" {
 			t.Fatalf("default lock=%+v", lock)
 		}
-		if _, err := Verify(context.Background(), opts); err != nil {
+		if _, err := verifyWindowsGenericManagedResult(context.Background(), opts); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -66,6 +68,21 @@ func TestWindowsManagedInstallDefaultsOpenAndClaudeVersionCanBeMissing(t *testin
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestWindowsCodexVersionFallbackStillRequiresProtectedMachineRuntime(t *testing.T) {
+	for _, agentVersion := range []string{"", "codex-cli 0.142.0"} {
+		t.Run(agentVersion, func(t *testing.T) {
+			fixture := newWindowsGenericCodexFixture(t)
+			t.Setenv("DEFENSECLAW_HOME", "")
+			opts := fixture.opts
+			opts.AgentVersion = agentVersion
+			if _, err := Install(context.Background(), opts); err == nil ||
+				!strings.Contains(err.Error(), "DEFENSECLAW_HOME must be exact protected StateRoot\\runtime") {
+				t.Fatalf("Install without protected machine runtime = %v, want StateRoot/runtime rejection", err)
+			}
+		})
+	}
 }
 
 func TestWindowsEnumerationUsesPresenceWithoutAgentVersion(t *testing.T) {

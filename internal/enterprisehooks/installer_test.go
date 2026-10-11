@@ -47,6 +47,9 @@ func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("strict managed runtime artifacts are native Windows-only")
 	}
+	// Managed contract comparison hashes the current runtime and binds it to
+	// the authenticated gateway service, including observe/drift-override cases.
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway-Test")
 	const oversizedManagedArtifact = int64(4<<20 + 1)
 	conn := connector.NewClaudeCodeConnector()
 	newOpts := func(dataDir string) connector.SetupOpts {

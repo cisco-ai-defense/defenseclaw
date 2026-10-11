@@ -105,6 +105,23 @@ Epic HD-DEFAULT: align hook availability defaults without weakening policy.
   the completion notifier and effective-contract assertion. Investigate the
   separate native Setup/lifecycle process-roster failure without weakening
   process identity checks or changing runtime behavior.
+- HD-12 [implemented; native execution pending]: align Windows-only test fixtures with the intended open
+  default and version fallback. Keep lock/cleanup fixtures explicitly closed
+  at both runtime generation and contract publication; include delivery mode
+  in verifier expectations and a gateway-service identity in drift fixtures.
+  Exercise the generic Codex fixture through its generic install/verify helpers,
+  not the public machine-requirements installer; the native Codex connector
+  contract remains the end-to-end certification for the public Windows path.
+  Add known/unversioned public-install regressions that require protected
+  StateRoot/runtime even when version fallback is available. Preserve all
+  ownership, bounded-reader, cleanup-CAS and tamper assertions.
+
+HD-12 is a test-only continuation of this PR with no version bump or production
+changes. The `c294b7fc` Go diagnostics identify deterministic fixture mismatches,
+not the preceding Claude completion timeout. Acceptance requires unchanged
+security assertions, macOS package verification and Windows test compilation/vet;
+native Windows CI is required to establish execution results. The intermittent
+Amp missing-decision failure is a separate investigation. CONTEXT.md stays absent.
 
 HD-11 is test-only and continues the existing PR without a version bump.
 At `752b0c48`, Windows Go reports hooks present at timeout and subsequently
@@ -208,8 +225,8 @@ unchanged. A portable, digest-verified PowerShell runtime was used only under
 The completed `9ed37a2a` run also reveals separate Windows Go fixture failures:
 protected StateRoot/runtime and gateway-service bindings are missing in some
 enterprise-hook fixtures, while managed-contract cleanup fixtures omit delivery
-mode and still expect closed. These are not addressed by HD-09 and require a
-separate follow-up before the entire Windows gate can pass.
+mode and still expect closed. HD-12 addresses these fixtures separately from
+HD-09; native Windows execution remains required before the gate can pass.
 
 Delivery-policy consistency verification: the Go and Python regression matrices
 reproduce the old observe/global-closed downgrade. Ten real Amp plugin cases
@@ -253,6 +270,15 @@ Cosign installer action: signature verification succeeds, but deleting `cosign`
 reports `Device or resource busy`. DefenseClaw acceptance does not run. This is
 an action/bootstrap file-lock failure suitable for retry; verifier and integrity
 checks must remain intact.
+
+Windows fixture verification (HD-12): the full enterprise-hook suite passes on
+macOS, along with focused connector managed-runtime, hook-contract, delivery-mode
+and Windows portable regressions. Both edited packages pass macOS and Windows
+amd64 vet, and their Windows test executables cross-compile. No production file,
+workflow, timeout, security assertion or installed runtime changed. Only existing
+synthetic fixture tokens are reused; no real credential or certificate is added.
+The new public Codex rejection test and all edited Windows-only cases require
+native CI execution; cross-compilation does not establish that they pass there.
 
 ## Top-level doc impact
 

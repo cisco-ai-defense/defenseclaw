@@ -1426,13 +1426,18 @@ func TestInstallWindowsGenericUsesUnionInsteadOfUserVersionCache(t *testing.T) {
 	}
 	opts := fixture.opts
 	opts.AgentVersion = " \t "
-	_, err := Install(context.Background(), opts)
+	// This fixture models the generic per-user runtime, not Codex's protected
+	// machine requirements. Use the same entry point as its lifecycle test.
+	_, err := installWindowsGenericManagedResult(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("Install error = %v, want unversioned union fallback", err)
 	}
 	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
 	if lock.CompatibilityStatus != connector.HookCompatibilityUnversioned || lock.HookFailMode != "open" {
 		t.Fatalf("fallback lock = %+v, want unversioned/open without user cache promotion", lock)
+	}
+	if _, err := verifyWindowsGenericManagedResult(context.Background(), opts); err != nil {
+		t.Fatalf("Verify unversioned union fallback: %v", err)
 	}
 }
 
