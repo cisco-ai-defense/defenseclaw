@@ -720,6 +720,25 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	if err := os.Symlink("unpack/existing", filepath.Join(project, "outlink2")); err != nil {
 		t.Fatal(err)
 	}
+	// GAP-1556: these links predate the command. The kernel traverses b
+	// before applying the ".." in l's target.
+	for _, dir := range []string{filepath.Join(project, "a"), filepath.Join(home, ".ssh", "d"),
+		filepath.Join(project, "a2"), filepath.Join(project, "unpack", "q", "r"),
+		filepath.Join(project, "build"), filepath.Join(home, "shared")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, link := range []struct{ name, target string }{
+		{filepath.Join(project, "a", "b"), filepath.Join(home, ".ssh", "d")},
+		{filepath.Join(project, "a", "l"), filepath.FromSlash("b/../authorized_keys")},
+		{filepath.Join(project, "a2", "b"), filepath.FromSlash("../unpack/q/r")},
+		{filepath.Join(project, "a2", "l"), filepath.FromSlash("b/../t")},
+	} {
+		if err := os.Symlink(link.target, link.name); err != nil {
+			t.Fatal(err)
+		}
+	}
 	big := filepath.Join(project, "big")
 	if err := os.MkdirAll(big, 0o700); err != nil {
 		t.Fatal(err)
@@ -744,6 +763,12 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`tar -C unpack -xf evil.tar && echo k >> outlink`,
 		`tar -C unpack -xf evil.tar && echo k >> dlink/n`,
 		`tar -C unpack -xf evil.tar && echo k >> outlink2`,
+		// GAP-1556: a pre-existing directory link precedes ".." in another link.
+		`echo k >> a/l`,
+		`cp x a/l`,
+		`tee -a a/l < x`,
+		`ln -s b/../authorized_keys a/new && echo k >> a/new`,
+		`tar -C unpack -xf evil.tar && echo k >> a2/l`,
 		// GAP-1547: an early redirect does not exempt later command writers.
 		`echo a > n1.txt; tar xf evil.tar; cp payload n1.txt`,
 		`echo a > n1.txt; tar xf evil.tar; dd if=payload of=n1.txt`,
@@ -830,6 +855,9 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp --archive disklink notes.txt`,
 		`cp --recursive tree copy`,
 		`cp -a -t copy tree`,
+		// Ordinary ".." and a link without a following ".." stay resolvable.
+		`cd build && cat ../README.md > ../out.txt`,
+		`ln -s ../shared lib && cat lib/x`,
 		// Extraction alone, listing, an extractor redirect and earlier writes.
 		`tar xzf x.tgz`,
 		`tar -t -f keys.tar`,

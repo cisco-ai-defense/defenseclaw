@@ -142,6 +142,9 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 	if err := os.WriteFile(keys, []byte("marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(home, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	// An existing alias that ln -f replaces.
 	notes := filepath.Join(home, "notes.txt")
 	if err := os.WriteFile(notes, nil, 0o600); err != nil {
@@ -188,5 +191,55 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 		if !ok || !present || got != tc.want || (targets[TruncatedKey] == "1") != (tc.want == "") {
 			t.Errorf("%q: target of %s = %q (present %v), want %q; all=%v", tc.command, operand, got, present, tc.want, targets)
 		}
+	}
+}
+
+// A ".." in a link target must be interpreted after the preceding component
+// has been inspected. A linked or unreadable component makes that path unknown.
+func TestRelativeLinkTargetDotDot(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		filepath.Join(home, ".ssh", "d"), filepath.Join(home, "a"),
+		filepath.Join(home, "a2"), filepath.Join(home, "unpack", "q", "r"),
+		filepath.Join(home, "ordinary"), filepath.Join(home, "shared"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, link := range []struct{ name, target string }{
+		{filepath.Join(home, "a", "b"), filepath.Join(home, ".ssh", "d")},
+		{filepath.Join(home, "a", "l"), filepath.FromSlash("b/../authorized_keys")},
+		{filepath.Join(home, "a2", "b"), filepath.FromSlash("../unpack/q/r")},
+		{filepath.Join(home, "a2", "l"), filepath.FromSlash("b/../t")},
+		{filepath.Join(home, "ordinary", "lib"), filepath.FromSlash("../shared")},
+	} {
+		if err := os.Symlink(link.target, link.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []struct {
+		name, path, want string
+		known            bool
+	}{
+		{"keys hop", filepath.Join(home, "a", "l"), "", false},
+		{"extractor hop", filepath.Join(home, "a2", "l"), "", false},
+		{"unknown hop", filepath.Join(home, "a", "missing") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", "", false},
+		{"ordinary dot dot", filepath.Join(home, "ordinary") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", filepath.Join(home, "out"), true},
+		{"ordinary link", filepath.Join(home, "ordinary", "lib", "x"), filepath.Join(home, "shared", "x"), true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got, ok := ResolveWriteTarget(row.path)
+			if ok != row.known || ok && got != row.want {
+				t.Errorf("resolved = %q, known %v; want %q, %v", got, ok, row.want, row.known)
+			}
+			_, formsOK := writePathForms(row.path, 0)
+			if formsOK != row.known {
+				t.Errorf("forms known = %v, want %v", formsOK, row.known)
+			}
+		})
 	}
 }

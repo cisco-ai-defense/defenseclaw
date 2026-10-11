@@ -783,7 +783,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		// A name that a link earlier in the command makes an alias of a
 		// protected file (GAP-1505).
-		if linked, ok := links.Target(target); ok && isProtected(linked) {
+		if linked, ok := links.Target(target); !ok || isProtected(linked) {
 			return true
 		}
 		info, err := os.Lstat(target)
@@ -805,7 +805,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// Resolve as the hook client does, so a link to a missing final
 		// file that the redirect would create is covered as well.
 		resolved, ok := hookpaths.ResolveWriteTarget(target)
-		return ok && isProtected(resolved)
+		// An existing link whose target cannot be resolved is still a
+		// possible write into the protected home. The client and gateway
+		// must both fail closed on a linked component before "..".
+		return !ok || isProtected(resolved)
 	}
 	// Partial command projections can omit a redirect PathFact. The shell AST
 	// still gives an exact write operand, which the user's hook resolved.
