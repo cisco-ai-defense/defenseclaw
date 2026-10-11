@@ -77,7 +77,7 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   MISSING_TOKEN_REASON="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
-  defenseclaw_log_hook_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure cursor cursor-hook "$MISSING_TOKEN_REASON" transport "$FAIL_MODE"
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: ${MISSING_TOKEN_REASON}, blocking cursor tool (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
     printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
@@ -90,7 +90,7 @@ fi
 
 # Read stdin under a 1MB cap so a hostile / runaway agent can't OOM
 # the hook process before the gateway sees the payload.
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: cursor hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook payload too large","agent_message":"DefenseClaw hook payload too large"}\n'
@@ -113,7 +113,7 @@ fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "cursor tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     printf '{"continue":false,"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}\n'
@@ -124,7 +124,7 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_log_hook_failure cursor cursor-hook "$1" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error: $1" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     emit_cursor_allow

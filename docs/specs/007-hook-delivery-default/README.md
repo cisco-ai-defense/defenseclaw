@@ -18,6 +18,11 @@
   and authenticated runtime generations retain their integrity checks.
 - Both changes ship on the existing branch and PR. Diagnose failing CI and fix
   code-related failures; report infrastructure failures separately.
+- Inspection failures that allow delivery emit an explicit fail-open warning
+  and an `outcome: fail_open` in the existing local hook failure JSONL log.
+  Record actual delivery outcomes separately from configured fail mode so
+  strict/managed overrides are not mislabeled. Never include payloads or tokens;
+  diagnostic writes must not change hook decisions.
 
 ## Design / decision
 
@@ -32,6 +37,17 @@ Carry the effective mode in the authenticated Windows runtime bundle and verify
 it against protected installation state. Never accept project or environment
 overrides that weaken an explicitly closed managed runtime.
 
+Codex, Claude Code and Cursor shell delivery failures and the shared native
+executor emit `WARNING hook fail-open; inspection bypassed` on stderr only when
+the failure permits delivery. Reuse `<runtime-home>/logs/hook-failures.jsonl`
+(`$DEFENSECLAW_HOME/logs/hook-failures.jsonl` for shell hooks), retaining timestamp,
+connector, hook, reason, category and configured `fail_mode`, and adding actual
+`outcome` (`fail_open` or `fail_closed`). An open mode plus strict transport
+availability therefore records `fail_closed`, not a bypass. Legacy shell
+diagnostic-only records use `unknown`: invalid trace metadata is not evidence
+that inspection was skipped. Logging is best-effort and content-free; the
+stderr warning remains available when the local log cannot be written.
+
 ## Plan
 
 Epic HD-DEFAULT: align hook availability defaults without weakening policy.
@@ -42,6 +58,12 @@ Epic HD-DEFAULT: align hook availability defaults without weakening policy.
   installation, registration, verification and native execution.
 - HD-04 [done; environment limitations noted]: verify packages, diagnose CI and
   update guidance and branch context.
+- HD-05 [done]: create a fresh Apple Silicon managed macOS bundle for
+  local testing, link the real ai-common CMID provider and verify the package
+  without running its installer.
+- HD-06 [done]: remove the added root CONTEXT.md at the user's request;
+  add content-free fail-open diagnostics and regression tests for macOS shell
+  and shared native Windows execution. Keep work notes in this spec instead.
 
 CI diagnosis: both failing leaf jobs at `791af585` read LiteLLM's mutable remote
 model-cost map despite documenting a bundled, locked registry. Read the installed
@@ -66,6 +88,21 @@ tests cross-compile. Schema/reference, catalog and upgrade-manifest checks pass.
 The Python connector matrix passes (483 passed, 20 skipped, 128 passing subtests)
 with isolated DefenseClaw state. Full `make check` stops at npm authentication E401 during provider dependency
 installation; native Windows execution and the new remote CI run remain pending.
+
+Local test bundle: managed macOS 0.8.6 arm64, built from source commit
+`3eb105e09f84ce2f5fd7bf9a32ff1c785d94d954` with the real ai-common CMID provider
+`v0.0.0-20261009205442-7eff5156d292`. Binary version/architecture, provider linkage,
+ad-hoc code-signature integrity, tar checksum and zip integrity checks pass.
+No installer was run. Build logs and extra handoff notes are not in the archive.
+
+Logging verification: the executable shell matrix (54 cases), shared native
+matrix (84 cases), JSON/line-injection tests, unwritable-log tests and full
+shell-hook regression set pass. Native hook executor, enterprise-hook and CLI
+suites pass; macOS/Windows Go vet and Windows cross-compilation pass. The full
+connector suite has one unrelated failure because the optional OpenClaw bundle
+is incomplete locally (`extensions/defenseclaw/dist/index.js` is missing).
+Native Windows execution remains a CI/Windows-host check. The existing macOS
+test bundle is preserved and predates this logging-only change; it was not rebuilt.
 
 ## Top-level doc impact
 
