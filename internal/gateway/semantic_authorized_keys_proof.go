@@ -1120,23 +1120,37 @@ func resolveAuthorizedKeysShellDirectory(input actionfacts.Input, current, direc
 func resolveAuthorizedKeysShellDirectoryWithNative(
 	input actionfacts.Input, current, directory string, native authorizedKeysDirectoryPaths,
 ) (string, bool) {
-	paths := authorizedKeysDirectoryPaths{path.IsAbs, path.Join, path.Clean}
-	if input.DialectHint == actionfacts.DialectCMD || input.DialectHint == actionfacts.DialectPowerShell {
-		paths = native
+	posix := authorizedKeysDirectoryPaths{path.IsAbs, path.Join, path.Clean}
+	// The anchor path picks the syntax. A POSIX command on Windows can still
+	// start from the native home or working directory (C:\Users\alice).
+	syntaxFor := func(anchor string) authorizedKeysDirectoryPaths {
+		if input.DialectHint == actionfacts.DialectCMD || input.DialectHint == actionfacts.DialectPowerShell ||
+			!posix.isAbs(anchor) && native.isAbs(anchor) {
+			return native
+		}
+		return posix
 	}
-	if directory == "~" {
+	var paths authorizedKeysDirectoryPaths
+	switch {
+	case directory == "~":
 		directory = input.ActiveHome
-	} else if strings.HasPrefix(directory, "~/") {
+		paths = syntaxFor(directory)
+	case strings.HasPrefix(directory, "~/"):
+		paths = syntaxFor(input.ActiveHome)
 		directory = paths.join(input.ActiveHome, directory[2:])
-	} else if !paths.isAbs(directory) {
-		base := current
-		if base == "" {
-			base = input.CWD
+	default:
+		paths = syntaxFor(directory)
+		if !paths.isAbs(directory) {
+			base := current
+			if base == "" {
+				base = input.CWD
+			}
+			paths = syntaxFor(base)
+			if !paths.isAbs(base) {
+				return "", false
+			}
+			directory = paths.join(base, directory)
 		}
-		if !paths.isAbs(base) {
-			return "", false
-		}
-		directory = paths.join(base, directory)
 	}
 	return paths.clean(directory), true
 }

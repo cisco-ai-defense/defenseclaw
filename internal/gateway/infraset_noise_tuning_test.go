@@ -210,40 +210,50 @@ func TestNetcatListenerUsesExposureTaxonomy(t *testing.T) {
 }
 
 func TestAuthorizedKeysShellDirectoryResolution(t *testing.T) {
-	input := actionfacts.Input{
+	posixInput := actionfacts.Input{
 		CWD: "/repo", ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX,
 	}
+	windowsInput := actionfacts.Input{CWD: `C:\repo`, ActiveHome: `C:\Users\alice`}
 	tests := []struct {
 		name, current, directory, want string
-		ok                             bool
+		ok, windowsOnly                bool
+		input                          actionfacts.Input
 	}{
-		{"home", "", "~", "/home/alice", true},
-		{"home ssh", "", "~/.ssh", "/home/alice/.ssh", true},
-		{"absolute", "", "/home/alice/.ssh", "/home/alice/.ssh", true},
-		{"relative to home", "/home/alice", ".ssh", "/home/alice/.ssh", true},
-		{"relative to cwd", "", "project/../notes", "/repo/notes", true},
-		{"relative base unknown", "relative", ".ssh", "", false},
+		{"home", "", "~", "/home/alice", true, false, posixInput},
+		{"home ssh", "", "~/.ssh", "/home/alice/.ssh", true, false, posixInput},
+		{"absolute", "", "/home/alice/.ssh", "/home/alice/.ssh", true, false, posixInput},
+		{"relative to home", "/home/alice", ".ssh", "/home/alice/.ssh", true, false, posixInput},
+		{"relative to cwd", "", "project/../notes", "/repo/notes", true, false, posixInput},
+		{"relative base unknown", "relative", ".ssh", "", false, false, posixInput},
+		// A POSIX-spelled command on Windows keeps the native home and CWD.
+		{"native home ssh", "", "~/.ssh", `C:\Users\alice\.ssh`, true, true, windowsInput},
+		{"native expanded home", "", `C:\Users\alice/.ssh`, `C:\Users\alice\.ssh`, true, true, windowsInput},
+		{"relative to native cwd", "", ".ssh", `C:\repo\.ssh`, true, true, windowsInput},
 	}
 	// On Linux, simulate native Windows path operations so this test still
 	// catches an accidental fallback to host paths for a POSIX command.
 	windowsPaths := authorizedKeysDirectoryPaths{
 		isAbs: func(value string) bool { return strings.HasPrefix(value, `C:\`) },
-		join:  func(...string) string { return `C:\unexpected` },
-		clean: func(string) string { return `C:\unexpected` },
+		join:  func(parts ...string) string { return strings.Join(parts, `\`) },
+		clean: func(value string) string { return strings.ReplaceAll(value, "/", `\`) },
 	}
 	resolvers := []struct {
-		name    string
-		resolve func(actionfacts.Input, string, string) (string, bool)
+		name      string
+		simulated bool
+		resolve   func(actionfacts.Input, string, string) (string, bool)
 	}{
-		{"host", resolveAuthorizedKeysShellDirectory},
-		{"simulated Windows host", func(input actionfacts.Input, current, directory string) (string, bool) {
+		{"host", false, resolveAuthorizedKeysShellDirectory},
+		{"simulated Windows host", true, func(input actionfacts.Input, current, directory string) (string, bool) {
 			return resolveAuthorizedKeysShellDirectoryWithNative(input, current, directory, windowsPaths)
 		}},
 	}
 	for _, resolver := range resolvers {
 		for _, test := range tests {
+			if test.windowsOnly && !resolver.simulated {
+				continue
+			}
 			t.Run(resolver.name+"/"+test.name, func(t *testing.T) {
-				got, ok := resolver.resolve(input, test.current, test.directory)
+				got, ok := resolver.resolve(test.input, test.current, test.directory)
 				if got != test.want || ok != test.ok {
 					t.Fatalf("resolved directory = %q, %t; want %q, %t", got, ok, test.want, test.ok)
 				}
