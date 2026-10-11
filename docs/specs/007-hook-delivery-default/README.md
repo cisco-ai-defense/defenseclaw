@@ -48,6 +48,10 @@ model-cost map despite documenting a bundled, locked registry. Read the installe
 wheel's JSON directly using package metadata, including when LiteLLM was already
 imported elsewhere. Keep model membership and deprecation validation intact.
 
+The updated CI run passes Schema & Parity. Connector Matrix exposes a stale
+init-command assertion for the former closed default; align it with the new
+default and add preservation coverage for an existing explicit closed policy.
+
 ## Verification
 
 Test unset, open, closed and invalid configuration; action-mode rendering;
@@ -59,7 +63,8 @@ Local results: Go config, connector, hook executor, enterprise-hook and CLI test
 pass; the focused Python suite has 379 passed, 6 skipped and 12 passing subtests.
 Go vet passes for macOS and Windows, and all changed Windows packages and their
 tests cross-compile. Schema/reference, catalog and upgrade-manifest checks pass.
-Full `make check` stops at npm authentication E401 during provider dependency
+The Python connector matrix passes (483 passed, 20 skipped, 128 passing subtests)
+with isolated DefenseClaw state. Full `make check` stops at npm authentication E401 during provider dependency
 installation; native Windows execution and the new remote CI run remain pending.
 
 ## Top-level doc impact

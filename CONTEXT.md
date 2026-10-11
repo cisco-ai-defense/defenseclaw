@@ -25,10 +25,17 @@ catalog checker imported LiteLLM's mutable remote registry despite documenting a
 locked bundled registry. The checker now reads the installed wheel's JSON via
 package metadata without importing LiteLLM, with regression coverage.
 
+The first updated CI run passed Schema & Parity but Connector Matrix exposed an
+old `init` test still expecting a closed fresh-install default. Align that test
+with open delivery and additionally verify a repeated init without the flag
+preserves an existing explicit closed setting.
+
 ## Verification / remaining environment checks
 
 - macOS Go config, connector, hook executor, enterprise-hook and CLI tests passed.
 - Focused Python suite: 379 passed, 6 skipped, 12 subtests passed.
+- Python connector matrix: 483 passed, 20 skipped, 128 subtests passed with
+  isolated DefenseClaw state; init defaults and closed-policy preservation pass.
 - Go vet passed for macOS and Windows; Windows packages and tests cross-compiled.
 - Schema/reference and catalog checks passed. Full local `make check` stopped at
   npm E401 in provider-coverage dependency installation, not a code assertion.
