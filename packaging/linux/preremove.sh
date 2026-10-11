@@ -13,8 +13,9 @@
 # This uninstall never purges: dpkg passes "remove" here for both apt remove
 # and apt purge, and rpm has no purge. It removes the machine state (config,
 # secrets, gateway and guardian state, logs, lifecycle state) and the
-# service account; each enrolled account keeps its ~/.defenseclaw and
-# per-user binaries. To remove those too, run
+# service account; the administrator policies in /etc/defenseclaw/policies
+# stay (apt purge deletes them), and each enrolled account keeps its
+# ~/.defenseclaw and per-user binaries. To remove those too, run
 # `defenseclaw-gateway enterprise linux uninstall --purge` before removing
 # the package; it names every account it purged or left alone.
 #

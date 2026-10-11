@@ -35,6 +35,10 @@ fi
 # own as files; an upgrade keeps them.
 case "${1:-}" in
     remove|purge|0)
+        # The vendor policies are written by the lifecycle, not shipped as
+        # package files; the uninstall keeps them while the package stays
+        # (GAP-0960), so they leave with the package.
+        rm -rf /opt/defenseclaw/share/policies
         rmdir /opt/defenseclaw/share/opencode /opt/defenseclaw/share /opt/defenseclaw/bin /opt/defenseclaw >/dev/null 2>&1 || true
         # The override `enterprise linux uninstall` wrote over this package's
         # tmpfiles.d entries leaves with the package.

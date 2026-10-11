@@ -159,6 +159,9 @@ type lifecycle struct {
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
+	// policiesKept is set when a Linux uninstall kept the administrator
+	// policies in Layout.PolicyDir (GAP-0960).
+	policiesKept bool
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -2731,8 +2734,15 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		_ = os.RemoveAll(env.P(fmt.Sprintf("/tmp/defenseclaw-plugin-cache-%d", record.ServiceUID)))
 	}
 	// Vendor policies are product files: they leave with the deployment,
-	// including the nested rule-pack directories.
-	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
+	// including the nested rule-pack directories. On a package host a plain
+	// uninstall keeps them with the package, whose payload holds only the
+	// binaries: an administrator recreates a custom pack from their
+	// guardrail/default, and the re-enable, `ensure --from-package --config`,
+	// needs that pack before it writes the vendor policies again (GAP-0960).
+	// The package removal deletes them (postremove.sh).
+	if l.opts.Purge || !packageManaged {
+		_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
+	}
 	// The managed OpenCode plugin left with the recorded files above, or
 	// leaves with the deb or rpm that ships it.
 	_ = removeDirIfEmpty(env.P(openCodePluginDir(env.Layout)))
@@ -2776,7 +2786,17 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
 	if removeState {
 		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir} {
-			if err := os.RemoveAll(env.P(dir)); err != nil {
+			var err error
+			if dir == env.Layout.ConfigDir && !l.opts.Purge && env.GOOS == "linux" {
+				// The administrator policies (custom rule packs, Rego) are
+				// inputs the administrator wrote, not machine state: the
+				// config that names them turns the deployment on again
+				// (GAP-0960). A purge removes them.
+				l.policiesKept, err = removeAllExcept(env.P(dir), env.P(env.Layout.PolicyDir))
+			} else {
+				err = os.RemoveAll(env.P(dir))
+			}
+			if err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -2815,6 +2835,24 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				if err != nil {
 					r.AddWarning(codeAccount, fmt.Sprintf("could not turn off the package's tmpfiles.d entries for the removed account: %v; the next boot logs that it cannot resolve %s", err, env.Layout.ServiceUser))
 				}
+			}
+		}
+		if l.policiesKept && !l.opts.KeepServiceAccount && !l.serviceAccountKept {
+			// The kept policies folder was root:<service group> 0750, and that
+			// group is gone: a group created later with its id would read
+			// it, and the account a reinstall creates could not reach the
+			// packs below it, so the re-enable refused them. It goes back to
+			// root, traversable, as an administrator stages it.
+			kept := env.P(env.Layout.PolicyDir)
+			err := fmt.Errorf("%s is not a directory", env.Layout.PolicyDir)
+			if info, statErr := os.Lstat(kept); statErr != nil {
+				err = statErr
+			} else if info.IsDir() { // never through a symlink
+				err = errors.Join(env.Lchown(kept, 0, 0), os.Chmod(kept, 0o751))
+			}
+			if err != nil {
+				r.AddWarning(codeLeftovers, fmt.Sprintf("could not hand %s back to root: %v; before the next ensure run `chown root:root %s` and `chmod 0751 %s`",
+					env.Layout.PolicyDir, err, env.Layout.PolicyDir, env.Layout.PolicyDir))
 			}
 		}
 	}
@@ -2917,12 +2955,35 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	default:
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}
+	if l.policiesKept {
+		lines = append(lines, "kept the administrator policies in "+layout.PolicyDir+" (custom rule packs and Rego), so `"+
+			env.lifecycleCommand(ActionEnsure)+" --from-package --config <file>` with the same config turns the deployment on again; --purge removes them")
+	}
 	if !l.opts.Purge {
 		if kept := l.keptPerUserLine(record); kept != "" {
 			lines = append(lines, kept)
 		}
 	}
 	return lines
+}
+
+// removeAllExcept removes dir, or, when keep is a direct child of dir that
+// holds files, everything in dir but keep. It reports whether keep stayed.
+func removeAllExcept(dir, keep string) (bool, error) {
+	if filepath.Dir(keep) != dir || !holdsState(keep) {
+		return false, os.RemoveAll(dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	var errs []error
+	for _, entry := range entries {
+		if path := filepath.Join(dir, entry.Name()); path != keep {
+			errs = append(errs, os.RemoveAll(path))
+		}
+	}
+	return true, errors.Join(errs...)
 }
 
 // recordPackageResult keeps the result of an `ensure --from-package` run

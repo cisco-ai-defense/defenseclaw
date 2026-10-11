@@ -560,3 +560,53 @@ func TestPackageKeptUninstallTurnsOffTheTmpfilesEntriesUntilTheNextInstall(t *te
 		t.Fatal("the next install kept the tmpfiles.d override")
 	}
 }
+
+// GAP-0960: the plain uninstall of a package host keeps the administrator
+// policies (a custom rule pack) and the vendor policies the pack was copied
+// from, so the documented re-enable, `ensure --from-package --config` with
+// the same config, works. A purge removes both.
+func TestUninstallKeepsTheAdministratorPoliciesForTheReenable(t *testing.T) {
+	h := packageHost(t, "1.0.0")
+	l := h.env.Layout
+	requireOK(t, h.run(Options{Action: ActionInstall, FromPackage: true}))
+	vendor, custom := filepath.Join(l.VendorPolicyDir, "guardrail", "default"), filepath.Join(l.PolicyDir, "guardrail", "custom")
+	if err := filepath.WalkDir(h.env.P(vendor), func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, _ := filepath.Rel(h.env.P(vendor), path)
+		data, err := os.ReadFile(path)
+		if err == nil {
+			writeHostFile(t, h, filepath.Join(custom, rel), string(data))
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(h.env.P(l.PolicyDir), 0o755); err != nil { // the service account reaches the pack
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "config.yaml")
+	raw := strings.Replace(v8AdminConfig(l), "rule_pack_dir: "+vendor, "rule_pack_dir: "+custom, 1)
+	if err := os.WriteFile(cfg, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reenable := Options{Action: ActionEnsure, FromPackage: true, ConfigFile: cfg}
+	requireOK(t, h.run(reenable))
+
+	r := h.run(Options{Action: ActionUninstall})
+	requireOK(t, r)
+	if exists(h.env.P(l.ConfigPath)) || !exists(h.env.P(filepath.Join(custom, "rules"))) || !exists(h.env.P(vendor)) {
+		t.Fatalf("plain uninstall: config kept=%v, custom pack kept=%v, vendor policies kept=%v",
+			exists(h.env.P(l.ConfigPath)), exists(h.env.P(custom)), exists(h.env.P(vendor)))
+	}
+	if summary := strings.Join(r.Changes, "\n"); !strings.Contains(summary, "kept the administrator policies in "+l.PolicyDir) {
+		t.Fatalf("uninstall summary does not name the kept policies:\n%s", summary)
+	}
+	requireOK(t, h.run(reenable))
+
+	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+	if exists(h.env.P(l.ConfigDir)) || exists(h.env.P(l.VendorPolicyDir)) {
+		t.Fatal("purge kept the administrator or vendor policies")
+	}
+}
