@@ -224,7 +224,14 @@ fail_response() {
   exit 2
 }
 
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{.HookSocketTransportSH}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}# Resolve write operands in the user's hook process; the managed gateway
+# cannot inspect this home under ProtectHome. Keep the payload off argv.
+_DC_RESOLVED_WRITES="$(/opt/defenseclaw/bin/defenseclaw-gateway hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" || _DC_RESOLVED_WRITES=
+RESOLVED_HEADER_ARGS=()
+if [ -n "${_DC_RESOLVED_WRITES}" ]; then
+  RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
+fi
+{{end}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
@@ -267,7 +274,8 @@ defenseclaw_hook_post() {
   curl -s --noproxy '*' -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
-    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \
+{{end}}    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
     "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
     "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
     --connect-timeout 2{{if .HookSocketTransportSH}} --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}} \

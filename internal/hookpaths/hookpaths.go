@@ -32,8 +32,17 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+// OperandFactsKey marks a client that enumerates shell write operands. The
+// gateway can fail closed on an omitted private operand only with this marker;
+// older headers did not promise facts for command destinations.
+const OperandFactsKey = "\x00operand-facts"
+
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
+
+// SedRelinkFactPrefix marks an in-place sed entry whose existing final link
+// has a dot-dot hop. The gateway may not be able to inspect that entry.
+const SedRelinkFactPrefix = "\x00sed-relink:"
 
 // maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
 // one path resolution. Every followed link counts, also in parent components,
@@ -99,6 +108,51 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		return true
 	})
 	return operands, true, dynamic
+}
+
+// ShellExtraWriteOperands lists destinations that the command-link proof
+// understands but ActionFacts does not emit as write PathFacts.
+func ShellExtraWriteOperands(command, cwd, home string) []string {
+	file, ok := parseShell(command)
+	if !ok {
+		return nil
+	}
+	var operands []string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 {
+			return true
+		}
+		words := make([]string, len(call.Args))
+		for i, arg := range call.Args {
+			var static bool
+			words[i], static = StaticWord(arg, home)
+			if !static {
+				return true
+			}
+		}
+		program := programBase(words[0])
+		var destination string
+		switch program {
+		case "ln", "gln":
+			for i := 1; i < len(words); i++ {
+				if words[i] == "-f" || words[i] == "--force" ||
+					strings.HasPrefix(words[i], "-") && strings.Contains(words[i], "f") {
+					destination = words[len(words)-1]
+					break
+				}
+			}
+		case "rsync":
+			destination = words[len(words)-1]
+		}
+		if destination != "" && !strings.HasPrefix(destination, "-") &&
+			(program != "rsync" || runtime.GOOS == "windows" || !strings.Contains(destination, ":")) &&
+			!strings.Contains(destination, "://") && !strings.Contains(destination, "::") {
+			operands = append(operands, OperandPath(destination, cwd))
+		}
+		return true
+	})
+	return operands
 }
 
 // OperandPath preserves dot-dot in the command operand until link resolution.
@@ -232,9 +286,10 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 		}
 		return true
 	}
-	// The stack records the status of components added after base. A link
-	// remains marked even after its target is resolved: the following ".."
-	// would otherwise erase the evidence of that hop.
+	// The stack records whether a component added after base is missing.
+	// A resolved link is a physical directory, so ".." ascends from its
+	// target. A missing component cannot be crossed: it may become a link
+	// before the command executes.
 	var crossed []bool
 	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
 		switch part {
@@ -275,7 +330,11 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
-				crossed = append(crossed, true)
+				_, err = os.Lstat(current)
+				if err != nil && !os.IsNotExist(err) {
+					return "", nil, linkDepth, false
+				}
+				crossed = append(crossed, os.IsNotExist(err))
 			} else {
 				current = candidate
 				crossed = append(crossed, unknown)
@@ -435,6 +494,7 @@ func Resolve(payload []byte) string {
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
 	var operands, literalOperands []string
+	var extraOperands []string
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
@@ -445,6 +505,7 @@ func Resolve(payload []byte) string {
 		sourceFacts[DirectoryFactPrefix+cwd] = "?"
 	}
 	var safeRedirects []RedirectOccurrence
+	var sedOperands map[string]bool
 	var toolArgs map[string]json.RawMessage
 	if json.Unmarshal(args, &toolArgs) == nil {
 		for _, key := range []string{"command", "cmd"} {
@@ -460,6 +521,13 @@ func Resolve(payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				extraOperands = ShellExtraWriteOperands(command, cwd, home)
+				sedOperands = SedReplacedOperands(command, cwd, home)
+				for path, safe := range sedOperands {
+					if !safe {
+						sourceFacts[SedRelinkFactPrefix+path] = "1"
+					}
+				}
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
 				truncated = truncated || !parsed
@@ -475,11 +543,13 @@ func Resolve(payload []byte) string {
 			}
 		}
 	}
-	targets := map[string]string{CWDKey: cwd}
+	targets := map[string]string{CWDKey: cwd, OperandFactsKey: "1"}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
 	protected := newProtectedFiles(home)
-	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
+	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 +
+		len(jsonString(OperandFactsKey)) + 1 + 3 + 1 +
+		len(jsonString(TruncatedKey)) + 1 + 3
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
 	add := func(path string, literal, safeRedirect bool) {
@@ -494,7 +564,7 @@ func Resolve(payload []byte) string {
 			size -= len(jsonString(path)) + 1 + len(jsonString(old)) + 1
 			delete(targets, path)
 		}
-		if len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
+		if len(path) > MaxWriteTargetPathBytes || len(targets)-2 >= MaxWriteTargets {
 			truncated = true
 			return
 		}
@@ -527,6 +597,12 @@ func Resolve(payload []byte) string {
 	for _, operand := range literalOperands {
 		add(operand, true, false)
 	}
+	for _, operand := range extraOperands {
+		add(operand, true, false)
+	}
+	for operand := range sedOperands {
+		add(operand, true, false)
+	}
 	for _, operand := range directoryOperands {
 		add(operand.Path, true, operand.Safe)
 	}
@@ -555,7 +631,7 @@ func Resolve(payload []byte) string {
 	}
 	for key, value := range sourceFacts {
 		entry := len(jsonString(key)) + 1 + len(jsonString(value)) + 1
-		if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
+		if len(targets)-2 >= MaxWriteTargets || size+entry > maxEncodedTargets {
 			truncated = true
 			break
 		}
@@ -601,8 +677,9 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+2 ||
-		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") {
+	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+3 ||
+		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
+		(targets[OperandFactsKey] != "" && targets[OperandFactsKey] != "1") {
 		return nil, false
 	}
 	for key, value := range targets {
@@ -610,6 +687,9 @@ func Decode(value string) (map[string]string, bool) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
+			return nil, false
+		}
+		if strings.HasPrefix(key, SedRelinkFactPrefix) && value != "1" {
 			return nil, false
 		}
 	}
@@ -842,18 +922,25 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				copyScopes = append(copyScopes, cpDestination(words[1:], static[1:], cwd))
 			}
 		case slices.Contains(archivePrograms, program):
+			destination := archiveDestination(program, words[1:], static[1:], cwd)
+			opaqueIn := links.unknownIn
+			if program == "rsync" && destination != "" {
+				// Its own destination is an ordinary write operand.
+				// A later write into the copied tree still sees the scope.
+				links.copyDestinations = append(links.copyDestinations, destination)
+				opaqueIn = links.unknownCopyIn
+			}
 			if slices.Contains(static[1:], false) {
 				// An option supplied at runtime may select extraction.
-				links.unknownIn(archiveDestination(program, words[1:], static[1:], cwd))
+				opaqueIn(destination)
 			}
 			if archiveMayLink(program, words[1:], static[1:]) {
-				links.unknownIn(archiveDestination(program, words[1:], static[1:], cwd))
+				opaqueIn(destination)
 			}
 			if archiveCopiesLinks(program, words[1:], static[1:]) {
-				destination := archiveDestination(program, words[1:], static[1:], cwd)
 				copyScopes = append(copyScopes, destination)
 				if copiesDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
-					links.unknownIn(destination)
+					opaqueIn(destination)
 				}
 			}
 		case slices.Contains(renamePrograms, program):

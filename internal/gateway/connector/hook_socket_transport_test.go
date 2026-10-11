@@ -82,6 +82,39 @@ func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.
 	}
 }
 
+// Managed Linux Claude Code must send the same user-resolved operand facts as
+// Codex. The gateway cannot inspect links in this home under ProtectHome.
+func TestClaudeManagedHookCarriesResolvedWriteOperands(t *testing.T) {
+	for _, tc := range []struct {
+		name, want                     string
+		managed, secureClient, sandbox bool
+	}{
+		{name: "managed", managed: true, want: "present"},
+		{name: "per-user", want: "absent"},
+		{name: "secure-client", managed: true, secureClient: true, want: "absent"},
+		{name: "sandbox", managed: true, sandbox: true, want: "absent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, err := renderHookTemplate("claude-code-hook.sh", templateData{
+				APIAddr: "127.0.0.1:18970", FailMode: "closed",
+				Managed: tc.managed, SecureClient: tc.secureClient, Sandbox: tc.sandbox,
+				TokenFile: ".token-claudecode", ScopedToken: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(body)
+			hasResolver := strings.Contains(text, " hook resolve-writes ")
+			hasHeader := strings.Contains(text, "X-DefenseClaw-Resolved-Writes:")
+			hasCurlArg := strings.Contains(text, "RESOLVED_HEADER_ARGS[@]")
+			want := tc.want == "present"
+			if hasResolver != want || hasHeader != want || hasCurlArg != want {
+				t.Fatalf("resolver=%t header=%t curl-arg=%t, want %t", hasResolver, hasHeader, hasCurlArg, want)
+			}
+		})
+	}
+}
+
 // recordingHookSocketGateway records each request and answers with response
 // (by default an allow that names the hook socket).
 type recordingHookSocketGateway struct {

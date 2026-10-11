@@ -195,7 +195,8 @@ func TestResolveLinkCreatedInCommand(t *testing.T) {
 }
 
 // A ".." in a link target must be interpreted after the preceding component
-// has been inspected. A linked or unreadable component makes that path unknown.
+// has been inspected. A readable link resolves physically; a missing
+// component remains unknown.
 func TestRelativeLinkTargetDotDot(t *testing.T) {
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -203,7 +204,7 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 	}
 	for _, dir := range []string{
 		filepath.Join(home, ".ssh", "d"), filepath.Join(home, "a"),
-		filepath.Join(home, "a2"), filepath.Join(home, "unpack", "q", "r"),
+		filepath.Join(home, "a2"), filepath.Join(home, "c", "real"), filepath.Join(home, "unpack", "q", "r"),
 		filepath.Join(home, "ordinary"), filepath.Join(home, "shared"),
 	} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -215,6 +216,8 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		{filepath.Join(home, "a", "l"), filepath.FromSlash("b/../authorized_keys")},
 		{filepath.Join(home, "a2", "b"), filepath.FromSlash("../unpack/q/r")},
 		{filepath.Join(home, "a2", "l"), filepath.FromSlash("b/../t")},
+		{filepath.Join(home, "c", "b2"), filepath.Join(home, "c", "real")},
+		{filepath.Join(home, "c", "l2"), filepath.FromSlash("b2/../ok.txt")},
 		{filepath.Join(home, "ordinary", "lib"), filepath.FromSlash("../shared")},
 	} {
 		if err := os.Symlink(link.target, link.name); err != nil {
@@ -225,8 +228,9 @@ func TestRelativeLinkTargetDotDot(t *testing.T) {
 		name, path, want string
 		known            bool
 	}{
-		{"keys hop", filepath.Join(home, "a", "l"), "", false},
-		{"extractor hop", filepath.Join(home, "a2", "l"), "", false},
+		{"keys hop", filepath.Join(home, "a", "l"), filepath.Join(home, ".ssh", "authorized_keys"), true},
+		{"extractor hop", filepath.Join(home, "a2", "l"), filepath.Join(home, "unpack", "q", "t"), true},
+		{"benign link hop", filepath.Join(home, "c", "l2"), filepath.Join(home, "c", "ok.txt"), true},
 		{"unknown hop", filepath.Join(home, "a", "missing") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", "", false},
 		{"ordinary dot dot", filepath.Join(home, "ordinary") + string(filepath.Separator) + ".." + string(filepath.Separator) + "out", filepath.Join(home, "out"), true},
 		{"ordinary link", filepath.Join(home, "ordinary", "lib", "x"), filepath.Join(home, "shared", "x"), true},

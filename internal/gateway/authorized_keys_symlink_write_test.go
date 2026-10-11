@@ -1150,3 +1150,130 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		}
 	}
 }
+
+// The hook sees user-owned links under /home, while a managed gateway with
+// ProtectHome does not. Exercise the header in both connector formats before
+// making the link invisible to the gateway.
+func TestManagedWriteOperandFactsForRelativeLinkHop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX link operands")
+	}
+	for _, row := range []struct {
+		name, command string
+		block         bool
+		omitFact      bool
+	}{
+		{"cp", "cp payload a/l", true, false},
+		{"tee", "tee -a a/l < payload", true, false},
+		{"mv", "mv payload a/l", true, false},
+		{"install", "install payload a/l", true, false},
+		{"dd", "dd if=payload of=a/l", true, false},
+		{"sed", "sed -i s/old/new/ a/l", true, false},
+		{"truncate", "truncate -s 0 a/l", true, false},
+		{"ln force", "ln -f payload a/l", true, false},
+		{"rsync", "rsync payload a/l", true, false},
+		{"cp omitted fact", "cp payload a/l", true, true},
+		{"cp sibling", "cp payload notes.txt", false, false},
+		{"tee sibling", "tee out.log < payload", false, false},
+		{"cp plain child", "cp payload a/ok.txt", false, false},
+		{"tee benign relink", "tee -a c/l2 < payload", false, false},
+		{"archive hop", "tar -C unpack -xf pack.tar && echo k >> a2/l", true, false},
+	} {
+		for _, connector := range []string{"claudecode", "codex"} {
+			for _, managed := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/managed=%v", row.name, connector, managed), func(t *testing.T) {
+					home := filepath.Join(t.TempDir(), "home")
+					project := filepath.Join(home, "proj")
+					keys := filepath.Join(home, ".ssh", "authorized_keys")
+					for _, dir := range []string{filepath.Dir(keys), filepath.Join(home, ".ssh", "d"),
+						filepath.Join(project, "a"), filepath.Join(project, "a2"), filepath.Join(project, "c", "real"),
+						filepath.Join(project, "unpack", "q", "r")} {
+						if err := os.MkdirAll(dir, 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+					for _, link := range []struct{ name, target string }{
+						{filepath.Join(project, "a", "b"), filepath.Join(home, ".ssh", "d")},
+						{filepath.Join(project, "a", "l"), filepath.FromSlash("b/../authorized_keys")},
+						{filepath.Join(project, "a2", "b"), filepath.FromSlash("../unpack/q/r")},
+						{filepath.Join(project, "a2", "l"), filepath.FromSlash("b/../t")},
+						{filepath.Join(project, "c", "b2"), filepath.Join(project, "c", "real")},
+						{filepath.Join(project, "c", "l2"), filepath.FromSlash("b2/../ok.txt")},
+					} {
+						if err := os.Symlink(link.target, link.name); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if err := os.WriteFile(keys, []byte("marker\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(project, "a", "ok.txt"), nil, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					t.Setenv("HOME", home)
+					tool, key := "Bash", "command"
+					if connector == "codex" {
+						tool, key = "exec_command", "cmd"
+					}
+					args := mustJSON(t, map[string]string{key: row.command, "description": "Run the copy command as specified"})
+					payload := mustJSON(t, map[string]any{"session_id": "marker-session", "hook_event_name": "PreToolUse",
+						"tool_name": tool, "cwd": project, "tool_input": json.RawMessage(args)})
+					header := hookpaths.Resolve(payload)
+					targets, ok := hookpaths.Decode(header)
+					if !ok {
+						t.Fatal("hook write facts did not decode")
+					}
+					if strings.Contains(row.command, "a/l") {
+						operand := filepath.Join(project, "a", "l")
+						_, present := targets[operand]
+						if !present {
+							t.Fatalf("hook omitted write operand %s: %v", operand, targets)
+						}
+						if row.name == "cp" || row.name == "tee" {
+							if got := targets[operand]; got != keys {
+								t.Fatalf("hook physical operand = %q, want %q", got, keys)
+							}
+						}
+					}
+					if row.omitFact {
+						delete(targets, filepath.Join(project, "a", "l"))
+						header = encodeTargets(t, targets)
+					}
+					if managed {
+						// Host-independent ProtectHome seam: after the user-side
+						// header is made, the gateway cannot inspect even the CWD.
+						// This also catches PathFacts left relative by its first pass.
+						if err := os.Rename(project, filepath.Join(home, "hidden")); err != nil {
+							t.Fatal(err)
+						}
+						if got := hookCWDForContext(withManagedHookPeer(context.Background(), managedHookPeer{Home: home}), project); got != "" {
+							t.Fatalf("gateway still resolved private cwd %q", got)
+						}
+					}
+					cfg := &config.Config{}
+					cfg.Guardrail.Mode = "action"
+					cfg.Guardrail.Connector = connector
+					api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+					request := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
+					request.Header.Set(hookpaths.Header, header)
+					if connector == "codex" {
+						setTestCodexHookBinding(request, "PreToolUse", defaultTestCodexHookContract)
+					}
+					if managed {
+						request = request.WithContext(withManagedHookPeer(request.Context(), managedHookPeer{Home: home}))
+					}
+					recorder := httptest.NewRecorder()
+					api.handleAgentHook(connector).ServeHTTP(recorder, request)
+					want := `{"action":"allow"`
+					if row.block {
+						want = `{"action":"block"`
+					}
+					if got := recorder.Body.String(); !strings.HasPrefix(got, want) ||
+						row.block && !strings.Contains(got, "persistence.ssh_authorized_keys_command") {
+						t.Fatalf("decision = %.400s, want %s; client facts=%v", got, want, targets)
+					}
+				})
+			}
+		}
+	}
+}

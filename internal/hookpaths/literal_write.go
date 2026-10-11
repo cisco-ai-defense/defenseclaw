@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -133,6 +134,10 @@ func SedReplacedOperands(command, cwd, home string) map[string]bool {
 				}
 				if !protected {
 					replaced[name] = true
+					if link, err := os.Readlink(name); err == nil &&
+						(strings.Contains(filepath.ToSlash(link), "/../") || strings.HasSuffix(filepath.ToSlash(link), "/..")) {
+						replaced[name] = false
+					}
 				}
 			}
 		}
