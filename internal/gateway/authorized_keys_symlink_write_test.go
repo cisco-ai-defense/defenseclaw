@@ -40,7 +40,7 @@ func TestAuthorizedKeysSymlinkWriteStatementsAndClientResolution(t *testing.T) {
 		{"tee", "ln -s ~/.ssh/authorized_keys ./ak.lnk; echo marker | tee -a ./ak.lnk", true},
 		{"copy", "ln -s ~/.ssh/authorized_keys ./ak.lnk; cp marker.pub ./ak.lnk", true},
 		{"dd", "ln -s ~/.ssh/authorized_keys ./ak.lnk; dd if=marker.pub of=./ak.lnk", true},
-		{"sed", "ln -s ~/.ssh/authorized_keys ./ak.lnk; sed -i s/old/new/ ./ak.lnk", true},
+		{"sed", "ln -s ~/.ssh/authorized_keys ./ak.lnk; sed -i s/old/new/ ./ak.lnk", false},
 		{"or x", "ln -sf ~/.ssh/authorized_keys ./x.cfg || echo marker >> ./x.cfg", true},
 		{"intervening command", "ln -s ~/.ssh/authorized_keys ./z.cfg; true; echo marker >> ./z.cfg", true},
 		{"brace group", "{ ln -s ~/.ssh/authorized_keys ./x.cfg; echo marker >> ./x.cfg; }", true},
@@ -697,6 +697,15 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 	if err := os.Symlink(keys, filepath.Join(project, "disklink")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(filepath.Dir(keys), filepath.Join(project, "dirlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "report.txt"), []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(project, "report.txt"), filepath.Join(project, "reportlink")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(os.DevNull, filepath.Join(project, "devlink")); err != nil {
 		t.Fatal(err)
 	}
@@ -749,6 +758,18 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		}
 	}
 	blocked := []string{
+		// GAP-1561: literal interpreter and in-place operands follow existing links.
+		`python3 -c 'open("disklink","a").write("k")'`,
+		`perl -e 'open F,">>","disklink"; print F "k"'`,
+		`awk 'BEGIN {print "k" >> "disklink"}'`,
+		`sed -i --follow-symlinks 's/marker/k/' disklink`,
+		`python3 -c 'open("dirlink/authorized_keys","a").write("k")'`,
+		`ruby -e 'File.write("disklink","k")'`,
+		`node -e 'fs.appendFileSync("disklink","k")'`,
+		`python3 -c 'open("disklink","w").write("k")'`,
+		`python3 -c 'open("disklink","r+").write("k")'`,
+		`python3 -c 'import os; os.open("disklink",os.O_WRONLY|os.O_APPEND)'`,
+		`python3 -c 'from pathlib import Path; Path("disklink").write_text("k")'`,
 		// GAP-1545: every archive destination spelling must cover the later write.
 		`tar -xf keys.tar -C../out && echo k >> ../out/n`,
 		`tar -xC ../out -f keys.tar && echo k >> ../out/n`,
@@ -848,6 +869,15 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
 	}
 	allowed := []string{
+		// Reads, unrelated targets and sed's default link replacement are safe.
+		`python3 -c 'open("disklink","r").read()'`,
+		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
+		`python3 -c 'open("report.txt","a").write("k")'`,
+		`python3 -c 'open("reportlink","a").write("k")'`,
+		`awk 'BEGIN {print "k" >> "reportlink"}'`,
+		`sed -i 's/marker/k/' disklink`,
+		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
+		`sed -i --follow-symlinks 's/marker/k/' reportlink`,
 		// GAP-1549: the copy's own destination is an allowed write.
 		`cp -r big copy3`,
 		`cp -a tree copy4`,

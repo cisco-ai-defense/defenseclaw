@@ -618,6 +618,7 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 		return input.Command[start:end]
 	}
 	links := make(map[string]struct{})
+	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, input.ActiveHome)
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		if found {
@@ -658,7 +659,7 @@ func trustedAuthorizedKeysSymlinkWrite(input actionfacts.Input) bool {
 			if strings.HasPrefix(operand, "of=") {
 				operand, prefix = operand[3:], 3
 			}
-			if operand != "" {
+			if operand != "" && !replacedBySed[trustedSymlinkName(input, operand)] {
 				if _, linked := links[trustedSymlinkName(input, operand)]; linked {
 					edits = append(edits, [2]int{int(value.Pos().Offset()) + prefix, int(value.End().Offset())})
 				}
@@ -720,7 +721,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
-	protectedPaths := hookpaths.AuthorizedKeysPaths(facts.ActiveHome)
+	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
 	protected := make(map[string]struct{}, len(protectedPaths))
 	for _, path := range protectedPaths {
 		protected[canonicalSemanticPath(path)] = struct{}{}
@@ -827,6 +828,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	links = hookpaths.CommandLinks(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome)
 	safeRedirects = hookpaths.SafeShellRedirects(input.Command, input.CWD, facts.ActiveHome)
+	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
 	if input.Command != "" {
 		operands, parsed, dynamic := hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
 		// A truncated client map is not complete, so a nonempty target in it
@@ -840,6 +842,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		for _, operand := range operands {
 			if writeTarget(operand, safeRedirects[operand], false) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, false) {
 				return true
 			}
 		}
@@ -872,6 +879,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		ownCopy := (command.Program == "cp" || command.Program == "gcp") &&
 			target == hookpaths.CopyDestination(command.Argv, clientCWD)
 		safeRedirect := integrityCommandOwnsStaticRedirect(command, candidate) && safeRedirects[target]
+		if replacedBySed[target] && !isProtected(target) {
+			continue
+		}
 		if writeTarget(target, safeRedirect, ownCopy) {
 			return true
 		}
