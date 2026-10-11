@@ -1495,6 +1495,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			symlinkWrite ||
 			trustedFindExecAuthorizedKeysWrite(input) ||
 			trustedHomeDirectoryAuthorizedKeysWrite(input) ||
+			trustedWindowsLocationAuthorizedKeysWrite(input) ||
 			trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
 			trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
 			trustedInlineAuthorizedKeysWrite(facts) ||
