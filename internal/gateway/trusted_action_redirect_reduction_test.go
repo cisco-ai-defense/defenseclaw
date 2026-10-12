@@ -636,6 +636,15 @@ func TestTrustedActionArgvRuleBlocksAfterSourcedFile(t *testing.T) {
 		"cd app && source ./env.sh && aws dynamodb scan --max-items 3":  true,
 		"source .env && echo dynamodb":                                  false,
 		"source \"$ENV_FILE\" && aws dynamodb scan --table-name T":      false,
+		// The dot form is the same statement.
+		". .env && aws dynamodb scan --table-name T": true,
+		". .env && echo dynamodb":                    false,
+		// A later PATH change can only make the match over-block.
+		"source .env && export PATH=/opt/bin && aws dynamodb scan --table-name T": true,
+		// A prefix assignment leaves the twin partial, so the view declines
+		// (as without the sourced file, GAP-1581).
+		"source .env && PATH=/x aws dynamodb scan --table-name T": false,
+		"source .env && PATH=/x echo dynamodb":                    false,
 	} {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: actionfacts.Input{
