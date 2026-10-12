@@ -57,8 +57,8 @@ type windowsAgentPackageJSON struct {
 //
 // The macOS analogue is `discover_agent_version` in
 // `packaging/macos/lib/installer_lib.sh`, which returns empty for
-// the same reasons. The enumerator caller drops any user × connector
-// with empty discovery — mirroring macOS's silently-skip behaviour.
+// the same reasons. The enumerator can still emit an unversioned target when
+// windowsAgentPresence finds independent per-user installation evidence.
 //
 // No process is ever spawned; all reads are static filesystem
 // inspection of well-known JSON manifests. This keeps the probe
@@ -107,7 +107,12 @@ func windowsAgentPresence(profileHome, connectorName string) bool {
 			filepath.Join(home, ".codex", "auth.json"), filepath.Join(home, ".codex", "history.jsonl"),
 			filepath.Join(home, ".codex", "sessions"))
 	case "cursor":
-		paths = append(paths, filepath.Join(home, "AppData", "Local", "Programs", "cursor", "Cursor.exe"))
+		// Cursor's user extensions stay in the profile even when the native
+		// executable is installed outside the known application roots. Do not
+		// use hooks.json: DefenseClaw itself can create that activation file.
+		runtimeDirectory = filepath.Join(home, ".cursor", "extensions")
+		paths = append(paths, filepath.Join(home, "AppData", "Local", "Programs", "cursor", "Cursor.exe"),
+			runtimeDirectory)
 	default:
 		return false
 	}
@@ -117,7 +122,7 @@ func windowsAgentPresence(profileHome, connectorName string) bool {
 		}
 		info, err := os.Lstat(path)
 		if err == nil && info.Mode()&os.ModeSymlink == 0 &&
-			(info.Mode().IsRegular() || (path == runtimeDirectory && info.IsDir())) {
+			((path != runtimeDirectory && info.Mode().IsRegular()) || (path == runtimeDirectory && info.IsDir())) {
 			return true
 		}
 	}
