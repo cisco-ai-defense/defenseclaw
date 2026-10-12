@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -87,7 +88,7 @@ func newSandboxFixture(t testing.TB, enrollment config.EnterpriseEnrollmentConfi
 	}
 	sandboxAuthorityKey = func(string) ([]byte, error) { return bytes.Repeat([]byte{7}, 32), nil }
 	sandboxHostAvailability = func(*config.Config, managedHookPeer, config.OpenShellAdminConfig) sandboxAvailability {
-		return sandboxAvailability{Available: true, Driver: "docker", DriverReason: "configured"}
+		return sandboxAvailability{Available: true, Driver: sandboxTestDriver, DriverReason: "configured"}
 	}
 	sandboxResolveWait = 300 * time.Millisecond
 	sandboxRecordRematched = func(_ *APIServer, before, after sandboxreg.Registration, changed []string, action string) {
@@ -178,11 +179,17 @@ func (f *sandboxFixture) do(peer managedHookPeer, method, path string, body any,
 	return rec
 }
 
+// sandboxTestDriver is the compute driver the gateway accepts on this
+// platform by default: the MicroVM driver on macOS, docker on Linux
+// (sandboxDriverClaim). The fixture claims it, so a resolve runs the same
+// host path the platform runs.
+var sandboxTestDriver = config.EnterpriseOpenShellConfig{}.SandboxDriver(runtime.GOOS)
+
 func claudeResolve() sandboxrelay.ResolveRequest {
 	spec, _ := harness.Get("claudecode")
 	return sandboxrelay.ResolveRequest{
 		V: 1, Harness: "claudecode", Connector: "claudecode", HarnessVersion: spec.DefaultVersion,
-		ProjectReal: "/home/ent-alice/project", Driver: "docker",
+		ProjectReal: "/home/ent-alice/project", Driver: sandboxTestDriver,
 	}
 }
 

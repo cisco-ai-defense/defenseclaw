@@ -455,6 +455,10 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 		Logf:           func(string, ...any) {},
 		countRunning:   func(context.Context) (int, error) { return int(f.running.Load()), nil },
 		openShell:      f.os,
+		// The fixture runs the Linux daemon on every platform: a Mac daemon
+		// probes the account Docker and selects the MicroVM driver before
+		// a create (dockerReady, selectDriver); tests of that set goos.
+		goos: "linux",
 	}
 	for _, m := range mutate {
 		m(&opts)

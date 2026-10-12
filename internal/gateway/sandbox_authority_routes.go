@@ -163,8 +163,8 @@ func sandboxDriverClaim(cfg *config.Config, goos string, floor config.OpenShellA
 		driver, reason = avail.Driver, avail.DriverReason
 	}
 	switch {
-	case want == config.EnterpriseOpenShellDriverDocker || (goos == "darwin" && want != config.EnterpriseOpenShellDriverDocker):
-		// One driver, no fallback.
+	case goos == "darwin" || want == config.EnterpriseOpenShellDriverDocker:
+		// One driver, no fallback: macOS runs only the MicroVM driver.
 		if goos == "darwin" {
 			want = config.EnterpriseOpenShellDriverVM
 		}
