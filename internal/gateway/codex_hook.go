@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -3703,6 +3704,9 @@ func sanitizeHookCWD(cwd string) string {
 	if !filepath.IsAbs(s) {
 		return ""
 	}
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(s) != nil {
+		return ""
+	}
 	resolved, err := resolveHookCWD(s)
 	if err != nil {
 		return ""
@@ -3801,6 +3805,9 @@ func safeGitEnv() []string {
 }
 
 func runGitList(ctx context.Context, cwd string, args ...string) ([]string, error) {
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd); err != nil {
+		return nil, err
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
 	cmd.Env = safeGitEnv()
@@ -3870,6 +3877,9 @@ func (a *APIServer) scanCodexComponents(ctx context.Context, req codexHookReques
 			paths = codexMCPEntryScanTargets(paths)
 		}
 		for _, p := range paths {
+			if component != "mcp" && managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
+				continue
+			}
 			if component != "mcp" {
 				if _, err := os.Stat(p); err != nil {
 					continue
@@ -3894,6 +3904,9 @@ func codexMCPEntryScanTargets(configPaths []string) []string {
 	userConfig := filepath.Join(connector.CodexHomeDir(), "config.toml")
 	var targets []string
 	for _, configPath := range configPaths {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(configPath) != nil {
+			continue
+		}
 		var (
 			entries []config.MCPServerEntry
 			err     error
@@ -3977,8 +3990,12 @@ func codexComponentTargets(cwd string) map[string][]string {
 		targets["skill"] = append(targets["skill"], childDirs(filepath.FromSlash("/etc/codex/skills"))...)
 	}
 
-	targets["plugin"] = append(targets["plugin"], connector.CodexPluginSourceDirs(cwd)...)
-	for _, root := range connector.CodexProjectLayerDirs(cwd) {
+	var projectLayers []string
+	if cwd == "" || managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) == nil {
+		targets["plugin"] = append(targets["plugin"], connector.CodexPluginSourceDirs(cwd)...)
+		projectLayers = connector.CodexProjectLayerDirs(cwd)
+	}
+	for _, root := range projectLayers {
 		targets["skill"] = append(targets["skill"],
 			childDirs(filepath.Join(root, ".agents", "skills"))...)
 		targets["mcp"] = append(targets["mcp"],
@@ -4051,6 +4068,9 @@ func sameCleanPath(left, right string) bool {
 }
 
 func gitRootForCWD(cwd string) string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) != nil {
+		return ""
+	}
 	safeCwd, err := validateGitCwd(cwd)
 	if err != nil {
 		return ""
@@ -4068,6 +4088,9 @@ func gitRootForCWD(cwd string) string {
 }
 
 func childDirs(root string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -4075,13 +4098,19 @@ func childDirs(root string) []string {
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
-			out = append(out, filepath.Join(root, entry.Name()))
+			path := filepath.Join(root, entry.Name())
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(path) == nil {
+				out = append(out, path)
+			}
 		}
 	}
 	return out
 }
 
 func childFilesWithExtension(root, extension string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -4089,7 +4118,10 @@ func childFilesWithExtension(root, extension string) []string {
 	out := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.EqualFold(filepath.Ext(entry.Name()), extension) {
-			out = append(out, filepath.Join(root, entry.Name()))
+			path := filepath.Join(root, entry.Name())
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(path) == nil {
+				out = append(out, path)
+			}
 		}
 	}
 	return out
@@ -4098,6 +4130,9 @@ func childFilesWithExtension(root, extension string) []string {
 func existingFiles(paths ...string) []string {
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
+			continue
+		}
 		if _, err := os.Stat(p); err == nil {
 			out = append(out, p)
 		}
@@ -4111,6 +4146,9 @@ func uniqueExistingDirs(paths []string) []string {
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[p] {
+			continue
+		}
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
 			continue
 		}
 		if info, err := os.Stat(p); err == nil && info.IsDir() {
@@ -4127,6 +4165,9 @@ func uniqueExistingPaths(paths []string) []string {
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
 		if p == "" || seen[p] {
+			continue
+		}
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
 			continue
 		}
 		if _, err := os.Stat(p); err == nil {

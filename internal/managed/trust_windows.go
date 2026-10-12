@@ -446,12 +446,32 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 		// populating the env.
 		return nil, nil
 	}
-	if _, err := ntServiceName(account); err != nil {
+	name, err := ntServiceName(account)
+	if err != nil {
 		return nil, err
 	}
+	derived, err := windowsDerivedServiceSID(name)
+	if err != nil {
+		return nil, fmt.Errorf("derive Windows service SID for %q: %w", account, err)
+	}
 	sid, _, _, err := windows.LookupSID("", account)
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		// A virtual account that logged on stays resolvable after its
+		// service is deleted. The LocalSystem gateway never logs on as
+		// NT SERVICE\<name>, so once Uninstall deletes the service the name
+		// no longer maps, and the managed data_dir check during teardown
+		// finalize failed (Setup /uninstall exit 1603). The service SID is
+		// a pure function of the name, as `sc.exe showsid` computes it.
+		return derived, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve Windows virtual service account %q: %w", account, err)
+	}
+	if !sid.Equals(derived) {
+		return nil, fmt.Errorf(
+			"resolved Windows virtual service account %q is %s, not its service SID %s",
+			account, sidString(sid), sidString(derived),
+		)
 	}
 	// LookupSID resolved the `NT SERVICE\<name>` string, but a compromised
 	// registrar could point the lookup at any SID. Bind trust to the NT
@@ -464,6 +484,13 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 		)
 	}
 	return sid, nil
+}
+
+// windowsDerivedServiceSID is the service SID SCM assigns to a service name
+// (WindowsServiceSIDString), as a SID. Callers pass a name ntServiceName
+// already checked.
+func windowsDerivedServiceSID(name string) (*windows.SID, error) {
+	return windows.StringToSid(WindowsServiceSIDString(name))
 }
 
 // ntServiceName is the service name of account once it is checked to be an
@@ -515,6 +542,79 @@ func sidIsNTService(sid *windows.SID) bool {
 // service-runtime versus strict administrator trust API for each path.
 func WindowsServiceAccountSID(account string) (*windows.SID, error) {
 	return windowsVirtualServiceSID(account)
+}
+
+// windowsTokenIdentity is the subset of windows.Token the service identity
+// check reads; tests substitute it to model LocalSystem service tokens.
+type windowsTokenIdentity interface {
+	GetTokenUser() (*windows.Tokenuser, error)
+	GetTokenGroups() (*windows.Tokengroups, error)
+}
+
+// WindowsTokenRunsAsService reports whether token belongs to a process
+// started by SCM for the service whose service SID is serviceSID.
+//
+// The gateway logs on as LocalSystem with a restricted service SID, so its
+// TokenUser is S-1-5-18 and the service SID is an enabled, non-deny-only
+// group. Earlier releases logged the gateway on as the virtual account
+// itself, where the service SID is the TokenUser. Both forms are accepted so
+// a host keeps working while it moves between them.
+func WindowsTokenRunsAsService(token windows.Token, serviceSID *windows.SID) (bool, error) {
+	return windowsTokenRunsAsService(token, serviceSID)
+}
+
+// WindowsCurrentProcessIsGatewayService reports whether the current
+// process is the managed gateway service. The gateway logs on as LocalSystem,
+// so code that grants LocalSystem administrator authority (policy writes,
+// hook mutations) calls this to keep that authority with the guardian and the
+// installer. The gateway's write-restricted token is the enforced boundary;
+// this keeps the same rule visible in code. An unset or unresolvable gateway
+// pin reports false so it cannot block the guardian.
+func WindowsCurrentProcessIsGatewayService() bool {
+	account := strings.TrimSpace(os.Getenv(WindowsServiceAccountEnv))
+	if account == "" {
+		return false
+	}
+	serviceSID, err := windowsVirtualServiceSID(account)
+	if err != nil || serviceSID == nil {
+		return false
+	}
+	isGateway, err := windowsTokenRunsAsService(windows.GetCurrentProcessToken(), serviceSID)
+	return err == nil && isGateway
+}
+
+func windowsTokenRunsAsService(token windowsTokenIdentity, serviceSID *windows.SID) (bool, error) {
+	if serviceSID == nil || !serviceSID.IsValid() {
+		return false, fmt.Errorf("windows service identity: service SID is unavailable")
+	}
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return false, fmt.Errorf("windows service identity: read token user: %w", err)
+	}
+	if user == nil || user.User.Sid == nil {
+		return false, fmt.Errorf("windows service identity: token has no user SID")
+	}
+	if user.User.Sid.Equals(serviceSID) {
+		return true, nil
+	}
+	if !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		return false, nil
+	}
+	groups, err := token.GetTokenGroups()
+	if err != nil {
+		return false, fmt.Errorf("windows service identity: read token groups: %w", err)
+	}
+	if groups == nil {
+		return false, nil
+	}
+	for _, group := range groups.AllGroups() {
+		if group.Sid == nil || !group.Sid.Equals(serviceSID) {
+			continue
+		}
+		return group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 &&
+			group.Attributes&windows.SE_GROUP_ENABLED != 0, nil
+	}
+	return false, nil
 }
 
 func sameWindowsSID(left, right *windows.SID) bool {

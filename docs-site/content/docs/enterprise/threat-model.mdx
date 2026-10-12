@@ -140,7 +140,7 @@ lifecycle writes all of it.
 | Boundary | Windows | Linux | macOS |
 | --- | --- | --- | --- |
 | Services started by | Service Control Manager | systemd | launchd |
-| Gateway account | `NT SERVICE\DefenseClawGateway` | `defenseclaw` | `_defenseclaw` |
+| Gateway account | LocalSystem, write-restricted by `NT SERVICE\DefenseClawGateway` | `defenseclaw` | `_defenseclaw` |
 | Hook to gateway | Loopback TCP, `127.0.0.1:18970` | Unix socket `/run/defenseclaw-hook/hook.sock`, held open by systemd | Unix socket `/opt/cisco/defenseclaw/run/hook.sock`, opened by the gateway |
 | The hook verifies the gateway | The connected process must be the one the Service Control Manager reports for `DefenseClawGateway` | The socket's owner must be root or `defenseclaw` | The socket's owner must be root or `_defenseclaw` |
 | The gateway verifies the caller | The hook's credential is bound to the user's SID | The caller's uid, from the kernel | The caller's uid, from the kernel |
@@ -156,7 +156,7 @@ identity it runs as.
 | --- | --- | --- |
 | Z0 | The Service Control Manager, and the MDM agent or an administrator running Setup (`DefenseClawSetup-Enterprise-Standalone-x64.exe`) or `defenseclaw.exe enterprise windows` | SYSTEM or an elevated administrator |
 | Z1 | The `DefenseClawHookGuardian`, `DefenseClawHookEnumerator` and `DefenseClawSensorHelper` services | LocalSystem. The sensor helper keeps only `SeChangeNotifyPrivilege`. |
-| Z2 | The `DefenseClawGateway` service, listening on `127.0.0.1:18970`. It writes only `runtime` and `logs\gateway` under `C:\ProgramData\Cisco\DefenseClaw`, and its IPC directory `C:\Program Files\Cisco\DefenseClaw\ipc`. | `NT SERVICE\DefenseClawGateway` |
+| Z2 | The `DefenseClawGateway` service, listening on `127.0.0.1:18970`. It writes only `runtime` and `logs\gateway` under `C:\ProgramData\Cisco\DefenseClaw`, and its IPC directory `C:\Program Files\Cisco\DefenseClaw\ipc`. | LocalSystem, write-restricted by its service SID |
 | Z3 | Binaries in `C:\Program Files\Cisco\DefenseClaw\bin`. Under `C:\ProgramData\Cisco\DefenseClaw`: `etc\config.yaml`, `secrets`, `hook-guardian\targets.yaml` (target manifest), `hook-guardian-state` (authorization ledger) and `install` (lifecycle state). Hook runtime state in `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`. Vendor machine policy in `%ProgramData%\OpenAI\Codex\requirements.toml`, `C:\Program Files\ClaudeCode\managed-settings.d`, `%ProgramData%\Cursor\hooks.json`, `%ProgramData%\GitHub\Copilot\policy.d` and `%ProgramData%\opencode`. | Written only by Administrators and SYSTEM. One exception: Users hold write attributes (timestamps and basic attributes, never content) on `share\opencode\defenseclaw.js`, which OpenCode needs to load it; the guardian undoes a read-only flag or reparse point set with it. |
 | Z4 | The AI agent; `defenseclaw-hook.exe`, an administrator-owned binary that runs as the user; the user's agent config and DefenseClaw hook registrations | The signed-in user |
 | Z5 | Cisco AI Defense | External |
@@ -303,7 +303,14 @@ it.
 
 These rules hold on every OS:
 
-- The gateway never runs as root or LocalSystem.
+- On Windows, the gateway runs as LocalSystem with a write-restricted service SID
+  and only `SeChangeNotifyPrivilege`. On Linux and macOS it uses a dedicated
+  service account.
+- The Windows gateway refuses reads and scans inside user profiles. It scans
+  readable paths outside profiles, and its watcher skips only profile roots.
+  Scanner children inherit the gateway token because it lacks the privileges
+  to start them as another user. Outside profiles, a caller-supplied path
+  readable only by administrators is now readable as LocalSystem (W-05).
 - No privileged service writes a user's files with its own rights.
 - `defenseclaw-hook` sends nothing to a listener it has not verified.
 - The authorization ledger, not a status file, decides who is protected.

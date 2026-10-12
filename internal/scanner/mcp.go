@@ -303,10 +303,9 @@ func (s *MCPScanner) runtimeServerEntry() ([]byte, error) {
 // way down from there is a link or reparse point; otherwise the scan keeps
 // the scanner's folder, as before, and says so.
 //
-// On managed Windows the gateway service account cannot read user profiles,
-// so the enumerator checks the folder as LocalSystem and its spool record
-// carries the result (entry.WorkDir, entry.WorkDirRefused); the gateway then
-// only checks the path's form and that it can open the folder itself.
+// On managed Windows the enumerator's spool record carries its checked
+// folder (entry.WorkDir, entry.WorkDirRefused). The LocalSystem gateway path
+// guard refuses a profile folder before a scanner child can start there.
 func (s *MCPScanner) serverWorkDir() string {
 	s.workDirRefused = ""
 	entry := s.ServerEntry
@@ -436,6 +435,43 @@ func (s *MCPScanner) workDirNote() string {
 var runMCPScannerCommand = processutil.RunTree
 
 func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
+	// URLs and server names are scanner inputs, not filesystem paths. The
+	// project directory is a separate path handed to the scanner child.
+	if s.Project != "" {
+		if err := requireScannerTargetPath(s.Project); err != nil {
+			return nil, err
+		}
+	}
+	if entry := s.ServerEntry; entry != nil {
+		for _, path := range []string{entry.Home, entry.Project, entry.WorkDir, entry.Source, entry.Command} {
+			if filepath.IsAbs(path) {
+				if err := requireScannerTargetPath(path); err != nil {
+					return nil, err
+				}
+			}
+		}
+		cwd := entry.CWD
+		if cwd != "" && !filepath.IsAbs(cwd) {
+			base := entry.Project
+			if base == "" {
+				base = entry.Home
+			}
+			if base != "" {
+				cwd = filepath.Join(base, cwd)
+			}
+		}
+		if cwd != "" {
+			if err := requireScannerTargetPath(cwd); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if !mcpScanTargetLooksLikeURL(target) &&
+		(filepath.IsAbs(target) || strings.ContainsAny(target, `/\`) || strings.HasSuffix(strings.ToLower(target), ".json")) {
+		if err := requireScannerTargetPath(target); err != nil {
+			return nil, err
+		}
+	}
 	start := time.Now()
 	exitCode := 0
 	var scanErr error

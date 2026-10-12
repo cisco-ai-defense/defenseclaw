@@ -579,3 +579,85 @@ func TestDescribeUntrustedRulePackFixKeepsGatewayRead(t *testing.T) {
 		}
 	}
 }
+
+type fakeServiceToken struct {
+	user   *windows.SID
+	groups []windows.SIDAndAttributes
+}
+
+func (token fakeServiceToken) GetTokenUser() (*windows.Tokenuser, error) {
+	return &windows.Tokenuser{User: windows.SIDAndAttributes{Sid: token.user}}, nil
+}
+
+func (token fakeServiceToken) GetTokenGroups() (*windows.Tokengroups, error) {
+	if len(token.groups) == 0 {
+		return &windows.Tokengroups{}, nil
+	}
+	if len(token.groups) != 1 {
+		panic("fakeServiceToken models at most one group")
+	}
+	return &windows.Tokengroups{GroupCount: 1, Groups: [1]windows.SIDAndAttributes{token.groups[0]}}, nil
+}
+
+func TestWindowsTokenRunsAsService(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherServiceSID, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.StringToSid("S-1-5-21-1-2-3-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := uint32(windows.SE_GROUP_ENABLED | windows.SE_GROUP_ENABLED_BY_DEFAULT | windows.SE_GROUP_MANDATORY)
+	for _, test := range []struct {
+		name  string
+		token fakeServiceToken
+		want  bool
+	}{
+		{"legacy virtual account user", fakeServiceToken{user: serviceSID}, true},
+		{"localsystem with enabled service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}},
+		}, true},
+		{"localsystem without service group", fakeServiceToken{user: localSystem}, false},
+		{"localsystem with another service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: otherServiceSID, Attributes: enabled}},
+		}, false},
+		{"localsystem with disabled service group", fakeServiceToken{
+			user:   localSystem,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: windows.SE_GROUP_MANDATORY}},
+		}, false},
+		{"localsystem with deny-only service group", fakeServiceToken{
+			user: localSystem,
+			groups: []windows.SIDAndAttributes{{
+				Sid: serviceSID, Attributes: enabled | windows.SE_GROUP_USE_FOR_DENY_ONLY,
+			}},
+		}, false},
+		{"interactive user with service group", fakeServiceToken{
+			user:   user,
+			groups: []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}},
+		}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := windowsTokenRunsAsService(test.token, serviceSID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("windowsTokenRunsAsService = %v, want %v", got, test.want)
+			}
+		})
+	}
+	if _, err := windowsTokenRunsAsService(fakeServiceToken{user: localSystem}, nil); err == nil {
+		t.Fatal("nil service SID was accepted")
+	}
+}

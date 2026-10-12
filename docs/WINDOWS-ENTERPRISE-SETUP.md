@@ -240,3 +240,60 @@ flavor.
 There is no AVC handoff kit for the standalone Setup. The AVC flow in
 [Windows AVC packaging handoff](WINDOWS-AVC-PACKAGING-HANDOFF.md) builds only
 `DefenseClawSetup-Enterprise-x64.exe`.
+
+## Service accounts
+
+Every DefenseClaw Windows service runs as LocalSystem: the gateway, the
+sensor helper, the hook guardian, the hook enumerator and, with the Secure
+Client profile, the credential broker.
+
+The gateway still runs with its own restricted service SID
+(`NT SERVICE\DefenseClawGateway`) and only `SeChangeNotifyPrivilege`. Its
+token is write-restricted: every write must also pass a check against its
+restricting SIDs (the gateway service SID, Everyone and WRITE_RESTRICTED).
+Among DefenseClaw's managed paths, only the runtime and log ACLs grant one of
+those, so configuration, the target manifest, the authorization ledger,
+binaries, and service definitions stay read-only to it. A host path outside
+DefenseClaw that grants write to Everyone stays writable to the gateway, as
+it was under the virtual account. The gateway makes its service SID the
+owner of the files it creates (its audit database, judge bodies and logs), as
+the virtual account did, so `icacls` shows `NT SERVICE\DefenseClawGateway`
+as their owner.
+
+Because LocalSystem holds the service logon right by design:
+
+- Install needs no "Log on as a service" grant.
+- No Group Policy change is needed. A domain policy that defines "Log on as
+  a service" cannot stop the gateway from starting.
+
+The LocalSystem gateway refuses reads and scans of paths inside user
+profiles, including a project MCP scan inside a profile. The refusal says:
+
+> the managed gateway runs as LocalSystem and does not read inside user profiles; scan the folder as the signed-in user (defenseclaw ... from the user session) or move it outside the profile
+
+Readable paths outside profiles still scan, and the watcher runs for those
+paths. It reports degraded health only when it skips a configured profile
+root. This keeps the former virtual-account boundary around other users'
+profiles. Scanner children inherit the gateway's write-restricted LocalSystem
+token and its single `SeChangeNotifyPrivilege`; the gateway cannot start a
+child as another user because it lacks `SeAssignPrimaryTokenPrivilege` and
+`SeIncreaseQuotaPrivilege`. A caller-supplied path outside a profile that
+only administrators could read can now be read by the gateway as LocalSystem
+(the W-05 early-phase limitation). Issue 1164 tracks a brokered scan as the
+enrolled user for projects inside profiles.
+
+### Upgrading from 1.0.0
+
+DefenseClaw 1.0.0 and earlier releases logged the gateway on as `NT SERVICE\DefenseClawGateway`.
+Those installs move to LocalSystem with no manual step:
+
+- `/ensure`, `/upgrade`, `/repair`, and `/install` over an existing deployment
+  reconfigure the gateway and keep the config, the manifest and the enrolled
+  users.
+- `/uninstall`, with or without purge, works before any upgrade.
+- If an upgrade fails and rolls back, the gateway returns to the account the
+  restored binaries were installed with.
+
+If an administrator added a local "Log on as a service" grant for the old
+gateway account, or for `NT SERVICE\ALL SERVICES`, DefenseClaw leaves it in
+place. It is no longer needed and can be removed.

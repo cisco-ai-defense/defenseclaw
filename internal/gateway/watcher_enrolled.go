@@ -58,6 +58,8 @@ func serviceHomeDir() string {
 type enrolledWatchSet struct {
 	skillDirs  []string
 	pluginDirs []string
+	// skippedProfiles counts enrolled homes omitted from LocalSystem watching.
+	skippedProfiles int
 	// roots maps each watched folder to the connector that owns it.
 	roots map[string]string
 	// mcp is every enrolled user's MCP servers, tagged with the connector
@@ -135,6 +137,9 @@ func (m *enrolledMCPServers) set(entries []config.MCPServerEntry) {
 
 func (e enrolledWatchSet) dirsKey() string {
 	parts := make([]string, 0, len(e.roots)+len(e.skillDirs)+len(e.pluginDirs))
+	if e.skippedProfiles > 0 {
+		parts = append(parts, fmt.Sprintf("skipped:%d", e.skippedProfiles))
+	}
 	for root, name := range e.roots {
 		parts = append(parts, strings.ToLower(root)+"="+name)
 	}
@@ -220,6 +225,10 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		if !target.OK || home == "" || name == "" || !filepath.IsAbs(home) {
 			continue
 		}
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil {
+			set.skippedProfiles++
+			continue
+		}
 		targets = append(targets, userConnector{filepath.Clean(home), name, strings.TrimSpace(target.SID)})
 		if key := strings.ToLower(filepath.Clean(home)); !ownedHomes[key] {
 			ownedHomes[key] = true
@@ -251,6 +260,10 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		skillDirs, pluginDirs := connector.ComponentDirsForHome(conn, serviceHome, target.home)
 		add := func(dirs []string, seen map[string]bool, out *[]string) {
 			for _, userDir := range dirs {
+				if managed.RequireWindowsGatewayPathOutsideUserProfiles(userDir) != nil {
+					set.skippedProfiles++
+					continue
+				}
 				key := strings.ToLower(userDir)
 				if seen[key] {
 					continue
@@ -293,6 +306,10 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		}
 		for _, entry := range entries {
 			entry.Home = target.home
+			if !gatewayMCPEntryOutsideProfiles(entry) {
+				set.skippedProfiles++
+				continue
+			}
 			key := watcher.MCPEventPath(entry)
 			if entry.Name == "" || entry.Bundled || seenMCP[key] {
 				continue
@@ -302,6 +319,28 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		}
 	}
 	return set
+}
+
+// gatewayMCPEntryOutsideProfiles checks filesystem locations passed from a
+// watcher MCP entry to the scanner child. URLs and bare command names are
+// not filesystem paths.
+func gatewayMCPEntryOutsideProfiles(entry config.MCPServerEntry) bool {
+	for _, path := range []string{entry.Home, entry.Project, entry.WorkDir, entry.Source, entry.Command} {
+		if filepath.IsAbs(path) && managed.RequireWindowsGatewayPathOutsideUserProfiles(path) != nil {
+			return false
+		}
+	}
+	cwd := entry.CWD
+	if cwd != "" && !filepath.IsAbs(cwd) {
+		base := entry.Project
+		if base == "" {
+			base = entry.Home
+		}
+		if base != "" {
+			cwd = filepath.Join(base, cwd)
+		}
+	}
+	return cwd == "" || managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) == nil
 }
 
 // enrolledMCPSpoolDir is the folder where the enumerator publishes the MCP

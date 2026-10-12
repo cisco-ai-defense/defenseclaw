@@ -179,8 +179,8 @@ passwords or directory identities in evidence.
 | new account | Created by the admin during [Enrollment](#enrollment) | Same | Same; it enrolls after its first real sign-in |
 | Optional | A directory account (SSSD/LDAP), an account whose home is under an extra `home_roots` entry, a systemd-userdb account | A directory or mobile account | A domain or Entra ID account (enrolled only after sign-in) |
 
-Service accounts the lifecycle creates: `defenseclaw` (Linux), `_defenseclaw`
-(macOS), and the `NT SERVICE\DefenseClawGateway` virtual account (Windows).
+Service accounts the lifecycle creates: `defenseclaw` (Linux) and `_defenseclaw`
+(macOS). On Windows the gateway runs as LocalSystem with its restricted service SID.
 
 ### Prerequisites
 

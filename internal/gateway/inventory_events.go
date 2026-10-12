@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -356,6 +357,7 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 		if !hasNativeMCPReader(connectorName) {
 			continue
 		}
+		// Native readers check each file at its open, including links.
 		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
 			appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
 		}
@@ -510,11 +512,17 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 	var results [][]config.MCPServerEntry
 	tryFile := func(reader func(string) ([]config.MCPServerEntry, error), relPath string) {
 		full := filepath.Join(home, relPath)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(full) != nil {
+			return
+		}
 		if entries, err := reader(full); err == nil && len(entries) > 0 {
 			results = append(results, entries)
 		}
 	}
 	tryHome := func(reader func(string) ([]config.MCPServerEntry, error)) {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil {
+			return
+		}
 		if entries, err := reader(home); err == nil && len(entries) > 0 {
 			results = append(results, entries)
 		}
@@ -604,7 +612,11 @@ func makeEndpointInventoryEmitter(
 			// A broken plugin directory must not hide built-in connectors or
 			// masquerade as an authoritative complete inventory. The bounded
 			// partial summary carries no path or loader error.
-			partial = reg.DiscoverPlugins(cfg.PluginDir) != nil
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(cfg.PluginDir) != nil {
+				partial = true
+			} else {
+				partial = reg.DiscoverPlugins(cfg.PluginDir) != nil
+			}
 		}
 		var report *inventory.AIDiscoveryReport
 		if snapshotFn != nil {
@@ -658,6 +670,8 @@ func endpointMCPComponents(cfg *config.Config) ([]endpointInventoryComponent, bo
 	if cfg == nil {
 		return nil, true
 	}
+	// ReadMCPServers guards each native config file, so an unreadable
+	// profile file does not hide a separate outside-profile source.
 	servers, err := cfg.ReadMCPServers()
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
