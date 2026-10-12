@@ -55,12 +55,9 @@ const (
 // root directory. Constant so tests and callers don't guess.
 const FileName = ".state"
 
-// StateDirName is the subdirectory under the daemon's data dir
-// (cfg.DataDir on both platforms) that the hook-guardian owns. The
-// guardian's targets.yaml AND its .state file both live here. Windows
-// installer maps this to `<StateRoot>\hook-guardian\` via the psm1
-// module's directory-prep block; Linux/macOS keep the same subdir
-// name for consistency across the two `.state` reader-writer paths.
+// StateDirName names the guardian-owned directory containing targets.yaml
+// and .state. The Windows installer places it under StateRoot, beside the
+// daemon's runtime data directory; Linux/macOS keep it under cfg.DataDir.
 const StateDirName = "hook-guardian"
 
 // PathForStateRoot returns the full state file path for a given
@@ -72,14 +69,15 @@ func PathForStateRoot(stateRoot string) string {
 	return filepath.Join(stateRoot, FileName)
 }
 
-// PathForDataDir returns the state file path derived from the
-// daemon's data dir. Callers on the READ side (the sidecar) don't
-// know the manifest path directly — they resolve it from cfg.DataDir
-// plus the fixed hook-guardian subdirectory convention. The writer
-// side (the guardian) uses PathForStateRoot with
-// filepath.Dir(manifestPath).
+// PathForDataDir returns the guardian's state file path for the sidecar.
+// Windows enterprise services keep runtime data in <StateRoot>\runtime and
+// guardian state in <StateRoot>\hook-guardian, so the installed service uses
+// its protected authorization-directory pin to resolve that sibling. Other
+// deployments retain the data-dir subdirectory convention. An invalid Windows
+// service layout returns an empty path, which ReadState treats as unknown.
+// The writer uses PathForStateRoot with filepath.Dir(manifestPath).
 func PathForDataDir(dataDir string) string {
-	return filepath.Join(dataDir, StateDirName, FileName)
+	return pathForDataDir(dataDir)
 }
 
 // ReadState reads the state file at the given path. Returns
@@ -93,6 +91,9 @@ func PathForDataDir(dataDir string) string {
 // a mistake or an attempt to consume unbounded RAM in the sidecar's
 // hot path; discard it.
 func ReadState(path string) string {
+	if !readStatePathTrusted(path) {
+		return StateUnknown
+	}
 	f, err := os.Open(path) // #nosec G304 — path derives from install-time layout, not user input.
 	if err != nil {
 		return StateUnknown
