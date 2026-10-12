@@ -11,7 +11,12 @@
 package gateway
 
 import (
+	"math"
 	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -47,8 +52,65 @@ var sandboxBudgetLimits = map[string]sandboxBudgetLimit{
 	sandboxBudgetHook:   {Rate: 100, Burst: 200, InFlight: 32},
 	sandboxBudgetPolicy: {Rate: 10, Burst: 20, InFlight: 8},
 	// The daemon posts its lifecycle and egress records every 2 s, one batch
-	// per sandbox (daemonRelayTelemetry), besides its other records.
-	sandboxBudgetEvents: {Rate: 4, Burst: 10, InFlight: 2},
+	// per sandbox (daemonRelayTelemetry), and stops a pass at its first
+	// 429, besides its other records. What a batch costs is bounded by the
+	// records budget (sandboxRecordBudget), not by this rate.
+	sandboxBudgetEvents: {Rate: 2, Burst: 8, InFlight: 2},
+}
+
+// The sandbox telemetry records one account's daemon may post: the request
+// budget above counts batches, and a batch holds up to
+// sandboxrelay.MaxTelemetryBatchRecords records, so this budget counts the
+// records themselves. 64 a second is one full batch per 2 s flush; the burst
+// is two batches, for a backlog after the gateway was out of reach.
+const (
+	sandboxTelemetryRecordRate  = 64
+	sandboxTelemetryRecordBurst = 2 * sandboxrelay.MaxTelemetryBatchRecords
+	// sandboxRecordBudgetSweepAt is the number of accounts tracked at which
+	// the buckets idle longer than sandboxRecordBudgetIdle (full again) go.
+	sandboxRecordBudgetSweepAt = 1024
+	sandboxRecordBudgetIdle    = time.Minute
+)
+
+// sandboxRecordBudget is the per-account sandbox telemetry records budget
+// (sandboxTelemetryRecordRate, sandboxTelemetryRecordBurst). The zero value
+// is ready.
+type sandboxRecordBudget struct {
+	mu    sync.Mutex
+	byUID map[int]*sandboxRecordBucket
+}
+
+type sandboxRecordBucket struct {
+	limiter *rate.Limiter
+	seen    time.Time
+}
+
+// take spends n records of uid's budget at now. When fewer are left it
+// spends none and returns how long until n are.
+func (b *sandboxRecordBudget) take(uid, n int, now time.Time) (time.Duration, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.byUID == nil {
+		b.byUID = map[int]*sandboxRecordBucket{}
+	}
+	if len(b.byUID) >= sandboxRecordBudgetSweepAt {
+		for id, bucket := range b.byUID {
+			if now.Sub(bucket.seen) > sandboxRecordBudgetIdle {
+				delete(b.byUID, id)
+			}
+		}
+	}
+	bucket, ok := b.byUID[uid]
+	if !ok {
+		bucket = &sandboxRecordBucket{limiter: rate.NewLimiter(sandboxTelemetryRecordRate, sandboxTelemetryRecordBurst)}
+		b.byUID[uid] = bucket
+	}
+	bucket.seen = now
+	if bucket.limiter.AllowN(now, n) {
+		return 0, true
+	}
+	short := float64(n) - bucket.limiter.TokensAt(now)
+	return time.Duration(math.Ceil(short / sandboxTelemetryRecordRate * float64(time.Second))), false
 }
 
 // sandboxBudgetClass is the budget class of a sandbox route path, "" for

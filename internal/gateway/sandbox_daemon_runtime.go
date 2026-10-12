@@ -483,8 +483,10 @@ func (d *SandboxDaemon) registrationOf(b sandboxauth.Binding) (string, bool) {
 }
 
 // telemetryRegistration is the registration of sandbox name for its
-// telemetry records: also a revoked one, whose records the managed gateway
-// still takes (handleSandboxEvents).
+// telemetry records: also a revoked one, whose last records (the deleting
+// and deleted phases, the ends of its connections) the managed gateway takes
+// for a while once the daemon reported the sandbox deleted
+// (sandboxTelemetryAdmit).
 func (d *SandboxDaemon) telemetryRegistration(name string) (string, bool) {
 	r, ok := d.regs.get(name)
 	return r.ID, ok && r.ID != ""

@@ -623,10 +623,10 @@ type SandboxActivityEvent struct {
 }
 
 // SandboxRecorder implements SandboxTelemetry on top of the Logger's bound v8
-// runtime. It also tracks the last recorded phase of each sandbox name so it
-// can supply the previous phase and publish the
-// metric.defenseclaw.sandbox.active gauge. The gauge is derived from this
-// state, so a process holds one recorder.
+// runtime. It also tracks the last recorded phase of each sandbox (by name,
+// or by managed registration: sandboxPhaseKey) so it can supply the previous
+// phase and publish the metric.defenseclaw.sandbox.active gauge. The gauge is
+// derived from this state, so a process holds one recorder.
 type SandboxRecorder struct {
 	logger *Logger
 
@@ -728,7 +728,8 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 	recorder.lifecycle.Lock()
 	defer recorder.lifecycle.Unlock()
 	previous := input.PreviousPhase
-	if tracked, known := recorder.phases[identity.Name]; previous == "" && known {
+	phaseKey := sandboxPhaseKey(identity)
+	if tracked, known := recorder.phases[phaseKey]; previous == "" && known {
 		previous = tracked.phase
 	}
 	fields := sandboxV8FieldsFor(identity)
@@ -775,7 +776,7 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 	if err != nil {
 		return err
 	}
-	activeCounts := recorder.commitPhaseLocked(identity.Name, identity.Connector, identity.Phase)
+	activeCounts := recorder.commitPhaseLocked(phaseKey, identity.Connector, identity.Phase)
 	// Gauges lead the batch: a batch stops at its first failure, and a lost
 	// gauge point stays stale until the next lifecycle event.
 	metrics := make([]RuntimeV8GeneratedMetric, 0, len(activeCounts)+1)
@@ -1808,18 +1809,32 @@ func (recorder *SandboxRecorder) newEvent(
 	return event
 }
 
-// commitPhaseLocked records name's new phase and returns the active-sandbox
-// counts of every connector whose count may have changed. A deleted sandbox
-// is forgotten. The caller holds recorder.lifecycle.
+// sandboxPhaseKey is the key a sandbox's tracked phase is kept under: its
+// name on a per-user gateway, whose recorder sees one account's sandboxes,
+// and its managed registration on the managed gateway, whose one recorder
+// sees every account's, so two people's sandboxes of the same name keep
+// their own previous phase and each counts once in the active gauge. A
+// sandbox name holds no NUL, so the two kinds of key never meet.
+func sandboxPhaseKey(identity SandboxIdentity) string {
+	if id := identity.Managed.RegistrationID; id != "" {
+		return "\x00registration\x00" + id
+	}
+	return identity.Name
+}
+
+// commitPhaseLocked records the new phase of the sandbox tracked under key
+// (sandboxPhaseKey) and returns the active-sandbox counts of every
+// connector whose count may have changed. A deleted sandbox is forgotten.
+// The caller holds recorder.lifecycle.
 func (recorder *SandboxRecorder) commitPhaseLocked(
-	name, connector string,
+	key, connector string,
 	phase SandboxPhase,
 ) []sandboxActiveCount {
-	previous, known := recorder.phases[name]
+	previous, known := recorder.phases[key]
 	if phase == SandboxPhaseDeleted {
-		delete(recorder.phases, name)
+		delete(recorder.phases, key)
 	} else {
-		recorder.phases[name] = sandboxTrackedPhase{connector: connector, phase: phase}
+		recorder.phases[key] = sandboxTrackedPhase{connector: connector, phase: phase}
 	}
 	affected := []string{connector}
 	if known && previous.connector != connector {

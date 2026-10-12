@@ -857,7 +857,7 @@ func TestSandboxBudgetKeys(t *testing.T) {
 		}
 	}
 	var l hookCallerLimiter
-	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetEvents); rps != 4 || burst != 10 || inFlight != 2 {
+	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetEvents); rps != 2 || burst != 8 || inFlight != 2 {
 		t.Fatalf("events limits %d/%d/%d", rps, burst, inFlight)
 	}
 	if rps, burst, _, _ := l.limits("1001"); rps != hookCallerRate || burst != hookCallerBurst {

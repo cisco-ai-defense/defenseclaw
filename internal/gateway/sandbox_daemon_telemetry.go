@@ -79,9 +79,9 @@ const (
 	daemonTelemetryFlushEvery = 2 * time.Second
 	// daemonTelemetryMaxPending bounds the queue; the oldest go first.
 	daemonTelemetryMaxPending = 2048
-	// daemonTelemetryBatch bounds one batch, under the route's record and
-	// byte limits (a record is well under 1 KiB).
-	daemonTelemetryBatch = 128
+	// daemonTelemetryBatch bounds one batch, the route's telemetry batch
+	// limit, under its byte limit (a record is well under 1 KiB).
+	daemonTelemetryBatch = sandboxrelay.MaxTelemetryBatchRecords
 	// daemonTelemetryWaitFor is how long a record waits for its sandbox's
 	// registration.
 	daemonTelemetryWaitFor = 10 * time.Minute
@@ -97,16 +97,17 @@ func newDaemonRelayTelemetry(relay sandboxrelay.Client, registration func(string
 // sandbox_egress record. Every field is the daemon's claim about one of the
 // caller's own sandboxes: the managed gateway takes the sandbox, its
 // registration, profile, policy and person from the registration and the
-// peer, and the recorder bounds each value as on any other host.
+// peer, bounds the severity (sandboxClaimSeverity) and strips control
+// characters from the text (sandboxClaimPayload), and the recorder bounds
+// each value as on any other host. The image digest, network profile and
+// policy revision are not sent: no registration vouches for them, so the
+// gateway would not record them (an older daemon's are ignored).
 type sandboxTelemetryClaim struct {
-	Sandbox       string `json:"sandbox"`
-	SandboxID     string `json:"sandbox_id,omitempty"`
-	Phase         string `json:"phase,omitempty"`
-	ImageDigest   string `json:"image_digest,omitempty"`
-	PolicyVersion uint32 `json:"policy_version,omitempty"`
-	Profile       string `json:"profile,omitempty"`
-	Pack          string `json:"pack,omitempty"`
-	Severity      string `json:"severity,omitempty"`
+	Sandbox   string `json:"sandbox"`
+	SandboxID string `json:"sandbox_id,omitempty"`
+	Phase     string `json:"phase,omitempty"`
+	Pack      string `json:"pack,omitempty"`
+	Severity  string `json:"severity,omitempty"`
 
 	// The lifecycle record's.
 	PreviousPhase string                 `json:"previous_phase,omitempty"`
@@ -146,8 +147,7 @@ type sandboxConditionClaim struct {
 
 // claimOf is the claim part of a record's sandbox identity.
 func claimOf(id audit.SandboxIdentity) sandboxTelemetryClaim {
-	return sandboxTelemetryClaim{Sandbox: id.Name, SandboxID: id.ID, Phase: string(id.Phase), ImageDigest: id.ImageDigest,
-		PolicyVersion: id.PolicyVersion, Profile: id.Profile, Pack: id.Pack}
+	return sandboxTelemetryClaim{Sandbox: id.Name, SandboxID: id.ID, Phase: string(id.Phase), Pack: id.Pack}
 }
 
 func lifecycleClaim(e audit.SandboxLifecycleEvent) sandboxTelemetryClaim {
@@ -276,9 +276,13 @@ func (t *daemonRelayTelemetry) flush(ctx context.Context) bool {
 		batches[rec.registration] = append(batches[rec.registration], rec)
 	}
 	var retry []daemonTelemetryRecord
+	// A gateway out of reach or over budget takes no other registration's
+	// batch either: the first such answer ends the pass, and the rest waits
+	// for the next one.
+	stopped := false
 	for _, registration := range order {
 		list := batches[registration]
-		for len(list) > 0 {
+		for len(list) > 0 && !stopped {
 			n := min(len(list), daemonTelemetryBatch)
 			chunk := list[:n]
 			list = list[n:]
@@ -296,12 +300,13 @@ func (t *daemonRelayTelemetry) flush(ctx context.Context) bool {
 			if daemonTelemetryRetryable(err) {
 				t.failed(len(chunk), err, true)
 				retry = append(retry, chunk...)
-				retry = append(retry, list...)
+				stopped = true
 				break
 			}
 			t.failed(len(chunk), err, false)
 			t.drop(len(chunk))
 		}
+		retry = append(retry, list...)
 	}
 
 	t.mu.Lock()

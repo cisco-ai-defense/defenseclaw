@@ -101,6 +101,8 @@ type sandboxAuthority struct {
 
 	// rematch serializes re-matches per registration id.
 	rematch keyedMutex
+	// records is each account's sandbox telemetry records budget.
+	records sandboxRecordBudget
 }
 
 // sandboxRegistrationStore is the registration store with the run record

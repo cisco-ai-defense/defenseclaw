@@ -164,6 +164,10 @@ const (
 	// MaxUnregisteredEventRecords bounds a batch without a registration
 	// (the daemon keeps at most as many records for the managed gateway).
 	MaxUnregisteredEventRecords = 64
+	// MaxTelemetryBatchRecords bounds a batch that carries sandbox
+	// telemetry records (EventTelemetry): the daemon posts at most this many
+	// per batch, and the managed gateway refuses a larger one.
+	MaxTelemetryBatchRecords = 128
 	// MaxOTLPBodyBytes bounds one relayed OTLP post.
 	MaxOTLPBodyBytes = 4 << 20
 	// MaxRequestAccessBytes bounds request_access text.
