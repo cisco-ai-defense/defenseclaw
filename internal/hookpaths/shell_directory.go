@@ -151,7 +151,7 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			writes = append(writes, RedirectOccurrence{Path: literal})
 		}
 		for _, extra := range extras {
-			writes = append(writes, RedirectOccurrence{Path: extra})
+			writes = append(writes, RedirectOccurrence{Path: extra.Path})
 		}
 		for _, candidate := range facts.Paths {
 			if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
@@ -419,16 +419,6 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			if cmd.Name != nil {
 				functions[cmd.Name.Value] = cmd
 			}
-			syntax.Walk(cmd.Body, func(node syntax.Node) bool {
-				if call, ok := node.(*syntax.CallExpr); ok {
-					if program, _, static := shellCommandWord(call, home); !static ||
-						program == "cd" || program == "pushd" || program == "popd" ||
-						program == "eval" || program == "source" || program == "." {
-						s.known, s.changed, s.stack = false, true, nil
-					}
-				}
-				return true
-			})
 			write(stmt, s)
 		case *syntax.CoprocClause:
 			child := s.clone()
@@ -469,9 +459,8 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 			write(stmt, s)
 		default:
-			// An unmodeled command, such as a function definition, may change
-			// the directory later. Its redirects are still inspected using the
-			// state at this point.
+			// An unmodeled command may change the directory. Its redirects
+			// are still inspected using the state at this point.
 			syntax.Walk(cmd, func(node syntax.Node) bool {
 				if call, ok := node.(*syntax.CallExpr); ok {
 					if program, _, static := shellCommandWord(call, home); !static ||

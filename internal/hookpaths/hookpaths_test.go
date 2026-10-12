@@ -202,7 +202,7 @@ func TestShellExtraWriteOperandsTarMembers(t *testing.T) {
 	}
 	got := ShellExtraWriteOperands("tar -C dirlink -xf keys.tar authorized_keys", cwd, "")
 	want := filepath.Join(cwd, "dirlink", "authorized_keys")
-	if len(got) != 1 || got[0] != want {
+	if len(got) != 1 || got[0].Path != want {
 		t.Fatalf("tar member operands = %v, want [%s]", got, want)
 	}
 	if got := ShellExtraWriteOperands("tar -C dirlink -xf keys.tar notes.txt", cwd, ""); len(got) != 0 {
@@ -281,8 +281,13 @@ func TestShellWriteOperandsNestedAndPoisonedVariables(t *testing.T) {
 					operands, dynamic, tc.wantOperands, tc.wantDynamic)
 			}
 			if tc.wantExtra != nil {
-				if extra := ShellExtraWriteOperands(tc.command, cwd, home); !slices.Equal(extra, tc.wantExtra) {
-					t.Fatalf("ShellExtraWriteOperands = %v, want %v", extra, tc.wantExtra)
+				extra := ShellExtraWriteOperands(tc.command, cwd, home)
+				paths := make([]string, 0, len(extra))
+				for _, operand := range extra {
+					paths = append(paths, operand.Path)
+				}
+				if !slices.Equal(paths, tc.wantExtra) {
+					t.Fatalf("ShellExtraWriteOperands = %v, want %v", paths, tc.wantExtra)
 				}
 			}
 		})

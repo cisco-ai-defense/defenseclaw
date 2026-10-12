@@ -901,7 +901,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 		}
 		for _, operand := range hookpaths.ShellExtraWriteOperands(input.Command, input.CWD, input.ActiveHome) {
-			if writeTarget(operand, false, true) {
+			if writeTarget(operand.Path, false, operand.OwnCopy) {
 				return true
 			}
 		}

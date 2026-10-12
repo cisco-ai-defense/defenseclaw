@@ -134,14 +134,21 @@ func shellWriteOccurrences(file *syntax.File, cwd, home string) []shellWriteOccu
 	return occurrences
 }
 
+// ExtraWriteOperand preserves whether a destination belongs to the copy
+// operation itself. Later writers to the same path cannot claim that scope.
+type ExtraWriteOperand struct {
+	Path    string
+	OwnCopy bool
+}
+
 // ShellExtraWriteOperands lists destinations that the command-link proof
 // understands but ActionFacts does not emit as write PathFacts.
-func ShellExtraWriteOperands(command, cwd, home string) []string {
+func ShellExtraWriteOperands(command, cwd, home string) []ExtraWriteOperand {
 	file, ok := parseShell(command)
 	if !ok {
 		return nil
 	}
-	var operands []string
+	var operands []ExtraWriteOperand
 	poison := shellVariablePoisonForFile(file, home)
 	states := shellWordStates(file, home, poison)
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -214,7 +221,7 @@ func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, un
 
 func shellCallExtraWriteOperands(
 	call *syntax.CallExpr, cwd, home string, vars shellVariables, poison shellVariablePoison,
-) []string {
+) []ExtraWriteOperand {
 	words := make([]string, len(call.Args))
 	for i, arg := range call.Args {
 		var static bool
@@ -231,8 +238,13 @@ func shellCallExtraWriteOperands(
 		programWords = programWords[1:]
 	}
 	program := programBase(programWords[0])
-	var operands []string
+	var operands []ExtraWriteOperand
 	var destination string
+	add := func(path string) {
+		operands = append(operands, ExtraWriteOperand{
+			Path: path, OwnCopy: program == "cp" || program == "gcp" || program == "rsync",
+		})
+	}
 	switch program {
 	case "ln", "gln":
 		if len(programWords) < 3 {
@@ -251,40 +263,38 @@ func shellCallExtraWriteOperands(
 		}
 	case "tee":
 		for _, target := range teeDestinations(programWords[1:]) {
-			operands = append(operands, OperandPath(target, cmdCWD))
+			add(OperandPath(target, cmdCWD))
 		}
 	case "cp", "gcp":
 		static := makeStatic(len(programWords) - 1)
-		if destination = cpDestination(programWords[1:], static, cmdCWD); destination != "" {
-			operands = append(operands, destination)
-		}
+		destination = cpDestination(programWords[1:], static, cmdCWD)
 	case "mv", "gmv", "install":
-		if destination = finalOperandDestination(programWords[1:], cmdCWD); destination != "" {
-			operands = append(operands, destination)
-		}
+		destination = finalOperandDestination(programWords[1:], cmdCWD)
 	case "dd":
 		for _, arg := range programWords[1:] {
 			if output, ok := strings.CutPrefix(arg, "of="); ok && output != "" {
-				operands = append(operands, OperandPath(output, cmdCWD))
+				add(OperandPath(output, cmdCWD))
 			}
 		}
 	case "sed", "gsed":
 		for _, name := range sedInPlaceFiles(programWords) {
 			if sedFollowsInPlaceLinks(programWords) || sedParentProtected(name, cmdCWD, home) {
-				operands = append(operands, OperandPath(name, cmdCWD))
+				add(OperandPath(name, cmdCWD))
 			}
 		}
 	case "truncate":
 		for _, name := range truncateFiles(programWords[1:]) {
-			operands = append(operands, OperandPath(name, cmdCWD))
+			add(OperandPath(name, cmdCWD))
 		}
 	case "tar", "gtar", "bsdtar":
-		operands = append(operands, tarExplicitExtractMembers(program, programWords[1:], cmdCWD)...)
+		for _, path := range tarExplicitExtractMembers(program, programWords[1:], cmdCWD) {
+			add(path)
+		}
 	}
 	if destination != "" && !strings.HasPrefix(destination, "-") &&
 		(program != "rsync" || runtime.GOOS == "windows" || !strings.Contains(destination, ":")) &&
 		!strings.Contains(destination, "://") && !strings.Contains(destination, "::") {
-		operands = append(operands, OperandPath(destination, cmdCWD))
+		add(OperandPath(destination, cmdCWD))
 	}
 	return operands
 }
@@ -690,6 +700,7 @@ func shellVariableCandidates(file *syntax.File, home string) shellVariableCandid
 		seen:    map[string]map[string]bool{},
 		unknown: map[string]bool{},
 	}
+	_, allowedUnsets := shellAllowedStraightMutations(file, home)
 	states := shellWordStates(file, home, shellVariablePoison{})
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
@@ -751,7 +762,7 @@ func shellVariableCandidates(file *syntax.File, home string) shellVariableCandid
 				candidates.unknown[name] = true
 			}
 		case *syntax.CallExpr:
-			if len(node.Args) == 0 {
+			if len(node.Args) == 0 || allowedUnsets[node] {
 				return true
 			}
 			program, static := shellStaticProgram(node, home)
@@ -810,6 +821,15 @@ func shellCandidateCallMutation(
 	call *syntax.CallExpr, program, home string, states shellWordStateMap, candidates *shellVariableCandidateSet,
 ) {
 	switch program {
+	case "unset":
+		names, ok := shellUnsetNames(call, home, nil, shellVariablePoison{})
+		if !ok {
+			candidates.allUnknown = true
+			return
+		}
+		for _, name := range names {
+			candidates.unknown[name] = true
+		}
 	case "eval", "source", ".", "trap", "let":
 		candidates.allUnknown = true
 	case "read":
@@ -952,8 +972,25 @@ func shellUnsetNames(
 		return nil, false
 	}
 	var names []string
+	options := true
+	functionOnly := false
+	variableOption := false
 	for _, word := range words[1:] {
-		if strings.HasPrefix(word, "-") {
+		if options && word == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(word, "-") {
+			for _, flag := range word[1:] {
+				switch flag {
+				case 'f':
+					functionOnly = true
+				case 'v', 'n':
+					variableOption = true
+				default:
+					return nil, false
+				}
+			}
 			continue
 		}
 		if !shellIdentifier(word) {
@@ -961,11 +998,26 @@ func shellUnsetNames(
 		}
 		names = append(names, word)
 	}
-	return names, len(names) > 0
+	if functionOnly && variableOption {
+		return nil, false
+	}
+	if functionOnly {
+		return nil, true
+	}
+	return names, true
 }
 
 func shellPoisonCallMutation(call *syntax.CallExpr, program, home string, poison *shellVariablePoison) {
 	switch program {
+	case "unset":
+		names, ok := shellUnsetNames(call, home, nil, shellVariablePoison{})
+		if !ok {
+			poison.all = true
+			return
+		}
+		for _, name := range names {
+			poison.add(name)
+		}
 	case "eval", "source", ".", "trap", "let":
 		poison.all = true
 	case "read":
@@ -1395,7 +1447,8 @@ func Resolve(payload []byte) string {
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
 	var operands, literalOperands []string
-	var dynamicOperands, extraOperands []string
+	var dynamicOperands []string
+	var extraOperands []ExtraWriteOperand
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
@@ -1505,7 +1558,7 @@ func Resolve(payload []byte) string {
 		add(operand, true, false)
 	}
 	for _, operand := range extraOperands {
-		add(operand, true, false)
+		add(operand.Path, true, false)
 	}
 	for operand := range sedOperands {
 		add(operand, true, false)
