@@ -21,14 +21,14 @@ DOCS = ROOT / "docs-site/content/docs"
 
 
 def _read(rel: str) -> str:
-    return (DOCS / rel).read_text()
+    return (DOCS / rel).read_text(encoding="utf-8")
 
 
 def test_docs_never_prescribe_sandbox_run_mount_or_yolo_flags() -> None:
     # `sandbox run` has no --mount or --yolo flag (GAP-0319, GAP-0372, GAP-0404).
     pattern = re.compile(r"sandbox run[^\n`]*--(mount|yolo)\b")
     files = list(DOCS.rglob("*.mdx")) + list((ROOT / "docs").glob("*.md"))
-    offenders = [str(p.relative_to(ROOT)) for p in files if pattern.search(p.read_text())]
+    offenders = [str(p.relative_to(ROOT)) for p in files if pattern.search(p.read_text(encoding="utf-8"))]
     assert offenders == []
 
 

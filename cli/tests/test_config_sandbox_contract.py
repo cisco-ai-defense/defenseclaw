@@ -42,7 +42,7 @@ def test_unset_floor_keys_are_never_written(tmp_path, monkeypatch):
     cfg.openshell.admin.request_access = "it-help@example.com"
     cfg.guardrail.profiles["p1"] = cfgmod.GuardrailProfile(description="contract")
     cfg.save()
-    doc = yaml.safe_load((tmp_path / "config.yaml").read_text())
+    doc = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     admin = doc["openshell"]["admin"]
     assert admin["request_access"] == "it-help@example.com"
     for name in cfgmod._OPENSHELL_ADMIN_FLOOR_KEYS:

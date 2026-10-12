@@ -2009,6 +2009,15 @@ func TestVerifiedUIDAssignmentSurvivesDirectoryFailure(t *testing.T) {
 	}
 }
 
+// Only a standalone Windows set keeps group SIDs; on any other set explain's
+// matched-group lookup must find none, not dereference the nil table.
+func TestProfileGroupSIDsNilSetHasNoSID(t *testing.T) {
+	var sids *profileGroupSIDs
+	if sid, ok := sids.sid("team"); ok || sid != "" {
+		t.Fatalf("nil SID table gave %q, %v", sid, ok)
+	}
+}
+
 // The first hook after a directory recovery must see a completed retry before
 // it decides against a strict group assignment.
 func TestWindowsGroupAssignmentRetryOnFirstHook(t *testing.T) {
