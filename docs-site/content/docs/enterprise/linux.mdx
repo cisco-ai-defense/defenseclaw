@@ -552,7 +552,10 @@ traversable again, mode `0751`, because the `defenseclaw` group goes with the
 account), and on a package host also the vendor policies in
 `/opt/defenseclaw/share/policies`, which the package does not ship as files.
 To turn the deployment on again with the same config, custom rule pack
-included, run `ensure --from-package --config <file>`. `--purge` removes both.
+included, run `ensure --from-package --config <file>` on a package host. A
+payload uninstall removes the binaries, so stage the payload again and run
+`"$PAYLOAD/defenseclaw-gateway" enterprise linux ensure --payload "$PAYLOAD"
+--config <file>`. `--purge` removes both.
 After an uninstall and after a reinstall, ask users to restart their agents:
 an agent session left open through both runs without DefenseClaw until it
 restarts, and the `ensure` result, `status` and `verify` name it with the

@@ -2956,8 +2956,14 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}
 	if l.policiesKept {
-		lines = append(lines, "kept the administrator policies in "+layout.PolicyDir+" (custom rule packs and Rego), so `"+
-			env.lifecycleCommand(ActionEnsure)+" --from-package --config <file>` with the same config turns the deployment on again; --purge removes them")
+		// A package host keeps its binaries, so ensure --from-package turns
+		// the deployment on again; a payload uninstall removed them, so the
+		// re-enable is a payload install with the same config.
+		reenable := "`" + env.lifecycleCommand(ActionEnsure) + " --from-package --config <file>` with the same config turns the deployment on again"
+		if !l.packageManaged {
+			reenable = "installing the payload again with the same config, `<payload>/" + binGateway + " enterprise linux ensure --payload <payload> --config <file>`, turns the deployment on again"
+		}
+		lines = append(lines, "kept the administrator policies in "+layout.PolicyDir+" (custom rule packs and Rego), so "+reenable+"; --purge removes them")
 	}
 	if !l.opts.Purge {
 		if kept := l.keptPerUserLine(record); kept != "" {
@@ -2968,9 +2974,11 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 }
 
 // removeAllExcept removes dir, or, when keep is a direct child of dir that
-// holds files, everything in dir but keep. It reports whether keep stayed.
+// is a directory with any entry (a file, or a folder an administrator staged
+// for a rule pack, even an empty one), everything in dir but keep. The empty
+// folder an install creates goes with dir. It reports whether keep stayed.
 func removeAllExcept(dir, keep string) (bool, error) {
-	if filepath.Dir(keep) != dir || !holdsState(keep) {
+	if filepath.Dir(keep) != dir || !nonEmptyDir(keep) {
 		return false, os.RemoveAll(dir)
 	}
 	entries, err := os.ReadDir(dir)
@@ -2984,6 +2992,16 @@ func removeAllExcept(dir, keep string) (bool, error) {
 		}
 	}
 	return true, errors.Join(errs...)
+}
+
+// nonEmptyDir reports whether path is a directory, not a symlink to one,
+// with at least one entry.
+func nonEmptyDir(path string) bool {
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) > 0
 }
 
 // recordPackageResult keeps the result of an `ensure --from-package` run

@@ -565,11 +565,12 @@ machine state: the config, credentials, gateway and guardian state, logs,
 lifecycle state and the service account. The root-owned `lifecycle.lock` stays
 in its lifecycle directory so waiting runs keep using the same lock. On Linux
 your policies in `/etc/defenseclaw/policies` stay, and on a package host so do
-the vendor policies in `/opt/defenseclaw/share/policies`, so `ensure
---from-package --config <file>` turns the deployment on again with the same
-config; a purge removes them. Each
-user keeps `~/.defenseclaw`
-and the per-user binaries; `--purge` removes those too. Add `--keep-state`
+the vendor policies in `/opt/defenseclaw/share/policies`. To turn the
+deployment on again with the same config, run `ensure --from-package --config
+<file>` on a package host; a payload uninstall removes the binaries, so stage
+the payload again and run its `ensure --payload <dir> --config <file>`. A purge
+removes the policies. Each user keeps `~/.defenseclaw` and the per-user
+binaries; `--purge` removes those too. Add `--keep-state`
 to keep the machine state for a reinstall instead.
 
 | Install channel | Remove the deployment and machine state, keep each user's data | Remove everything |

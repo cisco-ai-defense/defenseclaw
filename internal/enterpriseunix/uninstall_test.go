@@ -600,13 +600,42 @@ func TestUninstallKeepsTheAdministratorPoliciesForTheReenable(t *testing.T) {
 		t.Fatalf("plain uninstall: config kept=%v, custom pack kept=%v, vendor policies kept=%v",
 			exists(h.env.P(l.ConfigPath)), exists(h.env.P(custom)), exists(h.env.P(vendor)))
 	}
-	if summary := strings.Join(r.Changes, "\n"); !strings.Contains(summary, "kept the administrator policies in "+l.PolicyDir) {
-		t.Fatalf("uninstall summary does not name the kept policies:\n%s", summary)
+	if summary := strings.Join(r.Changes, "\n"); !strings.Contains(summary, "kept the administrator policies in "+l.PolicyDir) ||
+		!strings.Contains(summary, "--from-package --config <file>") {
+		t.Fatalf("uninstall summary does not name the kept policies and the package re-enable:\n%s", summary)
 	}
 	requireOK(t, h.run(reenable))
 
 	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
 	if exists(h.env.P(l.ConfigDir)) || exists(h.env.P(l.VendorPolicyDir)) {
 		t.Fatal("purge kept the administrator or vendor policies")
+	}
+}
+
+// A payload uninstall removes the binaries, so the kept policies come with a
+// payload reinstall step rather than ensure --from-package; and a policies
+// folder that holds only an empty folder an administrator staged for a rule
+// pack stays, while the empty folder the install created goes with the config.
+func TestUninstallKeepsStagedPolicyFoldersAndNamesThePayloadReinstall(t *testing.T) {
+	for _, staged := range []bool{false, true} {
+		h := newTestHost(t, "linux")
+		l := h.env.Layout
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		pack := h.env.P(filepath.Join(l.PolicyDir, "guardrail", "custom"))
+		if staged {
+			if err := os.MkdirAll(pack, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		r := h.run(Options{Action: ActionUninstall})
+		requireOK(t, r)
+		summary := strings.Join(r.Changes, "\n")
+		if exists(pack) != staged || exists(h.env.P(l.PolicyDir)) != staged ||
+			strings.Contains(summary, "kept the administrator policies") != staged {
+			t.Fatalf("staged=%v: pack kept=%v, policies kept=%v, summary:\n%s", staged, exists(pack), exists(h.env.P(l.PolicyDir)), summary)
+		}
+		if staged && (!strings.Contains(summary, "ensure --payload <payload> --config <file>") || strings.Contains(summary, "--from-package")) {
+			t.Fatalf("payload uninstall summary does not give the payload reinstall step:\n%s", summary)
+		}
 	}
 }
