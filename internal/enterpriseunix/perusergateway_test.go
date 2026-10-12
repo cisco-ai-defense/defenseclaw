@@ -63,19 +63,26 @@ func TestStatusMatchesMacOSGatewaysByExecutablePath(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	writeFreshLedger(t, h)
 	managedGateway := filepath.Join(h.env.Layout.BinDir, "defenseclaw-gateway")
+	// status skips its own process: keep the listed pids clear of the pid of
+	// the test binary (a macOS runner once ran it as pid 4203).
+	base := 4200
+	if own := os.Getpid(); own >= base && own <= base+5 {
+		base = own + 10
+	}
+	pid := func(n int) string { return fmt.Sprint(base + n) }
 	h.runner.ps = strings.Join([]string{
-		"4200 0 defenseclaw-gateway",                           // the managed binary, run by bare name
-		"4201 499 " + managedGateway,                           // the managed gateway
-		"4202 501 /Users/alice/.local/bin/defenseclaw-gateway", // a per-user gateway
-		"4203 502 defenseclaw-gateway",                         // a per-user gateway run by bare name
-		"4204 503 defenseclaw-gateway",                         // exited before its path was read
-		"4205 0 /bin/zsh",
+		pid(0) + " 0 defenseclaw-gateway",                           // the managed binary, run by bare name
+		pid(1) + " 499 " + managedGateway,                           // the managed gateway
+		pid(2) + " 501 /Users/alice/.local/bin/defenseclaw-gateway", // a per-user gateway
+		pid(3) + " 502 defenseclaw-gateway",                         // a per-user gateway run by bare name
+		pid(4) + " 503 defenseclaw-gateway",                         // exited before its path was read
+		pid(5) + " 0 /bin/zsh",
 	}, "\n")
 	execs := map[int]string{
-		4200: managedGateway,
-		4201: managedGateway,
-		4202: "/Users/alice/.local/bin/defenseclaw-gateway",
-		4203: "/Users/bob/.local/bin/defenseclaw-gateway",
+		base:     managedGateway,
+		base + 1: managedGateway,
+		base + 2: "/Users/alice/.local/bin/defenseclaw-gateway",
+		base + 3: "/Users/bob/.local/bin/defenseclaw-gateway",
 	}
 	h.env.ProcessExecPath = func(pid int) (string, error) {
 		if exe, ok := execs[pid]; ok {
@@ -86,14 +93,14 @@ func TestStatusMatchesMacOSGatewaysByExecutablePath(t *testing.T) {
 	got := h.run(Options{Action: ActionStatus})
 	requireOK(t, got)
 	message := messagesOf(got.Warnings, codePerUserGatewayRunning)
-	for _, want := range []string{"(pid 4202)", "(pid 4203)"} {
+	for _, want := range []string{"(pid " + pid(2) + ")", "(pid " + pid(3) + ")"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("status must name the per-user gateway %s: %+v", want, got.Warnings)
 		}
 	}
-	for _, pid := range []string{"4200", "4201", "4204", "4205"} {
-		if strings.Contains(message, pid) {
-			t.Fatalf("status names pid %s, which is not a per-user gateway: %+v", pid, got.Warnings)
+	for _, other := range []string{pid(0), pid(1), pid(4), pid(5)} {
+		if strings.Contains(message, other) {
+			t.Fatalf("status names pid %s, which is not a per-user gateway: %+v", other, got.Warnings)
 		}
 	}
 }
