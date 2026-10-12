@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	toml "github.com/pelletier/go-toml/v2"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -109,10 +110,20 @@ func expandPath(path string) string {
 	return path
 }
 
+// readGatewayMCPFile keeps native connector readers on the same profile
+// boundary as gateway scans. The guard is a no-op outside the Windows
+// LocalSystem gateway.
+func readGatewayMCPFile(path string) ([]byte, error) {
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
+		return nil, err
+	}
+	return os.ReadFile(path)
+}
+
 // readOpenclawConfig reads and parses the openclaw.json config file.
 func readOpenclawConfig(configFile string) (*openclawConfig, error) {
 	path := expandPath(configFile)
-	data, err := os.ReadFile(path)
+	data, err := readGatewayMCPFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +485,7 @@ func (c *Config) ReadWatchedMCPServers(connectors []string) ([]MCPServerEntry, e
 // claudeCodeProjectMCPServers lists, for each project in the Claude Code
 // state file, the local-scope servers stored there and the project .mcp.json.
 func claudeCodeProjectMCPServers() []MCPServerEntry {
-	data, err := os.ReadFile(claudeCodeMCPStatePath())
+	data, err := readGatewayMCPFile(claudeCodeMCPStatePath())
 	if err != nil {
 		return nil
 	}
@@ -483,7 +494,7 @@ func claudeCodeProjectMCPServers() []MCPServerEntry {
 		return nil
 	}
 	return claudeStateProjectServers(state, func(project string) ([]byte, error) {
-		return os.ReadFile(filepath.Join(project, ".mcp.json"))
+		return readGatewayMCPFile(filepath.Join(project, ".mcp.json"))
 	})
 }
 
@@ -561,9 +572,15 @@ func ReadUserMCPServersForConnector(connector string) ([]MCPServerEntry, error) 
 }
 
 func readMCPServersOpenClaw(configFile string) ([]MCPServerEntry, error) {
-	entries, err := readMCPServersViaCLI()
-	if err == nil {
-		return entries, nil
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(expandPath(configFile)); err != nil {
+		return nil, err
+	}
+	if home, homeErr := os.UserHomeDir(); runtime.GOOS != "windows" ||
+		(homeErr == nil && managed.RequireWindowsGatewayPathOutsideUserProfiles(home) == nil) {
+		entries, err := readMCPServersViaCLI()
+		if err == nil {
+			return entries, nil
+		}
 	}
 	return readMCPServersFromFile(configFile)
 }
@@ -581,7 +598,7 @@ func readMCPServersViaCLI() ([]MCPServerEntry, error) {
 
 func readMCPServersFromFile(configFile string) ([]MCPServerEntry, error) {
 	path := expandPath(configFile)
-	data, err := os.ReadFile(path)
+	data, err := readGatewayMCPFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("config: read %s: %w", path, err)
 	}
@@ -1258,7 +1275,7 @@ func claudeCodeMCPStatePath() string {
 }
 
 func readMCPFromClaudeState(path, workspaceDir string) (local, user []MCPServerEntry, err error) {
-	data, err := os.ReadFile(path)
+	data, err := readGatewayMCPFile(path)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1483,6 +1500,9 @@ const (
 // every user's home, and a config linked to /dev/zero would grow the scan
 // until the host ran out of memory (GAP-0694).
 func readMCPConfigFile(path string, limit int64) ([]byte, error) {
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- agent MCP config path
 	if err != nil {
 		return nil, err
@@ -1795,7 +1815,7 @@ func readMCPServersAntigravity(workspaceDir string) ([]MCPServerEntry, error) {
 }
 
 func readMCPFromJSONPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readGatewayMCPFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -1881,7 +1901,7 @@ func parseDotMCPJSON(data []byte) ([]MCPServerEntry, error) {
 }
 
 func readMCPFromZeptoConfig(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
+	data, err := readGatewayMCPFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -2074,6 +2094,9 @@ func preferredAMPSettingsPath(primary, fallback string) string {
 		if candidate == "" {
 			continue
 		}
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(candidate) != nil {
+			continue
+		}
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate
 		}
@@ -2084,6 +2107,9 @@ func preferredAMPSettingsPath(primary, fallback string) string {
 func readBoundedAMPDirectory(path string, remaining int) ([]os.DirEntry, error) {
 	if remaining <= 0 {
 		return nil, nil
+	}
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
+		return nil, err
 	}
 	directory, err := os.Open(path)
 	if err != nil {
@@ -2199,6 +2225,9 @@ func readMCPServersAMPFromHome(home, workspace string, settingsPaths, skillSetti
 	}
 
 	for _, skillRoot := range ampSkillDirsFromSettings(home, workspace, skillSettingsPaths) {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(skillRoot) != nil {
+			continue
+		}
 		children, err := os.ReadDir(skillRoot)
 		if err != nil {
 			continue
@@ -2216,6 +2245,9 @@ func readMCPServersAMPFromHome(home, workspace string, settingsPaths, skillSetti
 }
 
 func readStableAMPSettingsFile(path string) ([]byte, error) {
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
+		return nil, err
+	}
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err

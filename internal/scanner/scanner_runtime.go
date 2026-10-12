@@ -36,6 +36,12 @@ func usesScannerRuntime(binary string) bool {
 // loop retries such scans soon rather than an interval later (GAP-0975).
 var ErrScannerRuntimeUnavailable = errors.New("the managed scanner runtime is not ready")
 
+// requireScannerTargetPath checks a filesystem target before a scanner opens
+// it or starts a child under the gateway service token.
+var requireScannerTargetPath = func(path string) error {
+	return managed.RequireWindowsGatewayPathOutsideUserProfiles(path)
+}
+
 // scannerNotFound is the error of a scanner binary that does not exist.
 // hint is the generic remedy. A default scanner command on a host with a
 // managed scanner runtime never gets here: scannerRuntimePreflight stops

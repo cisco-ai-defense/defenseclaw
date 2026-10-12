@@ -18,8 +18,14 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
+
+// windowsCurrentOwnerSID is the account this process owns its files as: the
+// token user, or the gateway service SID for the LocalSystem gateway (which
+// writes through that SID, as the 1.0.0 virtual account did).
+var windowsCurrentOwnerSID = managed.WindowsCurrentProcessOwnerSID
 
 func secureOpenAppend(path string, _ bool) (*os.File, os.FileInfo, int64, error) {
 	if err := prepareSecureParent(path); err != nil {
@@ -92,11 +98,11 @@ func openWindowsFile(path string, access uint32, disposition uint32, protectNew 
 	}
 	var attributes *windows.SecurityAttributes
 	if protectNew {
-		user, err := windows.GetCurrentProcessToken().GetTokenUser()
-		if err != nil || user == nil || user.User.Sid == nil {
+		owner, err := windowsCurrentOwnerSID()
+		if err != nil || owner == nil {
 			return nil, ioFailure()
 		}
-		descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)(A;;FA;;;BA)")
+		descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + owner.String() + ")(A;;FA;;;SY)(A;;FA;;;BA)")
 		if err != nil {
 			return nil, ioFailure()
 		}
@@ -229,8 +235,8 @@ func windowsAllowedOwner(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err == nil && user != nil && user.User.Sid != nil && sid.Equals(user.User.Sid) {
+	owner, err := windowsCurrentOwnerSID()
+	if err == nil && owner != nil && sid.Equals(owner) {
 		return true
 	}
 	return sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid)

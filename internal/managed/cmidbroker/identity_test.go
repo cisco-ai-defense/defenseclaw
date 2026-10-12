@@ -42,3 +42,24 @@ func TestValidateIdentityBinding(t *testing.T) {
 		})
 	}
 }
+
+func TestGatewayServiceAccountAccepted(t *testing.T) {
+	for _, test := range []struct {
+		startName string
+		want      bool
+	}{
+		{"LocalSystem", true},
+		{"localsystem", true},
+		{`NT AUTHORITY\SYSTEM`, true},
+		{`NT SERVICE\DefenseClawGateway`, true},
+		{`NT SERVICE\OtherGateway`, false},
+		{`NT AUTHORITY\LocalService`, false},
+		{`NT AUTHORITY\NetworkService`, false},
+		{`.\localadmin`, false},
+		{"", false},
+	} {
+		if got := gatewayServiceAccountAccepted(test.startName, "DefenseClawGateway"); got != test.want {
+			t.Errorf("gatewayServiceAccountAccepted(%q) = %v, want %v", test.startName, got, test.want)
+		}
+	}
+}

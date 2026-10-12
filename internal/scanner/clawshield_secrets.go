@@ -113,6 +113,9 @@ var csSecretRules = []csSecretRule{
 }
 
 func (s *ClawShieldSecretsScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
+	if err := requireScannerTargetPath(target); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	result := &ScanResult{Scanner: s.Name(), Target: target, Timestamp: start}
 

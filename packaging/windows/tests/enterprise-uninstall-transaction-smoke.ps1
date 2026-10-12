@@ -1127,7 +1127,8 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [switch]$PendingTransaction,
                 [switch]$ServicingTransaction,
-                [switch]$AnyStartMode
+                [switch]$AnyStartMode,
+                [string[]]$ExpectedGatewayAccount
             )
             $script:HarnessState.service_contract_checks++
             $script:HarnessState.events.Add(
@@ -2170,9 +2171,11 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianLogPath,
                 [switch]$AgentApplicationControlAttested,
                 [switch]$ClaudeEffectivePolicyVerified,
-                [switch]$DeferAutomaticStart
+                [switch]$DeferAutomaticStart,
+                [string]$RestoreGatewayAccount
             )
             $script:HarnessState.events.Add('managed-services')
+            $script:HarnessState.restored_gateway_account = $RestoreGatewayAccount
             $mode = if ($DeferAutomaticStart) { 4 } else { 2 }
             $script:HarnessState.service_start_modes[$GatewayServiceName] =
                 $mode
@@ -2518,8 +2521,12 @@ targets:
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [switch]$RequireReadiness,
                 [switch]$PendingTransaction,
-                [switch]$ServicingTransaction
+                [switch]$ServicingTransaction,
+                [string[]]$ExpectedGatewayAccount
             )
+            if ($null -ne $ExpectedGatewayAccount) {
+                $script:HarnessState.verified_gateway_account = @($ExpectedGatewayAccount)
+            }
             if (-not [bool]$script:HarnessState.installed) {
                 throw 'reinstall verification did not observe installed metadata'
             }
@@ -5055,6 +5062,18 @@ targets:
                     -SnapshotPath $snapshotPath `
                     -Layout $layout `
                     -DeferServiceRestart)
+                # The harness preimage predates the recorded service account,
+                # so rollback must restore the gateway's virtual account.
+                Assert-Harness `
+                    -Condition (
+                        [string]$script:HarnessState.restored_gateway_account -ceq
+                            'NT SERVICE\DefenseClawGateway'
+                    ) `
+                    -Message (
+                        'rollback of a preimage without a recorded gateway account ' +
+                        "restored '$($script:HarnessState.restored_gateway_account)', " +
+                        'want NT SERVICE\DefenseClawGateway'
+                    )
                 $gc = $script:HarnessState.events.IndexOf(
                     'lifecycle-generation-gc'
                 )

@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 type claimedAssetFactsContextKey struct{}
@@ -103,7 +104,10 @@ func (a *APIServer) declaredSkillNames(ctx context.Context, connector, cwd strin
 		names = append(names, declared)
 	}
 	for _, root := range assetfacts.SkillRoots(connector, hookActiveHome(ctx), cwd) {
-		add(assetfacts.DeclaredSkillName(filepath.Join(root, name)))
+		dir := filepath.Join(root, name)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(dir) == nil {
+			add(assetfacts.DeclaredSkillName(dir))
+		}
 	}
 	for _, declared := range claimedAssetFactsFromContext(ctx).DeclaredFor(name) {
 		add(declared)
@@ -137,6 +141,9 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 	var paths []string
 	for _, root := range assetfacts.SkillRoots(connector, hookActiveHome(ctx), cwd) {
 		dir := filepath.Join(root, name)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(dir) != nil {
+			continue
+		}
 		_, err := os.Lstat(dir)
 		switch {
 		case err == nil, reported(dir):
@@ -159,6 +166,9 @@ const maxDeclaredNameScan = 256
 // disables it under its folder name, so a skill whose quarantine failed in
 // a folder of another name still ran (GAP-1101).
 func foldersDeclaringSkill(root, name string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -172,6 +182,9 @@ func foldersDeclaringSkill(root, name string) []string {
 			continue
 		}
 		dir := filepath.Join(root, entry.Name())
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(dir) != nil {
+			continue
+		}
 		if config.SameAssetName(assetfacts.DeclaredSkillName(dir), name) {
 			folders = append(folders, dir)
 		}
@@ -194,7 +207,11 @@ func (a *APIServer) installedSkillFolders(ctx context.Context, connector, cwd, n
 	for _, dir := range a.skillSourcePaths(ctx, connector, cwd, skillRuntimeProbe{
 		TargetType: "skill", SkillName: name, Matched: true,
 	}) {
-		info, err := os.Stat(filepath.Join(dir, "SKILL.md"))
+		manifest := filepath.Join(dir, "SKILL.md")
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(manifest) != nil {
+			continue
+		}
+		info, err := os.Stat(manifest)
 		switch {
 		case err == nil:
 			if info.Mode().IsRegular() {
@@ -252,8 +269,10 @@ func (a *APIServer) skillFolderAccessDecision(
 			continue
 		}
 		declared := facts.DeclaredFor(ref.Name)
-		if name := assetfacts.DeclaredSkillName(ref.Dir); name != "" {
-			declared = append(declared, name)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(ref.Dir) == nil {
+			if name := assetfacts.DeclaredSkillName(ref.Dir); name != "" {
+				declared = append(declared, name)
+			}
 		}
 		input := config.AssetPolicyInput{
 			TargetType: "skill", Name: ref.Name, DeclaredNames: declared,
@@ -293,6 +312,8 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 		return cfg.LookupMCPToolServerForConnector(connector, cwd, name)
 	}
 	if home != "" {
+		// Native MCP readers guard each config file; a refused file is
+		// treated like any other unreadable source, so other files remain.
 		if entry, ok := config.LookupMCPServerUnderHome(connector, home, cwd, name); ok {
 			return entry, true
 		}
@@ -317,12 +338,18 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 	if a == nil || !a.projectSkills.isActive() || strings.TrimSpace(cwd) == "" || isSandboxHookRequest(ctx) {
 		return
 	}
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) != nil {
+		return
+	}
 	cfg := a.liveConfig()
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return
 	}
 	home := hookActiveHome(ctx)
 	if home == "" || home == unresolvedCallerHome {
+		return
+	}
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(home) != nil {
 		return
 	}
 	_, peer := managedHookPeerFromContext(ctx)
@@ -339,6 +366,9 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 		}
 	}
 	for _, folder := range projectSkillFolders(connector, home, cwd) {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(folder) != nil {
+			continue
+		}
 		if managedCaller {
 			real, err := filepath.EvalSymlinks(folder)
 			if err != nil {
@@ -368,6 +398,9 @@ var projectSkillLstat = os.Lstat
 // and the watcher health lists it (doctor warns).
 func (a *APIServer) noteEnrolledProjectSkillFolders(cfg *config.Config, connector, home, cwd string) {
 	for _, folder := range enrolledProjectSkillCandidates(connector, home, cwd) {
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(folder) != nil {
+			continue
+		}
 		if a.projectSkills.registered(folder) {
 			continue
 		}

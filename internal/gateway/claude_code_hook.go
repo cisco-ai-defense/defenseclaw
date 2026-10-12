@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -874,6 +875,9 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	if !filepath.IsAbs(target) && req.CWD != "" {
 		target = filepath.Join(req.CWD, target)
 	}
+	if req.sandboxView == nil && managed.RequireWindowsGatewayPathOutsideUserProfiles(target) != nil {
+		return nil
+	}
 	rulesDir := ""
 	if cfg := a.decisionConfig(ctx); cfg != nil {
 		rulesDir = cfg.Scanners.CodeGuard
@@ -1047,6 +1051,9 @@ func (a *APIServer) scanClaudeCodeComponents(ctx context.Context, req claudeCode
 	count := 0
 	for component, paths := range targets {
 		for _, p := range paths {
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(p) != nil {
+				continue
+			}
 			if _, err := os.Stat(p); err != nil {
 				continue
 			}
@@ -1097,7 +1104,10 @@ func claudeCodeComponentTargets(cwd string) map[string][]string {
 	// into protected HookRuntime evidence. The host semantic inventory owns
 	// marketplace installed/version/enable attribution.
 	targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(userSkills)...)
-	targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(filepath.Join(claudeHome, "agents"))...)
+	userAgents := filepath.Join(claudeHome, "agents")
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(userAgents) == nil {
+		targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(userAgents)...)
+	}
 	targets["command"] = append(targets["command"], userCommands...)
 	targets["mcp"] = append(targets["mcp"], existingFiles(gatewayconnector.ClaudeCodeMCPStatePath())...)
 	targets["config"] = append(targets["config"], existingFiles(
@@ -1106,15 +1116,24 @@ func claudeCodeComponentTargets(cwd string) map[string][]string {
 		filepath.Join(claudeHome, "rules"),
 	)...)
 	targets["config"] = append(targets["config"], childDirs(filepath.Join(claudeHome, "rules"))...)
-	memory := claudecodepath.ResolveAutoMemory(claudeHome, cwd, nil)
-	targets["memory"] = append(targets["memory"], existingFiles(memory.Path)...)
-	targets["memory"] = append(targets["memory"], claudecodepath.AutoMemoryFiles(memory)...)
-	for _, workspaceSkills := range gatewayconnector.ClaudeCodeProjectSkillDirs(cwd) {
-		targets["skill"] = append(targets["skill"], claudePlainSkillDirs(workspaceSkills)...)
-		targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(workspaceSkills)...)
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(claudeHome) == nil &&
+		(cwd == "" || managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) == nil) {
+		memory := claudecodepath.ResolveAutoMemory(claudeHome, cwd, nil)
+		if memory.Path != "" && managed.RequireWindowsGatewayPathOutsideUserProfiles(memory.Path) == nil {
+			targets["memory"] = append(targets["memory"], existingFiles(memory.Path)...)
+			targets["memory"] = append(targets["memory"], claudecodepath.AutoMemoryFiles(memory)...)
+		}
 	}
-	for _, projectAgents := range gatewayconnector.ClaudeCodeProjectAgentDirs(cwd) {
-		targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(projectAgents)...)
+	if cwd == "" || managed.RequireWindowsGatewayPathOutsideUserProfiles(cwd) == nil {
+		for _, workspaceSkills := range gatewayconnector.ClaudeCodeProjectSkillDirs(cwd) {
+			targets["skill"] = append(targets["skill"], claudePlainSkillDirs(workspaceSkills)...)
+			targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(workspaceSkills)...)
+		}
+		for _, projectAgents := range gatewayconnector.ClaudeCodeProjectAgentDirs(cwd) {
+			if managed.RequireWindowsGatewayPathOutsideUserProfiles(projectAgents) == nil {
+				targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(projectAgents)...)
+			}
+		}
 	}
 	for _, root := range workspaceCodexRoots(cwd) {
 		claudeDir := filepath.Join(root, ".claude")
@@ -1143,9 +1162,17 @@ func claudePluginManifestPath(root string) string {
 }
 
 func claudeSkillsPluginDirs(root string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	var plugins []string
 	for _, candidate := range claudecodepath.SkillDirs(root) {
-		if info, err := os.Lstat(claudePluginManifestPath(candidate)); err == nil &&
+		manifest := claudePluginManifestPath(candidate)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(candidate) != nil ||
+			managed.RequireWindowsGatewayPathOutsideUserProfiles(manifest) != nil {
+			continue
+		}
+		if info, err := os.Lstat(manifest); err == nil &&
 			info.Mode().IsRegular() {
 			plugins = append(plugins, candidate)
 		}
@@ -1154,9 +1181,17 @@ func claudeSkillsPluginDirs(root string) []string {
 }
 
 func claudePlainSkillDirs(root string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	var skills []string
 	for _, candidate := range claudecodepath.SkillDirs(root) {
-		if _, err := os.Lstat(claudePluginManifestPath(candidate)); err == nil {
+		manifest := claudePluginManifestPath(candidate)
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(candidate) != nil ||
+			managed.RequireWindowsGatewayPathOutsideUserProfiles(manifest) != nil {
+			continue
+		}
+		if _, err := os.Lstat(manifest); err == nil {
 			continue
 		}
 		skills = append(skills, candidate)
@@ -1165,6 +1200,9 @@ func claudePlainSkillDirs(root string) []string {
 }
 
 func claudeCommandFiles(root string) []string {
+	if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
+		return nil
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil
@@ -1175,6 +1213,9 @@ func claudeCommandFiles(root string) []string {
 			continue
 		}
 		path := filepath.Join(root, entry.Name())
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(path) != nil {
+			continue
+		}
 		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
 			commands = append(commands, path)
 		}

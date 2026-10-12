@@ -54,6 +54,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -2895,6 +2896,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.rejectWindowsGatewayPath(w, req.Target) {
+		return
+	}
 	if isBundledSkillScanPath(req.Target) {
 		a.writeJSON(w, http.StatusConflict, map[string]string{
 			"error": "vendor-bundled skills are discovery-only and are not scanned or blocked",
@@ -2955,6 +2959,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 // name, its exit code or its Python traceback (GAP-0229, GAP-0256). A path that
 // exists but is not a directory is only logged: the scanner reports it.
 func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, target string, mustRead ...string) bool {
+	if a.rejectWindowsGatewayPath(w, target) {
+		return true
+	}
 	info, err := os.Stat(target)
 	// Secure Client keeps the scan of main, which the scanner fails on
 	// (issue #1092): nothing below applies to it.
@@ -2982,6 +2989,9 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 	}
 	for _, name := range mustRead {
 		file := filepath.Join(target, name)
+		if a.rejectWindowsGatewayPath(w, file) {
+			return true
+		}
 		handle, openErr := os.Open(file)
 		if errors.Is(openErr, fs.ErrPermission) {
 			a.writeJSON(w, http.StatusForbidden, map[string]string{
@@ -2992,6 +3002,14 @@ func (a *APIServer) rejectUnreadableScanTarget(w http.ResponseWriter, what, targ
 		if openErr == nil {
 			_ = handle.Close()
 		}
+	}
+	return false
+}
+
+func (a *APIServer) rejectWindowsGatewayPath(w http.ResponseWriter, path string) bool {
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		return true
 	}
 	return false
 }
@@ -3073,6 +3091,9 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if a.rejectWindowsGatewayPath(w, req.Target) {
+		return
+	}
 	if a.isManagedPluginScanTarget(req.Target) {
 		a.writeJSON(w, http.StatusConflict, map[string]string{
 			"error": "connector-managed plugins are lifecycle-owned and are not scanned",
@@ -3135,6 +3156,11 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
+	if (filepath.IsAbs(req.Target) || strings.ContainsAny(req.Target, `/\`) ||
+		strings.HasSuffix(strings.ToLower(req.Target), ".json")) &&
+		!strings.Contains(req.Target, "://") && a.rejectWindowsGatewayPath(w, req.Target) {
+		return
+	}
 
 	if a.scannerCfg == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
@@ -3195,6 +3221,9 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Target == "" {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
+		return
+	}
+	if a.rejectWindowsGatewayPath(w, req.Target) {
 		return
 	}
 
