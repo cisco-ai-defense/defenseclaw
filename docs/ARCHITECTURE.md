@@ -1,3 +1,4 @@
+<!-- doc-sync: last-spec=007 last-synced=2026-10-11 -->
 # Architecture
 
 This is a code-ownership map for contributors. Product concepts and operator
@@ -57,11 +58,28 @@ Do not maintain a second endpoint table in repository Markdown.
 
 ### Connectors
 
+Hook availability defaults to open when unset, independently of action-mode
+policy enforcement. Explicit closed policy, managed authorization, runtime
+integrity and strict availability remain distinct controls. See
+[spec 007](specs/007-hook-delivery-default/README.md) for platform scope.
+
+Windows Cursor's protected machine adapter binds delivery fallback to each
+enrolled process SID and verifies it against that user's authenticated runtime.
+Its shared `failClosed` flag remains conservative if any enrolled user is closed;
+launcher errors inside the running adapter use the individual user's policy.
+
 Connector names, capabilities, hook profiles, and setup behavior are executable
 contracts under `internal/gateway/connector/` and
 `cli/defenseclaw/connector_contracts.py`. A new connector or capability change
 must update both implementations, their tests, and the published compatibility
 pages.
+
+Agent-version evidence selects the exact hook contract when available, but is
+not a Unix enterprise installation prerequisite. An unversioned, unsupported,
+or incompatibly changed contract uses the reviewed best-effort event matrix in
+fail-open mode until a later reconciliation verifies a known contract. Version
+changes inside the same registered contract remain compatible. See
+[`development/unverified-hook-contract-fallback.md`](development/unverified-hook-contract-fallback.md).
 
 ### Policy
 

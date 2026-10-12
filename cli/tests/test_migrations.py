@@ -1187,21 +1187,14 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
     """
 
     def test_loader_normalizes_typos_to_closed(self):
-        # The secure default is "closed": a typo or any non-canonical
-        # value collapses to "closed" so a misconfigured config.yaml
-        # never silently puts the agent into fail-OPEN mode at the
-        # response-layer boundary. The "open" sentinel still
-        # round-trips because it is the documented opt-in.
+        # Malformed non-empty policy remains closed; explicit open round-trips.
         from defenseclaw.config import _merge_guardrail
 
         gc = _merge_guardrail({"hook_fail_mode": "OpEn"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "open")
 
         gc = _merge_guardrail({"hook_fail_mode": "klosed"}, "/tmp")
-        # Anything other than the canonical "open" sentinel falls
-        # back to "closed" — silently fail-closed is strictly safer
-        # than silently fail-open. Mirrors normalizeHookFailMode in
-        # internal/gateway/connector/subprocess.go.
+        # A typo must not silently select the unset-policy open default.
         self.assertEqual(gc.hook_fail_mode, "closed")
 
     def test_loader_accepts_explicit_closed(self):
@@ -1210,14 +1203,13 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
         gc = _merge_guardrail({"hook_fail_mode": "closed"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "closed")
 
-    def test_default_is_closed_when_missing(self):
+    def test_default_is_open_when_missing(self):
         # Fresh install: no ``hook_fail_mode`` key in YAML at all.
-        # New v4 default is the safer "closed". Existing v3 installs
-        # are pinned to "open" by _migrate_0_4_0_seed_hook_fail_mode.
+        # Missing policy defaults open without rewriting explicit settings.
         from defenseclaw.config import _merge_guardrail
 
         gc = _merge_guardrail({"enabled": True}, "/tmp")
-        self.assertEqual(gc.hook_fail_mode, "closed")
+        self.assertEqual(gc.hook_fail_mode, "open")
 
 
 class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):

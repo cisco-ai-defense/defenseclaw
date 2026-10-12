@@ -64,7 +64,9 @@ defenseclaw_harden_env
 # Fail mode set BEFORE the missing-token check so the helper has a
 # stable FAIL_MODE to log against. See codex-hook.sh for the full
 # response-layer and transport-layer rationale.
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Managed}}FAIL_MODE="{{.FailMode}}"
+{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{end}}
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
@@ -72,7 +74,7 @@ DEFENSECLAW_HOOK_CONNECTOR="claudecode"
 DEFENSECLAW_HOOK_NAME="claude-code-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: claudecode hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
@@ -139,7 +141,7 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure claudecode claude-code-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "claude-code tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
@@ -150,7 +152,7 @@ fail_unreachable() {
 fail_response() {
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
-  defenseclaw_log_hook_failure claudecode claude-code-hook "$reason" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure claudecode claude-code-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: claude-code hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0

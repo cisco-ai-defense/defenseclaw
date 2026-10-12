@@ -69,6 +69,7 @@ func stageEnterpriseHookDeferredManagedPolicies(
 		manifest,
 		pending,
 		apiAddr,
+		cfg.EffectiveHookFailModeForConnector("cursor"),
 	)
 }
 

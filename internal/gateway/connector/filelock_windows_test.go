@@ -120,6 +120,7 @@ func TestManagedWindowsRuntimeLocksPinEffectiveOwnerForEveryConnector(t *testing
 				"127.0.0.1:18970",
 				connectorName,
 				"scoped-test-token",
+				"closed",
 			); err != nil {
 				t.Fatalf("reconcile managed runtime: %v", err)
 			}
@@ -179,6 +180,7 @@ func TestManagedWindowsMultiConnectorNoChangeReconcileKeepsCanonicalInodes(t *te
 				"127.0.0.1:18970",
 				connectorName,
 				"scoped-"+connectorName+"-token",
+				"closed",
 			); err != nil {
 				t.Fatalf("reconcile %s managed runtime: %v", connectorName, err)
 			}

@@ -1687,14 +1687,36 @@ function Assert-AmpPluginPrivateACL([string]$PluginPath) {
     Write-Result 'amp:private-plugin' pass 'regular protected owner-and-SYSTEM-only plugin plus structured backup authority verified'
 }
 
+function Test-AmpPluginSelfHealReadRetry([Exception]$Exception) {
+    $cause = $Exception.GetBaseException()
+    # ReadAllBytes can race the protected publication handle after the name
+    # becomes visible, or a replacement between Test-Path and the read.
+    # Do not retry permission, malformed-path or unrelated I/O failures.
+    return ($cause -is [IO.IOException] -and
+        ($cause.HResult -band 0xFFFF) -in @(2, 32, 33))
+}
+
 function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
     if ($Connector -ne 'amp') { return }
     Remove-Item -LiteralPath $PluginPath -Force -ErrorAction Stop
     $restored = $false
+    $lastState = 'missing'
     for ($attempt = 0; $attempt -lt 80; $attempt++) {
         Start-Sleep -Milliseconds 250
-        if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) { continue }
-        $actual = [IO.File]::ReadAllBytes($PluginPath)
+        if (-not (Test-Path -LiteralPath $PluginPath -PathType Leaf)) {
+            $lastState = 'missing'
+            continue
+        }
+        try {
+            $actual = [IO.File]::ReadAllBytes($PluginPath)
+        } catch {
+            if (Test-AmpPluginSelfHealReadRetry $_.Exception) {
+                $lastState = 'transient-read-error'
+                continue
+            }
+            throw
+        }
+        $lastState = 'content-mismatch'
         if ([Convert]::ToBase64String($ExpectedBytes) -ceq
             [Convert]::ToBase64String($actual)) {
             $restored = $true
@@ -1702,13 +1724,15 @@ function Assert-AmpPluginSelfHeal([string]$PluginPath, [byte[]]$ExpectedBytes) {
         }
     }
     if (-not $restored) {
-        throw 'Amp policy plugin self-heal did not restore the exact managed artifact within 20 seconds'
+        # Report only the restoration state, never plugin contents or credentials.
+        throw "Amp policy plugin self-heal did not restore the exact managed artifact within 20 seconds (last state: $lastState)"
     }
     Assert-AmpPluginPrivateACL $PluginPath
     Write-Result 'amp:self-heal' pass 'live connector guard restored the deleted plugin byte-for-byte'
 }
 
 function Assert-DoctorWindowsHookRegistration {
+    param([ValidateSet('open', 'closed')][string]$ExpectedFailMode = 'open')
     $label = Get-ConnectorDoctorLabel
     $configPath = Get-EffectiveConnectorConfigPath $Connector
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) { throw "Doctor contract hook config is missing: $configPath" }
@@ -1740,7 +1764,7 @@ function Assert-DoctorWindowsHookRegistration {
         foreach ($marker in @(
             'DefenseClaw Amp policy bridge',
             '/api/v1/amp/hook',
-            'const DC_FAIL_MODE: string = "closed"',
+            ('const DC_FAIL_MODE: string = "' + $ExpectedFailMode + '"'),
             'const DC_TIMEOUT_MS = 10000',
             'new AbortController()',
             'ctx.ui.confirm',
@@ -2360,6 +2384,21 @@ function Invoke-ContractRun {
     Set-IsolatedGatewayPort
     Invoke-Setup observe
     Assert-DoctorHookRegistration
+    if ($Connector -eq 'amp') {
+        # Fresh installs default open; an explicit closed policy must still
+        # render and verify independently. Restore open before the corpus.
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        try {
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'closed', '--yes', '--no-restart') | Out-Null
+            Invoke-Setup observe
+            Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed
+        } finally {
+            Invoke-Tool 'defenseclaw' @('guardrail', 'fail-mode', 'open', '--yes', '--no-restart') | Out-Null
+            Invoke-Setup observe
+        }
+        Assert-DoctorWindowsHookRegistration -ExpectedFailMode open
+        Write-Result 'amp:delivery-mode-contract' pass 'default open and explicit closed plugins both rendered and verified'
+    }
     Invoke-DangerousCommandCorpus observe
     $blockEvent = if ($Connector -eq 'amp') { 'tool.call' } else { 'PreTool-block' }
     Invoke-Hook $blockEvent (Join-Path $golden 'pre_tool_block.json') allow $true

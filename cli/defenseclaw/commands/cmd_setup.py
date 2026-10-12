@@ -3098,7 +3098,7 @@ def _rotate_token_connector_state(
         if callable(fail_mode_resolver):
             hook_fail_mode = str(fail_mode_resolver(name) or "").strip().lower()
         else:
-            configured_fail_mode = str(getattr(guardrail, "hook_fail_mode", "") or "closed").strip().lower()
+            configured_fail_mode = str(getattr(guardrail, "hook_fail_mode", "") or "open").strip().lower()
             hook_fail_mode = configured_fail_mode if mode == "action" else "open"
         enabled_resolver = getattr(guardrail, "effective_enabled", None)
         enabled = bool(enabled_resolver(name)) if callable(enabled_resolver) else True

@@ -722,6 +722,17 @@ class PerConnectorToggleTests(unittest.TestCase):
 class PerConnectorFailModeTests(unittest.TestCase):
     """`guardrail fail-mode [open|closed] --connector X` — scoped override."""
 
+    def setUp(self):
+        # Transaction snapshots include agent config. Never snapshot or restore
+        # a developer's real ~/.codex or ~/.claude during rollback tests.
+        import tempfile
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        environment = patch.dict(os.environ, {"HOME": directory.name, "USERPROFILE": directory.name})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_set_one_connector_closed_persists_and_restarts_only_it(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
@@ -854,7 +865,7 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(restart_mock.call_count, 2)
         self.assertIn("restored", result.output)
 
-    def test_connector_open_clears_dormant_closed_override_in_observe_mode(self):
+    def test_connector_open_clears_explicit_closed_override_in_observe_mode(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": None, "claudecode": None})
         app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
@@ -868,8 +879,11 @@ class PerConnectorFailModeTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertNotIn("nothing to do", result.output)
-        self.assertIn("closed → open", result.output)
-        self.assertNotIn("open → open", result.output)
+        # Redirected/TERM=dumb output uses ASCII; the state transition must
+        # remain the same in either console presentation.
+        transition_output = result.output.replace("→", "->")
+        self.assertIn("closed -> open", transition_output)
+        self.assertNotIn("open -> open", transition_output)
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "open")
         app.cfg.save.assert_called_once()
 

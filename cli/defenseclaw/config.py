@@ -1804,26 +1804,24 @@ class GuardrailConfig:
     # transport, missing-token/authentication, and invalid-response failures.
     # Two values are supported:
     #
-    #   - ``"closed"`` (default, safer): connection failures, timeouts,
+    #   - ``"closed"`` (explicit opt-in): connection failures, timeouts,
     #     5xx/4xx responses, missing authentication, malformed JSON, or a
     #     missing action BLOCK the event where the connector has a block shape.
     #     CodeGuard rule codeguard-0-authorization-access-control:
     #     deny by default.
     #
-    #   - ``"open"``: those failures ALLOW the event with a stderr warning and
+    #   - ``"open"`` (default): those failures ALLOW the event with a stderr warning and
     #     a record in
     #     ``$DEFENSECLAW_HOME/logs/hook-failures.jsonl``. Choose when
     #     a brief observability gap is preferable to bricking the
     #     agent on a gateway hiccup.
     #
-    # Backwards compat: existing v3 installs are pinned to ``"open"``
-    # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
-    # NEW-INSTALL-ONLY behavior change.
+    # Existing explicit closed settings are preserved, not migrated.
     #
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
     # in internal/config/config.go.
-    hook_fail_mode: str = "closed"
+    hook_fail_mode: str = "open"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -1906,23 +1904,15 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """Explicit connector posture > observe compatibility > global.
+        """Explicit connector posture > global > open default.
 
-        Existing observe-only installs remain fail-open when they only carry
-        the legacy global value. A connector-scoped value is an explicit
-        runtime response-integrity choice, however, and must not be collapsed
-        back to open merely because policy findings are being observed.
+        Delivery failures and policy enforcement are independent. Observe
+        mode must not replace an explicit closed setting during hook repair.
         """
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
-            if pc.hook_fail_mode.strip().lower() == "closed":
-                return "closed"
-            return "open"
-        if self.effective_mode(connector).strip().lower() != "action":
-            return "open"
-        if self.hook_fail_mode.strip().lower() == "closed":
-            return "closed"
-        return "open"
+            return _normalize_hook_fail_mode(pc.hook_fail_mode)
+        return _normalize_hook_fail_mode(self.hook_fail_mode)
 
     def effective_block_message(self, connector: str = "") -> str:
         """Per-connector block message when set, else the global one."""
@@ -4013,13 +4003,10 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     sentinels the gateway understands.
 
     Mirrors ``normalizeHookFailMode`` in
-    ``internal/gateway/connector/subprocess.go``. Anything other than
-    the explicit ``"open"`` sentinel collapses to ``"closed"`` so a
-    typo in config.yaml never accidentally puts the agent into
-    fail-OPEN mode at the hook failure boundary (CodeGuard rule
-    codeguard-0-authorization-access-control: deny by default).
+    ``internal/gateway/connector/subprocess.go``. Missing/empty policy defaults
+    open; malformed non-empty configuration remains closed.
     """
-    if isinstance(value, str) and value.strip().lower() == "open":
+    if value is None or (isinstance(value, str) and value.strip().lower() in {"", "open"}):
         return "open"
     return "closed"
 

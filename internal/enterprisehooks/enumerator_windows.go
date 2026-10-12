@@ -492,8 +492,10 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		return false
 	}
 	key := previousManifestKey(row.SID, row.Connector)
+	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
 	if prev, ok := previous[key]; ok {
-		row.AgentVersion = prev.AgentVersion
+		// Preserve authorization, not stale compatibility evidence.
+		row.AgentVersion = version
 		row.Enabled = prev.Enabled
 		row.Deferred = prev.Deferred
 		row.User = prev.User
@@ -501,8 +503,7 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 		row.GID = prev.GID
 		return true
 	}
-	version, reason := windowsAgentVersionExplain(row.UserHome, row.Connector)
-	if version == "" {
+	if version == "" && !windowsAgentPresence(row.UserHome, row.Connector) {
 		logfSafely(
 			logf,
 			row.SID,
@@ -518,13 +519,17 @@ func applyPreviousRowState(row *ManifestTarget, previous map[string]ManifestTarg
 	row.AgentVersion = version
 	row.Enabled = &enabled
 	row.Deferred = false
+	versionEvidence := version
+	if versionEvidence == "" {
+		versionEvidence = "unverified (static presence detected; best-effort hooks)"
+	}
 	logfSafely(
 		logf,
 		row.SID,
 		fmt.Sprintf(
 			"newly-discovered (SID, %s) row auto-authorized at version %s",
 			row.Connector,
-			version,
+			versionEvidence,
 		),
 	)
 	return true

@@ -12,6 +12,7 @@ func stageWindowsEnterpriseDeferredPoliciesPlatform(
 	Manifest,
 	[]ManifestTarget,
 	string,
+	...string,
 ) error {
 	return errors.New("enterprise hooks: deferred machine-policy staging requires Windows")
 }

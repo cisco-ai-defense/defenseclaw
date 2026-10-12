@@ -32,9 +32,6 @@ func validateManifestPlatformTarget(index int, target ManifestTarget) error {
 	if windowsEnterpriseSystemIdentity(sid) {
 		return fmt.Errorf("enterprise hooks: Windows target %d sid %s is not an interactive user", index, sid)
 	}
-	if strings.TrimSpace(target.AgentVersion) == "" {
-		return fmt.Errorf("enterprise hooks: Windows target %d requires explicit agent_version", index)
-	}
 	if err := requireWindowsEnterpriseManagedAgentVersion(
 		target.Connector,
 		target.AgentVersion,

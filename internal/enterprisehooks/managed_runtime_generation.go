@@ -27,6 +27,7 @@ type WindowsManagedRuntimeGenerationDesired struct {
 	HookExecutable             string `json:"hook_executable"`
 	GatewayAddr                string `json:"gateway_addr"`
 	GatewayServiceName         string `json:"gateway_service_name"`
+	FailMode                   string `json:"fail_mode"`
 	ScopedToken                string `json:"-"`
 	HookContractID             string `json:"hook_contract_id"`
 	HookContractLockUpdatedAt  string `json:"hook_contract_lock_updated_at"`
@@ -240,6 +241,7 @@ type WindowsManagedRuntimeGenerationResolved struct {
 	HookExecutable             string `json:"hook_executable"`
 	GatewayAddr                string `json:"gateway_addr"`
 	GatewayServiceName         string `json:"gateway_service_name"`
+	FailMode                   string `json:"fail_mode"`
 	GenerationID               string `json:"generation_id"`
 	BundleSHA256               string `json:"bundle_sha256"`
 	HookContractID             string `json:"hook_contract_id"`

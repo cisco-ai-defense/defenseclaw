@@ -34,6 +34,7 @@ func stubEnterpriseManagedRuntimeResolver(
 	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = ""
 	nativeEnterpriseHookRuntimeSnapshot.scopedToken = ""
 	nativeEnterpriseHookRuntimeSnapshot.generationID = ""
+	nativeEnterpriseHookRuntimeSnapshot.failMode = ""
 	nativeEnterpriseHookRuntimeSnapshot.err = nil
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	t.Cleanup(func() {
@@ -49,6 +50,7 @@ func stubEnterpriseManagedRuntimeResolver(
 		nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = ""
 		nativeEnterpriseHookRuntimeSnapshot.scopedToken = ""
 		nativeEnterpriseHookRuntimeSnapshot.generationID = ""
+		nativeEnterpriseHookRuntimeSnapshot.failMode = ""
 		nativeEnterpriseHookRuntimeSnapshot.err = nil
 		nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	})

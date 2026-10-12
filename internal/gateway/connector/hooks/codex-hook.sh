@@ -68,7 +68,9 @@ defenseclaw_harden_env
 # DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override. Set BEFORE the
 # missing-token check so defenseclaw_handle_missing_token below has a
 # stable FAIL_MODE to log against.
-FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{if .Managed}}FAIL_MODE="{{.FailMode}}"
+{{else}}FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+{{end}}
 
 # Bail early when neither the companion .token file nor the env var
 # carries a token: without one the gateway will reject every request
@@ -89,7 +91,7 @@ fi
 # A plain Bash assignment preserves the exported bit of an inherited variable,
 # which would otherwise copy the hook payload or bearer into curl's environment.
 unset PAYLOAD API_TOKEN CURL_CONFIG_TOKEN
-PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
@@ -122,7 +124,7 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # refused, the request timed out, or the gateway answered with 5xx.
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
-  defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure codex codex-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "codex tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     exit 2
@@ -137,7 +139,7 @@ fail_unreachable() {
 fail_response() {
   local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
-  defenseclaw_log_hook_failure codex codex-hook "$reason" response "$FAIL_MODE"
+  defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response "$FAIL_MODE"
   echo "defenseclaw: codex hook error: $reason" >&2
   if [ "$FAIL_MODE" = "open" ]; then
     exit 0

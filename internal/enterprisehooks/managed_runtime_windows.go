@@ -29,6 +29,7 @@ type WindowsManagedHookRuntime struct {
 	Registered         bool   `json:"registered"`
 	GatewayAddr        string `json:"gateway_addr"`
 	GatewayServiceName string `json:"gateway_service_name"`
+	FailMode           string `json:"fail_mode"`
 	ScopedToken        string `json:"-"`
 	GenerationID       string `json:"generation_id"`
 }
@@ -118,11 +119,24 @@ func resolveWindowsCursorManagedHookRuntime(
 		return result, err
 	}
 	result.GatewayAddr = generation.GatewayAddr
+	if err := verifyWindowsCursorRuntimeDeliveryMode(target.hookFailMode, generation.FailMode); err != nil {
+		return result, err
+	}
 	result.GatewayServiceName = generation.GatewayServiceName
 	result.ScopedToken = generation.ScopedToken()
 	result.GenerationID = generation.GenerationID
+	result.FailMode = generation.FailMode
 	result.Registered = true
 	return result, nil
+}
+
+func verifyWindowsCursorRuntimeDeliveryMode(adapterMode, generationMode string) error {
+	// Legacy singleton adapters had no per-SID mode binding. Reconciliation
+	// migrates them without invalidating previously authenticated generations.
+	if adapterMode != "" && adapterMode != generationMode {
+		return errors.New("enterprise hooks: Cursor adapter mode differs from the authenticated runtime generation")
+	}
+	return nil
 }
 
 func validateWindowsCursorManagedRuntime(
@@ -196,7 +210,7 @@ func validateWindowsCursorManagedRuntime(
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], hooksPath) ||
 		len(lock.Locations.HookScriptPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookScriptPaths[0], adapterPath) ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		(lock.HookFailMode != "open" && lock.HookFailMode != "closed") {
 		return errors.New("enterprise hooks: Cursor managed hook contract does not identify the active enterprise adapter")
 	}
 	return nil
@@ -268,6 +282,7 @@ func resolveWindowsClaudeManagedHookRuntime(
 	result.GatewayServiceName = generation.GatewayServiceName
 	result.ScopedToken = generation.ScopedToken()
 	result.GenerationID = generation.GenerationID
+	result.FailMode = generation.FailMode
 	result.Registered = true
 	return result, nil
 }
@@ -327,6 +342,7 @@ func resolveWindowsCodexManagedHookRuntime(
 	result.GatewayServiceName = generation.GatewayServiceName
 	result.ScopedToken = generation.ScopedToken()
 	result.GenerationID = generation.GenerationID
+	result.FailMode = generation.FailMode
 	result.Registered = true
 	return result, nil
 }
@@ -403,9 +419,6 @@ func validateWindowsCodexManagedRuntime(
 			}
 		}
 	}
-	if err := connector.ValidateManagedHookRuntimeState(dataDir, "codex", "closed"); err != nil {
-		return fmt.Errorf("enterprise hooks: Codex managed runtime sidecars are invalid: %w", err)
-	}
 	lock, err := connector.LoadHookContractLockEntryForMode(
 		dataDir,
 		"codex",
@@ -424,8 +437,11 @@ func validateWindowsCodexManagedRuntime(
 		len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], requirementsPath) ||
 		len(lock.Locations.HookScriptPaths) != 0 ||
-		!strings.EqualFold(strings.TrimSpace(lock.HookFailMode), "closed") {
+		(lock.HookFailMode != "open" && lock.HookFailMode != "closed") {
 		return errors.New("enterprise hooks: Codex managed hook contract lock does not identify the active machine requirements")
+	}
+	if err := connector.ValidateManagedHookRuntimeState(dataDir, "codex", lock.HookFailMode); err != nil {
+		return fmt.Errorf("enterprise hooks: Codex managed runtime sidecars are invalid: %w", err)
 	}
 	return nil
 }

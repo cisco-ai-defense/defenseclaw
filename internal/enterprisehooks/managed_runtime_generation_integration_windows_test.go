@@ -76,6 +76,7 @@ func TestVerifyWindowsManagedRuntimeGenerationForInstallDoesNotImpersonate(t *te
 		HookExecutable:             `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`,
 		GatewayAddr:                "127.0.0.1:18970",
 		GatewayServiceName:         "DefenseClawGateway-Test",
+		FailMode:                   "open",
 		ScopedToken:                "scoped-test-token",
 		HookContractID:             "codex-hooks-v1",
 		HookContractLockUpdatedAt:  "2026-08-23T10:00:00Z",
@@ -96,6 +97,9 @@ func TestVerifyWindowsManagedRuntimeGenerationForInstallDoesNotImpersonate(t *te
 	}
 	if captured.ScopedToken != want.ScopedToken {
 		t.Fatal("privileged verifier did not receive the exact scoped token")
+	}
+	if captured.FailMode != want.FailMode {
+		t.Fatalf("privileged verifier fail mode = %q, want %q", captured.FailMode, want.FailMode)
 	}
 	captured.ScopedToken = ""
 	want.ScopedToken = ""

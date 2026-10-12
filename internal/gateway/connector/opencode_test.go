@@ -361,7 +361,7 @@ func TestOpenCodeOwnedHookContractRequiresExactRegularFileMarker(t *testing.T) {
 // TestOpenCodeSetup_FailModeDefaultsClosed asserts an unset HookFailMode
 // renders the bridge in fail-closed mode, matching defaultHookFailMode
 // (deny by default; see normalizeHookFailMode).
-func TestOpenCodeSetup_FailModeDefaultsClosed(t *testing.T) {
+func TestOpenCodeSetup_FailModeDefaultsOpen(t *testing.T) {
 	dir := t.TempDir()
 	pluginPath := filepath.Join(dir, "plugins", "defenseclaw.js")
 	prev := OpenCodePluginPathOverride
@@ -376,8 +376,8 @@ func TestOpenCodeSetup_FailModeDefaultsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read plugin: %v", err)
 	}
-	if !strings.Contains(string(raw), `DC_FAIL_MODE = "closed"`) {
-		t.Errorf("default fail mode should be closed:\n%s", string(raw))
+	if !strings.Contains(string(raw), `DC_FAIL_MODE = "open"`) {
+		t.Errorf("default fail mode should be open:\n%s", string(raw))
 	}
 }
 

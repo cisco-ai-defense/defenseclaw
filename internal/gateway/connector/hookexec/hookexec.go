@@ -537,8 +537,9 @@ func (sp spec) decide(opts Options, body []byte) int {
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
-	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed" {
+	blocked := opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed"
+	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
+	if blocked {
 		fmt.Fprintf(opts.Stderr,
 			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)
@@ -556,7 +557,7 @@ func handleUnavailableHome(opts Options, sp spec, reason string) int {
 
 // handleOversized mirrors the per-connector oversized-payload branch.
 func handleOversized(opts Options, sp spec, failMode string) int {
-	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode)
+	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode, failMode == "closed")
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook refusing oversized payload\n", sp.connector)
 	if failMode == "closed" {
 		return emit(opts.Stdout, sp.oversizedClosed)
@@ -568,8 +569,9 @@ func handleOversized(opts Options, sp spec, failMode string) int {
 // transport failures. Strict availability remains an unconditional closed
 // override for compatibility with existing deployments.
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
-	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.StrictAvailability || failMode == "closed" {
+	blocked := opts.StrictAvailability || failMode == "closed"
+	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
+	if blocked {
 		fmt.Fprintf(opts.Stderr,
 			"defenseclaw: gateway unreachable, blocking %s (fail mode closed): %s\n", sp.subject, reason)
 		return emit(opts.Stdout, sp.unreachableStrict)
@@ -593,7 +595,7 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
 	reason = responseFailureReason(reason)
-	logHookFailure(opts, sp, reason, "response", failMode)
+	logHookFailure(opts, sp, reason, "response", failMode, failMode != "open")
 	fmt.Fprintf(opts.Stderr, "defenseclaw: %s hook error: %s\n", sp.errLabel, reason)
 	if failMode == "open" {
 		return emit(opts.Stdout, sp.openAllow)

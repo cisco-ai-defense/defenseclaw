@@ -87,7 +87,7 @@ func TestApplicationProtectionPolicyOverlay(t *testing.T) {
 	}
 }
 
-func TestManagedEnterpriseNativeHookFailModesAreAlwaysClosed(t *testing.T) {
+func TestManagedEnterpriseNativeHookFailModesHonorPolicy(t *testing.T) {
 	cfg := &Config{DeploymentMode: "managed_enterprise"}
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.HookFailMode = "open"
@@ -97,10 +97,15 @@ func TestManagedEnterpriseNativeHookFailModesAreAlwaysClosed(t *testing.T) {
 		"cursor":     {HookFailMode: "open"},
 	}
 
-	for _, connector := range []string{"codex", "claudecode"} {
-		if got := cfg.EffectiveHookFailModeForConnector(connector); got != "closed" {
-			t.Errorf("managed enterprise %s fail mode = %q, want closed", connector, got)
+	for _, connector := range []string{"codex", "claudecode", "cursor"} {
+		if got := cfg.EffectiveHookFailModeForConnector(connector); got != "open" {
+			t.Errorf("managed enterprise %s fail mode = %q, want open", connector, got)
 		}
+		cfg.Guardrail.Connectors[connector] = PerConnectorGuardrailConfig{HookFailMode: "closed"}
+		if got := cfg.EffectiveHookFailModeForConnector(connector); got != "closed" {
+			t.Errorf("explicit managed enterprise %s fail mode = %q, want closed", connector, got)
+		}
+		cfg.Guardrail.Connectors[connector] = PerConnectorGuardrailConfig{HookFailMode: "open"}
 	}
 	if got := cfg.EffectiveHookFailModeForConnector("cursor"); got != "open" {
 		t.Errorf("managed enterprise non-native connector fail mode = %q, want open", got)

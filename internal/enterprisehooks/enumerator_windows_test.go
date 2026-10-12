@@ -516,7 +516,7 @@ func TestWriteTargetsManifestAtomicRejectsHardLinkedDestination(t *testing.T) {
 // cycles. A NEW row is auto-authorized at the per-user CLI's
 // discovered version (macOS parity) — or dropped entirely if no
 // per-user CLI is present.
-func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
+func TestApplyPreviousRowStateRefreshesVersionAndPreservesAuthorization(t *testing.T) {
 	enabled := true
 	previous := map[string]ManifestTarget{
 		previousManifestKey("S-1-5-21-1000-2000-3000-1001", "codex"): {
@@ -536,8 +536,8 @@ func TestApplyPreviousRowStatePreservesAgentVersion(t *testing.T) {
 	if !applyPreviousRowState(&matched, previous, nil) {
 		t.Fatal("existing-row emission signal: want true, got false")
 	}
-	if matched.AgentVersion != "0.145.0" {
-		t.Fatalf("existing-row AgentVersion not preserved: got %q, want %q", matched.AgentVersion, "0.145.0")
+	if matched.AgentVersion != "" {
+		t.Fatalf("stale version survived unavailable discovery: %q", matched.AgentVersion)
 	}
 	if matched.Enabled == nil || !*matched.Enabled {
 		t.Fatal("existing-row Enabled=true not preserved")

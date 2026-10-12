@@ -57,6 +57,7 @@ var nativeEnterpriseHookRuntimeSnapshot struct {
 	gatewayServiceName string
 	scopedToken        string
 	generationID       string
+	failMode           string
 	err                error
 }
 
@@ -197,6 +198,7 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = runtime.GatewayServiceName
 	nativeEnterpriseHookRuntimeSnapshot.scopedToken = runtime.ScopedToken
 	nativeEnterpriseHookRuntimeSnapshot.generationID = runtime.GenerationID
+	nativeEnterpriseHookRuntimeSnapshot.failMode = runtime.FailMode
 	nativeEnterpriseHookRuntimeSnapshot.err = err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	return enterpriseManagedRuntimeAbsenceNoop(
@@ -218,6 +220,21 @@ func validEnterpriseManagedRuntimeGenerationID(generationID string) bool {
 		}
 	}
 	return true
+}
+
+// Only authenticated immutable generation policy may relax managed delivery.
+// An absent or invalid snapshot remains closed, independently of CLI/env flags.
+func enterpriseManagedHookRuntimeFailMode() string {
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil &&
+		nativeEnterpriseHookRuntimeSnapshot.registered &&
+		validEnterpriseManagedRuntimeGenerationID(nativeEnterpriseHookRuntimeSnapshot.generationID) &&
+		nativeEnterpriseHookRuntimeSnapshot.failMode == "open" {
+		return "open"
+	}
+	return "closed"
 }
 
 func enterpriseManagedRuntimeAbsenceNoop(

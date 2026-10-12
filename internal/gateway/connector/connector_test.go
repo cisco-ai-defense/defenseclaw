@@ -8901,14 +8901,14 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 	}
 }
 
-// TestHookScript_FailClosedOnUnreachable_Default asserts that the effective
+// TestHookScript_FailOpenOnUnreachable_Default asserts that the effective
 // fail mode has one meaning for both response and transport failures. The
-// safer fresh-install default is closed, so an unreachable gateway blocks.
+// fresh-install default is open, so an unreachable gateway permits delivery.
 //
 // NOTE on fail_mode in the failure log: this is metadata recording
 // the effective fail mode at write time. The category remains transport so
 // operators can distinguish an outage from a malformed or rejected response.
-func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
+func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -8932,12 +8932,11 @@ func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 		"DEFENSECLAW_HOME="+dcHome,
 	)
 	err := cmd.Run()
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 2 {
-		t.Fatalf("hook should fail-closed (exit 2) on transport failure by default, got: %v", err)
+	if err != nil {
+		t.Fatalf("hook should fail-open (exit 0) on transport failure by default, got: %v", err)
 	}
 
-	// Even though the hook blocked, a structured failure record must
+	// Even though the hook allowed delivery, a structured failure record must
 	// still be written so operators can diagnose the outage in
 	// monitoring. The category MUST be "transport" so a triage
 	// dashboard can tell infrastructure outages apart from
@@ -8951,9 +8950,9 @@ func TestHookScript_FailClosedOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		// The fresh-install default is closed for both response and
+		// The fresh-install default is open for both response and
 		// transport failures.
-		`"fail_mode":"closed"`,
+		`"fail_mode":"open"`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)
@@ -9200,31 +9199,26 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			// The safer default is "closed": empty
-			// SetupOpts.HookFailMode renders the hook with
-			// FAIL_MODE=closed so response-layer failures (4xx,
-			// malformed JSON, missing action) BLOCK rather than
-			// silently allowing. Pre-existing installs are pinned to
-			// "open" by _migrate_0_4_0_seed_hook_fail_mode (Python).
-			name:         "codex_empty_opts_falls_back_to_closed_default",
+			// Empty SetupOpts.HookFailMode uses open delivery by default.
+			name:         "codex_empty_opts_falls_back_to_open_default",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "closed",
+			wantFailMode: "open",
 		},
 		{
-			name:         "empty_opts_with_codex_enforcement_upgrades_to_closed",
+			name:         "empty_opts_with_codex_enforcement_remains_open",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", CodexEnforcement: true},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "closed",
+			wantFailMode: "open",
 		},
 		{
-			name:         "empty_opts_with_claudecode_enforcement_upgrades_to_closed",
+			name:         "empty_opts_with_claudecode_enforcement_remains_open",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", ClaudeCodeEnforcement: true},
 			connector:    &ClaudeCodeConnector{},
 			hookFile:     "claude-code-hook.sh",
-			wantFailMode: "closed",
+			wantFailMode: "open",
 		},
 		{
 			// Garbage / typo values normalize to the safer "closed"
@@ -9304,6 +9298,7 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 		APIAddr:           "127.0.0.1:1",
 		APIToken:          "scoped-token",
 		ManagedEnterprise: true,
+		HookFailMode:      "closed",
 	}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
@@ -9326,7 +9321,7 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	}
 }
 
-func TestCodexHookScript_FailClosed_DefaultForObservabilitySetup(t *testing.T) {
+func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -9347,9 +9342,8 @@ func TestCodexHookScript_FailClosed_DefaultForObservabilitySetup(t *testing.T) {
 		"DEFENSECLAW_HOME="+dcHome,
 	)
 	err := cmd.Run()
-	exitErr, ok := err.(*exec.ExitError)
-	if !ok || exitErr.ExitCode() != 2 {
-		t.Fatalf("observability Codex hook should fail-closed by default, got: %v", err)
+	if err != nil {
+		t.Fatalf("observability Codex hook should fail-open by default, got: %v", err)
 	}
 	failureLog, err := os.ReadFile(filepath.Join(dcHome, "logs", "hook-failures.jsonl"))
 	if err != nil {
@@ -9365,8 +9359,8 @@ func TestCodexHookScript_FailClosed_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		// The effective closed mode applies to transport failures too.
-		`"fail_mode":"closed"`,
+		// The effective open mode applies to transport failures too.
+		`"fail_mode":"open"`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("hook failure log missing %s:\n%s", want, logText)

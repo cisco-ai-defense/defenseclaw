@@ -62,16 +62,10 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 }
 
 // windowsEnterpriseHookFailMode is the authoritative managed-native hook
-// policy used by rendering, lock publication, and verification. The protected
-// Windows deployment never permits Codex or Claude hooks to inherit a
-// fail-open normal-mode setting.
+// policy used by rendering, lock publication, and verification. Enrollment and
+// integrity checks are independent of delivery availability.
 func windowsEnterpriseHookFailMode(connectorName, configured string) string {
-	switch strings.ToLower(strings.TrimSpace(connectorName)) {
-	case "codex", "claudecode", "cursor":
-		return "closed"
-	default:
-		return strings.TrimSpace(configured)
-	}
+	return canonicalHookFailMode(configured)
 }
 
 func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
@@ -96,61 +90,15 @@ func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bo
 	return result, true, err
 }
 
-func requireWindowsEnterpriseManagedAgentVersion(connectorName, raw string) error {
-	if err := requireWindowsEnterpriseAgentVersion(raw); err != nil {
-		return err
-	}
-	name := strings.ToLower(strings.TrimSpace(connectorName))
-	minimum := ""
-	switch name {
-	case "codex":
-		minimum = "0.131.0"
-	case "claudecode":
-		minimum = "2.1.152"
-	case "cursor":
-		minimum = "1.7.0"
-	default:
+// Version uncertainty selects a best-effort contract; connector certification
+// remains mandatory and independent of version discovery.
+func requireWindowsEnterpriseManagedAgentVersion(connectorName, _ string) error {
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "codex", "claudecode", "cursor":
 		return nil
+	default:
+		return fmt.Errorf("enterprise hooks: unsupported Windows managed connector %q", connectorName)
 	}
-	normalized := connector.NormalizeAgentVersion(name, raw)
-	if normalized == "" {
-		return fmt.Errorf(
-			"enterprise hooks: connector %s agent_version %q is malformed",
-			name,
-			raw,
-		)
-	}
-	if compareWindowsEnterpriseVersion(normalized, minimum) < 0 {
-		return fmt.Errorf(
-			"enterprise hooks: connector %s agent_version %s is below the Windows enterprise minimum %s",
-			name,
-			normalized,
-			minimum,
-		)
-	}
-	return nil
-}
-
-func compareWindowsEnterpriseVersion(left, right string) int {
-	parse := func(value string) [3]int {
-		var result [3]int
-		parts := strings.Split(value, ".")
-		for index := 0; index < len(parts) && index < len(result); index++ {
-			_, _ = fmt.Sscanf(parts[index], "%d", &result[index])
-		}
-		return result
-	}
-	leftTuple := parse(left)
-	rightTuple := parse(right)
-	for index := range leftTuple {
-		if leftTuple[index] < rightTuple[index] {
-			return -1
-		}
-		if leftTuple[index] > rightTuple[index] {
-			return 1
-		}
-	}
-	return 0
 }
 
 func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
@@ -159,9 +107,6 @@ func installWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions)
 
 func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
-		return InstallResult{}, err
-	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
@@ -235,14 +180,8 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 	if setupOpts.HookAPIToken == "" {
 		return InstallResult{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	if err := requireWindowsEnterpriseAgentVersion(setupOpts.AgentVersion); err != nil {
-		return InstallResult{}, err
-	}
-	if setupOpts.HookContractID == "" {
-		resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
-		setupOpts.HookContractID = resolution.Contract.ContractID
-	}
-	if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+	setupOpts, err = prepareHookContract(opts.GuardrailMode, conn, setupOpts)
+	if err != nil {
 		return InstallResult{}, err
 	}
 
@@ -314,6 +253,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		lock.ContractID,
 		lockUpdatedAt,
 		entryUpdatedAt,
+		setupOpts.HookFailMode,
 	); err != nil {
 		return InstallResult{}, err
 	}
@@ -428,14 +368,8 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 	if setup.HookAPIToken == "" {
 		return windowsGenericManagedTarget{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
 	}
-	if err := requireWindowsEnterpriseAgentVersion(setup.AgentVersion); err != nil {
-		return windowsGenericManagedTarget{}, err
-	}
-	if setup.HookContractID == "" {
-		resolution := connector.ResolveHookContract(conn.Name(), setup.AgentVersion)
-		setup.HookContractID = resolution.Contract.ContractID
-	}
-	if err := validateHookContract(opts.GuardrailMode, conn, setup); err != nil {
+	setup, err = prepareHookContract(opts.GuardrailMode, conn, setup)
+	if err != nil {
 		return windowsGenericManagedTarget{}, err
 	}
 	return windowsGenericManagedTarget{
@@ -453,9 +387,6 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 		return InstallResult{}, err
 	}
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
-		return InstallResult{}, err
-	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
@@ -545,9 +476,6 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 
 func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
-		return InstallResult{}, err
-	}
-	if err := requireWindowsEnterpriseAgentVersion(opts.AgentVersion); err != nil {
 		return InstallResult{}, err
 	}
 	target, err := resolveWindowsGenericManagedTarget(opts)
@@ -1415,13 +1343,6 @@ func validateWindowsEnterpriseImpersonationSetup(setup connector.SetupOpts) erro
 	}
 	if setup.Interactive {
 		return fmt.Errorf("enterprise hooks: Windows enterprise connector callbacks may not be interactive")
-	}
-	return nil
-}
-
-func requireWindowsEnterpriseAgentVersion(raw string) error {
-	if strings.TrimSpace(raw) == "" {
-		return fmt.Errorf("enterprise hooks: native Windows managed target requires explicit agent_version")
 	}
 	return nil
 }

@@ -104,6 +104,7 @@ func TestManagedHookContractCleanupClaimIgnoresGlobalTimestampAndRejectsReplacem
 		"127.0.0.1:18970",
 		"codex",
 		"scoped-old-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +196,7 @@ func TestDelayedPurgePreservesSameContractPublishedByNewGatewayScope(t *testing.
 		"127.0.0.1:18970",
 		"codex",
 		"same-scoped-token-shape",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -254,6 +256,7 @@ func TestCleanupCaptureDoesNotClaimCursorEntryFromNewGatewayScope(t *testing.T) 
 		"127.0.0.1:18970",
 		"cursor",
 		"scope-b-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -322,6 +325,7 @@ func TestCleanupCaptureRemovesLegacyUnboundEntry(t *testing.T) {
 		"127.0.0.1:18970",
 		"codex",
 		"legacy-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -378,6 +382,7 @@ func TestCleanupCaptureRejectsWhitespaceGatewayBinding(t *testing.T) {
 		"127.0.0.1:18970",
 		"codex",
 		"tampered-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -419,6 +424,7 @@ func TestCleanupClaimMissingStateRequiresPersistedMutationBarrier(t *testing.T) 
 					"127.0.0.1:18970",
 					"codex",
 					"scoped-token",
+					"closed",
 				); err != nil {
 					t.Fatal(err)
 				}
@@ -510,6 +516,7 @@ func TestCleanupApplyBarrierAbortAbortsDelete(t *testing.T) {
 		"127.0.0.1:18970",
 		"codex",
 		"barrier-token",
+		"closed",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -576,6 +583,7 @@ func TestClearManagedHookContractLockEntryForOwnerPreservesPeers(t *testing.T) {
 			"127.0.0.1:18970",
 			name,
 			"scoped-"+name+"-token",
+			"closed",
 		); err != nil {
 			t.Fatalf("reconcile %s managed runtime: %v", name, err)
 		}
