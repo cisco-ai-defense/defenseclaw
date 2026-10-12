@@ -216,6 +216,18 @@ func ShellDirectoryWriteOperands(command, cwd, home string, directoryFacts map[s
 			}
 			return false
 		}
+		if program == "trap" {
+			// A DEBUG, RETURN or ERR action runs before or after later
+			// commands and may change the directory there. Only listing
+			// traps leaves the directory known.
+			for _, word := range call.Args[arg:] {
+				if value, ok := StaticWord(word, home); !ok || value != "-p" && value != "-l" && value != "--" {
+					s.known, s.changed, s.stack = false, true, nil
+					break
+				}
+			}
+			return false
+		}
 		if program != "cd" && program != "pushd" && program != "popd" {
 			return false
 		}

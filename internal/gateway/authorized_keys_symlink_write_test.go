@@ -695,6 +695,8 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 			block   bool
 		}{
 			{"cd dirlink && echo k >> authorized_keys", true},
+			{"f() { cd dirlink; }; trap f DEBUG; echo k >> authorized_keys", true},
+			{"trap 'rm -f tmp.txt' EXIT; echo ok >> notes.txt", false},
 			{"cd ~/proj/dirlink && tee -a authorized_keys", true},
 			{"cd -P dirlink && echo k >> authorized_keys", true},
 			{"cd -L \"dirlink\" && echo k >> authorized_keys", true},
