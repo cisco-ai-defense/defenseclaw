@@ -134,6 +134,55 @@ func TestAuditDBWindowsManagedRuntimeFileCanonicalForms(t *testing.T) {
 	); err != nil || canonical {
 		t.Fatalf("gateway-owned descriptor without OWNER RIGHTS canonical = %v, %v", canonical, err)
 	}
+
+	// A LocalSystem gateway owns the files it creates as SYSTEM. That takes
+	// the same OWNER RIGHTS form as a virtual-account gateway's files.
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	systemRuntimeDACL, err := auditDBWindowsProtectedDACLForOwner(false, localSystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical, err := auditDBWindowsManagedRuntimeFileCanonical(
+		newAuditDBWindowsTestDescriptor(t, localSystem, systemRuntimeDACL),
+		current.User.Sid,
+	); err != nil || !canonical {
+		t.Fatalf("LocalSystem-owned runtime descriptor canonical = %v, %v", canonical, err)
+	}
+	if canonical, err := auditDBWindowsManagedRuntimeFileCanonical(
+		newAuditDBWindowsTestDescriptor(t, localSystem, installerDACL),
+		current.User.Sid,
+	); err != nil || canonical {
+		t.Fatalf("LocalSystem-owned descriptor without OWNER RIGHTS canonical = %v, %v", canonical, err)
+	}
+}
+
+func TestAuditDBWindowsAcceptsLocalSystemGatewayToken(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-555-444-333-222-111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := auditDBWindowsTokenRunsAsService
+	t.Cleanup(func() { auditDBWindowsTokenRunsAsService = previous })
+
+	// LocalSystem with the gateway service SID as a token group.
+	auditDBWindowsTokenRunsAsService = func(_ windows.Token, sid *windows.SID) (bool, error) {
+		return sid.Equals(serviceSID), nil
+	}
+	if err := requireAuditDBWindowsGatewayToken("audit", serviceSID); err != nil {
+		t.Fatalf("LocalSystem gateway token rejected: %v", err)
+	}
+
+	// Any other token, including LocalSystem without the service SID.
+	auditDBWindowsTokenRunsAsService = func(windows.Token, *windows.SID) (bool, error) {
+		return false, nil
+	}
+	err = requireAuditDBWindowsGatewayToken("audit", serviceSID)
+	if err == nil || !strings.Contains(err.Error(), "does not carry pinned service SID "+serviceSID.String()) {
+		t.Fatalf("non-gateway token error = %v", err)
+	}
 }
 
 func TestAuditDBWindowsRejectsIncompleteOrMismatchedGatewayPins(t *testing.T) {

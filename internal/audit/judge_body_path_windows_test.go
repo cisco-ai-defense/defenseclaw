@@ -332,6 +332,34 @@ func TestJudgeBodyWindowsTrustRejectsWorldOwner(t *testing.T) {
 	}
 }
 
+// A LocalSystem gateway's token user is S-1-5-18, so the pinned gateway
+// service SID that holds Modify on the store must be trusted on its own.
+func TestJudgeBodyWindowsTrustsPinnedGatewayServiceSID(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-555-444-333-222-111")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignSID, err := windows.StringToSid("S-1-5-80-111-222-333-444-555")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const serviceName = "DefenseClawCertGateway_JudgeTrust"
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, serviceName)
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\`+serviceName)
+	previous := auditDBWindowsServiceAccountSID
+	auditDBWindowsServiceAccountSID = func(string) (*windows.SID, error) {
+		return serviceSID, nil
+	}
+	t.Cleanup(func() { auditDBWindowsServiceAccountSID = previous })
+
+	if !judgeBodyWindowsTrustedPrincipal(serviceSID) {
+		t.Fatal("pinned gateway service SID was not trusted on the judge-body store")
+	}
+	if judgeBodyWindowsTrustedPrincipal(foreignSID) {
+		t.Fatal("an unpinned NT SERVICE SID was trusted on the judge-body store")
+	}
+}
+
 func pinJudgeBodyWindowsGatewayToCurrentUser(t *testing.T) *windows.SID {
 	t.Helper()
 	current, err := windows.GetCurrentProcessToken().GetTokenUser()

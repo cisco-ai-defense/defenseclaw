@@ -223,16 +223,8 @@ func judgeBodyPlatformPathNeedsHardening(path string) (bool, error) {
 	if gatewayServiceSID == nil {
 		return false, nil
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
-		return false, fmt.Errorf("judge_body: resolve current Windows user for managed DACL validation: %w", err)
-	}
-	if !currentUser.User.Sid.Equals(gatewayServiceSID) {
-		return false, fmt.Errorf(
-			"judge_body: managed gateway token SID %s does not match pinned service SID %s",
-			judgeBodyWindowsSID(currentUser.User.Sid),
-			judgeBodyWindowsSID(gatewayServiceSID),
-		)
+	if err := requireAuditDBWindowsGatewayToken("judge_body", gatewayServiceSID); err != nil {
+		return false, err
 	}
 	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(sd, gatewayServiceSID)
 	if err != nil {
@@ -339,6 +331,14 @@ func judgeBodyWindowsTrustedPrincipal(sid *windows.SID) bool {
 		return false
 	}
 	if sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid) {
+		return true
+	}
+	// The pinned gateway service SID holds Modify on the judge-body store. It
+	// was trusted as the token user when the gateway logged on as its virtual
+	// account; under LocalSystem it must be trusted explicitly, as the audit
+	// store already does.
+	if gatewayServiceSID, err := auditDBWindowsPinnedGatewayServiceSID(); err == nil &&
+		gatewayServiceSID != nil && sid.Equals(gatewayServiceSID) {
 		return true
 	}
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()

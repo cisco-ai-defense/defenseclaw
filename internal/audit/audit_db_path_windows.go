@@ -19,6 +19,32 @@ import (
 
 var auditDBWindowsServiceAccountSID = managed.WindowsServiceAccountSID
 
+var auditDBWindowsTokenRunsAsService = managed.WindowsTokenRunsAsService
+
+// requireAuditDBWindowsGatewayToken proves the current process is the pinned
+// gateway service: its virtual service SID as token user (earlier releases)
+// or LocalSystem carrying that SID as an enabled group.
+func requireAuditDBWindowsGatewayToken(prefix string, gatewayServiceSID *windows.SID) error {
+	token := windows.GetCurrentProcessToken()
+	runsAsGateway, err := auditDBWindowsTokenRunsAsService(token, gatewayServiceSID)
+	if err != nil {
+		return fmt.Errorf("%s: resolve current Windows token for managed validation: %w", prefix, err)
+	}
+	if runsAsGateway {
+		return nil
+	}
+	current := "<unknown>"
+	if user, userErr := token.GetTokenUser(); userErr == nil && user != nil && user.User.Sid != nil {
+		current = user.User.Sid.String()
+	}
+	return fmt.Errorf(
+		"%s: managed gateway token SID %s does not carry pinned service SID %s",
+		prefix,
+		current,
+		auditDBWindowsSID(gatewayServiceSID),
+	)
+}
+
 // Shared access masks for the managed audit-database DACL. These form a
 // closed round-trip between auditDBWindowsProtectedDACLForOwner (which
 // writes the DACL) and auditDBWindowsManagedRuntimeFileCanonical (which
@@ -121,16 +147,8 @@ func auditDBPlatformFileNeedsHardening(file *os.File) (bool, error) {
 	if gatewayServiceSID == nil {
 		return false, nil
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
-		return false, fmt.Errorf("audit: resolve current Windows user for managed audit validation: %w", err)
-	}
-	if !currentUser.User.Sid.Equals(gatewayServiceSID) {
-		return false, fmt.Errorf(
-			"audit: managed gateway token SID %s does not match pinned service SID %s",
-			auditDBWindowsSID(currentUser.User.Sid),
-			auditDBWindowsSID(gatewayServiceSID),
-		)
+	if err := requireAuditDBWindowsGatewayToken("audit", gatewayServiceSID); err != nil {
+		return false, err
 	}
 	canonical, err := auditDBWindowsManagedRuntimeFileCanonical(sd, gatewayServiceSID)
 	if err != nil {
@@ -332,12 +350,8 @@ func auditDBWindowsProtectedDACLForOwner(
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
 	if gatewayServiceSID != nil {
-		if !currentUser.User.Sid.Equals(gatewayServiceSID) {
-			return nil, fmt.Errorf(
-				"audit: managed gateway token SID %s does not match pinned service SID %s",
-				auditDBWindowsSID(currentUser.User.Sid),
-				auditDBWindowsSID(gatewayServiceSID),
-			)
+		if err := requireAuditDBWindowsGatewayToken("audit", gatewayServiceSID); err != nil {
+			return nil, err
 		}
 		ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
 		if err != nil {
@@ -426,7 +440,10 @@ func auditDBWindowsManagedRuntimeFileCanonical(
 		return false, err
 	}
 	ownerIsAdministrators := owner.IsWellKnown(windows.WinBuiltinAdministratorsSid)
-	ownerIsGateway := owner.Equals(gatewayServiceSID)
+	// The gateway owns files it creates: as its virtual service SID in earlier
+	// releases, as LocalSystem now. Both take the OWNER RIGHTS form below.
+	ownerIsGateway := owner.Equals(gatewayServiceSID) ||
+		owner.IsWellKnown(windows.WinLocalSystemSid)
 	if !ownerIsAdministrators && !ownerIsGateway {
 		return false, nil
 	}
