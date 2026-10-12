@@ -29,6 +29,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -203,7 +204,8 @@ func TestTarballInstallPlacesVerifiedBinaries(t *testing.T) {
 	}
 	for _, want := range []string{".local/bin/openshell", ".local/bin/openshell-gateway", ".local/libexec/openshell/openshell-driver-vm"} {
 		info, err := os.Stat(filepath.Join(home, want))
-		if err != nil || info.Mode().Perm() != 0o755 {
+		// Windows has no POSIX mode bits to check.
+		if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o755 {
 			t.Errorf("%s: %v %v", want, info, err)
 		}
 	}

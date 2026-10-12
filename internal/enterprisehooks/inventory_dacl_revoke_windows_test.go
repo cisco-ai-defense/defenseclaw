@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -34,7 +35,7 @@ func TestRevokeGatewayInventoryReadRestoresTheProtectedDACL(t *testing.T) {
 	if err := setWindowsUserPathProtection(config, target, true); err != nil {
 		t.Fatalf("set canonical DACL: %v", err)
 	}
-	gateway, err := windows.StringToSid(windowsServiceSIDString(productionGatewayServiceName))
+	gateway, err := windows.StringToSid(managed.WindowsServiceSIDString(productionGatewayServiceName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +92,7 @@ func TestRevokeGatewayInventoryReadRestoresTheProtectedDACL(t *testing.T) {
 // profile file a hard link to another account's file, does not take the
 // gateway's read ACE off that account's folder or file when revoked.
 func TestRevokeGatewayInventoryReadSkipsAJunctionBelowTheProfile(t *testing.T) {
-	gateway, err := windows.StringToSid(windowsServiceSIDString(productionGatewayServiceName))
+	gateway, err := windows.StringToSid(managed.WindowsServiceSIDString(productionGatewayServiceName))
 	if err != nil {
 		t.Fatal(err)
 	}

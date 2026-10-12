@@ -14,6 +14,11 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+// OpenShell runs on Linux and macOS only; these tests check its POSIX host
+// paths and files.
+
+//go:build !windows
+
 package openshell
 
 import (

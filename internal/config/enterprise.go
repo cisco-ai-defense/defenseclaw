@@ -589,7 +589,8 @@ func validateEnterpriseOpenShell(cfg *Config, goos string) error {
 		if goos != "darwin" {
 			return fmt.Errorf("config: enterprise.openshell.e2fsprogs_dir applies to macOS only")
 		}
-		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		// A macOS path, judged as one on whatever host validates the config.
+		if !path.IsAbs(dir) || path.Clean(dir) != dir {
 			return fmt.Errorf("config: enterprise.openshell.e2fsprogs_dir %q must be a clean absolute path", dir)
 		}
 	}

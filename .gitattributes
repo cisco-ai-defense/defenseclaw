@@ -48,3 +48,9 @@ benchmarks/fixtures/** -text
 # The Secure Client evaluation goldens are compared byte for byte, also on a
 # Windows checkout.
 internal/gateway/testdata/secure_client_evaluation/** text eol=lf
+
+# The sandbox golden texts are compared byte-for-byte; keep them LF on
+# Windows checkouts too.
+internal/config/testdata/*.golden text eol=lf
+internal/openshell/packs/testdata/*.golden text eol=lf
+internal/openshell/sandboxapi/testdata/*.golden text eol=lf

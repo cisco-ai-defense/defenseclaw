@@ -506,8 +506,9 @@ func runPrintedFix(t *testing.T, powershell, root, text string) {
 // account's own (a standard user may see only their own policy), which the
 // Users removal does not touch.
 func TestDescribeUntrustedRulePackFixKeepsGatewayRead(t *testing.T) {
-	gateway, err := windowsVirtualServiceSID(DefaultGatewayServiceAccount)
-	if err != nil || gateway == nil {
+	// Derived like the fix derives it: the gateway service need not exist.
+	gateway, err := windows.StringToSid(WindowsServiceSIDString("DefenseClawGateway"))
+	if err != nil {
 		t.Fatalf("gateway service SID: %v", err)
 	}
 	refused := &UntrustedPrincipalError{Path: `C:\Packs\pack`, SID: "S-1-5-32-545"}
@@ -522,6 +523,14 @@ func TestDescribeUntrustedRulePackFixKeepsGatewayRead(t *testing.T) {
 	powershell, err := exec.LookPath("powershell.exe")
 	if err != nil {
 		t.Skip("Windows PowerShell is not available")
+	}
+	// icacls grants only a SID that maps to an account, and a service SID
+	// maps once its service is installed. A test host has no DefenseClawGateway
+	// service, so the printed fix runs for a service every Windows host has.
+	const installedService = `NT SERVICE\TrustedInstaller`
+	installed, err := windows.StringToSid(WindowsServiceSIDString("TrustedInstaller"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	root := t.TempDir()
 	pack := filepath.Join(root, "pack")
@@ -545,7 +554,7 @@ func TestDescribeUntrustedRulePackFixKeepsGatewayRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	refused.Path = pack
-	text, ok = DescribeUntrustedRulePack("guardrail.rule_pack_dir", pack, DefaultGatewayServiceAccount, refused)
+	text, ok = DescribeUntrustedRulePack("guardrail.rule_pack_dir", pack, installedService, refused)
 	if !ok {
 		t.Fatal("refusal is not described")
 	}
@@ -562,8 +571,8 @@ func TestDescribeUntrustedRulePackFixKeepsGatewayRead(t *testing.T) {
 		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
 			t.Fatalf("after the printed fix: %v", err)
 		}
-		if !serviceHasAccess(path, []*windows.SID{gateway}, serviceTreeAccess) {
-			t.Fatalf("after the printed fix the gateway service cannot read %s", path)
+		if !serviceHasAccess(path, []*windows.SID{installed}, serviceTreeAccess) {
+			t.Fatalf("after the printed fix the service cannot read %s", path)
 		}
 		if readers, err := StandardUserReadersOf(path); err != nil || len(readers) != 0 {
 			t.Fatalf("after the printed fix standard users can read %s: %q (%v)", path, readers, err)

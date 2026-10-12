@@ -446,26 +446,8 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 		// populating the env.
 		return nil, nil
 	}
-	const prefix = `NT SERVICE\`
-	if len(account) <= len(prefix) || !strings.EqualFold(account[:len(prefix)], prefix) {
-		return nil, fmt.Errorf(
-			"%s must identify an NT SERVICE virtual account, got %q",
-			WindowsServiceAccountEnv,
-			account,
-		)
-	}
-	name := account[len(prefix):]
-	for _, char := range name {
-		if (char >= 'a' && char <= 'z') ||
-			(char >= 'A' && char <= 'Z') ||
-			(char >= '0' && char <= '9') ||
-			char == '_' || char == '.' || char == '-' {
-			continue
-		}
-		return nil, fmt.Errorf("%s contains an invalid service name: %q", WindowsServiceAccountEnv, account)
-	}
-	if len(name) > 128 {
-		return nil, fmt.Errorf("%s service name is too long", WindowsServiceAccountEnv)
+	if _, err := ntServiceName(account); err != nil {
+		return nil, err
 	}
 	sid, _, _, err := windows.LookupSID("", account)
 	if err != nil {
@@ -482,6 +464,33 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 		)
 	}
 	return sid, nil
+}
+
+// ntServiceName is the service name of account once it is checked to be an
+// NT SERVICE virtual account with a valid service name.
+func ntServiceName(account string) (string, error) {
+	const prefix = `NT SERVICE\`
+	if len(account) <= len(prefix) || !strings.EqualFold(account[:len(prefix)], prefix) {
+		return "", fmt.Errorf(
+			"%s must identify an NT SERVICE virtual account, got %q",
+			WindowsServiceAccountEnv,
+			account,
+		)
+	}
+	name := account[len(prefix):]
+	for _, char := range name {
+		if (char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			char == '_' || char == '.' || char == '-' {
+			continue
+		}
+		return "", fmt.Errorf("%s contains an invalid service name: %q", WindowsServiceAccountEnv, account)
+	}
+	if len(name) > 128 {
+		return "", fmt.Errorf("%s service name is too long", WindowsServiceAccountEnv)
+	}
+	return name, nil
 }
 
 func sidIsNTService(sid *windows.SID) bool {

@@ -86,14 +86,15 @@ const DefaultGatewayServiceAccount = `NT SERVICE\DefenseClawGateway`
 // RulePackServiceReadGrant is the icacls grant that lets the gateway service
 // account, and no standard user, read a rule pack folder: "*<service
 // SID>:(OI)(CI)RX". The SID is derived from the service name, so the grant
-// works before the service exists (a first install).
+// works before the service exists (a first install): looking the account up
+// fails until the service is installed.
 func RulePackServiceReadGrant(serviceAccount string) string {
-	if strings.TrimSpace(serviceAccount) == "" {
-		serviceAccount = DefaultGatewayServiceAccount
+	account := strings.TrimSpace(serviceAccount)
+	if account == "" {
+		account = DefaultGatewayServiceAccount
 	}
-	account := serviceAccount
-	if sid, err := windowsVirtualServiceSID(serviceAccount); err == nil && sid != nil {
-		account = "*" + sid.String()
+	if name, err := ntServiceName(account); err == nil {
+		account = "*" + WindowsServiceSIDString(name)
 	}
 	return account + ":(OI)(CI)RX"
 }

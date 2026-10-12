@@ -255,7 +255,12 @@ func TestLauncherSandboxPreRunRefusesAnUntrustedDaemonSocket(t *testing.T) {
 	t.Cleanup(func() { launcherManagedClient, cfg = restoreClient, restoreCfg })
 	command := &cobra.Command{Use: "list"}
 	err := launcherSandboxPreRun(command, nil)
-	if err == nil || !strings.Contains(err.Error(), "not trusted") {
+	want := "not trusted"
+	if runtime.GOOS == "windows" {
+		// Sandboxes don't run on Windows; that refusal comes first.
+		want = "Linux and macOS only"
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("pre-run = %v, want the descriptor refusal (never a per-user fallback)", err)
 	}
 }

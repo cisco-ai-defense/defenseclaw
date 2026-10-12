@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -52,7 +53,7 @@ func windowsGatewayReadablePluginRoot(path string) bool {
 // windowsGatewayPluginRootReadSID is the service SID of the standalone
 // gateway service, derived from its name.
 var windowsGatewayPluginRootReadSID = sync.OnceValues(func() (*windows.SID, error) {
-	return windows.StringToSid(windowsServiceSIDString(productionGatewayServiceName))
+	return windows.StringToSid(managed.WindowsServiceSIDString(productionGatewayServiceName))
 })
 
 // windowsGatewayPluginRootAppliedACEs is the read grant as Windows stores it

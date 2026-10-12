@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -102,6 +103,9 @@ func TestDriverChoiceText(t *testing.T) {
 }
 
 func TestVMProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the VM driver runs on Linux and macOS only; its probe reads POSIX host paths")
+	}
 	dir := t.TempDir()
 	withFlags := filepath.Join(dir, "cpuinfo-vmx")
 	noFlags := filepath.Join(dir, "cpuinfo-none")
