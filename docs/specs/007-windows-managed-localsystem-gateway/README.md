@@ -53,6 +53,20 @@ and the token user is `S-1-5-18` instead of the service SID. The service SID
 is still in the token as an enabled group, which is how code recognizes the
 gateway.
 
+Ownership stays as it was. A LocalSystem token's default owner is SYSTEM,
+which is not a restricting SID, so files the gateway created would be
+SYSTEM-owned and its write-restricted token could not use the owner's
+implicit `WRITE_DAC` to secure them: Setup failed with exit 1603 because the
+gateway could not harden its new audit database ("reopen existing database
+file for ACL hardening: Access is denied"). SCM gives the service SID
+`SE_GROUP_OWNER`, so the service host sets it as the token's default owner
+before the gateway creates its first file
+(`managed.AdoptWindowsGatewayServiceFileOwner`) and fails to start if it
+cannot. Files the gateway writes are owned by the service SID, as under the
+virtual account; no ACL grants anything new. The audit, judge-body and JSONL
+owner checks recognize the gateway by its service SID
+(`managed.WindowsCurrentProcessOwnerSID`), not by the token user.
+
 ## Scanner path boundary
 
 `managed.RequireWindowsGatewayPathOutsideUserProfiles(path)` applies only to

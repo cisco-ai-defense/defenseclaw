@@ -255,7 +255,10 @@ Among DefenseClaw's managed paths, only the runtime and log ACLs grant one of
 those, so configuration, the target manifest, the authorization ledger,
 binaries, and service definitions stay read-only to it. A host path outside
 DefenseClaw that grants write to Everyone stays writable to the gateway, as
-it was under the virtual account.
+it was under the virtual account. The gateway makes its service SID the
+owner of the files it creates (its audit database, judge bodies and logs), as
+the virtual account did, so `icacls` shows `NT SERVICE\DefenseClawGateway`
+as their owner.
 
 Because LocalSystem holds the service logon right by design:
 
