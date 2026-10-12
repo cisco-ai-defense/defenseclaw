@@ -978,6 +978,11 @@ func TestRepeatedRefusalsAreFolded(t *testing.T) {
 // folded lines read the same: the feed shows one, counting them all.
 func TestFoldedRefusalsOfOneDestinationAreOneLine(t *testing.T) {
 	fastFlush(t)
+	// A loaded runner can take longer than the 100 ms window of fastFlush to
+	// record the nine refusals: the folded line was then printed before
+	// first was read, and the wait below never saw it. Set before the sink
+	// starts; the cleanup of fastFlush restores it.
+	feedFoldWindow = time.Second
 	e := liveEnv(t, "pairbox", nil)
 	now := time.Now()
 	for range 3 {
@@ -986,7 +991,7 @@ func TestFoldedRefusalsOfOneDestinationAreOneLine(t *testing.T) {
 		e.ocsf("pairbox", "NET:OPEN [MED] DENIED /usr/bin/npm(43) -> registry.npmjs.org:443/tcp [policy:- engine:opa] [reason:transparent_tcp_policy_denied]", now)
 	}
 	first := len(e.events("pairbox", sandboxapi.ActivityEgressBlocked, ""))
-	eventually(t, "the folded lines", func() bool {
+	eventuallyWithin(t, 10*time.Second, "the folded lines", func() bool {
 		e.m.sink.flushOpenShell(t.Context(), time.Now())
 		return len(e.events("pairbox", sandboxapi.ActivityEgressBlocked, "")) > first
 	})
