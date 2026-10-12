@@ -19021,6 +19021,33 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         -Metadata $metadata `
         -Layout $Layout `
         -Action 'Committed Uninstall finalization'
+    # A crash can occur after the native finalizer durably changes the
+    # authenticated journal to finalized, but before self-uninstall retires
+    # the InstallRoot. Re-entering the native finalizer is unnecessary and
+    # may fail because SCM has already removed the gateway virtual account.
+    # Authenticate both journal and cleanup receipt before treating that
+    # completed phase as the retry boundary. Purge still needs the native
+    # contract-lock action unless its receipt was finalized as well.
+    $teardownPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+        -Layout $Layout `
+        -Metadata $metadata `
+        -GatewayServiceName $GatewayServiceName `
+        -AllowLegacyInactive
+    $contractReceipt = Get-DefenseClawManagedHookContractCleanupReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Metadata $metadata `
+        -Required
+    if ($teardownPhase -ceq 'finalized' -and
+        (-not $Purge -or
+            [string]$contractReceipt.phase -ceq 'finalized')) {
+        return
+    }
+    if ($teardownPhase -cne 'prepared' -and
+        $teardownPhase -cne 'finalized') {
+        throw "managed-hook finalization requires a prepared or finalized journal: $teardownPhase"
+    }
     return Invoke-DefenseClawManagedHooksTeardownCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
