@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // projectSkillRootsSettle is how long the watcher waits after a new project
@@ -249,6 +250,9 @@ func projectSkillFolders(connector, home, cwd string) []string {
 	var folders []string
 	for _, root := range assetfacts.SkillRoots(connector, home, cwd) {
 		if user[projectRootKey(root)] {
+			continue
+		}
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(root) != nil {
 			continue
 		}
 		if info, err := os.Lstat(root); err == nil && info.IsDir() {

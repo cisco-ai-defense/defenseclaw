@@ -3804,7 +3804,6 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		<-ctx.Done()
 		return false, nil
 	}
-
 	// Resolve the active connector to get connector-specific component
 	// directories. Falls back to cfg.SkillDirs()/PluginDirs() (OpenClaw
 	// paths) when the connector does not implement ComponentScanner.
@@ -3817,6 +3816,26 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	reg := connector.NewDefaultRegistry()
 	conns := watcherConnectors(reg, s.currentConfig())
 	skillDirs, pluginDirs, roots, src := resolveWatcherDirsForConnectors(s.currentConfig(), conns, wcfg)
+	skippedProfileRoots := false
+	watchPathAllowed := func(path string) bool {
+		if path == "" {
+			return false
+		}
+		if managed.RequireWindowsGatewayPathOutsideUserProfiles(path) != nil {
+			skippedProfileRoots = true
+			return false
+		}
+		return true
+	}
+	filterWatchDirs := func(dirs []string) []string {
+		kept := dirs[:0]
+		for _, dir := range dirs {
+			if watchPathAllowed(dir) {
+				kept = append(kept, dir)
+			}
+		}
+		return kept
+	}
 	var enrolled *enrolledWatchSet
 	if cfg := s.currentConfig(); cfg != nil && !watcherUsesConnectorDirs(cfg) {
 		if src.Skill != watcherDirsFromConfig {
@@ -3827,6 +3846,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		if watcherUsesEnrolledUserDirs(cfg) {
 			set := resolveEnrolledWatchSet(cfg, reg, wcfg, serviceHomeDir())
+			if set.skippedProfiles > 0 {
+				skippedProfileRoots = true
+			}
 			publishMCPStatesUnreadable(set.mcpUnreadable)
 			enrolled = &set
 			// The service reads the users' folders but may not delete in
@@ -3851,6 +3873,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 			}
 		}
 	}
+	skillDirs = filterWatchDirs(skillDirs)
+	pluginDirs = filterWatchDirs(pluginDirs)
 	// The skill folders of the projects the agents run in are watched too,
 	// unless explicit gateway.watcher.skill.dirs name the folders; a new
 	// one restarts the watcher, which admits it at its start (GAP-1063).
@@ -3860,6 +3884,14 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		cfgNow.Watch.RescanEnabled && !cfgNow.SecureClientIntegration()
 	baseSkillDirs := skillDirs
 	projectRoots, freshProjectRoots := s.projectSkills.start(projectActive)
+	keptProjectRoots := projectRoots[:0]
+	for _, root := range projectRoots {
+		if watchPathAllowed(root.Path) {
+			keptProjectRoots = append(keptProjectRoots, root)
+		}
+	}
+	projectRoots = keptProjectRoots
+	freshProjectRoots = filterWatchDirs(freshProjectRoots)
 	var enrolledProjectRoots []projectSkillRoot
 	for _, root := range projectRoots {
 		if slices.ContainsFunc(skillDirs, func(dir string) bool { return projectRootKey(dir) == projectRootKey(root.Path) }) {
@@ -3877,6 +3909,23 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	}
 	if enrolled != nil {
 		enrolled.addProjectRoots(enrolledProjectRoots)
+	}
+	for root := range roots {
+		if !watchPathAllowed(root) {
+			delete(roots, root)
+		}
+	}
+	watcherState := StateRunning
+	watcherDetail := ""
+	if skippedProfileRoots {
+		watcherState = StateDegraded
+		watcherDetail = "user-profile watch roots were skipped by the LocalSystem gateway"
+	}
+	watcherDetails := func(details map[string]interface{}) map[string]interface{} {
+		if skippedProfileRoots {
+			details["profile_roots_skipped"] = true
+		}
+		return s.watcherHealthDetails(details)
 	}
 	watchCtx := ctx
 	changed := make(chan struct{})
@@ -3931,17 +3980,17 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	// directories). Its discovery poll still needs a running watcher.
 	if len(skillDirs) == 0 && len(pluginDirs) == 0 && enrolled == nil &&
 		!(watcherUsesConnectorDirs(s.currentConfig()) && !s.currentConfig().SecureClientIntegration()) {
-		s.health.SetWatcher(StateRunning, "", map[string]interface{}{
+		s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
 			"skill_dirs":  0,
 			"plugin_dirs": 0,
 			"idle":        "no directories configured",
-		})
+		}))
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: no directories to watch\n")
 		<-watchCtx.Done()
 		return false, nil
 	}
 
-	s.health.SetWatcher(StateStarting, "", s.watcherHealthDetails(map[string]interface{}{
+	s.health.SetWatcher(StateStarting, watcherDetail, watcherDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
 		"plugin_dirs":        len(pluginDirs),
 		"skill_take_action":  wcfg.Skill.TakeAction,
@@ -4008,7 +4057,17 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 				names = append(names, conn.Name())
 			}
 			w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
-				return s.currentConfig().ReadWatchedMCPServers(names)
+				entries, err := s.currentConfig().ReadWatchedMCPServers(names)
+				if err != nil {
+					return nil, err
+				}
+				kept := entries[:0]
+				for _, entry := range entries {
+					if gatewayMCPEntryOutsideProfiles(entry) {
+						kept = append(kept, entry)
+					}
+				}
+				return kept, nil
 			})
 			w.SetMCPDiscoveryPoll(true)
 		}
@@ -4016,13 +4075,19 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	var artifacts []string
 	bundledSet := false
 	for _, conn := range conns {
-		artifacts = append(artifacts, connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
+		for _, artifact := range connector.ManagedPluginArtifacts(conn, connector.SetupOpts{
 			WorkspaceDir: s.currentConfig().ConnectorWorkspaceDir(),
-		})...)
+		}) {
+			if watchPathAllowed(artifact) {
+				artifacts = append(artifacts, artifact)
+			}
+		}
 		if bundled, ok := conn.(connector.BundledPluginChecker); ok && !bundledSet {
 			bundledSet = true
 			w.SetBundledPluginCheck(bundled.IsBundledPlugin)
-			w.SetBundledPluginDir(bundled.BundledPluginDir())
+			if dir := bundled.BundledPluginDir(); dir != "" && watchPathAllowed(dir) {
+				w.SetBundledPluginDir(dir)
+			}
 		}
 	}
 	w.SetManagedArtifacts(artifacts)
@@ -4035,7 +4100,11 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
 		len(skillDirs), len(pluginDirs), wcfg.Skill.TakeAction, wcfg.Plugin.TakeAction)
 
-	s.health.SetWatcher(StateRunning, "", s.watcherHealthDetails(map[string]interface{}{
+	if skippedProfileRoots {
+		watcherState = StateDegraded
+		watcherDetail = "user-profile watch roots were skipped by the LocalSystem gateway"
+	}
+	s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
 		"plugin_dirs":        len(pluginDirs),
 		"skill_take_action":  wcfg.Skill.TakeAction,

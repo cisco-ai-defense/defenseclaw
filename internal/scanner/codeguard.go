@@ -145,6 +145,9 @@ func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) C
 }
 
 func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
+	if err := requireScannerTargetPath(target); err != nil {
+		return nil, err
+	}
 	start := time.Now()
 	var scanErr error
 	var result *ScanResult
