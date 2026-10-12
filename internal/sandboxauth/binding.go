@@ -194,6 +194,10 @@ type Binding struct {
 	ExpiresAt      time.Time `json:"expires_at,omitzero"`
 	// TTLSeconds is the credential lifetime re-applied on every rotation.
 	TTLSeconds int64 `json:"ttl_seconds,omitempty"`
+	// RegistrationID is the managed gateway registration (sandboxreg) a
+	// relayed request's binding was rebuilt from; empty outside a managed
+	// relay.
+	RegistrationID string `json:"registration_id,omitempty"`
 }
 
 // Spec returns the caller-owned fields of b, so an Update round trip keeps

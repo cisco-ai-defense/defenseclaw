@@ -489,6 +489,11 @@ type Decision struct {
 	Unblockable bool
 	// Violation is the refusing policy decision, when one refused it.
 	Violation *packs.Violation
+	// AdminRule is the organization's egress list that refused Host
+	// (egress.AdminRule: egress_block, egress_allow_only), "" for any other
+	// refusal: the person can't approve it, and the feed and the agent are
+	// told whom to ask (GAP-0502).
+	AdminRule string
 }
 
 // Classify judges a proposal. The rule itself is judged first (its name,
@@ -717,6 +722,9 @@ func judgeEndpoint(ctx context.Context, ep Endpoint, allowedIPs []string, pol Po
 		case dec.Source == egress.SourceGuard:
 			return reject(d, ReasonInvalid, "the egress proxy refuses "+host+": "+dec.Reason)
 		case dec.Source == egress.SourceAdmin, dec.Source == egress.SourceOperator, dec.Source == egress.SourceFeed:
+			if dec.Source == egress.SourceAdmin {
+				d.AdminRule = egress.AdminRule(dec.Category)
+			}
 			return reject(d, ReasonBlocklisted, blocklistedMessage(host, dec))
 		}
 		// Not allowlisted: the approvals mode decides below.
@@ -824,6 +832,7 @@ func checkResolved(ctx context.Context, verdict Decision, pol Policy, decider *e
 		}
 		return ask(verdict, ReasonPrivateNetwork, "the sandbox asks to reach "+verdict.Host+", which resolves to a private network address")
 	case chk.Category == egress.CategoryAdminBlock:
+		verdict.AdminRule = egress.AdminRule(chk.Category)
 		return reject(verdict, ReasonAdmin, verdict.Host+" resolves to an address your organization's DefenseClaw policy blocks")
 	default:
 		return reject(verdict, ReasonBlocklisted, verdict.Host+" resolves to an address on the egress blocklist ("+chk.Rule+")")

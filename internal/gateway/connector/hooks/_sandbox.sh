@@ -74,6 +74,53 @@ readonly DC_SANDBOX_MAX_TIME={{.SandboxMaxTime}}
 readonly DC_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
 readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
 
+# DC_SANDBOX_UNREACHABLE is why a sandbox hook blocked when DefenseClaw did not
+# answer, worded for the agent and for the user who reads its screen: what is
+# down, and how the user brings it back. "sandbox ingress unreachable" alone
+# left both guessing when the daemon stopped mid-session (GAP-0272). A
+# daemon that was just started can take a minute to answer: the agent told
+# the user to start the daemon they had just started (GAP-0332). The same
+# image runs on a per-user install and on a managed computer, where the user
+# cannot start DefenseClaw's services: the next step is the doctor, which
+# names the fix for the user's own install (GAP-0506).
+readonly DC_SANDBOX_UNREACHABLE="DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs \`defenseclaw sandbox doctor\` there, which says what is wrong and how to bring it back, and retries in a minute"
+
+# DC_SANDBOX_MANAGED_UNREACHABLE is why a sandbox hook blocked when the user's
+# sandbox daemon answered that the organization's DefenseClaw gateway service
+# does not: only the administrator can start that service.
+readonly DC_SANDBOX_MANAGED_UNREACHABLE="the DefenseClaw gateway service on the user's machine does not answer, so every tool call is blocked until it is back: the user tries again in a moment, and if this continues asks their administrator (\`defenseclaw sandbox doctor\` says what is wrong)"
+
+# defenseclaw_sandbox_unreachable_reason RESPONSE prints why a sandbox hook
+# blocked when defenseclaw_sandbox_post failed. RESPONSE is what it printed:
+# nothing for a transport failure, else the last 502, 503 or 504 answer
+# ("<body>\n<code>"). The daemon's 502 for an unreachable managed gateway and
+# a managed gateway's own 503 refusal (its message says why, for example an
+# account the directory can't look up right now) are named as such; anything
+# else is DC_SANDBOX_UNREACHABLE. The message is cut to one printable line of
+# at most 300 characters (bash only: cut is not among the image's tools).
+defenseclaw_sandbox_unreachable_reason() {
+  local code body message
+  case "$1" in
+    *$'\n'50[234]) ;;
+    *) printf '%s' "$DC_SANDBOX_UNREACHABLE"; return 0 ;;
+  esac
+  code="${1##*$'\n'}"
+  body="${1%$'\n'*}"
+  message="$(printf '%s' "$body" | _dc_jq -r 'if type == "object" then (.message // .error // "") else "" end' 2>/dev/null)" || message=""
+  message="$(printf '%s' "$message" | LC_ALL=C tr -d '\000-\037\177')"
+  message="${message:0:300}"
+  case "$code:$message" in
+    "502:the managed DefenseClaw gateway is not reachable")
+      printf '%s' "$DC_SANDBOX_MANAGED_UNREACHABLE" ;;
+    503:?*)
+      case "$body" in
+        *'"message"'*) printf 'DefenseClaw on the user'"'"'s machine can'"'"'t check this call right now, so it is blocked: %s' "$message" ;;
+        *) printf '%s' "$DC_SANDBOX_UNREACHABLE" ;;
+      esac ;;
+    *) printf '%s' "$DC_SANDBOX_UNREACHABLE" ;;
+  esac
+}
+
 # defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
 #
 # The binding token is the only credential a sandbox hook may present. A
@@ -125,6 +172,32 @@ defenseclaw_sandbox_idempotency_key() {
   printf '%s' "$key"
 }
 
+# defenseclaw_response_failure_reason REASON replaces _hardening.sh's for the
+# sandbox hooks, whose answer body the hook holds in RESULT. A 403 whose body
+# is OpenShell's own refusal of a post that carries a credential placeholder
+# from the conversation (an env output shows them) is named as that: the
+# token, the ingress and DefenseClaw are fine, and a new conversation works
+# (GAP-0355). Another 401 or 403 is the ingress refusing the request, which
+# the host's advice (token drift, doctor --fix, gateway restart) does not
+# reach from inside a sandbox.
+defenseclaw_response_failure_reason() {
+  case "$1" in
+    *"HTTP 401"*|*"HTTP 403"*)
+      case "${RESULT:-}" in
+        *"credential placeholder"*)
+          printf '%s (OpenShell refused it: this conversation holds a sandbox credential placeholder, which an env output shows, and OpenShell forwards no request that carries one; the user starts a new conversation)' "$1"
+          ;;
+        *)
+          printf '%s (DefenseClaw on the user'"'"'s machine refused the sandbox'"'"'s request: the user runs `defenseclaw sandbox doctor` there)' "$1"
+          ;;
+      esac
+      ;;
+    *)
+      printf '%s' "$1"
+      ;;
+  esac
+}
+
 # defenseclaw_sandbox_post PATH BODY MAX_TIME RETRY_MAX_TIME [CURL_ARGS...]
 #
 # POSTs BODY to the baked ingress and prints "<response body>\n<http code>",
@@ -134,7 +207,9 @@ defenseclaw_sandbox_idempotency_key() {
 # once with the same X-DefenseClaw-Hook-Idempotency-Key: the OpenShell relay
 # occasionally drops a request, possibly after the ingress acted on it, and the
 # ingress dedupes retries by key. Without a random key the request is sent
-# once. The body travels on stdin so large payloads never hit the argv limit.
+# once. A 502, 503 or 504 that is still the answer after the retry is printed
+# before the failure status, for defenseclaw_sandbox_unreachable_reason. The
+# body travels on stdin so large payloads never hit the argv limit.
 # An Authorization header among CURL_ARGS (-H "Authorization: ...") reaches
 # curl as configuration on a descriptor instead of its command line, which
 # every process in the sandbox can read: with token_delivery: env the bearer
@@ -197,6 +272,9 @@ defenseclaw_sandbox_post() {
     max_time="$retry_max_time"
   done
   if [ "$status" -ne 0 ]; then
+    case "${out##*$'\n'}" in
+      502|503|504) printf '%s' "$out" ;;
+    esac
     return "$status"
   fi
   printf '%s' "$out"

@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -139,6 +141,8 @@ func readyImages(ta *testApp) []image.Record {
 type fakeInstaller struct {
 	consent func(*openshell.InstallPlan) (bool, error)
 	ran     bool
+	// upgraded is set once Upgrade ran.
+	upgraded bool
 	// err is the installer's failure once it runs.
 	err error
 	// e2fsprogs and resigned count the Homebrew steps for the MicroVM
@@ -175,6 +179,20 @@ func (f *fakeInstaller) Install(context.Context) (*openshell.InstallResult, erro
 	return &openshell.InstallResult{Installed: true, CLIVersion: v}, nil
 }
 
+func (f *fakeInstaller) Upgrade(context.Context) (*openshell.InstallResult, error) {
+	if ok, err := f.consent(&openshell.InstallPlan{Release: openshell.InstallerTag}); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, openshell.ErrInstallDeclined
+	}
+	f.upgraded = true
+	if f.err != nil {
+		return nil, f.err
+	}
+	v, _ := openshell.ParseVersion(openshell.InstallerVersion)
+	return &openshell.InstallResult{Installed: true, CLIVersion: v}, nil
+}
+
 func TestSetupNonInteractive(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.IO.TTY = false
@@ -203,6 +221,34 @@ func TestSetupNonInteractive(t *testing.T) {
 		"gateway configured and restarted", "Done →  cd <project> && defenseclaw sandbox run claude")
 }
 
+// TestSetupStopsAtAnotherAccountsGateway (GAP-0296): a second account on a
+// Mac whose gateway is the first account's was told to start Docker
+// Desktop. Setup stops at the gateway's owner instead, before any machine
+// check that gateway decides, and starts nothing.
+func TestSetupStopsAtAnotherAccountsGateway(t *testing.T) {
+	ta := setupApp(t, "", "", false)
+	ta.IO.TTY = false
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.GatewayPortElsewhere = true
+		for i := range r.Checks {
+			switch c := &r.Checks[i]; c.ID {
+			case openshell.CheckIDDocker:
+				c.Status, c.Detail = openshell.StatusSkip, "not checked: the OpenShell gateway on this machine is another account's (see Gateway service)"
+			case openshell.CheckIDGatewayService:
+				c.Status, c.Detail = openshell.StatusFail, "127.0.0.1:17670, the gateway's port, is held by a process of another account"
+				c.Fix = &openshell.Fix{Summary: "one OpenShell gateway runs on a machine, under the account that started it"}
+			}
+		}
+	})
+	err := ta.Setup(bg, SetupOptions{NonInteractive: true, Yes: true})
+	if err == nil || ta.gateway.applied != 0 || len(ta.images.built) != 0 {
+		t.Fatalf("setup = %v, gateway applied %d, images %v", err, ta.gateway.applied, ta.images.built)
+	}
+	has(t, ta.output(), "Gateway service: 127.0.0.1:17670, the gateway's port, is held by a process of another account",
+		"→ one OpenShell gateway runs on a machine, under the account that started it")
+	lacks(t, ta.output(), "Docker Desktop")
+}
+
 // TestSetupSwitchesAnUndrivenGatewayToDocker: a gateway whose configuration
 // pins a driver DefenseClaw does not drive (podman, from its install) is
 // switched to docker in setup's one plan (GAP-1264).
@@ -226,10 +272,32 @@ func TestSetupIsNotDoneWhileSandboxesStayOff(t *testing.T) {
 	useGateway(ta)
 	ta.daemon.status.Available = false
 	ta.daemon.status.Reason = "the OpenShell gateway is not available"
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	// Not ready is status 1, as doctor's failures (GAP-0165).
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	has(t, ta.output(), "the daemon has not turned sandboxes on yet: the OpenShell gateway is not available",
 		"not ready for sandboxes yet: the DefenseClaw daemon has not turned sandboxes on; run `defenseclaw sandbox doctor --fix`")
 	lacks(t, ta.output(), "Done →")
+}
+
+// TestSetupIsNotDoneWithoutTheDaemon (GAP-0145): an account that never
+// started the DefenseClaw daemon got setup's green "Done", then a run that
+// said the gateway was not set up. Setup now ends not ready and says to
+// start the daemon, whether it does not answer or never started (no token).
+func TestSetupIsNotDoneWithoutTheDaemon(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.IO.TTY = false
+	useGateway(ta)
+	ta.daemon.errors["GET "+sandboxapi.PathStatus] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "the DefenseClaw daemon is not reachable"}
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
+	has(t, ta.output(), "not ready for sandboxes yet: the DefenseClaw daemon is not running; start it with `defenseclaw-gateway start`, "+
+		"then `defenseclaw sandbox run claude`")
+	lacks(t, ta.output(), "Done →")
+	// A run before the first start says to start it, and to set the gateway
+	// up only where init did not.
+	msg := sandboxapi.ErrNoGatewayToken.Error()
+	if start, setup := strings.Index(msg, "start it with `defenseclaw-gateway start`"), strings.Index(msg, "if `defenseclaw init` did not set it up"); start < 0 || setup < start {
+		t.Fatalf("ErrNoGatewayToken = %q", msg)
+	}
 }
 
 // TestSetupShowsTheMachineCheckWhileItRuns pins that the machine check's
@@ -299,13 +367,23 @@ func TestSetupWithoutATerminalNeedsYesOrNonInteractive(t *testing.T) {
 	ta.IO.TTY = false
 	before, _ := os.ReadFile(ta.ConfigPath)
 	useGateway(ta)
-	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "there is no terminal; pass --yes to accept the defaults, or --non-interactive")
+	wantErr(t, ta.Setup(bg, SetupOptions{SkipImages: true}), "its standard input is not a terminal; pass --yes to accept the defaults, or --non-interactive")
 	if len(ta.gateway.planned) != 0 || ta.gateway.applied != 0 {
 		t.Fatalf("gateway plans = %+v, applied %d; want none", ta.gateway.planned, ta.gateway.applied)
 	}
 	if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
 		t.Fatalf("the configuration changed:\n%s", after)
 	}
+
+	// GAP-0059: with only the output piped (`sandbox setup | tee
+	// setup.log`) someone at the terminal answers; setup asked for --yes.
+	piped := setupApp(t, "n\n", "", false)
+	piped.IO.TTY, piped.IO.InTTY = false, true
+	useGateway(piped)
+	if err := piped.Setup(bg, SetupOptions{SkipImages: true}); err != nil && strings.Contains(err.Error(), "not a terminal") {
+		t.Fatalf("Setup = %v with a terminal on standard input", err)
+	}
+	has(t, piped.output(), "Allow sandboxes to mount the project folder you launch from?")
 }
 
 func TestSetupNeedsConsentToInstall(t *testing.T) {
@@ -334,6 +412,195 @@ func TestSetupNeedsConsentToInstall(t *testing.T) {
 	if !inst.ran {
 		t.Fatal("the installer did not run")
 	}
+}
+
+// GAP-0286: Ctrl-C at a setup question says where setup stopped and how to
+// finish, and exits 130, instead of ending it with a bare ^C.
+func TestSetupCtrlCAtAQuestionSaysWhereItStopped(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	pr, pw := io.Pipe() // a terminal nobody types into
+	t.Cleanup(func() { _ = pw.Close() })
+	ta.IO.In, ta.IO.TTY = pr, true
+	useGateway(ta)
+	ta.HostDoctor = upgradableReport(nil)
+	sig := make(chan os.Signal, 1)
+	ta.App.interrupts = func() (<-chan os.Signal, func()) {
+		sig <- os.Interrupt
+		return sig, func() {}
+	}
+	err := ta.Setup(bg, SetupOptions{})
+	wantExit(t, err, exitInterrupted)
+	wantErr(t, err, `setup interrupted at "Upgrade OpenShell 0.1.1 to `+openshell.InstallerVersion+
+		` in place with NVIDIA's installer?": that step was not done, and the steps before it are kept; run `+"`defenseclaw sandbox setup`"+` again`)
+}
+
+// GAP-0343: end of input (Ctrl-D) at a setup question says the same.
+func TestSetupEndOfInputAtAQuestionSaysWhereItStopped(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.IO.In, ta.IO.TTY = strings.NewReader(""), true
+	useGateway(ta)
+	ta.HostDoctor = upgradableReport(nil)
+	wantErr(t, ta.Setup(bg, SetupOptions{}), `setup stopped at "Upgrade OpenShell 0.1.1 to `+openshell.InstallerVersion+
+		` in place with NVIDIA's installer?", whose input ended before an answer (end of input): that step was not done, and the steps before it are kept`)
+}
+
+// upgradableReport is hostReport on OpenShell 0.1.1, which the doctor
+// offers the in-place upgrade to InstallerVersion (its CLI check warns).
+func upgradableReport(edit func(*openshell.DoctorReport)) func(context.Context, *openshell.Doctor) *openshell.DoctorReport {
+	return hostReport(func(r *openshell.DoctorReport) {
+		c := r.Get(openshell.CheckIDCLI)
+		c.Status, c.Detail = openshell.StatusWarn, "0.1.1 at /usr/bin/openshell; OpenShell "+openshell.InstallerVersion+" fixes a supervisor bug"
+		c.Fix = &openshell.Fix{Summary: "upgrade OpenShell to " + openshell.InstallerVersion + " in place", Command: "defenseclaw sandbox setup --install-openshell"}
+		if edit != nil {
+			edit(r)
+		}
+	})
+}
+
+// TestSetupOffersTheUpgrade: OpenShell 0.1.1 works, so setup asks before
+// it upgrades it in place (no by default, which --yes and -n take) and
+// says what the upgrade fixes and how to run it later; --install-openshell
+// upgrades it. The question and the flag name the sandboxes the gateway
+// restart disrupts. While MicroVM sandboxes run, which the restart would
+// stop without a flush, setup keeps 0.1.1 and says to stop them first,
+// and an upgrade the installer refused before its script (still running
+// MicroVMs, the supervisor images Docker could not pull) keeps it too.
+func TestSetupOffersTheUpgrade(t *testing.T) {
+	const later = "→ upgrade OpenShell to " + openshell.InstallerVersion + " in place: defenseclaw sandbox setup --install-openshell\n"
+	const names = "(dc-claude-theirs-a, dc-claude-theirs-b)"
+	question := "Upgrade OpenShell 0.1.1 to " + openshell.InstallerVersion + " in place with NVIDIA's installer? (sudo; sha256 verified; pulls OpenShell's " +
+		openshell.InstallerVersion + " supervisor images from ghcr.io; restarts the gateway: it drops the connections of the 2 sandboxes running on it " + names + ") [y/N]"
+	flag := SetupOptions{NonInteractive: true, InstallOpenShell: true}
+	for _, tc := range []struct {
+		name     string
+		input    string
+		tty      bool
+		o        SetupOptions
+		driver   openshell.ComputeDriver
+		running  int
+		err      error
+		upgraded bool
+		says     []string
+	}{
+		{"a terminal answers no by default", "\n", true, SetupOptions{}, "", 2, nil, false, []string{question, later}},
+		{"a terminal answers yes", "y\ny\n", true, SetupOptions{}, "", 2, nil, true, []string{question, "Run this plan?", "OpenShell upgraded to " + openshell.InstallerVersion}},
+		{"--yes keeps it", "", true, SetupOptions{Yes: true}, "", 2, nil, false, []string{later}},
+		{"-n keeps it", "", false, SetupOptions{NonInteractive: true}, "", 2, nil, false, []string{later}},
+		{"--install-openshell upgrades it", "", false, flag, "", 2, nil, true,
+			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: it drops the connections of the 2 sandboxes running on it"}},
+		{"Docker cannot pull the images", "", false, flag, "", 0, fmt.Errorf("%w (docker pull: no such host): let Docker reach ghcr.io", openshell.ErrRuntimeImages), true,
+			[]string{"⚠ OpenShell 0.1.1 is kept: Docker could not pull the images the upgraded gateway starts with (docker pull: no such host): let Docker reach ghcr.io"}},
+		// The restart would stop a running MicroVM without a flush.
+		{"MicroVMs running", "", true, SetupOptions{}, openshell.DriverVM, 2, nil, false,
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes running on it " +
+				names + " without a flush", "→ stop them first (`defenseclaw sandbox stop NAME` flushes their disks), then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
+		{"MicroVMs running, --install-openshell", "", false, flag, openshell.DriverVM, 2, nil, false,
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, which would stop the 2 MicroVM sandboxes"}},
+		{"no MicroVM running", "", false, flag, openshell.DriverVM, 0, nil, true,
+			[]string{"upgrading OpenShell 0.1.1 to " + openshell.InstallerVersion + " restarts the gateway: no sandbox runs on it now"}},
+		{"a MicroVM started meanwhile", "", false, flag, openshell.DriverVM, 0, fmt.Errorf("%w (dc-late): stop them first", openshell.ErrSandboxesRunning), true,
+			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush (dc-late): stop them first"}},
+		// GAP-0056, GAP-0064: sudo refused or cancelled before the script.
+		{"no sudo", "", false, flag, "", 0, fmt.Errorf("%w: cancelled at sudo's password prompt", openshell.ErrSudo), true,
+			[]string{"⚠ OpenShell 0.1.1 is kept, the upgrade did not run: the install needs sudo: cancelled at sudo's password prompt",
+				"→ an administrator upgrades the machine's openshell package (`defenseclaw sandbox setup --install-openshell` from an account with sudo)"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := setupApp(t, tc.input, "", true)
+			ta.IO.TTY = tc.tty
+			if tc.running > 0 {
+				runningOn(t, ta, tc.running)
+			} else {
+				useGateway(ta)
+			}
+			calls := 0
+			ta.HostDoctor = func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport {
+				if calls++; calls == 1 {
+					return upgradableReport(func(r *openshell.DoctorReport) {
+						if tc.driver != "" {
+							r.Driver = tc.driver
+						}
+						if tc.driver == openshell.DriverVM {
+							// A Linux host whose gateway already runs MicroVMs.
+							r.MicroVM = &openshell.MicroVMHost{Linux: true, E2fsprogs: "/usr/sbin", DriverBinary: "/home/dev/.local/libexec/openshell/openshell-driver-vm",
+								Identity: openshell.VMIdentity{UID: 1000, GID: 1000}}
+							ta.gateway.upToDate = true
+						}
+					})(ctx, d)
+				}
+				return hostReport(nil)(ctx, d)
+			}
+			inst := &fakeInstaller{err: tc.err}
+			ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+				inst.consent = consent
+				return inst
+			}
+			o := tc.o
+			o.SkipImages, o.NoWrappers = true, true
+			ta.ok(t, ta.Setup(bg, o))
+			if inst.upgraded != tc.upgraded || inst.ran {
+				t.Fatalf("upgraded %v (installed %v), want %v\n%s", inst.upgraded, inst.ran, tc.upgraded, ta.output())
+			}
+			has(t, ta.output(), append([]string{"⚠ OpenShell 0.1.1 (" + openshell.InstallerVersion + " available)"}, tc.says...)...)
+			if !tc.upgraded || tc.err != nil {
+				lacks(t, ta.output(), "OpenShell upgraded")
+			}
+			if tc.o.Yes || tc.o.NonInteractive || tc.driver == openshell.DriverVM && tc.running > 0 {
+				lacks(t, ta.output(), "Upgrade OpenShell 0.1.1")
+			}
+		})
+	}
+	// A gateway that is not usable comes first: setup stops on its fix, and
+	// offers the upgrade on the next run.
+	t.Run("a broken gateway first", func(t *testing.T) {
+		ta := setupApp(t, "", "", true)
+		ta.HostDoctor = upgradableReport(func(r *openshell.DoctorReport) {
+			c := r.Get(openshell.CheckIDGatewayService)
+			c.Status, c.Detail = openshell.StatusFail, "openshell-gateway is inactive"
+			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: "systemctl --user enable --now openshell-gateway"}
+		})
+		inst := &fakeInstaller{}
+		ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
+			inst.consent = consent
+			return inst
+		}
+		wantErr(t, ta.Setup(bg, SetupOptions{InstallOpenShell: true, SkipImages: true, NoWrappers: true}), "is not usable yet (Gateway service)")
+		lacks(t, ta.output(), "Upgrade OpenShell", "upgrading OpenShell")
+		if inst.upgraded {
+			t.Fatal("upgraded under a gateway that is not usable")
+		}
+	})
+}
+
+// TestSetupStartsAStoppedGatewayService (GAP-0054, GAP-0063): with the
+// OpenShell package installed machine-wide and this account's gateway
+// service stopped and unregistered, setup stopped on the registration's
+// hint (which could not work before the gateway had started), then on the
+// service's, and reached the upgrade question only on a third run. It stops
+// on the service first, offers its fix (start, then register) and goes on
+// in the same run.
+func TestSetupStartsAStoppedGatewayService(t *testing.T) {
+	started := false
+	ta := setupApp(t, "\nn\n", "", true)
+	ta.HostDoctor = upgradableReport(func(r *openshell.DoctorReport) {
+		if started {
+			return
+		}
+		r.Service = &openshell.ServiceState{Manager: "systemd", Unit: openshell.GatewayService, Installed: true}
+		svc := r.Get(openshell.CheckIDGatewayService)
+		svc.Status, svc.Detail = openshell.StatusFail, "openshell-gateway is inactive (dead)"
+		svc.Fix = &openshell.Fix{Summary: "start the gateway and enable it at login, then register it", Command: "systemctl --user enable --now openshell-gateway",
+			Automatic: true, Apply: func(context.Context) error { started = true; return nil }}
+		reg := r.Get(openshell.CheckIDRegistration)
+		reg.Status, reg.Detail = openshell.StatusFail, "openshell: no gateway registration found"
+	})
+	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+	if !started {
+		t.Fatal("the service fix did not run")
+	}
+	has(t, ta.output(), "✗ Gateway service: openshell-gateway is inactive (dead)", `Fix "Gateway service" now: start the gateway and enable it at login, then register it?`,
+		`fixed "Gateway service"`, "Upgrade OpenShell 0.1.1 to "+openshell.InstallerVersion)
+	lacks(t, ta.output(), "Gateway registration:")
 }
 
 // TestSetupSaysWhatToDoWhenHomebrewFails: on macOS the installer fails when
@@ -485,8 +752,8 @@ func TestSetupInstallQuestionSaysHowItInstalls(t *testing.T) {
 			r.CLIVersion = ""
 			r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
 		})
-		wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
-		has(t, ta.output(), "Install OpenShell 0.1.1 with NVIDIA's installer? "+want)
+		wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell "+openshell.InstallerVersion+" is needed")
+		has(t, ta.output(), "Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's installer? "+want)
 	}
 }
 
@@ -554,7 +821,7 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 			c := r.Get(openshell.CheckIDGatewayVersion)
 			c.Title, c.Status, c.Detail = "Gateway", openshell.StatusFail, "the gateway is not answering: connection refused"
 			c.Fix = &openshell.Fix{Summary: "start the gateway", Command: start, Automatic: true, Apply: func(context.Context) error { return nil }}
-		}, "Gateway", "✗ Gateway: the gateway is not answering: connection refused\n", "→ start the gateway: " + start + "\n"},
+		}, "Gateway service", "✗ Gateway service: openshell-gateway is inactive\n", "→ start the gateway and enable it at login: " + start + "\n"},
 		// Something else answers: the service's own fix, which the doctor
 		// gives as the operator's (it does not start the unit over it).
 		{"service stopped, a gateway answers", func(r *openshell.DoctorReport) {
@@ -574,7 +841,9 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 	} {
 		for _, o := range []SetupOptions{{}, {InstallOpenShell: true}, {NonInteractive: true}} {
 			t.Run(fmt.Sprintf("%s %+v", tc.name, o), func(t *testing.T) {
-				ta := setupApp(t, "", "", false)
+				// A stopped service's fix is offered (no); -n takes it, and
+				// stops when the service is still stopped.
+				ta := setupApp(t, "n\n", "", false)
 				ta.HostDoctor = hostReport(tc.edit)
 				inst := &fakeInstaller{}
 				ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
@@ -599,8 +868,8 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 	}
 	ta := setupApp(t, "n\n", "", false)
 	ta.HostDoctor = hostReport(older)
-	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell 0.1.1 is needed")
-	has(t, ta.output(), "✗ OpenShell 0.0.40 unsupported", "Install OpenShell 0.1.1 with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
+	wantErr(t, ta.Setup(bg, SetupOptions{}), "OpenShell "+openshell.InstallerVersion+" is needed")
+	has(t, ta.output(), "✗ OpenShell 0.0.40 unsupported", "Install OpenShell "+openshell.InstallerVersion+" with NVIDIA's installer? (sudo; sha256 verified) [y/N]")
 
 	// The TUI presets its "Install OpenShell" from `sandbox doctor --json`.
 	for _, tc := range []struct {
@@ -609,7 +878,7 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 	}{{nil, false}, {stopped, false}, {older, true}} {
 		ta := newTestApp(t, "")
 		ta.HostDoctor = hostReport(tc.edit)
-		ta.ok(t, ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+		_ = ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON}) // exits 1 where the CLI check failed
 		var rep struct {
 			OpenShellInstall *bool `json:"openshell_install"`
 		}
@@ -653,7 +922,7 @@ func TestSetupSaysTheDaemonNeedsARestartForDocker(t *testing.T) {
 	ta.IO.TTY = false
 	useGateway(ta)
 	ta.daemon.status.DockerGroupMissing = true
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	has(t, ta.output(), "started before you joined the docker group", "`defenseclaw-gateway restart`")
 	lacks(t, ta.output(), "Done →")
 }
@@ -781,7 +1050,7 @@ func TestSetupChecksTheDockerVMBeforeInstalling(t *testing.T) {
 func TestSetupCopyOnlyWithoutMounts(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
-	ta.ok(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}))
+	wantExit(t, ta.Setup(bg, SetupOptions{NonInteractive: true, NoMounts: true, Harnesses: []string{"codex"}}), 1)
 	if len(ta.gateway.planned) != 0 {
 		t.Fatalf("gateway changed without need: %+v", ta.gateway.planned)
 	}
@@ -881,18 +1150,16 @@ func (g emptyPlans) Plan(ctx context.Context, ch openshell.GatewayChanges) (*ope
 // TestSetupOnMacOSPlansMicroVMsNotBindMounts: on a Mac setup asks about
 // MicroVMs, not bind mounts, and plans the vm driver with this user as
 // every sandbox's and the recommended resources where the configuration
-// has none, in one plan and one restart. It still changes OpenShell's
-// telemetry only through the systemd unit: on macOS it neither asks about
-// it nor edits gateway.env for it, and says how to turn it off (manual
-// test M8).
+// has none, in one plan and one restart. It asks to turn OpenShell's
+// telemetry off as on Linux, in gateway.env, which the Homebrew service
+// reads, in the same plan, unless the telemetry is kept (manual test M8).
 func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
-	const note = "OpenShell's anonymous usage telemetry stays on: setup turns it off on Linux only. To turn it off here, set " +
-		"OPENSHELL_TELEMETRY_ENABLED=false in ~/.config/openshell/gateway.env, which the Homebrew service reads, and restart the gateway " +
-		"(`brew services restart nvidia/openshell/openshell`)"
+	const question = "Disable OpenShell's anonymous usage telemetry? (edits ~/.config/openshell/gateway.env, which the Homebrew service reads, " +
+		"and restarts the OpenShell gateway"
 	for _, upstream := range []bool{false, true} {
-		// On a terminal: the MicroVM question; no sandbox runs, so the
-		// restart is not asked.
-		ta := setupApp(t, "y\n", "", false)
+		// On a terminal: the MicroVM question, then the telemetry one
+		// unless it is kept; no sandbox runs, so the restart is not asked.
+		ta := setupApp(t, "y\ny\n", "", false)
 		ta.GOOS = "darwin"
 		ta.HostDoctor = macReport(openshell.DriverDocker, nil)
 		ta.gateway.state.EnvPath = filepath.Join(ta.home, ".config", "openshell", "gateway.env")
@@ -903,7 +1170,11 @@ func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
 		_, _ = useGateway(ta)
 		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true, UpstreamTelemetry: upstream}))
 		p := ta.gateway.planned
-		if len(p) != 1 || p[0].EnableBindMounts || p[0].ComputeDriver != openshell.DriverVM || len(p[0].Env) != 0 || len(p[0].UnsetEnv) != 0 ||
+		wantEnv := map[string]string{openshell.EnvTelemetryEnabled: "false"}
+		if upstream {
+			wantEnv = nil
+		}
+		if len(p) != 1 || p[0].EnableBindMounts || p[0].ComputeDriver != openshell.DriverVM || !maps.Equal(p[0].Env, wantEnv) || len(p[0].UnsetEnv) != 0 ||
 			p[0].VMIdentity == nil || *p[0].VMIdentity != (openshell.VMIdentity{UID: 501, GID: 20}) ||
 			p[0].VMResources == nil || *p[0].VMResources != (openshell.VMResources{VCPUs: 4, OverlayDiskMiB: 16384}) || ta.gateway.applied != 1 {
 			t.Fatalf("upstream %t: gateway plans = %+v, applied %d", upstream, p, ta.gateway.applied)
@@ -914,16 +1185,33 @@ func TestSetupOnMacOSPlansMicroVMsNotBindMounts(t *testing.T) {
 				"with `openshell sandbox create`, then runs as 501:20",
 			"✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs",
 			"every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull` brings the changes back")
-		lacks(t, ta.output(), "Allow sandboxes to mount", "Disable OpenShell's anonymous usage telemetry?", "does not read gateway.env",
-			"Download the OpenShell base image")
-		if shown := strings.Contains(ta.output(), note); shown == upstream {
-			t.Fatalf("upstream %t: telemetry note shown = %t:\n%s", upstream, shown, ta.output())
+		lacks(t, ta.output(), "Allow sandboxes to mount", "does not read gateway.env", "Download the OpenShell base image", "telemetry stays on")
+		if asked := strings.Contains(ta.output(), question); asked == upstream {
+			t.Fatalf("upstream %t: telemetry question asked = %t:\n%s", upstream, asked, ta.output())
 		}
 		// The driver clamps runs to a copy: the mode is not recorded.
 		if c := loadConfig(t, ta); c.OpenShell.Workdir.Mode != "" {
 			t.Fatalf("workdir.mode = %q, want none", c.OpenShell.Workdir.Mode)
 		}
 	}
+}
+
+// TestSetupNamesTheGatewayTOMLOnceKnown (GAP-0061): before OpenShell was
+// installed the MicroVM question named ~/.config/openshell/gateway.toml,
+// and after the Homebrew install the plan edited the formula's file under
+// the Homebrew prefix. Until OpenShell is installed the question names no
+// path.
+func TestSetupNamesTheGatewayTOMLOnceKnown(t *testing.T) {
+	ta := setupApp(t, "n\n", "", false)
+	ta.GOOS = "darwin"
+	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) {
+		r.CLIVersion = ""
+		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
+	})
+	ta.gateway.state.TOMLPath = filepath.Join(ta.home, ".config", "openshell", "gateway.toml")
+	_ = ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true})
+	has(t, ta.output(), `(sets compute_driver = "vm" in the gateway's gateway.toml and restarts the gateway;`)
+	lacks(t, ta.output(), "~/.config/openshell/gateway.toml")
 }
 
 // TestSetupSwitchesADockerDesktopMacToMicroVMs: a fresh Mac on Docker
@@ -992,7 +1280,7 @@ func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = noLandlockInTheVM })
 	ta.gateway.applyRes = &openshell.GatewayApplyResult{}
 	runningOn(t, ta, 1)
-	ta.ok(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}))
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
 	if ta.gateway.applied != 0 || ta.gateway.restarts != 0 {
 		t.Fatalf("applied %d, restarts %d", ta.gateway.applied, ta.gateway.restarts)
 	}
@@ -1021,6 +1309,7 @@ func TestSetupSaysASwitchNotAppliedLeavesDocker(t *testing.T) {
 func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	ta := setupApp(t, "", "", false)
 	ta.GOOS = "darwin"
+	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
 	ta.App.Gateway = emptyPlans{ta.gateway}
 	ta.HostDoctor = macReport(openshell.DriverVM, nil)
 	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
@@ -1036,6 +1325,7 @@ func TestSetupOnAMacAlreadyOnMicroVMs(t *testing.T) {
 	// sandbox runs on the gateway.
 	ta = setupApp(t, "\ny\n", "", false)
 	ta.GOOS = "darwin"
+	ta.gateway.state.Env = map[string]string{openshell.EnvTelemetryEnabled: "false"}
 	ta.App.Gateway = emptyPlans{ta.gateway}
 	ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { r.ConfiguredDriver = openshell.DriverVM })
 	runningOn(t, ta, 1)
@@ -1113,7 +1403,7 @@ func TestSetupInstallsWhatTheMicroVMDriverNeeds(t *testing.T) {
 			"(brew postinstall nvidia/openshell/openshell) [y/N]"
 	)
 
-	ta, inst := setup(t, "y\ny\ny\n")
+	ta, inst := setup(t, "y\ny\ny\ny\n")
 	ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
 	has(t, ta.output(), e2fsprogs, "✓ e2fsprogs installed", resign, "✓ MicroVM driver signed for Apple's Hypervisor")
 	if inst.e2fsprogs != 1 || inst.resigned != 1 || len(ta.gateway.planned) != 1 {
@@ -1223,7 +1513,9 @@ func TestSetupListsTheSandboxesASwitchStrands(t *testing.T) {
 		{openshell.Check{ID: openshell.CheckIDLandlock, Title: "Landlock", Status: openshell.StatusPass, Detail: "ABI 6 in the Linux VM Docker runs in"},
 			"2 sandboxes run on the docker driver (dc-a, dc-b): pull their work now (`defenseclaw sandbox pull NAME`); after the switch it is reachable only by switching back"},
 	} {
-		ta := newTestApp(t, "\n\n", sandboxapi.Sandbox{Name: "dc-b"}, sandboxapi.Sandbox{Name: "dc-a"})
+		// The MicroVM and telemetry questions take their default (yes), the
+		// restart its default (no).
+		ta := newTestApp(t, "\n\n\n", sandboxapi.Sandbox{Name: "dc-b"}, sandboxapi.Sandbox{Name: "dc-a"})
 		writeConfig(t, ta, "")
 		ta.GOOS = "darwin"
 		ta.HostDoctor = macReport(openshell.DriverDocker, func(r *openshell.DoctorReport) { *r.Get(openshell.CheckIDLandlock) = tc.landlock })
@@ -1234,10 +1526,16 @@ func TestSetupListsTheSandboxesASwitchStrands(t *testing.T) {
 			}
 		}
 		_ = fake
-		ta.ok(t, ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}))
+		// Left on the docker driver without Landlock, setup ends not ready
+		// (status 1, GAP-0165).
+		if err := ta.Setup(bg, SetupOptions{SkipImages: true, NoWrappers: true}); tc.landlock.Status == openshell.StatusPass {
+			ta.ok(t, err)
+		} else {
+			wantExit(t, err, 1)
+		}
 		out := ta.output()
-		has(t, out, tc.want, "the 2 sandboxes on it (dc-a, theirs) were made on the docker driver, stop if running, and cannot start again "+
-			"unless the gateway is switched back", "Restart the OpenShell gateway now? [y/N]",
+		has(t, out, tc.want, "the 2 sandboxes on it (dc-a, theirs) were made on the docker driver, stop if running, and cannot start again: "+
+			"OpenShell drops them a few minutes after the switch", "Restart the OpenShell gateway now? [y/N]",
 			"skipped: the OpenShell gateway change above")
 		if strings.Index(out, tc.want) > strings.Index(out, "Run sandboxes in OpenShell MicroVMs?") {
 			t.Fatalf("the sandboxes were listed after the question:\n%s", out)
@@ -1409,13 +1707,59 @@ func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 	wantExit(t, ta.RunDoctor(bg, DoctorOptions{}), 1) // the broken wrapper
 	has(t, ta.output(), "DefenseClaw daemon", "connected to OpenShell 0.1.1 gateway openshell", "Harness images",
 		"not built yet: codex", "calls /nonexistent/defenseclaw-gateway, which is missing", "Organization policy")
-	ta.ok(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+	// JSON exits as text does when a check failed (GAP-0308).
+	wantExit(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}), 1)
 	var rep struct {
 		OK     bool
 		Checks []openshell.Check
 	}
 	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || rep.OK || len(rep.Checks) < 10 {
 		t.Fatalf("doctor json = %+v, %v", rep, err)
+	}
+}
+
+// GAP-0226: with the gateway's user service gone, the Gateway row and the
+// daemon row each printed the raw gRPC dial error, and the summary counted
+// one cause three times. The daemon row now leans on the Gateway row.
+// TestDoctorNamesTheOrganizationConstraints (GAP-0252): the row said
+// "advisory: openshell.admin is enforced but advisory: you own config.yaml"
+// and named none of the constraints. It says whose the block is once, and
+// lists each constraint in force.
+func TestDoctorNamesTheOrganizationConstraints(t *testing.T) {
+	ta := newTestApp(t, "")
+	off := false
+	ta.Cfg.OpenShell.Admin = config.OpenShellAdminConfig{MinProfile: "balanced", AllowedHarnesses: []string{"claudecode", "codex"},
+		AllowYolo: &off, EgressBlock: []string{"paste.example"}, RequireCopyFor: []string{"~/customers/**"},
+		MaxResources: config.OpenShellResourcesConfig{CPU: "4", Memory: "8Gi"}, Locked: []string{"profile"}}
+	c := ta.adminCheck()
+	want := "advisory (you own config.yaml and can change it): profile balanced or stricter, harnesses claudecode, codex only, " +
+		"no skip-permissions, copy mode for ~/customers/**, 1 blocked host, at most 4 CPUs and 8Gi memory, locked: profile"
+	if c.Detail != want {
+		t.Fatalf("detail = %q\nwant     %q", c.Detail, want)
+	}
+}
+
+func TestDoctorCountsADownGatewayOnce(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.status.Available = false
+	ta.daemon.status.Reason = `the OpenShell gateway is not available: openshell: health: Unavailable: connection error: desc = "transport: Error while dialing: dial tcp 127.0.0.1:17670: connect: connection refused"`
+	ta.HostDoctor = hostReport(func(rep *openshell.DoctorReport) {
+		gw := rep.Get(openshell.CheckIDGatewayVersion)
+		gw.Status, gw.Detail = openshell.StatusFail, "the gateway is not running: nothing listens on https://127.0.0.1:17670"
+	})
+	ta.images.recs = readyImages(ta)
+	_ = ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON})
+	var rep struct{ Checks []openshell.Check }
+	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(rep.Checks, func(c openshell.Check) bool { return c.ID == CheckIDDaemon })
+	if i < 0 {
+		t.Fatalf("no daemon row in %+v", rep.Checks)
+	}
+	if c := rep.Checks[i]; c.Status != openshell.StatusSkip || c.Fix != nil || strings.Contains(c.Detail, "connection refused") ||
+		!strings.Contains(c.Detail, "once the OpenShell gateway answers (see Gateway)") {
+		t.Fatalf("daemon row = %+v", c)
 	}
 }
 
@@ -1521,6 +1865,32 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	}
 }
 
+// TestDoctorFixWaitsForTheDaemonAfterARestart (GAP-0074): a fix that
+// restarted the gateway was followed at once by the checks again, whose
+// report ended with a failed DefenseClaw daemon row (sandboxes unavailable,
+// connection refused) seconds before the daemon reconnected. The doctor now
+// waits for the daemon first.
+func TestDoctorFixWaitsForTheDaemonAfterARestart(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
+		r.Checks = append(r.Checks, openshell.Check{ID: openshell.CheckIDTelemetry, Title: "OpenShell telemetry", Status: openshell.StatusWarn,
+			Detail: "on", Fix: &openshell.Fix{Summary: "set it off and restart the gateway", Automatic: true, RestartsGateway: true,
+				Apply: func(context.Context) error { return nil }}})
+	})
+	runningOn(t, ta, 0)
+	calls := 0
+	ta.daemon.mu.Lock()
+	ta.daemon.status.Available, ta.daemon.status.Reason = false, "connection refused"
+	ta.daemon.onStatus = func(st *sandboxapi.Status) {
+		calls++
+		st.Available = calls >= 3
+	}
+	ta.daemon.mu.Unlock()
+	_ = ta.RunDoctor(bg, DoctorOptions{Fix: true, Yes: true})
+	has(t, ta.output(), "waiting for the DefenseClaw daemon to reconnect to the restarted gateway", `fixed "OpenShell telemetry"`)
+	lacks(t, ta.output(), "sandboxes are unavailable")
+}
+
 // TestDoctorFixNamesChecksAsItAsked: `doctor --fix` asked `Fix "Gateway":
 // start the gateway?` and then reported "✗ gateway-version: brew services
 // start …", naming the check by its id; the outcome lines name it by the
@@ -1616,7 +1986,7 @@ func TestDoctorVerdict(t *testing.T) {
 		t.Fatalf("a failing doctor ends:\n%s", out)
 	}
 	lacks(t, ta.output(), "✓ ready for sandboxes")
-	ta.ok(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+	wantExit(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}), 1) // as text does (GAP-0308)
 	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || rep.OK || rep.Ready {
 		t.Fatalf("failing doctor json ok/ready = %+v, %v", rep, err)
 	}
@@ -1676,7 +2046,7 @@ func TestDoctorWrapperHintNamesAConfiguredHarness(t *testing.T) {
 	} {
 		ta := newTestApp(t, "")
 		ta.Cfg.OpenShell.Harnesses = tc.harnesses
-		if c := ta.wrappersCheck(); c.Detail != tc.want {
+		if c := ta.wrappersCheck(bg, false); c.Detail != tc.want {
 			t.Errorf("harnesses %v: wrappers check = %q, want %q", tc.harnesses, c.Detail, tc.want)
 		}
 	}
@@ -1701,14 +2071,13 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 		}
 	}
 	// Ingress profiles: this config's listener's, an earlier port's (our
-	// orphan's provider uses it), another daemon's unused one (it is not
-	// ours to remove) and the legacy gateway-wide one of earlier releases.
+	// orphan's provider uses it) and another daemon's unused one (it is not
+	// ours to remove).
 	ownPort := ta.Cfg.OpenShellIngressPort()
 	oldPort, otherPort := ownPort+1000, ownPort+2000
 	for _, port := range []int{ownPort, oldPort, otherPort} {
 		importProfile(t, client, profiles.IngressID, profiles.Input{IngressPort: port}, "")
 	}
-	importProfile(t, client, profiles.IngressID, profiles.Input{IngressPort: 18000}, profiles.LegacyIngressID)
 	importProfile(t, client, profiles.AnthropicID, profiles.Input{Binaries: []string{"/opt/defenseclaw-harness/claudecode/bin/claude"}}, "")
 	for _, p := range []*openshell.Provider{
 		{Name: "dc-claude-orphan-ingress", Type: profiles.IngressProfileID(oldPort), Labels: ours, Spec: openshell.ProviderSpec{Credentials: map[string]string{"DEFENSECLAW_SANDBOX_TOKEN": "t"}}},
@@ -1727,6 +2096,11 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	writeFile(t, edited, "dc\n")
 	ta.ok(t, ta.recordGatewayApply(&openshell.GatewayApplyResult{Files: []openshell.AppliedFile{{Path: kept, Backup: kept + ".bak"}, {Path: edited}}}))
 	writeFile(t, edited, "user edit\n")
+	// GAP-0123: every edit left a backup, and teardown kept them all.
+	backups := []string{kept + ".defenseclaw-20261007T100000Z.bak", kept + ".defenseclaw-20261007T110000Z.bak"}
+	for _, b := range append(backups, edited+".defenseclaw-20261007T100000Z.bak") {
+		writeFile(t, b, "dc\n")
+	}
 	rc := filepath.Join(ta.home, ".bashrc")
 	if _, err := wrapper.Enable(wrapper.Bash, rc, "/usr/local/bin/defenseclaw-gateway", wrapper.Wrap{Command: "claude", Harness: "claude"}); err != nil {
 		t.Fatal(err)
@@ -1735,12 +2109,11 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	writeFile(t, filepath.Join(ta.Cfg.DataDir, "sandboxes", "dc-claude-stale", "copy", "stage", "proj", "README.md"), "x")
 
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
-	// The profiles, each labeled: this install's ingress ones, then the
-	// earlier release's gateway-wide one.
+	// The profiles, labeled: this install's ingress ones.
 	has(t, ta.output(), "leftover data     dc-claude-stale", "dc-claude-live, dc-claude-orphan",
-		"provider profiles "+profiles.IngressProfileID(ownPort)+", "+profiles.IngressProfileID(oldPort)+" (this install's hook ingress)\n"+
-			"                    "+profiles.LegacyIngressID+" (from an earlier DefenseClaw release)\n  images ")
+		"provider profiles "+profiles.IngressProfileID(ownPort)+", "+profiles.IngressProfileID(oldPort)+" (this install's hook ingress)\n  images ")
 	lacks(t, ta.output(), "dc-claude-theirs")
+	has(t, ta.output(), "then remove the 2 backups DefenseClaw made of it")
 	if ta.calls("DELETE", "dc-claude-live") != 0 || len(ta.gateway.rollbacks) != 0 {
 		t.Fatal("the dry run changed something")
 	}
@@ -1759,7 +2132,6 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 		"our provider":                          {errOf(client.GetProvider(bg, "dc-claude-orphan-ingress")), true},
 		"our ingress profile":                   {errOf(client.GetProfile(bg, profiles.IngressProfileID(ownPort))), true},
 		"our earlier port's ingress profile":    {errOf(client.GetProfile(bg, profiles.IngressProfileID(oldPort))), true},
-		"the legacy ingress profile":            {errOf(client.GetProfile(bg, profiles.LegacyIngressID)), true},
 		"another daemon's ingress profile":      {errOf(client.GetProfile(bg, profiles.IngressProfileID(otherPort))), false},
 		"a profile another provider still uses": {errOf(client.GetProfile(bg, profiles.AnthropicID)), false},
 	} {
@@ -1773,7 +2145,15 @@ func TestTeardownRemovesEverythingDefenseClawCreated(t *testing.T) {
 	if len(ta.gateway.rollbacks) != 1 || len(ta.gateway.rollbacks[0].Files) != 1 || ta.gateway.rollbacks[0].Files[0].Path != kept {
 		t.Fatalf("rollbacks = %+v", ta.gateway.rollbacks)
 	}
-	has(t, ta.output(), edited+" changed after DefenseClaw edited it")
+	has(t, ta.output(), edited+" changed after DefenseClaw edited it", "removed the 2 backups DefenseClaw made of the gateway configuration")
+	for _, b := range backups {
+		if _, err := os.Stat(b); !os.IsNotExist(err) {
+			t.Errorf("backup %s is still there: %v", b, err)
+		}
+	}
+	if _, err := os.Stat(edited + ".defenseclaw-20261007T100000Z.bak"); err != nil {
+		t.Errorf("the backup of a file left alone is gone: %v", err)
+	}
 	if b, _ := wrapper.Read(rc); len(b.Wraps) != 0 {
 		t.Fatalf("wrappers left: %+v", b)
 	}
@@ -1850,8 +2230,7 @@ func TestTeardownDryRunListsEveryStep(t *testing.T) {
 }
 
 // The daemon's delete leaves the CLI's own state of a sandbox (the run's
-// options, a copy's hand-over, and what an earlier CLI kept there: a run
-// log, the accepted undo point) under its data directory, which `sandbox
+// options, a copy's hand-over) under its data directory, which `sandbox
 // delete` removes after it: teardown removes it too.
 func TestTeardownForgetsTheCLIStateOfTheSandboxesItDeletes(t *testing.T) {
 	ta := newTestApp(t, "")
@@ -1868,11 +2247,11 @@ func TestTeardownForgetsTheCLIStateOfTheSandboxesItDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "run.log"), "what the agent printed\n")
+	writeFile(t, filepath.Join(dir, runLaunchFile), `{"harness":"claudecode"}`)
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{Yes: true, KeepImages: true}))
 	ta.wantCalls(t, 1, "DELETE", "dc-claude-live")
 	if _, err := os.Stat(filepath.Join(sandboxes, "dc-claude-live")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the sandbox's directory (and its kept run log) is still there: %v", err)
+		t.Fatalf("the sandbox's directory (and the CLI's state in it) is still there: %v", err)
 	}
 }
 

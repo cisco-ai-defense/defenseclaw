@@ -519,6 +519,43 @@ func TestContinuousAIDiscoveryV8CarriesModelProvenanceAcrossLifecycleFamilies(t 
 	}
 }
 
+// A sandbox scan's signal names its sandbox on every lifecycle family.
+func TestContinuousAIDiscoveryV8NamesTheSandboxAcrossLifecycleFamilies(t *testing.T) {
+	withManagedEnterprise(t, true)
+	capture := &endpointInventoryCapture{}
+	adapter := &aiDiscoveryV8Adapter{runtime: capture}
+	report := inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{
+			ScanID: "scan-sandbox-lifecycle", Source: "scheduled", PrivacyMode: "enhanced", Result: "ok",
+			TotalSignals: 4, ActiveSignals: 3, NewSignals: 1, ChangedSignals: 1, GoneSignals: 1,
+		},
+	}
+	for _, state := range []string{inventory.AIStateNew, inventory.AIStateChanged, inventory.AIStateSeen, inventory.AIStateGone} {
+		report.Signals = append(report.Signals, inventory.AISignal{
+			SignalID: "sandbox-" + state, SignatureID: "dccert-agent", Category: inventory.SignalMCPServer,
+			Vendor: "DC", Product: "DC Cert Agent", Confidence: .9, State: state, Detector: "mcp",
+			Source: inventory.AISourceSandbox, SandboxID: "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33", SandboxName: "myapp-7f3a",
+		})
+	}
+	if err := adapter.EmitReport(t.Context(), report, nil); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for _, record := range capture.snapshot() {
+		if record.EventName() == "ai.discovery.completed" {
+			continue
+		}
+		seen++
+		body := canonicalBody(t, record)
+		if body["defenseclaw.sandbox.id"] != "0f5b3c2e-9d4a-4f61-8a7e-2c1b0d9e6f33" || body["defenseclaw.sandbox.name"] != "myapp-7f3a" {
+			t.Errorf("%s sandbox=%v/%v want the sandbox's id and name", record.EventName(), body["defenseclaw.sandbox.id"], body["defenseclaw.sandbox.name"])
+		}
+	}
+	if seen != 4 {
+		t.Fatalf("records = %d, want one per lifecycle family", seen)
+	}
+}
+
 // The owner's connector address reaches the per-cycle observation while
 // ai_discovery.include_user_email is on, and never a record without an owner
 // (GAP-0961, GAP-1025).
@@ -756,14 +793,14 @@ func TestIDEPluginTotalGaugeCoversEmptyAndOffScans(t *testing.T) {
 	installed := false
 	for _, panel := range parsed.Panels {
 		if panel.Title == "IDE plugins installed" {
-			if len(panel.Targets) != 1 || panel.Targets[0].Expr != `sum(defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=""})` {
+			if len(panel.Targets) != 1 || panel.Targets[0].Expr != `sum(defenseclaw_inventory_ide_plugins{host_name=~"$host", defenseclaw_ide_product=""})` {
 				t.Fatalf("installed panel does not select only the current total: %+v", panel.Targets)
 			}
 			installed = true
 		}
 		if _, ok := breakdowns[panel.Title]; ok {
 			if len(panel.Targets) != 1 ||
-				!strings.Contains(panel.Targets[0].Expr, `and on(service_instance_id) (defenseclaw_inventory_ide_plugins{defenseclaw_ide_product=""} > 0)`) {
+				!strings.Contains(panel.Targets[0].Expr, `and on(service_instance_id) (defenseclaw_inventory_ide_plugins{host_name=~"$host", defenseclaw_ide_product=""} > 0)`) {
 				t.Errorf("%s does not filter stale plugin series by its gateway total: %+v", panel.Title, panel.Targets)
 			}
 			breakdowns[panel.Title] = true

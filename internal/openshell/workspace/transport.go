@@ -23,7 +23,9 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -351,6 +353,13 @@ func runProcess(ctx context.Context, argv []string, stdout io.Writer) ([]byte, i
 	err = cmd.Run()
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && ctx.Err() == nil {
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGINT {
+			// A Ctrl-C reached the command (the terminal signals the whole
+			// foreground process group): the user interrupted the step,
+			// which read as its failure with "exit -1" and no cause
+			// (GAP-0368).
+			return stderr.Bytes(), -1, fmt.Errorf("%s: %w", filepath.Base(argv[0]), openshell.ErrInterrupted)
+		}
 		return stderr.Bytes(), exitErr.ExitCode(), nil
 	}
 	if err != nil {

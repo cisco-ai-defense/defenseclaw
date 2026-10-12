@@ -57,6 +57,10 @@ const (
 	infoPipeCallLimit = 5 * time.Second
 )
 
+// FlushDirectoryCaches has nothing to flush on Linux: SSSD refreshes the
+// entries it served offline at their next lookup once it is online again.
+func FlushDirectoryCaches(context.Context) error { return nil }
+
 func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccount, now time.Time) (IdentitySpoolRecord, error) {
 	resolver, err := unixidentity.NewNSSResolver(ctx)
 	if err != nil {

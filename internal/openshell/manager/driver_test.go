@@ -38,12 +38,9 @@ import (
 )
 
 // newVMEnv is newEnv on a gateway that runs OpenShell's MicroVM driver.
-// Its sandboxes answer the workload check as their records expect.
 func newVMEnv(t *testing.T, edit func(*config.Config)) *harnessEnv {
 	t.Helper()
-	e := newDaemonEnv(t, daemonOptions{driver: openshell.DriverVM}, edit)
-	e.fake.HandleExec(e.workloadChecks(nil, nil))
-	return e
+	return newDaemonEnv(t, daemonOptions{driver: openshell.DriverVM}, edit)
 }
 
 // The connector reads the driver off the gateway, and a gateway that runs
@@ -159,6 +156,39 @@ func TestTheDaemonFollowsADriverSwitch(t *testing.T) {
 	}
 }
 
+// Setup's in-place upgrade restarts the gateway on a newer release under
+// the connection: the status asks again once its last answer is a few
+// seconds old, and a new release drops the connection, whose replacement
+// reports it (and checks it against the supported window).
+func TestTheDaemonFollowsAnInPlaceUpgrade(t *testing.T) {
+	e := newEnv(t, nil)
+	_, advance := e.fakeClock(time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC))
+	connects := 0
+	e.m.opts.Connect = func(ctx context.Context) (*Gateway, error) {
+		connects++
+		h, err := e.client.Health(ctx)
+		if err != nil {
+			return nil, err
+		}
+		gw := *e.gw
+		gw.Version = h.RawVersion
+		return &gw, nil
+	}
+	if st, err := e.m.Status(t.Context()); err != nil || st.Gateway == nil || st.Gateway.Version != openshell.SupportedMin {
+		t.Fatalf("status = %+v, %v", st, err)
+	}
+	e.fake.SetRelease(openshell.InstallerVersion)
+	advance(driverRecheck)
+	if st, _ := e.m.Status(t.Context()); st.Gateway.Version != openshell.InstallerVersion || connects != 2 {
+		t.Fatalf("status after the recheck = %+v (connects %d)", st.Gateway, connects)
+	}
+	// The same release again keeps the connection.
+	advance(driverRecheck)
+	if st, _ := e.m.Status(t.Context()); st.Gateway.Version != openshell.InstallerVersion || connects != 2 {
+		t.Fatalf("status = %+v (connects %d)", st.Gateway, connects)
+	}
+}
+
 // A MicroVM cannot take a live mount of the project: a Claude Code create
 // that staged no copy is told to (CodeNeedsCopy) before anything is made,
 // on the host or on the gateway. (In copy mode its run files go into a run
@@ -269,6 +299,46 @@ func TestIdentityNamesTheDriverAndTheImageThatRuns(t *testing.T) {
 		if v.RunImage != tc.runImage || v.RunImageID != tc.runImgID {
 			t.Fatalf("%s: view = %+v", tc.rec.Name, v)
 		}
+	}
+}
+
+// GAP-0219: a first start on a full Mac ended with OpenShell's
+// ProvisioningTimedOut alone; on the vm driver the error says what to check.
+func TestProvisioningTimeoutNamesTheDisk(t *testing.T) {
+	vm, _ := openshell.LookupDriver("vm")
+	docker, _ := openshell.LookupDriver("docker")
+	timedOut := errors.New(`sandbox "x" is in error state; OpenShell says: ProvisioningTimedOut: Provisioning repair window expired after 300 seconds`)
+	if err := provisioningFailure(vm, upstream("wait for sandbox x", timedOut)); !strings.Contains(err.Error(), "Disk space in `defenseclaw sandbox doctor`") ||
+		!strings.Contains(err.Error(), "defenseclaw sandbox image prune") {
+		t.Fatalf("vm: %v", err)
+	}
+	for _, err := range []error{provisioningFailure(docker, upstream("wait for sandbox x", timedOut)),
+		provisioningFailure(vm, upstream("wait for sandbox x", errors.New("deadline exceeded")))} {
+		if strings.Contains(err.Error(), "image prune") {
+			t.Fatalf("hint on another failure: %v", err)
+		}
+	}
+}
+
+// GAP-0005: a MicroVM whose driver lacks the hypervisor entitlement showed
+// only "VM process exited with status 1"; the error now names the cause,
+// and on a managed computer sends the user to IT.
+func TestVMExitNamesTheHypervisorEntitlement(t *testing.T) {
+	vm, _ := openshell.LookupDriver("vm")
+	docker, _ := openshell.LookupDriver("docker")
+	exited := func() error {
+		return upstream("wait for sandbox x", errors.New(`sandbox "x" is in error state; OpenShell says: ProcessExited: VM process exited with status 1`))
+	}
+	if err := vmExitFailure("darwin", false, vm, exited()); !strings.Contains(err.Error(), "com.apple.security.hypervisor") ||
+		!strings.Contains(err.Error(), "defenseclaw sandbox doctor") {
+		t.Fatalf("darwin: %v", err)
+	}
+	if err := vmExitFailure("linux", true, vm, exited()); !strings.Contains(err.Error(), "/dev/kvm") ||
+		!strings.Contains(err.Error(), "IT help desk") || strings.Contains(err.Error(), "sandbox doctor") {
+		t.Fatalf("managed linux: %v", err)
+	}
+	if err := vmExitFailure("darwin", false, docker, exited()); strings.Contains(err.Error(), "usual cause") {
+		t.Fatalf("hint on the docker driver: %v", err)
 	}
 }
 

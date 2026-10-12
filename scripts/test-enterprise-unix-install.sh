@@ -138,6 +138,12 @@ if [ "$platform" = linux ]; then
         defenseclaw-hook-guardian.service defenseclaw-hook-enumerator.service defenseclaw-sensor-helper.service)
     detect="$repo/packaging/mdm/linux/detect.sh"
     unit_dir=/usr/lib/systemd/system
+    launcher=/usr/bin/defenseclaw
+    launcher_target=/opt/defenseclaw/bin/defenseclaw-gateway
+    user_unit_dir=/usr/lib/systemd/user
+    sandbox_files=("$user_unit_dir/defenseclaw-sandbox.socket" "$user_unit_dir/defenseclaw-sandbox.service"
+        "$user_unit_dir/defenseclaw-openshell-gateway.service")
+    openshell_config_dir=/etc/defenseclaw/openshell
 else
     install_root=/opt/cisco/defenseclaw
     config_dir=$install_root/etc
@@ -148,6 +154,11 @@ else
     services=(com.cisco.defenseclaw.gateway com.cisco.defenseclaw.hook-guardian
         com.cisco.defenseclaw.hook-enumerator com.cisco.defenseclaw.sensor-helper)
     detect="$repo/packaging/mdm/macos/detect.sh"
+    launcher=/usr/local/bin/defenseclaw
+    launcher_target=$install_root/bin/defenseclaw-gateway
+    sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist
+        /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist)
+    openshell_config_dir=$config_dir/openshell
 fi
 gateway=$install_root/bin/defenseclaw-gateway
 config=$config_dir/config.yaml
@@ -170,6 +181,9 @@ diagnostics() {
     if [ -f "$lifecycle_dir/last-package-result.log" ]; then
         tail -n 40 "$lifecycle_dir/last-package-result.log" >&2 || true
     fi
+    # The lifecycle runs still alive (a lifecycle_busy step names no holder).
+    echo "--- lifecycle runs" >&2
+    ps -A -o pid,ppid,lstart,command 2>/dev/null | grep '[d]efenseclaw-gateway enterprise' >&2 || true
     if [ "$platform" = linux ]; then
         systemctl --no-pager --full status 'defenseclaw*' 2>&1 | tail -n 60 >&2 || true
         journalctl --no-pager -n 80 -u 'defenseclaw*' 2>&1 | tail -n 80 >&2 || true
@@ -297,14 +311,31 @@ directive_minimum() {
 # Any other diagnostic about a DefenseClaw unit, or a failed verify, fails.
 unit_diagnostics() {
     local version unit line key minimum output rc=0 unexpected="" ignored=""
-    local units=()
+    local units=() dir=$unit_dir scope=() runtime="" kind=""
+    # --user: the user units of the per-user sandbox daemon, verified in a
+    # user manager. That manager resolves %t (the socket's ListenStream) from
+    # XDG_RUNTIME_DIR, which root has no value for in a container or under
+    # sudo, and refuses to start without it ("Failed to initialize manager:
+    # No such device or address" on systemd 239 and 252). A scratch runtime
+    # directory stands in for the account's /run/user/<uid>.
+    if [ "${1:-}" = --user ]; then
+        dir=$user_unit_dir
+        scope=(--user)
+        runtime=$(mktemp -d)
+        kind="user "
+    fi
     version=$(systemctl --version | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p')
     [ -n "$version" ] || die "cannot read the systemd version from systemctl --version"
-    for unit in "$unit_dir"/defenseclaw*; do
+    for unit in "$dir"/defenseclaw*; do
         case "$unit" in *.service | *.socket | *.path | *.timer) units+=("$unit") ;; esac
     done
-    [ "${#units[@]}" -gt 0 ] || die "no DefenseClaw units in $unit_dir"
-    output=$(systemd-analyze verify "${units[@]}" 2>&1) || rc=$?
+    [ "${#units[@]}" -gt 0 ] || die "no DefenseClaw units in $dir"
+    if [ -n "$runtime" ]; then
+        output=$(XDG_RUNTIME_DIR=$runtime systemd-analyze "${scope[@]}" verify "${units[@]}" 2>&1) || rc=$?
+        rm -rf "$runtime"
+    else
+        output=$(systemd-analyze verify "${units[@]}" 2>&1) || rc=$?
+    fi
     while IFS= read -r line; do
         case "$line" in *defenseclaw*) ;; *) continue ;; esac
         key=$(printf '%s\n' "$line" |
@@ -319,11 +350,78 @@ unit_diagnostics() {
         printf 'systemd-analyze verify exited %s on systemd %s:\n%s\n' "$rc" "$version" "$output" >&2
         die "unit diagnostics outside the systemd $version allow list:"$'\n'"${unexpected:-  (none; verify failed)}"
     fi
-    echo "${#units[@]} DefenseClaw units load on systemd $version"
+    echo "${#units[@]} DefenseClaw ${kind}units load on systemd $version"
     if [ -n "$ignored" ]; then
         echo "systemd $version ignores these directives (added in a later release):"
         printf '%s' "$ignored" | sort -u | sed 's/^/  /'
     fi
+}
+
+# owner_mode PATH: "<uid>:<gid> <octal mode>" of PATH itself (not its target).
+owner_mode() {
+    if [ "$platform" = linux ]; then
+        stat -c '%u:%g %a' "$1"
+    else
+        stat -f '%u:%g %Lp' "$1"
+    fi
+}
+
+# as_standard_user COMMAND...: run a command as an unprivileged account.
+as_standard_user() {
+    if [ "$platform" = linux ]; then
+        runuser -u nobody -- "$@"
+    else
+        sudo -u nobody "$@"
+    fi
+}
+
+# sandbox_files_present: the package installed the standard user's sandbox
+# launcher (a root-owned link to the gateway), the user units or launch agents
+# of the per-user sandbox daemon (root-owned, writable by root only) and, on
+# Linux, the directory of the rendered OpenShell gateway.toml.
+sandbox_files_present() {
+    local file root_group
+    root_group=0 # root:root, root:wheel
+    [ -L "$launcher" ] || die "$launcher is not a symbolic link"
+    [ "$(readlink "$launcher")" = "$launcher_target" ] || die "$launcher points at '$(readlink "$launcher")', want $launcher_target"
+    [ "$(owner_mode "$launcher" | cut -d' ' -f1)" = "0:$root_group" ] || die "$launcher is not owned by root: $(owner_mode "$launcher")"
+    for file in "${sandbox_files[@]}"; do
+        [ -f "$file" ] && [ ! -L "$file" ] || die "$file is not a regular file"
+        [ "$(owner_mode "$file")" = "0:$root_group 644" ] || die "$file is '$(owner_mode "$file")', want 0:$root_group 644"
+    done
+    if [ "$platform" = linux ]; then
+        [ -d "$openshell_config_dir" ] || die "$openshell_config_dir is missing"
+        [ "$(owner_mode "$openshell_config_dir")" = "0:0 755" ] || die "$openshell_config_dir is '$(owner_mode "$openshell_config_dir")', want 0:0 755"
+    else
+        local agent
+        for agent in "${sandbox_files[@]}"; do
+            plutil -lint "$agent" >/dev/null || die "plutil -lint refuses $agent"
+        done
+    fi
+    echo "sandbox launcher $launcher -> $launcher_target and ${#sandbox_files[@]} user service definitions are in place"
+}
+
+# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent.
+sandbox_files_gone() {
+    local file
+    for file in "$launcher" "${sandbox_files[@]}"; do
+        { [ ! -e "$file" ] && [ ! -L "$file" ]; } || die "$file remains after uninstall"
+    done
+    [ ! -e "$openshell_config_dir" ] || die "$openshell_config_dir remains after uninstall"
+    echo "no sandbox launcher or user service definition is left"
+}
+
+# launcher_offers_only_sandbox: an unprivileged account that runs the launcher
+# is told the computer is managed, and sees the sandbox tree in its help.
+launcher_offers_only_sandbox() {
+    local output rc=0 text="This computer is managed; only \`defenseclaw sandbox\` commands are available here."
+    output=$(as_standard_user "$launcher" status 2>&1) || rc=$?
+    [ "$rc" = 2 ] || die "defenseclaw status exited $rc as a standard user, want 2: $output"
+    [ "$output" = "$text" ] || die "defenseclaw status printed '$output', want '$text'"
+    output=$(as_standard_user "$launcher" --help 2>&1) || die "defenseclaw --help failed as a standard user: $output"
+    grep -Fq "defenseclaw sandbox" <<<"$output" || die "the launcher help does not offer the sandbox commands: $output"
+    ! grep -Eq '^[[:space:]]+(enterprise|setup|status)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
+    echo "defenseclaw offers only the sandbox commands to a standard user"
 }
 
 policy_entries() {
@@ -500,6 +598,8 @@ upgrade_lane() {
     [ "$config_version" = 8 ] || generation_floor=$((previous_generation - 1))
     check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready --complete \
         "${policy_checks[@]}" --policy-applied --config-generation-above "$generation_floor"
+    sandbox_files_present
+    launcher_offers_only_sandbox
     if [ "$config_version" = 8 ]; then
         [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
         [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
@@ -549,7 +649,11 @@ else
     if [ "$platform" = linux ]; then
         step "the packaged units load on this systemd (systemd-analyze verify)"
         unit_diagnostics
+        unit_diagnostics --user
     fi
+    step "the sandbox launcher and the user service definitions are installed"
+    sandbox_files_present
+    launcher_offers_only_sandbox
 
     # ---- reconfigure ---------------------------------------------------------------
     step "ensure with an administrator config that enables Claude Code and Codex"
@@ -608,6 +712,7 @@ elif [ -f "$lifecycle_dir/last-package-result.json" ]; then
     die "the preremove uninstall reported a problem (result kept in $lifecycle_dir)"
 fi
 services_gone
+sandbox_files_gone
 [ ! -e "$gateway" ] || die "$gateway remains after uninstall"
 # The default uninstall removes the machine state too; only --keep-state keeps it.
 [ ! -e "$config" ] || die "$config remains after uninstall"

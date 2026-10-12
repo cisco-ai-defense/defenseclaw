@@ -92,9 +92,6 @@ var (
 	ErrLockBusy = cfgtxn.ErrLockBusy
 	// ErrManaged means the host is managed and the actor may not write.
 	ErrManaged = errors.New("configwrite: this device is managed; policy changes are made in the management plane")
-	// ErrNotImplemented was returned by the frozen stubs. Nothing returns it
-	// now; it stays for callers that compiled against the stub contract.
-	ErrNotImplemented = errors.New("configwrite: not implemented yet")
 )
 
 // Change is one edit. Path is dotted, with [i] for list items, for example
@@ -190,6 +187,35 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		return Result{}, err
 	}
 	return Result{Generation: state.Generation, SHA256: sum}, nil
+}
+
+// ActorUnattributedHandEdit is the actor of a hand edit recorded by a process
+// that cannot tell who wrote the file (the Windows hook guardian, which runs
+// as SYSTEM).
+const ActorUnattributedHandEdit = ActorPrefixHandEdit + "unattributed"
+
+// IsHandEditActor reports whether actor recorded bytes that no config writer
+// wrote (an edit in a text editor, configuration management).
+func IsHandEditActor(actor string) bool { return strings.HasPrefix(actor, ActorPrefixHandEdit) }
+
+// RecordUnrecorded records raw, the bytes now at path, as the next generation
+// when config.generation.json does not record them (a hand edit), with the
+// actor and reason in opt. It takes the writer lock, so a writer in progress
+// records its own generation first, and it records nothing when the file
+// changed again since raw was read (the next reload handles that). recorded
+// says whether a generation was written.
+func RecordUnrecorded(ctx context.Context, path string, raw []byte, opt Options) (recorded bool, err error) {
+	sum := cfgtxn.SHA256Hex(raw)
+	_, err = Locked(ctx, path, opt, func() (bool, error) {
+		current, err := os.ReadFile(path)
+		if err != nil || cfgtxn.SHA256Hex(current) != sum {
+			return false, err
+		}
+		state, err := cfgtxn.ReadGenerationState(path)
+		recorded = err != nil || !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), sum)
+		return recorded, nil
+	})
+	return recorded && err == nil, err
 }
 
 // LockPath returns the writer lock path for a config path.
@@ -333,7 +359,7 @@ var restartKeys = []string{
 	"guardrail.scanner_mode", "guardrail.retain_judge_bodies",
 	"guardrail.hook_self_heal", "guardrail.hook_self_heal_debounce_ms",
 	"claw", "agent", "routing", "plugin_dir",
-	"deployment_mode", "enterprise.profile", "enterprise.network",
+	"deployment_mode", "enterprise.profile", "enterprise.network", "enterprise.openshell",
 	"environment", "tenant_id", "workspace_id", "discovery_source",
 }
 

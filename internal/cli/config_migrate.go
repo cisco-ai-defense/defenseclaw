@@ -39,7 +39,7 @@ import (
 // that the config stays on config_version 8 (issue #1092, GAP-0270).
 var configCmd = &cobra.Command{
 	Use:         "config",
-	Short:       "Migrate config.yaml",
+	Short:       "Migrate or validate config.yaml",
 	Annotations: map[string]string{secureClientHiddenAnnotation: "true"},
 	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 		return nil

@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -311,6 +312,45 @@ func TestLifecycleTestFaultRollsBackOnlyWhenRootOwned(t *testing.T) {
 	}
 	if got := h.read(filepath.Join(h.env.Layout.BinDir, binGateway)); got != "defenseclaw-gateway 2.0.0\n" {
 		t.Fatalf("the previous gateway was not restored: %q", got)
+	}
+}
+
+// The rollback drill on macOS: launchd's bootstrap returns before the job
+// listens (systemd waits for the gateway's READY=1), so the result of the
+// rolled-back upgrade must wait for the restored gateway instead of
+// reporting it not ready.
+func TestRolledBackUpgradeReportsTheRestoredGatewayOnceItAnswers(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	fault := filepath.Join(h.env.Layout.LifecycleDir, testFaultFileName)
+	writeHostFile(t, h, fault, testFaultAfterServices+"\n")
+	if err := os.Chmod(h.env.P(fault), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.owners[h.env.P(fault)] = [2]int{0, 0}
+	// The gateway answers from the third probe after each start.
+	health, starts, probes := h.env.HealthGet, 0, 0
+	h.env.HealthGet = func(ctx context.Context) (int, []byte, error) {
+		h.services.mu.Lock()
+		n := 0
+		for _, call := range h.services.calls {
+			if call == "start "+labelGateway {
+				n++
+			}
+		}
+		h.services.mu.Unlock()
+		if n != starts {
+			starts, probes = n, 0
+		}
+		if probes++; probes < 3 {
+			return 0, nil, errors.New("connection refused")
+		}
+		return health(ctx)
+	}
+	r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("2.0.0")})
+	requireError(t, r, codeLifecycleTestFault)
+	if !hasWarning(r, codeRolledBack) || !r.Readiness.Gateway {
+		t.Fatalf("the rolled-back upgrade must report the restored gateway ready: %+v %+v", r.Readiness, r.Warnings)
 	}
 }
 

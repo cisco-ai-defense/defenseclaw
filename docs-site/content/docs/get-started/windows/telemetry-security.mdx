@@ -107,6 +107,11 @@ Each connector still gets its own credential, separate from the gateway
 token; rotation never prints them or lets one connector use another's. After
 a rotation, restart every agent you set up (fully exit and relaunch Amp) so it uses the new settings.
 
+Rotation refuses a hook credential file that is not private to your account,
+and names the file, the reason and the `icacls` command that makes it private.
+The upgrade from 0.8.x seals the credential files 0.8.x left with the
+permissions they inherited from the folder.
+
 Verify without reading any token:
 
 ```powershell

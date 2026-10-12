@@ -317,8 +317,6 @@ func (a *APIServer) writeAssetListError(w http.ResponseWriter, r *http.Request, 
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, configwrite.ErrConflict):
 		status = http.StatusConflict
-	case errors.Is(err, configwrite.ErrNotImplemented):
-		status = http.StatusNotImplemented
 	}
 	a.writeJSON(w, status, map[string]string{"error": err.Error()})
 }

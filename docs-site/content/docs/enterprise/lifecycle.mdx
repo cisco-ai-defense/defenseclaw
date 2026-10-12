@@ -72,6 +72,12 @@ If you deploy through an MDM, the wrapper scripts run these same actions. See
 
 ## Upgrade
 
+On Linux and macOS, a user's sandbox daemon is not restarted while that user has
+a sandbox running; `ensure` reports "pending restart" and the launcher restarts
+an idle, outdated daemon on the next command. Rollback and uninstall cover the
+sandbox units, the `defenseclaw` launcher and the rendered OpenShell settings.
+See [Upgrade, roll back, uninstall](/docs/enterprise/sandboxes#upgrade-roll-back-uninstall).
+
 ### Windows
 
 Run the new release's Setup with `/ensure`. When the Setup is newer than the
@@ -108,6 +114,16 @@ result to `/var/lib/defenseclaw-enterprise/last-package-result.json`. The
 script never fails the package transaction, so read that file or run `verify`
 afterwards. A later `ensure` or `repair` that applies the deployment removes a
 failed result, so the file never reports a failure that was fixed.
+
+If the computer runs [Tetragon](/docs/enterprise/tetragon), two things follow
+an upgrade. A release that changes a kernel control changes the digest that
+`enterprise.tetragon.enforce_ack` approves, so with `mode: enforce` every user
+falls back to monitor mode (`kernel_enforce_ack_stale`) until the approval
+matches: push the old and the new digest as a list while the rings upgrade
+([Upgrades](/docs/enterprise/tetragon#upgrades)). And the first `ensure` or
+`repair` of a release with Tetragon support applies the sensor helper's new
+unit settings; a computer with no `enterprise.tetragon` block gets no new
+drop-in.
 
 ```bash title="Payload archive"
 VERSION=1.0.0   # the release you deploy
@@ -226,6 +242,13 @@ version 8 file: it applies the installed config.
 - **RHEL.** `dnf` and `rpm` run the installed package's scripts after the
   older files are in place, so only the older package's own preinstall can
   refuse the downgrade.
+- **Tetragon (Linux).** A failed or interrupted `ensure`, upgrade or package
+  install that rolls itself back stops a sensor helper that loaded Tetragon
+  policies, deletes those `defenseclaw-*` policies, and only then puts the
+  previous files back. Your own Tetragon policies are not touched. A
+  deliberate rollback to a release before Tetragon support leaves those
+  policies loaded in Tetragon, so clean them up first; see
+  [Remove the policies, or downgrade](/docs/enterprise/tetragon#remove-the-policies-or-downgrade).
 - **MDM wrapper.** The Linux wrapper installs `.rpm` files with `rpm -U`, so
   it refuses older RHEL packages.
 
@@ -244,6 +267,17 @@ The managed config is administrator-owned. For what it contains, see
 is still running (usually under a minute), they report `lifecycle_busy`, exit
 `75` and say a configuration change is being applied. That is not a failure and needs no repair: run them again when it
 finishes.
+
+**A hand edit of the config is applied, not reported as drift.** When you edit
+the managed `config.yaml` in place as root (keeping its mode and owner), the
+apply trigger picks the change up and runs `ensure`, so after the trigger
+finishes (about 20 seconds on a Mac, usually under a minute) the new file is the
+applied config and `verify` finds nothing to report. An immediate `verify`
+while the trigger runs answers `lifecycle_busy`, not drift. `verify` reports
+drift for the installed files, binaries and entries the config produces, and
+for a rejected edit (`config_rejected`), not for a valid edit of the config
+itself. `ensure --config` with the reviewed file puts the reviewed version
+back and records it as the applied config.
 
 On Linux and macOS you can also hand the new file to `ensure`. It validates the
 file, installs it as the managed config (mode `0640`, owner root, group of the
@@ -563,9 +597,15 @@ included. The Secure Client profile keeps its machine state unless you purge.
 On Linux and macOS, the default uninstall removes the deployment and its
 machine state: the config, credentials, gateway and guardian state, logs,
 lifecycle state and the service account. The root-owned `lifecycle.lock` stays
-in its lifecycle directory so waiting runs keep using the same lock. Each
-user keeps `~/.defenseclaw`
-and the per-user binaries; `--purge` removes those too. Add `--keep-state`
+in its lifecycle directory so waiting runs keep using the same lock. On Linux
+the files in your policies folder, `/etc/defenseclaw/policies`, stay; the
+vendor policies in `/opt/defenseclaw/share/policies` and any policy folder
+left without a file go, and `ensure` writes the vendor policies again. To turn the
+deployment on again with the same config, run `ensure --from-package --config
+<file>` on a package host; a payload uninstall removes the binaries, so stage
+the payload again and run its `ensure --payload <dir> --config <file>`. A purge
+removes the policies. Each user keeps `~/.defenseclaw` and the per-user
+binaries; `--purge` removes those too. Add `--keep-state`
 to keep the machine state for a reinstall instead.
 
 | Install channel | Remove the deployment and machine state, keep each user's data | Remove everything |
@@ -589,6 +629,16 @@ to keep the machine state for a reinstall instead.
   `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux uninstall --purge --json`
   before you remove the package. The MDM `uninstall.sh --purge` does this
   for you.
+- **Tetragon (Linux).** Uninstall deletes the `defenseclaw-*` policies the
+  sensor helper loaded in Tetragon before it removes any file, so no control
+  keeps denying after the helper is gone. With the machine state it then
+  removes the helper's state in `/var/lib/defenseclaw-sensor` (burn-in, a
+  pause and the record of loaded policies) and its runtime directories
+  `/run/defenseclaw-sensor` and `/run/defenseclaw-sensor-tetragon`;
+  `--keep-state` keeps the state. `apt remove` and `dnf remove` run the same
+  cleanup from the package's pre-removal script. Tetragon itself and your own
+  policies stay. See
+  [Remove the policies, or downgrade](/docs/enterprise/tetragon#remove-the-policies-or-downgrade).
 - **Lifecycle uninstall with the Linux package kept.** The package's
   `/usr/lib/tmpfiles.d/defenseclaw.conf` names the `defenseclaw` account the
   uninstall removed, so the uninstall writes an override of the same name in

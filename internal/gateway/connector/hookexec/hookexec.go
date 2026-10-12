@@ -231,6 +231,9 @@ type Options struct {
 	// Event is the agent hook event used for deadlines and failure logs. Claude
 	// Code supplies it in the payload when the CLI flag is omitted.
 	Event string
+	// gatewayRefusal is what a per-user hook the gateway refused with an
+	// error status shows in the agent (perUserRefusalText); doRequest sets it.
+	gatewayRefusal string
 	// HookContractID is the finite Setup-selected connector contract bound into
 	// the protected native Windows command. Codex uses it to prevent local
 	// failure paths from backfilling newer lifecycle controls into legacy tiers.
@@ -736,6 +739,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody))
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		opts.gatewayRefusal = perUserRefusalText(opts, resp.StatusCode, body)
+	}
 	switch {
 	case resp.StatusCode >= 500 && resp.StatusCode < 600:
 		return failUnreachable(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
@@ -760,6 +766,39 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 
 	return sp.decide(opts, body)
+}
+
+// perUserRefusalText is what a per-user hook shows in the agent when the
+// gateway answered it with an error status and its own message
+// ({"error": ...}): the agents that display the structured denial showed
+// only "DefenseClaw hook failed closed", with no cause and no next step,
+// for example after an agent update left its protected hook setup stale
+// (GAP-0159; doctor names the fix). Managed hooks keep their own text, and
+// a body that is not the gateway's JSON keeps the generic one.
+func perUserRefusalText(opts Options, status int, body []byte) string {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
+		return ""
+	}
+	var refusal struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(body, &refusal) != nil {
+		return ""
+	}
+	msg := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, refusal.Error)), " ")
+	if msg == "" {
+		return ""
+	}
+	if len(msg) > 200 {
+		msg = strings.ToValidUTF8(msg[:200], "") + "…"
+	}
+	return fmt.Sprintf("DefenseClaw blocked this %s: the DefenseClaw gateway refused it (HTTP %d: %s). "+
+		"Run `defenseclaw doctor` to see why and how to fix it.", hookEventSubject(opts.Event), status, msg)
 }
 
 // hookBusyRetries is how many times a hook sends its call again after the
@@ -1387,6 +1426,10 @@ func unreachableDetail(opts Options, reason string) string {
 // closed" with no cause or next step (GAP-1337). Managed hooks keep their own
 // text (managedStandaloneFailClosedText).
 func perUserGatewayDownText(opts Options, reason string) string {
+	if opts.gatewayRefusal != "" {
+		// The gateway answered with an error of its own (perUserRefusalText).
+		return opts.gatewayRefusal
+	}
 	if strings.HasPrefix(reason, foreignListenerReasonPrefix) && !opts.ManagedEnterprise {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + reason + "."
 	}
@@ -1442,11 +1485,17 @@ const unixUnenrolledAccountExplanation = "this account is not enrolled in Defens
 	"DefenseClaw enrolls a new account within about five minutes of its first sign-in, so try again then; " +
 	"if this continues, the policy may exclude this account, so ask your administrator"
 
-// unenrolledAccountExplanation is why an unenrolled account's call is blocked.
-const unenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer; the administrator's " +
-	"policy has not enrolled it yet or excludes it. Windows enrolls an account while it is signed in to the desktop " +
-	"(at the console or over Remote Desktop); an SSH, scheduled-task or runas session does not enroll it, so sign " +
-	"in to the desktop once, or ask your administrator if this continues"
+// unenrolledAccountExplanation is why an unenrolled Windows account's call is
+// blocked. It leads with the next step and the wait, because Claude Code
+// shows only the first line's first 80-odd characters (GAP-0385): a new
+// account waited 4-7 minutes behind "this account is not enrolled in
+// DefenseClaw on t...". Enrollment follows the desktop sign-in and, for
+// Claude Code, its first start, which records the build the enumerator
+// verifies; the next cycle (within five minutes) then enrolls the account.
+const unenrolledAccountExplanation = "this account is not enrolled yet; restart the agent in 5 minutes. " +
+	"DefenseClaw enrolls an account within 5 minutes of its desktop sign-in (console or Remote Desktop; " +
+	"not SSH, a scheduled task or runas) and, for Claude Code, of its first start. " +
+	"If this continues, the policy may exclude this account: ask your administrator"
 
 // failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
 // an account the administrator has not enrolled (yet) or excludes, and says
@@ -1473,7 +1522,9 @@ func failUnenrolled(opts Options, sp spec, reason string) int {
 	if sp.connector == "claudecode" && managedStandaloneHook(opts) {
 		return emitManagedClaudeBlock(opts, explanation)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, why, reason)
+	// The agent shows this line as the hook error, cut short: the explanation
+	// leads, and the reason code stays in the hook-failure log (GAP-0385).
+	fmt.Fprintln(opts.Stderr, explanation)
 	if sp.connector == "codex" {
 		return emitCodexBlock(opts, explanation)
 	}
@@ -1578,6 +1629,9 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	}
 	if sp.failOpenOnly || failMode == "open" {
 		return emitHookResult(opts, sp, sp.openAllow)
+	}
+	if opts.gatewayRefusal != "" {
+		return emitPerUserGatewayDown(opts, sp, opts.gatewayRefusal)
 	}
 	return emitHookResult(opts, sp, sp.responseClosed)
 }

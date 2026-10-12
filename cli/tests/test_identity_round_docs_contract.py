@@ -45,7 +45,7 @@ def test_macos_membership_cache_recovery() -> None:
     text = page("guardrail/user-and-group-policies.mdx")
     assert "dscacheutil -flushcache" in text
     assert "dsmemberutil flushcache" in text
-    assert "then restart the gateway" in text
+    assert "then explain the account, restart the gateway, or wait" in text
 
 
 def test_profile_enforcement_matches_install_mode() -> None:

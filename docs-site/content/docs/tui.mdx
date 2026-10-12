@@ -58,7 +58,7 @@ to filter.
 | Key | Panel | What it shows |
 | --- | --- | --- |
 | `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied policy generation and digest](#policy-generation-and-digest), at-a-glance health |
-| `2` | Alerts | Recent guardrail and hook alerts |
+| `2` | Alerts | Recent guardrail and hook alerts. A rule that matched a call it could not decide (a detection-only finding) is not an alert: the panel says how many the last 24 hours had, as `defenseclaw alerts` does, and `defenseclaw audit export --since 24h` lists them. The details of an alert raised in an OpenShell sandbox name it in a **Sandbox** fact |
 | `3` | Skills | Scanned skill inventory, with [block and allow actions](#block-and-allow-from-the-panels) |
 | `4` | MCPs | Scanned MCP servers, with block and allow actions |
 | `5` | Plugins | Installed plugins and their scan results for every connector that has plugins (Amp, Hermes, OpenClaw and others), with block and allow actions |
@@ -74,11 +74,33 @@ to filter.
 | `P` | Policies | The protection center: posture per connector, opt-in packs, chains, rule families, policies, rule packs and sandbox packs ([below](#policies-panel-protection-center)) |
 | `0` | Setup | Setup tasks grouped by goal, and the config editor ([below](#setup-panel)) |
 
+The Alerts panel counts the detection-only findings of the last 24 hours under its summary line. With an alert selected, its details name the OpenShell sandbox that raised it in the **Sandbox** fact:
+
+![DefenseClaw TUI Alerts panel on Linux: the summary line, a line saying 16 detection-only findings of the last 24 hours are not listed, the alert table with a paste-site block selected, and its details with the Sandbox fact myapp-claude](/images/sandboxes/screens/tui-alerts-sandbox.png)
+
 The Overview panel's **AI Agents** metric intentionally excludes `local_model`
 rows so a large model cache cannot hide agent activity. Open **AI Discovery**
 with `V` for the full model inventory; model rows add Model, Model status, and
 Format columns, with recipe, modality, device, byte size, and pinned state in
 the detail view when the source reports them.
+
+What AI discovery finds inside an
+[OpenShell sandbox](/docs/ai-discovery#inside-openshell-sandboxes) is listed
+there too, as its own rows tagged `Product (sandbox NAME)`: the same product on
+your machine and in a sandbox are separate rows, and the detail names the
+sandbox. `defenseclaw agent usage --sandbox NAME` lists one sandbox's.
+
+![DefenseClaw TUI AI Discovery panel with a row for Claude Code on the host and a separate row, Claude Code (sandbox myapp-claude), for what the scan found inside the sandbox](/images/sandboxes/screens/tui-ai-discovery-sandbox.png)
+
+The Runtime panel reads the same gateway as `agent discovery runtime status`.
+It has no Tetragon lines. Only a managed Linux gateway reports Tetragon, and
+the managed Linux packages ship no `defenseclaw` command line or TUI in this
+release. On managed Linux,
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
+prints the kernel sensor, the kernel controls and your own Tetragon policies,
+`enterprise linux tetragon status` the rest, and `defenseclaw-gateway status`
+ends its Subsystems list with a `Kernel sensor:` line; see
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon).
 
 ### IDE plugins
 
@@ -359,6 +381,8 @@ not supported. The
 [macOS app](/docs/macos-app#openshell-sandboxes) shows the same sandboxes in
 its menu bar, notifications and Sandboxes panel.
 
+![DefenseClaw TUI on Windows with the Sandboxes tab open: the panel says OpenShell sandboxes run on Linux and macOS only and that Windows and WSL2 are not supported](/images/sandboxes/screens/tui-sandboxes-windows-unsupported.png)
+
 The header shows the state (`READY`, `OFF`, `WAITING`, `UNAVAILABLE` or
 `UNREACHABLE`), how many sandboxes run, how many asks wait, the gateway with
 its compute driver (`docker`, or `MicroVM` for OpenShell's `vm` driver), and
@@ -427,6 +451,11 @@ what needs attention:
   says it).
 - **orphaned**: the sandbox has no DefenseClaw binding, so its hooks cannot
   authenticate. Delete it and run again.
+- **N alerts**: the alerts raised in the sandbox since it was created, such
+  as a rule's finding on one of its tool calls or a shadow AI
+  destination. The details count them by severity
+  (`Alerts  2 (1 CRITICAL, 1 LOW)`); in Alerts (`2`), `/` and the sandbox name
+  list them, as `defenseclaw alerts` does with `sandbox=NAME`.
 
 The TUI also toasts a blocked destination you can unblock (once per sandbox
 and host per minute), a new ask, hook tamper, hooks that stop or start
@@ -477,9 +506,9 @@ rather than a finished setup.
 | Harnesses (Claude Code, Codex, Amp, Antigravity, GitHub Copilot CLI, Cursor Agent, Devin CLI, Hermes Agent, Kiro CLI, OmniGent, OpenCode, OpenHands) | `--harness <name>` for each one on | The ones in `openshell.harnesses`, else Claude Code and Codex; only harnesses `openshell.admin.allowed_harnesses` allows are listed |
 | Credentials | none | Names the model key `defenseclaw sandbox run` would share with each harness, never its value. It follows `openshell.llm`, as a run without `--llm` does. Under `auto` (the default) that is `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` for Claude Code, and `OPENAI_API_KEY`, `CODEX_API_KEY` or the API key a `codex login --with-api-key` stored in `auth.json` (in `$CODEX_HOME`, else `~/.codex`) for Codex; each list ends with `AWS_BEARER_TOKEN_BEDROCK` for Amazon Bedrock. A ChatGPT login is not shared, so it is not counted. With `none` nothing is shared; with a provider only its key counts, and without it runs are refused |
 | This machine | none | Docker, Landlock, OpenShell and bind-mount status, one per line, from a `sandbox doctor` check that runs when the form opens. When the gateway runs (or is set to run) OpenShell's MicroVM driver, Landlock reads `Landlock (MicroVM)`, and the MicroVM driver's own check (e2fsprogs, the driver's signature) takes the place of the bind-mount line |
-| Install OpenShell | `--install-openshell` | On when OpenShell is missing, its gateway needs attention, or the MicroVM driver's check fails: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` on Linux and installs the `nvidia/openshell` Homebrew formula on macOS. On macOS it also lets setup install e2fsprogs, which the MicroVM driver needs |
+| Install OpenShell | `--install-openshell` | On when OpenShell is missing, its gateway needs attention, or the MicroVM driver's check fails: NVIDIA's pinned, SHA-256-verified installer, which uses `sudo` on Linux and installs the `nvidia/openshell` Homebrew formula on macOS. On macOS it also lets setup install e2fsprogs, which the MicroVM driver needs. Off on OpenShell 0.1.1, whose hint offers the upgrade: on, setup upgrades it to 0.1.2 in place, which restarts the OpenShell gateway (on a Mac only once no MicroVM sandbox runs) |
 | Mount Project Folder | `--no-mounts` when off | On: enables bind mounts on your local OpenShell gateway, and DefenseClaw mounts only the folder you launch from and the read-only settings Claude Code and Codex sandboxes need. Off: no Claude Code or Codex sandbox can start, and other harnesses run on a copy. Turning bind mounts on restarts the OpenShell gateway (see below). Not shown on macOS: setup runs sandboxes there in OpenShell MicroVMs, which mount no host folders, and the form says so under **MicroVMs** |
-| Disable OpenShell Telemetry | `--upstream-telemetry` when off | On. Changing it restarts the OpenShell gateway (see below). Not shown on macOS: the Homebrew gateway does not read `gateway.env`, so setup cannot turn OpenShell's telemetry off there |
+| OpenShell Telemetry Off | `--upstream-telemetry` when off | On: setup turns OpenShell's anonymous usage telemetry off in `gateway.env` (on macOS `~/.config/openshell/gateway.env`, which the Homebrew service reads). Changing it restarts the OpenShell gateway (see below). Not shown for a Mac gateway that no Homebrew service runs: that gateway takes the setting from the environment it was started with |
 | Shell Wrappers | `--wrappers` or `--no-wrappers` | Off. On makes the chosen harnesses' commands (`claude`, `codex`, ...) run sandboxed when you type them |
 | Build Images Now | `--skip-images` when off | On. The first build downloads about 3 GB; off leaves it to the first run |
 

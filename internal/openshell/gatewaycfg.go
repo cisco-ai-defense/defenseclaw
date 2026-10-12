@@ -47,6 +47,10 @@ import (
 const (
 	// GatewayTOMLFile is read by openshell-gateway through XDG discovery.
 	GatewayTOMLFile = "gateway.toml"
+	// GatewayFallbackTOMLFile is the rendered docker configuration a
+	// managed Linux user's gateway starts with when the MicroVM driver is
+	// wanted, KVM does not work for the user and driver_fallback is docker.
+	GatewayFallbackTOMLFile = "gateway-docker.toml"
 	// GatewayEnvFile is the systemd unit's EnvironmentFile; the Homebrew
 	// service's wrapper sources it too.
 	GatewayEnvFile = "gateway.env"
@@ -117,10 +121,12 @@ var (
 	// on a change (Write). Rollback returns it once it has restored the
 	// files.
 	ErrNoGatewayService = errors.New("openshell: no gateway service runs the gateway")
-	// ErrBrewNeedsTerminal means Homebrew refused `brew services` because
-	// the shell runs under tmux: it answers nothing about the gateway
-	// service there (GAP-0274).
-	ErrBrewNeedsTerminal = errors.New("openshell: brew services needs a normal terminal: Homebrew refuses to run it under tmux")
+	// ErrGatewayServiceStopped means the gateway service is installed but
+	// not running. Rollback returns it once it has restored the files,
+	// without the restart, which would start the service: it loads them when
+	// it starts. With another account's gateway on the port, a restart left
+	// the service restarting forever (GAP-0149).
+	ErrGatewayServiceStopped = errors.New("openshell: the gateway service is not running")
 )
 
 // What the MicroVM (vm) driver gives every sandbox when
@@ -209,7 +215,25 @@ type GatewayConfigurator struct {
 	// restarted gateway that does not come up names (Linux; default
 	// ServiceManagerMissesDockerGroup).
 	ServiceDockerGroupMissing func() bool
+	// Rendered, when set, is the root-owned configuration a managed
+	// enterprise lifecycle rendered: the configurator reads it in place of
+	// Dir's gateway.toml and gateway.env and refuses every change
+	// (ErrRenderedGateway). Drift compares what runs against it.
+	Rendered *RenderedPaths
+	// Managed marks a host the administrator's DefenseClaw lifecycle
+	// manages: what the MicroVM driver lacks is the administrator's to
+	// provide, so fix hints name enterprise.openshell, not Homebrew. A
+	// Rendered configuration implies it.
+	Managed bool
+	// AccountVM, with Rendered, is the identity the account's gateway runs
+	// MicroVM workloads as: the exec shim starts it with AccountVMEnvironment,
+	// which overrides the rendered file, so Read reports it in place of the
+	// file's (GAP-0254).
+	AccountVM *VMIdentity
 }
+
+// managedHost reports whether the gateway belongs to a managed host.
+func (g *GatewayConfigurator) managedHost() bool { return g != nil && (g.Managed || g.Rendered != nil) }
 
 // gatewayExecutable is the openshell-gateway that preflights gateway.toml:
 // the one on PATH (its bare name, as an install puts it there), else the
@@ -330,6 +354,9 @@ func (g *GatewayConfigurator) EnvPath() (string, error) {
 	if err := g.defaults(); err != nil {
 		return "", err
 	}
+	if g.Rendered != nil {
+		return g.Rendered.Env, nil
+	}
 	return g.homebrewFallback(filepath.Join(g.Dir, GatewayEnvFile), GatewayEnvFile)
 }
 
@@ -342,6 +369,9 @@ func (g *GatewayConfigurator) TOMLPath() (string, error) {
 	envPath, err := g.EnvPath()
 	if err != nil {
 		return "", err
+	}
+	if g.Rendered != nil {
+		return g.Rendered.TOML, nil
 	}
 	data, _, _, err := g.readConfigFile(envPath)
 	if err != nil {
@@ -386,6 +416,10 @@ func (g *GatewayConfigurator) homebrewFallback(dirFile, name string) (string, er
 // prefix several macOS accounts share): it is read, never written, and a
 // change goes to a copy in Dir, which the service reads from then on.
 func (g *GatewayConfigurator) readConfigFile(path string) (data []byte, info fs.FileInfo, foreign bool, err error) {
+	if g.Rendered != nil && (path == g.Rendered.TOML || path == g.Rendered.Env) {
+		data, info, err = readRenderedFile(path)
+		return data, info, false, err
+	}
 	data, info, err = readGatewayFile(path)
 	if !errors.Is(err, errForeignGatewayFile) {
 		return data, info, false, err
@@ -435,6 +469,18 @@ type GatewayConfigState struct {
 	VM VMConfig `json:"vm"`
 	// server holds the gateway.toml listener and authentication settings.
 	server gatewayServer
+	// docker holds the images the docker driver starts with
+	// (RuntimeImages).
+	docker dockerRuntime
+}
+
+// dockerRuntime is what [openshell.drivers.docker] in gateway.toml says
+// about the images OpenShell's docker driver starts with: each one set
+// replaces a default image of the gateway's release.
+type dockerRuntime struct {
+	// SupervisorImage is supervisor_image, SandboxRuntimeImage
+	// sandbox_runtime_image and SupervisorBin supervisor_bin.
+	SupervisorImage, SandboxRuntimeImage, SupervisorBin string
 }
 
 // Driver is the compute driver the configuration selects, and false when
@@ -606,6 +652,9 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 						ResourceAdmission struct {
 							Enabled *bool `toml:"enabled"`
 						} `toml:"resource_admission"`
+						SupervisorImage     string `toml:"supervisor_image"`
+						SandboxRuntimeImage string `toml:"sandbox_runtime_image"`
+						SupervisorBin       string `toml:"supervisor_bin"`
 					} `toml:"docker"`
 					VM struct {
 						SandboxUID     *int64 `toml:"sandbox_uid"`
@@ -629,9 +678,14 @@ func (g *GatewayConfigurator) Read() (*GatewayConfigState, error) {
 		if d.ResourceAdmission.Enabled != nil {
 			st.BindMounts.ResourceAdmission = *d.ResourceAdmission.Enabled
 		}
+		st.docker = dockerRuntime{SupervisorImage: d.SupervisorImage, SandboxRuntimeImage: d.SandboxRuntimeImage, SupervisorBin: d.SupervisorBin}
 		st.VM = VMConfig(doc.OpenShell.Drivers.VM)
 	}
 	st.overrideFromEnv()
+	if g.Rendered != nil && g.AccountVM != nil {
+		uid, gid := g.AccountVM.UID, g.AccountVM.GID
+		st.VM.SandboxUID, st.VM.SandboxGID = &uid, &gid
+	}
 	return st, nil
 }
 
@@ -676,6 +730,13 @@ type GatewayChanges struct {
 	// ([openshell.drivers.vm] vcpus, mem_mib, overlay_disk_mib); zero
 	// fields are left alone.
 	VMResources *VMResources
+	// ServiceUMask gives the gateway service this umask ("0022") through a
+	// systemd drop-in of its user unit, whichever file the unit is (the
+	// package's under /usr/lib/systemd/user, or one of the user's that
+	// shadows it in ~/.config/systemd/user), for the MicroVM driver on
+	// Linux (see ServiceUMask). Nothing is planned without a unit
+	// (systemd only).
+	ServiceUMask string
 	// Env sets gateway.env entries (e.g. EnvTelemetryEnabled=false). The
 	// plan summary prints the values, so they must not be secrets.
 	Env map[string]string
@@ -767,6 +828,9 @@ type GatewayPlan struct {
 	// configuration selected before (docker when it named none).
 	ComputeDriver ComputeDriver `json:"compute_driver,omitempty"`
 	FromDriver    ComputeDriver `json:"from_driver,omitempty"`
+	// ServiceUMask is the umask the plan gives the gateway service (a
+	// drop-in): Apply checks that the restarted service runs with it.
+	ServiceUMask string `json:"service_umask,omitempty"`
 	// Manual marks a plan for a gateway that no gateway service runs
 	// (DoctorReport.GatewayUnmanaged), which the caller sets: Write writes
 	// it, and the gateway loads it once its operator restarts it.
@@ -806,7 +870,7 @@ func (p *GatewayPlan) String() string {
 			fmt.Fprintf(&b, "  edit %s (a timestamped backup is kept)\n", f.Path)
 		}
 		for _, s := range f.Summary {
-			fmt.Fprintf(&b, "    set %s\n", s)
+			fmt.Fprintf(&b, "    %s\n", summaryLine(s))
 		}
 		if !f.TOML {
 			// gateway.env may hold credentials: show only the summary.
@@ -826,17 +890,31 @@ func (p *GatewayPlan) String() string {
 	switch {
 	case p.Manual && p.switchesDriver():
 		fmt.Fprintf(&b, "  then you restart the gateway, the way you started it, on the %s compute driver (DefenseClaw cannot restart it), which stops every sandbox on it%s; "+
-			"sandboxes made on the %s driver cannot start again unless it is switched back (one gateway runs one driver)\n", p.ComputeDriver, flushFirst, p.FromDriver)
+			"sandboxes made on the %s driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back\n", p.ComputeDriver, flushFirst, p.FromDriver)
 	case p.Manual:
 		b.WriteString("  then you restart the gateway, the way you started it, so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it" +
 			flushFirst + "\n")
 	case p.switchesDriver():
 		fmt.Fprintf(&b, "  then restart the gateway (%s) on the %s compute driver; running sandboxes stop, and sandboxes "+
-			"made on the %s driver cannot start again unless it is switched back (one gateway runs one driver)\n", p.Restart, p.ComputeDriver, p.FromDriver)
+			"made on the %s driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back\n", p.Restart, p.ComputeDriver, p.FromDriver)
 	default:
 		fmt.Fprintf(&b, "  then restart the gateway (%s); running sandboxes restart with it\n", p.Restart)
 	}
 	return b.String()
+}
+
+// summaryLine is one change of a plan's file: "set KEY = VALUE", or
+// "remove KEY" for a gateway.env variable it drops (editEnvFile's
+// "unset KEY"), saying what that leaves.
+func summaryLine(s string) string {
+	k, ok := strings.CutPrefix(s, "unset ")
+	switch {
+	case !ok:
+		return "set " + s
+	case k == EnvTelemetryEnabled:
+		return "remove " + k + " (OpenShell's usage telemetry stays on, its default)"
+	}
+	return "remove " + k
 }
 
 // Plan computes the changes without touching anything. On Linux it first
@@ -847,12 +925,15 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 	if err := g.defaults(); err != nil {
 		return nil, err
 	}
+	if g.Rendered != nil {
+		return nil, ErrRenderedGateway
+	}
 	plan := &GatewayPlan{Restart: strings.Join(g.restartCommand().argv(), " ")}
 	settings, err := ch.tomlSettings()
 	if err != nil {
 		return nil, err
 	}
-	if len(settings) == 0 && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 {
+	if len(settings) == 0 && len(ch.Env) == 0 && len(ch.UnsetEnv) == 0 && ch.ServiceUMask == "" {
 		return plan, nil
 	}
 	env, err := g.serviceEnvironment(ctx)
@@ -926,10 +1007,101 @@ func (g *GatewayConfigurator) Plan(ctx context.Context, ch GatewayChanges) (*Gat
 			plan.Files = append(plan.Files, fc)
 		}
 	}
+	if ch.ServiceUMask != "" {
+		fc, err := g.planUnitUMask(ctx, ch.ServiceUMask)
+		if err != nil {
+			return nil, err
+		}
+		if fc != nil {
+			plan.Files = append(plan.Files, fc)
+			plan.ServiceUMask = ch.ServiceUMask
+		}
+	}
 	if plan.Empty() {
 		plan.ComputeDriver, plan.FromDriver = "", ""
 	}
 	return plan, nil
+}
+
+// unitUMask is a umask as systemd's UMask= takes it.
+var unitUMask = regexp.MustCompile(`^0?[0-7]{3}$`)
+
+// unitDropInPath is the drop-in DefenseClaw gives the gateway's user unit
+// (the unit file itself is left alone, wherever it is: the package's
+// /usr/lib/systemd/user/openshell-gateway.service, or a copy of the user's
+// in ~/.config/systemd/user that shadows it, which a drop-in applies to
+// either way).
+func (g *GatewayConfigurator) unitDropInPath() string {
+	return filepath.Join(filepath.Dir(g.Dir), "systemd", "user", GatewayService+".service.d", vmUnitDropIn)
+}
+
+// unitDropInSuffix marks a path as a systemd drop-in directory's file.
+const unitDropInSuffix = ".service.d"
+
+// planUnitUMask plans the drop-in that gives the gateway service umask;
+// nil when it already has it, or when no service exists to give it to.
+//
+// Side effect to document: with 0022, everything the gateway creates under
+// the user's state directory is group- and other-readable by default (the
+// directory holding it stays as private as the home: 0700 on RHEL, 0750 on
+// Ubuntu). It is the workaround for NVIDIA/OpenShell#4014, which makes the
+// driver's guest directories follow the service umask.
+func (g *GatewayConfigurator) planUnitUMask(ctx context.Context, umask string) (*FileChange, error) {
+	if g.GOOS != "linux" {
+		return nil, fmt.Errorf("openshell: a service umask is a systemd setting, and this host's service manager is %s's", g.GOOS)
+	}
+	if !unitUMask.MatchString(umask) {
+		return nil, fmt.Errorf("openshell: %q is not a umask (an octal number such as 0022)", umask)
+	}
+	if g.NoService(ctx) {
+		return nil, nil
+	}
+	path := g.unitDropInPath()
+	before, info, err := readGatewayFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if info == nil {
+		before = nil
+	}
+	after := []byte("# Written by DefenseClaw. The OpenShell MicroVM driver builds each guest's root disk from directories\n" +
+		"# created with the gateway's umask; a stricter one than 0022 makes every MicroVM fail to start.\n" +
+		"[Service]\nUMask=" + umask + "\n")
+	if info != nil && bytes.Equal(before, after) {
+		return nil, nil
+	}
+	return &FileChange{Path: path, Before: before, After: after, Summary: []string{"UMask=" + umask + " for the " + GatewayService + " service (a systemd drop-in)"}}, nil
+}
+
+// checkServiceUMask checks that the restarted service runs with umask.
+func (g *GatewayConfigurator) checkServiceUMask(ctx context.Context, umask string) error {
+	st, err := g.ServiceState(ctx)
+	if err != nil {
+		return err
+	}
+	// A looser umask than planned (0002 for 0022) hides nothing from the
+	// guest; only a stricter one fails. A umask that is not reported is not
+	// wrong either: the plan cannot be told apart from a manager that does
+	// not print it.
+	if !UMaskTooStrict(st.UMask) {
+		return nil
+	}
+	return fmt.Errorf("openshell: the restarted %s service runs with umask %s, not %s: another setting overrides the drop-in (drop-ins applied: %s)",
+		GatewayService, st.UMask, umask, strings.Join(st.DropIns, ", "))
+}
+
+// reloadUnits tells the systemd user manager to read the unit files again
+// when files include a drop-in of a unit (a restart does not).
+func (g *GatewayConfigurator) reloadUnits(ctx context.Context, files []AppliedFile) error {
+	for _, f := range files {
+		if strings.HasSuffix(filepath.Base(filepath.Dir(f.Path)), unitDropInSuffix) {
+			if out, err := g.Runner.Output(ctx, Command{Name: "systemctl", Args: []string{"--user", "daemon-reload"}, Timeout: 30 * time.Second}); err != nil {
+				return fmt.Errorf("openshell: systemctl --user daemon-reload: %v: %s", err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		}
+	}
+	return nil
 }
 
 // newGatewayTOML starts a gateway.toml that does not exist yet.
@@ -1031,6 +1203,9 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if err := g.defaults(); err != nil {
 		return nil, err
 	}
+	if g.Rendered != nil {
+		return nil, ErrRenderedGateway
+	}
 	res := &GatewayApplyResult{}
 	if plan.Empty() {
 		return res, nil
@@ -1048,6 +1223,9 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if err := g.writeFiles(res, plan); err != nil {
 		return res, g.rollbackAfter(ctx, res, err, false)
 	}
+	if err := g.reloadUnits(ctx, res.Files); err != nil {
+		return res, g.rollbackAfter(ctx, res, err, false)
+	}
 	// The restart stops every sandbox on the gateway: their disks are
 	// flushed first where its driver's stop would not keep what they
 	// wrote, and one that cannot be flushed refuses it.
@@ -1060,6 +1238,13 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 	if plan.BindMounts {
 		// Check again against the gateway that now honours bind mounts.
 		if err := g.requirePrivateGateway(ctx, env); err != nil {
+			return res, g.rollbackAfter(ctx, res, err, true)
+		}
+	}
+	if plan.ServiceUMask != "" {
+		// A later drop-in (or a unit setting systemd applies after ours) can
+		// still set another UMask=: the service must run with ours.
+		if err := g.checkServiceUMask(ctx, plan.ServiceUMask); err != nil {
 			return res, g.rollbackAfter(ctx, res, err, true)
 		}
 	}
@@ -1088,6 +1273,9 @@ func (g *GatewayConfigurator) Write(ctx context.Context, plan *GatewayPlan) (*Ga
 	if err := g.defaults(); err != nil {
 		return nil, err
 	}
+	if g.Rendered != nil {
+		return nil, ErrRenderedGateway
+	}
 	res := &GatewayApplyResult{}
 	if plan.Empty() {
 		return res, nil
@@ -1100,7 +1288,7 @@ func (g *GatewayConfigurator) Write(ctx context.Context, plan *GatewayPlan) (*Ga
 		return nil, err
 	}
 	if err := g.writeFiles(res, plan); err != nil {
-		if rerr := g.restore(res); rerr != nil {
+		if rerr := g.restore(ctx, res); rerr != nil {
 			return res, fmt.Errorf("%w; restoring the previous configuration also failed: %v", err, rerr)
 		}
 		return res, fmt.Errorf("%w (the previous configuration was restored)", err)
@@ -1240,20 +1428,9 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 	if a := s.Auth.AllowUnauthenticatedUsers; a != nil && *a {
 		issues = append(issues, "[openshell.gateway.auth] allow_unauthenticated_users is on")
 	}
-	host, port := "127.0.0.1", strconv.Itoa(defaultGatewayPort)
-	if s.BindAddress != "" {
-		h, p, err := net.SplitHostPort(s.BindAddress)
-		if err != nil {
-			return fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, s.BindAddress, st.TOMLPath)
-		}
-		host, port = h, p
-	}
-	// An empty variable counts as unset, as it does for the gateway.
-	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
-		host = v
-	}
-	if v := strings.TrimSpace(env[envServerPort]); v != "" {
-		port = v
+	host, port, err := st.listenAddress(env)
+	if err != nil {
+		return err
 	}
 	if !isLoopbackHost(host) {
 		issues = append(issues, fmt.Sprintf("the gateway listens on %q, beyond this machine", host))
@@ -1277,6 +1454,26 @@ func gatewayExposure(reg *Registration, st *GatewayConfigState, env map[string]s
 	return nil
 }
 
+// listenAddress is where the gateway listens: gateway.toml's bind_address
+// (default 127.0.0.1:17670), then OPENSHELL_BIND_ADDRESS and
+// OPENSHELL_SERVER_PORT in env.
+func (s *GatewayConfigState) listenAddress(env map[string]string) (host, port string, err error) {
+	host, port = "127.0.0.1", strconv.Itoa(defaultGatewayPort)
+	if b := s.server.BindAddress; b != "" {
+		if host, port, err = net.SplitHostPort(b); err != nil {
+			return "", "", fmt.Errorf("%w: bind_address %q in %s is not ip:port", ErrGatewayMismatch, b, s.TOMLPath)
+		}
+	}
+	// An empty variable counts as unset, as it does for the gateway.
+	if v := strings.TrimSpace(env[envBindAddress]); v != "" {
+		host = v
+	}
+	if v := strings.TrimSpace(env[envServerPort]); v != "" {
+		port = v
+	}
+	return host, port, nil
+}
+
 // envFlag reads a boolean flag variable the way the gateway's command
 // line parser does: anything but an empty or false-like value is true.
 func envFlag(v string) bool {
@@ -1290,7 +1487,7 @@ func envFlag(v string) bool {
 // rollbackAfter restores what Apply wrote after cause, restarting the
 // gateway again when it was already restarted with the new files.
 func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApplyResult, cause error, restart bool) error {
-	if err := g.restore(res); err != nil {
+	if err := g.restore(ctx, res); err != nil {
 		return fmt.Errorf("%w; restoring the previous configuration also failed: %v", cause, err)
 	}
 	if restart {
@@ -1316,7 +1513,8 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 // Rollback restores the files an Apply (or a Write) wrote and restarts the
 // gateway. With no gateway service to restart it through, it restores the
 // files and returns ErrNoGatewayService: the gateway, run another way,
-// loads them once its operator restarts it.
+// loads them once its operator restarts it. With a service that is not
+// running, it restores them and returns ErrGatewayServiceStopped.
 func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyResult) error {
 	if err := g.defaults(); err != nil {
 		return err
@@ -1325,10 +1523,21 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 		return nil
 	}
 	if g.NoService(ctx) {
-		if err := g.restore(res); err != nil {
+		if err := g.restore(ctx, res); err != nil {
 			return err
 		}
 		return ErrNoGatewayService
+	}
+	// A stopped systemd service starts on the restored files (Homebrew's
+	// state is not asked: `brew services info` is slow).
+	if g.GOOS != "darwin" {
+		if svc, err := g.ServiceState(ctx); err == nil && svc.Installed && !svc.Active {
+			if err := g.restore(ctx, res); err != nil {
+				return err
+			}
+			g.clearRestartPending()
+			return ErrGatewayServiceStopped
+		}
 	}
 	// Before anything changes: a sandbox that cannot be flushed refuses
 	// the restart.
@@ -1338,7 +1547,7 @@ func (g *GatewayConfigurator) Rollback(ctx context.Context, res *GatewayApplyRes
 	if err := g.markRestartPending(); err != nil {
 		return err
 	}
-	if err := g.restore(res); err != nil {
+	if err := g.restore(ctx, res); err != nil {
 		return err
 	}
 	return g.restart(ctx)
@@ -1382,8 +1591,12 @@ func (g *GatewayConfigurator) clearRestartPending() {
 	_ = os.Remove(g.restartPendingPath())
 }
 
-func (g *GatewayConfigurator) restore(res *GatewayApplyResult) error {
+func (g *GatewayConfigurator) restore(ctx context.Context, res *GatewayApplyResult) error {
 	var errs []error
+	defer func() {
+		// A systemd drop-in put back is not read until the manager reloads.
+		_ = g.reloadUnits(ctx, res.Files)
+	}()
 	for i := len(res.Files) - 1; i >= 0; i-- {
 		f := res.Files[i]
 		if f.Backup == "" {
@@ -1611,6 +1824,13 @@ type ServiceState struct {
 	// EnvironmentFiles are the files systemd loads the service's
 	// environment from, in order (systemd only).
 	EnvironmentFiles []string `json:"environment_files,omitempty"`
+	// UMask is the umask the service runs with, as systemd prints it
+	// ("0022"; empty: not reported). A MicroVM gateway needs one no
+	// stricter than 0022 (systemd only).
+	UMask string `json:"umask,omitempty"`
+	// DropIns are the unit's drop-in files, in the order systemd applies
+	// them (systemd only).
+	DropIns []string `json:"drop_ins,omitempty"`
 	// Environment is what the service starts with before its
 	// EnvironmentFiles: the user manager's environment overlaid with the
 	// unit's Environment= settings, limited to HOME, XDG_CONFIG_HOME and
@@ -1632,7 +1852,7 @@ func (g *GatewayConfigurator) ServiceState(ctx context.Context) (*ServiceState, 
 	}
 	st := &ServiceState{Manager: "systemd", Unit: GatewayService}
 	out, err := g.Runner.Output(ctx, Command{Name: "systemctl", Args: []string{"--user", "show", GatewayService, "--timestamp=us+utc",
-		"-p", "LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp,Environment,EnvironmentFiles"}, Timeout: 30 * time.Second})
+		"-p", "LoadState,ActiveState,SubState,UnitFileState,ActiveEnterTimestamp,Environment,EnvironmentFiles,UMask,DropInPaths"}, Timeout: 30 * time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("openshell: systemctl --user show %s: %v: %s", GatewayService, err, strings.TrimSpace(string(out)))
 	}
@@ -1656,6 +1876,8 @@ func (g *GatewayConfigurator) ServiceState(ctx context.Context) (*ServiceState, 
 	// Only "enabled" survives a reboot: "linked" units have no Wants
 	// symlink, and "enabled-runtime" ones lose theirs with /run.
 	st.Enabled = props["UnitFileState"] == "enabled"
+	st.UMask = props["UMask"]
+	st.DropIns = strings.Fields(props["DropInPaths"])
 	st.Status = strings.TrimSpace(props["ActiveState"] + " (" + props["SubState"] + ")")
 	if t, err := time.Parse(systemdTimestamp, props["ActiveEnterTimestamp"]); err == nil {
 		st.StartedAt = t
@@ -1869,10 +2091,7 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 	}
 	out, err := g.Runner.Output(ctx, Command{Name: g.BrewCommand(), Args: []string{"services", "info", GatewayFormula, "--json"}, Env: brewQuietEnv, Timeout: time.Minute})
 	if err != nil {
-		if bytes.Contains(out, []byte("cannot run under tmux")) {
-			return nil, ErrBrewNeedsTerminal
-		}
-		return nil, fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, brewErrorLine(out))
+		return nil, brewServicesError(err, out)
 	}
 	var infos []struct {
 		Running    bool   `json:"running"`
@@ -1881,45 +2100,68 @@ func (g *GatewayConfigurator) brewServiceState(ctx context.Context) (*ServiceSta
 		File       string `json:"file"`
 		Registered bool   `json:"registered"`
 	}
-	if err := json.NewDecoder(bytes.NewReader(jsonArrayFrom(out))).Decode(&infos); err != nil || len(infos) == 0 {
+	// Homebrew may print warnings and hints first ("Warning: running
+	// through sudo, using user/* instead of gui/* domain!" in a shell from
+	// sudo -iu): the answer is the JSON array after them.
+	if err := json.NewDecoder(bytes.NewReader(jsonArrayStart(out))).Decode(&infos); err != nil || len(infos) == 0 {
 		return nil, fmt.Errorf("openshell: brew services info %s: unexpected output %q", GatewayFormula, strings.TrimSpace(string(out)))
 	}
 	i := infos[0]
 	st.Installed = i.File != "" || i.Loaded || i.Registered
-	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, i.Status
+	st.Active, st.Enabled, st.Status = i.Running, i.Loaded || i.Registered, brewStatusText(i.Status)
 	return st, nil
 }
 
-// brewErrorLine is the error brew printed, without the usage text it
-// prints after an error: its first "Error:" line, else its first line.
-func brewErrorLine(out []byte) string {
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "Error:") {
-			return strings.TrimSpace(line)
-		}
-	}
-	return strings.TrimSpace(lines[0])
-}
+// ErrBrewServicesTmux marks `brew services` refusing to run in a tmux
+// session that has no access to the account's macOS login session (a tmux
+// server started over ssh, for one): Homebrew checks that with pbpaste.
+var ErrBrewServicesTmux = errors.New("`brew services` refuses to run in a tmux session that has no access to this account's macOS login session")
 
 // brewQuietEnv turns off the warning Homebrew prints before the JSON of
 // `brew services info --json` when it runs through sudo (an administrator
 // who switched to the user with sudo -u) and its environment hints.
 var brewQuietEnv = []string{"HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1", "HOMEBREW_NO_ENV_HINTS=1"}
 
-// jsonArrayFrom is out from the first line that starts a JSON array: the
-// command's output is its stdout and stderr together, so a warning or a
-// hint can come before the JSON (and after it, which a decoder ignores).
-func jsonArrayFrom(out []byte) []byte {
-	for rest := out; len(rest) > 0; {
-		if bytes.HasPrefix(bytes.TrimLeft(rest, " \t"), []byte("[")) {
-			return rest
+// brewServicesError is a failed `brew services info` in one line:
+// Homebrew's own "Error:" line, not the usage text it prints first
+// (GAP-0192).
+func brewServicesError(err error, out []byte) error {
+	msg := strings.TrimSpace(string(out))
+	for _, line := range strings.Split(msg, "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "Error:"); ok {
+			msg = strings.TrimSpace(rest)
 		}
-		nl := bytes.IndexByte(rest, '\n')
-		if nl < 0 {
-			break
+	}
+	if strings.Contains(msg, "cannot run under tmux") {
+		return fmt.Errorf("openshell: brew services info %s: %w", GatewayFormula, ErrBrewServicesTmux)
+	}
+	return fmt.Errorf("openshell: brew services info %s: %v: %s", GatewayFormula, err, msg)
+}
+
+// brewStatusText says a `brew services` status in words: "none" is a
+// service launchd has not loaded, so not running.
+func brewStatusText(status string) string {
+	switch status {
+	case "none", "":
+		return "not running (not loaded)"
+	case "error":
+		return "failing (see `brew services info " + GatewayFormula + "`)"
+	}
+	return status
+}
+
+// jsonArrayStart is out from its first line that starts a JSON array (all
+// of out when none does).
+func jsonArrayStart(out []byte) []byte {
+	for i := 0; i < len(out); {
+		line := out[i:]
+		if j := bytes.IndexByte(line, '\n'); j >= 0 {
+			line = line[:j+1]
 		}
-		rest = rest[nl+1:]
+		if t := bytes.TrimLeft(line, " \t"); len(t) > 0 && t[0] == '[' {
+			return out[i:]
+		}
+		i += len(line)
 	}
 	return out
 }
@@ -2001,11 +2243,25 @@ func readGatewayFileOf(path string, foreign bool) ([]byte, fs.FileInfo, error) {
 		return nil, nil, fmt.Errorf("openshell: %s %w", path, errForeignGatewayFile)
 	}
 	data, err := safefile.ReadRegularFileBounded(path, maxGatewayFileBytes)
+	if foreign && errors.Is(err, fs.ErrPermission) {
+		// The Homebrew prefix's copy of the account that set the prefix
+		// up, private to it (GAP-0191): its gateway is that account's.
+		owner := ownerName(info)
+		if owner == "" {
+			owner = "another account"
+		}
+		return nil, nil, fmt.Errorf("openshell: %s belongs to %s: %w", path, owner, ErrForeignGatewayConfig)
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("openshell: read %s: %w", path, err)
 	}
 	return data, info, nil
 }
+
+// ErrForeignGatewayConfig marks a gateway configuration of another account
+// that this one may not read: on a Mac whose Homebrew prefix that account
+// set up, the gateway (one runs on a machine) is that account's.
+var ErrForeignGatewayConfig = errors.New("this account may not read another account's gateway configuration")
 
 var envAssignment = regexp.MustCompile(`^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$`)
 

@@ -25,6 +25,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -53,11 +54,16 @@ func (CLI) Getenv(key string) string { return os.Getenv(key) }
 
 // Run implements Docker.
 func (c CLI) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
-	binary := c.Binary
+	binary, extra := c.Binary, []string(nil)
 	if binary == "" {
-		binary = "docker"
+		binary, extra = DockerBinary(runtime.GOOS, exec.LookPath, os.Stat)
 	}
 	cmd := processutil.CommandContext(ctx, binary, args...)
+	if len(extra) > 0 {
+		// docker runs its plugins and credential helpers (buildx,
+		// docker-credential-desktop) from its own folder.
+		cmd.Env = append(os.Environ(), "PATH="+strings.Join(append([]string{os.Getenv("PATH")}, extra...), string(os.PathListSeparator)))
+	}
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -69,6 +75,37 @@ func (c CLI) Run(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer,
 		return fmt.Errorf("docker %s: %w", firstArg(args), err)
 	}
 	return nil
+}
+
+// dockerInstalls are where docker is installed outside the PATH a service
+// runs with. A macOS LaunchAgent's PATH is /usr/bin:/bin:/usr/sbin:/sbin,
+// and Docker Desktop links docker into /usr/local/bin. Without these, the
+// managed Mac's sandbox daemon could not build a harness image (GAP-0443).
+var dockerInstalls = map[string][]string{
+	"darwin": {"/usr/local/bin/docker", "/opt/homebrew/bin/docker", "/Applications/Docker.app/Contents/Resources/bin/docker"},
+	"linux":  {"/usr/bin/docker", "/usr/local/bin/docker"},
+}
+
+// DockerBinary is the docker CLI to run: the PATH's, else the first of
+// dockerInstalls that exists, with the folders its plugins and credential
+// helpers are in (its own and its link target's) for the PATH it runs with.
+// "docker" when there is none, which fails as before.
+func DockerBinary(goos string, lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) (string, []string) {
+	if path, err := lookPath("docker"); err == nil {
+		return path, nil
+	}
+	for _, path := range dockerInstalls[goos] {
+		info, err := stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		dirs := []string{filepath.Dir(path)}
+		if real, err := filepath.EvalSymlinks(path); err == nil && filepath.Dir(real) != dirs[0] {
+			dirs = append(dirs, filepath.Dir(real))
+		}
+		return path, dirs
+	}
+	return "docker", nil
 }
 
 // CommandError reports a docker command that exited non-zero.

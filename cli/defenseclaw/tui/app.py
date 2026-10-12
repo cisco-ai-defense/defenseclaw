@@ -2946,6 +2946,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
         if panel == "sandboxes":
+            self.sandbox_model.shown()
             self._schedule_sandbox_poll()
         if panel == "policies":
             model = self.policy_model
@@ -5070,19 +5071,24 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                 ("p", "Expand / collapse the plane list"),
                 ("r", "Refresh"),
             ],
-            "sandboxes": [
-                ("j/k or Up/Down", "Navigate the selected view"),
-                ("t", "Switch Sandboxes / Activity / Asks"),
-                ("Enter", "Open the highlighted row"),
-                ("u", "Unblock the selected sandbox's blocked destination (this sandbox or always)"),
-                ("a / A / x", "Approve / always approve / reject an ask"),
-                ("c / n", "Connect / new run (the harness gets the terminal)"),
-                ("s / d", "Stop / delete the sandbox (both ask first)"),
-                ("U / R", "Undo the session / review its changes"),
-                ("P", "Pull a copy's work back (show, apply or branch); U then reverts the last apply"),
-                ("w", "Sandboxed on/off for claude and codex (shell wrapper)"),
-                ("r", "Refresh"),
-            ],
+            "sandboxes": (
+                [
+                    ("j/k or Up/Down", "Navigate the selected view"),
+                    ("t", "Switch Sandboxes / Activity / Asks"),
+                    ("Enter", "Open the highlighted row"),
+                    ("u", "Unblock the selected sandbox's blocked destination (this sandbox or always)"),
+                    ("a / A / x", "Approve / always approve / reject an ask"),
+                    ("c / n", "Connect / new run (the harness gets the terminal)"),
+                    ("s / d", "Stop / delete the sandbox (both ask first)"),
+                    ("U / R", "Undo the session / review its changes"),
+                    ("P", "Pull a copy's work back (show, apply or branch); U then reverts the last apply"),
+                    ("w", "Sandboxed on/off for claude and codex (shell wrapper)"),
+                    ("e", "On a managed computer: your own sandbox policy (what is required, allowed and blocked for you)"),
+                    ("r", "Refresh"),
+                ]
+                if self._sandbox_supported()
+                else [("(no panel-specific shortcuts)", "OpenShell sandboxes run on Linux and macOS only")]
+            ),
             "registries": [
                 ("h/l", "Sources / entries / approved sub-tab"),
                 ("j/k or Up/Down", "Navigate rows"),
@@ -5251,8 +5257,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             if self._sandbox_supported():
                 # Under 100 columns the table leaves out what Enter's detail shows.
                 compact = 0 < self.size.width < 100
+                self.sandbox_model.set_alert_events(self.alerts_model.audit_events)
                 self._table_columns = self.sandbox_model.data_table_columns(compact)
-                self._table_rows = self.sandbox_model.data_table_rows(compact)
+                # The table spans the body (6 columns of borders and padding).
+                self._table_rows = self.sandbox_model.data_table_rows(compact, max(0, self.size.width - 6))
             self.body_text = self._sandbox_body_text()
             return self.body_text
         if self.active_panel == "policies":
@@ -5562,7 +5570,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Under 100 columns the KEYS line carries the Sandboxes keys and the
         # rows get the bar's rows.
         sandboxes.set_class(
-            self.active_panel != "sandboxes" or self.help_open or self._sandbox_button_bar_collapsed(),
+            self.active_panel != "sandboxes"
+            or self.help_open
+            or self._sandbox_button_bar_collapsed()
+            or not self._sandbox_supported(),
             "hidden",
         )
         policies.set_class(self.active_panel != "policies" or self.help_open, "hidden")
@@ -10892,7 +10903,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             logs_paused=bool(self.logs_model.paused),
             new_lines_since_pause=int(self.logs_model.new_lines_since_pause),
             panel_view=self._hint_panel_view(active_panel),
-            panel_keys=self.sandbox_model.keys_line() if active_panel == "sandboxes" else "",
+            panel_keys=self._sandbox_keys_line() if active_panel == "sandboxes" else "",
             panel_conditions=self._hint_panel_conditions(active_panel),
             panel_has_rows=bool(self._table_rows) if active_panel == "sandboxes" else True,
             not_configured=self.config is None,
@@ -11842,6 +11853,9 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
             self.runtime_model.short_screen = 0 < self.size.height < 32
             return self._apply_runtime_action(self.runtime_model.handle_key(key))
         if self.active_panel == "sandboxes":
+            if not self._sandbox_supported():
+                # Nothing runs here: n and w say why, every other key is left alone.
+                return key in {"n", "w"} and self._apply_sandbox_action(self.sandbox_model.handle_key(key))
             # ``U`` (undo) differs from ``u`` (unblock); _panel_key folds it.
             if event.character == "U":
                 key = "U"
@@ -14767,6 +14781,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
 
         if self._snapshot_panel_revisions.get("alerts") != snapshot.revision:
             self.alerts_model.set_events(list(snapshot.alert_events))
+            self.alerts_model.detection_only = snapshot.detection_only
             self._snapshot_panel_revisions["alerts"] = snapshot.revision
 
         self._apply_enforcement_counts(snapshot)

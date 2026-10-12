@@ -159,6 +159,9 @@ type fakeSSSD struct {
 	ln     net.Listener
 	sids   map[string]string
 	errors map[string]uint32
+	// delay holds each SID-by-uid answer back, as SSSD does while it
+	// searches the directory for an expired entry.
+	delay time.Duration
 }
 
 func startFakeSSSD(t *testing.T, sids map[string]string) *fakeSSSD {
@@ -167,6 +170,11 @@ func startFakeSSSD(t *testing.T, sids map[string]string) *fakeSSSD {
 
 func startFakeSSSDWithErrors(t *testing.T, sids map[string]string, statuses map[string]uint32) *fakeSSSD {
 	t.Helper()
+	return serveFakeSSSD(t, &fakeSSSD{sids: sids, errors: statuses})
+}
+
+func serveFakeSSSD(t *testing.T, f *fakeSSSD) *fakeSSSD {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "nss")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
@@ -174,7 +182,7 @@ func startFakeSSSDWithErrors(t *testing.T, sids map[string]string, statuses map[
 	}
 	orig := sssdNSSSocket
 	sssdNSSSocket = path
-	f := &fakeSSSD{ln: ln, sids: sids, errors: statuses}
+	f.ln = ln
 	t.Cleanup(func() { sssdNSSSocket = orig; ln.Close() })
 	go func() {
 		for {
@@ -186,6 +194,21 @@ func startFakeSSSDWithErrors(t *testing.T, sids map[string]string, statuses map[
 		}
 	}()
 	return f
+}
+
+// GAP-0363, GAP-0383: a SID call SSSD answers only after its own search of
+// the directory, seconds later, is an answer, not an "i/o timeout" that left
+// the account on default_lookup_failed while the directory was reachable.
+func TestSSSDNSSWaitsForSlowDirectoryAnswer(t *testing.T) {
+	serveFakeSSSD(t, &fakeSSSD{sids: map[string]string{"uid:1201": "S-1-5-21-1-2-3-1201"}, delay: 2500 * time.Millisecond})
+	conn, err := dialSSSDNSS(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if sid, err := conn.sidByUID(1201); err != nil || sid != "S-1-5-21-1-2-3-1201" {
+		t.Fatalf("slow SID answer = %q, %v; want the SID", sid, err)
+	}
 }
 
 // stop closes the socket, as a stopped or restarting SSSD does.
@@ -208,6 +231,7 @@ func (f *fakeSSSD) serve(conn net.Conn) {
 		case sssCmdGetVersion:
 		case sssCmdSIDByUID:
 			key = "uid:" + strconv.Itoa(int(binary.NativeEndian.Uint32(body)))
+			time.Sleep(f.delay)
 		case sssCmdSIDByGID:
 			key, idType = "gid:"+strconv.Itoa(int(binary.NativeEndian.Uint32(body))), sssIDTypeGID
 		case sssCmdSIDByUserName:

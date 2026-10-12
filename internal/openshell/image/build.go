@@ -303,6 +303,13 @@ type PruneOptions struct {
 	// names. Unset (a docker gateway, or one whose driver is not known),
 	// the newest images of both kinds are kept.
 	MicroVMGateway bool
+	// DefenseClawVersion is the DefenseClaw build new sandboxes start with
+	// (manager.ImageVersion). An image another build made is never current
+	// again (Store.Current matches the build), so it is superseded unless
+	// Keep names it: after an upgrade, prune called the earlier build's
+	// images current and kept them, with their MicroVM disks (GAP-0320).
+	// Empty, every build's newest image is kept.
+	DefenseClawVersion string
 }
 
 // PruneReport lists what Prune did.
@@ -401,6 +408,9 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 			// only a MicroVM image for its sandboxes.
 			continue
 		}
+		if opts.DefenseClawVersion != "" && r.DefenseClawVersion != opts.DefenseClawVersion {
+			continue
+		}
 		id := identity{r.Connector, r.UID, r.GID, r.IngressPort, r.MicroVM}
 		if cur, ok := latest[id]; !ok || r.BuiltAt.After(cur.BuiltAt) {
 			latest[id] = r
@@ -479,15 +489,17 @@ func (b *Builder) Prune(ctx context.Context, opts PruneOptions) (PruneReport, er
 // pruneRunImages is Prune for the run images and aliases (runs, as the
 // store records them) of the driver whose image references use
 // opts.AliasRepository. Only recorded, owned ones are removed, run images
-// before aliases, and only when Keep names
-// neither their tag nor their ID and their overlay image is not kept
-// either (baseKept holds the IDs of the overlay images that stay
-// recorded). A run image of a kept overlay image is what the next sandbox
-// of its posture boots: a rebuilt one would get a new image ID, which the
-// vm driver prepares a new disk for (about a minute and about 5 GB it never
-// removes), while the run image itself only adds its files' few layers.
-// An alias shares its overlay image's ID, so untagging it frees nothing
-// while that image stays.
+// before aliases, and only when Keep names neither their tag nor their ID.
+// Of a kept overlay image (baseKept holds the IDs of the overlay images
+// that stay recorded), the alias stays, and so does the newest run image no
+// sandbox runs: what the next sandbox of that posture likely boots, where a
+// rebuilt one would get a new image ID, which the vm driver prepares a new
+// disk for (about a minute and about 5 GB it never removes). Its other run
+// images no sandbox runs go, with their disks: each distinct run
+// configuration (a profile, --safe, a key) made one, and on a 150 GiB Mac
+// they filled the disk after their sandboxes were deleted (GAP-0334). An
+// alias shares its overlay image's ID, so untagging it frees nothing while
+// that image stays.
 func (b *Builder) pruneRunImages(ctx context.Context, opts PruneOptions, owner string, runs []RunImage, baseKept, inUse map[string]bool,
 	report *PruneReport, removeErrs *[]error) error {
 	aliasRepo, runRepo := opts.AliasRepository, RunRepository(opts.AliasRepository)
@@ -549,13 +561,22 @@ func (b *Builder) pruneRunImages(ctx context.Context, opts PruneOptions, owner s
 		}
 		return candidates[i].Tag < candidates[j].Tag
 	})
+	newest := map[string]RunImage{}
+	for _, r := range candidates {
+		if r.Alias || !baseKept[r.BaseImageID] || inUse[r.Tag] || inUse[r.ImageID] {
+			continue
+		}
+		if cur, ok := newest[r.BaseImageID]; !ok || r.BuiltAt.After(cur.BuiltAt) {
+			newest[r.BaseImageID] = r
+		}
+	}
 	for _, r := range candidates {
 		switch {
 		case inUse[r.Tag] || inUse[r.ImageID]:
 			report.Kept = append(report.Kept, r.Tag)
 			report.InUse = append(report.InUse, r.Tag)
 			continue
-		case baseKept[r.BaseImageID]:
+		case baseKept[r.BaseImageID] && (r.Alias || newest[r.BaseImageID].Tag == r.Tag):
 			report.Kept = append(report.Kept, r.Tag)
 			continue
 		}

@@ -177,9 +177,10 @@ func managedWindowsAdminStatusHint() string {
 }
 
 // managedHostPerUserDaemonCommands are the per-user gateway commands a
-// managed computer refuses; its root help hides them.
+// managed computer refuses; its root help hides them. `sandbox` is not one:
+// on a standalone managed computer each user's sandbox daemon serves it.
 var managedHostPerUserDaemonCommands = map[string]bool{
-	"start": true, "stop": true, "restart": true, "watchdog": true, "sandbox": true,
+	"start": true, "stop": true, "restart": true, "watchdog": true,
 }
 
 // managedHostHelpInstalled keeps addManagedHostHelp from wrapping the help
@@ -188,8 +189,8 @@ var managedHostHelpInstalled bool
 
 // addManagedHostHelp makes the root --help on a managed computer describe
 // the managed gateway. It described the per-user runtime ("Run without
-// arguments to start the sidecar daemon") and listed start, stop, restart,
-// watchdog and sandbox, all of which a managed computer refuses (GAP-1182,
+// arguments to start the sidecar daemon") and listed start, stop, restart
+// and watchdog, all of which a managed computer refuses (GAP-1182,
 // GAP-1192). The managed-host check runs only when the root help is shown.
 func addManagedHostHelp(root *cobra.Command) {
 	if managedHostHelpInstalled {
@@ -231,7 +232,7 @@ func applyManagedHostHelp(root *cobra.Command) bool {
 	root.Long = fmt.Sprintf(`DefenseClaw managed gateway. Your organization manages DefenseClaw on this
 computer: the gateway runs as a system service, answers the hooks of the
 enrolled agents and enforces the managed policy. The per-user daemon
-commands (start, stop, restart, watchdog, sandbox) are not available here.
+commands (start, stop, restart, watchdog) are not available here.
 
 Managed deployment record:
   %s

@@ -187,11 +187,11 @@ For hook-only connectors, add a case to `hookOnlyProfileRespond` (`hook_only_pro
 4. Source `_hardening.sh`, then call `defenseclaw_harden_resources` and the env hardening.
 5. `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"`.
 6. Call `defenseclaw_handle_missing_token`, then `defenseclaw_read_stdin_capped` (1 MiB).
-7. Read the scoped token.
+7. Read the scoped token into `API_TOKEN`, then `unset DEFENSECLAW_GATEWAY_TOKEN` so no child process inherits it.
 8. Define `fail_unreachable` and `fail_response`.
 9. Insert `{{.HookSocketTransportSH}}`.
 10. Send the auth, trace and identity headers. `X-DefenseClaw-User-Id` and `-User-Name` are required; `hook_user_identity_test.go` globs `hooks/*-hook.sh`.
-11. `curl --connect-timeout 2 --max-time 10 [--unix-socket]`.
+11. `defenseclaw_gateway_post "http://${API_ADDR}/api/v1/<id>/hook" 10 "$PAYLOAD" <headers> [--unix-socket "${DEFENSECLAW_HOOK_SOCKET}"]` (`_hardening.sh`). It runs `curl -q` and hands curl the `Authorization` header and the body on descriptors. Never put the token or the payload on a command line (`curl -H`/`-d`, `jq --arg`): every local account can read it. Add the connector to `hookArgvShellConnectors` and `hookArgvConnectorCase` in `hook_argv_privacy_test.go`; `TestHookArgvCasesCoverEveryShellHook` fails until you do.
 12. Map the result to connector-native stdout and exit code.
 
 **Plugins.**

@@ -362,3 +362,22 @@ func TestMacJSONLDestinationReadACL(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0498, GAP-0514: ensure's refusal names the missing key with its fix,
+// and the size limit with the value's size.
+func TestManagedConfigNamesMissingKeyAndSizeLimit(t *testing.T) {
+	h := newTestHost(t, "linux")
+	base := "config_version: 9\nguardrail:\n  profiles:\n    engineering: {}\n"
+	for doc, want := range map[string]string{
+		base + "  profile_assignments:\n    - profile: engineering\n": "guardrail.profile_assignments[0] is missing match (required); " +
+			"add match: a mapping that sets at least one of agents, connectors, groups, users",
+		base + "    contractors:\n      sandbox:\n        request_access: " + strings.Repeat("x", 600) + "\n": "guardrail.profiles.contractors.sandbox.request_access " +
+			"must be a string of at most 512 characters (it has 600)",
+	} {
+		err := config.ValidateV8SchemaBytes("/tmp/admin.yaml", []byte(doc))
+		got, ok := h.env.plainConfigProblem(err, "/tmp/admin.yaml", []byte(doc))
+		if !ok || !strings.Contains(got, want) {
+			t.Fatalf("refusal = %q (handled %t), want %q", got, ok, want)
+		}
+	}
+}

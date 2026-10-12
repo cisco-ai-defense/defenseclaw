@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -80,6 +81,12 @@ type identityCache[T any] struct {
 	// refreshed as soon as a lookup may retry, so a sign-in shows within
 	// about one enumerator cycle.
 	partial func(T) bool
+	// settling, when set, marks an answer that may still miss part of the
+	// account's groups right after a directory outage (a bound Mac's Open
+	// Directory, GAP-0517): it is served like an incomplete one but refreshed
+	// as soon as a lookup may retry, so the account's profile comes back
+	// within one retry cycle of the directory answering in full.
+	settling func(T) bool
 	// logf, when set, reports a key's first failure and its recovery.
 	logf func(format string, args ...any)
 	// maxAge, when set, is the age past which facts are no longer served.
@@ -148,15 +155,8 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		entry = &identityCacheEntry[T]{}
 		c.entries[key] = entry
 	}
+	c.dropAgedLocked(key, entry, now)
 	age := now.Sub(entry.fetchedAt)
-	if entry.ok && c.maxAge > 0 && age >= c.maxAge {
-		var none T
-		entry.facts, entry.ok = none, false
-		if c.logf != nil {
-			c.logf("directory facts for %s are %s old and no longer used; the account gets the default guardrail profile "+
-				"(default_lookup_failed) until a lookup succeeds", key, age.Round(time.Minute))
-		}
-	}
 	invalidated := entry.ok && entry.fetchedAt.Before(c.staleBefore)
 	expired := age >= c.lifetime(entry.facts) || invalidated
 	if (!entry.ok || expired) && entry.inflight == nil && !now.Before(entry.nextAttempt) {
@@ -170,7 +170,7 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 		// next request rather than the one after (GAP-0326). Expired
 		// partial groups also wait: old memberships can select a lenient profile.
 		partial := c.partial != nil && c.partial(facts)
-		incomplete := c.incomplete != nil && c.incomplete(facts)
+		incomplete := c.incomplete != nil && c.incomplete(facts) || c.settling != nil && c.settling(facts)
 		if !block || !expired || (!partial && !incomplete && !invalidated) {
 			c.mu.Unlock()
 			return facts, true
@@ -220,14 +220,167 @@ func (c *identityCache[T]) get(key string, block bool) (T, bool) {
 	return entry.facts, entry.ok
 }
 
+// dropAgedLocked stops serving entry's facts once they are maxAge old.
+func (c *identityCache[T]) dropAgedLocked(key string, entry *identityCacheEntry[T], now time.Time) {
+	age := now.Sub(entry.fetchedAt)
+	if !entry.ok || c.maxAge <= 0 || age < c.maxAge {
+		return
+	}
+	var none T
+	entry.facts, entry.ok = none, false
+	if c.logf != nil {
+		c.logf("directory facts for %s are %s old and no longer used; the account gets the default guardrail profile "+
+			"(default_lookup_failed) until a lookup succeeds", key, age.Round(time.Minute))
+	}
+}
+
+// What `guardrail profile explain --user` reports.
+//
+// Explain answers from this cache, the one hook calls read, after a lookup
+// of its own. It used to resolve the account through the operating system
+// on a path of its own, so the oracle and the hooks disagreed exactly when
+// it mattered: a lookup that failed for explain (an SSSD responder slow to
+// answer right after a configuration apply, a domain controller away) gave
+// default_lookup_failed while hook calls kept the group profile of the facts
+// they had cached, and two explain calls seconds apart gave two profiles for
+// one account and one configuration (GAP-0307, GAP-0361, GAP-0363,
+// GAP-0383). Now a lookup explain starts refreshes the facts hooks use, and
+// a lookup that fails leaves explain with what hooks keep: the facts cached
+// before it, with their age (explainCacheView), or none.
+
+const (
+	// identityExplainFresh is how recent a lookup's outcome must be for
+	// explain to reuse it instead of starting another: the spelling check
+	// and the facts of one explain call, and calls seconds apart, share one
+	// lookup.
+	identityExplainFresh = 5 * time.Second
+	// identityExplainFreshIncomplete is the same for an outcome whose facts
+	// the cache itself calls incomplete or settling (an account whose
+	// guardian record or UPN has not arrived yet): explain looks again at
+	// once instead of repeating them for identityExplainFresh. Right after a
+	// restart the startup check had resolved the account just before the
+	// administrator's first explain, which repeated its incomplete facts, and
+	// a users entry written as a UPN or in upper case then selected nobody
+	// for about eight seconds (GAP-0575).
+	identityExplainFreshIncomplete = time.Second
+	// identityExplainWait bounds how long explain waits for its lookup. The
+	// lookup goes on within its own bound and its answer is cached; the CLI
+	// waits 35 s for the whole answer.
+	identityExplainWait = 12 * time.Second
+)
+
+// identityExplainAnswer is what the cache holds for a key after explain's
+// lookup.
+type identityExplainAnswer[T any] struct {
+	facts     T
+	fetchedAt time.Time
+	ok        bool
+	// failedSince and reason are set while the key's lookups fail; facts,
+	// when ok, are then the ones cached before the failure.
+	failedSince time.Time
+	reason      string
+	// running is set when the lookup had not finished within the wait.
+	running bool
+}
+
+// explain refreshes key's facts unless a lookup of it ran in the last
+// identityExplainFresh or is running, waits for that lookup at most wait,
+// and returns what hook calls of key get from then on: the new facts, the
+// facts cached before a failed lookup (within maxAge), or none.
+func (c *identityCache[T]) explain(key string, wait time.Duration) identityExplainAnswer[T] {
+	var answer identityExplainAnswer[T]
+	if c == nil || key == "" || c.resolve == nil {
+		return answer
+	}
+	c.mu.Lock()
+	now := c.now()
+	entry := c.entries[key]
+	if entry == nil {
+		if len(c.entries) >= identityDirectoryMax {
+			c.evictLocked()
+		}
+		entry = &identityCacheEntry[T]{}
+		c.entries[key] = entry
+	}
+	c.dropAgedLocked(key, entry, now)
+	last := entry.fetchedAt
+	if entry.lastFailedAt.After(last) {
+		last = entry.lastFailedAt
+	}
+	fresh := identityExplainFresh
+	if entry.ok && c.unsettled(entry.facts) {
+		fresh = identityExplainFreshIncomplete
+	}
+	if entry.inflight == nil && (last.IsZero() || now.Sub(last) >= fresh) {
+		c.refreshLocked(key, entry)
+	}
+	done := entry.inflight
+	c.mu.Unlock()
+	if done != nil {
+		timer := time.NewTimer(wait)
+		select {
+		case <-done:
+		case <-timer.C:
+			answer.running = true
+		}
+		timer.Stop()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	answer.facts, answer.fetchedAt, answer.ok = entry.facts, entry.fetchedAt, entry.ok
+	answer.failedSince, answer.reason = entry.failedSince, entry.lastErr
+	return answer
+}
+
+// explainDirectoryFacts returns the directory facts a hook call of key gets
+// after explain's lookup (identityCache.explain), or why it gets none.
+func explainDirectoryFacts(cache *identityDirectoryCache, key string) (useridentity.DirectoryFacts, error) {
+	answer := cache.explain(key, identityExplainWait)
+	switch {
+	case answer.ok:
+		return answer.facts, nil
+	case answer.reason != "":
+		return useridentity.DirectoryFacts{}, errors.New(answer.reason)
+	case answer.running:
+		return useridentity.DirectoryFacts{}, fmt.Errorf("the directory lookup for %s has not finished after %s; "+
+			"hook calls get no directory facts for it until it does", key, identityExplainWait)
+	default:
+		return useridentity.DirectoryFacts{}, fmt.Errorf("the directory lookup for %s returned no facts", key)
+	}
+}
+
+// refreshFailing reports a key whose latest lookups fail while its requests
+// still use facts cached before the failure.
+func (c *identityCache[T]) refreshFailing(key string) (since time.Time, reason string, ok bool) {
+	if c == nil {
+		return time.Time{}, "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[key]
+	if entry == nil || !entry.ok || entry.failedSince.IsZero() {
+		return time.Time{}, "", false
+	}
+	return entry.failedSince, entry.lastErr, true
+}
+
+// unsettled reports facts the cache serves but expects to replace soon: an
+// incomplete answer, one built from stale inputs, or one resolved while a
+// directory outage settles.
+func (c *identityCache[T]) unsettled(facts T) bool {
+	return c.partial != nil && c.partial(facts) || c.settling != nil && c.settling(facts) ||
+		c.incomplete != nil && c.incomplete(facts)
+}
+
 // lifetime is how long facts are served before a refresh: the full TTL,
 // identityDirectoryIncompleteTTL for an answer the resolver calls
-// incomplete, or identityDirectoryRetry for one built from stale inputs.
+// incomplete, or identityDirectoryRetry for one built from stale inputs or
+// resolved while a directory outage settles.
 func (c *identityCache[T]) lifetime(facts T) time.Duration {
 	switch {
 	case c == nil:
 		return identityDirectoryTTL
-	case c.partial != nil && c.partial(facts):
+	case c.partial != nil && c.partial(facts), c.settling != nil && c.settling(facts):
 		return identityDirectoryRetry
 	case c.incomplete != nil && c.incomplete(facts):
 		return identityDirectoryIncompleteTTL
@@ -299,6 +452,16 @@ func (c *identityCache[T]) forget(key string) {
 	c.mu.Unlock()
 }
 
+// identityFactsUnconfirmedError is a failed lookup that also says nothing
+// confirms the facts cached before it any more, so they are dropped at once
+// instead of at maxAge: a bound Mac's Open Directory answering without an
+// account's domain groups once the guardian has not confirmed the account for
+// an hour (openDirectoryGroupsUnavailable).
+type identityFactsUnconfirmedError struct{ err error }
+
+func (e *identityFactsUnconfirmedError) Error() string { return e.err.Error() }
+func (e *identityFactsUnconfirmedError) Unwrap() error { return e.err }
+
 // forgetAll drops every entry, so each key resolves afresh.
 func (c *identityCache[T]) forgetAll() {
 	if c == nil {
@@ -316,8 +479,13 @@ func (c *identityCache[T]) refreshLocked(key string, entry *identityCacheEntry[T
 		facts, err := c.resolve(key)
 		c.mu.Lock()
 		now := c.now()
-		if err == nil {
+		var unconfirmed *identityFactsUnconfirmedError
+		switch {
+		case err == nil:
 			entry.facts, entry.ok, entry.fetchedAt = facts, true, now
+		case entry.ok && errors.As(err, &unconfirmed):
+			var none T
+			entry.facts, entry.ok = none, false
 		}
 		entry.nextAttempt = now.Add(identityDirectoryRetry)
 		entry.inflight = nil

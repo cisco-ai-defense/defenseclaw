@@ -3185,6 +3185,10 @@ _GATEWAY_OUTCOMES = {
         "The change is saved, but the gateway restart failed; run defenseclaw-gateway restart, "
         "then defenseclaw doctor."
     ),
+    "not_applied": (
+        "The running gateway did not apply it and still enforces the previous setting "
+        "(defenseclaw-gateway status says why); restart it to apply this: defenseclaw-gateway restart."
+    ),
     "still_starting": (
         "The change is saved. The gateway is still starting and was kept running, so protection is "
         "not confirmed yet; check it with: defenseclaw-gateway status (restart it only if it does "
@@ -3192,7 +3196,7 @@ _GATEWAY_OUTCOMES = {
     ),
 }
 #: Outcomes that leave the change unconfirmed: the command exits 1.
-_GATEWAY_UNCONFIRMED = frozenset({"restart_failed", "still_starting"})
+_GATEWAY_UNCONFIRMED = frozenset({"restart_failed", "still_starting", "not_applied"})
 
 
 def _resolve_scope_connector(app: AppContext, connector: str) -> tuple[str, str]:
@@ -3332,7 +3336,7 @@ def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: 
     if not _gateway_running(app):
         return "not_running"
     if not needs_restart:
-        return "live"
+        return _live_apply_outcome(app)
     if not restart:
         return "restart_needed"
     import contextlib
@@ -3345,6 +3349,59 @@ def _apply_to_running_gateway(app: AppContext, *, needs_restart: bool, restart: 
     if restarted:
         return "restarted"
     return "still_starting" if cmd_setup._take_gateway_left_starting() else "restart_failed"
+
+
+#: How long a saved change waits for the running gateway to report the new
+#: config generation; its watcher lets a write settle for 0.5 s, then builds
+#: the new policy generation.
+_APPLY_CONFIRM_SECONDS = 10.0
+
+
+def _live_apply_outcome(app: AppContext) -> str:
+    """Whether the running gateway applied the config generation just saved.
+
+    ``live`` when its health reports that generation, or when it cannot say
+    (no answer, or no policy in its health); ``restart_needed`` when it applied
+    the change but holds sections it reads only at start; ``not_applied`` when
+    it still enforces an earlier generation: a rejected reload, or a gateway
+    that never reloaded. After a 0.8.x upgrade an older gateway process
+    refused the change while this said it applied it now (GAP-0362).
+    """
+    import time
+
+    from defenseclaw import config_writer
+    from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+
+    try:
+        want = config_writer.read_generation_state(config_path_for_data_dir(app.cfg.data_dir)).generation
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=app.cfg.gateway.api_port,
+            token=app.cfg.gateway.resolved_token(),
+            timeout=2,
+        )
+    except Exception:  # noqa: BLE001 - no recorded generation or no client: it cannot say.
+        return "live"
+    start = time.monotonic()
+    try:
+        while True:
+            try:
+                health = client.health()
+                policy = health.get("policy")
+                applied = int(policy["config_generation"])
+            except Exception:  # noqa: BLE001 - no answer, or a gateway without policy health.
+                return "live"
+            if applied >= want:
+                details = (health.get("config") or {}).get("details") or {}
+                return "restart_needed" if details.get("restart_required") else "live"
+            waited = time.monotonic() - start
+            # A reload error older than this change clears once the new
+            # generation builds, so it counts only after the watcher's turn.
+            if waited >= _APPLY_CONFIRM_SECONDS or (waited >= 2 and policy.get("last_reload_error")):
+                return "not_applied"
+            time.sleep(0.25)
+    finally:
+        client.close()
 
 
 def _log_guardrail_change(app: AppContext, operation: str, details: str) -> None:
@@ -3451,6 +3508,34 @@ def _scope_block(cfg, connector_key: str | None, profile: str | None):
 def _scope_rules(cfg, connector_key: str | None, profile: str | None):
     block = _scope_block(cfg, connector_key, profile)
     return getattr(block, "rules", None) if block is not None else None
+
+
+def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
+    """Unset the ``guardrail.custom_packs`` pins no scope selects once the
+    scopes in *after* (config path -> its new ``rule_pack``, "" when unset)
+    are written. A pin left behind keeps a path and digest no pack uses and
+    outlives the folder it names (GAP-0127); ``use-pack DIR`` pins it again."""
+    from defenseclaw import config_writer
+
+    gc = cfg.guardrail
+    selected = {"guardrail": getattr(gc, "rule_pack", "")}
+    for connector, block in (getattr(gc, "connectors", None) or {}).items():
+        selected[_scope_key(connector, None)] = getattr(block, "rule_pack", "")
+    for profile, block in (getattr(gc, "profiles", None) or {}).items():
+        selected[_scope_key(None, profile)] = getattr(block, "rule_pack", "")
+        for connector, sub in (getattr(block, "connectors", None) or {}).items():
+            selected[_scope_key(connector, profile)] = getattr(sub, "rule_pack", "")
+    selected.update(after)
+    used = {str(name or "").strip() for name in selected.values()}
+    dropped = sorted(name for name in (getattr(gc, "custom_packs", None) or {}) if name not in used)
+    return [config_writer.Change(f"guardrail.custom_packs.{name}", unset=True) for name in dropped], dropped
+
+
+def _dropped_pins_note(dropped: list[str]) -> str:
+    if not dropped:
+        return ""
+    names = ", ".join(f"guardrail.custom_packs.{name}" for name in dropped)
+    return f" Removed the pin no connector uses any more: {names}."
 
 
 def _scope_words(connector_key: str | None, profile: str | None) -> str:
@@ -3572,6 +3657,9 @@ def _applied_note(app: AppContext, result: object) -> str:
         return f"Saved{stamp}. The guardrail is off; this takes effect when you run defenseclaw guardrail enable."
     if not _gateway_running(app):
         return f"Saved{stamp}. The gateway isn't running; it loads this when it starts."
+    outcome = _live_apply_outcome(app)
+    if outcome != "live":
+        return f"Saved{stamp}. {_GATEWAY_OUTCOMES[outcome]}"
     return f"Saved{stamp}. The running gateway applies it on its next reload."
 
 
@@ -3633,7 +3721,8 @@ def use_pack_cmd(
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
     ``guardrail.custom_packs.NAME`` with its validated digest, so an edited
-    pack is refused until it is pinned again. Without ``--connector`` every
+    pack is refused until ``use-pack NAME`` pins it again (it runs while that
+    stale pin fails the config check). Without ``--connector`` every
     connector uses PACK and per-connector packs are removed. ``--clear
     --connector X`` removes X's pack. The running gateway picks it up on its
     next reload; nothing is restarted.
@@ -3649,6 +3738,7 @@ def use_pack_cmd(
         path: str = "",
         cleared: list[str] | None = None,
         dropped: list[str] | None = None,
+        dropped_pins: list[str] | None = None,
         validation: dict | None = None,
         warning: str = "",
     ) -> None:
@@ -3663,6 +3753,7 @@ def use_pack_cmd(
                         "pack": pack_name,
                         "path": path,
                         "cleared_overrides": list(cleared or []),
+                        "dropped_pins": list(dropped_pins or []),
                         "dropped_rule_references": list(dropped or []),
                         "validation": validation,
                         "message": message,
@@ -3714,10 +3805,11 @@ def use_pack_cmd(
             return
         _preflight_config_write(app)
         key = _scope_key(connector_key, None)
+        pin_changes, dropped_pins = _unused_pin_changes(app.cfg, {key: ""})
         stale, dropped = _stale_rule_changes(app.cfg, fallback.path, connector_key)
         result = _write_guardrail_config(
             app,
-            [config_writer.Change(f"{key}.rule_pack", unset=True), *stale],
+            [config_writer.Change(f"{key}.rule_pack", unset=True), *pin_changes, *stale],
             f"guardrail use-pack --clear --connector {connector_key}",
             _fail,
         )
@@ -3731,10 +3823,11 @@ def use_pack_cmd(
             pack_name=fallback.pack,
             path=fallback.path,
             dropped=dropped,
+            dropped_pins=dropped_pins,
             message=(
-                f"{_connector_label(connector_key)} now uses the global rule pack '{fallback.pack}'. "
-                + (f"Dropped rule references the pack does not have: {'; '.join(dropped)}. " if dropped else "")
-                + _applied_note(app, result)
+                f"{_connector_label(connector_key)} now uses the global rule pack '{fallback.pack}'."
+                + (f" Dropped rule references the pack does not have: {'; '.join(dropped)}." if dropped else "")
+                + f"{_dropped_pins_note(dropped_pins)} {_applied_note(app, result)}"
             ),
         )
         return
@@ -3871,6 +3964,10 @@ def use_pack_cmd(
                 other_key = _scope_key(other, None)
                 changes.append(config_writer.Change(f"{other_key}.rule_pack", unset=True))
                 cleared.append(other)
+    pin_changes, dropped_pins = _unused_pin_changes(
+        app.cfg, {key: name, **{_scope_key(other, None): "" for other in cleared}}
+    )
+    changes.extend(pin_changes)
     # Rule references the new pack does not ship would fail the whole save (GAP-0258, GAP-0261).
     stale, dropped = _stale_rule_changes(app.cfg, path, connector_key)
     changes.extend(stale)
@@ -3903,9 +4000,10 @@ def use_pack_cmd(
         path=path,
         cleared=cleared,
         dropped=dropped,
+        dropped_pins=dropped_pins,
         validation=validation,
         warning=warning,
-        message=f"{message} {_applied_note(app, result)}",
+        message=f"{message}{_dropped_pins_note(dropped_pins)} {_applied_note(app, result)}",
     )
 
 

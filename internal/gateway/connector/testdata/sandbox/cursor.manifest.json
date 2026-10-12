@@ -32,44 +32,44 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 65652,
-      "sha256": "5d55d3da67646c05a3d95d9485f35a7a5968973185b4b08f01ca710779fa3416"
+      "size": 69581,
+      "sha256": "e5f816e9668b0295ddfbb09f110423af1c219f7af56703416adf01ab54dba62d"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 8119,
-      "sha256": "649402885e0ffcbe20a7e80d3daf3fb8aaad8ae2bc21e868f5f8b110765b84ec"
+      "size": 12549,
+      "sha256": "0012d90e6c0a4c12a0d191b4a19ac0335ae6f3dd9f22aa5b7673eecb707326b5"
     },
     "/usr/local/lib/defenseclaw/hooks/cursor-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 8970,
-      "sha256": "309b8060d9ae723cb59f84e1354956bfd591646346568a27d20017f3710a2dca"
+      "size": 8996,
+      "sha256": "7c41de67b49d68cc6974e22673e67faa0f36c3486977ba01835a2dffc9967304"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6077,
-      "sha256": "52b9ece5f88618241a56a68a1a4f15fb10361bb3c3e1e46788f2333011632ea8"
+      "size": 6103,
+      "sha256": "254be2dda54179a0bfd84a0df594a8fa61140d7f4bdbcbb2d078b2277328cf38"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5345,
-      "sha256": "5cb30e9d5402897eb2ffab4196b2833604ec37711c37f2b2ed09d3345f5f692a"
+      "size": 5371,
+      "sha256": "3582b79bc920548f6b3d6cc07879d88c80d75d688423838e3c93045c7f5e437a"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5595,
-      "sha256": "2e839a415dd3592ecbcbbcaffeca05cfe0dba2e5255fd9d5194471d6e776ac2e"
+      "size": 5889,
+      "sha256": "7bd9add71aaa2b1be56210379638ecde17ae8aa0b680df370197b44522ade242"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6034,
-      "sha256": "a19748faeeb580d19f563f67053973b960eb2af79baaa7856884383ae110d9e4"
+      "size": 6273,
+      "sha256": "28064dc36e5ba2d69ead93bc5b3c5e979e0bd85489ec33cf3deab8e9b2acbba2"
     }
   }
 }

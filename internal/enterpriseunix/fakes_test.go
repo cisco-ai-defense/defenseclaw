@@ -54,8 +54,10 @@ type fakeServices struct {
 	// activating units are running a oneshot start (systemd "activating").
 	activating map[string]bool
 	reloads    int
-	inner      ServiceManager // definition paths and unit list
-	env        *Env
+	// failReloadOnce makes the next Reload fail (a failure before the services start).
+	failReloadOnce bool
+	inner          ServiceManager // definition paths and unit list
+	env            *Env
 }
 
 func newFakeServices(env *Env) *fakeServices {
@@ -109,7 +111,15 @@ func (f *fakeServices) Check(context.Context) error            { return nil }
 func (f *fakeServices) Version(context.Context) int            { return f.version }
 func (f *fakeServices) Units() []Unit                          { return f.inner.Units() }
 func (f *fakeServices) DefinitionPath(u Unit, c string) string { return f.inner.DefinitionPath(u, c) }
-func (f *fakeServices) Reload(context.Context) error           { f.reloads++; f.record("reload"); return nil }
+func (f *fakeServices) Reload(context.Context) error {
+	f.reloads++
+	f.record("reload")
+	if f.failReloadOnce {
+		f.failReloadOnce = false
+		return errors.New("fake: daemon-reload failed")
+	}
+	return nil
+}
 
 func (f *fakeServices) Start(_ context.Context, u Unit) error {
 	f.record("start " + u.Name)

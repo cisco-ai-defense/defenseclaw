@@ -75,8 +75,9 @@ const (
 	StateStopped      SubsystemState = "stopped"
 	StateError        SubsystemState = "error"
 	StateDisabled     SubsystemState = "disabled"
-	// StateDegraded marks a subsystem that is up but needs operator action;
-	// today only the legacy standalone sandbox shim reports it.
+	// StateDegraded marks a subsystem that is up but needs operator action:
+	// the sandbox subsystem reports it when a sandbox listener, the sandbox
+	// manager or the OpenShell gateway fails (sidecar_sandbox.go).
 	StateDegraded SubsystemState = "degraded"
 )
 

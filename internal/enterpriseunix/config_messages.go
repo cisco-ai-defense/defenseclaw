@@ -115,6 +115,12 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 				field = fmt.Sprintf("%s (destination %q)", field, name)
 			}
 			reason = "sets both; set " + schemaErr.Expected
+		} else if schemaErr.Keyword == "required" && len(schemaErr.Missing) > 0 {
+			// The key that is missing, and what it takes (GAP-0498).
+			reason = fmt.Sprintf("is missing %s (required)", strings.Join(schemaErr.Missing, ", "))
+			if _, takes, ok := strings.Cut(schemaErr.Expected, ": "); ok && len(schemaErr.Missing) == 1 {
+				reason += fmt.Sprintf("; add %s: %s", schemaErr.Missing[0], takes)
+			}
 		} else if schemaErr.Expected != "" {
 			reason = "must be " + schemaErr.Expected
 		}

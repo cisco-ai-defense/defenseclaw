@@ -287,6 +287,18 @@ func TestSSHShimRefusesAnSSHThatShares(t *testing.T) {
 		"run `"+wrapper+" -G -o ProxyCommand=true sandbox` to see why ssh cannot read its settings for that host") {
 		t.Fatalf("NewSSHShim with an ssh that cannot answer -G = %+v, %v", s, err)
 	}
+	// GAP-0595: an ssh that finds no user for the calling uid (the directory
+	// is down) is not a configuration problem, and is told apart from one.
+	writeFile(t, wrapper, "#!/bin/sh\necho 'No user exists for uid 94404076' >&2\nexit 255\n", 0o700)
+	s, err = openshell.NewSSHShim(pathEnv)
+	var lookup *openshell.AccountLookupError
+	if s != nil || !errors.As(err, &lookup) || errors.As(err, &sharing) || strings.Contains(err.Error(), "ssh configuration") ||
+		!strings.Contains(err.Error(), "your account can't be looked up on this computer right now") {
+		t.Fatalf("NewSSHShim with an ssh that finds no user = %+v, %v", s, err)
+	}
+	if err := openshell.CheckAccountLookup(pathEnv); !errors.As(err, &lookup) {
+		t.Fatalf("CheckAccountLookup = %v", err)
+	}
 	writeFile(t, wrapper, "#!/bin/sh\necho 'user dev'\n", 0o700)
 	if s, err := openshell.NewSSHShim(pathEnv); s != nil || err == nil ||
 		!strings.Contains(err.Error(), ": `ssh -G sandbox` through DefenseClaw's shim printed no controlmaster setting; run `") {
@@ -742,6 +754,7 @@ var spawnSites = map[string]string{
 	"sshshim.go":                  "runs the ssh shim to prove a PATH search runs it (answering a probe without ssh) and that ssh -G through it shows sharing off",
 	"runner.go":                   "ExecRunner: docker, brew, systemctl, the installer and openshell commands that open no ssh session",
 	"image/docker.go":             "docker image builds",
+	"manager/foreign_content.go":  "docker cp of a plain container's program, read for an agent's package name (GAP-0689); docker opens no ssh session",
 	"sandboxcli/gitidentity.go":   "git config",
 	"sandboxcli/ui.go":            "the pager",
 	"sandboxcli/terminal_unix.go": "execs a harness in place for a nested run inside a sandbox",

@@ -34,6 +34,9 @@ def test_cursor_action_shows_closed_and_disabled_connector_has_no_drift(
     cfg.guardrail.connectors["cursor"].mode = "action"
     cfg.guardrail.connectors["codex"].enabled = False
     app = _app(cfg)
+    # The connector table falls back to blocks on a narrow terminal, and the
+    # width comes from the runner (a tty, COLUMNS, or the xdist worker default).
+    monkeypatch.setattr(cmd_guardrail, "_terminal_width", lambda: 200)
     with (
         patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),

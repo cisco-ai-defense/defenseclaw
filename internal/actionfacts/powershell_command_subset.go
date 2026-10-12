@@ -193,21 +193,27 @@ func PowerShellCommandSubsetReduction(input Input, facts Facts) (view Facts, ok 
 		if len(commands) == 0 || len(view.Commands)+len(commands) > maxCommands {
 			continue
 		}
-		for _, command := range commands {
-			command.ID = int64(len(view.Commands) + 1)
-			command.ParentCommandID = 0
-			command.PipelineID = 0
-			command.ControlFlowUncertain = false
-			command.ControlFlowOperator = ControlFlowOperatorNone
-			command.Wrappers = nil
-			view.Commands = append(view.Commands, command)
-			inner++
-		}
+		inner += appendPowerShellBodyCommands(&view, commands)
 	}
 	if inner == 0 {
 		return Facts{}, false
 	}
 	return view, true
+}
+
+// appendPowerShellBodyCommands adds a body's commands to view as top-level
+// commands that run, and reports how many it added.
+func appendPowerShellBodyCommands(view *Facts, commands []CommandFact) int {
+	for _, command := range commands {
+		command.ID = int64(len(view.Commands) + 1)
+		command.ParentCommandID = 0
+		command.PipelineID = 0
+		command.ControlFlowUncertain = false
+		command.ControlFlowOperator = ControlFlowOperatorNone
+		command.Wrappers = nil
+		view.Commands = append(view.Commands, command)
+	}
+	return len(commands)
 }
 
 // powerShellScriptSubset is the view of a partial PowerShell action read as a
@@ -359,7 +365,8 @@ func powerShellNullAssignmentCommand(segment string) string {
 // process state that determines the next command's identity.
 func powerShellCommandPreservesNext(command CommandFact) bool {
 	switch command.Program {
-	case "echo", "write-output", "write-host", "out-null", "get-date", "get-location", "pwd":
+	case "echo", "write-output", "write-host", "out-null", "get-date", "get-location", "pwd",
+		"get-content", "gc", "cat", "type":
 		return true
 	default:
 		return false

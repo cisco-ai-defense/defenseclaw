@@ -1139,7 +1139,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
 	// Secure Client serves none of the identity routes (issue #1092).
 	if !a.managedAIDOnly() {
-		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", a.handleGuardrailProfileResolve)
+		mux.HandleFunc("/api/v1/guardrail/profiles/resolve", awaitConfigReload(a.handleGuardrailProfileResolve))
 	}
 	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
@@ -1485,6 +1485,15 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := a.health.Snapshot()
+	cfg := a.runtimeConfigSnapshot()
+	// A standalone host's ordinary account reads liveness and the binary
+	// version only: the config content hash, the generation counters and
+	// the reload details (changed sections, last success) would let it
+	// detect and fingerprint the administrator's policy (GAP-0666).
+	administrator := a.healthAdministratorCaller(r, cfg)
+	if !administrator {
+		snap.Config = healthConfigLiveness(snap.Config)
+	}
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -1495,8 +1504,12 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	body["provenance"] = version.Current()
-	if cfg := a.runtimeConfigSnapshot(); (cfg == nil || !cfg.SecureClientIntegration()) && a.store.DatabaseFileReplaced() {
+	if administrator {
+		body["provenance"] = version.Current()
+	} else {
+		body["provenance"] = version.Current().Public()
+	}
+	if (cfg == nil || !cfg.SecureClientIntegration()) && a.store.DatabaseFileReplaced() {
 		// Present only when it happened, so the usual body is unchanged;
 		// Secure Client keeps its health body (issue #1092).
 		body["audit_store"] = map[string]interface{}{
@@ -1504,8 +1517,8 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"detail": "audit.db was deleted or replaced after the gateway opened it, so new audit records are lost; restart the gateway: defenseclaw-gateway restart",
 		}
 	}
-	if policy, ok := CurrentPolicyHealth(); ok {
-		body["policy"] = policy
+	if policy, ok := CurrentPolicyHealth(); ok && administrator {
+		body["policy"] = a.policyHealthBody(policy)
 	}
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {
 		body["agent_identities"] = ledger
@@ -1516,11 +1529,16 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// number and reads them from the authenticated /status (GAP-1268).
 	peer, viaHookSocket := managedHookPeerFromContext(r.Context())
 	rootPeer := viaHookSocket && peer.UID == 0
-	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+	if cfg != nil {
 		if !cfg.SecureClientIntegration() {
 			if set := a.guardrailProfileSet(); set != nil {
 				setHealthProfileWarnings(body, "profile_assignment_warnings", "profile_assignment_warning_count",
 					set.assignmentWarnings(true), rootPeer)
+				if set.groupCheckPending() {
+					// Lifecycle commands read /health again until the first
+					// check has finished (GAP-0306, GAP-0409).
+					body["profile_assignment_check_pending"] = true
+				}
 			}
 		}
 		body["acp"] = map[string]interface{}{
@@ -1550,6 +1568,43 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.writeJSON(w, http.StatusOK, body)
+}
+
+// healthAdministratorCaller reports whether a /health caller may read what
+// describes the administrator's configuration: the policy block (the
+// host-wide effective digest, the generation and config generation, reload
+// errors), the provenance content hash and generation, and the config
+// reload details. /health needs no credential, and on a standalone
+// deployment an ordinary account sees only its own effective policy
+// (GAP-0481, GAP-0666), so only an administrator reads them there: the hook
+// socket's root or service-account peer, where the Linux and macOS
+// lifecycle probes it, or a caller that presents the gateway token, which
+// only administrators can read (the Windows lifecycle). Every other
+// deployment keeps them for every caller.
+func (a *APIServer) healthAdministratorCaller(r *http.Request, cfg *config.Config) bool {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return true
+	}
+	if peer, viaHookSocket := managedHookPeerFromContext(r.Context()); viaHookSocket {
+		return peer.UID == 0 || peer.UID == os.Geteuid()
+	}
+	expected := ""
+	if a.scannerCfg != nil {
+		expected = a.scannerCfg.Gateway.Token
+	}
+	token := requestGatewayToken(r)
+	return expected != "" && token != "" && constantTimeStringMatch(token, expected)
+}
+
+// healthConfigLiveness keeps the config subsystem's state and drops what
+// describes the administrator's file: its path, the generation, the changed
+// sections, the last success and the reload error text, which can quote it.
+func healthConfigLiveness(s SubsystemHealth) SubsystemHealth {
+	s.Details = nil
+	if s.LastError != "" {
+		s.LastError = "the configuration did not load; an administrator can read the cause in defenseclaw status"
+	}
+	return s
 }
 
 // setHealthProfileWarnings puts warnings in the /health body under key for
@@ -3659,6 +3714,24 @@ func authenticatedInspectConnector(ctx context.Context) string {
 	return canonicalConnectorRulePackKey(connectorName)
 }
 
+// requestGatewayToken is the credential a management request presents:
+// Authorization: Bearer, X-DefenseClaw-Token, or X-DC-Auth: Bearer.
+func requestGatewayToken(r *http.Request) string {
+	token := ""
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		token = strings.TrimPrefix(auth, "Bearer ")
+	}
+	if token == "" {
+		token = r.Header.Get("X-DefenseClaw-Token")
+	}
+	if token == "" {
+		if dcAuth := r.Header.Get("X-DC-Auth"); strings.HasPrefix(dcAuth, "Bearer ") {
+			token = strings.TrimPrefix(dcAuth, "Bearer ")
+		}
+	}
+	return token
+}
+
 // tokenAuth wraps a handler with Bearer token authentication. Management
 // clients may use Authorization, X-DefenseClaw-Token, or the proxy-compatible
 // X-DC-Auth header; all are compared against the same gateway token.
@@ -3729,18 +3802,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		token := ""
-		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
-			token = strings.TrimPrefix(auth, "Bearer ")
-		}
-		if token == "" {
-			token = r.Header.Get("X-DefenseClaw-Token")
-		}
-		if token == "" {
-			if dcAuth := r.Header.Get("X-DC-Auth"); strings.HasPrefix(dcAuth, "Bearer ") {
-				token = strings.TrimPrefix(dcAuth, "Bearer ")
-			}
-		}
+		token := requestGatewayToken(r)
 
 		expected := ""
 		if a.scannerCfg != nil {
@@ -4056,7 +4118,7 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		}
 
 		ct := r.Header.Get("Content-Type")
-		if isOTLPEndpointPath(r.URL.Path) {
+		if isOTLPEndpointPath(r.URL.Path) || isSandboxRelayOTLPPath(r.URL.Path) {
 			if !isOTLPContentType(ct) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
 				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)

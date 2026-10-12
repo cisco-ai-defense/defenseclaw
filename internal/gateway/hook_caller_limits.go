@@ -117,9 +117,15 @@ func (l *hookCallerLimiter) globalLimit() int {
 	return max(hookGlobalInFlightMin, hookGlobalInFlightPerProc*runtime.GOMAXPROCS(0))
 }
 
-func (l *hookCallerLimiter) limits() (rps, burst, inFlight, running int) {
-	rps, burst, inFlight = hookCallerRate, hookCallerBurst, hookCallerInFlight
+// limits returns the bounds of one limiter key: the managed sandbox route
+// classes (sandbox_authority_limits.go) have their own; host hooks and
+// OTLP exports take the caller defaults (or a test's overrides).
+func (l *hookCallerLimiter) limits(key string) (rps, burst, inFlight, running int) {
 	running = max(1, runtime.GOMAXPROCS(0)/2)
+	if class, ok := sandboxBudgetForKey(key); ok {
+		return class.Rate, class.Burst, class.InFlight, min(running, class.InFlight)
+	}
+	rps, burst, inFlight = hookCallerRate, hookCallerBurst, hookCallerInFlight
 	if l.rate > 0 {
 		rps = l.rate
 	}
@@ -165,7 +171,7 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 		}
 		return nil, nil, managedHookReasonOverloaded, logNow
 	}
-	rps, burst, inFlight, running := l.limits()
+	rps, burst, inFlight, running := l.limits(caller)
 	// Keep capacity for at least three other callers even when one
 	// caller fills every request it may hold while queued.
 	inFlight = min(inFlight, max(1, l.globalLimit()/4))
@@ -209,13 +215,18 @@ func (l *hookCallerLimiter) acquire(caller string) (release func(), run chan str
 const hookCallerTelemetryBudget = "|otlp"
 
 // hookCallerBudgetKey is the limiter key for one request of identity: OTLP
-// ingest paths get their own budget, every other route shares the caller's.
+// ingest paths (the sandbox relay's included) get their own budget, each
+// managed sandbox route class gets <identity>|<class> (sandboxBudgetClass),
+// and every other route shares the caller's.
 func hookCallerBudgetKey(identity, path string) string {
-	if isUnscopedOTLPEndpointPath(path) {
+	if isUnscopedOTLPEndpointPath(path) || isSandboxOTLPPath(path) {
 		return identity + hookCallerTelemetryBudget
 	}
 	if _, _, ok := parseOTLPPathToken(path); ok {
 		return identity + hookCallerTelemetryBudget
+	}
+	if class := sandboxBudgetClass(path); class != "" {
+		return identity + "|" + class
 	}
 	return identity
 }

@@ -48,7 +48,13 @@ var enterpriseHookIdentitySpoolState struct {
 	last        time.Time
 	fingerprint string
 	failed      bool
+	// unreachable is set after a pass that listed accounts and resolved
+	// none: the directory does not answer the guardian.
+	unreachable bool
 }
+
+// enterpriseHookFlushDirectoryCaches is replaceable in tests.
+var enterpriseHookFlushDirectoryCaches = enterprisehooks.FlushDirectoryCaches
 
 // enterpriseHookIdentitySpoolAccounts lists the accounts a pass resolves
 // identity facts for, and the keys that tell whether they changed.
@@ -136,6 +142,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 	if due {
 		state.running = true
 	}
+	unreachable := state.unreachable
 	state.Unlock()
 	if !due {
 		return
@@ -148,6 +155,7 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			state.last = time.Now()
 			state.fingerprint = fingerprint
 			state.failed = passErr != nil
+			state.unreachable = unreachable
 			state.Unlock()
 		}()
 		if err := ensureEnterpriseHookStandaloneAuthDir(managed.HookGuardianAuthorizationDir(cfg.DataDir)); err != nil {
@@ -156,9 +164,28 @@ func startEnterpriseHookIdentitySpool(ctx context.Context, stderr io.Writer, run
 			return
 		}
 		logf := func(format string, args ...any) { fmt.Fprintf(stderr, format+"\n", args...) }
-		passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf)
+		var resolved int
+		resolved, passErr = enterprisehooks.WriteIdentitySpool(ctx, dir, accounts, enterpriseHookAuthorizationOwnershipSetter, logf)
 		if passErr != nil {
 			fmt.Fprintf(stderr, "[hook-guardian] identity spool: %v\n", passErr)
 		}
+		unreachable = enterpriseHookIdentityPassDone(ctx, stderr, unreachable, len(accounts), resolved)
 	}()
+}
+
+// enterpriseHookIdentityPassDone flushes the directory caches when a pass
+// resolves accounts after one that resolved none: the directory answers
+// again, and the operating system's own caches may still hold the answers of
+// the outage (enterprisehooks.FlushDirectoryCaches). It reports whether the
+// directory still does not answer the guardian.
+func enterpriseHookIdentityPassDone(ctx context.Context, stderr io.Writer, unreachable bool, accounts, resolved int) bool {
+	if unreachable && resolved > 0 {
+		if err := enterpriseHookFlushDirectoryCaches(ctx); err != nil {
+			fmt.Fprintf(stderr, "[hook-guardian] identity spool: the directory answers again, but its caches were not flushed: %v\n", err)
+		} else {
+			fmt.Fprintf(stderr, "[hook-guardian] identity spool: the directory answers again; flushed the directory caches so "+
+				"accounts get their groups at their next lookup\n")
+		}
+	}
+	return accounts > 0 && resolved == 0
 }

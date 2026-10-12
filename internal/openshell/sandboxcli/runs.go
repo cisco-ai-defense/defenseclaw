@@ -20,10 +20,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,7 +31,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // Detached runs. `sandbox run --detach` starts the harness in the background
@@ -108,6 +105,13 @@ func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.
 	if sb.Phase != "ready" {
 		return true, true, nil
 	}
+	// A session attached in another terminal ends with the stop: the stop
+	// asked about a detached run only (GAP-0277, GAP-0285).
+	if n := a.attachedSessions(sb.Name); n > 0 {
+		if ok, err := a.confirmEnding(attachedText(sb.Name, n)+"; stopping the sandbox ends "+them(n), "Stop anyway?", yes); err != nil || !ok {
+			return false, false, err
+		}
+	}
 	run, err := a.detachedRun(ctx, cli, sb)
 	if err != nil {
 		// Without an answer the stop goes ahead, as it did before runs
@@ -131,6 +135,29 @@ func (a *App) beforeStop(ctx context.Context, cli openshell.CLI, sb *sandboxapi.
 	return true, run.State != sandboxapi.RunRunning, nil
 }
 
+// attachedText names the sessions attached to sandbox name in other
+// terminals (attachedSessions).
+func attachedText(name string, n int) string {
+	return plural(int64(n), "terminal is", "terminals are") + " attached to " + name + " (a harness session or `" + CommandName + " connect --shell`)"
+}
+
+func them(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+// confirmEnding asks, defaulting to no, before a command ends what what
+// names; without a terminal, or with yes, it says so and goes on.
+func (a *App) confirmEnding(what, question string, yes bool) (bool, error) {
+	if a.IO.TTY && !yes {
+		return a.ask(what+". "+question, false, false)
+	}
+	a.warn(what)
+	return true, nil
+}
+
 func (a *App) startedText(started int64) string {
 	if started <= 0 {
 		return ""
@@ -138,57 +165,14 @@ func (a *App) startedText(started int64) string {
 	return " (started " + a.clock(time.Unix(started, 0)) + ")"
 }
 
-// legacyRun is a detached run's log an earlier CLI kept on this machine as
-// it stopped the sandbox (cli/run.json and cli/run.log), before the daemon
-// kept them: `sandbox logs` of a stopped sandbox the daemon kept none for
-// still shows it.
-type legacyRun struct {
-	harness.DetachedRun
-	// SandboxID ties the log to the sandbox: a later sandbox of the same
-	// name does not show it.
-	SandboxID string    `json:"sandbox_id,omitempty"`
-	Name      string    `json:"name"`
-	SavedAt   time.Time `json:"saved_at"`
-}
-
 // cliStateDir is where the CLI keeps what it remembers of a sandbox: the
-// run's options and where a copy's work went (runstate.go), and what an
-// earlier CLI kept there before the daemon did (a run log, the undo point
-// the user accepted). The daemon never reads it; `sandbox delete` removes
-// it.
+// run's options and where a copy's work went (runstate.go). The daemon
+// never reads it; `sandbox delete` removes it.
 func (a *App) cliStateDir(name string) (string, error) {
 	if !openshell.ValidSandboxName(name) {
 		return "", fmt.Errorf("%w: sandbox %q", openshell.ErrInvalidName, name)
 	}
 	return filepath.Join(a.dataDir(), "sandboxes", name, "cli"), nil
-}
-
-// legacyRunLog returns the log an earlier CLI kept for this sandbox, if
-// any.
-func (a *App) legacyRunLog(sb *sandboxapi.Sandbox) (*legacyRun, []byte, error) {
-	dir, err := a.cliStateDir(sb.Name)
-	if err != nil {
-		return nil, nil, err
-	}
-	data, err := safefile.ReadRegularFileBounded(filepath.Join(dir, "run.json"), 64<<10)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil, nil
-		}
-		return nil, nil, err
-	}
-	var meta legacyRun
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, nil, fmt.Errorf("read the kept run log of %s: %w", sb.Name, err)
-	}
-	if meta.SandboxID != sb.ID {
-		return nil, nil, nil
-	}
-	log, err := safefile.ReadRegularFileBounded(filepath.Join(dir, "run.log"), sandboxapi.MaxRunLogBytes+1)
-	if err != nil {
-		return nil, nil, err
-	}
-	return &meta, log, nil
 }
 
 // forgetCLIState removes what the CLI kept for a deleted sandbox, and the
@@ -198,6 +182,13 @@ func (a *App) forgetCLIState(name string) {
 	if dir, err := a.cliStateDir(name); err == nil {
 		_ = os.RemoveAll(dir)
 		_ = os.Remove(filepath.Dir(dir))
+	}
+	// The copy `run` staged in this user's data directory: the daemon removes
+	// the copy of its own data directory, and a managed computer's daemon
+	// keeps another one, so the staged project snapshot and its metadata
+	// (copy.json, base.git) stayed in the home after the delete (GAP-0584).
+	if a.Workspace != nil && openshell.ValidSandboxName(name) {
+		_ = a.Workspace.Discard(a.dataDir(), name)
 	}
 }
 

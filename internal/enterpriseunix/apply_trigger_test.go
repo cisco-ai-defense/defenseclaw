@@ -227,3 +227,77 @@ func TestStatusAndVerifyWhileTheApplyTriggerRunsAreBusyNotFailed(t *testing.T) {
 	}()
 	requireOK(t, h.run(Options{Action: ActionVerify}))
 }
+
+// A package upgrade that fails rolls back, but the package has installed
+// the new binaries. The macOS apply job ran right after the rollback with
+// the new binary against the restored record and retried the failed upgrade
+// under the lifecycle lock, so the upgrade gate's next ensure --from-package
+// failed lifecycle_busy. The apply trigger stands down while its inputs are
+// the restored deployment's; a new push is applied (and upgrades).
+func TestAnApplyRunDoesNotRetryARolledBackPackageUpgrade(t *testing.T) {
+	for _, goos := range []string{"darwin", "linux"} {
+		t.Run(goos, func(t *testing.T) {
+			var h *testHost
+			if goos == "linux" {
+				h = packageHost(t, "1.0.0")
+			} else {
+				h = newTestHost(t, goos)
+			}
+			placePackageBinaries := func(version string) {
+				staged := h.payload(version)
+				if err := os.MkdirAll(h.env.P(h.env.Layout.BinDir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				entries, err := os.ReadDir(staged)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if entry.IsDir() {
+						continue
+					}
+					if err := h.env.copyFileAtomic(filepath.Join(staged, entry.Name()), h.env.P(filepath.Join(h.env.Layout.BinDir, entry.Name())), 0o755, rootOwner()); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			placePackageBinaries("1.0.0")
+			requireOK(t, h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}))
+
+			placePackageBinaries("2.0.0")
+			h.env.ProductVersion = "2.0.0"
+			h.healthy = false
+			failed := h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package"})
+			requireError(t, failed, codeActivate)
+			if !hasWarning(failed, codeRolledBack) || failed.InstalledVersion != "1.0.0" {
+				t.Fatalf("expected a rollback to 1.0.0: %+v %+v", failed.Errors, failed.Warnings)
+			}
+			h.healthy = true
+
+			before := len(h.services.calls)
+			r := h.run(Options{Action: ActionEnsure, Reason: "path"})
+			requireOK(t, r)
+			if !r.Noop || r.NoopReason != "upgrade_rolled_back" || !hasWarning(r, codeUpgradeRolledBack) || len(h.services.calls) != before {
+				t.Fatalf("the apply run retried the rolled-back upgrade: noop=%v reason=%q calls=%v", r.Noop, r.NoopReason, h.services.calls[before:])
+			}
+			if r.InstalledVersion != "1.0.0" {
+				t.Fatalf("the stand-down changed the deployment: %q", r.InstalledVersion)
+			}
+
+			// An administrator push after the failure is applied, with the
+			// upgrade, and the record of the failure goes with it.
+			edited := strings.Replace(h.read(h.env.Layout.ConfigPath), "mode: observe", "mode: action", 1)
+			if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), []byte(edited), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			pushed := h.run(Options{Action: ActionEnsure, Reason: "path"})
+			requireOK(t, pushed)
+			if pushed.Noop || pushed.InstalledVersion != "2.0.0" {
+				t.Fatalf("the apply run did not apply the push: noop=%v reason=%q installed=%q", pushed.Noop, pushed.NoopReason, pushed.InstalledVersion)
+			}
+			if exists(h.env.rolledBackUpgradePath()) {
+				t.Fatal("the committed upgrade kept the record of the rolled-back one")
+			}
+		})
+	}
+}

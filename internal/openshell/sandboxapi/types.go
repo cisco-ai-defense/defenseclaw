@@ -35,6 +35,14 @@ const (
 	PathActivity      = "/api/v1/sandbox/activity"
 	PathEgressUnblock = "/api/v1/sandbox/egress/unblock"
 	PathPolicyExplain = "/api/v1/sandbox/policy/explain"
+	// PathPolicyTest is POST: what a sandbox's egress policy decides for
+	// destinations (PolicyTestRequest).
+	PathPolicyTest = "/api/v1/sandbox/policy/test"
+	// PathReady is POST: a managed computer's sandbox daemon readies the
+	// account's OpenShell for a first run (installs the pinned release in
+	// setup mode, starts and registers the account's gateway) and answers
+	// the Status.
+	PathReady = "/api/v1/sandbox/ready"
 )
 
 // ClientHeader is the CSRF header every mutating request carries, and
@@ -52,6 +60,10 @@ type Status struct {
 	// OpenShell gateway; Reason says why not.
 	Available bool   `json:"available"`
 	Reason    string `json:"reason,omitempty"`
+	// GatewayElsewhere says what holds this machine's OpenShell gateway
+	// port while sandboxes are off for this account and another account's
+	// process holds it: one gateway runs on a machine (GAP-0307).
+	GatewayElsewhere string `json:"gateway_elsewhere,omitempty"`
 	// Gateway describes the OpenShell gateway the daemon drives.
 	Gateway *Gateway `json:"gateway,omitempty"`
 	// IngressAddr and EgressAddr are the DefenseClaw listeners sandboxes
@@ -80,6 +92,54 @@ type Status struct {
 	// group but the daemon started before that, so it cannot reach Docker
 	// until it restarts (Linux).
 	DockerGroupMissing bool `json:"docker_group_missing,omitempty"`
+	// TelemetryFailures counts the sandbox telemetry records the recorder
+	// refused since the daemon started; TelemetryError is the last refusal.
+	TelemetryFailures int64  `json:"telemetry_failures,omitempty"`
+	TelemetryError    string `json:"telemetry_error,omitempty"`
+	// Managed is set by a managed host's per-user sandbox daemon: the
+	// caller's own policy, never another account's.
+	Managed *ManagedStatus `json:"managed,omitempty"`
+}
+
+// ManagedStatus is the managed part of Status: the caller's own sandbox
+// policy as the managed gateway resolved it, and the daemon's OpenShell.
+type ManagedStatus struct {
+	// Profile is the caller's matched guardrail profile ("" = the
+	// organization's floor alone) and Description its description.
+	Profile     string `json:"profile"`
+	Description string `json:"description,omitempty"`
+	// Provisional says the directory could not be reached and the default
+	// profile applies until it can.
+	Provisional bool `json:"provisional,omitempty"`
+	// EffectiveDigest is the caller's effective sandbox policy digest.
+	EffectiveDigest string    `json:"effective_digest,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at,omitzero"`
+	RequestAccess   string    `json:"request_access,omitempty"`
+	// InstallMode (prerequisite or setup), Driver and OpenShellVersion
+	// describe the daemon's OpenShell.
+	InstallMode      string `json:"install_mode,omitempty"`
+	Driver           string `json:"driver,omitempty"`
+	OpenShellVersion string `json:"openshell_version,omitempty"`
+	// GatewayPort is the port the organization gives the caller's OpenShell
+	// gateway (enterprise.openshell.gateway_port; 0 from an older daemon).
+	GatewayPort int `json:"gateway_port,omitempty"`
+	// DriverReason is why Driver (openshell.DriverReason*): the reason of
+	// the caller's last sandbox start, or of the managed gateway's view
+	// before one. DriverFallback is the caller's fallback where the
+	// MicroVM driver can't run (docker, none or "").
+	DriverReason   string `json:"driver_reason,omitempty"`
+	DriverFallback string `json:"driver_fallback,omitempty"`
+	// PendingRestart says an upgrade or setting change waits for the
+	// caller's sandboxes to stop.
+	PendingRestart bool `json:"pending_restart,omitempty"`
+	// OtherGateways are the OpenShell gateways the caller's account runs
+	// besides the one the organization's service runs, each as "pid N:
+	// command": they share the account's MicroVM state with the managed
+	// gateway and stop its sandboxes (GAP-0610).
+	OtherGateways []string `json:"other_gateways,omitempty"`
+	// Unavailable is why sandboxes can't run for the caller ("" = they
+	// can).
+	Unavailable string `json:"unavailable,omitempty"`
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
@@ -131,6 +191,9 @@ type CreateRequest struct {
 	Learn     bool     `json:"learn,omitempty"`
 	CPU       string   `json:"cpu,omitempty"`
 	Memory    string   `json:"memory,omitempty"`
+	// ProcessTree turns the process tree on for this sandbox (the pack's
+	// observe.process_tree turns it on for every one).
+	ProcessTree bool `json:"process_tree,omitempty"`
 	// NoSnapshot skips the pre-session snapshot of a mounted project, which
 	// also disables undo for this session.
 	NoSnapshot bool `json:"no_snapshot,omitempty"`
@@ -149,7 +212,16 @@ type CreateRequest struct {
 	// where the image has its zone file (openshell.EnvHostTimeZone), and
 	// on UTC without it.
 	TimeZone string `json:"time_zone,omitempty"`
+	// RepoPolicyDigest is the digest of the project's repository policy
+	// (Explain.RepoPolicy) the client resolved the run with, NoRepoPolicy
+	// when it had none. The daemon reads the file itself and refuses the
+	// create when it changed since; empty skips the check.
+	RepoPolicyDigest string `json:"repo_policy_digest,omitempty"`
 }
+
+// NoRepoPolicy is CreateRequest.RepoPolicyDigest for a project without a
+// repository policy.
+const NoRepoPolicy = "none"
 
 // LLMCredential selects one of the harness's provider profiles and carries
 // its secret values keyed by the profile's environment variable names.
@@ -195,13 +267,31 @@ type Sandbox struct {
 	// no longer has, or "deleted" for a sandbox that is gone but whose
 	// pre-session snapshot is kept (delete --keep-snapshot, or deleted
 	// outside DefenseClaw): only undo, review and delete apply to it.
-	Phase       string `json:"phase"`
+	Phase string `json:"phase"`
+	// PhaseReason is why the sandbox is in the error phase, in words (its
+	// MicroVM's disk is full, what OpenShell says), when it is.
+	PhaseReason string `json:"phase_reason,omitempty"`
 	Pack        string `json:"pack,omitempty"`
 	PackDigest  string `json:"pack_digest,omitempty"`
 	Profile     string `json:"profile"`
 	NetworkMode string `json:"network_mode,omitempty"`
 	Approvals   string `json:"approvals,omitempty"`
-	Yolo        bool   `json:"yolo"`
+	// UserApprovals is the floor's user_approvals the sandbox runs under
+	// (none, session or ""): under none every ask is refused, whatever
+	// Approvals says triage does (GAP-0468).
+	UserApprovals string `json:"user_approvals,omitempty"`
+	Yolo          bool   `json:"yolo"`
+	// ProcessTree reports that the sandbox's processes are sampled while it
+	// runs (GET /sandboxes/{name}/processes, `sandbox ps`).
+	ProcessTree bool `json:"process_tree,omitempty"`
+	// UnflushedAt is when its MicroVM last went down without DefenseClaw
+	// stopping it (the OpenShell gateway restarted under it, for one), so
+	// without a flush: what it wrote in its last seconds may be missing,
+	// empty or cut short (UnflushedText).
+	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
+	// RepoPolicy is the repository policy (.defenseclaw/sandbox.yaml) the
+	// posture includes, without its content, as the launch banner names it.
+	RepoPolicy *RepoPolicy `json:"repo_policy,omitempty"`
 	// SessionYolo reports whether the session running now was launched in
 	// skip-permissions mode: Launch.Yolo as it was when the sandbox last
 	// became ready. Yolo and Launch.Yolo are what the next launch gets;
@@ -220,8 +310,13 @@ type Sandbox struct {
 	// not Image: on the MicroVM (vm) driver, the image its per-run harness
 	// files are baked into, or an alias of Image under a name no registry
 	// serves. Empty on the docker driver.
-	RunImage       string    `json:"run_image,omitempty"`
-	RunImageID     string    `json:"run_image_id,omitempty"`
+	RunImage   string `json:"run_image,omitempty"`
+	RunImageID string `json:"run_image_id,omitempty"`
+	// Driver is the compute driver the sandbox runs on (docker or vm), and
+	// DriverReason why on a managed host (openshell.DriverReason*, such as
+	// kvm_missing when the docker fallback replaced the MicroVM driver).
+	Driver         string    `json:"driver,omitempty"`
+	DriverReason   string    `json:"driver_reason,omitempty"`
 	HarnessVersion string    `json:"harness_version,omitempty"`
 	HookContract   string    `json:"hook_contract,omitempty"`
 	TamperTier     string    `json:"tamper_tier,omitempty"`
@@ -323,6 +418,14 @@ type HookCoverage struct {
 	// Silent is set while the harness is active without hook traffic.
 	Silent      bool      `json:"silent,omitempty"`
 	SilentSince time.Time `json:"silent_since,omitzero"`
+	// OnSilence is what DefenseClaw does once the harness has worked for
+	// SilenceAfter ("10m") without hook traffic: "stop" stops the sandbox
+	// (a user-tier harness under the pack's hooks.on_silence: stop), "alert"
+	// raises a finding and leaves it running. While the sandbox's policy is
+	// not resolved, a user-tier harness gets the fail-closed "stop" after
+	// "10m".
+	OnSilence    string `json:"on_silence,omitempty"`
+	SilenceAfter string `json:"silence_after,omitempty"`
 	// HookFailed counts the authenticated hook posts DefenseClaw answered
 	// with an error status (a refused route, the rate limit, a malformed
 	// request). The hooks fail closed, so the harness did not do what each
@@ -331,6 +434,25 @@ type HookCoverage struct {
 	HookFailed        int64     `json:"hook_failed,omitempty"`
 	LastHookFailure   string    `json:"last_hook_failure,omitempty"`
 	LastHookFailureAt time.Time `json:"last_hook_failure_at,omitzero"`
+	// LastHookFailureCause is ReasonPlaceholderRefused when the last failure
+	// came as OpenShell refused the requests of a conversation that holds a
+	// credential placeholder (PlaceholderRefusedAt): a hook post of that
+	// conversation, not DefenseClaw refusing a hook. HooksAnsweredAt is
+	// DefenseClaw's first verdict after the last failure, outside such a
+	// conversation: the hooks work again.
+	LastHookFailureCause string    `json:"last_hook_failure_cause,omitempty"`
+	HooksAnsweredAt      time.Time `json:"hooks_answered_at,omitzero"`
+	// ModelKeyRejected says the model API rejected the sandbox's model
+	// credential (Claude Code's StopFailure hook reported it) and how to
+	// hand the sandbox a fresh key, until a turn ends normally or a start
+	// hands it a new key. ModelKeyRejectedAt is the last rejection.
+	ModelKeyRejected   string    `json:"model_key_rejected,omitempty"`
+	ModelKeyRejectedAt time.Time `json:"model_key_rejected_at,omitzero"`
+	// PlaceholderRefusedAt is when OpenShell last refused a request of the
+	// sandbox's session whose body carried a credential placeholder
+	// (PlaceholderRefusal): the conversation that shows one cannot go on
+	// (PlaceholderConversationText). A turn that ends normally clears it.
+	PlaceholderRefusedAt time.Time `json:"placeholder_refused_at,omitzero"`
 	// IngressRefused counts the hook connections and requests to the
 	// DefenseClaw ingress that OpenShell refused (the sandbox's network
 	// policy does not allow its port or path).
@@ -373,11 +495,135 @@ type Endpoint struct {
 // a sandbox whose feed shows two ✗ destinations reports Blocked 2 however
 // often each was tried. BlockedRequests counts the refused requests.
 type EgressStats struct {
-	Destinations    int   `json:"destinations"`
-	Blocked         int   `json:"blocked"`
-	BlockedRequests int   `json:"blocked_requests"`
-	BytesUp         int64 `json:"bytes_up"`
-	BytesDown       int64 `json:"bytes_down"`
+	Destinations    int `json:"destinations"`
+	Blocked         int `json:"blocked"`
+	BlockedRequests int `json:"blocked_requests"`
+	// UpstreamFailed counts the allowed tunnels and requests the egress
+	// proxy could not complete upstream (DestinationRow.Failed).
+	UpstreamFailed int   `json:"upstream_failed,omitempty"`
+	BytesUp        int64 `json:"bytes_up"`
+	BytesDown      int64 `json:"bytes_down"`
+	// ModelProviders, HarnessVendor and ShadowAI count the AI destinations
+	// of the sandbox's destinations view (GET /sandboxes/{name}/destinations)
+	// by the kind its KIND column names: its model provider, the AI APIs of
+	// its harness's vendor, and the other AI APIs and inference-shaped hosts
+	// it reached or tried to reach (one count of the first two read "3 model
+	// APIs" next to one model provider, GAP-0319).
+	ModelProviders int `json:"model_providers,omitempty"`
+	HarnessVendor  int `json:"harness_vendor,omitempty"`
+	ShadowAI       int `json:"shadow_ai,omitempty"`
+}
+
+// Destination kinds (DestinationRow.Kind), in the order they are told apart.
+// A row that is none of the AI kinds takes the egress category the proxy
+// gave it (a feed category such as package_registry), else blocked or other.
+const (
+	// DestinationModelProvider: reached under the provider rule of the
+	// sandbox's model provider (its model endpoint).
+	DestinationModelProvider = "model_provider"
+	// DestinationCredential: reached under the provider rule of one of the
+	// sandbox's --credential bindings, its endpoint. The user bound a
+	// credential there, so it is no shadow AI either.
+	DestinationCredential = "credential"
+	// DestinationHarnessVendor: an AI API of the harness's own vendor.
+	DestinationHarnessVendor = "harness_vendor"
+	// DestinationOtherAI: another catalogued AI provider (shadow AI).
+	DestinationOtherAI = "other_ai_api"
+	// DestinationUnknownAI: a host shaped like an inference endpoint the
+	// catalog does not know (shadow AI).
+	DestinationUnknownAI = "unknown_ai"
+	// DestinationBlocked: only ever refused.
+	DestinationBlocked = "blocked"
+	// DestinationThisMachine: a port on this machine, reached through
+	// host.openshell.internal (a --host-port service, a local model
+	// endpoint).
+	DestinationThisMachine = "this_machine"
+	// DestinationOther: anything else.
+	DestinationOther = "other"
+)
+
+// ShadowAIKind reports whether a destination kind is shadow AI.
+func ShadowAIKind(kind string) bool {
+	return kind == DestinationOtherAI || kind == DestinationUnknownAI
+}
+
+// MaxDestinations bounds the rows a sandbox's destinations view keeps.
+const MaxDestinations = 512
+
+// Destinations is GET /sandboxes/{name}/destinations: every destination the
+// sandbox reached or tried to reach, through DefenseClaw's egress proxy or
+// OpenShell's own network boundary, since it was created (it survives daemon
+// restarts and stops; a delete drops it), and the model calls OpenShell's
+// inference route reported.
+type Destinations struct {
+	Name         string           `json:"name"`
+	Harness      string           `json:"harness,omitempty"`
+	Destinations []DestinationRow `json:"destinations"`
+	Models       []ModelUse       `json:"models,omitempty"`
+	// Dropped counts the destinations left out over MaxDestinations.
+	Dropped int `json:"dropped,omitempty"`
+}
+
+// DestinationRow is one destination host of a sandbox.
+type DestinationRow struct {
+	Host  string `json:"host"`
+	Ports []int  `json:"ports,omitempty"`
+	// Kind is a Destination* kind or an egress category.
+	Kind string `json:"kind"`
+	// Provider and Vendor name the AI provider the catalog matched (or
+	// the OpenShell provider rule's), Category the egress proxy's category.
+	Provider string `json:"provider,omitempty"`
+	Vendor   string `json:"vendor,omitempty"`
+	Category string `json:"category,omitempty"`
+	// Rule is the OpenShell policy rule that last allowed it.
+	Rule string `json:"rule,omitempty"`
+	// Sources are the boundaries that saw it: dc-egress-proxy, openshell.
+	Sources []string `json:"sources"`
+	// Connections counts the connections and requests OpenShell allowed,
+	// Tunnels those the DefenseClaw proxy relayed; Refused and Blocked the
+	// refusals of each. ModelTurns counts the model calls among OpenShell's
+	// requests.
+	Connections int64 `json:"connections,omitempty"`
+	Tunnels     int64 `json:"tunnels,omitempty"`
+	Refused     int64 `json:"refused,omitempty"`
+	Blocked     int64 `json:"blocked,omitempty"`
+	// Failed counts the tunnels and requests the proxy allowed and could
+	// not complete upstream (the host refused or dropped the connection,
+	// did not answer, or did not resolve); Tunnels does not count them.
+	Failed     int64 `json:"failed,omitempty"`
+	ModelTurns int64 `json:"model_turns,omitempty"`
+	// BytesUp and BytesDown are what the proxy relayed.
+	BytesUp   int64 `json:"bytes_up,omitempty"`
+	BytesDown int64 `json:"bytes_down,omitempty"`
+	// Binaries are the executables OpenShell named making the
+	// connections (the last few), PID the last one's process. Both are what
+	// the workload claims.
+	Binaries []string `json:"binaries,omitempty"`
+	PID      int      `json:"pid,omitempty"`
+	// Lineage is PID's process and its parents, from the opt-in process
+	// tree (observe.process_tree), when it knows the process.
+	Lineage   []DestinationProcess `json:"lineage,omitempty"`
+	FirstSeen time.Time            `json:"first_seen"`
+	LastSeen  time.Time            `json:"last_seen"`
+}
+
+// DestinationProcess is one process of a destination's lineage.
+type DestinationProcess struct {
+	PID   int       `json:"pid"`
+	PPID  int       `json:"ppid,omitempty"`
+	Exe   string    `json:"exe,omitempty"`
+	Comm  string    `json:"comm,omitempty"`
+	Start time.Time `json:"start,omitzero"`
+}
+
+// ModelUse is a provider and model OpenShell's inference route reported
+// model calls to.
+type ModelUse struct {
+	Provider string    `json:"provider,omitempty"`
+	Model    string    `json:"model,omitempty"`
+	Calls    int64     `json:"calls"`
+	Failed   int64     `json:"failed,omitempty"`
+	LastSeen time.Time `json:"last_seen"`
 }
 
 // WorkspaceSummary is the launch-banner view of a mounted project.
@@ -403,11 +649,21 @@ type MCPSummary struct {
 	Project []string `json:"project,omitempty"`
 }
 
-// MCPLeftBehind is a server a run did not bring along.
+// MCPLeftBehind is a server a run did not bring along. Code is set when
+// the organization's policy left it out: MCPCodeOrganizationBlock or
+// MCPCodeAssetPolicy (ManagedMCP's reasons).
 type MCPLeftBehind struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
+	Code   string `json:"code,omitempty"`
 }
+
+// The organization's reasons for an MCP server a managed run leaves out
+// (MCPLeftBehind.Code, ManagedMCP.Reason).
+const (
+	MCPCodeOrganizationBlock = "organization_block"
+	MCPCodeAssetPolicy       = "asset_policy"
+)
 
 // SnapshotInfo describes the pre-session snapshot.
 type SnapshotInfo struct {
@@ -467,6 +723,11 @@ type StartRequest struct {
 	// an earlier session's changes: they are accepted, and undo no longer
 	// reverts them.
 	NewSnapshot bool `json:"new_snapshot,omitempty"`
+	// LLM is the model credential as the caller's environment holds it now
+	// (secret values): when it is of the profile the sandbox was created
+	// with and differs from the one its provider holds (a rotated or
+	// renewed key), the start gives the provider the new one.
+	LLM *LLMCredential `json:"llm,omitempty"`
 }
 
 // AcceptRequest is POST /sandboxes/{name}/accept: the user kept the changes
@@ -608,6 +869,27 @@ const (
 	ApprovalFailed   = "failed"
 )
 
+// Who approved an ask: the Reason of the approval.resolved event of an
+// approval that was applied (ApprovalApplied).
+const (
+	ApprovedAutomatically = "automatic"
+	ApprovedByOperator    = "operator"
+	ApprovedByPolicy      = "policy"
+)
+
+// ApprovalApplied reports an approval.resolved event whose rule was
+// applied: the destination it names is open from then on.
+func ApprovalApplied(ev ActivityEvent) bool {
+	if ev.Kind != ActivityApprovalResolved {
+		return false
+	}
+	switch ev.Reason {
+	case ApprovedAutomatically, ApprovedByOperator, ApprovedByPolicy:
+		return true
+	}
+	return false
+}
+
 // Approval is one rare ask: an OpenShell draft proposal triage would not
 // decide on its own.
 type Approval struct {
@@ -708,6 +990,9 @@ type ExplainRequest struct {
 	// Explain.VMFirstBoot does too. Without it the daemon takes the newest
 	// sandbox of the harness's.
 	Run *ExplainRun `json:"run,omitempty"`
+	// Sources asks a managed host's daemon to label each explained value
+	// with its source (Explain.Managed.Sources); ignored elsewhere.
+	Sources bool `json:"sources,omitempty"`
 }
 
 // ExplainRun is what of a create request the run files of the sandbox
@@ -737,20 +1022,228 @@ type ExplainRun struct {
 
 // Explain is the resolved sandbox posture with provenance.
 type Explain struct {
-	Pack        string      `json:"pack"`
-	PackSource  string      `json:"pack_source"`
-	PackDigest  string      `json:"pack_digest"`
+	Pack       string `json:"pack"`
+	PackSource string `json:"pack_source"`
+	PackDigest string `json:"pack_digest"`
+	// PackChain are the packs the pack extends, parent first.
+	PackChain []PackLink `json:"pack_chain,omitempty"`
+	// RepoPolicy is the project's repository policy
+	// (.defenseclaw/sandbox.yaml) the posture includes, if any.
+	RepoPolicy  *RepoPolicy `json:"repo_policy,omitempty"`
 	Profile     string      `json:"profile"`
 	NetworkMode string      `json:"network_mode"`
 	Approvals   string      `json:"approvals"`
 	Admin       AdminStatus `json:"admin"`
-	Settings    []Setting   `json:"settings"`
-	Violations  []Violation `json:"violations,omitempty"`
+	// Workspace is the copy policy of the run or sandbox explained.
+	Workspace  *WorkspacePolicy `json:"workspace,omitempty"`
+	Settings   []Setting        `json:"settings"`
+	Violations []Violation      `json:"violations,omitempty"`
 	// VMFirstBoot says the sandbox would boot an image the gateway's
 	// MicroVM (vm) driver has not prepared yet: the first start of each
 	// image prepares its MicroVM disk, which takes about a minute. Always
 	// false on the docker driver.
 	VMFirstBoot bool `json:"vm_first_boot,omitempty"`
+	// Managed is set on a managed host: the caller's own floor as the
+	// managed gateway explains it.
+	Managed *ManagedExplain `json:"managed,omitempty"`
+}
+
+// Sources of an explained value (ManagedExplain.Sources).
+const (
+	ExplainSourceOrganization = "organization"
+	ExplainSourceProfile      = "profile"
+	ExplainSourcePack         = "pack"
+	ExplainSourceRepo         = "repo"
+	ExplainSourceFlag         = "flag"
+)
+
+// ManagedExplain is the caller's own sandbox policy on a managed host
+// (`defenseclaw sandbox policy explain`). It names only the caller's own
+// profile and match; nothing in it describes another account's.
+// WorkspacePolicy is what an effective policy holds back from and keeps of
+// a project copy: the masks and their exceptions, the git history depth and
+// the size cap. A managed computer's CLI stages a copy with it, because the
+// organization pack that decides it is the administrator's file, which the
+// CLI cannot read (GAP-0478).
+type WorkspacePolicy struct {
+	Masks       []string `json:"masks"`
+	Unmask      []string `json:"unmask,omitempty"`
+	GitDepth    int      `json:"git_depth"`
+	MaxUploadMB int      `json:"max_upload_mb"`
+}
+
+type ManagedExplain struct {
+	// Profile is the caller's matched guardrail profile ("" = the
+	// organization's floor alone); Match is how it matched (agent, user,
+	// group, connector, default, default_unverified,
+	// default_lookup_failed, none) and MatchedGroup the caller's group
+	// that matched.
+	Profile string `json:"profile"`
+	// Workspace is the copy policy of a new run, as the managed gateway
+	// resolves it with the organization's pack (nil for a registration).
+	Workspace    *WorkspacePolicy `json:"workspace,omitempty"`
+	Description  string           `json:"description,omitempty"`
+	Match        string           `json:"match"`
+	MatchedGroup string           `json:"matched_group,omitempty"`
+	Provisional  bool             `json:"provisional,omitempty"`
+	// Allowed is false when the caller may run no sandbox.
+	Allowed bool `json:"allowed"`
+	// RequiredFor lists the connectors that run only in a sandbox on this
+	// computer; WhenUnavailable is refuse or alert.
+	RequiredFor     []string `json:"required_for,omitempty"`
+	WhenUnavailable string   `json:"when_unavailable,omitempty"`
+	// AllowedHarnesses and AllowedCredentials are unset when they
+	// constrain nothing; AllowedCredentials [none] allows no credentials.
+	AllowedHarnesses   []string `json:"allowed_harnesses,omitempty"`
+	AllowedCredentials []string `json:"allowed_credentials,omitempty"`
+	// EgressAllowOnly and EgressBlock are the floor's egress lists.
+	EgressAllowOnly []string `json:"egress_allow_only,omitempty"`
+	EgressBlock     []string `json:"egress_block,omitempty"`
+	// UserApprovals (none, session or "") and AllowUnblock say which asks
+	// and unblocks the caller may approve.
+	UserApprovals string `json:"user_approvals,omitempty"`
+	AllowUnblock  bool   `json:"allow_unblock"`
+	// MCPIncluded names the caller's MCP servers the run includes;
+	// MCPBlocked those it leaves out, with the reason.
+	MCPIncluded []string     `json:"mcp_included,omitempty"`
+	MCPBlocked  []ManagedMCP `json:"mcp_blocked,omitempty"`
+	// WorkdirMode is copy on managed hosts; AllowMount, AllowHostPorts and
+	// AllowYolo are the floor's.
+	WorkdirMode    string `json:"workdir_mode,omitempty"`
+	AllowMount     bool   `json:"allow_mount"`
+	AllowHostPorts bool   `json:"allow_host_ports"`
+	AllowYolo      bool   `json:"allow_yolo"`
+	// OnSilence and MaxSilenceAfter bind user-tier harnesses whose hooks
+	// fall silent.
+	OnSilence          string `json:"on_silence,omitempty"`
+	MaxSilenceAfter    string `json:"max_silence_after,omitempty"`
+	ProcessTree        bool   `json:"process_tree,omitempty"`
+	DeleteStoppedAfter string `json:"delete_stopped_after,omitempty"`
+	// Driver and DriverReason are the compute driver of the explained
+	// sandbox (or the one a sandbox would get now) and why
+	// (openshell.DriverReason*); DriverFallback is the caller's fallback
+	// where the MicroVM driver can't run (docker, none, or "" where none
+	// applies).
+	Driver         string `json:"driver,omitempty"`
+	DriverReason   string `json:"driver_reason,omitempty"`
+	DriverFallback string `json:"driver_fallback,omitempty"`
+	// PolicyDigest is the caller's effective sandbox policy digest.
+	PolicyDigest  string    `json:"policy_digest"`
+	UpdatedAt     time.Time `json:"updated_at,omitzero"`
+	RequestAccess string    `json:"request_access,omitempty"`
+	// Sources maps each explained key to its source (ExplainSourceX) when
+	// the caller asked for sources.
+	Sources map[string]string `json:"sources,omitempty"`
+	// Posture is the explained run as the managed gateway resolves it
+	// under the caller's floor. The daemon moves it into the Explain's own
+	// fields (the pack, the profile and every setting), so the user's
+	// explain shows the authoritative policy: the daemon cannot read the
+	// administrator's packs, and a posture it resolved itself would leave
+	// out the required pack and the profile minimum (GAP-0179, GAP-0438).
+	Posture *ManagedPosture `json:"posture,omitempty"`
+}
+
+// ManagedPosture is the caller's own resolved sandbox posture as the
+// managed gateway resolves it for an explained run (ManagedExplain.Posture):
+// the pack and its chain, the profile, the network and approval modes,
+// every setting with its provenance, and the run's violations. Pack sources
+// name no host path: "organization" for an administrator's pack,
+// "builtin:<name>" for a built-in one.
+type ManagedPosture struct {
+	Pack          string      `json:"pack"`
+	PackSource    string      `json:"pack_source"`
+	PackDigest    string      `json:"pack_digest"`
+	PackChain     []PackLink  `json:"pack_chain,omitempty"`
+	Profile       string      `json:"profile"`
+	NetworkMode   string      `json:"network_mode"`
+	Approvals     string      `json:"approvals"`
+	Settings      []Setting   `json:"settings"`
+	Violations    []Violation `json:"violations,omitempty"`
+	RepoTightened []string    `json:"repo_tightened,omitempty"`
+}
+
+// ManagedMCP is one MCP server a managed run leaves out, and why
+// (organization_block or asset_policy).
+type ManagedMCP struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// MaxPolicyChecks bounds the destinations of one policy test.
+const MaxPolicyChecks = 1024
+
+// PolicyTestRequest is POST /policy/test: the destinations to judge with a
+// sandbox's egress policy, its unblocks included.
+type PolicyTestRequest struct {
+	Sandbox string        `json:"sandbox"`
+	Checks  []PolicyCheck `json:"checks"`
+	// Project and Harness name a new run when Sandbox is empty: a managed
+	// computer's daemon judges the destinations with the caller's own
+	// policy for that run, before any sandbox exists.
+	Project string `json:"project,omitempty"`
+	Harness string `json:"harness,omitempty"`
+}
+
+// PolicyCheck is one destination of a policy test. Port 0 judges the host
+// on any port the policy carries; Binary names the program, which the
+// egress proxy does not tell apart (every program in the sandbox reaches
+// the web through it).
+type PolicyCheck struct {
+	Host   string `json:"host"`
+	Port   int    `json:"port,omitempty"`
+	Binary string `json:"binary,omitempty"`
+}
+
+// PolicyTestResult is a policy test's answer.
+type PolicyTestResult struct {
+	Sandbox     string           `json:"sandbox,omitempty"`
+	Pack        string           `json:"pack"`
+	Profile     string           `json:"profile"`
+	NetworkMode string           `json:"network_mode"`
+	Decisions   []PolicyDecision `json:"decisions"`
+}
+
+// PolicyDecision is what the egress policy decides for one destination,
+// walking the egress proxy's order: Rule is the step that decided (a
+// packs.EgressRule), Match the pattern, feed entry or port, and Source the
+// setting that holds it.
+type PolicyDecision struct {
+	PolicyCheck
+	Allowed     bool   `json:"allowed"`
+	Rule        string `json:"rule"`
+	Match       string `json:"match,omitempty"`
+	Source      string `json:"source"`
+	Reason      string `json:"reason,omitempty"`
+	Unblockable bool   `json:"unblockable"`
+	// Ask is set for a destination that raises an ask the user answers
+	// (a --host-port of the sandbox not yet approved): not allowed until
+	// approved.
+	Ask bool `json:"ask,omitempty"`
+	// Direct names a provider of the sandbox (its --llm model endpoint, a
+	// --credential binding) whose OpenShell rule opens the destination to
+	// that provider's programs around the egress proxy.
+	Direct string `json:"direct,omitempty"`
+}
+
+// PackLink is one pack of an extends chain.
+type PackLink struct {
+	Name    string `json:"name"`
+	Builtin bool   `json:"builtin"`
+	Source  string `json:"source"`
+	Digest  string `json:"digest"`
+}
+
+// RepoPolicy is a project's repository sandbox policy as a run read it: it
+// may only tighten the posture. Content is the file as read (at most
+// packs.MaxRepoPolicyBytes), so a client resolves exactly what the daemon
+// resolved.
+type RepoPolicy struct {
+	// Path is the file read (<project>/.defenseclaw/sandbox.yaml).
+	Path   string `json:"path"`
+	Digest string `json:"digest"`
+	// Tightened are the settings it made stricter for this run.
+	Tightened []string `json:"tightened,omitempty"`
+	Content   []byte   `json:"content,omitempty"`
 }
 
 // Setting is one resolved key and where its value came from.
@@ -793,6 +1286,16 @@ const (
 // which it refused. An unblock of the destination lifts the block.
 const CategoryLargeUpload = "large_upload"
 
+// The Category of a block-list refusal whose entry is the pack's, the
+// repository policy's (.defenseclaw/sandbox.yaml) or the host egress
+// firewall's deny rules; the user's own openshell.egress.block keeps the
+// proxy's operator_block.
+const (
+	CategoryPackBlock       = "pack_block"
+	CategoryRepoPolicyBlock = "repo_policy_block"
+	CategoryFirewallBlock   = "firewall_block"
+)
+
 // LargeUploadBlockedText is how the feed words an egress.blocked event of
 // category large_upload, whose Reason is the egress proxy's sentence
 // ("This sandbox tried to send more than 25 MiB to a destination it had
@@ -830,10 +1333,22 @@ const ReasonNestedRepo = "nested_repo"
 // with), and Host is host.openshell.internal.
 const ReasonHostPortClosed = "host_port_closed"
 
+// ReasonShadowAI is the Reason of the finding event of a shadow AI
+// destination (DestinationOtherAI, DestinationUnknownAI): Host names it.
+const ReasonShadowAI = "shadow_ai"
+
 // ReasonHookFinding is the Reason of the finding event of a hook verdict
 // that let a tool call run but flagged it (an alert); Severity is the
 // verdict's.
 const ReasonHookFinding = "hook_finding"
+
+// UndecidedNote closes the reason of a sandbox verdict that let a tool
+// call run although a rule that blocks such calls matched it: the match
+// could not decide the call (GAP-0312). The feed and the session summary
+// say so, where they said only "allowed but flagged".
+const UndecidedNote = "The rule could not decide this call, so it ran: DefenseClaw decides only the commands it can read in full " +
+	"(a shell variable, a substitution or a construct it does not analyze leaves a match undecided). " +
+	"DefenseClaw recorded the finding for the user's review."
 
 // ReasonPolicyChanged is the Reason of the sandbox.lifecycle event a
 // sandbox gets when a configuration change moves the policy it runs under
@@ -857,6 +1372,51 @@ const (
 	ReasonHooksRestored    = "hooks_restored"
 )
 
+// ReasonToolHostRefused is the Reason of the (INFO) finding event the feed
+// gets the first time the policy refuses a host a tool of the harness calls
+// for every use (Claude Code's WebFetch and api.anthropic.com).
+const ReasonToolHostRefused = "tool_host_refused"
+
+// ReasonUnflushedStop is the Reason of the finding event a MicroVM gets
+// when it goes down without DefenseClaw stopping it: its last writes may
+// be lost (no flush).
+const ReasonUnflushedStop = "unflushed_stop"
+
+// ReasonUpstreamFailed is the Reason of the (INFO) finding event the feed
+// gets the first time the egress proxy could not complete an allowed
+// connection to a host upstream: an outage, not a policy block.
+const ReasonUpstreamFailed = "upstream_failed"
+
+// ReasonModelKeyRejected is the Reason of the finding event a sandbox gets
+// when the model API rejected its model credential (HookCoverage.ModelKeyRejected).
+const ReasonModelKeyRejected = "model_credential_rejected"
+
+// UnflushedText is what Sandbox.UnflushedAt means for the work in sandbox
+// name, which `sandbox status` says.
+func UnflushedText(name string, at time.Time) string {
+	return name + "'s MicroVM went down without DefenseClaw stopping it at " + at.Local().Format("15:04:05") +
+		" (the OpenShell gateway restarted, for one), so files it wrote in its last seconds may be missing, empty or end in zero bytes: " +
+		"check them before you bring the work back (its pull flags the empty and cut ones)"
+}
+
+// ReasonPlaceholderRefused is the Reason of the finding event a sandbox gets
+// when OpenShell refused a request of its conversation that carried a
+// credential placeholder (PlaceholderRefusal, HookCoverage.PlaceholderRefusedAt).
+const ReasonPlaceholderRefused = "credential_placeholder_refused"
+
+// ModelErrorPlaceholder is the model error class of a turn that ended on
+// OpenShell's refusal of a request that carried a credential placeholder
+// (Claude Code shows it as an HTTP 403, like a rejected key).
+const ModelErrorPlaceholder = "credential_placeholder"
+
+// PlaceholderConversationText says what PlaceholderRefusal means for sandbox
+// name's conversation, and what to do.
+func PlaceholderConversationText(name string) string {
+	return "OpenShell refuses this conversation's requests, to the model and to DefenseClaw's hooks: the conversation holds a sandbox " +
+		"credential placeholder (an `env` output shows them), and OpenShell forwards no request whose body carries one. The model key, " +
+		"the sandbox token and DefenseClaw are fine: start a new conversation (`defenseclaw sandbox connect " + name + "`, without --continue)"
+}
+
 // HooksUnreachableWarning opens every warning about hooks that do not
 // reach DefenseClaw; HooksDoctorHint closes it.
 const (
@@ -878,7 +1438,13 @@ const (
 // ActivityEvent is one item of the live activity feed.
 type ActivityEvent struct {
 	// Seq increases by one per event; resume with ?since=<seq>.
-	Seq     uint64    `json:"seq"`
+	Seq uint64 `json:"seq"`
+	// Epoch names the feed that numbered Seq. The feed lives in the
+	// daemon's memory, so a daemon that restarted numbers its events from
+	// one again under another epoch: a client that sees the epoch change
+	// reads the new feed from its start instead of resuming after its old
+	// Seq.
+	Epoch   string    `json:"epoch,omitempty"`
 	Time    time.Time `json:"time"`
 	Kind    string    `json:"kind"`
 	Sandbox string    `json:"sandbox,omitempty"`
@@ -897,6 +1463,9 @@ type ActivityEvent struct {
 	// it ends: BytesUp is what had been sent then, and the upload sent
 	// more than Threshold.
 	Threshold int64 `json:"threshold,omitempty"`
+	// Repeats counts the refusals like this one folded into it, after the
+	// first was reported on its own line ("(and N more like it)").
+	Repeats int `json:"repeats,omitempty"`
 	// Approval and hook fields.
 	ApprovalID string `json:"approval_id,omitempty"`
 	Tool       string `json:"tool,omitempty"`
@@ -906,6 +1475,11 @@ type ActivityEvent struct {
 	// Reason is the machine-readable cause, Message the display line.
 	Reason  string `json:"reason,omitempty"`
 	Message string `json:"message,omitempty"`
+	// Refusal is the organization's access refusal of the destination
+	// (AccessRefused: the rule, "You can't approve this", the
+	// request-access contact and the Quote line), shown under the line;
+	// "" when no managed rule refused it (GAP-0502, GAP-0468).
+	Refusal string `json:"refusal,omitempty"`
 	// Replayed marks an OpenShell record from before the daemon started,
 	// which OpenShell's stream replays when DefenseClaw starts again: it
 	// arrives after newer events.

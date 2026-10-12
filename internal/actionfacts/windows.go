@@ -4143,17 +4143,23 @@ func windowsAddPowerShellPrimaryPath(
 	pathParams := map[string]bool{
 		"-path": true, "-literalpath": true, "-filepath": true,
 	}
+	// Set-Content, Add-Content and Out-File take their content with -Value
+	// or -InputObject, and -NoNewline, -Append and -NoClobber shape the
+	// write without moving it: the structured binder knows them, and an
+	// agent's write commonly carries one, so they must not leave the raw
+	// parse partial and its CEL rules on detection-only fallback (GAP-0175).
 	valueParams := map[string]bool{
 		"-value": true, "-encoding": true, "-filter": true, "-include": true,
 		"-exclude": true, "-erroraction": true, "-warningaction": true,
 		"-name": true, "-type": true, "-itemtype": true, "-argumentlist": true,
 		"-workingdirectory": true, "-verb": true, "-credential": true,
-		"-width": true, "-wi": true,
+		"-width": true, "-wi": true, "-inputobject": true,
 	}
 	switchParams := map[string]bool{
 		"-force": true, "-recurse": true, "-raw": true, "-quiet": true,
 		"-confirm": true, "-whatif": true, "-nonewwindow": true,
 		"-wait": true, "-passthru": true, "-usenewenvironment": true,
+		"-nonewline": true, "-append": true, "-noclobber": true,
 	}
 	if program == "out-file" || program == "tee" || program == "tee-object" {
 		valueParams["-inputobject"] = true

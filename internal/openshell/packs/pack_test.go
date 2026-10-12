@@ -99,6 +99,11 @@ func TestBuiltinPacksLoad(t *testing.T) {
 			if pack.Hooks.FailMode != FailModeClosed || pack.Hooks.OnTamper != w.onTamper {
 				t.Fatalf("hooks fail_mode=%q on_tamper=%q, want on_tamper=%q", pack.Hooks.FailMode, pack.Hooks.OnTamper, w.onTamper)
 			}
+			// Silent hooks are answered like a tamper: alert in open, stop
+			// in balanced and strict, after the 10 minutes of the default.
+			if pack.Hooks.OnSilence != w.onTamper || pack.Hooks.SilenceAfter != "10m" || pack.Hooks.SilenceAfterDuration() != DefaultSilenceAfter {
+				t.Fatalf("hooks on_silence=%q silence_after=%q, want %q after 10m", pack.Hooks.OnSilence, pack.Hooks.SilenceAfter, w.onTamper)
+			}
 			if !reflect.DeepEqual(pack.Egress.Feeds, []string{FeedBuiltin}) {
 				t.Fatalf("feeds %v", pack.Egress.Feeds)
 			}
@@ -237,6 +242,24 @@ func TestParseTamperAndProjectServerDefaults(t *testing.T) {
 	}
 }
 
+// hooks.on_silence defaults like on_tamper, and hooks.silence_after to 10m;
+// explicit values win and are kept as a pack writes them.
+func TestParseSilenceDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		network, hooks, response, after string
+	}{
+		{"open", "{fail_mode: closed}", OnSilenceAlert, "10m"},
+		{"allowlist", "{fail_mode: closed}", OnSilenceStop, "10m"},
+		{"open", "{fail_mode: closed, on_silence: stop, silence_after: 90s}", OnSilenceStop, "1m30s"},
+		{"allowlist", "{fail_mode: closed, on_silence: alert, silence_after: 2h}", OnSilenceAlert, "2h"},
+	} {
+		doc := strings.NewReplacer("network: {mode: open}", "network: {mode: "+tc.network+"}", "hooks: {fail_mode: closed}", "hooks: "+tc.hooks).Replace(minimalPack)
+		if pack := mustParse(t, doc); pack.Hooks.OnSilence != tc.response || pack.Hooks.SilenceAfter != tc.after {
+			t.Errorf("%+v: on_silence = %q, silence_after = %q", tc, pack.Hooks.OnSilence, pack.Hooks.SilenceAfter)
+		}
+	}
+}
+
 func TestParseRejects(t *testing.T) {
 	replace := func(old, new string) string { return strings.Replace(minimalPack, old, new, 1) }
 	list := func(n int, prefix string) string {
@@ -253,8 +276,8 @@ func TestParseRejects(t *testing.T) {
 		{"duplicate top-level key", minimalPack + "harness: {yolo: false}\n", "yaml_duplicate", "harness"},
 		{"too large", minimalPack + "description: " + strings.Repeat("x", MaxPackBytes) + "\n", "too_large", ""},
 		{"long description", minimalPack + "description: " + strings.Repeat("x", maxDescription+1) + "\n", "invalid_value", "description"},
-		{"too many ports", replace("network: {mode: open}", "network: {mode: open}\negress: {ports: "+list(maxPorts+1, "")+"}"), "invalid_value", "egress.ports"},
-		{"too many masks", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: "+list(maxListEntries+1, "f")+"}"), "invalid_value", "workspace.masks"},
+		{"too many ports", replace("network: {mode: open}", "network: {mode: open}\negress: {ports: "+list(MaxPorts+1, "")+"}"), "invalid_value", "egress.ports"},
+		{"too many masks", replace("workspace: {mode: mount}", "workspace: {mode: mount, masks: "+list(MaxListEntries+1, "f")+"}"), "invalid_value", "workspace.masks"},
 		{"not yaml", "version: [1\n", "yaml_invalid", ""},
 		{"two documents", minimalPack + "---\nversion: 1\n", "yaml_documents", ""},
 		{"top-level list", "- 1\n", "yaml_type", ""},
@@ -282,6 +305,10 @@ func TestParseRejects(t *testing.T) {
 		{"open fail mode", replace("fail_mode: closed", "fail_mode: open"), "invalid_value", "hooks.fail_mode"},
 		{"unknown tamper response", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_tamper: kill}"), "invalid_value", "hooks.on_tamper"},
 		{"list tamper response", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_tamper: [stop]}"), "yaml_type", "hooks.on_tamper"},
+		{"unknown silence response", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_silence: kill}"), "invalid_value", "hooks.on_silence"},
+		{"silence_after not a duration", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, silence_after: ten}"), "invalid_value", "hooks.silence_after"},
+		{"silence_after too short", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, silence_after: 30s}"), "invalid_value", "hooks.silence_after"},
+		{"silence_after too long", replace("hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, silence_after: 25h}"), "invalid_value", "hooks.silence_after"},
 		{"missing yolo", replace("harness: {yolo: true}", "harness: {}"), "missing_field", "harness.yolo"},
 		{"missing mcp import", replace("mcp: {import: true, host_ports: false}", "mcp: {host_ports: false}"), "missing_field", "mcp.import"},
 		{"unknown project servers", replace("mcp: {import: true, host_ports: false}", "mcp: {import: true, host_ports: false, project_servers: trusted}"), "invalid_value", "mcp.project_servers"},

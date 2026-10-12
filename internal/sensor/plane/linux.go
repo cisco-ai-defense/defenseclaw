@@ -65,10 +65,11 @@ const (
 // file events.
 //
 // The two halves are started independently and either can fail alone. cn_proc
-// is unprivileged in the host namespace; fanotify needs CAP_SYS_ADMIN. An
-// unprivileged host therefore gets the process half with the file half
-// honestly reported absent, which is strictly better than losing the whole
-// plane to one missing capability.
+// needs CAP_NET_ADMIN in the initial user namespace to join the process
+// connector's multicast group; fanotify needs CAP_SYS_ADMIN. A process that
+// holds only one of them gets that half with the other honestly reported
+// absent, which is strictly better than losing the whole plane to one missing
+// capability.
 type linuxSource struct {
 	buffer *Buffer
 

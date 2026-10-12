@@ -13,6 +13,13 @@
 #
 # The user owns this file and can edit it. To enforce a policy the user cannot change,
 # use the standalone enterprise profile (admin-config.windows.example.yaml).
+#
+# Sandboxes: a profile can also carry a `sandbox:` section (which agents must run in an
+# OpenShell sandbox, which hosts they may reach, what the user may approve). The managed
+# gateway of a standalone enterprise install reads it, so it does nothing here, and a
+# per-user install's openshell.admin block is only advisory because the user can edit it.
+# Windows computers cannot run sandboxes. For a policy chosen by directory group on
+# Linux and macOS, see ../ad/sandbox-profiles.example.yaml.
 ai_discovery:
   include_user_principal: true   # put the UPN in records; off by default
 guardrail:

@@ -85,15 +85,51 @@ func profileExplainUnresolved(name string, lookupErr error) (profileSubject, err
 	if cached, ok := profileExplainCachedSubject(name, time.Now()); ok {
 		return cached, nil
 	}
+	if subject, ok := profileExplainUID(strings.TrimSpace(name), lookupErr); ok {
+		return subject, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), profileExplainLookupTimeout)
 	defer cancel()
 	return profileSubject{UserName: name}, unixidentity.AccountLookupError(name, profileExplainQualifiedName(ctx, name), lookupErr)
 }
 
-// profileExplainDirectoryFacts resolves the facts a verified request from
-// uid carries: the account database plus the guardian identity spool.
+// profileExplainDirectoryFacts returns the facts a verified request from uid
+// carries (the account database plus the guardian identity spool) from the
+// cache requests read, after a lookup of explain's own
+// (explainDirectoryFacts).
 var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts, error) {
-	return resolvePeerDirectoryFacts(id)
+	return explainDirectoryFacts(peerDirectoryCache(), id)
+}
+
+// profileExplainUID explains a uid the account database cannot name now as
+// a hook call from it is decided: the kernel verifies the uid, so users
+// entries naming it still select their profile, from the cached facts if any
+// and with default_lookup_failed for the rest. Explain printed
+// default_lookup_failed for it while its hook calls got the uid's profile
+// (GAP-0361).
+func profileExplainUID(name string, lookupErr error) (profileSubject, bool) {
+	uid, err := strconv.Atoi(name)
+	if err != nil || uid < 0 || strconv.Itoa(uid) != name {
+		return profileSubject{}, false
+	}
+	userName := managedHookPeerHomes.lastName(uid)
+	facts, err := profileExplainDirectoryFacts(name)
+	if err == nil && !facts.ResolvedAt.IsZero() {
+		return profileSubjectFromVerified(VerifiedSubject{
+			UserID: name, IDKind: useridentity.KindForID(name), UserName: userName, Directory: facts,
+		}, identityLookupBlocking.Load()), true
+	}
+	reason := "the account database names no account for this uid now"
+	if lookupErr != nil {
+		reason += " (" + lookupErr.Error() + ")"
+	}
+	if err != nil {
+		reason += "; directory lookup: " + err.Error()
+	}
+	return profileSubject{
+		UserID: name, IDKind: useridentity.KindForID(name), UserName: userName,
+		LookupFailed: identityLookupBlocking.Load(), LookupError: reason,
+	}, true
 }
 
 // profileExplainCachedSubject serves explain for an account the directory

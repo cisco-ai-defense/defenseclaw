@@ -226,6 +226,48 @@ func (e *SSHSharingError) Fix() string {
 	return fix + filepath.Dir(e.Next) + " before " + filepath.Dir(e.SSH) + " on PATH, so the OpenShell CLI runs " + e.Next
 }
 
+// AccountLookupError is the refusal of an ssh that cannot find the calling
+// account ("No user exists for uid N"): the directory that knows the account
+// does not answer, which ssh reports in its own words. It is not a problem
+// with the ssh configuration, and is no cause to tell the person to change it
+// (GAP-0595).
+type AccountLookupError struct {
+	// Err is the failed `ssh -G`.
+	Err error
+}
+
+func (e *AccountLookupError) Error() string {
+	return "your account can't be looked up on this computer right now (ssh found no user for it)"
+}
+
+func (e *AccountLookupError) Unwrap() error { return e.Err }
+
+// accountLookupFailure reports ssh's complaint that no user exists for the
+// calling uid (OpenSSH's "No user exists for uid N"; older versions: "you
+// don't exist, go away!").
+func accountLookupFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "no user exists for uid") || strings.Contains(text, "you don't exist")
+}
+
+// CheckAccountLookup reports an *AccountLookupError when the ssh the
+// OpenShell CLI runs cannot find the calling account, and nil otherwise
+// (every other problem with ssh surfaces where the CLI uses it).
+func CheckAccountLookup(pathEnv string) error {
+	s, err := NewSSHShim(pathEnv)
+	if s != nil {
+		_ = s.Remove()
+	}
+	var lookup *AccountLookupError
+	if errors.As(err, &lookup) {
+		return lookup
+	}
+	return nil
+}
+
 // newSSHSharingError is the refusal of realSSH, found on pathEnv, for
 // sharing or err.
 func newSSHSharingError(realSSH, pathEnv string, sharing sshSharing, err error) *SSHSharingError {
@@ -424,6 +466,9 @@ func (s *SSHShim) checkNoSharing() error {
 		return nil
 	}
 	sharing, err := s.sharing()
+	if accountLookupFailure(err) {
+		return &AccountLookupError{Err: err}
+	}
 	if err != nil || !sharing.off() {
 		return newSSHSharingError(s.Real, pathEnv, sharing, err)
 	}

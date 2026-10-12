@@ -465,15 +465,24 @@ func ExecuteContext(ctx context.Context) int {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Started as the package's defenseclaw symlink on a managed host, the
+	// binary is the standard user's sandbox launcher (launcher.go).
+	if launcherActive() {
+		return executeLauncher(ctx, rootCmd, os.Args[1:])
+	}
 	addManagedWindowsSetupAnswer(rootCmd)
 	addManagedHostHelp(rootCmd)
 	keepCommandTreeOfMainOnSecureClient(rootCmd)
 	installUsageArgChecks(rootCmd)
 	pendingUnknownSubcommand = nil
-	err := rootCmd.ExecuteContext(ctx)
+	return executeResult(rootCmd, rootCmd.ExecuteContext(ctx))
+}
+
+// executeResult turns the outcome of running root into the process exit code.
+func executeResult(root *cobra.Command, err error) int {
 	if err == nil && pendingUnknownSubcommand != nil {
 		err, pendingUnknownSubcommand = pendingUnknownSubcommand, nil
-		rootCmd.PrintErrln(rootCmd.ErrPrefix(), err.Error())
+		root.PrintErrln(root.ErrPrefix(), err.Error())
 	}
 	if err == nil {
 		return 0
@@ -493,7 +502,7 @@ func ExecuteContext(ctx context.Context) int {
 	}
 	// An unknown top-level command is a usage error, as in the Python CLI
 	// (GAP-1549).
-	if isUnknownRootCommand(rootCmd, err) {
+	if isUnknownRootCommand(root, err) {
 		return 2
 	}
 	return 1

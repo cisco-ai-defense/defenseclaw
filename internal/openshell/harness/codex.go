@@ -231,7 +231,7 @@ func codexApprovalNever(v string) bool {
 }
 
 var codexLauncher = `#!/bin/bash -p
-# defenseclaw-sandbox-launcher v2
+# defenseclaw-sandbox-launcher v3
 # DefenseClaw Codex launcher (OpenShell sandbox images, root-owned). Adds the
 # runtime-only settings that cannot live in static configuration, then execs
 # the pinned Codex binary with the caller's arguments.
@@ -264,6 +264,31 @@ case "$dir" in
     ;;
 esac
 
+# Codex bundles metadata for its own model ids only. A Bedrock Mantle id
+# (openai.gpt-5.5) has none, and Codex warns at the first request that model
+# metadata was not found and that the fallback "can degrade performance and
+# cause issues". Under the Mantle provider the catalog Codex reads also holds
+# the bundled entry of each model under its Mantle id (openai.<slug>), hidden
+# from the model picker. It is made from the Codex in the image and kept
+# until that is replaced; without it (any step failing) Codex runs as it did,
+# with the warning (GAP-0637).
+catalog=()
+if /usr/bin/grep -Eqs '^model_provider *= *.mantle.' /etc/codex/managed_config.toml; then
+  cat="$home/dc-model-catalog.json"
+  if [ ! -s "$cat" ] || [ /usr/local/bin/codex -nt "$cat" ]; then
+    tmp="$(/bin/mktemp "$home/.dc-model-catalog.XXXXXX" 2>/dev/null || true)"
+    if [ -n "$tmp" ]; then
+      { /usr/bin/timeout 15 /usr/local/bin/codex debug models --bundled 2>/dev/null || /usr/bin/timeout 15 /usr/local/bin/codex debug models 2>/dev/null; } |
+        node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const c=JSON.parse(s),have=new Set(c.models.map(m=>m.slug));for(const m of c.models.slice()){if(m.slug.startsWith("openai."))continue;const slug="openai."+m.slug;if(!have.has(slug))c.models.push({...m,slug:slug,display_name:slug,visibility:"hide"})}process.stdout.write(JSON.stringify(c))}catch(e){process.exit(1)}})' >"$tmp" 2>/dev/null &&
+        [ -s "$tmp" ] && /bin/mv -f "$tmp" "$cat" 2>/dev/null
+      /bin/rm -f "$tmp" 2>/dev/null || true
+    fi
+  fi
+  if [ -s "$cat" ] && [ ! -L "$cat" ]; then
+    catalog=(-c "model_catalog_json=\"$cat\"")
+  fi
+fi
+
 # The interactive client with the built-in OpenAI provider needs a stored
 # login; refresh it with this start's placeholder.
 if [ "${#sub[@]}" -eq 0 ] && [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -292,4 +317,4 @@ unset token
 # NODE_USE_ENV_PROXY is experimental. This fixed NODE_OPTIONS silences only
 # that warning; the caller's NODE_OPTIONS is dropped with the other start-up
 # variables.
-` + launcherExec(`NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/codex "${sub[@]+"${sub[@]}"}" "$@"`)
+` + launcherExec(`NODE_OPTIONS=--disable-warning=UNDICI-EHPA /usr/local/bin/codex "${sub[@]+"${sub[@]}"}" "${catalog[@]+"${catalog[@]}"}" "$@"`)

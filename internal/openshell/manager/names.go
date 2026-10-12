@@ -79,22 +79,13 @@ func managedBy(labels map[string]string, owner string) bool {
 	return owner != "" && labels[LabelManaged] == "true" && labels[LabelOwner] == owner
 }
 
-// ownerOf is the owner a recorded sandbox's objects are labelled with: the
-// one it was created under, this data dir's for older records.
-func (m *Manager) ownerOf(rec record) string {
-	if rec.Owner != "" {
-		return rec.Owner
-	}
-	return m.opts.Owner
-}
-
 // sameSandboxLocked reports whether sb, what OpenShell holds under b's
 // name, is b's sandbox: labelled for b's owner, and the one b recorded
 // when b knows its ID. A sandbox deleted outside DefenseClaw can be
 // followed by another of the same name (another daemon's, or anyone's),
 // which operations on b must never act on. Callers hold Manager.mu.
 func (m *Manager) sameSandboxLocked(b *box, sb *openshell.Sandbox) bool {
-	if sb == nil || !managedBy(sb.Labels, m.ownerOf(b.rec)) {
+	if sb == nil || !managedBy(sb.Labels, b.rec.Owner) {
 		return false
 	}
 	return b.rec.ID == "" || sb.ID == "" || sb.ID == b.rec.ID

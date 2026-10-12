@@ -246,7 +246,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     archives = {archive["id"]: archive for archive in release["archives"]}
     flat_name = "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     assert set(archives) == {"default", "enterprise-posix", "windows-amd64"}
-    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-acp-posix"]
+    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
     # The standalone managed-enterprise payload is its own flat asset family;
     # per-user installers never fetch it.
     enterprise = archives.pop("enterprise-posix")

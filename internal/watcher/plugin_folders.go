@@ -161,8 +161,14 @@ func (w *InstallWatcher) pluginFolderEvents(path string) ([]InstallEvent, bool) 
 // plugin added to ~/.hermes/plugins/<category>/ after a gateway restart, or to
 // a bundled hermes-agent/plugins/<category>/, never reached admission
 // (GAP-2462).
+//
+// A plugin cache (Claude Code's, and Codex's plugins/cache) holds
+// <marketplace>/<plugin>/<version>, and its own watches and enumeration
+// admit only the version folder: waiting on its marketplace folders here
+// would admit a <marketplace>/<plugin> folder as a plugin.
 func (w *InstallWatcher) watchExistingPluginFolders(root string) {
-	if w.connectorForPath(root) == "claudecode" {
+	if w.connectorForPath(root) == "claudecode" ||
+		w.cacheLayoutPlugins(root) && strings.EqualFold(filepath.Base(filepath.Clean(root)), "cache") {
 		return
 	}
 	entries, err := os.ReadDir(root)

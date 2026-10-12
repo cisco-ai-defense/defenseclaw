@@ -416,6 +416,59 @@ func connectedDriver(ctx context.Context, c openshell.Client) (openshell.Driver,
 	return openshell.GatewayDriver(info)
 }
 
+// otherGatewayTimeout bounds the health check of one other gateway, and
+// maxOtherGateways the other gateways one reconcile connects to.
+const (
+	otherGatewayTimeout = 5 * time.Second
+	maxOtherGateways    = 8
+)
+
+// OtherRegisteredGateways is Options.OtherGateways for a managed daemon: it
+// connects to each gateway registered with the account's openshell CLI
+// besides the managed one that Discover accepts (local, mTLS, the
+// account's own files) and that answers. A gateway the user started by hand
+// and added with `openshell gateway add` is one: what it runs is no managed
+// sandbox (GAP-0678). It is only listed and its sandboxes stopped, so
+// neither the version window nor the driver a gateway DefenseClaw drives
+// must have is asked of it. A registration of the managed gateway's port
+// under another name is the managed gateway itself, and is skipped.
+func OtherRegisteredGateways(discover openshell.DiscoverOptions, client openshell.ClientOptions) func(context.Context, *Gateway) []*Gateway {
+	return func(ctx context.Context, managed *Gateway) []*Gateway {
+		var out []*Gateway
+		for _, name := range openshell.RegistrationNames(discover) {
+			if len(out) == maxOtherGateways || ctx.Err() != nil {
+				break
+			}
+			if managed != nil && name == managed.Name {
+				continue
+			}
+			d := discover
+			d.Gateway = name
+			reg, err := openshell.Discover(d)
+			if err != nil {
+				continue
+			}
+			port := registrationPort(reg)
+			if managed != nil && port != 0 && port == managed.Port {
+				continue
+			}
+			c, err := openshell.Dial(reg, client)
+			if err != nil {
+				continue
+			}
+			hctx, cancel := context.WithTimeout(ctx, otherGatewayTimeout)
+			_, err = c.Health(hctx)
+			cancel()
+			if err != nil {
+				_ = c.Close()
+				continue
+			}
+			out = append(out, &Gateway{Client: c, Name: reg.Name, Endpoint: reg.Endpoint, Port: port, Close: c.Close})
+		}
+		return out
+	}
+}
+
 func registrationPort(reg *openshell.Registration) int {
 	target := reg.Target()
 	if i := strings.LastIndexByte(target, ':'); i >= 0 {

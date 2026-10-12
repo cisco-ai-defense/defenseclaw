@@ -51,7 +51,13 @@ UMask=0077
 # check and the file-ownership trust checks depend on.
 PrivateUsers=no
 NoNewPrivileges=true
+# PrivateDevices hides every device node. The require-sandbox gate judges
+# whether a caller may use /dev/kvm by its owner, group and mode
+# (internal/gateway/sandbox_availability.go), so the node is bound in
+# read-only for stat (GAP-0210). PrivateDevices' closed device policy still
+# refuses opening it: the gateway itself never gets KVM access.
 PrivateDevices=true
+BindReadOnlyPaths=-/dev/kvm
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true

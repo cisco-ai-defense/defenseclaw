@@ -316,7 +316,7 @@ func preCutoverAuditDB(dbPath string) bool {
 	if err != nil {
 		return false
 	}
-	db, err := openAuditReadOnly(absolute)
+	db, err := openAuditReadOnlySchemaTolerant(absolute)
 	if err != nil {
 		return false
 	}
@@ -333,8 +333,41 @@ func preCutoverAuditDB(dbPath string) bool {
 	return false
 }
 
+// schemaTolerantQuery turns on writable_schema for a connection, so SQLite
+// skips a schema entry it would refuse instead of failing every statement.
+// 0.8.x stores can carry one: the same concurrent writers leave an orphan
+// quarantine_records index ("malformed database schema
+// (sqlite_autoindex_quarantine_records_1) - orphan index", GAP-1576), and a
+// 0.8.10 store started after a rollback to it gets one within minutes. The
+// tables stay intact and read in full, and a VACUUM writes the store anew from
+// the table definitions, the dropped index included.
+const schemaTolerantQuery = "&_pragma=writable_schema(1)"
+
+// schemaTolerantPragmas open a store for its rebuild: writable_schema and
+// the busy timeout only, because SQLite refuses most other audit pragmas
+// (journal_mode, synchronous and more) on such a schema even with
+// writable_schema on. The store keeps the WAL mode its header records, and
+// the caller reopens it with the full audit pragmas after the rebuild.
+const schemaTolerantPragmas = "?_pragma=writable_schema(1)&_pragma=busy_timeout(5000)"
+
+// openAuditReadOnlySchemaTolerant opens a store read-only; when SQLite
+// refuses its schema as damaged it opens it again with schemaTolerantQuery.
+func openAuditReadOnlySchemaTolerant(dbPath string) (*sql.DB, error) {
+	db, err := openAuditReadOnly(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	var entries int
+	if probeErr := db.QueryRow(`SELECT count(*) FROM sqlite_schema`).Scan(&entries); !isSQLiteCorrupt(probeErr) {
+		return db, nil
+	}
+	_ = db.Close()
+	return openAuditReadOnlyWith(dbPath, schemaTolerantQuery)
+}
+
 // rebuildAuditDB rewrites every table and index of the store from a full read
-// (VACUUM), in place. 0.8.x closed its own descriptors of audit.db while
+// (VACUUM), in place, with writable_schema on so a refused schema entry
+// (schemaTolerantQuery) does not stop it. 0.8.x closed its own descriptors of audit.db while
 // SQLite held POSIX locks through them (fixed in 1.0 by #672), so a gateway,
 // a hook and the CLI could write at the same time. The stores that left fail
 // quick_check ("Rowid N out of order") but still read in full, and VACUUM
@@ -347,7 +380,7 @@ func rebuildAuditDB(dbPath string, progress io.Writer, opts ...StoreOption) erro
 	if err := auditDBOpenElsewhere(absolute); err != nil {
 		return err
 	}
-	store, err := NewStore(dbPath, opts...)
+	store, err := newStoreWithHooks(dbPath, auditDBPathHooks{schemaTolerant: true}, opts...)
 	if err != nil {
 		return err
 	}
@@ -360,12 +393,54 @@ func rebuildAuditDB(dbPath string, progress io.Writer, opts ...StoreOption) erro
 		return err
 	}
 	defer conn.Close() //nolint:errcheck -- returns the connection to the pool.
+	// VACUUM copies only the tables SQLite could load: a table among the
+	// skipped entries would be dropped, so such a store is moved aside whole
+	// instead.
+	if err := everySchemaTableReads(ctx, conn); err != nil {
+		return err
+	}
 	if _, err := conn.ExecContext(ctx, `VACUUM`); err != nil {
 		return err
 	}
 	// Give back the WAL the rebuild wrote; best effort, the store is correct either way.
 	var busy, frames, checkpointed int
 	_ = conn.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &frames, &checkpointed)
+	return nil
+}
+
+// everySchemaTableReads checks that each table sqlite_schema lists can be
+// read on conn.
+func everySchemaTableReads(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite\_%' ESCAPE '\'`)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		names = append(names, name)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+	for _, name := range names {
+		// NOT INDEXED: the index of a skipped entry has no root page, and
+		// VACUUM reads the table itself.
+		quoted := `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+		rows, err := conn.QueryContext(ctx, `SELECT 1 FROM `+quoted+` NOT INDEXED LIMIT 1`)
+		if err == nil {
+			for rows.Next() {
+			}
+			err = errors.Join(rows.Err(), rows.Close())
+		}
+		if err != nil {
+			return fmt.Errorf("table %s cannot be read: %w", name, err)
+		}
+	}
 	return nil
 }
 
@@ -407,7 +482,7 @@ func quarantineCorruptAuditDB(dbPath string) (string, error) {
 // carryOverActions copies the readable block/allow rows of the moved store
 // into this new one, so a rebuild never silently lifts a block.
 func (s *Store) carryOverActions(movedPath string) (int, error) {
-	old, err := openAuditReadOnly(movedPath)
+	old, err := openAuditReadOnlySchemaTolerant(movedPath)
 	if err != nil {
 		return 0, err
 	}

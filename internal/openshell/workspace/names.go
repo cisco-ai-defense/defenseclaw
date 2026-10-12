@@ -40,12 +40,6 @@ const (
 	DefaultTargetRoot = "/work"
 )
 
-// reservedNames are sandbox names that would collide with a fixed entry of
-// the data-dir layout: <data>/snapshots/git holds every project's shadow
-// git directory, so a snapshot named "git" would share (and on removal
-// delete) all of them.
-var reservedNames = map[string]struct{}{"git": {}}
-
 // ValidateName checks a sandbox name before it is used in refs, paths or
 // any gateway call. The rule is openshell.ValidSandboxName (a DNS label:
 // lowercase letters, digits and '-', at most 63 characters), the only
@@ -55,9 +49,6 @@ var reservedNames = map[string]struct{}{"git": {}}
 func ValidateName(name string) error {
 	if !openshell.ValidSandboxName(name) {
 		return fmt.Errorf("%w: sandbox %q (use lowercase letters, digits and '-', at most 63 characters, starting and ending with a letter or digit)", openshell.ErrInvalidName, name)
-	}
-	if _, reserved := reservedNames[name]; reserved {
-		return fmt.Errorf("%w: sandbox name %q is reserved", openshell.ErrInvalidName, name)
 	}
 	return nil
 }

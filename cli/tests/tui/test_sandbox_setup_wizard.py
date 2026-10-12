@@ -39,7 +39,7 @@ from defenseclaw.tui.services.setup_state import (
 
 @pytest.fixture(autouse=True)
 def _linux_host(monkeypatch):
-    # The wizard's fields depend on the host (no telemetry question on macOS);
+    # The wizard's fields depend on the host (no mounts question on macOS);
     # pin Linux unless a test names the platform.
     monkeypatch.setattr("defenseclaw.tui.panels.setup.host_os", lambda: "linux")
 
@@ -82,9 +82,8 @@ def test_configured_harnesses_seed_the_toggles() -> None:
 @pytest.mark.parametrize(
     ("changes", "expected_tail"),
     [
-        ({"Install OpenShell": "yes"}, ("--install-openshell", "--no-wrappers")),
         ({"Mount Project Folder": "no"}, ("--no-mounts", "--no-wrappers")),
-        ({"Disable OpenShell Telemetry": "no"}, ("--upstream-telemetry", "--no-wrappers")),
+        ({"OpenShell Telemetry Off": "no"}, ("--upstream-telemetry", "--no-wrappers")),
         ({"Shell Wrappers": "yes"}, ("--wrappers",)),
         ({"Build Images Now": "no"}, ("--no-wrappers", "--skip-images")),
     ],
@@ -99,12 +98,16 @@ def test_each_consent_maps_to_its_flag(changes: dict[str, str], expected_tail: t
     assert args[5:] == expected_tail
 
 
-def test_macos_has_no_telemetry_question() -> None:
-    # The Homebrew gateway does not read gateway.env, so the answer would do nothing.
+def test_macos_asks_the_telemetry_question_about_the_homebrew_gateway_env() -> None:
+    # The Homebrew service's wrapper sources gateway.env, so on a Mac too the
+    # answer is the consent `sandbox setup --non-interactive` acts on.
     fields = list(sandbox_wizard_fields(os_name="darwin"))
-    assert "Disable OpenShell Telemetry" not in {field.label for field in fields}
+    telemetry = next(field for field in fields if field.label == "OpenShell Telemetry Off")
+    assert telemetry.value == "yes"
+    assert "~/.config/openshell/gateway.env, which the Homebrew service reads" in telemetry.hint
     assert "--upstream-telemetry" not in build_wizard_args(SetupWizard.SANDBOX, fields)
-    assert "Disable OpenShell Telemetry" in {field.label for field in sandbox_wizard_fields(os_name="linux")}
+    keep = build_wizard_args(SetupWizard.SANDBOX, _set(fields, "OpenShell Telemetry Off", "no"))
+    assert keep[-2:] == ("--upstream-telemetry", "--no-wrappers")
 
 
 def test_macos_has_no_mounts_question_and_says_every_run_works_on_a_copy() -> None:
@@ -138,7 +141,7 @@ def test_every_wizard_argv_parses_with_the_click_stubs(monkeypatch) -> None:
         base,
         _set(base, "Action", "doctor"),
         _set(_set(_set(base, "Install OpenShell", "yes"), "Shell Wrappers", "yes"), "Build Images Now", "no"),
-        _set(_set(base, "Mount Project Folder", "no"), "Disable OpenShell Telemetry", "no"),
+        _set(_set(base, "Mount Project Folder", "no"), "OpenShell Telemetry Off", "no"),
     ]
     for fields in variants:
         args = build_wizard_args(SetupWizard.SANDBOX, fields)
@@ -284,7 +287,7 @@ def test_every_harness_is_offered_and_setups_defaults_are_on() -> None:
 
 def test_gateway_changes_warn_that_they_restart_the_gateway() -> None:
     hints = {field.label: field.hint for field in sandbox_wizard_fields({}, os_name="linux")}
-    for label in ("Disable OpenShell Telemetry", "Mount Project Folder"):
+    for label in ("OpenShell Telemetry Off", "Mount Project Folder"):
         assert "restarts the OpenShell gateway" in hints[label], label
         assert "drops the connections of every running sandbox" in hints[label], label
 
@@ -300,6 +303,7 @@ def test_other_sandbox_commands_never_mark_the_wizard() -> None:
 NO_OPENSHELL = {
     "ok": False,
     "docker_version": "29.4.0",
+    "openshell_install_version": "0.1.2",
     "checks": [
         {"id": "platform", "title": "Platform", "status": "pass", "detail": "linux/arm64"},
         {"id": "landlock", "title": "Landlock", "status": "pass", "detail": "ABI 6"},
@@ -348,7 +352,7 @@ def test_a_missing_openshell_presets_the_install_and_says_why() -> None:
     ]
     install = _row(model, "Install OpenShell")
     assert install.value == "yes"
-    assert install.hint.startswith("OpenShell is not installed: yes installs OpenShell 0.1.1")
+    assert install.hint.startswith("OpenShell is not installed: yes installs OpenShell 0.1.2 with")
     assert "--install-openshell" in model.wizard_command_preview()
 
     # The operator's own answer survives a later check and an Action rebuild.
@@ -370,6 +374,53 @@ def test_an_installed_openshell_needs_no_install() -> None:
     fields = sandbox_wizard_fields({}, machine=check)
     install = next(field for field in fields if field.label == "Install OpenShell")
     assert install.value == "no" and install.hint == "OpenShell 0.1.1 is installed; nothing to install."
+
+
+def test_an_older_openshell_is_offered_the_upgrade_with_the_install_off() -> None:
+    # OpenShell 0.1.1 works: setup upgrades it in place only with consent
+    # (DoctorReport.OpenShellUpgradeAvailable), as the upgrade restarts the
+    # shared gateway.
+    why = "OpenShell 0.1.2 fixes a supervisor bug that can stall a sandbox's first connection, and cuts the CPU an idle sandbox uses"
+    cli = {
+        "id": "openshell-cli",
+        "title": "OpenShell CLI",
+        "status": "warn",
+        "detail": f"0.1.1 at /usr/bin/openshell; {why}",
+        "fix": {
+            "summary": "upgrade OpenShell to 0.1.2 in place",
+            "command": "defenseclaw sandbox setup --install-openshell",
+        },
+    }
+    checks = READY["checks"]
+    report = {
+        **READY,
+        "openshell_install": False,
+        "openshell_upgrade": True,
+        "openshell_install_version": "0.1.2",
+        "checks": [*checks[:2], cli, *checks[3:]],
+    }
+    check = sandbox_machine_check(report)
+    assert check.openshell_upgrade and not check.openshell_needed and not check.openshell_attention
+    assert check.summary.split("\n") == ["✓ Docker 29.4.0", "⚠ OpenShell 0.1.1 (0.1.2 available)", "✓ bind mounts"]
+    model = SetupPanelModel({}, os_name="linux")
+    model.open_goal_menu(SetupWizard.SANDBOX)
+    model.apply_sandbox_machine_check(check)
+    install = _row(model, "Install OpenShell")
+    assert install.value == "no"
+    # GAP-0085: the field hint shows two lines, so the restart leads and the
+    # flag comes first on the Will run line.
+    assert install.hint == (
+        "Yes upgrades in place to OpenShell 0.1.2 (sudo); the gateway restart drops every running sandbox's "
+        f"connections. OpenShell 0.1.1 is installed; {why}. Docker first pulls the new supervisor images from "
+        "ghcr.io. It runs NVIDIA's pinned, sha256-verified installer (uses sudo; the terminal asks for your password)."
+    )
+    mac = sandbox_wizard_fields({}, machine=check, os_name="darwin")
+    assert next(f for f in mac if f.label == "Install OpenShell").hint.startswith(
+        "Yes upgrades in place to OpenShell 0.1.2 (Homebrew), only while no MicroVM sandbox runs."
+    )
+    assert "--install-openshell" not in model.wizard_command_preview()
+    model.form_fields = _set(model.form_fields, "Install OpenShell", "yes")
+    assert model.wizard_command_preview().startswith("defenseclaw sandbox setup --install-openshell ")
 
 
 @pytest.mark.parametrize(
@@ -436,8 +487,12 @@ def test_an_openshell_outside_the_homebrew_formula_is_used_while_its_gateway_ans
     ), install.hint
     # Setup goes on to e2fsprogs; the MicroVM switch is the user's restart.
     assert "e2fsprogs" in install.hint
-    micro = next(f for f in sandbox_wizard_fields({}, machine=check, os_name="darwin") if f.label == "MicroVMs")
+    darwin = sandbox_wizard_fields({}, machine=check, os_name="darwin")
+    micro = next(f for f in darwin if f.label == "MicroVMs")
     assert "you restart the gateway yourself" in micro.hint and "restarts it once" not in micro.hint
+    # Such a gateway takes its telemetry setting from the environment it was
+    # started with, which setup does not change: no telemetry question.
+    assert "OpenShell Telemetry Off" not in {f.label for f in darwin}
 
     # With its gateway down setup stops where it would have to start it,
     # with the doctor's fix, before e2fsprogs.
@@ -489,7 +544,7 @@ def test_an_openshell_without_the_linux_user_unit_is_used_while_its_gateway_answ
             "started it; nothing to install."
         )
         # The mounts and telemetry changes are written, not restarted.
-        for label in ("Mount Project Folder", "Disable OpenShell Telemetry"):
+        for label in ("Mount Project Folder", "OpenShell Telemetry Off"):
             hint = _row(model, label).hint
             assert "you restart it yourself, the way you started it" in hint and "doctor --fix" not in hint, hint
     else:

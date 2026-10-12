@@ -28,6 +28,9 @@ policies/guardrail/** text eol=lf
 # ones run under /bin/sh; keep them LF on Windows checkouts too.
 packaging/mdm/**/*.sh text eol=lf
 packaging/mdm/**/*.ps1 text eol=lf
+# The Tetragon fleet examples are embedded verbatim in the Tetragon guide and
+# cli/tests/test_tetragon_examples.py checks they stay LF.
+packaging/mdm/linux/examples/tetragon/** text eol=lf
 
 # The identity kit (packaging/identity and the Intune tenant helper) is copied
 # to tenant consoles and hosts as committed, and cli/tests/test_identity_kit.py
@@ -48,3 +51,14 @@ benchmarks/fixtures/** -text
 # The Secure Client evaluation goldens are compared byte for byte, also on a
 # Windows checkout.
 internal/gateway/testdata/secure_client_evaluation/** text eol=lf
+
+# The kernel controls are embedded and pinned by SHA-256 (policies/kernel
+# TestDigestIsPinned, the CHANGELOG digest line and tetragon verify); a CRLF
+# checkout changed the digest. Keep them LF on Windows checkouts too.
+policies/kernel/** text eol=lf
+
+# The sandbox golden texts are compared byte-for-byte; keep them LF on
+# Windows checkouts too.
+internal/config/testdata/*.golden text eol=lf
+internal/openshell/packs/testdata/*.golden text eol=lf
+internal/openshell/sandboxapi/testdata/*.golden text eol=lf

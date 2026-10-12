@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // SchemaVersion is the lifecycle result schema. Version 1 is the Secure
@@ -46,7 +47,7 @@ const (
 // Service is one managed service or unit.
 type Service struct {
 	Name      string `json:"name"`
-	Kind      string `json:"kind"` // gateway, guardian, enumerator, sensor_helper, socket, timer, path
+	Kind      string `json:"kind"` // gateway, guardian, enumerator, sensor_helper, socket, timer, path, sandbox
 	State     string `json:"state"`
 	StartMode string `json:"start_mode,omitempty"`
 	PID       int    `json:"pid,omitempty"`
@@ -174,6 +175,10 @@ type Result struct {
 	Destinations []Destination `json:"destinations,omitempty"`
 	LogPath      string        `json:"log_path,omitempty"`
 	ExitCode     int           `json:"exit_code"`
+	// ConfigRefused marks a run that refused the submitted config before it
+	// changed anything: the policy, services and advisories it reports are
+	// the running deployment's. Text output only (GAP-0564).
+	ConfigRefused bool `json:"-"`
 	// PreserveNotRootDeploymentState retains the pre-1.0 Secure Client JSON
 	// shape for an unelevated macOS lifecycle command.
 	PreserveNotRootDeploymentState bool `json:"-"`
@@ -247,6 +252,19 @@ func (p *PolicyState) Line() string {
 	}
 	if p.ConfigUnrecorded {
 		line += "; config.yaml was changed outside the lifecycle"
+	}
+	return line
+}
+
+// PolicyLine is Policy.Line(), labelled as the running deployment's when the
+// run refused the submitted config (ConfigRefused); "" without a policy.
+func (r *Result) PolicyLine() string {
+	if r == nil || r.Policy == nil {
+		return ""
+	}
+	line := r.Policy.Line()
+	if r.ConfigRefused {
+		line = "running policy (the refused config changed nothing)" + strings.TrimPrefix(line, "policy")
 	}
 	return line
 }

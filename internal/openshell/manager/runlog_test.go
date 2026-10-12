@@ -43,17 +43,31 @@ import (
 // what the manager keeps is what the scripts found.
 func runDirSandbox(t *testing.T, e *harnessEnv, runs string) {
 	t.Helper()
-	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		return runOnHost(ctx, call, runs)
 	})
 }
 
 // runOnHost runs one of the stop's in-sandbox scripts on this machine, as
-// runDirSandbox does.
+// runDirSandbox does. It keeps endHarnessScript off this machine's
+// processes: the script walks an empty directory in place of /proc, under a
+// harness install root no process runs from, and flushes nothing. The real
+// walk would send SIGTERM to every process of this user that names a
+// harness path (another sandbox's harness on a shared host among them),
+// and would take as long as the host is busy.
 func runOnHost(ctx context.Context, call openshelltest.ExecCall, runs string) openshelltest.ExecResponse {
 	argv := slices.Clone(call.Command)
 	if len(argv) < 4 || argv[0] != "/bin/sh" || argv[1] != "-c" {
 		return openshelltest.ExecResponse{}
+	}
+	if argv[3] == "defenseclaw-end-harness" {
+		const walk = "for d in /proc/[0-9]*;"
+		if len(argv) < 5 || strings.Count(argv[2], walk) != 1 {
+			return openshelltest.ExecResponse{Err: errors.New("runOnHost: endHarnessScript no longer walks /proc as this helper expects; keep it off this machine's processes")}
+		}
+		argv[2] = strings.Replace(argv[2], walk, "for d in "+filepath.Join(runs, "no-proc")+"/[0-9]*;", 1)
+		argv[2] = strings.ReplaceAll(argv[2], "/bin/sync", "true")
+		argv[4] = filepath.Join(runs, "no-harness")
 	}
 	for i, a := range argv {
 		if a == harness.RunDir {
@@ -183,7 +197,7 @@ func TestStopWithoutALiveRun(t *testing.T) {
 	e := liveEnv(t, "quietbox", nil)
 	runDirSandbox(t, e, t.TempDir())
 	e.stopBox("quietbox")
-	if calls := e.fake.ExecCalls(); len(calls) != 1 {
+	if calls := e.execCalls(); len(calls) != 1 {
 		t.Fatalf("exec calls = %d, want only the harness's end", len(calls))
 	}
 	if _, err := e.m.RunLog(t.Context(), "quietbox", 0); !sandboxapi.IsCode(err, sandboxapi.CodeNotFound) {
@@ -212,7 +226,7 @@ func TestStopSaysWhenARunsLogWasNotKept(t *testing.T) {
 	e.m.mu.Unlock()
 	must(t, e.m.saveRunLog("lostbox", keptRun{SandboxID: id, State: sandboxapi.RunExited, Exit: "0",
 		StartedAt: time.Unix(1780000000, 0).UTC(), KeptAt: time.Now()}, []byte("an earlier run\n")))
-	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if slices.Contains(call.Command, "defenseclaw-run-log") {
 			return openshelltest.ExecResponse{Err: errors.New("exec relay closed")}
 		}
@@ -246,7 +260,7 @@ func TestStopKeepsTheRunLogWhenTheHarnessEndFails(t *testing.T) {
 			e := liveEnv(t, "slowbox", nil)
 			going := detachedRunDir(t, "working\n", "")
 			liveRunner(t, going)
-			e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+			e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 				if !slices.Contains(call.Command, "defenseclaw-end-harness") {
 					return runOnHost(ctx, call, going)
 				}
@@ -368,23 +382,33 @@ func TestATamperStopDoesNotReadTheRunLog(t *testing.T) {
 	e.m.mu.Unlock()
 	must(t, e.m.saveRunLog("tamperlog", keptRun{SandboxID: id, State: sandboxapi.RunExited, Exit: "0",
 		StartedAt: time.Unix(1780000000, 0).UTC(), KeptAt: time.Now()}, []byte("an earlier run\n")))
-	var reads atomic.Int32
-	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
-		if slices.Contains(call.Command, "defenseclaw-run-log") {
+	// Every look at the run directory is held, as the workload could hold
+	// it, and counted: a stop that waited on one would have to count it.
+	var reads, probes atomic.Int32
+	e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+		switch {
+		case slices.Contains(call.Command, "defenseclaw-run-log"):
 			reads.Add(1)
-			<-ctx.Done()
-			return openshelltest.ExecResponse{Err: ctx.Err()}
+		case slices.Contains(call.Command, "defenseclaw-run-probe"):
+			probes.Add(1)
+		default:
+			return runOnHost(ctx, call, going)
 		}
-		return runOnHost(ctx, call, going)
+		<-ctx.Done()
+		return openshelltest.ExecResponse{Err: ctx.Err()}
 	})
 	d := e.decider("tamperlog", "Bash")
-	began := time.Now()
 	e.m.ObserveHookDecision(d("PostToolUse", "toolu_1", "allow"))
 	if !stopped(t, e, "tamperlog") {
 		t.Fatal("the tampered sandbox did not stop")
 	}
-	if took := time.Since(began); reads.Load() != 0 || took > 10*time.Second {
-		t.Fatalf("the tamper stop read the run log %d times and took %s", reads.Load(), took)
+	if reads.Load() != 0 || probes.Load() != 0 {
+		t.Fatalf("the tamper stop read the run log %d times and looked at the run %d times", reads.Load(), probes.Load())
+	}
+	for _, call := range e.execCalls() {
+		if slices.Contains(call.Command, "defenseclaw-end-harness") && slices.Contains(call.Command, harness.RunDir) {
+			t.Fatalf("the tamper stop's harness end was given the run directory %s", harness.RunDir)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(going, "latest.exit")); !os.IsNotExist(err) {
 		t.Fatalf("the tamper stop wrote into the run directory: %v", err)
@@ -403,7 +427,7 @@ func TestStopIsPublishedBeforeTheRunLogIsRead(t *testing.T) {
 	liveRunner(t, going)
 	b := e.boxOf("orderbox")
 	var atRead audit.SandboxPhase
-	e.fake.HandleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
+	e.handleExec(func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if slices.Contains(call.Command, "defenseclaw-run-log") {
 			e.m.mu.Lock()
 			atRead = b.phase

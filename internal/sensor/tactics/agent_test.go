@@ -135,3 +135,67 @@ func TestAgentIdentityFromInstallPath(t *testing.T) {
 		})
 	}
 }
+
+// TestIdentifyAgentPrefersTheExecutablePath pins the Exe identity: a native
+// Claude Code install runs as a version-numbered binary, so its name alone is
+// nothing, while the resolved path names the install. The name stays the
+// fallback for a backend that reports no path.
+func TestIdentifyAgentPrefersTheExecutablePath(t *testing.T) {
+	t.Parallel()
+	native := IdentifyAgent("/home/dev/.local/share/claude/versions/2.1.292", "2.1.292", "")
+	if native.Name != "claude" || native.Basis != BasisInstallPath || native.Connector != "claudecode" {
+		t.Fatalf("native install = %+v, want claude by install path, connector claudecode", native)
+	}
+	if byName := IdentifyAgent("", "2.1.292", ""); byName.Name != "" {
+		t.Fatalf("the version-number name alone identified %+v", byName)
+	}
+	if fallback := IdentifyAgent("", "claude", "claude"); fallback.Name != "claude" || fallback.Connector != "claudecode" {
+		t.Fatalf("name fallback = %+v", fallback)
+	}
+	npm := IdentifyAgent("/usr/bin/node", "node", "/usr/bin/node /home/dev/.npm-global/bin/claude --resume")
+	if npm.Name != "claude" || npm.Basis != BasisScript || npm.Connector != "claudecode" {
+		t.Fatalf("npm install = %+v, want claude by script", npm)
+	}
+	if windows := IdentifyAgent(`C:\Tools\codex.exe`, "", ""); windows.Connector != "codex" {
+		t.Fatalf("windows codex = %+v, want connector codex", windows)
+	}
+}
+
+// TestIdentifyAgentMarksObserveOnlyRoots pins the D11 rule as the gateway
+// sees it: heuristics and IDE-hosted surfaces attribute activity, but only a
+// CLI connector named by its executable, install or script can ever be an
+// enforcement root, and no argv match names a connector.
+func TestIdentifyAgentMarksObserveOnlyRoots(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, exe, cmdline string
+		wantName           string
+		wantConnector      string
+		wantObserveOnly    string
+	}{
+		{"cli connector", "/usr/local/bin/codex", "codex", "codex", "codex", ""},
+		{"cursor cli", "/home/dev/.local/share/cursor-agent/versions/1/cursor-agent", "", "cursor-agent", "cursor", ""},
+		{"cursor ide", `C:\Users\dev\AppData\Local\cursor\app\host.exe`, "", "cursor", "", RootIDEHosted},
+		{"copilot language server", "/opt/ext/copilot-language-server", "", "copilot-language-server", "", RootIDEHosted},
+		{"tmux named after a framework", "/usr/bin/tmux", "tmux new -s langchain", "tmux", "", RootHeuristic},
+		{"framework module", "/usr/bin/python3", "python3 -m crewai run", "python3", "", RootHeuristic},
+		{"mcp server", "/usr/bin/node", "node /opt/mcp-server-git/index.js", "node", "", RootHeuristic},
+		{"pattern-named non-connector", "/usr/local/bin/aider", "aider", "aider", "", RootHeuristic},
+		{"not an agent", "/usr/bin/grep", "grep -r token .", "", "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := IdentifyAgent(test.exe, "", test.cmdline)
+			if root.Name != test.wantName || root.Connector != test.wantConnector || root.ObserveOnly != test.wantObserveOnly {
+				t.Fatalf("IdentifyAgent(%q, %q) = %+v, want name %q connector %q observe-only %q",
+					test.exe, test.cmdline, root, test.wantName, test.wantConnector, test.wantObserveOnly)
+			}
+		})
+	}
+	if got := ConnectorForAgent("Claude.exe"); got != "claudecode" {
+		t.Fatalf("ConnectorForAgent(Claude.exe) = %q", got)
+	}
+	if got := ConnectorForAgent("tmux"); got != "" {
+		t.Fatalf("ConnectorForAgent(tmux) = %q, want none", got)
+	}
+}

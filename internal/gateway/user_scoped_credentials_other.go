@@ -21,8 +21,9 @@ import (
 )
 
 // userScopedIdentityName names the account a per-user credential is bound
-// to: the SID's account on Windows.
-var userScopedIdentityName = useridentity.NameForID
+// to: the SID's account on Windows, by its sAMAccountName even while the
+// LSA answers the UPN its user signed in with (GAP-0382).
+var userScopedIdentityName = useridentity.CanonicalNameForID
 
 // userScopedIdentityForName is the identity (SID) of the account an
 // account name names now, or false when none has it.
@@ -41,6 +42,10 @@ var userScopedIdentityHome = useridentity.HomeForID
 // agentIdentityAccountName names no account on Windows: an agent identity
 // is keyed on a SID, which no other account ever gets.
 var agentIdentityAccountName = func(string) string { return "" }
+
+// managedHookPeerLastName keeps no last name off Linux and macOS, where no
+// sandbox runs.
+var managedHookPeerLastName = func(int) string { return "" }
 
 // setManagedHookPeerHomeStore persists nothing on Windows: a profile path
 // comes from the SID's ProfileList entry, not from a directory lookup.

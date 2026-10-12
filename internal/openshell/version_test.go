@@ -48,6 +48,24 @@ func TestParseVersionAcceptsReportedShapes(t *testing.T) {
 	}
 }
 
+// TestInstallerPin: setup installs InstallerVersion with the script of its
+// tag, whose digest is pinned, from inside the supported window; the advice names it.
+func TestInstallerPin(t *testing.T) {
+	if InstallerVersion != "0.1.3" || InstallerTag != "v"+InstallerVersion ||
+		InstallerURL != "https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.1.3/install.sh" ||
+		InstallerSHA256 != "b8daa915e766564f0473b76ed4e012fff9723c1ac98007b3f85ba20f59442d28" {
+		t.Fatalf("installer pin = %s %s %s", InstallerTag, InstallerURL, InstallerSHA256)
+	}
+	if v := mustParse(InstallerVersion); CheckSupported(v) != nil || v.Compare(mustParse(SupportedMin)) < 0 {
+		t.Fatalf("InstallerVersion %s is outside >=%s <%s", InstallerVersion, SupportedMin, SupportedBelow)
+	}
+	for v, want := range map[string]string{"0.0.40": "upgrade it in place to " + InstallerVersion, "0.0.16": "then install " + InstallerVersion} {
+		if err := CheckSupported(mustParse(v)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: %v, want %q", v, err, want)
+		}
+	}
+}
+
 func TestCheckSupportedWindow(t *testing.T) {
 	// The advice matches what Installer does: clean up before 0.0.37,
 	// upgrade in place from 0.0.37 on.

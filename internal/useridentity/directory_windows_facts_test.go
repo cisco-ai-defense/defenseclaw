@@ -12,6 +12,7 @@ type fakeWindowsReader struct {
 	values    map[string]string // path|name -> value
 	subkeys   map[string][]string
 	accounts  map[string][2]string
+	names     map[string]string // account name -> SID (LookupAccountName)
 	computer  string
 	adDomain  string
 	dnsName   string
@@ -27,7 +28,8 @@ func (f fakeWindowsReader) LookupAccount(sid string) (string, string, bool) {
 	a, ok := f.accounts[sid]
 	return a[0], a[1], ok
 }
-func (f fakeWindowsReader) ComputerName() string { return f.computer }
+func (f fakeWindowsReader) SIDForName(name string) string { return f.names[name] }
+func (f fakeWindowsReader) ComputerName() string          { return f.computer }
 func (f fakeWindowsReader) DomainJoin() (string, string, bool) {
 	return f.adDomain, f.adDNSName, f.adDomain != ""
 }
@@ -226,5 +228,46 @@ func TestWindowsGroupNamesLookupHonorsBudget(t *testing.T) {
 		if got[i] != sid {
 			t.Fatalf("group %d = %q; want SID %q after timeout", i, got[i], sid)
 		}
+	}
+}
+
+// GAP-0533: the same AD account has the same verified facts whether its user
+// signed in as DCLAB\ent-bob or ENT-BOB@DCLAB.TEST, where the LSA names the
+// account by the UPN as typed: the principal and the UPN lookup are those of
+// its sAMAccountName. An account whose own sAMAccountName holds an @ keeps it.
+func TestWindowsDirectoryFactsSameForEverySignInForm(t *testing.T) {
+	const bob = "S-1-5-21-602989718-809138714-1982218064-4077"
+	const literal = "S-1-5-21-602989718-809138714-1982218064-4090"
+	now := time.Unix(1_800_000_000, 0)
+	reader := fakeWindowsReader{
+		names: map[string]string{`DCLAB\ENT-BOB`: bob, "ENT-BOB@DCLAB.TEST": bob, `DCLAB\ent-bob`: bob,
+			`DCLAB\ent-bob@dclab.test`: literal},
+		computer: "WIN2-SBX", adDomain: "DCLAB", adDNSName: "dclab.test",
+	}
+	for _, tc := range []struct {
+		name, sid, lsa, wantSAM string
+	}{
+		{"DCLAB sign-in", bob, "ent-bob", `DCLAB\ent-bob`},
+		{"UPN sign-in", bob, "ENT-BOB@DCLAB.TEST", `DCLAB\ENT-BOB`},
+		{"literal @ sAMAccountName", literal, "ent-bob@dclab.test", `DCLAB\ent-bob@dclab.test`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader.accounts = map[string][2]string{tc.sid: {tc.lsa, "DCLAB"}}
+			var asked string
+			facts := resolveWindowsDirectoryFacts(reader, tc.sid, func(_, sam string) string { asked = sam; return "" }, now)
+			if !EqualFold(asked, tc.wantSAM) {
+				t.Fatalf("UPN lookup asked for %q, want %q", asked, tc.wantSAM)
+			}
+			if facts.Directory != DirectoryActiveDirectory || facts.AccountDomain != "DCLAB" || facts.Domain != "dclab.test" {
+				t.Fatalf("facts = %+v", facts)
+			}
+			wantPrincipal := "ent-bob@dclab.test"
+			if tc.sid == literal {
+				wantPrincipal = "" // an @ in the sAMAccountName never becomes a principal untranslated
+			}
+			if facts.Principal != wantPrincipal {
+				t.Fatalf("principal = %q, want %q", facts.Principal, wantPrincipal)
+			}
+		})
 	}
 }

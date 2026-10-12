@@ -82,6 +82,10 @@ const (
 	SourceOperator Source = "operator"
 	// SourceUnblock is a per-sandbox or persistent unblock decision.
 	SourceUnblock Source = "unblock"
+	// SourceApproval is an ask the user approved for the sandbox's
+	// session (DeciderOptions.Approved): it opens a host off the
+	// allowlist, nothing else.
+	SourceApproval Source = "approval"
 	// SourceFeed is the blocklist or allowlist feed.
 	SourceFeed Source = "feed"
 	// SourceDefault is the mode default: allow in open mode, block in
@@ -119,6 +123,20 @@ type Decision struct {
 	// the administrator can open what the decider refuses
 	// (DefaultUnblockHint).
 	NoUnblock bool
+}
+
+// AdminRule is the openshell.admin key whose list refuses with category c
+// (egress_block, egress_allow_only), "" for any other category: the
+// organization's lists, which the person can't approve or unblock, and
+// whose refusal names the rule (sandboxapi.AccessRefused).
+func AdminRule(c Category) string {
+	switch c {
+	case CategoryAdminBlock:
+		return "egress_block"
+	case CategoryAdminAllowOnly:
+		return "egress_allow_only"
+	}
+	return ""
 }
 
 // Unblock lifts a block for one sandbox, or for every sandbox when
@@ -205,6 +223,12 @@ type DeciderOptions struct {
 	NoUnblock bool
 	// Unblocks supplies unblock decisions; nil means none.
 	Unblocks Unblocks
+	// Approved supplies the asks the user approved for a sandbox's
+	// session: hosts the allowlist mode refused by default. They open
+	// only that default refusal, after every list and feed, so they apply
+	// under NoUnblock too, where the organization still lets the user
+	// approve an ask for the session. Nil means none.
+	Approved Unblocks
 }
 
 // Decider decides whether a principal may reach a destination. It is
@@ -221,6 +245,7 @@ type Decider struct {
 	allow      *hostSet[struct{}]
 	noUnblock  bool
 	unblocks   Unblocks
+	approved   Unblocks
 	// local is this machine's own addresses, refused as IP literals.
 	local *localAddrs
 }
@@ -230,7 +255,7 @@ func DefaultPorts() []int { return []int{80, 443} }
 
 // NewDecider validates opts and builds a Decider.
 func NewDecider(opts DeciderOptions) (*Decider, error) {
-	d := &Decider{mode: ModeOpen, unblocks: opts.Unblocks, noUnblock: opts.NoUnblock, local: hostAddrs}
+	d := &Decider{mode: ModeOpen, unblocks: opts.Unblocks, approved: opts.Approved, noUnblock: opts.NoUnblock, local: hostAddrs}
 	if opts.Mode != "" {
 		mode, err := ParseMode(string(opts.Mode))
 		if err != nil {
@@ -390,7 +415,8 @@ func (d *Decider) Feeds() []FeedInfo {
 //  6. the blocklist feed;
 //  7. an allow-only entry allows;
 //  8. the mode default: open allows names and blocks IP literals, allowlist
-//     allows only allowlist feed matches.
+//     allows only allowlist feed matches and the asks the user approved
+//     for the sandbox (Approved, NoUnblock or not).
 //
 // Only refusals from steps 6 and 8 are unblockable, and none when
 // NoUnblock is set.
@@ -501,6 +527,12 @@ func (d *Decider) decide(p Principal, host string, port int, checkPort bool) Dec
 		dec.Allowed, dec.Source, dec.Rule, dec.Category = true, SourceFeed, m.Pattern, m.Entry.Category
 		dec.Feed, dec.FeedVersion, dec.Entry = m.Feed.Name, m.Feed.Version, m.Entry.Name
 		return dec
+	}
+	if d.approved != nil {
+		if u, ok := d.approved.Unblocked(p, h); ok {
+			dec.Allowed, dec.Source, dec.Rule = true, SourceApproval, u.Pattern
+			return dec
+		}
 	}
 	dec = blocked(dec, CategoryNotAllowlisted, SourceDefault, "")
 	dec.Unblockable = !d.noUnblock

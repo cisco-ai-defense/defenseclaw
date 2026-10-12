@@ -106,25 +106,6 @@ class TestStatusCommand(unittest.TestCase):
         self.assertIn("running", result.output)
 
     @patch("defenseclaw.gateway.OrchestratorClient")
-    def test_status_points_legacy_sandbox_hosts_at_cleanup(self, mock_client_cls):
-        from defenseclaw.commands.cmd_status import status
-
-        self.app.cfg.openshell.mode = "standalone"
-        mock_client = MagicMock()
-        mock_client.is_running.return_value = False
-        mock_client_cls.return_value = mock_client
-
-        result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("legacy install detected", result.output)
-        self.assertIn("defenseclaw sandbox legacy-cleanup", result.output)
-
-        result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
-        self.assertEqual(result.exit_code, 0, result.output)
-        payload = json.loads(result.output)
-        self.assertEqual(payload["sandbox"], {"available": False, "enabled": False, "legacy_standalone": True})
-
-    @patch("defenseclaw.gateway.OrchestratorClient")
     def test_status_sandbox_not_configured_on_host_mode(self, mock_client_cls):
         from defenseclaw.commands.cmd_status import status
 
@@ -135,7 +116,7 @@ class TestStatusCommand(unittest.TestCase):
         result = self.runner.invoke(status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertEqual(payload["sandbox"], {"available": False, "enabled": False, "legacy_standalone": False})
+        self.assertEqual(payload["sandbox"], {"available": False, "enabled": False})
         # Windows shows "not supported on Windows" instead.
         with patch("defenseclaw.commands.cmd_status._host_is_windows", return_value=False):
             result = self.runner.invoke(status, [], obj=self.app, catch_exceptions=False)
@@ -156,6 +137,11 @@ class TestStatusCommand(unittest.TestCase):
             self.assertIn("details: defenseclaw sandbox status", result.output)
             result = self.runner.invoke(cmd_status.status, ["--json"], obj=self.app, catch_exceptions=False)
         self.assertTrue(json.loads(result.output)["sandbox"]["enabled"])
+        # GAP-0246: on Windows the platform wins over the config flag.
+        with patch.object(cmd_status, "_host_is_windows", return_value=True):
+            result = self.runner.invoke(cmd_status.status, [], obj=self.app, catch_exceptions=False)
+        self.assertIn("not supported on Windows (openshell.enabled has no effect here)", result.output)
+        self.assertNotIn("details: defenseclaw sandbox status", result.output)
 
 
 # ---------------------------------------------------------------------------

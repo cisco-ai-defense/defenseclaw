@@ -25,8 +25,10 @@
     With -UpgradeFrom it is the enterprise upgrade lane instead of step 1:
     the previous release's Setup /ensure installs with the same config, then
     this Setup's /ensure upgrades it. The upgrade must report the applied
-    policy from a newer config generation, keep the secrets and the guardian
-    ledger, and write migration-v9.json plus config.yaml.v8.bak for v8 input.
+    policy, keep the secrets and the guardian ledger, and write
+    migration-v9.json plus config.yaml.v8.bak for v8 input. A v8 config is
+    migrated, so its policy comes from a newer config generation; a v9 one
+    (a 1.x previous release) keeps its bytes and its generation.
     Steps 2-5 then run on the upgraded deployment. The source config, upgraded
     config and any migration record are kept in -ResultsRoot for
     scripts/check_enterprise_upgrade_config.py. The rollback drill of the
@@ -309,6 +311,23 @@ function Get-TreeSha([string]$Path) {
     return [BitConverter]::ToString([Security.Cryptography.SHA256]::HashData($bytes)).Replace('-', '')
 }
 
+# The targets the guardian ledger protects: account, connector and outcome.
+# Every guardian reconcile rewrites the ledger's updated_at and each target's
+# install details (backups, contract lock times); the restarted guardian of
+# an upgrade does too, so the file's hash is no measure of what it protects.
+function Get-LedgerTargets([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'absent' }
+    $ledger = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $targets = foreach ($target in @($ledger.protected_targets)) {
+        # The ledger omits empty fields (user and user_home on Windows).
+        @(foreach ($name in 'sid', 'user', 'user_home', 'connector', 'ok') {
+                $property = $target.PSObject.Properties[$name]
+                if ($property) { [string]$property.Value } else { '' }
+            }) -join '|'
+    }
+    return (@($targets) | Sort-Object) -join "`n"
+}
+
 function Get-ConfigGeneration([string]$Result) {
     $document = Get-Content -LiteralPath $Result -Raw | ConvertFrom-Json
     if ($null -eq $document.PSObject.Properties['policy'] -or $null -eq $document.policy) { return 0 }
@@ -440,14 +459,17 @@ try {
         $run = Invoke-Lifecycle -Name '01-previous-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
         Assert-Result $run 'previous-status' (@('--action', 'status', '--installed', '--version', $PreviousVersion) + $installedChecks)
         $previousGeneration = Get-ConfigGeneration $run.Result
+        # A v8 config is migrated, so the upgrade applies a new config
+        # generation; a v9 one keeps its bytes and its generation.
+        $generationFloor = if ($sourceConfigVersion -eq 8) { $previousGeneration } else { $previousGeneration - 1 }
         $previousConfigSha = Get-FileSha $installedConfig
         $previousSecretsSha = Get-TreeSha $secretsDirectory
-        $previousLedgerSha = Get-FileSha $guardianLedger
+        $previousLedgerTargets = Get-LedgerTargets $guardianLedger
 
         Step "Setup /ensure upgrades to $Version"
         $run = Invoke-Lifecycle -Name '01-setup-ensure-upgrade' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
         Assert-Result $run 'setup-ensure-upgrade' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
-            $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$previousGeneration))
+            $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$generationFloor))
         Assert-ServicesRunning
         $record = Join-Path (Split-Path -Parent $installedConfig) 'migration-v9.json'
         if ($sourceConfigVersion -eq 8) {
@@ -457,7 +479,7 @@ try {
         }
         Copy-Item -LiteralPath $installedConfig -Destination (Join-Path $ResultsRoot 'config-upgraded.yaml')
         if ((Get-TreeSha $secretsDirectory) -ne $previousSecretsSha) { Fail "the upgrade changed the secrets under $secretsDirectory" }
-        if ((Get-FileSha $guardianLedger) -ne $previousLedgerSha) { Fail "the upgrade changed the guardian ledger $guardianLedger" }
+        if ((Get-LedgerTargets $guardianLedger) -ne $previousLedgerTargets) { Fail "the upgrade changed the protected targets in the guardian ledger $guardianLedger" }
     }
     else {
         Step 'Setup /ensure with an administrator config (installs the services, enrolls Claude Code and Codex)'

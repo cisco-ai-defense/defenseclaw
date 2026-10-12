@@ -60,6 +60,12 @@ type runFlags struct {
 	CPU       string   `json:"cpu,omitempty"`
 	Memory    string   `json:"memory,omitempty"`
 	Context   []string `json:"context,omitempty"`
+	// ProcessTree is --process-tree.
+	ProcessTree bool `json:"process_tree,omitempty"`
+	// RepoPolicy is the project's repository policy as the create read it:
+	// the sandbox keeps it, so an edit made during a session applies from
+	// the next run on.
+	RepoPolicy *packs.RepoPolicy `json:"repo_policy,omitempty"`
 }
 
 // gatewayFacts are what the gateway a sandbox runs on adds to its policy
@@ -75,6 +81,7 @@ func (f runFlags) packs(harness, project string, gw gatewayFacts) packs.Flags {
 		Pack: f.Pack, Harness: harness, Project: project, Profile: f.Profile, Copy: f.Copy, Safe: f.Safe,
 		Yolo: f.Yolo, Unmask: f.Unmask, HostPorts: f.HostPorts, NoMCP: f.NoMCP, Learn: f.Learn,
 		CPU: f.CPU, Memory: f.Memory, OpenShellGatewayPort: gw.Port, MountUnsupported: gw.Driver.MountRefusal,
+		ProcessTree: f.ProcessTree, RepoPolicy: f.RepoPolicy,
 	}
 }
 
@@ -109,10 +116,22 @@ type record struct {
 	HookContract   string `json:"hook_contract,omitempty"`
 	TamperTier     string `json:"tamper_tier,omitempty"`
 
+	// RegistrationID is the managed gateway registration of a sandbox a
+	// managed host's daemon created (empty outside managed mode). What the
+	// registration resolved (the guardrail profile, provisional, the
+	// digest) is the daemon's (daemonRegistration), which the manager asks
+	// (ProfileLookup); records written before carry it unread.
+	RegistrationID string `json:"registration_id,omitempty"`
+
 	// Driver is the compute driver of the gateway the sandbox was created
 	// on (openshell.ComputeDriver). Empty in records from before it was
 	// kept, which were all made on docker (openshell.LookupDriver).
 	Driver string `json:"driver,omitempty"`
+	// DriverReason is why the sandbox runs on Driver on a managed host
+	// (openshell.DriverReason*: configured, kvm_available, or the KVM
+	// probe's reason when the docker fallback replaced the MicroVM driver);
+	// empty outside managed mode. A sandbox never switches driver.
+	DriverReason string `json:"driver_reason,omitempty"`
 	// RunImage and RunImageID are the image the sandbox's template names
 	// when that is not Image: on a driver that bakes the per-run files into
 	// an image (openshell.Driver.RunFilesInImage), the run image, or an
@@ -129,23 +148,27 @@ type record struct {
 	Verify *verifyRecord `json:"verify,omitempty"`
 
 	// TokenDelivery is how the sandbox received its ingress token
-	// (openshell.token_delivery at create; empty in older records, see
-	// tokenDelivery).
+	// (openshell.token_delivery at create).
 	TokenDelivery string `json:"token_delivery,omitempty"`
 
 	// Gateway, GatewayEndpoint and GatewayWorkspace say where the sandbox
 	// lives: the gateway registration, its endpoint and the OpenShell
-	// workspace (older records learn them once reconciliation finds the
-	// sandbox). While DefenseClaw is connected to another gateway or
+	// workspace (a sandbox adopted without a record learns them once
+	// reconciliation finds it). While DefenseClaw is connected to another gateway or
 	// workspace, not finding the sandbox proves nothing, so it is not
 	// released (see gatewayElsewhere).
 	Gateway          string `json:"gateway,omitempty"`
 	GatewayEndpoint  string `json:"gateway_endpoint,omitempty"`
 	GatewayWorkspace string `json:"gateway_workspace,omitempty"`
 
-	CredentialProfile string   `json:"credential_profile,omitempty"`
-	BedrockRegion     string   `json:"bedrock_region,omitempty"`
-	Providers         []string `json:"providers,omitempty"`
+	CredentialProfile string `json:"credential_profile,omitempty"`
+	BedrockRegion     string `json:"bedrock_region,omitempty"`
+	// LLMDigest is the credentialDigest of the model credential DefenseClaw
+	// last gave the sandbox's model provider, never the value: OpenShell
+	// does not return a provider's values, so a start compares the caller's
+	// key with it (refreshModelCredential).
+	LLMDigest string   `json:"llm_digest,omitempty"`
+	Providers []string `json:"providers,omitempty"`
 	// ProviderEndpoints are what the sandbox's --llm and --credential
 	// providers open directly, around the egress proxy; every later policy
 	// resolution judges them again. DetachedProviders are the providers
@@ -163,21 +186,35 @@ type record struct {
 	EgressUser string `json:"egress_user,omitempty"`
 
 	// Phase is the last lifecycle phase recorded for the sandbox, so a
-	// restarted daemon reports the transition it observes.
-	Phase string `json:"phase,omitempty"`
+	// restarted daemon reports the transition it observes. PhaseReason is
+	// why it is in the error phase, in words (errorPhaseReason).
+	Phase       string `json:"phase,omitempty"`
+	PhaseReason string `json:"phase_reason,omitempty"`
 	// ReadyAt is when DefenseClaw saw the sandbox become ready (zero while
 	// it is not): a restarted daemon that finds it still ready reports its
 	// uptime from then. OpenShell 0.1.1 reports no transition times.
 	ReadyAt time.Time `json:"ready_at,omitempty"`
+	// UnflushedAt is when the MicroVM last went down without DefenseClaw
+	// stopping it, so without a flush: what it wrote in its last seconds
+	// may be missing, empty or cut short (GAP-0367).
+	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
+	// StoppedAt is when the sandbox stopped running, by a stop or because
+	// its main process ended (completed); zero while it is in another
+	// phase. delete_stopped_after counts from it (deleteExpired).
+	StoppedAt time.Time `json:"stopped_at,omitzero"`
 	// SessionYolo is the skip-permissions mode the session that began at
 	// ReadyAt was launched with (launchYolo then); nil while the sandbox
-	// is not ready, and in records from before it was kept.
+	// is not ready.
 	SessionYolo *bool `json:"session_yolo,omitempty"`
 	// Sessions counts the transitions to ready DefenseClaw saw (a create,
 	// every start, one outside DefenseClaw a restarted daemon finds): an
 	// accept names the session it reviewed (Manager.Accept). A restarted
 	// daemon that finds the sandbox still ready counts nothing.
 	Sessions int `json:"sessions,omitempty"`
+	// HookCounts are the hook counters as the daemon last kept them
+	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
+	// record share them, so they are replaced, never changed in place.
+	HookCounts *hookCounts `json:"hook_counts,omitempty"`
 	// Cursor resumes the WatchSandbox stream.
 	Cursor string `json:"cursor,omitempty"`
 	// HostAlias is what OpenShell last reported of host.openshell.internal
@@ -186,6 +223,9 @@ type record struct {
 	HostAlias *hostAliasRecord `json:"host_alias,omitempty"`
 	// Unblocks are sandbox-scoped egress unblock patterns.
 	Unblocks []string `json:"unblocks,omitempty"`
+	// Approved are the hosts off the allowlist the user approved for the
+	// sandbox's session when it asked (approveProxyAsk).
+	Approved []string `json:"approved,omitempty"`
 	// ApprovedRules are the triaged OpenShell rules (allow_*) approvals
 	// applied, each with who approved it: automatic (triage, on its own, for
 	// any part of the rule) or operator (the user, for all of it, whose
@@ -198,7 +238,7 @@ type record struct {
 	Workspace *sandboxapi.WorkspaceSummary `json:"workspace,omitempty"`
 	MCP       *sandboxapi.MCPSummary       `json:"mcp,omitempty"`
 	// RunConfig renders the per-run harness files again on start (nil for
-	// a harness without them, and in records from before it existed).
+	// a harness without them).
 	RunConfig *runConfigRecord `json:"run_config,omitempty"`
 	// Resources are the limits the sandbox's template got at create (an
 	// empty field is unlimited); nil in records from before they were kept.
@@ -311,9 +351,9 @@ func (s recordStore) has(name string) bool {
 
 // OrphanedSandboxData lists the sandboxes that have data under
 // <data_dir>/sandboxes/<name> (mount state and masks, copy-mode state, run
-// files, a kept run log) or a pre-session snapshot under
+// files, a kept run log, kept destinations) or a pre-session snapshot under
 // <data_dir>/snapshots/<name> (with its refs in the project) but no daemon
-// record: an interrupted create or delete, or an older build, left it.
+// record: an interrupted create or delete left it.
 // RemoveOrphanedSandboxData removes it.
 func OrphanedSandboxData(dataDir string) []string {
 	records := newRecordStore(dataDir)
@@ -374,10 +414,19 @@ func RemoveOrphanedSandboxData(dataDir, name string) error {
 	dir := filepath.Join(dataDir, "sandboxes", name)
 	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
 	keep(os.RemoveAll(filepath.Join(dir, runLogDirName)))
+	keep(removeIfExists(filepath.Join(dir, destinationsFile)))
 	if err := os.Remove(dir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("%s holds files DefenseClaw did not write there; it is left in place", dir))
 	}
 	return errors.Join(errs...)
+}
+
+// removeIfExists removes a file, which may be gone already.
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 // RecordedSandbox is a sandbox the daemon keeps a record of under a data
@@ -453,6 +502,7 @@ func RemoveSandboxState(ctx context.Context, dataDir, name string) error {
 	dir := filepath.Join(dataDir, "sandboxes", name)
 	keep(os.RemoveAll(filepath.Join(dir, runConfigDirName)))
 	keep(os.RemoveAll(filepath.Join(dir, runLogDirName)))
+	keep(removeIfExists(filepath.Join(dir, destinationsFile)))
 	if rec.BindingID != "" {
 		keep(revokeStoredBinding(dataDir, rec.BindingID))
 	}

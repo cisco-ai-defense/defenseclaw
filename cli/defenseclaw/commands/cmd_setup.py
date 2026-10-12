@@ -3656,10 +3656,23 @@ def _rotate_token_hook_metadata(path: str) -> os.stat_result:
         raise click.ClickException("A connector hook credential has an untrusted owner; refusing token rotation.")
     if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
         raise click.ClickException("A connector hook credential is not owner-only; refusing token rotation.")
-    if os.name == "nt" and windows_acl_custody_confidentiality_error(path) is not None:
-        raise click.ClickException("A connector hook credential ACL is not private; refusing token rotation.")
-    if sys.platform == "darwin" and darwin_acl_confidentiality_error(path) is not None:
-        raise click.ClickException("A connector hook credential ACL is not private; refusing token rotation.")
+    problem = None
+    if os.name == "nt":
+        problem = windows_acl_custody_confidentiality_error(path)
+    elif sys.platform == "darwin":
+        problem = darwin_acl_confidentiality_error(path)
+    if problem is not None:
+        # Name the file, why, and the fix: the message named none (GAP-0364).
+        if os.name == "nt":
+            import getpass
+
+            fix = f'icacls "{path}" /inheritance:r /grant:r "{getpass.getuser()}:F" "SYSTEM:F"'
+        else:
+            fix = f'chmod -N "{path}" && chmod 600 "{path}"'
+        raise click.ClickException(
+            f"The connector hook credential {path} is not private ({problem}); refusing token rotation. "
+            f"Make it private to your account ({fix}), then run the command again."
+        )
     return info
 
 
@@ -6637,6 +6650,7 @@ def setup_guardrail(
         proxy_active = _guarded_proxy_connector(gc)
         if proxy_active and explicit_connector not in _PROXY_BACKED_CONNECTORS:
             _refuse_hook_setup_over_proxy_connector(explicit_connector, proxy_active)
+        _refuse_guardrail_for_connector_not_set_up(gc, explicit_connector)
     elif (
         non_interactive
         and not app.cfg.has_connector_configured()
@@ -6807,7 +6821,14 @@ def setup_guardrail(
             preselect_guardrail_targets(target_connectors)
 
         if explicit_connector:
-            if not (getattr(gc, "connectors", None) and target_connector in gc.connectors):
+            roster = getattr(gc, "connectors", None) or {}
+            if not (roster and target_connector in roster):
+                gc.connector = target_connector
+            elif normalize_connector((gc.connector or "").strip()) not in {normalize_connector(n) for n in roster}:
+                # GAP-0371: a primary mirror that is not on the roster (an
+                # earlier build's half switch left one) names a connector that
+                # is not set up; the summary, claw.mode and the gateway's
+                # primary must follow the connector this run configures.
                 gc.connector = target_connector
         elif not gc.connector or gc.connector == "openclaw":
             if target_connector:
@@ -9595,13 +9616,18 @@ def _write_connector_identity(
         (getattr(gc, "connector", "") or getattr(cfg.claw, "mode", "") or "").strip()
     )
     if write_mode == "add":
-        if not getattr(gc, "connectors", None):
+        first_add = not getattr(gc, "connectors", None)
+        if first_add:
             gc.connectors = {}
         existing_single = (getattr(gc, "connector", "") or "").strip()
         # Only seed a HOOK-enforced predecessor into the multi map — a
         # proxy-backed connector cannot be a multi-connector peer (D4=A).
+        # Only on the first add: once the roster exists the singular field is
+        # just its mirror, and a stale mirror is not a connector that was set
+        # up (GAP-0371: 'setup codex' enrolled a Claude Code nobody set up).
         if (
-            existing_single
+            first_add
+            and existing_single
             and existing_single != connector
             and existing_single in _HOOK_ENFORCED_CONNECTORS
             and existing_single not in gc.connectors
@@ -12783,6 +12809,31 @@ def _guarded_proxy_connector(gc) -> str:
         return ""
     single = normalize_connector((getattr(gc, "connector", "") or "").strip())
     return single if single in _PROXY_BACKED_CONNECTORS else ""
+
+
+def _refuse_guardrail_for_connector_not_set_up(gc, connector: str) -> None:
+    """Fail when ``setup guardrail --connector X`` names a connector the roster lacks.
+
+    GAP-0371: on an install whose ``guardrail.connectors`` roster held only
+    Codex, ``--connector claudecode`` repointed ``guardrail.connector`` without
+    adding Claude Code to the roster, and the gateway's restart dropped the
+    Codex hook registration while status still listed Codex. ``setup
+    <connector>`` adds a connector to the roster (or replaces it with
+    ``--replace``); this command tunes one that is on it. A single-connector
+    install without a roster keeps its switch, and proxy connectors keep their
+    own rules.
+    """
+    roster = {normalize_connector(name) for name in (getattr(gc, "connectors", None) or {}) if name.strip()}
+    if not roster or connector in roster or connector in _PROXY_BACKED_CONNECTORS:
+        return
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    slug = "claude-code" if connector == "claudecode" else connector
+    raise click.ClickException(
+        f"{label} is not set up here (set up: {', '.join(sorted(roster))}), so setup guardrail has no "
+        f"{label} guardrail to configure. No changes made. Add it next to them with "
+        f"'defenseclaw setup {slug}' (or switch to it with 'defenseclaw setup {slug} --replace'), "
+        "then run this again."
+    )
 
 
 def _refuse_hook_setup_over_proxy_connector(connector: str, proxy: str) -> None:
@@ -18218,8 +18269,16 @@ def _preflight_docker() -> tuple[bool, str]:
         return False, "docker_daemon_not_running"
     click.echo("    Docker daemon running... ok")
 
+    own_stack: bool | None = None
     for port, label in [(8000, "Splunk Web"), (8088, "HEC")]:
         if _port_in_use(port):
+            if own_stack is None:
+                own_stack = is_compose_project_running(SPLUNK_COMPOSE_PROJECT, environment=_splunk_bridge_child_env())
+            if own_stack:
+                # DefenseClaw's own local Splunk holds it, which setup
+                # restarts (GAP-0346: a stack whose setup was interrupted).
+                click.echo(f"    Port {port} ({label})... used by DefenseClaw's local Splunk, which setup restarts")
+                continue
             click.echo(f"    Port {port} ({label})... IN USE")
             click.echo(f"    Free port {port} or stop the existing Splunk instance.")
             return False, f"port_{port}_in_use"
@@ -18459,17 +18518,33 @@ def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
         return
+    if not is_compose_project_running(SPLUNK_COMPOSE_PROJECT, environment=child_env):
+        click.echo("    Local Splunk container was not running")
+        return
+    # The bridge refuses to run without its env file, which `up` was given
+    # too: without it `down` failed while this said "stopped" (GAP-0346).
+    down_args = [bridge, "down"]
+    env_file = os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL)
+    if os.path.isfile(env_file):
+        down_args.extend(["--env-file", env_file])
     try:
-        subprocess.run(
-            [bridge, "down"],
+        result = subprocess.run(
+            down_args,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=120,
+            check=False,
             env=child_env,
         )
+        lines = (result.stderr or result.stdout or "").strip().splitlines()
+        failure, stopped = (lines[-1] if lines else f"exit {result.returncode}"), result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        failure, stopped = str(exc), False
+    if stopped and not is_compose_project_running(SPLUNK_COMPOSE_PROJECT, environment=child_env):
         click.echo("    Local Splunk container stopped")
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        click.echo("    Could not stop local Splunk container (may not be running)")
+        return
+    click.echo(f"    Could not stop the local Splunk container: {failure}")
+    click.echo(f"    Stop it with: docker compose -p {SPLUNK_COMPOSE_PROJECT} down")
 
 
 # ---------------------------------------------------------------------------

@@ -36,6 +36,17 @@ func DirectoryFactsFunc(ctx context.Context) func(uid int) (useridentity.Directo
 	}
 }
 
+// platformMobileAccounts finds none on Linux, whose directory accounts are
+// never copied into /etc/passwd.
+func platformMobileAccounts(context.Context) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
+// platformOpenDirectoryNodeStates has no Open Directory to read on Linux.
+func platformOpenDirectoryNodeStates(context.Context) (string, error) {
+	return "", errors.New("unixidentity: no Open Directory on this platform")
+}
+
 const loginDefsPath = "/etc/login.defs"
 
 var (
@@ -52,6 +63,15 @@ func platformLocalAccounts(context.Context) (map[string]int, error) {
 		return nil, err
 	}
 	return parseLocalPasswd(string(data)), nil
+}
+
+// platformLocalGroups reads /etc/group, the files backend itself.
+func platformLocalGroups(context.Context) (map[string]int, error) {
+	data, err := readSmallFile(localGroupPath, 16<<20)
+	if err != nil {
+		return nil, err
+	}
+	return parseLocalGroups(string(data)), nil
 }
 
 // platformDirectoryConfigured reads the passwd sources of nsswitch.conf. A

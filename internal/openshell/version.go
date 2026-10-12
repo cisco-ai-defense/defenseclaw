@@ -33,14 +33,23 @@ const (
 	// SupportedBelow is the first release outside the window.
 	SupportedBelow = "0.2.0"
 
-	// InstallerTag is the upstream release the setup flow installs.
-	InstallerTag = "v0.1.1"
+	// InstallerVersion is the release the setup flow installs, and the one
+	// it offers an older supported release an in-place upgrade to
+	// (Installer.Upgrade, DoctorReport.OpenShellUpgradeAvailable).
+	InstallerVersion = "0.1.3"
+	// InstallerTag is InstallerVersion's upstream release tag.
+	InstallerTag = "v" + InstallerVersion
 	// InstallerURL is the tag-pinned upstream installer. Fetching it from a
 	// tag rather than main keeps the bytes stable enough to pin a digest.
 	InstallerURL = "https://raw.githubusercontent.com/NVIDIA/OpenShell/" + InstallerTag + "/install.sh"
 	// InstallerSHA256 is the digest of InstallerURL. Setup refuses to run a
 	// script that does not match it.
-	InstallerSHA256 = "5c98a86a4b811c471b212219cb2a62d458244220ffa71ac8e3baf3700b17b871"
+	InstallerSHA256 = "b8daa915e766564f0473b76ed4e012fff9723c1ac98007b3f85ba20f59442d28"
+
+	// installerUpgradeReason says why a host on an older supported release
+	// is offered InstallerVersion (the doctor's CLI check). Review it with
+	// InstallerVersion.
+	installerUpgradeReason = "fixes a supervisor bug that can stall a sandbox's first connection (0.1.2), cuts the CPU an idle sandbox uses (0.1.2) and ships the MicroVM driver already signed for Apple's Hypervisor (0.1.3)"
 
 	// DefaultBaseImage is the digest-pinned NVIDIA community sandbox image
 	// the DefenseClaw overlay is built on (multi-arch; ships node, uv, git
@@ -95,6 +104,31 @@ var NSSMyhostnameDebs = map[string]PinnedDeb{
 			"https://launchpadlibrarian.net/871327181/libnss-myhostname_255.4-1ubuntu8.17_arm64.deb",
 		},
 		SHA256: "5f39fb3175f068aad4ab0b39479fb0ad1265343982fdc19983f8dfa659e74465",
+	},
+}
+
+// TarballBaseURL is where NVIDIA publishes the release tarballs and their
+// checksum files: TarballBaseURL + "v<version>/<asset>".
+const TarballBaseURL = "https://github.com/NVIDIA/OpenShell/releases/download/"
+
+// TarballPins are the SHA-256 digests of NVIDIA's release tarballs, by
+// release, that the managed-enterprise "setup" install mode installs
+// (TarballInstaller). A tarball is installed only when its digest is
+// listed in NVIDIA's own checksum file for the release and equals the
+// digest pinned here, so the digests of a release are compiled in only
+// after they were checked against the published ones. Add a release with
+// InstallerVersion; a release without an entry cannot be installed.
+var TarballPins = map[string]map[string]string{
+	"0.1.3": {
+		"openshell-x86_64-unknown-linux-musl.tar.gz":           "ed08ea7874c47f22d6e5dcc4b27d9ef1ef5d2060f83035b35ff725d5160830a3",
+		"openshell-aarch64-unknown-linux-musl.tar.gz":          "07687dacefc52bc73b01943f5b58f7a5082c1ceaa228461b9a2a78023b8057c0",
+		"openshell-aarch64-apple-darwin.tar.gz":                "2eda3676aa85ff60551b403847090942e119c89f37c84d1635ac166c6b879826",
+		"openshell-gateway-x86_64-unknown-linux-gnu.tar.gz":    "da8dce943fe01cce90243b2bf2587c71a243e4d641a4b616528829b681ced198",
+		"openshell-gateway-aarch64-unknown-linux-gnu.tar.gz":   "801214322227f64f2d3faa6989daaa5e6cd9ef1ab768b5860496deeb1158c27b",
+		"openshell-gateway-aarch64-apple-darwin.tar.gz":        "a0cff0699f4a608a644805dbbf898c42caa59856274ff3cc2cdd6b3af4bacabe",
+		"openshell-driver-vm-x86_64-unknown-linux-gnu.tar.gz":  "22593640c6179eb87413ab099832fbd133d3a6a4979904d27679e7da6d80a0cb",
+		"openshell-driver-vm-aarch64-unknown-linux-gnu.tar.gz": "4426ee0992989060eb5987ad7072feb3eb6aecf5a628ad0284c3d7ad5f39974b",
+		"openshell-driver-vm-aarch64-apple-darwin.tar.gz":      "56e321f990741ca5585f5229e37c178f541b0c38029351fe59b72a36c1c750d4",
 	},
 }
 
@@ -173,9 +207,9 @@ func (e *ErrUnsupportedVersion) Error() string {
 	case e.Found.Compare(mustParse(breakingReleaseFloor)) < 0:
 		return fmt.Sprintf("OpenShell %s predates %s, and %s cannot use its gateway state or sandboxes: back up what you need, "+
 			"clean up with the old CLI (openshell sandbox delete --all && openshell gateway destroy), then install %s",
-			e.Found, breakingReleaseFloor, SupportedMin, SupportedMin)
+			e.Found, breakingReleaseFloor, InstallerVersion, InstallerVersion)
 	case e.Found.Compare(mustParse(SupportedMin)) < 0:
-		return fmt.Sprintf("OpenShell %s is older than %s; upgrade it in place to %s", e.Found, SupportedMin, SupportedMin)
+		return fmt.Sprintf("OpenShell %s is older than %s; upgrade it in place to %s", e.Found, SupportedMin, InstallerVersion)
 	}
 	return fmt.Sprintf("OpenShell %s is not supported; DefenseClaw drives >=%s <%s", e.Found, SupportedMin, SupportedBelow)
 }

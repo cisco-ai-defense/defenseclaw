@@ -45,6 +45,9 @@ type windowsDirectoryReader interface {
 	SubKeys(path string) []string
 	// LookupAccount resolves a SID to its account and domain names.
 	LookupAccount(sid string) (account, domain string, ok bool)
+	// SIDForName resolves a user account name (DOMAIN\name or a UPN) to its
+	// SID (LookupAccountName), or "".
+	SIDForName(name string) string
 	// ComputerName is the NetBIOS computer name.
 	ComputerName() string
 	// DomainJoin reports the NetBIOS and DNS names of the primary AD domain
@@ -112,6 +115,11 @@ func resolveWindowsDirectoryFacts(
 	account = strings.TrimSpace(account)
 	if ok {
 		facts.AccountDomain = domain
+		// While its user signed in with a UPN, the LSA can name an AD
+		// account by that UPN; the account's facts (its principal, the UPN
+		// lookup) are those of its sAMAccountName whatever the sign-in form
+		// (GAP-0533).
+		account, _ = canonicalSIDAccountName(sid, domain, account, nil, nil, r.SIDForName)
 	}
 	upn, provider := identityStoreUPN(r, sid)
 	switch {

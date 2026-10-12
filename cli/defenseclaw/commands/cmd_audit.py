@@ -19,6 +19,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE, is_known_action
 from defenseclaw.context import AppContext, pass_context
+from defenseclaw.gateway import GATEWAY_NOT_FOUND_MESSAGE
 
 
 @click.group("audit")
@@ -40,10 +41,7 @@ def audit() -> None:
 _execv = os.execv
 _run = subprocess.run
 
-_GATEWAY_MISSING = (
-    "defenseclaw-gateway is not installed; run 'defenseclaw upgrade' (or 'make gateway-install' "
-    "in a source checkout) and try again"
-)
+_GATEWAY_MISSING = GATEWAY_NOT_FOUND_MESSAGE
 
 
 def run_gateway(argv: Sequence[str]) -> NoReturn:

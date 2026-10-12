@@ -1461,11 +1461,29 @@ def _prompt_action_connectors(
     return action
 
 
+def _current_hook_fail_mode(data_dir: str | os.PathLike[str] | None = None) -> str:
+    """The hook fail mode an Enter at the init prompt keeps.
+
+    A new install gets the config default, closed, which --non-interactive,
+    quickstart and the fail-mode help all name; a re-run keeps the saved
+    value (GAP-0047)."""
+    try:
+        from defenseclaw import config as cfg_mod
+
+        if not os.path.isfile(cfg_mod.config_path_for_data_dir(data_dir or cfg_mod.default_data_path())):
+            return "closed"
+        saved = (cfg_mod.load(data_dir=data_dir).guardrail.hook_fail_mode or "").strip().lower()
+        return saved if saved in {"open", "closed"} else "closed"
+    except Exception:  # noqa: BLE001 - an unreadable config offers the default
+        return "closed"
+
+
 def _prompt_action_policy(
     *,
     fail_mode: str | None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
+    data_dir: str | os.PathLike[str] | None = None,
 ) -> tuple[str | None, bool | None, str | None]:
     """Ask the action-mode policy knobs once, shared by every action connector.
 
@@ -1473,10 +1491,7 @@ def _prompt_action_policy(
     enforces, so we ask them a single time after the action subset is known
     rather than per connector. Pre-supplied flags skip the matching prompt."""
     # Hook fail-mode: surface the choice so first-run operators don't have to
-    # discover `defenseclaw guardrail fail-mode` later. Default is "closed",
-    # the same posture quickstart and the non-interactive init give an action
-    # connector: an action connector whose hooks fail open lets every blocked
-    # call run while the gateway is down.
+    # discover `defenseclaw guardrail fail-mode` later.
     if fail_mode is None:
         terminal_checkbox.restore_line_prompt_mode()
         ux.section("Hook fail-mode (delivery and response failures)")
@@ -1489,7 +1504,7 @@ def _prompt_action_policy(
         fail_mode = click.prompt(
             "  " + ux.bold("Fail mode"),
             type=click.Choice(["open", "closed"], case_sensitive=False),
-            default="closed",
+            default=_current_hook_fail_mode(data_dir),
             show_choices=True,
         )
     # Human-In-the-Loop (HITL) only fires in action mode, so it is only asked
@@ -1995,6 +2010,7 @@ def _prompt_first_run(
             fail_mode=fail_mode,
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity,
+            data_dir=data_dir,
         )
         if "cursor" in action_set and (shared_fail or "").lower() == "open":
             # GAP-1517: Cursor's hook contract ties failures to its mode.
@@ -2875,6 +2891,10 @@ def _seed_splunk_bridge(data_dir: str) -> None:
     bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
     if os.path.isfile(bridge_bin):
         os.chmod(bridge_bin, 0o755)
+    from defenseclaw.bundle_refresh import ensure_splunk_bridge_container_access
+
+    for error in ensure_splunk_bridge_container_access(dest):
+        click.echo(f"  Splunk bridge: {error}", err=True)
     click.echo(f"  Splunk bridge: seeded in {dest}")
 
 

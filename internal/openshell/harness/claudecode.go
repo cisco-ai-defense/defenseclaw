@@ -73,6 +73,8 @@ esac`,
 		}}, nil
 	},
 	launcher: claudeCodeLauncher,
+	toolHosts: []ToolHost{{Host: "api.anthropic.com",
+		What: "Claude Code's WebFetch asks it whether each URL is safe before it fetches, so WebFetch fails for every site while it is refused, not only for this one"}},
 	bypassFlags: []bypassFlag{
 		{name: "--dangerously-skip-permissions"},
 		{name: "--allow-dangerously-skip-permissions"},

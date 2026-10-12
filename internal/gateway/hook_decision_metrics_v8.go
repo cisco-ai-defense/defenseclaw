@@ -76,6 +76,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 	}
 	effectiveAction := normalizeHookActionLabel(resp.Action)
 	sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
+	managed := sandboxHookManagedV8(ctx)
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
 		RawSeverity: string(severity.Severity), Enforced: env.Enforced,
@@ -178,6 +179,14 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,
+			DefenseClawSandboxDriver:            managed.Driver,
+			DefenseClawSandboxRegistrationID:    managed.RegistrationID,
+			DefenseClawSandboxPolicyDigest:      managed.PolicyDigest,
+			DefenseClawSandboxPolicyGeneration:  managed.PolicyGeneration,
+			DefenseClawSandboxPolicyProvisional: managed.Provisional,
+			DefenseClawOpenshellVersion:         managed.OpenShellVersion,
+			DefenseClawOpenshellInstallMode:     managed.InstallMode,
+			DefenseClawSubjectKey:               managed.SubjectKey,
 		}
 		meta.Identity.applyTo(&identityInput)
 		return builder.BuildLogCompatHookDecision(identityInput)

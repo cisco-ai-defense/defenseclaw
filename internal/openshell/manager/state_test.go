@@ -350,7 +350,7 @@ func TestSandboxesOfAnEarlierOwnerStayManaged(t *testing.T) {
 	m := e.newManager()
 	m.mu.Lock()
 	b := m.boxes["earlier"]
-	if len(m.boxes) != 1 || b == nil || m.ownerOf(b.rec) != "ffffffffffffffff" {
+	if len(m.boxes) != 1 || b == nil || b.rec.Owner != "ffffffffffffffff" {
 		t.Errorf("boxes = %v", m.boxes)
 	}
 	m.mu.Unlock()
@@ -433,6 +433,24 @@ func switchGateway(t *testing.T, e *harnessEnv, gw *Gateway) {
 	must(t, err)
 	e.gw = gw
 	e.m.dropGateway(cur, &types.StatusError{Code: types.ErrorUnavailable, Message: "reconnecting"})
+}
+
+// GAP-0202: with the OpenShell gateway gone (stopped for a hand-over, or
+// another account's on its port) a sandbox last seen ready or provisioning
+// read so in list and status for minutes; its phase is not known then.
+func TestPhaseIsUnknownWhileTheGatewayIsDown(t *testing.T) {
+	e := liveEnv(t, "gonebox", nil)
+	cur, err := e.m.gateway(t.Context())
+	must(t, err)
+	e.connErr = errors.New("connection refused")
+	e.m.dropGateway(cur, &types.StatusError{Code: types.ErrorUnavailable, Message: "the gateway stopped"})
+	if got := e.get("gonebox"); got.Phase != "unknown" {
+		t.Fatalf("get = %q, want unknown", got.Phase)
+	}
+	list, err := e.m.List(t.Context())
+	if err != nil || len(list) != 1 || list[0].Phase != "unknown" {
+		t.Fatalf("list = %+v, %v", list, err)
+	}
 }
 
 // On another gateway or workspace the daemon keeps the sandboxes it created
@@ -781,6 +799,24 @@ func TestApprovalBatchesWatchProxyTunnels(t *testing.T) {
 // A subscriber gets its backlog and its sandbox's new events; a slow one gets
 // a marker counting what it dropped; subscribers are capped, and a cancel
 // releases the slot.
+// TestFeedEndsItsStreamsWhenTheManagerStops (GAP-0092): a follower of a
+// manager that stopped (its daemon let go of it, another took over) waited
+// on a feed that published nothing more. The streams end, so clients
+// reconnect to the feed that replaces it.
+func TestFeedEndsItsStreamsWhenTheManagerStops(t *testing.T) {
+	f := NewFeed(4, nil)
+	_, ch, cancel, ok := f.Subscribe(0, "")
+	if !ok {
+		t.Fatal("no subscription")
+	}
+	f.closeSubscribers()
+	if _, open := <-ch; open {
+		t.Fatal("the stream is still open")
+	}
+	cancel()
+	f.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle})
+}
+
 func TestFeed(t *testing.T) {
 	f := NewFeed(4, nil)
 	for i := 1; i <= 6; i++ {
@@ -794,6 +830,11 @@ func TestFeed(t *testing.T) {
 	}
 	if got := f.Since(0, "s1"); len(got) != 2 || got[0].Seq != 3 || got[1].Seq != 5 {
 		t.Fatalf("filtered = %+v", got)
+	}
+	// Every event carries the feed's epoch, and a new feed (a restarted
+	// daemon's) has another one.
+	if all := f.Since(0, ""); len(f.Epoch()) != 16 || all[0].Epoch != f.Epoch() || all[3].Epoch != f.Epoch() || NewFeed(4, nil).Epoch() == f.Epoch() {
+		t.Fatalf("epochs = %q, %+v", f.Epoch(), all)
 	}
 
 	f = NewFeed(16, nil)
@@ -828,7 +869,7 @@ func TestFeed(t *testing.T) {
 		<-ch
 	}
 	f.Publish(sandboxapi.ActivityEvent{Kind: "after"})
-	if marker, ev := <-ch, <-ch; marker.Kind != sandboxapi.ActivityDropped || marker.BytesUp != 10 || ev.Kind != "after" {
+	if marker, ev := <-ch, <-ch; marker.Kind != sandboxapi.ActivityDropped || marker.BytesUp != 10 || ev.Kind != "after" || marker.Epoch != f.Epoch() {
 		t.Fatalf("marker = %+v, then %+v", marker, ev)
 	}
 
@@ -847,5 +888,52 @@ func TestFeed(t *testing.T) {
 	cancels[0]()
 	if _, _, _, ok := f.Subscribe(0, ""); !ok {
 		t.Fatal("slot not released")
+	}
+}
+
+// GAP-0189: after `sandbox delete NAME` and a new sandbox of that name, the
+// new one's activity starts at its creation; the old one's events stay in
+// the unfiltered feed, and an explicit since still reaches them.
+func TestFeedOfANameStartsAtItsLatestCreation(t *testing.T) {
+	f := NewFeed(16, nil)
+	creating := sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: "myapp", Phase: string(audit.SandboxPhaseCreating)}
+	f.Publish(creating)
+	f.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: "myapp", Phase: string(audit.SandboxPhaseDeleted)})
+	f.Publish(sandboxapi.ActivityEvent{Kind: "other", Sandbox: "elsewhere"})
+	again := f.Publish(creating)
+	f.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressBlocked, Sandbox: "myapp"})
+	if got := f.Since(0, "myapp"); len(got) != 2 || got[0].Seq != again.Seq {
+		t.Fatalf("myapp backlog = %+v; want its latest creation and after", got)
+	}
+	if backlog, _, cancel, _ := f.Subscribe(0, "myapp"); len(backlog) != 2 || backlog[0].Seq != again.Seq {
+		cancel()
+		t.Fatalf("myapp stream backlog = %+v", backlog)
+	} else {
+		cancel()
+	}
+	if got := f.Since(0, ""); len(got) != 5 {
+		t.Fatalf("whole feed = %+v", got)
+	}
+	if got := f.Since(1, "myapp"); len(got) != 3 {
+		t.Fatalf("myapp since 1 = %+v", got)
+	}
+}
+
+// A restarted daemon republishes every sandbox's phase to telemetry, but the
+// feed says what happened: a sandbox stopped before the restart gets no new
+// "stopped" line (GAP-0167).
+func TestRestartFeedsNoUnchangedPhase(t *testing.T) {
+	e := liveEnv(t, "stillstopped", nil)
+	e.stopBox("stillstopped")
+	e.restartDaemon()
+	for _, ev := range e.events("stillstopped", sandboxapi.ActivityLifecycle, "") {
+		if ev.Phase != "" {
+			t.Fatalf("feed after a restart: %+v", ev)
+		}
+	}
+	if len(where(&e.tel.mu, &e.tel.lifecycle, func(ev audit.SandboxLifecycleEvent) bool {
+		return ev.Sandbox.Name == "stillstopped" && ev.Trigger == audit.SandboxTriggerReconcile && ev.Sandbox.Phase == audit.SandboxPhaseStopped
+	})) == 0 {
+		t.Fatalf("lifecycle not republished: %+v", e.tel.lifecycle)
 	}
 }

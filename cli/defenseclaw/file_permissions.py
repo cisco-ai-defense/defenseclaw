@@ -1650,7 +1650,9 @@ def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | Non
     return None
 
 
-def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> str | None:
+def windows_acl_custody_confidentiality_error(
+    path: str | os.PathLike[str], *, allow_inheritable: bool = False
+) -> str | None:
     """Validate a current-user secret managed by Windows system controllers.
 
     The gateway's connector-token trust model admits the current user,
@@ -1659,7 +1661,8 @@ def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> s
     Generic user-secret validation remains stricter; this predicate is for
     that managed-token boundary only. Every other effective read or write ACE,
     a foreign owner, an inheritable or null DACL, or missing owner/SYSTEM access
-    still fails.
+    still fails. ``allow_inheritable`` skips only the inheritance check, to
+    tell a file that just needs its DACL sealed from one that is exposed.
     """
 
     if os.name != "nt":
@@ -1680,7 +1683,7 @@ def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> s
     if owner_sid != current_sid:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
     try:
-        dacl_protected = _windows_dacl_is_protected(path)
+        dacl_protected = allow_inheritable or _windows_dacl_is_protected(path)
     except OSError as exc:
         return f"cannot inspect Windows DACL protection ({exc})"
     if not dacl_protected:

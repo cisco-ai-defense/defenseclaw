@@ -19,8 +19,11 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -40,6 +43,64 @@ type EnterpriseConfig struct {
 	Trust         EnterpriseTrustConfig         `mapstructure:"trust"          yaml:"trust,omitempty"`
 	Coexistence   EnterpriseCoexistenceConfig   `mapstructure:"coexistence"    yaml:"coexistence,omitempty"`
 	Network       EnterpriseNetworkConfig       `mapstructure:"network"        yaml:"network,omitempty"`
+	Tetragon      EnterpriseTetragonConfig      `mapstructure:"tetragon"       yaml:"tetragon,omitempty"`
+	// OpenShell is how the lifecycle provides and pins OpenShell for
+	// managed sandboxes. Every key is lifecycle (restart-required).
+	OpenShell EnterpriseOpenShellConfig `mapstructure:"openshell" yaml:"openshell,omitempty"`
+}
+
+// enterprise.openshell values.
+const (
+	// EnterpriseOpenShellInstallPrerequisite: the administrator installs
+	// OpenShell; DefenseClaw verifies it (the default).
+	EnterpriseOpenShellInstallPrerequisite = "prerequisite"
+	// EnterpriseOpenShellInstallSetup: the user's sandbox daemon installs
+	// the pinned NVIDIA release into the user's home at first use.
+	EnterpriseOpenShellInstallSetup = "setup"
+
+	EnterpriseOpenShellDriverDocker = "docker"
+	EnterpriseOpenShellDriverVM     = "vm"
+	// EnterpriseOpenShellDriverAuto: the MicroVM driver where the per-user
+	// KVM probe passes at sandbox start, else docker (Linux; vm on macOS).
+	EnterpriseOpenShellDriverAuto = "auto"
+
+	// enterprise.openshell.driver_fallback (and the tighten-only
+	// openshell.admin / profile sandbox key of the same name): what a Linux
+	// sandbox gets when the MicroVM driver is wanted and KVM is not
+	// available for the user. docker (the default) falls back to the docker
+	// driver with every profile floor unchanged; none refuses the sandbox.
+	EnterpriseOpenShellFallbackDocker = "docker"
+	EnterpriseOpenShellFallbackNone   = "none"
+
+	// DefaultEnterpriseOpenShellGatewayPort is the OpenShell gateway's
+	// default bind port.
+	DefaultEnterpriseOpenShellGatewayPort = 17670
+)
+
+// EnterpriseOpenShellConfig is enterprise.openshell. DefenseClaw never
+// ships OpenShell: Install chooses who installs it.
+type EnterpriseOpenShellConfig struct {
+	// Install is prerequisite or setup ("" = prerequisite).
+	Install string `mapstructure:"install" yaml:"install,omitempty"`
+	// Driver is docker, vm or auto ("" = vm on macOS, docker on Linux). auto
+	// is vm where the user's KVM probe passes at sandbox start, else docker;
+	// on macOS every value but docker is the MicroVM driver.
+	Driver string `mapstructure:"driver" yaml:"driver,omitempty"`
+	// DriverFallback is docker or none ("" = docker): what a Linux sandbox
+	// gets when driver is vm or auto and KVM is not available for the user.
+	// none refuses the sandbox with the reason and the request-access
+	// contact. A profile's sandbox.driver_fallback: none tightens it per
+	// user; nothing loosens none.
+	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
+	// Version is an exact version ("0.1.3") or a range inside
+	// ">=0.1.1 <0.2.0"; setup needs an exact pin.
+	Version string `mapstructure:"version" yaml:"version,omitempty"`
+	// GatewayPort is the OpenShell gateway's bind port (0 =
+	// DefaultEnterpriseOpenShellGatewayPort).
+	GatewayPort int `mapstructure:"gateway_port" yaml:"gateway_port,omitempty"`
+	// E2fsprogsDir is the administrator's e2fsprogs directory (macOS only;
+	// absolute, with a root-owned chain).
+	E2fsprogsDir string `mapstructure:"e2fsprogs_dir" yaml:"e2fsprogs_dir,omitempty"`
 }
 
 // EnterpriseInspectionConfig chooses the optional remote inspection of a
@@ -329,6 +390,307 @@ type EnterpriseNetworkConfig struct {
 	NoProxy    string `mapstructure:"no_proxy"    yaml:"no_proxy,omitempty"`
 }
 
+// Tetragon modes (enterprise.tetragon.mode).
+const (
+	// TetragonModeOff: the sensor helper never connects to Tetragon (after
+	// retiring the policies its own state recorded) and uses cn_proc.
+	TetragonModeOff = "off"
+	// TetragonModeConsume (default): the helper reads Tetragon's process
+	// events and loads no policy.
+	TetragonModeConsume = "consume"
+	// TetragonModeObserve: the helper also loads DefenseClaw's built-in
+	// kernel controls in monitor mode.
+	TetragonModeObserve = "observe"
+	// TetragonModeEnforce: the controls deny for burned-in users once
+	// enforce_ack equals the helper's kernel_policy digest.
+	TetragonModeEnforce = "enforce"
+)
+
+// enterprise.tetragon.burn_in: 0 (skip the burn-in, with a status warning for
+// as long as enforcement runs) or whole hours from MinTetragonBurnIn to
+// MaxTetragonBurnIn.
+const (
+	DefaultTetragonBurnIn = 168 * time.Hour
+	MinTetragonBurnIn     = 24 * time.Hour
+	MaxTetragonBurnIn     = 2160 * time.Hour
+)
+
+// Status reasons of the Tetragon caps TetragonMode applies. The helper adds
+// the caps that need its own state (a missing or stale enforce_ack, the
+// Tetragon version, keep-sensors-on-exit).
+const (
+	TetragonReasonPlaneCOff     = "tetragon_plane_c_off"
+	TetragonReasonNotApplicable = "tetragon_not_applicable"
+)
+
+// enterprise.tetragon.customer_events: what the sensor helper does with the
+// kprobe and LSM events of the customer's own Tetragon policies. It never
+// manages, changes or deletes those policies in either case.
+const (
+	// TetragonCustomerEventsAgent (default) forwards the events that fall
+	// under an AI agent's process lineage, attributed to the agent, the user
+	// and the hook decision; every other event is only counted.
+	TetragonCustomerEventsAgent = "agent"
+	// TetragonCustomerEventsOff forwards none; the per-policy counts and the
+	// policy summary stay.
+	TetragonCustomerEventsOff = "off"
+)
+
+// MaxTetragonEnforceAcks bounds the list form of enterprise.tetragon.
+// enforce_ack: the old and the new build's digest during a ring upgrade, with
+// room for a skipped release.
+const MaxTetragonEnforceAcks = 4
+
+var (
+	tetragonBurnInPattern     = regexp.MustCompile(`^[0-9]{1,4}h$`)
+	tetragonEnforceAckPattern = regexp.MustCompile(`^sha256:[0-9a-f]{12}$`)
+)
+
+// TetragonEnforceAcks is enterprise.tetragon.enforce_ack: the kernel_policy
+// digests the administrator approved. YAML takes one digest as a string ("" for
+// none) or a list of at most MaxTetragonEnforceAcks, so a ring upgrade can
+// approve the old and the new build at once. A one-item list and the string
+// mean the same and marshal the same, as the string.
+type TetragonEnforceAcks []string
+
+// UnmarshalYAML accepts a string or a list of strings.
+func (a *TetragonEnforceAcks) UnmarshalYAML(node *yaml.Node) error {
+	switch {
+	case node.Kind == yaml.ScalarNode && node.ShortTag() == "!!null":
+		*a = nil
+	case node.Kind == yaml.ScalarNode:
+		*a = TetragonEnforceAcks{node.Value}
+	case node.Kind == yaml.SequenceNode:
+		items := make([]string, 0, len(node.Content))
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode {
+				return fmt.Errorf("config: enterprise.tetragon.enforce_ack must be a digest or a list of digests")
+			}
+			items = append(items, item.Value)
+		}
+		*a = items
+	default:
+		return fmt.Errorf("config: enterprise.tetragon.enforce_ack must be a digest or a list of digests")
+	}
+	return nil
+}
+
+// MarshalYAML writes one digest as a string and several as a list.
+func (a TetragonEnforceAcks) MarshalYAML() (any, error) {
+	if len(a) == 1 {
+		return a[0], nil
+	}
+	return []string(a), nil
+}
+
+// Canonical is the list trimmed, without empty items or repeats, in the order
+// written; nil when it approves nothing.
+func (a TetragonEnforceAcks) Canonical() TetragonEnforceAcks {
+	var out TetragonEnforceAcks
+	for _, item := range a {
+		item = strings.TrimSpace(item)
+		if item != "" && !slices.Contains(out, item) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// Approves reports whether the list approves digest.
+func (a TetragonEnforceAcks) Approves(digest string) bool {
+	return digest != "" && slices.Contains(a.Canonical(), digest)
+}
+
+// String is the canonical list joined by commas: the drop-in's value.
+func (a TetragonEnforceAcks) String() string { return strings.Join(a.Canonical(), ",") }
+
+// EnterpriseTetragonConfig is enterprise.tetragon: how the managed Linux
+// sensor helper uses the Tetragon the host already runs. It applies to the
+// Linux standalone profile only: macOS and Windows accept and ignore it, and
+// the enterprise-block rule refuses it in every unmanaged or Secure Client
+// config. The lifecycle renders the effective values into the helper's
+// systemd drop-in; the helper never reads config.yaml.
+//
+// Validation checks only the format. Every semantic condition (Plane C off,
+// a missing or stale enforce_ack, a connector whose guardrail is not in
+// action mode) caps the mode at run time with a status reason instead: a
+// rejected push reverts the whole config on a managed host and blocks
+// unrelated changes.
+type EnterpriseTetragonConfig struct {
+	// Mode is off, consume (the default), observe or enforce.
+	Mode string `mapstructure:"mode" yaml:"mode,omitempty"`
+	// BurnIn is the covered agent time each enrolled user needs before its
+	// uid is enforced: "0" or whole hours from 24h to 2160h (default 168h).
+	BurnIn string `mapstructure:"burn_in" yaml:"burn_in,omitempty"`
+	// EnforceAck are the kernel_policy digests the administrator approved,
+	// each "sha256:" and 12 lowercase hex digits as `enterprise linux
+	// tetragon verify --ready-for enforce` prints them: one, or at most
+	// MaxTetragonEnforceAcks during a ring upgrade. Only mode enforce reads
+	// it; with any other mode it is kept but inert.
+	EnforceAck TetragonEnforceAcks `mapstructure:"enforce_ack" yaml:"enforce_ack,omitempty"`
+	// CustomerEvents is agent (the default: forward the kprobe and LSM
+	// events of the customer's own Tetragon policies that fall under an AI
+	// agent) or off (count them only).
+	CustomerEvents string `mapstructure:"customer_events" yaml:"customer_events,omitempty"`
+}
+
+// Effective returns the block with the defaults filled in and every value in
+// canonical form: mode lowercased (consume when unset, or for a value that is
+// not a mode), burn_in as whole hours ("168h" when unset or malformed, "0"
+// for no burn-in), enforce_ack trimmed without empty items or repeats (nil
+// for none) and customer_events lowercased (agent when unset or malformed).
+// Two blocks with the same Effective value configure the helper identically,
+// so an absent block and one that spells out the defaults are the same intent.
+func (t EnterpriseTetragonConfig) Effective() EnterpriseTetragonConfig {
+	mode := strings.ToLower(strings.TrimSpace(t.Mode))
+	switch mode {
+	case TetragonModeOff, TetragonModeConsume, TetragonModeObserve, TetragonModeEnforce:
+	default:
+		mode = TetragonModeConsume
+	}
+	events := strings.ToLower(strings.TrimSpace(t.CustomerEvents))
+	if events != TetragonCustomerEventsOff {
+		events = TetragonCustomerEventsAgent
+	}
+	return EnterpriseTetragonConfig{
+		Mode:           mode,
+		BurnIn:         formatTetragonBurnIn(t.BurnInDuration()),
+		EnforceAck:     t.EnforceAck.Canonical(),
+		CustomerEvents: events,
+	}
+}
+
+// BurnInDuration is the effective burn_in: DefaultTetragonBurnIn when unset
+// or malformed, 0 when the burn-in is skipped.
+func (t EnterpriseTetragonConfig) BurnInDuration() time.Duration {
+	burnIn, err := parseTetragonBurnIn(t.BurnIn)
+	if err != nil {
+		return DefaultTetragonBurnIn
+	}
+	return burnIn
+}
+
+// IsDefault reports whether the block configures the helper exactly as an
+// absent block does.
+func (t EnterpriseTetragonConfig) IsDefault() bool {
+	effective, defaults := t.Effective(), EnterpriseTetragonConfig{}.Effective()
+	return effective.Mode == defaults.Mode && effective.BurnIn == defaults.BurnIn &&
+		len(effective.EnforceAck) == 0 && effective.CustomerEvents == defaults.CustomerEvents
+}
+
+func parseTetragonBurnIn(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	switch {
+	case value == "":
+		return DefaultTetragonBurnIn, nil
+	case value == "0":
+		return 0, nil
+	case !tetragonBurnInPattern.MatchString(value):
+		return 0, fmt.Errorf("not 0 or whole hours")
+	}
+	hours, err := strconv.Atoi(strings.TrimSuffix(value, "h"))
+	if err != nil {
+		return 0, err
+	}
+	burnIn := time.Duration(hours) * time.Hour
+	if burnIn != 0 && (burnIn < MinTetragonBurnIn || burnIn > MaxTetragonBurnIn) {
+		return 0, fmt.Errorf("outside %s to %s", formatTetragonBurnIn(MinTetragonBurnIn), formatTetragonBurnIn(MaxTetragonBurnIn))
+	}
+	return burnIn, nil
+}
+
+func formatTetragonBurnIn(burnIn time.Duration) string {
+	if burnIn <= 0 {
+		return "0"
+	}
+	return strconv.FormatInt(int64(burnIn/time.Hour), 10) + "h"
+}
+
+func tetragonEmpty(t EnterpriseTetragonConfig) bool {
+	return strings.TrimSpace(t.Mode) == "" && strings.TrimSpace(t.BurnIn) == "" &&
+		len(t.EnforceAck.Canonical()) == 0 && strings.TrimSpace(t.CustomerEvents) == ""
+}
+
+// TetragonMode is the Tetragon mode the managed sensor helper runs with on
+// goos: enterprise.tetragon.mode (consume by default), capped at off where the
+// helper does not use Tetragon. reason is the status code of a cap that
+// overrides what the administrator wrote, "" otherwise:
+//
+//   - not Linux: tetragon_not_applicable whenever the block is set (macOS and
+//     Windows accept and ignore it);
+//   - not a managed standalone deployment: off with no reason (no helper reads
+//     Tetragon there, and the enterprise-block rule refuses the block);
+//   - Plane C not selected (the runtime planes disabled, or EffectivePlanes
+//     without c): tetragon_plane_c_off for a written mode other than off,
+//     because kernel controls whose events nobody records are pointless.
+func (c *Config) TetragonMode(goos string) (mode, reason string) {
+	if c == nil {
+		return TetragonModeOff, ""
+	}
+	written := !tetragonEmpty(c.Enterprise.Tetragon)
+	configured := c.Enterprise.Tetragon.Effective().Mode
+	if goos != "linux" {
+		if written {
+			return TetragonModeOff, TetragonReasonNotApplicable
+		}
+		return TetragonModeOff, ""
+	}
+	if !c.StandaloneEnterprise() {
+		return TetragonModeOff, ""
+	}
+	if !c.PlaneCSelected() {
+		if written && configured != TetragonModeOff {
+			return TetragonModeOff, TetragonReasonPlaneCOff
+		}
+		return TetragonModeOff, ""
+	}
+	return configured, ""
+}
+
+// PlaneCSelected reports whether AI Discovery Plane C runs: the runtime
+// planes are enabled and EffectivePlanes contains c. Without it the managed
+// sensor helper runs with Tetragon off.
+func (c *Config) PlaneCSelected() bool {
+	return c != nil && c.AIDiscovery.Runtime.Enabled && planeCSelected(c.AIDiscovery.Runtime)
+}
+
+func planeCSelected(runtime AIRuntimeConfig) bool {
+	for _, plane := range runtime.EffectivePlanes() {
+		if plane == "c" {
+			return true
+		}
+	}
+	return false
+}
+
+// validateEnterpriseTetragon checks enterprise.tetragon's format on every OS
+// (one config may serve Linux, macOS and Windows hosts).
+func validateEnterpriseTetragon(t EnterpriseTetragonConfig) error {
+	if err := oneOf("enterprise.tetragon.mode", t.Mode,
+		TetragonModeOff, TetragonModeConsume, TetragonModeObserve, TetragonModeEnforce); err != nil {
+		return err
+	}
+	if strings.TrimSpace(t.BurnIn) != "" {
+		if _, err := parseTetragonBurnIn(t.BurnIn); err != nil {
+			return fmt.Errorf("config: enterprise.tetragon.burn_in %q must be 0 or whole hours from 24h to 2160h", t.BurnIn)
+		}
+	}
+	acks := t.EnforceAck.Canonical()
+	if len(acks) > MaxTetragonEnforceAcks {
+		return fmt.Errorf("config: enterprise.tetragon.enforce_ack lists %d digests; list at most %d (the builds a ring upgrade runs at once)", len(acks), MaxTetragonEnforceAcks)
+	}
+	for _, ack := range acks {
+		if !tetragonEnforceAckPattern.MatchString(ack) {
+			return fmt.Errorf("config: enterprise.tetragon.enforce_ack %q must be sha256: and 12 lowercase hex digits, the kernel_policy digest that `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify --ready-for enforce` prints", ack)
+		}
+	}
+	if err := oneOf("enterprise.tetragon.customer_events", t.CustomerEvents,
+		TetragonCustomerEventsAgent, TetragonCustomerEventsOff); err != nil {
+		return err
+	}
+	return nil
+}
+
 // ResolvedConnectorPolicy is a connector's effective machine policy.
 type ResolvedConnectorPolicy struct {
 	Connector               string
@@ -465,7 +827,15 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 	}
 	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if !enterpriseBlockEmpty(cfg.Enterprise) {
-			return fmt.Errorf("config: the enterprise block requires deployment_mode %s", managed.DeploymentModeManagedEnterprise)
+			// Typed, so validation names the block and the way out instead of
+			// "could not be compiled safely" at $ (GAP-0044): an administrator
+			// may paste a managed snippet into a per-user config.
+			return &V8SemanticError{
+				Path:     "$.enterprise",
+				Summary:  "the enterprise block requires deployment_mode " + managed.DeploymentModeManagedEnterprise,
+				Expected: "no enterprise block in a per-user configuration",
+				Action:   "remove the enterprise block (enterprise settings apply to a managed enterprise deployment only)",
+			}
 		}
 		return nil
 	}
@@ -483,7 +853,129 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		standalonePolicyDirDefault(cfg, cfg.DataDir, goos)
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 	}
-	return validateEnterpriseConfig(cfg)
+	if err := validateEnterpriseConfig(cfg); err != nil {
+		return enterpriseSettingError(err)
+	}
+	// The schema takes only the lowercase values; every reader compares them
+	// exactly, so a loader without the schema keeps them lowercase too.
+	o := &cfg.Enterprise.OpenShell
+	o.Install, o.Driver = strings.ToLower(strings.TrimSpace(o.Install)), strings.ToLower(strings.TrimSpace(o.Driver))
+	o.DriverFallback = strings.ToLower(strings.TrimSpace(o.DriverFallback))
+	return enterpriseSettingError(validateEnterpriseOpenShell(cfg, goos))
+}
+
+var (
+	enterpriseOpenShellExactVersion = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+	enterpriseOpenShellVersionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
+)
+
+// validateEnterpriseOpenShell checks enterprise.openshell (standalone only;
+// Secure Client refuses the key with the rest of the block). Whether the
+// host meets the mode, driver and version is judged by ensure and the
+// sandbox daemon, not here: driver vm with install prerequisite on Linux is
+// accepted.
+func validateEnterpriseOpenShell(cfg *Config, goos string) error {
+	o := cfg.Enterprise.OpenShell
+	if err := oneOf("enterprise.openshell.install", o.Install, EnterpriseOpenShellInstallPrerequisite, EnterpriseOpenShellInstallSetup); err != nil {
+		return err
+	}
+	if err := oneOf("enterprise.openshell.driver", o.Driver, EnterpriseOpenShellDriverDocker, EnterpriseOpenShellDriverVM, EnterpriseOpenShellDriverAuto); err != nil {
+		return err
+	}
+	if err := oneOf("enterprise.openshell.driver_fallback", o.DriverFallback, EnterpriseOpenShellFallbackDocker, EnterpriseOpenShellFallbackNone); err != nil {
+		return err
+	}
+	if v := strings.TrimSpace(o.Version); v != "" {
+		exact := enterpriseOpenShellExactVersion.MatchString(v)
+		bounds := enterpriseOpenShellVersionRange.FindStringSubmatch(v)
+		switch {
+		case !exact && bounds == nil:
+			return fmt.Errorf("config: enterprise.openshell.version %q must be an exact version such as 0.1.3 or a range such as \">=0.1.1 <0.2.0\"", o.Version)
+		case bounds != nil && bounds[2] != "" && compareDottedVersions(bounds[1], bounds[2]) >= 0:
+			return fmt.Errorf("config: enterprise.openshell.version %q is an empty range", o.Version)
+		case bounds != nil && o.Install == EnterpriseOpenShellInstallSetup:
+			return fmt.Errorf("config: enterprise.openshell.version %q is a range; install: setup needs an exact version such as 0.1.3", o.Version)
+		}
+	}
+	if dir := o.E2fsprogsDir; dir != "" {
+		if goos != "darwin" {
+			return fmt.Errorf("config: enterprise.openshell.e2fsprogs_dir applies to macOS only")
+		}
+		// A macOS path, judged as one on whatever host validates the config.
+		if !path.IsAbs(dir) || path.Clean(dir) != dir {
+			return fmt.Errorf("config: enterprise.openshell.e2fsprogs_dir %q must be a clean absolute path", dir)
+		}
+	}
+	port, note := o.GatewayPort, ""
+	if port == 0 && cfg.StandaloneEnterprise() {
+		// The gateway binds the default port on every standalone host.
+		port, note = DefaultEnterpriseOpenShellGatewayPort, " (the default; set enterprise.openshell.gateway_port)"
+	}
+	if port != 0 {
+		if port < 1024 || port > 65535 {
+			return fmt.Errorf("config: enterprise.openshell.gateway_port %d must be between 1024 and 65535", port)
+		}
+		for _, other := range []struct {
+			name string
+			port int
+		}{
+			{"gateway.api_port", effectiveAPIPort(cfg.Gateway.APIPort)}, {"guardrail.port", cfg.Guardrail.Port},
+			{"openshell.ingress_port", cfg.OpenShellIngressPort()}, {"openshell.egress_port", cfg.OpenShellEgressPort()},
+		} {
+			if other.port == port {
+				return fmt.Errorf("config: enterprise.openshell.gateway_port %d collides with %s%s", port, other.name, note)
+			}
+		}
+	}
+	return nil
+}
+
+// SandboxDriver is the compute driver managed sandboxes want on goos:
+// enterprise.openshell.driver, else vm on macOS and docker on Linux. macOS
+// runs the MicroVM driver only, so auto is vm there; on Linux auto stays
+// auto (the per-user KVM probe at sandbox start decides).
+func (o EnterpriseOpenShellConfig) SandboxDriver(goos string) string {
+	driver := strings.ToLower(strings.TrimSpace(o.Driver))
+	switch {
+	case driver == "" && goos == "darwin", driver == EnterpriseOpenShellDriverAuto && goos == "darwin":
+		return EnterpriseOpenShellDriverVM
+	case driver == "":
+		return EnterpriseOpenShellDriverDocker
+	}
+	return driver
+}
+
+// SandboxDriverFallback is the fallback a user with floor F gets on goos
+// when the MicroVM driver is wanted and KVM is not available for them:
+// docker or none, the stricter of enterprise.openshell.driver_fallback
+// (default docker) and F's driver_fallback (a profile may only tighten it to
+// none). It is "" where no fallback applies: macOS (MicroVM only) and the
+// docker driver.
+func (o EnterpriseOpenShellConfig) SandboxDriverFallback(goos string, floor OpenShellAdminConfig) string {
+	if goos == "darwin" || o.SandboxDriver(goos) == EnterpriseOpenShellDriverDocker {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(o.DriverFallback), EnterpriseOpenShellFallbackNone) ||
+		strings.EqualFold(strings.TrimSpace(floor.DriverFallback), EnterpriseOpenShellFallbackNone) {
+		return EnterpriseOpenShellFallbackNone
+	}
+	return EnterpriseOpenShellFallbackDocker
+}
+
+// compareDottedVersions compares two "x.y.z" versions numerically.
+func compareDottedVersions(a, b string) int {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := range pa {
+		x, _ := strconv.Atoi(pa[i])
+		y, _ := strconv.Atoi(pb[i])
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // requireDeclaredStandaloneProfile refuses a standalone-pinned load of a
@@ -735,7 +1227,9 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		machinePolicyEmpty(e.MachinePolicy) &&
 		strings.TrimSpace(e.Trust.Mode) == "" && len(e.Trust.AllowedSigners) == 0 &&
 		strings.TrimSpace(e.Coexistence.PerUserInstall) == "" && e.Coexistence.DisableSelfUpdate == nil &&
-		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == ""
+		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == "" &&
+		tetragonEmpty(e.Tetragon) &&
+		e.OpenShell == (EnterpriseOpenShellConfig{})
 }
 
 // standaloneInlineSecrets lists the inline secret keys cfg sets.
@@ -926,7 +1420,7 @@ func validateEnterpriseConfig(cfg *Config) error {
 			return fmt.Errorf("config: enterprise.network.https_proxy: %w", err)
 		}
 	}
-	return nil
+	return validateEnterpriseTetragon(e.Tetragon)
 }
 
 // EgressProxy returns the administrator's outbound proxy for this managed

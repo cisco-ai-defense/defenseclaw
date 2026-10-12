@@ -61,6 +61,15 @@ The actions that set up and maintain a deployment: `install`, `upgrade`,
 | Linux, macOS | `defenseclaw-gateway enterprise linux <action>` or `defenseclaw-gateway enterprise macos <action>`, as root |
 | Windows | `defenseclaw.exe enterprise windows <action> --profile standalone` from an elevated prompt, or the Setup program (`/install`, `/ensure`, and so on). The standalone lifecycle runs in PowerShell 7 |
 
+The packages do not put `defenseclaw-gateway` on the `PATH`, so a fresh root
+login shell answers a bare `defenseclaw-gateway` with `command not found`. Use
+the packaged path, `/opt/defenseclaw/bin/defenseclaw-gateway` on Linux and
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS, or add that folder
+to the `PATH` of the root shell first (`export PATH="$PATH:/opt/defenseclaw/bin"`).
+The pages in this section show the full path where a command is meant to be
+copied. The `defenseclaw` launcher for users (`/usr/bin/defenseclaw` on Linux,
+`/usr/local/bin/defenseclaw` on macOS) is on every `PATH`.
+
 ### Ensure
 
 The one action an MDM needs to run. It installs when nothing is installed. When

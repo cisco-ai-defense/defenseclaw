@@ -164,7 +164,7 @@ func TestProfileIDHelpers(t *testing.T) {
 		}
 	}
 	for _, id := range []string{
-		LegacyIngressID, "defenseclaw-ingress-", "defenseclaw-ingress-0", "defenseclaw-ingress-029001",
+		IngressID, "defenseclaw-ingress-", "defenseclaw-ingress-0", "defenseclaw-ingress-029001",
 		"defenseclaw-ingress-65536", "defenseclaw-ingress-123456", "defenseclaw-ingress-x", "dc-ingress-29001",
 	} {
 		if _, ok := IngressPort(id); ok {
@@ -172,7 +172,7 @@ func TestProfileIDHelpers(t *testing.T) {
 		}
 	}
 	for id, want := range map[string]bool{
-		LegacyIngressID: true, "defenseclaw-ingress-29001": true, AnthropicID: true, ClaudeBedrockMantleID: true,
+		IngressID: false, "defenseclaw-ingress-29001": true, AnthropicID: true, ClaudeBedrockMantleID: false,
 		"defenseclaw-claude-bedrock-mantle-eu-west-1": true, "defenseclaw-codex-bedrock-mantle-us-gov-west-1": true,
 		"defenseclaw-openai-us-east-1": false, "defenseclaw-claude-bedrock-mantle-evil": false, "defenseclaw-egress": false,
 		"defenseclaw-ingress-0": false, "dc-cred-0123456789ab": false, "user-profile": false,

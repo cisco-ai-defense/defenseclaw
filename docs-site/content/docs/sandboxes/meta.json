@@ -7,7 +7,6 @@
     "guide",
     "network",
     "policy-packs",
-    "apps",
-    "legacy-cleanup"
+    "apps"
   ]
 }

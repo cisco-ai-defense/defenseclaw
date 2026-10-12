@@ -86,6 +86,15 @@ is given in the second column so reviewers can compare the two platforms.
    OmniGent have neither, and the guard covers Hermes shell hooks with the
    gaps listed in R24.
 9. Every lifecycle action is a transaction that commits fully or rolls back.
+10. Only the root sensor helper talks to a Tetragon API, only over a Unix
+    socket that root owns and root serves, and only the `defenseclaw-*`
+    policies it recorded itself are ever changed or deleted. Kernel
+    enforcement starts only when the administrator approves the exact control
+    set, is limited to enrolled command-line agents' own process trees, and
+    is removed by every uninstall, rollback and downgrade path. The events of
+    the customer's own Tetragon policies are read, never managed: no call names
+    a policy the helper did not record loading, and only typed, bounded fields
+    of events below an AI agent cross the broker.
 
 ## Zones on Linux
 
@@ -95,7 +104,7 @@ is given in the second column so reviewers can compare the two platforms.
 | Z1 | `defenseclaw-hook-guardian.service` | root; `CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`; `AmbientCapabilities=CAP_SETGID CAP_SETUID` (systemd 255 otherwise drops `CAP_SETUID`); `NoNewPrivileges=true` | Root-owned unit; `ProtectSystem=strict`; writes only homes (through the worker), `/var/lib/defenseclaw` (hook tokens and the per-user credential key) and the guardian state |
 | Z1 | `defenseclaw-hook-enumerator.service` | root; `CAP_CHOWN CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, the last two also ambient; `ProtectHome=read-only` | Writes only `/etc/defenseclaw/hook-guardian` and `refused-surfaces.json` (root:defenseclaw 0640) in `/var/lib/defenseclaw-hook-guardian` |
 | Z1 | Per-user `enterprise hooks apply-target` worker | the target user's uid and primary gid | New session, parent-death signal, non-dumpable, rlimits, timeout, minimal environment |
-| Z1 | `defenseclaw-sensor-helper.service` | root with acquisition capabilities (`CAP_SYS_ADMIN`, `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_DAC_READ_SEARCH`, `CAP_SYS_PTRACE`, `CAP_CHOWN`, `CAP_FOWNER`) | Own `RuntimeDirectory=defenseclaw-sensor`; fixed fieldless request protocol; homes from the manifest |
+| Z1 | `defenseclaw-sensor-helper.service` | root with acquisition capabilities (`CAP_SYS_ADMIN`, `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_DAC_READ_SEARCH`, `CAP_SYS_PTRACE`, `CAP_CHOWN`, `CAP_FOWNER`) | Own `RuntimeDirectory=defenseclaw-sensor` and `StateDirectory=defenseclaw-sensor` (`0700`); fixed fieldless request protocol; homes from the manifest. Ordered after `tetragon.service`. When the computer runs Tetragon it is the only client of that root-equivalent API (L-42), limited to the calls each `enterprise.tetragon.mode` allows |
 | Z2 | `defenseclaw-gateway.service` (`Type=notify`, watchdog) | `defenseclaw:defenseclaw`, `CapabilityBoundingSet=` (empty) | `ProtectSystem=strict`, `ProtectHome=true`, `PrivateDevices`, `PrivateTmp`, `ProtectProc=invisible` (systemd 247 or later; see [Review scope](#review-scope)), `@system-service` syscall filter, `RestrictNamespaces` (no `MemoryDenyWriteExecute`: the sonic JSON library maps executable memory on x86_64); read-only `/etc/defenseclaw`, `/opt/defenseclaw` and the ledger |
 | Z2 endpoints | `defenseclaw-gateway-api.socket` (`127.0.0.1:18970`) and `defenseclaw-gateway-hook.socket` (`/run/defenseclaw-hook/hook.sock`) | bound by PID 1 | Held across gateway restarts. `/run/defenseclaw-hook` is created `0755 defenseclaw:defenseclaw` by systemd-tmpfiles at boot (`packaging/systemd/defenseclaw.conf`) and by the lifecycle; only root and the service account can create entries in it. The socket is `0666 defenseclaw:defenseclaw` (`SocketUser`, `SocketGroup`, `SocketMode`) so every local user can connect; the gateway authorizes each caller by kernel uid (L-08) |
 | Z3 | `/opt/defenseclaw` (binaries), `/etc/defenseclaw` (config, `policies/`, `secrets/`, `hook-guardian/targets.yaml`, `managed-runtime.json`, `machine-policy.json`), `/var/lib/defenseclaw-hook-guardian` (ledger), `/var/lib/defenseclaw-enterprise` (lifecycle), `/etc/{codex,claude-code,cursor,github-copilot,opencode}` | root | Administrator-only write; secrets root-only with systemd 247 or later, otherwise `root:defenseclaw 0640` |
@@ -234,6 +243,13 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-39 | — | Operator block or allow entries are placed in the `actions` table of `audit.db` | Ignored: the gateway decides from `asset_policy` in the config. A managed `ensure` that migrates a version 8 config counts them and warns `local_enforcement_entries_ignored`; it neither imports nor deletes them | `internal/enforce/policy.go`, `internal/config/migrate_v9.go`; enterprise B19 |
 | L-40 | — | A release is fetched from a redirected source (`update.source`, `DEFENSECLAW_REPO`) and installed | The release identity is compiled into `install.sh` and `defenseclaw upgrade`; the source only changes where bytes come from. A mirror needs cosign 2.0 or later and the unchanged signed `checksums.txt`; only the official source falls back to `checksums.txt` alone. On a managed host `defenseclaw upgrade` and `rollback` refuse and `DEFENSECLAW_REPO` is ignored | `cli/tests/test_upgrade_shim.py`; enterprise B20 |
 | L-41 | — | The gateway enforces an older policy than the config on disk | A change that does not build keeps the previous policy generation and shows as `policy.last_reload_error` on `/health`; `status --json` and `verify --json` report `policy.applied` (the digest the config computes to against the one the gateway reports), and `ensure` warns `policy_not_applied`. The last applied digest is in `policy-state.json` | `internal/enterpriseunix/policystate_test.go`; enterprise B21 |
+| L-42 | — | A local account, or an endpoint it controls, uses Tetragon's API: a TCP listener lets any account load or remove kernel policies, and a forged socket or info file could point the helper at an attacker | The helper reads `/var/run/tetragon/tetragon-info.json` only when root owns it and nobody else can write it, dials only `unix://` addresses, and connects only when the socket file and its directory belong to root, are not world-writable, and `SO_PEERCRED` of the connection is uid 0 and the pid the info file names. A TCP `server_address` is never dialed: the helper stays on `cn_proc` and `fanotify`, `observe` and `enforce` are refused, and status and `doctor` warn `tetragon_tcp_api`. The helper's calls are limited per mode: `off` and `consume` read only (and delete names it recorded itself), `observe` and `enforce` may also add, configure and delete `defenseclaw-*` policies | `internal/sensor/tetragon` and `internal/sensor/kernelpolicy` tests with a fake Tetragon server (missing socket, TCP address, wrong owner, wrong peer, call allow-list per mode); live rows TG-04 and TG-14 |
+| L-43 | — | A compromised gateway or user asks the helper to load, widen or remove kernel policy | The request protocol stays fieldless and gains one read-only operation, `kernel_status`. Desired state comes only from root-owned inputs: the helper's drop-in (rendered by the lifecycle from the config `ensure` accepted), the control set compiled into the binary, `targets.yaml` and the process table. The helper never reads `config.yaml`, and the gateway sends no policy | `internal/sensor/acquire` request field-count test; `internal/enterpriseunix` render tests |
+| L-44 | — | A kernel control denies the wrong process or user: an empty filter list widens a rule, a look-alike process is treated as an agent, or an IDE terminal is locked out | A policy linter refuses any deny selector whose binary, pid, user or namespace list is empty (upstream ignores an empty binary list, which would leave a path-only rule). Controls apply only below an enrolled command-line agent, resolved to its real install file or live pid, as that uid, in the host process namespace. Processes recognized only by name or arguments, IDE-hosted agents and other users are observe-only. Only `Post`, `NoPost` and `Override -EPERM` are allowed; there are no program denies, no `Sigkill`, no socket or address rules, and no hook-runtime, provider-credential or repository paths. A control is enforced only with a matching `enforce_ack`, for a connector in `action` mode, and for a user who finished a measured burn-in | `internal/sensor/kernelpolicy` lint tests and golden renders; live rows TG-15 to TG-26 |
+| L-45 | — | An administrator's stop is undone by a helper or Tetragon restart, or a human's change is overwritten | `enterprise linux tetragon pause` writes a root-owned record that survives restarts of the helper and of Tetragon (`--until-reboot` is kept in `/run`), is checked before every policy change, and moves the controls to monitor within seconds. A policy moved to monitor or deleted with `tetra` is recorded as an operator override and never re-promoted until the intent (`enforce_ack` or the mode) changes. A control set that changes with a release makes the old ack stale | `internal/sensor/kernelpolicy` reconciler tests; live rows TG-29 to TG-31 |
+| L-46 | — | DefenseClaw's policies stay loaded in Tetragon after uninstall, purge, rollback, downgrade or a stopped helper, enforcing with nobody reconciling | Every exit path deletes the names the helper recorded, using the helper that loaded them, before binaries or state are removed: `uninstall`, `purge`, a transaction rollback, and the package's pre-removal script. `verify` fails with `kernel_policy_orphaned` for a recorded name that is still loaded while the mode is `off` or `consume` or the helper is not running. Enforcement is refused when Tetragon runs with `keep-sensors-on-exit`, because its programs would outlive it | `internal/enterpriseunix` lifecycle and `packaging/linux` tests; live rows TG-33 to TG-37 |
+| L-47 | — | Command lines read from Tetragon carry secrets or a turn's content to the gateway or an exporter | The helper applies the shared command-line redaction before a line leaves it, withholds the arguments of Codex's notify program, asks Tetragon for no environment variables, capabilities, namespaces or pod data, and never forwards raw Tetragon events. The hook's own short-lived helper processes are summarized; any other child, and any process that does not match the exact rendered hook command, is forwarded in full | `internal/redaction` tests; `internal/sensor` self-filter tests; live row TG-08 |
+| L-48 | — | The helper changes or deletes a policy of the customer's while it reads that policy's events, or those events carry content to the gateway or an exporter that the customer did not expect | Ownership is by record: a policy is DefenseClaw's only if this helper recorded loading it, whatever its name, and a customer policy named like a DefenseClaw one is treated as the customer's and warned about (`tetragon_foreign_defenseclaw_name`). The reading adds no request and no RPC: the per-mode call allowlist of L-42 is unchanged, and a fake Tetragon serving customer policies (one named `defenseclaw-controls-deadbeef`, one from `tetragon.tp.d`) sees no add, delete or configure call naming them through every mode, a mode change, the cleanup, uninstall and rollback. Only typed fields of kprobe and LSM events cross the broker (policy name, hook type, function, action, policy mode, outcome, one file or binary path or socket peer, tags, message and the process facts every event carries, with the command line redacted). String and byte arguments, integers, credentials, stack traces, return values, ancestors and the raw event are never forwarded; a test feeds a string argument carrying a marker and asserts it never crosses. Volume is bounded in the helper (repeats folded within 60 seconds, 20 events a second per policy, 200 a second per host, the overflow counted and warned as `tetragon_customer_events_capped`). The gateway exports a record only for an event below an AI agent's process lineage; the rest are counted per policy. The target is a content-class field, so each destination's redaction profile decides whether it leaves the computer, and `enterprise.tetragon.customer_events: off` forwards nothing. The events are not scored | `internal/sensor/tetragon` mapper fixtures and the never-mutate pin; `internal/sensor` host-plane lineage-gate tests; manual onboarding rows OB-05 to OB-07 |
 
 ## Invariants
 
@@ -348,3 +364,45 @@ access. Status shows presence, modification time and a digest prefix only.
     Copilot, OpenCode, Amp and Antigravity stay closed. Closing it needs
     the vendor to treat a failed or timed-out hook as a deny, or
     application control or EDR that stops users from signalling the hook.
+13. The root sensor helper reaches Tetragon's API, which lets its caller load
+    kernel programs. Only the helper connects, over a verified Unix socket, but
+    a compromise of the helper is also a kernel-policy compromise. It is
+    inside the trusted-administrator assumption of residual 4. A Tetragon that
+    serves its API on TCP is a host risk whatever DefenseClaw does; `doctor` and
+    status warn (L-42).
+14. The kernel controls are narrow by design (L-44). They deny in-place write
+    opens of shell profiles and user autostart entries, and opens of SSH
+    private keys by name, for the descendants of an enrolled command-line
+    agent. They do not stop replacing a file by rename or removing it; a
+    second name for the same file created beforehand (a link); a library-based
+    SSH tool (libssh2, paramiko) in the agent's tree, which is denied like any
+    other reader and shows in the burn-in first; a process that is not below an
+    enrolled agent root (an IDE terminal, a look-alike by name, another
+    user); agent configuration files, which are observed only; program
+    execution; or any destination. Hook rules and the observe policy keep the
+    record for these.
+15. Kernel enforcement fails open. While Tetragon is stopped nothing is denied;
+    after a restart the policies are loaded again within one reconcile pass
+    (about a minute); while the helper is stopped loaded policies keep the
+    scope they had. Enforcing policies anchor only native agent binaries,
+    never a process ID: a pid freed and reused by another process of the same
+    user inside the host namespace can briefly fall under a monitor-mode pid
+    anchor until the next pass, where it can only count as a would-block hit
+    (and reset that user's burn-in), never deny. Two coverage limits follow: a
+    script-hosted agent (such as an npm install run by `node`) is monitored,
+    never denied (`kernel_pid_anchor_monitor_only`), and one controls policy
+    denies for one user per computer, the lowest uid of the users who
+    finished burn-in and have a native agent install, while the other users
+    stay in monitor
+    (`kernel_binary_anchor_scope_limited`).
+16. The arguments of Codex's notify program carry the turn's content. The
+    helper withholds them from its stream, but any other
+    process accounting on the computer (Tetragon's own export file, which is
+    root `0600` and the customer's, or `auditd`) records them.
+17. The events of the customer's own Tetragon policies carry a target (a file
+    or binary path, or a socket peer) and a policy message for events below an
+    AI agent. The helper forwards no other argument type, but a path can
+    itself be sensitive. The target is a content-class field: each destination's
+    redaction profile decides whether it leaves the computer, and
+    `enterprise.tetragon.customer_events: off` stops the forwarding while
+    keeping the counts (L-48).

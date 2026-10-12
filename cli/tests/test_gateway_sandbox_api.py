@@ -157,15 +157,15 @@ def test_reads_carry_the_token_and_decode_the_payloads(daemon: FakeDaemon) -> No
     assert daemon.requests[4]["query"] == {"since": ["2"], "sandbox": ["x"]}
 
 
-def test_the_gateways_driver_and_a_run_image_reach_the_panel(daemon: FakeDaemon) -> None:
+def test_the_gateways_driver_and_the_image_reach_the_panel(daemon: FakeDaemon) -> None:
     from defenseclaw.tui.services.sandbox_state import decode_sandbox, decode_status
 
-    image = "defenseclaw.invalid/sandbox-run:codex-0123456789ab-ba9876543210-u501"
+    image = "defenseclaw/sandbox:codex-0123456789ab-u501"
     status = {"enabled": True, "available": True, "gateway": {"name": "openshell", "version": "0.1.1", "driver": "vm"}}
     daemon.routes[("GET", "/api/v1/sandbox/status")] = (200, status)
     daemon.routes[("GET", "/api/v1/sandbox/sandboxes")] = (
         200,
-        {"sandboxes": [{**SANDBOX, "workdir_mode": "copy", "run_image": image}]},
+        {"sandboxes": [{**SANDBOX, "workdir_mode": "copy", "image": image}]},
     )
     client = daemon.client()
 
@@ -173,11 +173,11 @@ def test_the_gateways_driver_and_a_run_image_reach_the_panel(daemon: FakeDaemon)
     assert decoded.driver == "vm" and decoded.gateway == "OpenShell 0.1.1 gateway openshell (MicroVM)"
     assert decoded.copy_only_note.startswith("MicroVM sandboxes work on a copy")
     row = decode_sandbox(client.list_sandboxes()[0])
-    assert row is not None and row.run_image == image and row.copy_mode
-    # A daemon older than the fields: docker, mount mode possible, no run image.
+    assert row is not None and row.image == image and row.copy_mode
+    # A daemon older than the fields: docker, mount mode possible, no image.
     older = decode_status({"enabled": True, "gateway": {"name": "openshell"}})
     assert older.driver == "" and older.copy_only_note == "" and older.gateway == "OpenShell gateway openshell"
-    assert decode_sandbox(SANDBOX).run_image == ""
+    assert decode_sandbox(SANDBOX).image == ""
 
 
 def test_mutations_post_json_bodies_the_go_api_decodes_strictly(daemon: FakeDaemon) -> None:

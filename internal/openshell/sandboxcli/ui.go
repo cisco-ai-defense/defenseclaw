@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -67,7 +68,51 @@ func (a *App) printf(format string, args ...any) {
 func (a *App) println(args ...any) { fmt.Fprint(a.IO.Out, terminalText(fmt.Sprintln(args...))) }
 
 // line prints one indented line.
-func (a *App) line(text string) { fmt.Fprintln(a.IO.Out, terminalText("  "+text)) }
+func (a *App) line(text string) {
+	full := "  " + text
+	if w := a.width(); w > 0 && (visibleLen(full) > w || strings.Contains(full, "\n")) {
+		for _, l := range wrapWords(full, w, hangingIndent(full)) {
+			fmt.Fprintln(a.IO.Out, terminalText(l))
+		}
+		return
+	}
+	fmt.Fprintln(a.IO.Out, terminalText(full))
+}
+
+// maxPathText is the most of a file name the workload chose that a list
+// prints (pathText).
+const maxPathText = 160
+
+// pathText is a file name the workload chose as a list prints it: on one
+// line, with its control characters escaped as Go writes them (\n, \t,
+// \x1b), every other unsafe character as U+FFFD (sandboxapi.DisplayText),
+// and a long name cut in the middle, so a hostile name cannot forge lines
+// of the review a user trusts before bringing the work back (GAP-0291).
+func pathText(p string) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(p, string(utf8.RuneError)) {
+		if r < 0x20 || r == 0x7f {
+			q := strconv.QuoteRune(r)
+			b.WriteString(q[1 : len(q)-1])
+			continue
+		}
+		b.WriteRune(r)
+	}
+	s := sandboxapi.DisplayText(b.String())
+	if rs := []rune(s); len(rs) > maxPathText {
+		s = string(rs[:maxPathText/2]) + "…" + string(rs[len(rs)-maxPathText/2+1:])
+	}
+	return s
+}
+
+// pathTexts is pathText of every name.
+func pathTexts(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = pathText(p)
+	}
+	return out
+}
 
 // palette are the escape sequences this file prints itself.
 var palette = []string{ansiBold, ansiCyan, ansiGreen, ansiYellow, ansiRed, ansiDim, ansiReset}
@@ -146,6 +191,10 @@ func (a *App) mark(ok bool) string {
 
 // table writes aligned columns.
 func (a *App) table(header []string, rows [][]string) {
+	if w := a.width(); w > 0 && tableWidth(header, rows) > w {
+		a.stackedTable(header, rows)
+		return
+	}
 	w := tabwriter.NewWriter(a.IO.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, strings.Join(header, "\t"))
 	for _, r := range rows {
@@ -215,9 +264,17 @@ func (a *App) ask(question string, def bool, assumeDefault bool) (bool, error) {
 	if def {
 		hint = "[Y/n]"
 	}
+	a.asked, _, _ = strings.Cut(question, "?")
 	for {
 		fmt.Fprint(a.IO.Out, terminalText(question+" "+a.dim(hint)+" "))
-		ans, err := a.readLine()
+		read := a.readLine
+		if a.intr == nil {
+			// Outside run and connect, whose interrupt runs their cleanup,
+			// Ctrl-C here returns errInterrupted, which the command says in a
+			// line, instead of ending it with a bare ^C (GAP-0286, GAP-0290).
+			read = a.readAnswer
+		}
+		ans, err := read()
 		if err != nil {
 			return false, err
 		}
@@ -229,6 +286,7 @@ func (a *App) ask(question string, def bool, assumeDefault bool) (bool, error) {
 		case "n", "no":
 			return false, nil
 		}
+		fmt.Fprintln(a.IO.Out, terminalText(a.dim("answer y or n")))
 	}
 }
 
@@ -249,6 +307,12 @@ type choice struct {
 // errInterrupted is a choice the user answered with Ctrl-C; the caller
 // says what that leaves as it is.
 var errInterrupted = errors.New("interrupted")
+
+// errNoAnswer is a question whose input ended (Ctrl-D) before an answer.
+var errNoAnswer = errors.New("no answer (end of input)")
+
+// IsInterrupted reports a question the user answered with Ctrl-C.
+func IsInterrupted(err error) bool { return errors.Is(err, errInterrupted) }
 
 // choose asks for one of choices; an empty answer selects def. An answer
 // is a letter and Enter, which the prompt says, and Ctrl-C returns
@@ -276,11 +340,14 @@ func (a *App) choose(question string, choices []choice, def string) (string, err
 		if ans == "" {
 			return def, nil
 		}
+		keys := make([]string, 0, len(choices))
 		for _, c := range choices {
 			if ans == c.Key || ans == strings.ToLower(c.Label) {
 				return c.Key, nil
 			}
+			keys = append(keys, c.Key)
 		}
+		fmt.Fprintln(a.IO.Out, terminalText(a.dim("answer "+strings.Join(keys, ", "))))
 	}
 }
 
@@ -407,7 +474,7 @@ func (a *App) readLineNow() (string, error) {
 	s, err := a.reader.ReadString('\n')
 	if err != nil && (s == "" || !errors.Is(err, io.EOF)) {
 		if errors.Is(err, io.EOF) {
-			return "", errors.New("no answer (end of input)")
+			return "", errNoAnswer
 		}
 		return "", err
 	}
@@ -445,6 +512,17 @@ func truncate(s string, n int) string {
 	}
 	r := []rune(s)
 	return string(r[:n-1]) + "…"
+}
+
+// truncateLeft is truncate keeping the end of s, such as a path's file
+// name.
+func truncateLeft(s string, n int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return "…" + string(r[len(r)-(n-1):])
 }
 
 func humanDuration(d time.Duration) string {

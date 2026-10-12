@@ -243,7 +243,7 @@ func printLifecycleResult(w io.Writer, result *enterprisestatus.Result, asJSON b
 	// The policy the lifecycle left in place (absent under Secure Client):
 	// an administrator reading the text must see the generation and digest.
 	if result.Policy != nil {
-		fmt.Fprintf(w, "  %s\n", result.Policy.Line())
+		fmt.Fprintf(w, "  %s\n", result.PolicyLine())
 	}
 	// A busy status checked nothing else, but still reports the recorded
 	// deployment's version, as the docs say (GAP-2409).

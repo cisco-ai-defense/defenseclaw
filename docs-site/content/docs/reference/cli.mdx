@@ -203,7 +203,7 @@ writer refuses such a change up front; the gateway rejects it when someone edits
 the file by hand:
 
 ```text
-  [FAIL] Config validation  —  line 11: guardrail: config rule pack "badpack": digest sha256:47c16bf9651541dfe808ef1f6127b7a65f6f7982b99d1739e334633c88d2e9f5 does not match guardrail.custom_packs.badpack.digest; expected rule packs, custom pack digests and rule IDs the gateway can load; fix the reference, then retry.
+  [FAIL] Config validation  —  line 11: guardrail: config rule pack "badpack": digest sha256:47c16bf9651541dfe808ef1f6127b7a65f6f7982b99d1739e334633c88d2e9f5 does not match guardrail.custom_packs.badpack.digest (the pack's files changed after it was pinned; if that was intended, pin the new digest: defenseclaw config set guardrail.custom_packs.badpack.digest sha256:47c16bf9651541dfe808ef1f6127b7a65f6f7982b99d1739e334633c88d2e9f5); expected rule packs, custom pack digests and rule IDs the gateway can load; fix the reference, then retry.
   [FAIL] Policy  —  generation 20, digest sha256:f61a485cfcbf is still enforcing: the last change was rejected (config reload rule pack preflight: global rule pack "badpack": digest sha256:47c16bf9651541dfe808ef1f6127b7a65f6f7982b99d1739e334633c88d2e9f5 does not match guardrail.custom_packs.badpack.digest)
       ↪ Next step: Fix the change the error names in config.yaml or the policy asset; the gateway applies it once it builds
 ```
@@ -368,7 +368,7 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage config-v8 destinations across OTLP, Galileo, Splunk HEC, JSONL, HTTP JSONL, console, and Prometheus capabilities. Omitted destination policy means all supported signals/buckets, unredacted. Distinct from `setup webhook`, which manages notifier webhooks. |
 | `defenseclaw setup redaction [status\|remove-all\|apply\|defaults\|bucket\|profile\|destination\|route]` | Configure v8 redaction interactively or with scriptable subcommands. Bare invocation offers a simple baseline choice followed by **Show advanced settings?** for all buckets, profiles, destination policy, and ordered routes. Mutations preview the canonical effective diff; changed non-dry-run writes create a timestamped backup and verify the installed plan. |
 | `defenseclaw observability plan` | Print the masked effective v8 graph: generated local SQLite policy, collection, destination capabilities, routes, profiles, retention, and warnings. |
-| `defenseclaw observability destination test NAME [--write-probe] [--timeout S]` | Test one destination's DNS, connection, TLS, and protocol without ordinary collection or fan-out. `--write-probe` also sends one marked, content-free probe where the destination supports it. |
+| `defenseclaw observability destination test NAME [--write-probe] [--timeout S]` | Test one destination's DNS, connection, TLS, and protocol without ordinary collection or fan-out. `--write-probe` also sends one marked, content-free probe where the destination supports it. A local or pull destination (`jsonl`, `sqlite`, `console`, `prometheus`) has nothing to reach: the test says `SKIPPED` and exits 0, as does `defenseclaw setup observability test NAME`. |
 
 For observability destinations, `name` is the stable identity: a new name adds,
 and an existing name updates only that destination. Run `list --json` for the
@@ -664,9 +664,16 @@ its next reload; the usual case), `restarted` (a hook fail-mode change),
 `not_running` (it loads the change when it starts), `guardrail_off` (takes
 effect when you run `defenseclaw guardrail enable`), `restart_needed`
 (`--no-restart`: the running gateway keeps the old setting until you restart
-it), `restart_failed` (the change is saved but the restart failed; exit `1`) or
+it), `restart_failed` (the change is saved but the restart failed; exit `1`),
 `still_starting` (saved, but the gateway was still starting, so protection is
-not confirmed yet; exit `1`). The `protection`, `rule` and `suppress` commands
+not confirmed yet; exit `1`) or `not_applied` (the running gateway still
+reports the earlier config generation 10 seconds after the save: it rejected
+the change, which `defenseclaw-gateway status` names, or it never reloaded;
+`defenseclaw-gateway restart` applies it; exit `1`, while the `use-pack`,
+`protection`, `rule` and `suppress` commands print the line and exit `0`, the
+change being saved). A change the gateway
+applies except for a section it reads only at start is `restart_needed` too.
+The `protection`, `rule` and `suppress` commands
 print `Saved (config generation N).` and the same one-line outcome.
 
 ## Policies
@@ -741,7 +748,7 @@ These list/inventory verbs read across the full active roster:
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw alerts [--connector X] [--json]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. A finding row names its target, decision (`blocked`, `would block (observe mode)`, `detected in the prompt (cannot block)` for a Copilot CLI prompt, ...), rule and scanner, and an ACP finding its route (`ACP session/prompt (client zed)`); `--json` prints the same fields (`target`, `decision`, `rule`, `scanner`, `location`, `route`, `path`, `moved_to` for quarantine rows) next to the raw `details`. |
+| `defenseclaw alerts [--connector X] [--json]` | Snapshot of recent alerts (default 25) as a table. `--connector X` filters by per-event connector attribution; `--limit N` widens the scan window, and `--show <n>` prints the full record. A finding row names its target, decision (`blocked`, `would block (observe mode)`, `detected in the prompt (cannot block)` for a Copilot CLI prompt, ...), rule and scanner, an ACP finding its route (`ACP session/prompt (client zed)`), and a finding raised in a sandbox session its sandbox (`sandbox=myapp-claude`); `--json` prints the same fields (`target`, `decision`, `rule`, `scanner`, `location`, `route`, `path`, `moved_to` for quarantine rows) next to the raw `details`. A detection-only finding is not an alert: a rule that matched but could not decide the call, such as a regex fallback on a command DefenseClaw could not fully parse. When there were some in the last 24 hours, the list ends with how many (`2 detection-only findings of the last 24 hours not listed: …`), and an empty list says `No alerts.` instead of `No alerts. All clear.`; `defenseclaw audit export --since 24h` lists them as `scan-finding` rows next to the hook decision. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts. The gateway records the change, so it must be running. Select them with `--id`, `--connector`, `--target`, `--since`, `--before`, or `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW\|ERROR\|INFO`; `--dry-run` shows what would change. |
 | `defenseclaw-gateway audit export` (or `defenseclaw audit export`, which runs it with the same options) | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Rows are emitted oldest-first; `--limit N` returns the earliest N matching rows, and with `--newest` the most recent N (still written oldest-first). `--since` (inclusive) and `--until` (exclusive) take an RFC3339 time or a duration ago such as `30m` or `2h`. `--connector` keeps one connector's rows. `--db PATH` reads another audit database with no configuration, for example the install a rollback left in `~/.defenseclaw/previous/data/audit.db` (see Rollback in the upgrade guide). Configuration changes and operator actions are audit rows in this export (action `config-update` and others); `--include-activity` also appends rows of the `activity_events` table, which holds only history from releases before 1.0, within the same window. |
 | `defenseclaw audit logs [--source gateway\|watchdog] [-n N] [--grep TEXT]` | Print the newest lines of `~/.defenseclaw/gateway.log` (or `watchdog.log`), the same log the TUI Logs panel shows. `-n` defaults to 50; `--grep` keeps lines that contain the text (case-insensitive). For config changes and operator actions use `defenseclaw audit export --since 1h`: they are audit rows with action `config-update` and others. |
@@ -761,7 +768,7 @@ Enhanced mode expands the bounded roots searched for models; it does not relax w
 | `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |
 | `defenseclaw agent discovery enable [--mode passive\|enhanced] [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--lookup-model-provenance-online/--no-lookup-model-provenance-online] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. `passive` limits model-file coverage to known stores plus narrower configured roots and suppresses an exact user-home/`~` root; `enhanced` also honors the broad home root and adds bounded macOS application-storage and app-resource roots for unknown applications. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. Public Hugging Face lineage lookup is a separate opt-in because it transmits recovered model repository IDs. |
 | `defenseclaw agent discovery setup\|status\|scan\|disable` | Configure discovery interactively, inspect on-disk/live state, trigger a full scan, or disable the service. |
-| `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--wide] [--json]` | Read the sidecar snapshot. Local-model rows show model ID and `installed`/`loaded` status (`--wide` adds format, version and identity/presence confidence); `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
+| `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--sandbox NAME] [--show-gone] [--by-detector] [--wide] [--json]` | Read the sidecar snapshot. Local-model rows show model ID and `installed`/`loaded` status (`--wide` adds format, version and identity/presence confidence); `--component` also matches model IDs; `--sandbox` keeps what AI discovery found inside that OpenShell sandbox, whose rows every view tags "(sandbox NAME)". `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
 | `defenseclaw agent identities [--user U] [--connector C] [--limit N] [--json]` | List every agent identity (`agt-...`), or the `N` most recently seen, one per connector install, user and machine, with their session count, last seen time and config root. |
 | `defenseclaw agent ide-plugins [--user U] [--ide IDE] [--ai-only] [--json]` | List every IDE extension and plugin per user (User, IDE, Plugin, Version, Enabled, AI) from the gateway's last full scan. See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory). |
 | `defenseclaw agent processes [--refresh] [--json] [--limit N]` | List live AI process signals with PID, user, command name, and uptime. |
@@ -905,7 +912,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway start` | Start the sidecar as a background daemon. |
 | `defenseclaw-gateway stop` | Stop the running sidecar. |
 | `defenseclaw-gateway restart` | Restart the sidecar. |
-| `defenseclaw-gateway status [--json]` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. `--json` prints one JSON document (`running`, `endpoint`, the `/health` snapshot as `health`, or `error` and `hint`); it exits `1` when the gateway does not answer. |
+| `defenseclaw-gateway status [--json]` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. `--json` prints one JSON document (`running`, `endpoint`, the `/health` snapshot as `health`, or `error` and `hint`); it exits `1` when the gateway does not answer. On a managed Linux computer whose sensor helper reports a Plane C backend, the Subsystems list ends with one line: `Kernel sensor: Tetragon v1.7.1 (consume)`, with `; kernel controls: enforcing 2 of 3 users` after it when DefenseClaw's controls are loaded, or `cn_proc and fanotify (Tetragon not used: <reason>)` on the fallback. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon#step-1-turn-on-plane-c-and-consume). |
 | `defenseclaw-gateway watchdog [start\|stop\|status]` | Health-watchdog daemon that notifies when the gateway is down and, on Linux and macOS, starts a per-user gateway whose process stopped on its own. |
 | `defenseclaw-gateway policy reload` | Ask the running daemon to reload its OPA policies without bouncing it. |
 | `defenseclaw-gateway policy validate\|test [--rego-dir DIR]` | Compile-check the Rego modules and the admission policy compiled from `config.yaml`, or run the Rego unit tests without a separate `opa` binary. On a managed host, which ships no Rego, `validate` says so and prints where each admission policy comes from. |
@@ -913,6 +920,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway policy digest [--json]` | Compute the effective policy digest from `config.yaml` and the policy assets it names (rule packs, Rego modules, signature packs, scanner policies), the way the gateway does when it applies a configuration. Compare it with `policy.effective_digest` on the gateway's `/health` to see whether the running gateway applies this configuration. See [Policy generation and digest](#policy-generation-and-digest). Secure Client does not provide `policy digest`; it returns an unknown-command error. |
 | `defenseclaw-gateway policy evaluate [--target-type T] [--target-name N] [--severity S] [--findings N]` | Dry-run the admission policy for one input. |
 | `defenseclaw-gateway rulepack validate [--dir DIR] [--json]` | Validate a rule-pack directory the way the gateway does when it loads one, without starting it; without `--dir` it validates the embedded default pack. `defenseclaw guardrail validate-pack` runs this. |
+| `defenseclaw-gateway config validate [FILE] [--json] [--data-dir DIR]` | Read-only check of a candidate `config.yaml` with the compiler and loader the gateway runs at start: schema, guardrail profiles and assignments, every profile's sandbox floor combined with `openshell.admin`, rule packs and destinations. A refusal names the setting and the profile, for example `guardrail.profiles["contractors"]: sandbox: allowed: false contradicts required_for [claudecode]`. Exits 1 when the gateway would refuse the file. |
 | `defenseclaw-gateway config migrate [--dry-run] [--json] [--ack] [--config FILE] [--data-dir DIR] [--to 9]` | The migration that `defenseclaw config migrate` and `defenseclaw migrate` run: moves `policies/rego/data.json`, the `*_actions` keys, `rule_pack_dir`, the v8 scanner keys, `update_check` and, on a per-user install, the operator block and allow entries of `audit.db` into `config.yaml`. See [Upgrade](#upgrade). |
 | `defenseclaw-gateway provenance show` | Print the config schema version, content hash, generation, and binary version. |
 | `defenseclaw-gateway connector reconcile\|verify\|teardown\|list-backups [--connector X] [--json]` | Low-level lifecycle for one connector, outside the `setup` flow: refresh its installed registration, check it left no residual state, remove its config patches, or list its pristine backups. Without `--connector` it uses the active connector. `defenseclaw uninstall` uses these. |
@@ -1272,10 +1280,10 @@ moved keys and the upgrade steps.
 ## Sandbox
 
 Linux, and Apple-silicon Macs, where sandboxes are OpenShell MicroVMs that
-work on a copy (see [macOS](/docs/sandboxes/guide#macos)). The `sandbox`
+work on a copy (see [macOS](/docs/sandboxes/guide#macos)); Windows and WSL2
+are not supported, and every `sandbox` command exits 3 there. The `sandbox`
 commands run coding agents in NVIDIA OpenShell 0.1 sandboxes. `defenseclaw sandbox` checks the command
-line, then hands it unchanged to `defenseclaw-gateway sandbox`;
-`legacy-cleanup` is the one command the Python CLI runs itself. Every command
+line, then hands it unchanged to `defenseclaw-gateway sandbox`. Every command
 and flag, with an example, is on [Sandbox CLI](/docs/reference/sandbox-cli);
 see also [Sandbox](/docs/sandboxes/guide).
 
@@ -1287,12 +1295,12 @@ see also [Sandbox](/docs/sandboxes/guide).
 | `defenseclaw sandbox list\|status\|connect\|exec\|logs\|stop\|start\|delete` | Manage sandboxes and their sessions. |
 | `defenseclaw sandbox activity [-f]\|approvals\|approve\|reject\|unblock` | Follow the live activity feed, answer the rare asks, and lift egress blocks. |
 | `defenseclaw sandbox review\|undo\|pull <name>` | Review a mounted project's changes, restore its pre-session snapshot, or bring a copy-mode sandbox's work back. |
-| `defenseclaw sandbox policy show\|explain\|suggest\|allow\|block` | Show where each setting of the sandbox policy comes from, suggest an allowlist, and edit the egress lists. |
+| `defenseclaw sandbox policy show\|explain\|suggest\|test\|allow\|block` | Show where each setting of the sandbox policy comes from, suggest a pack from what sandboxes reached, test a destination, and edit the egress lists. |
 | `defenseclaw sandbox pack list\|show\|validate` | Inspect sandbox policy packs and their digests. |
 | `defenseclaw sandbox image build\|list\|prune\|rm` | Build, list, prune, and remove the harness images. |
 | `defenseclaw sandbox enable\|disable <harness>` | Add or remove the shell wrapper that makes a harness command run sandboxed. |
 | `defenseclaw sandbox teardown [--dry-run]` | Remove DefenseClaw's sandboxes, providers, images, gateway change, and wrappers. `defenseclaw uninstall` runs it. |
-| `defenseclaw sandbox legacy-cleanup [--dry-run] [--yes] [--remove-user] [--remove-binary]` | Linux only. Remove a retired `openshell-sandbox` 0.0.x standalone install and restore host OpenClaw networking, ownership, and config. |
+| `defenseclaw sandbox kernel-feed install\|status\|uninstall` | Linux: install (as root), check or remove the opt-in sandbox kernel feed, a root service that adds Tetragon's exec and exit records to your docker sandboxes' process trees. Run as yourself, `install` prints the `sudo` command. See [sandbox kernel-feed](/docs/reference/sandbox-cli#sandbox-kernel-feed). |
 
 ## Enterprise
 
@@ -1326,6 +1334,10 @@ Every mutating action is a transaction that rolls back on failure. See
 | `profile-explain` | Show which guardrail profile a user, connector or agent gets, and why, with every configured profile's digest. Read-only; prints JSON. `--user U` (account name, uid, SID or principal), `--connector C`, `--agent agt-...`. See [User- and group-based policies](/docs/guardrail/user-and-group-policies#deliver-it-to-managed-hosts) |
 | `agent-identities` | List the agent identities (`agt-...`) the gateway has seen, with their sessions, 1000 at a time. Read-only; prints JSON. `--user U`, `--connector C`, `--cursor C` (the previous page's `next_cursor`) |
 | `ide-plugins` | List the IDE extensions and plugins of the last AI Discovery scan, per user. Read-only; prints JSON. `--user U`, `--ide IDE`, `--ai-only`, `--cursor C` (the previous page's `next_cursor`). See [IDE plugin inventory](/docs/ai-discovery#ide-plugin-inventory) |
+| `tetragon status` | **Linux.** Report the kernel sensor and the DefenseClaw policies in it: Tetragon's version and socket check, the effective mode, the `kernel_policy` digest to put in `enforce_ack`, each policy's state, per-user burn-in and hits, agents observed but not enforced, your own Tetragon policies and their events, any pause or operator override, and orphaned names, then a `Next:` line. Reads the sensor helper's state files; root only. `--user` limits it to one account. `--json` follows a pinned schema. See [Tetragon on a Linux fleet](/docs/enterprise/tetragon) |
+| `tetragon verify` | **Linux.** Check that this computer is ready for a Tetragon mode, one line per check with the command that fixes a failure. Without `--ready-for` it checks the configured mode. For `enforce` it also prints each user's burn-in progress and estimate, the details of every hit, and the `enforce_ack` block to approve. Exit `0` when no check fails, `1` when one fails (warnings never fail it), `2` for bad arguments. Never changes anything and never connects to Tetragon; root only. `--json` follows a pinned schema |
+| `tetragon pause` | **Linux.** Move DefenseClaw's kernel controls to monitor mode until the pause ends. Survives restarts of the helper and of Tetragon. `--for <duration>` (default `4h`, at most `7d`), `--until-reboot`, `--reason <text>`. A runtime action, so it works on a managed computer |
+| `tetragon resume` | **Linux.** End a pause; the next helper pass applies the configured intent |
 | `verify` | Check every file, permission, service, and readiness item. Read-only; exits non-zero on any problem |
 | `uninstall` | Stop and remove the deployment and every account's hooks. Each account keeps `~/.defenseclaw`. `--purge` removes everything, every enrolled account's data and binaries included |
 
@@ -1338,12 +1350,15 @@ Every mutating action is a transaction that rolls back on failure. See
 | `--product-version <v>` | install, upgrade, repair, ensure | Refuse unless the payload is exactly this version |
 | `--allow-downgrade` | install, upgrade, repair, ensure | Allow a payload older than the installed release (a deliberate rollback). Without it the lifecycle refuses with `downgrade_refused` |
 | `--adopt-existing` | install, ensure | Back up and take over an unmanaged DefenseClaw layout |
-| `--reason <text>` | ensure | Why `ensure` runs. Recorded in the result |
+| `--reason <text>` | ensure, tetragon pause | Why `ensure` runs, or why kernel enforcement is paused. Recorded in the result |
+| `--for <duration>` | tetragon pause | How long the pause lasts. Default `4h`, at most `7d` |
+| `--until-reboot` | tetragon pause | Keep the pause in `/run`, so a reboot ends it. Not with `--for` |
 | `--lock-wait <duration>` | install, upgrade, repair, reconcile, rotate-credentials, ensure, uninstall | Wait up to this long (default `5s`, at most `15m`) for another lifecycle run before exiting `75` |
 | `--purge` | uninstall | Also remove each enrolled account's `~/.defenseclaw`, the empty agent folders DefenseClaw created in its home, its per-user binaries and launcher links in `~/.local/bin`, and the DefenseClaw entries in its uv cache (`~/.cache/uv`), after stopping its per-user gateway and watchdog. The result names every account whose data it removed, and every account it left alone with the reason (home not trusted or not available, a hook removal that failed); fix the cause and rerun. Without `--purge`, uninstall already removes the config, credentials, state, logs and the service account |
 | `--keep-state` | uninstall | Keep the config, credentials, state, logs and the service account, so a reinstall resumes with them. Not with `--purge` |
 | `--keep-service-account` | uninstall | Keep the gateway service account, which uninstall deletes otherwise |
-| `--user <u>` | discovery, profile-explain, agent-identities, ide-plugins | Limit the view to one account (name, uid or SID). A bare name lists the account of that name in every domain; a qualified name (`alice@corp.example.com`, `CORP\alice`) lists only the rows of exactly that domain (on Windows, whose rows keep the bare name next to the SID, every account of that name) |
+| `--ready-for <mode>` | tetragon verify | The mode to check readiness for: `consume`, `observe` or `enforce` |
+| `--user <u>` | discovery, profile-explain, agent-identities, ide-plugins, tetragon status | Limit the view to one account (name, uid or SID). A bare name lists the account of that name in every domain; a qualified name (`alice@corp.example.com`, `CORP\alice`) lists only the rows of exactly that domain (on Windows, whose rows keep the bare name next to the SID, every account of that name) |
 | `--connector <c>`, `--agent <id>` | profile-explain (`--connector` also agent-identities) | The connector, or the `agt-` agent identity, to resolve or list |
 | `--ide <ide>`, `--ai-only`, `--cursor <c>` | ide-plugins | Limit to one IDE product or family, to AI plugins, or continue from the previous page |
 | `--json` | all | Print the lifecycle result as JSON |
@@ -1356,6 +1371,28 @@ sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --from-pac
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
 sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall --purge --json
 ```
+
+The sensor helper has two maintenance options for Tetragon, run as root:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup
+sudo /opt/defenseclaw/bin/defenseclaw-sensor-helper --tetragon-cleanup --check
+```
+
+`--tetragon-cleanup` deletes the Tetragon policies the helper recorded loading
+(only names that match `defenseclaw-<family>-<8 hex>` and are in its own
+state file) and empties that record. It exits `1`, and removes nothing, while
+a helper in `observe` or `enforce` runs (stop it first:
+`systemctl stop defenseclaw-sensor-helper`), and `3` when Tetragon does not
+answer. `--check` only reports whether this helper supports the cleanup, with
+exit `0`. `uninstall`, a rollback and the package's pre-removal script run it
+for you.
+
+On an open-source Linux install the same binary is the sandbox kernel feed:
+`defenseclaw-sensor-helper --sandbox-feed` serves it (its systemd unit runs
+that), `--sandbox-feed --check` checks Tetragon and Docker and exits `0` or
+`1`, and `--sandbox-feed --uninstall` removes the service and the root copy.
+Use `defenseclaw sandbox kernel-feed` rather than these.
 
 ### Lifecycle on Windows
 

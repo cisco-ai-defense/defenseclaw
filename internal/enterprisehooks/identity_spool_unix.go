@@ -55,19 +55,25 @@ const identitySpoolLookupTimeout = 10 * time.Second
 // accounts from one directory's enumeration while another still answers;
 // removing those records would lose their UPN facts (GAP-0145, GAP-1228).
 // A failed pass removes nothing young.
-func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error, logf func(string, ...any)) error {
+//
+// It returns how many accounts the privileged lookup resolved: a pass that
+// lists accounts and resolves none is a directory the guardian cannot reach,
+// which the caller watches for (FlushDirectoryCaches).
+func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoolAccount, setOwnership func(string) error,
+	logf func(string, ...any)) (int, error) {
+	resolved := 0
 	if dir == "" {
-		return nil
+		return 0, nil
 	}
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("create identity spool: %w", err)
+		return 0, fmt.Errorf("create identity spool: %w", err)
 	}
 	if err := os.Chmod(dir, 0o750); err != nil {
-		return fmt.Errorf("harden identity spool: %w", err)
+		return 0, fmt.Errorf("harden identity spool: %w", err)
 	}
 	if setOwnership != nil {
 		if err := setOwnership(dir); err != nil {
-			return fmt.Errorf("set identity spool ownership: %w", err)
+			return 0, fmt.Errorf("set identity spool ownership: %w", err)
 		}
 	}
 	keep := map[string]bool{}
@@ -84,7 +90,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 				// A UID assigned to a different account must not retain its
 				// previous owner's privileged facts if this lookup fails.
 				if err := os.Remove(filepath.Join(dir, name)); err != nil {
-					return fmt.Errorf("remove reassigned identity spool record: %w", err)
+					return resolved, fmt.Errorf("remove reassigned identity spool record: %w", err)
 				}
 			}
 		}
@@ -93,6 +99,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		record, err := collectIdentitySpoolRecord(lookupCtx, account, time.Now().UTC())
 		cancel()
 		if err == nil {
+			resolved++
 			if previous, readErr := ReadIdentitySpoolRecord(dir, strconv.Itoa(account.UID), nil); readErr == nil {
 				var kept bool
 				if record, kept = KeepVerifiedInfoPipeUPN(record, previous); kept && previous.UPNSource != UPNSourceInfoPipeKept && logf != nil {
@@ -125,7 +132,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
+		return resolved, errors.Join(passErr, fmt.Errorf("read identity spool: %w", err))
 	}
 	for _, entry := range entries {
 		if keep[entry.Name()] {
@@ -137,7 +144,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 		_ = os.RemoveAll(filepath.Join(dir, entry.Name()))
 	}
-	return passErr
+	return resolved, passErr
 }
 
 // identitySpoolRecordLeft reports whether a young unlisted record can be

@@ -76,35 +76,55 @@ func (a *App) Enable(o WrapperOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := a.wrapperPreflight(spec); err != nil {
+	api, err := a.wrapperPreflight(spec)
+	if err != nil {
 		return err
 	}
-	return a.enableWrapper(spec, o)
+	return a.enableWrapper(spec, o, !a.sandboxRequired(api, spec))
 }
 
-// wrapperPreflight checks what `sandbox run` checks before it starts a run.
-func (a *App) wrapperPreflight(spec *harness.Spec) error {
+// wrapperPreflight checks what `sandbox run` checks before it starts a run,
+// and returns the daemon's client.
+func (a *App) wrapperPreflight(spec *harness.Spec) (API, error) {
 	why := func(err error) error {
 		return fmt.Errorf("not wrapping `%s`, which would then fail to start in every new shell: %w", spec.Command, err)
 	}
-	if a.Cfg != nil && !a.Cfg.OpenShell.Enabled {
-		return why(errors.New(sandboxapi.DisabledMessage))
+	// On a managed computer the daemon, not a local configuration, says
+	// whether sandboxes are on, and its answer names the organization's
+	// contact where this one would send the user to `sandbox setup` (GAP-0362).
+	if a.Cfg != nil && !a.Cfg.OpenShell.Enabled && !a.ManagedHost() {
+		return nil, why(errors.New(sandboxapi.DisabledMessage))
 	}
 	api, err := a.api()
 	if err != nil {
-		return why(err)
+		return nil, why(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if _, err := a.preflight(ctx, api); err != nil {
-		return why(err)
+	if _, err := a.checkSandboxes(ctx, api, false); err != nil {
+		return nil, why(err)
 	}
-	return nil
+	return api, nil
+}
+
+// sandboxRequired reports that the organization requires spec to run only in
+// a sandbox on this managed computer: a bypass of the wrapper is refused
+// there, so the receipt does not offer one (GAP-0292). It is false when the
+// daemon does not say.
+func (a *App) sandboxRequired(api API, spec *harness.Spec) bool {
+	if !a.ManagedHost() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Harness: spec.Name})
+	return err == nil && ex.Managed != nil && slices.Contains(ex.Managed.RequiredFor, spec.Name)
 }
 
 // enableWrapper writes the wrapper; setup calls it directly while it is
-// turning sandboxes on.
-func (a *App) enableWrapper(spec *harness.Spec, o WrapperOptions) error {
+// turning sandboxes on. bypass says the receipt may offer the one-time
+// bypass of the wrapper.
+func (a *App) enableWrapper(spec *harness.Spec, o WrapperOptions, bypass bool) error {
 	sh, rc, err := a.wrapperTarget(o)
 	if err != nil {
 		return err
@@ -119,14 +139,22 @@ func (a *App) enableWrapper(spec *harness.Spec, o WrapperOptions) error {
 	}
 	// The receipt finds the file again for disable, doctor and teardown
 	// when it is not the shell's usual rc file (--rc, another ZDOTDIR).
-	if err := a.recordWrapperFile(sh, ch.Path); err != nil {
-		a.warn("could not record " + a.tildePath(ch.Path) + " for teardown: " + err.Error())
+	// On a managed computer a shell's usual rc file is found again without
+	// a receipt, so the user's data directory gets one only for another file.
+	if !a.ManagedHost() || o.RC != "" {
+		if err := a.recordWrapperFile(sh, ch.Path); err != nil {
+			a.warn("could not record " + a.tildePath(ch.Path) + " for teardown: " + err.Error())
+		}
 	}
 	a.recordWrappers()
 	if ch.Changed {
 		a.ok(fmt.Sprintf("`%s` now runs in a DefenseClaw sandbox in new %s sessions (%s)", spec.Command, sh, a.tildePath(ch.Path)))
 	} else {
 		a.ok(fmt.Sprintf("`%s` already runs in a DefenseClaw sandbox (%s)", spec.Command, a.tildePath(ch.Path)))
+	}
+	if !bypass {
+		a.note(fmt.Sprintf("apply it now: source %s · undo: %s disable %s", a.tildePath(ch.Path), CommandName, spec.Command))
+		return nil
 	}
 	a.note(fmt.Sprintf("apply it now: source %s · bypass once: %s=1 %s · undo: %s disable %s",
 		a.tildePath(ch.Path), wrapper.EnvBypass, spec.Command, CommandName, spec.Command))
@@ -271,9 +299,10 @@ func (a *App) wrappedHarnesses() []string {
 }
 
 // recordWrappers mirrors the wrapped harnesses into openshell.wrappers
-// (best effort: the rc files are the truth).
+// (best effort: the rc files are the truth). A managed computer has no
+// per-user config.yaml to write: the rc files are all it records (GAP-0292).
 func (a *App) recordWrappers() {
-	if a.Cfg == nil {
+	if a.Cfg == nil || a.ManagedHost() {
 		return
 	}
 	names := a.wrappedHarnesses()

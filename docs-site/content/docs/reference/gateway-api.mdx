@@ -37,16 +37,13 @@ described under [Sandbox listeners](#sandbox-listeners).
 | Knob | Config default | Effective value |
 | --- | --- | --- |
 | `gateway.api_port` | `18970` | Sidecar API port |
-| `gateway.api_bind` | empty | `127.0.0.1` when empty, except on an uncleaned legacy sandbox host (below) |
+| `gateway.api_bind` | empty | `127.0.0.1` when empty |
 
-The API binds to loopback by default. The one exception is a host that still
-carries the removed legacy standalone sandbox: while the config still says
-`openshell.mode: standalone`, an empty `gateway.api_bind` inherits
-`guardrail.host` when that value is non-empty and is not the literal
-`localhost` (for example `10.200.0.1`), so `upgrade` health checks keep
-reaching the gateway. Running [`defenseclaw sandbox legacy-cleanup`](/docs/sandboxes/guide)
-resets that config and returns the API to loopback. An explicit
-`gateway.api_bind` always takes precedence. A non-loopback value expands access
+The API binds to loopback unless `gateway.api_bind` names another address.
+(A 0.8.x host that ran the retired standalone sandbox kept it on
+`guardrail.host`, `10.200.0.1`; the upgrade to 1.0 resets that, see
+[Remove a retired standalone sandbox](/docs/sandboxes/guide#remove-a-retired-standalone-sandbox).)
+A non-loopback value expands access
 to the authenticated management surface; protect that listener with host
 firewalling and a deployment-specific network design.
 `gateway.host` and `gateway.port` describe the upstream agent gateway, while
@@ -196,20 +193,16 @@ for the OpenShell sandbox runtime:
   `egress`, `manager`, or `openshell` (the connection to the OpenShell
   gateway). Sandbox hooks fail closed while a part is down;
 - `disabled`, with the reason, on a platform or in a deployment that can't
-  run sandboxes: any platform but Linux and macOS, or a `managed_enterprise`
-  install;
+  run sandboxes: Windows, an Intel Mac, a Secure Client profile, or
+  `openshell.enabled: false`;
 - `error`, with the cause in `last_error`, when the sandbox runtime can't be
   set up at all, for example because its binding store or image store can't
   be opened. The sandbox routes then answer 503 `unavailable`, and sandbox
   hooks fail closed;
 - `stopped` while the API listener restarts.
 
-On a host that still carries the removed legacy standalone sandbox (see
-[Bind address](#bind-address)), `/health` includes a `sandbox` subsystem with
-state `degraded` and a `last_error` of "legacy standalone install detected",
-directing the operator to run `defenseclaw sandbox legacy-cleanup`. On a host
-with neither, where `openshell.enabled` is `false` and no legacy install is
-left, the `sandbox` subsystem is absent from `/health`.
+Where `openshell.enabled` is `false`, the `sandbox` subsystem is absent from
+`/health`.
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
 
@@ -301,6 +294,27 @@ of profiles; `defenseclaw-gateway policy digest` lists each one.
 When a change fails to build, the previous generation keeps running and the
 object gains `last_reload_error` with the reason; `defenseclaw doctor` reports
 that as a failed Policy row. The next change that builds clears it.
+
+On a managed Linux computer whose sensor helper has DefenseClaw policies in
+Tetragon (`observe` or `enforce`, or policies still loaded after a mode
+change), `policy` also carries a `kernel` object. It is absent in every other
+state, so a reader treats a missing `kernel` as "nothing loaded". `enterprise
+linux status` compares its `kernel_policy` with `components.kernel_policy`
+(`kernel_policy_not_applied`).
+
+| Key | Meaning |
+| --- | --- |
+| `available`, `reason` | Whether the helper runs the kernel-policy reconciler; when it does not, the reason |
+| `mode`, `intent_mode` | The `enterprise.tetragon` mode the helper runs, and the mode the drop-in asks for before any cap |
+| `kernel_policy` | The digest of the kernel controls this build ships, the value `enforce_ack` approves |
+| `approval` | `not_needed`, `missing`, `stale` or `approved` |
+| `applied` | `true` when the helper's last pass left Tetragon with the policies the config calls for |
+| `helper_reachable`, `fetched_at`, `updated_at` | Whether the gateway could read the helper, and when it did and when the helper last wrote its state |
+| `mode_by_uid_count` | Enrolled users by the mode the helper holds them in (`enforce`, `monitor`, ...) |
+| `paused_until` | When an active pause ends |
+| `overrides` | Policy families an operator moved to monitor mode or deleted with `tetra` |
+| `orphaned` | DefenseClaw policy names still loaded with nothing reconciling them |
+| `warnings` | The reason codes in force, for example `kernel_enforce_ack_stale`; see [Kernel sensor warnings](/docs/enterprise/troubleshooting#kernel-sensor-warnings) |
 
 ### Connector hooks
 
@@ -536,6 +550,41 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | `POST` | `/api/v1/ai-usage/confidence/policy/validate` | Dry-run validation of a candidate policy file. |
 | `GET` | `/api/v1/ai-usage/runtime` | Latest runtime-discovery snapshot: each runtime plane (what it can see and why) and scored findings. Returns `enabled: false` with empty lists when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime status` and `findings`. |
 | `POST` | `/api/v1/ai-usage/runtime/scan` | Poll the runtime planes now and return the new snapshot. Answers `503` when `ai_discovery.runtime` is off. Backs `defenseclaw agent discovery runtime scan`. |
+
+#### Plane C backend on managed Linux
+
+On a managed Linux computer the Plane C entry of the snapshot carries a
+`backend` object. The same object is in `/health` under
+`ai_runtime.details.planes.c.backend`. `defenseclaw-gateway status` and
+`enterprise linux discovery` read it; the `defenseclaw` command line and TUI do
+not, because the managed packages ship neither in this release. Other computers
+omit it.
+
+```json title="GET /health, ai_runtime.details.planes.c.backend (trimmed, values illustrative)"
+{
+  "kind": "tetragon",
+  "version": "v1.7.1",
+  "mode": "consume",
+  "socket": "/var/run/tetragon/tetragon.sock",
+  "events_lost": 0,
+  "loss_known": true,
+  "customer_events": {"seen": 322, "forwarded": 308, "dropped": 0, "container": 11, "capped": 0, "attributed": 1, "gated": 307},
+  "customer_policies": [
+    {"name": "file-sensitive", "mode": "monitor_only", "state": "enabled",
+     "seen": 212, "forwarded": 212, "dropped": 0, "container": 0, "capped": 0, "attributed": 0, "gated": 212}
+  ]
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `kind` | `tetragon`, or `native` for `cn_proc` and `fanotify` |
+| `version`, `mode`, `socket` | Tetragon's version, the effective `enterprise.tetragon` mode the helper runs, and the socket it reads |
+| `events_lost`, `loss_known` | What Tetragon reports losing. `loss_known: false` means its counters could not be read: show the loss as unknown, not as zero |
+| `fallback_reason` | When `kind` is `native` although Tetragon is wanted: a reason code, a colon and the detail, for example `tetragon_tcp_api` |
+| `policies` | DefenseClaw's own policies in Tetragon: `name`, `mode`, `state` and `error` |
+| `kernel_floor` | The kernel controls, when the helper runs `observe` or `enforce`: `mode`, `enrolled_users`, `enforced_users`, `burn_in_users`, `approval`, `paused_until`, `paused_by`, `blocked_1h`, `would_block_1h` (for every user on the computer in the last hour) and `next_ready_hours` (calendar time until the user closest to the end of burn-in is ready). The key keeps its name; the surfaces say "kernel controls" |
+| `customer_policies`, `customer_events` | Your own Tetragon policies, with the counts of their events: `seen`, `forwarded`, `dropped`, `container` and `capped` come from the helper, `attributed` (recorded below an AI agent) and `gated` (counted only) from the gateway. DefenseClaw reads these events and never changes the policies |
 
 ### Identity, profiles and IDE inventory
 
@@ -865,7 +914,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
-| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway` (with the compute `driver` it runs: `docker`, or `vm` for OpenShell's MicroVM driver), `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, `started_at` (when the sandbox runtime started: nothing keeps the sandboxes' hook and egress counters across a restart, so they count from then), and `daemon_uid` (the uid the daemon runs as; absent on Windows). |
+| `GET` | `/api/v1/sandbox/status` | — | `Status`: `enabled`, `available` and `reason`, the OpenShell `gateway` (with the compute `driver` it runs: `docker`, or `vm` for OpenShell's MicroVM driver), `ingress_addr` and `egress_addr`, the configured `pack` and `profile`, `admin` (see below), counts of `sandboxes`, `running`, and `pending_approvals`, `last_reconcile`, `started_at` (when the sandbox runtime started: nothing keeps the sandboxes' hook and egress counters across a restart, so they count from then), `daemon_uid` (the uid the daemon runs as; absent on Windows), and `telemetry_failures` and `telemetry_error` (the sandbox telemetry records the recorder refused since then, and the last refusal). |
 | `GET` | `/api/v1/sandbox/sandboxes` | — | `{"sandboxes": [Sandbox]}` |
 | `POST` | `/api/v1/sandbox/sandboxes` | `CreateRequest` | `Sandbox` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}` | — | `Sandbox` |
@@ -876,11 +925,16 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/review` | Optional `{"diff": bool}` | `ReviewResponse`: the `report`, a `summary`, a `risk_line`, the `unmasked_secrets` (project files that look like secrets and that the sandbox does not mask, so its next start refuses), and the `diff` when asked |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/accept` | Optional `{"snapshot_created_at": time, "session": int}`; `409 conflict` when the sandbox is running, its undo point was undone, it is another one than `snapshot_created_at` names, or the sandbox was started again since the `session` named; `400 invalid_request` for a copy-mode sandbox; `404 not_found` without an undo point | `Sandbox`, whose `snapshot` carries `accepted_at` |
 | `GET` | `/api/v1/sandbox/sandboxes/{name}/logs` | Query `lines` (optional, 0 or absent for all of it); `404 not_found` when no log was kept | `RunLog`: `name`, `state` (`exited` or `interrupted`), `exit`, `started_at`, `kept_at`, `log` |
+| `GET` | `/api/v1/sandbox/sandboxes/{name}/destinations` | — | `Destinations`: `name`, `harness`, `destinations` (one row per host: `host`, `ports`, `kind` (`model_provider`, `credential` for the endpoint of a `--credential` binding, `harness_vendor`, `other_ai_api` and `unknown_ai` for shadow AI, `this_machine` for a port on this machine through `host.openshell.internal`, else the egress category it was allowed under, `blocked` or `other`), `provider`, `vendor`, `category`, `rule`, `sources`, the `connections`, `tunnels`, `refused`, `blocked` and `model_turns` counts, `bytes_up`, `bytes_down`, the `binaries` and `pid` OpenShell named, the process `lineage` when the process tree is on, `first_seen`, `last_seen`), `models` (the `provider`, `model`, `calls` and `failed` calls OpenShell's inference route reported) and `dropped` (rows dropped over 512) |
 | `POST` | `/api/v1/sandbox/sandboxes/{name}/workspace` | `WorkspaceReport` | `{"status": "recorded"}` |
+| `POST` | `/api/v1/sandbox/sandboxes/{name}/discover` | Optional `{}`; `409 conflict` when the sandbox is not running; `503 disabled` when `ai_discovery.enabled` is `false` | `DiscoveryResult`: `name`, `scanned_at`, `duration_ms`, `result` (`ok`, or `partial` with the `problems`), the `entries` the sandbox listed, the `files` scanned, and the `signals` found (`category`, `product`, `vendor`, `detector`, `names`, `confidence`). The gateway's AI inventory takes them up on its next scan. |
+| `GET` | `/api/v1/sandbox/sandboxes/{name}/processes` | — | `ProcessList`: `name`, `enabled` (whether the sandbox's process tree is on), `sampled_at`, `interval_seconds`, the live `processes` and up to 256 that `exited` most recently (each with `pid`, `ppid`, `uid`, `started_at`, `exited_at`, `exit_code`, `comm`, `exe`, `cwd`, `cmdline` and `source`: `sample` or `ocsf`), and `truncated` when the last sample may lack processes. The text fields are the agent's to choose. |
 | `GET` | `/api/v1/sandbox/approvals` | Query `sandbox` (optional) | `{"approvals": [Approval]}` |
 | `POST` | `/api/v1/sandbox/approvals/{id}` | `ApprovalDecision` | `ApprovalResult`: the `approval`, whether it was `persisted`, a `message` |
 | `POST` | `/api/v1/sandbox/egress/unblock` | `UnblockRequest` | `UnblockResponse`: `host`, `sandbox`, `scope` (`sandbox` or `always`), `persisted`, `message` |
 | `GET` | `/api/v1/sandbox/policy/explain` | Query, see below | `Explain` |
+| `POST` | `/api/v1/sandbox/policy/test` | `{"sandbox", "checks": [{"host", "port", "binary"}]}`, at most 1024 checks; `404 not_found` for an unknown sandbox | `PolicyTestResult`, see [Policy test](#policy-test) |
+| `POST` | `/api/v1/sandbox/ready` | Optional `{}` | `Status`. A managed computer's per-user sandbox daemon readies the account's OpenShell first: in setup mode it installs the pinned release into the account's `~/.local`, and in both install modes it starts and registers the account's OpenShell gateway. `sandbox run` calls it before a first run. A failure is `503 unavailable` with the reason. The per-user gateway has nothing to ready and answers the status. |
 | `GET` | `/api/v1/sandbox/activity` | Query `sandbox`, `since`, `follow` | `{"events": [ActivityEvent]}`, or a server-sent event stream |
 
 Any other path under `/api/v1/sandbox/` gets 404 `not_found`.
@@ -895,12 +949,13 @@ it for `sandbox run`.
 | `harness` | Required. The connector to run, such as `claudecode` or `codex`. |
 | `project` | Required. The absolute host path of the launch folder. In mount mode the daemon checks and mounts it. In copy mode it only labels the sandbox: the CLI stages and uploads the copy after the create, then reports it with `POST …/{name}/workspace`. |
 | `name` | Optional. At most 19 lowercase letters, digits, and `-` (OpenShell 0.1.1 refuses longer names). Empty picks `<folder>-<random>`, the folder name cut to fit. |
-| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed). |
+| `pack`, `profile`, `copy`, `safe`, `yolo`, `context`, `unmask`, `host_ports`, `no_mcp`, `learn`, `process_tree`, `cpu`, `memory` | The run options that take part in [policy resolution](/docs/sandboxes/policy-packs#how-the-effective-policy-is-computed). |
 | `no_snapshot` | Skip the pre-session snapshot of a mounted project, and so undo. |
 | `no_build` | Refuse, with 409 `image_unavailable`, instead of building and hook-checking a missing harness image inside the request. A build can take minutes. |
 | `llm` | The model credential: `profile` (a provider profile the harness supports, such as `defenseclaw-anthropic`), `credentials` (its environment variable names and secret values), and `bedrock_region`. |
 | `credentials` | `--credential` bindings: `name`, `value`, `host`, and `port` (default 443). |
 | `env` | Non-secret environment variables. DefenseClaw, proxy, and loader variables, and variables the harness image pins, are refused. |
+| `repo_policy_digest` | Optional. The digest of the project's [repository policy](/docs/sandboxes/policy-packs#repository-policy-defenseclawsandboxyaml) the client resolved the run with (`Explain.repo_policy.digest`), or `none` when it had none. The daemon reads the file itself and answers `409 conflict` when it changed since. |
 
 Secret values in `llm.credentials` and `credentials` go to OpenShell as
 provider credentials. The daemon never stores them or returns them.
@@ -915,13 +970,20 @@ when OpenShell no longer has it), and its policy: `pack`, `pack_digest`,
 `tamper_tier`, `hooks` (hook traffic, blocked tool calls, the last block's
 plain reason, tamper counts, the verdicts per hook event under the
 harness's own event names in `events`, at most 48 names with the rest in
-`other_events`, and whether hooks are `silent` or `unreachable`),
+`other_events`, whether hooks are `silent` or `unreachable`, and
+`on_silence` with `silence_after`: `stop` or `alert`, what silent hooks
+lead to once the harness has worked that long without them),
 `endpoints` (the last result of each credentialed endpoint),
-`egress` totals, `pending_approvals`, the
+`egress` totals (with `model_providers`, `harness_vendor` and `shadow_ai`,
+the AI destinations of its destinations view by kind), `pending_approvals`, the
 `workspace` and `mcp` banner views, `snapshot`, `session` (a count that goes
 up each time the daemon sees the sandbox become ready), `violations` (settings the
-policy clamped), `warnings`, `orphaned`, and `nested_repos` (repositories the
-nested-repository guard found in a mounted project). `launch` holds what the
+policy clamped), `warnings`, `orphaned`, `nested_repos` (repositories the
+nested-repository guard found in a mounted project), `process_tree`
+when its processes are sampled (`GET …/{name}/processes`), and `repo_policy`
+when the project's `.defenseclaw/sandbox.yaml` is part of its posture
+(`path`, `digest`, and `tightened`, the settings it made stricter; never its
+content). `launch` holds what the
 CLI needs to start the harness. `credentials` lists the sandbox's
 `--credential` bindings (`name`, `host` and `port`, never the value) and
 `host_ports` the host ports it may ask to reach: what a resume keeps.
@@ -985,9 +1047,15 @@ sandbox. Only refusals the policy marks unblockable can be lifted; see
 provenance. The query names either `sandbox` (the policy that sandbox runs
 with, against the current config) or the run options `harness`, `pack`,
 `profile`, `project`, `copy`, `safe`, `yolo`, and `unmask` (repeatable).
-The `Explain` response has the `pack`, `pack_source`, and `pack_digest`, the
-`profile`, `network_mode`, and `approvals`, the `admin` status, `settings`,
-and `violations`. Before a create on a MicroVM gateway, `vm_first_boot` says
+The `Explain` response has the `pack`, `pack_source`, and `pack_digest`,
+`pack_chain` (the packs it extends, parent first, each with `name`,
+`builtin`, `source`, and `digest`), `repo_policy` (the project's repository
+policy the posture includes: `path`, `digest`, the keys it `tightened`, and
+the file's `content`, for a new run read from `project`, for a sandbox the
+copy its create read), the `profile`, `network_mode`, and `approvals`, the
+`admin` status, `settings`, and `violations`. A repository policy that would
+loosen the policy adds one fatal violation per key, with `source` `repo`.
+Before a create on a MicroVM gateway, `vm_first_boot` says
 the image the sandbox would boot has no prepared MicroVM disk yet, so its
 first start takes about a minute.
 
@@ -1002,14 +1070,32 @@ Codex), `run=true` describes that request with the following parameters:
 
 Without `run`, the daemon uses the newest sandbox of the harness.
 
-Each setting has a `key`, `value`, `source` (`pack`, `user`, `flag`, `admin`,
-`gateway`, or `default`), `origin` (such as `openshell.admin.min_profile`),
-and, for a clamped setting, the value `requested`. `gateway` is the compute
+Each setting has a `key`, `value`, `source` (`pack`, `user`, `flag`, `repo`,
+`admin`, `gateway`, or `default`), `origin` (such as
+`openshell.admin.min_profile`), and, for a clamped setting or one the
+repository policy tightened, the value `requested`. `gateway` is the compute
 driver of the OpenShell gateway (origin `openshell.gateway.compute_driver`):
 OpenShell's MicroVM driver mounts no host folders, so it runs every project
 on a copy. `admin` has `configured`,
 `authority` (`authoritative` in `managed_enterprise`, otherwise `advisory`),
 and `detail`.
+
+### Policy test
+
+`POST /api/v1/sandbox/policy/test` judges destinations with a sandbox's
+egress policy as its egress proxy does: the policy resolved against the
+current configuration, with the sandbox's own decider, so its unblocks
+count. Each check names a `host`, an optional `port` (0 judges the host on
+any port the policy carries), and an optional `binary`, which only labels
+the answer: the proxy decides by destination. The `PolicyTestResult` has the
+`sandbox`, `pack`, `profile`, `network_mode`, and one `decisions` entry per
+check: the check's fields, `allowed`, the deciding `rule` (`invalid`,
+`host_internal`, `private_network`, `port`, `admin_block`,
+`admin_allow_only`, `block`, `unblock`, `allow`, `feed`, `network_open`,
+`ip_literal`, `network_allowlist`, `network_deny`), the `match` (pattern,
+feed entry, or port), the `source` setting, the `reason`, `unblockable`, and
+`direct` when one of the sandbox's providers opens the destination around the
+proxy. `defenseclaw sandbox policy test --sandbox NAME` sends it.
 
 ### Activity stream
 
@@ -1022,17 +1108,24 @@ events after `since`, or after the `Last-Event-ID` header, which wins over
 ```text
 id: 42
 event: activity
-data: {"seq":42,"time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
+data: {"seq":42,"epoch":"3f9c2a1d7b6e4058","time":"2026-09-27T10:15:03Z","kind":"egress.blocked","sandbox":"myapp-7f3a","host":"webhook.site","port":443,"source":"dc-egress-proxy","category":"webhook_catcher","unblockable":true}
 ```
 
 A `: keepalive` comment follows the replay and repeats every 15 seconds.
 `sandbox` limits the feed to one sandbox. Too many open streams get 429.
 
-Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
-`sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
+Each `ActivityEvent` has a `seq` (one higher per event), `epoch`, `time`,
+`kind`, and `sandbox`, plus the fields of its kind: `host`, `port`, `method`, `source`
 (`dc-egress-proxy` or `openshell`), `category`, `rule`, `unblockable`,
 `bytes_up`, `bytes_down`, `threshold`, `approval_id`, `tool`, `event`,
 `phase`, `severity`, `reason`, and `message`.
+
+The feed lives in the daemon's memory. A daemon that restarts starts a new
+feed, numbered from one again under a new `epoch` (16 hex digits), so a
+client that resumes with `since` compares the epoch of what it reads with
+the one it last saw: another epoch, or nothing at all after `since - 1`,
+means the daemon restarted, and the client reads the new feed from its start
+(`since=0`). The TUI and the macOS app do this.
 
 | `kind` | Meaning |
 | --- | --- |
@@ -1043,7 +1136,7 @@ Each `ActivityEvent` has a `seq` (one higher per event), `time`, `kind`, and
 | `tool.blocked` | DefenseClaw blocked a tool call. `reason` is plain and never quotes matched content. |
 | `hook.blocked` | DefenseClaw blocked a hook event other than a tool call, such as a submitted prompt (`event` names it). The sandbox's `hooks.prompt_blocked` counts blocked prompts. |
 | `sandbox.lifecycle` | A sandbox changed phase. |
-| `finding` | A finding. Its `reason` is, for example, `hook_tamper` (a tool ran without a DefenseClaw verdict), `hook_silence`, `hooks_unreachable` (hooks do not reach DefenseClaw, so every tool call is blocked), `hooks_restored`, or `nested_repo`. |
+| `finding` | A finding. Its `reason` is, for example, `hook_tamper` (a tool ran without a DefenseClaw verdict), `hook_silence`, `hooks_unreachable` (hooks do not reach DefenseClaw, so every tool call is blocked), `hooks_restored`, `nested_repo`, or `shadow_ai` (an AI API that is neither the sandbox's model provider nor its harness's vendor; `host` names it). |
 | `workspace` | An undo, or a copy-mode upload or pull. |
 | `dropped` | A slow subscriber missed events. |
 
@@ -1064,7 +1157,7 @@ starts with "blocked by your organization's DefenseClaw policy".
 | 409 | `conflict` | The sandbox exists already or is in the wrong phase, another sandbox already mounts the folder (or one inside or around it) live, or an undo would revert a folder another running sandbox mounts. |
 | 409 | `needs_copy` | The project cannot be mounted live (a linked worktree, `.git` as a symbolic link, a git directory outside the folder, or a gateway whose compute driver mounts no host folders, when the request staged no copy); `detail` says why. `sandbox run` then creates the sandbox in copy mode. |
 | 409 | `image_unavailable` | No hook-checked harness image, and building one was refused or failed. |
-| 422 | `policy_rejected` | OpenShell rejected the sandbox configuration, or the sandbox it made does not run as DefenseClaw prepared it (the check after ready on the MicroVM driver: the identity the workload runs as, its capabilities, and DefenseClaw's hook and settings files). The sandbox is deleted, or stopped again after a start. |
+| 422 | `policy_rejected` | OpenShell rejected the sandbox configuration, or the sandbox it made does not run as DefenseClaw prepared it (the check after ready, on every compute driver: the identity the workload runs as, its capabilities, and DefenseClaw's hook and settings files). The sandbox is deleted, or stopped again after a start, and the message says which. |
 | 429 | `unavailable` | Too many activity streams are open. |
 | 502 | `upstream_error` | An OpenShell call failed. |
 | 503 | `disabled`, `unavailable` | Sandboxes are off, or the runtime or the OpenShell gateway is not available, or (MicroVM driver) the volume of its image cache lacks the room to prepare the disk of an image the sandbox is the first to boot: the message names what is free and what is needed. |
@@ -1088,8 +1181,10 @@ sandbox. Inside the sandbox, both listeners are addressed as
 
 The gateway starts both listeners, and the sandbox manager behind the
 [Sandbox API](#sandbox-api), with the API when `openshell.enabled` is `true`
-on Linux or macOS. In a `managed_enterprise` install it starts neither, and
-`/health` reports the `sandbox` subsystem as `disabled`. A listener that
+on Linux or macOS, in a standalone `managed_enterprise` install as well
+([Sandboxes on managed computers](/docs/enterprise/sandboxes)). On Windows, on
+an Intel Mac and in a Secure Client profile it starts neither, and `/health`
+reports the `sandbox` subsystem as `disabled`. A listener that
 cannot start marks the subsystem `degraded` (sandbox hooks then fail closed),
 but never stops the API.
 

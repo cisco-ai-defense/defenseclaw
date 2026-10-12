@@ -166,9 +166,35 @@ var domainCategories = map[string]Category{
 	"cdn-lfs.huggingface.co": CategoryModelHub,
 }
 
+// multiVendor is the vendor of a signature that lists the model API hosts
+// of several vendors (the AI SDKs signature). Its name names no provider,
+// so each of its hosts takes the vendor apiVendors gives it: its name, its
+// price, and an id of its own.
+const multiVendor = "multiple"
+
+// apiVendors are the vendors of the model API hosts a multi-vendor
+// signature lists, spelled as vendorCategories keys them.
+var apiVendors = map[string]string{
+	"api.openai.com":                    "OpenAI",
+	"api.anthropic.com":                 "Anthropic",
+	"generativelanguage.googleapis.com": "Google",
+	"aiplatform.googleapis.com":         "Google",
+	"api.mistral.ai":                    "Mistral AI",
+	"api.cohere.ai":                     "Cohere",
+	"api.groq.com":                      "Groq",
+	"openrouter.ai":                     "OpenRouter",
+	"api.x.ai":                          "xAI",
+	"api.perplexity.ai":                 "Perplexity",
+	"api.together.xyz":                  "Together",
+	"api.deepseek.com":                  "DeepSeek",
+	"api.fireworks.ai":                  "Fireworks",
+	"api.replicate.com":                 "Replicate",
+}
+
 // Provider is a resolved egress peer.
 type Provider struct {
-	// ID is the signature id the domain came from, or "" for an unknown
+	// ID is the signature id the domain came from (with "/" and the
+	// domain for a multi-vendor signature's), or "" for an unknown
 	// inference-shaped host.
 	ID string
 	// DisplayName is what an operator reads.
@@ -178,6 +204,10 @@ type Provider struct {
 	// MatchedDomain is the catalog domain that matched, which is what makes
 	// the classification auditable.
 	MatchedDomain string
+	// SupportedConnector is the DefenseClaw connector the signature is of
+	// (its supported_connector), "" for every other provider: a host of the
+	// harness's own vendor is no shadow AI in that harness's sandbox.
+	SupportedConnector string
 }
 
 // Weight prices reaching this provider.
@@ -229,12 +259,18 @@ func FromSignatures(signatures []inventory.AISignature) *Catalog {
 				continue
 			}
 			provider := Provider{
-				ID:            signature.ID,
-				DisplayName:   signature.Name,
-				Vendor:        signature.Vendor,
-				Category:      classify(signature.Vendor, domain),
-				MatchedDomain: domain,
+				ID:                 signature.ID,
+				DisplayName:        signature.Name,
+				Vendor:             signature.Vendor,
+				MatchedDomain:      domain,
+				SupportedConnector: signature.SupportedConnector,
 			}
+			// A host of the AI SDKs signature is its vendor's, not "AI SDKs"
+			// by "Multiple" (GAP-0119).
+			if vendor, ok := apiVendors[domain]; ok && strings.EqualFold(strings.TrimSpace(signature.Vendor), multiVendor) {
+				provider.ID, provider.DisplayName, provider.Vendor = signature.ID+"/"+domain, vendor, vendor
+			}
+			provider.Category = classify(provider.Vendor, domain)
 			// First writer wins so a later signature cannot silently reclassify
 			// a domain an earlier one already owns.
 			if _, exists := catalog.exact[domain]; !exists {
@@ -294,6 +330,15 @@ var inferenceShapedFragments = []string{
 	"generativeai", "bedrock", "vertexai", "aiplatform",
 }
 
+// vendorSites maps the domain of a vendor named in inferenceShapedFragments
+// to that name. The catalog lists the vendor's model APIs (api.openai.com,
+// api.anthropic.com); any other host of its own (docs, help, status, the
+// console) is its website, so the vendor's name in it is no sign of an AI
+// endpoint the catalog misses (GAP-0214: a Codex sandbox reading
+// developers.openai.com raised shadow AI). A host of anyone else that carries
+// the name (my-openai-proxy.example.net, x.openai.azure.com) still is one.
+var vendorSites = map[string]string{"openai.com": "openai", "anthropic.com": "anthropic"}
+
 // InferenceShaped reports whether a hostname looks like an AI endpoint the
 // catalog does not know.
 func InferenceShaped(hostname string) bool {
@@ -301,8 +346,9 @@ func InferenceShaped(hostname string) bool {
 	if domain == "" {
 		return false
 	}
+	own := siteVendor(domain)
 	for _, fragment := range inferenceShapedFragments {
-		if strings.Contains(domain, fragment) {
+		if fragment != own && strings.Contains(domain, fragment) {
 			return true
 		}
 	}
@@ -310,8 +356,34 @@ func InferenceShaped(hostname string) bool {
 		if strings.HasPrefix(domain, prefix) {
 			// A bare "api." prefix is weak on its own; require the label to
 			// also suggest a model service rather than any REST API.
-			if strings.Contains(domain, "ai") || strings.Contains(domain, "model") ||
+			if aiWord(domain) || strings.Contains(domain, "model") ||
 				strings.Contains(domain, "chat") || strings.Contains(domain, "llm") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// siteVendor is the vendorSites name of the vendor whose own site domain is
+// on, "" for any other host.
+func siteVendor(domain string) string {
+	for site, name := range vendorSites {
+		if domain == site || strings.HasSuffix(domain, "."+site) {
+			return name
+		}
+	}
+	return ""
+}
+
+// aiWord reports a domain that has "ai" as a word: a label or a part of one
+// between hyphens that is "ai" or ends in it (x.ai, someai, my-ai-gateway),
+// not the letters inside another word (api.mailgun.net, api.airtable.com,
+// api.domain.com), which every other REST API would match.
+func aiWord(domain string) bool {
+	for _, label := range strings.Split(domain, ".") {
+		for _, part := range strings.Split(label, "-") {
+			if strings.HasSuffix(part, "ai") {
 				return true
 			}
 		}

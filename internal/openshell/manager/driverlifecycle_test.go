@@ -253,6 +253,7 @@ func TestTheViewJudgesVMResourcesAsTheStartDoes(t *testing.T) {
 
 	// The organization lowers the maximum below what every MicroVM gets.
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.MaxResources.CPU = "2" })
+	e.m.refreshEgress() // the config loop's re-resolution: the view judges the sandbox's own floor
 	if w := warnings(); !slices.Contains(w, over) || findWarning(w, "your organization now caps") != "" {
 		t.Fatalf("warnings = %q", w)
 	}
@@ -473,7 +474,7 @@ func TestStopOnVMFlushesFirst(t *testing.T) {
 	// Docker's stop keeps its exec as it was: no flush.
 	d := liveEnv(t, "dockerstop", nil)
 	d.stopBox("dockerstop")
-	dc := d.fake.ExecCalls()
+	dc := d.execCalls()
 	if len(dc) != 1 || dc[0].Command[2] != endHarnessScript || dc[0].Timeout != harnessExitWait+3*time.Second {
 		t.Fatalf("docker exec = %+v", dc)
 	}
@@ -484,5 +485,17 @@ func TestEndHarnessScriptFlushes(t *testing.T) {
 	out, err := exec.Command("/bin/sh", "-c", flushTrap+endHarnessScript, "defenseclaw-end-harness", "/nonexistent/harness", "1").Output()
 	if err != nil || strings.Join(strings.Fields(string(out)), " ") != "none synced" {
 		t.Fatalf("script = %q, %v", out, err)
+	}
+}
+
+// On a managed computer the bind-mount refusal sends the user to the help
+// desk, never to doctor --fix, which edits a configuration the
+// administrator renders (GAP-0449).
+func TestBindMountsOffManagedWording(t *testing.T) {
+	spec, _ := harness.Get("claudecode")
+	err := bindMountsOff(spec, false, true, true, errors.New("Conflict: caller driver config is disabled"))
+	e := sandboxapi.AsError(err)
+	if strings.Contains(e.Error(), "doctor --fix") || !strings.Contains(e.Detail, sandboxapi.RequestAccessFallback) {
+		t.Fatalf("managed refusal = %v", e)
 	}
 }

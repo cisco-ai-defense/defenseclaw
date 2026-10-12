@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
@@ -26,6 +27,26 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+// accountGroupNames names uid's groups; the sandbox rows that read them are
+// Linux-only, so Windows keeps the os/user lookup.
+func accountGroupNames(uid int) ([]string, error) {
+	account, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return nil, err
+	}
+	ids, err := account.GroupIds()
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, id := range ids {
+		if g, err := user.LookupGroupId(id); err == nil {
+			names = append(names, g.Name)
+		}
+	}
+	return names, nil
+}
 
 // pinStandaloneManagedEnv points an elevated administrator's (or
 // LocalSystem's) policy command at the standalone managed deployment, with

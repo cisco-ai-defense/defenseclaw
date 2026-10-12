@@ -1,0 +1,45 @@
+# Pause (or resume) DefenseClaw kernel enforcement on every host in the group.
+# A pause is host-wide: every user on the host moves to monitor mode within
+# about five seconds, and visibility continues. It ends by itself.
+#
+#   ansible-playbook -i inventory emergency-pause.yml -e reason=TICKET-123
+#   ansible-playbook -i inventory emergency-pause.yml -e reason=TICKET-123 -e pause_for=8h
+#   ansible-playbook -i inventory emergency-pause.yml -e pause_action=resume
+- name: Pause or resume DefenseClaw kernel enforcement
+  hosts: defenseclaw_linux
+  become: true
+  gather_facts: false
+  vars:
+    defenseclaw_gateway: /opt/defenseclaw/bin/defenseclaw-gateway
+    pause_action: pause
+    pause_for: 4h
+  tasks:
+    - name: Require a reason for a pause
+      ansible.builtin.assert:
+        that:
+          - reason is defined
+          - reason | length > 0
+        fail_msg: "Pass the ticket or reason with -e reason=TICKET-123"
+        quiet: true
+      when: pause_action == 'pause'
+
+    - name: Pause kernel enforcement
+      ansible.builtin.command:
+        argv:
+          - "{{ defenseclaw_gateway }}"
+          - enterprise
+          - linux
+          - tetragon
+          - pause
+          - --for
+          - "{{ pause_for }}"
+          - --reason
+          - "{{ reason }}"
+      changed_when: true
+      when: pause_action == 'pause'
+
+    - name: Resume kernel enforcement
+      ansible.builtin.command:
+        argv: ["{{ defenseclaw_gateway }}", enterprise, linux, tetragon, resume]
+      changed_when: true
+      when: pause_action == 'resume'

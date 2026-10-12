@@ -31,9 +31,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -170,6 +170,9 @@ type AIDiscoveryOptions struct {
 	// When set, full scans ingest it and this service's own process
 	// detector, which its sandbox blinds, is left to those scans.
 	UserScanDir string
+	// SandboxScanDir is <data_dir>/sandboxes, whose OpenShell sandboxes'
+	// scan records full scans ingest (SandboxScanDirForConfig).
+	SandboxScanDir string
 	// IDEInventory is ai_discovery.ide_inventory (all, ai_only or off).
 	IDEInventory string
 	// SecureClient marks the Secure Client profile, whose discovery output
@@ -385,6 +388,11 @@ type AISignal struct {
 	// the scan's own output.
 	UserID   string `json:"user_id,omitempty"`
 	UserName string `json:"user,omitempty"`
+	// SandboxID and SandboxName name the OpenShell sandbox a sandbox scan
+	// found the signal in (Source "sandbox"). The gateway takes both from
+	// the sandbox manager's record, never from the scan's own output.
+	SandboxID   string `json:"sandbox_id,omitempty"`
+	SandboxName string `json:"sandbox_name,omitempty"`
 	// UserEmail is the Claude Code or Codex account address read from the
 	// owner's own profile when ai_discovery.include_user_email is on
 	// (stampOwnerEmails, ScanUserHome). It is not kept in the state file.
@@ -645,6 +653,9 @@ type ContinuousDiscoveryService struct {
 	// processOwners, when set, limits the process detector to processes of
 	// these owners (the account name or uid of a per-user scan).
 	processOwners map[string]bool
+	// sandbox, when set, makes this the scanner of one sandbox's collected
+	// tree (ScanSandboxRoot): its facts stand in for the host's.
+	sandbox *sandboxFacts
 	// account, when set, is the account a per-user install belongs to: the
 	// owner of every signal its scans find (perUserAccount).
 	account ideOwner
@@ -683,11 +694,7 @@ func NewContinuousDiscoveryService(cfg *config.Config) (*ContinuousDiscoveryServ
 	return svc, nil
 }
 
-func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature, legacy ...any) *ContinuousDiscoveryService {
-	// Historical constructors accepted optional telemetry collaborators. The
-	// v8 runtime binds observability explicitly after construction, but keeping
-	// the optional arguments source-compatible lets older native tests build.
-	_ = legacy
+func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog []AISignature) *ContinuousDiscoveryService {
 	opts = normalizeAIDiscoveryOptions(opts)
 	svc := &ContinuousDiscoveryService{
 		opts:     opts,
@@ -840,6 +847,7 @@ func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
 		ManagedEnterprise:           managed.IsManagedEnterprise(cfg.DeploymentMode),
 		StandaloneEnterprise:        cfg.StandaloneEnterprise(),
 		UserScanDir:                 UserScanDirForConfig(cfg),
+		SandboxScanDir:              SandboxScanDirForConfig(cfg),
 		IDEInventory:                ad.EffectiveIDEInventory(),
 		SecureClient:                cfg.SecureClientIntegration(),
 	})
@@ -1504,6 +1512,9 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		}
 	}
 	measure := func(name string, fn func() ([]AISignal, int, error)) {
+		if s.hostOnlyDetector(name) {
+			return
+		}
 		start := time.Now()
 		child := scanObservation.startDetector(ctx, s, AIDiscoveryV8DetectorStart{
 			ScanID: scanID, Detector: name, StartedAt: start,
@@ -1597,6 +1608,18 @@ func (s *ContinuousDiscoveryService) scanSignals(
 			}
 			if len(errs) > 0 {
 				return out, files, errors.New("per-user scan records are incomplete")
+			}
+			return out, files, nil
+		})
+	}
+	if s.opts.SandboxScanDir != "" {
+		measure("sandbox_scan", func() ([]AISignal, int, error) {
+			out, files, errs := s.detectSandboxScans()
+			for key, detail := range errs {
+				stats.DetectorErrors[key] = detail
+			}
+			if len(errs) > 0 {
+				return out, files, errors.New("sandbox scan records are incomplete")
 			}
 			return out, files, nil
 		})
@@ -2134,17 +2157,35 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 	for _, sig := range s.catalog {
 		for _, candidate := range sig.MCPPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
-				if pathExists(path) && !s.profileLinkRefused(path) {
-					signal := s.signalFromMCPConfigPath(sig, path)
-					// A link swapped in during the read leaves no record.
-					if !s.profileLinkRefused(path) {
-						out = append(out, signal)
-					}
+				if !pathExists(path) || s.profileLinkRefused(path) {
+					continue
+				}
+				// A config read in full that declares no server is no MCP
+				// server (GAP-2337): Claude Code writes ~/.claude.json
+				// whether or not it has one, so every Claude Code home, and
+				// every Claude Code sandbox, listed an MCP server (GAP-0269).
+				// A link swapped in during the read leaves no record.
+				if signal := s.signalFromMCPConfigPath(sig, path); declaresMCPServer(signal) && !s.profileLinkRefused(path) {
+					out = append(out, signal)
 				}
 			}
 		}
 	}
 	return out
+}
+
+// declaresMCPServer reports an MCP config signal that names a server, or
+// one whose config could not be read in full (Partial), which may.
+func declaresMCPServer(signal AISignal) bool {
+	if signal.Partial {
+		return true
+	}
+	for _, ev := range signal.Evidence {
+		if ev.Type == "mcp_server" {
+			return true
+		}
+	}
+	return false
 }
 
 // signalFromMCPConfigPath builds a SignalMCPServer signal for an MCP
@@ -2560,6 +2601,9 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 // account's own Hermes home, so every user's Hermes category folders and
 // .bundled_manifest were listed as skills (GAP-2263).
 func (s *ContinuousDiscoveryService) isHermesSkillsRoot(path string) bool {
+	if s.sandbox != nil {
+		return s.sandbox.hermesSkills != "" && filepath.Clean(path) == s.sandbox.hermesSkills
+	}
 	if hermesskills.IsRoot(path) {
 		return true
 	}
@@ -2636,6 +2680,9 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 
 func (s *ContinuousDiscoveryService) isCodexBundledSkillContainer(path string) bool {
 	configured := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if s.sandbox != nil {
+		configured, _ = s.variable("CODEX_HOME")
+	}
 	if configured != "" {
 		if !filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
 			return false
@@ -2695,7 +2742,7 @@ func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
 	var out []AISignal
 	for _, sig := range s.catalog {
 		for _, bin := range sig.BinaryNames {
-			if path, err := exec.LookPath(bin); err == nil && path != "" {
+			if path, err := s.lookPath(bin); err == nil && path != "" {
 				out = append(out, s.signalFromPath(sig, SignalAICLI, "binary", path))
 			}
 		}
@@ -2704,7 +2751,7 @@ func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
 }
 
 func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
-	procs, err := processSnapshot()
+	procs, err := s.processes()
 	if err != nil {
 		return nil, fmt.Errorf("process snapshot: %w", err)
 	}
@@ -3135,7 +3182,7 @@ func (s *ContinuousDiscoveryService) detectLocalEndpoints() []AISignal {
 
 func (s *ContinuousDiscoveryService) detectEnvVars() []AISignal {
 	present := map[string]bool{}
-	for _, kv := range os.Environ() {
+	for _, kv := range s.environment() {
 		if idx := strings.IndexByte(kv, '='); idx > 0 {
 			present[strings.ToUpper(kv[:idx])] = true
 		}
@@ -3898,7 +3945,7 @@ func (s *ContinuousDiscoveryService) expandCandidatePath(candidate string) []str
 	}
 	missingEnv := false
 	candidate = os.Expand(candidate, func(name string) string {
-		value, ok := platformDiscoveryVariable(name, s.opts.HomeDir)
+		value, ok := s.variable(name)
 		if !ok || strings.TrimSpace(value) == "" {
 			missingEnv = true
 		}
@@ -4425,6 +4472,8 @@ func (s *ContinuousDiscoveryService) IngestExternalReport(ctx context.Context, r
 		report.Signals[i].Source = AISourceExternal
 		// Account attribution comes only from the guardian's per-user scans.
 		report.Signals[i].UserID, report.Signals[i].UserName, report.Signals[i].UserEmail = "", "", ""
+		// Sandbox attribution comes only from the sandbox manager's records.
+		report.Signals[i].SandboxID, report.Signals[i].SandboxName = "", ""
 		// Provenance country/publisher claims are catalog-controlled. An
 		// external discovery client may supply the model ID, but it cannot
 		// impersonate a higher-confidence publisher rule on outbound events.
@@ -4802,10 +4851,12 @@ func isSafeLoopbackEndpoint(endpoint string) bool {
 
 func isProjectPackageManifest(name string) bool {
 	lower := strings.ToLower(name)
-	return strings.HasSuffix(lower, ".csproj") ||
-		strings.HasSuffix(lower, ".fsproj") ||
-		strings.HasSuffix(lower, ".vbproj")
+	return slices.ContainsFunc(projectManifestSuffixes, func(suffix string) bool { return strings.HasSuffix(lower, suffix) })
 }
+
+// projectManifestSuffixes name the project files isProjectPackageManifest
+// reads as package manifests (lowercase).
+var projectManifestSuffixes = []string{".csproj", ".fsproj", ".vbproj"}
 
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
@@ -4903,13 +4954,12 @@ func projectRootForManifest(path string) string {
 // `__pycache__` and `library` (macOS) stay skipped because they never
 // contain manifest data we care about.
 func shouldSkipDiscoveryDir(name string) bool {
-	switch strings.ToLower(name) {
-	case ".git", ".cache", "cache", "dist", "build", "target", "__pycache__", "library":
-		return true
-	default:
-		return false
-	}
+	return slices.Contains(discoverySkipDirs, strings.ToLower(name))
 }
+
+// discoverySkipDirs are the folder names (lowercase) shouldSkipDiscoveryDir
+// skips; a sandbox scan's collector skips them too (PlanSandboxScan).
+var discoverySkipDirs = []string{".git", ".cache", "cache", "dist", "build", "target", "__pycache__", "library"}
 
 // pathHashKey is the per-installation HMAC key that turns the
 // otherwise-reversible path SHA-256 fingerprint into an

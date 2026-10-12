@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import codecs
 import copy
+import json
 import locale
 import logging
 import ntpath
@@ -34,7 +35,7 @@ import stat
 import subprocess
 import sys
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ from typing import Any
 import yaml
 
 from defenseclaw import connector_paths, credential_provenance, envvars, legacy_connector
+from defenseclaw.config_writer import ManagedConfigWriteError
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
 # moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
@@ -684,14 +686,37 @@ def ignored_deployment_pins() -> list[str]:
     return list(_ignored_deployment_pins)
 
 
-def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None) -> None:
-    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_doc(data)
-    if not managed:
+class ManagedStandaloneWriteError(ManagedConfigWriteError, PermissionError):
+    """The writer's managed refusal of a standalone managed config change,
+    also a PermissionError for the callers that report a refused save as one."""
+
+
+def _assert_config_write_allowed(path: str, data: dict[str, Any] | None = None, actor: str | None = None) -> None:
+    """Refuse a write the managed gate refuses.
+
+    A standalone managed document or host takes changes only from the
+    lifecycle and migrations, whoever runs the process (Go
+    ``configwrite.managedRefuses``). The Secure Client profile keeps its
+    administrator check.
+    """
+    from defenseclaw import config_writer
+
+    document = data if _is_managed_enterprise_doc(data) else None
+    if document is None:
         try:
-            managed = _is_managed_enterprise_doc(_load_existing_config_yaml(path))
+            existing = _load_existing_config_yaml(path)
         except Exception:
-            managed = False
-    if managed and not _is_admin_process():
+            existing = None
+        if _is_managed_enterprise_doc(existing):
+            document = existing
+    managed = document is not None or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+    if not managed and not config_writer.machine_managed_standalone():
+        return
+    if not config_writer.secure_client_document(document if document is not None else (data or {})):
+        if actor in (config_writer.ACTOR_LIFECYCLE, config_writer.ACTOR_MIGRATION):
+            return
+        raise ManagedStandaloneWriteError(config_writer.MANAGED_REFUSAL)
+    if not _is_admin_process():
         raise PermissionError(
             "managed_enterprise config changes require operating-system "
             "administrator privileges; use the enterprise managed config path "
@@ -859,7 +884,6 @@ class ClawConfig:
     home_dir: str = "~/.openclaw"
     config_file: str = "~/.openclaw/openclaw.json"
     workspace_dir: str = ""
-    openclaw_home_original: str = ""
 
 
 @dataclass
@@ -1494,8 +1518,6 @@ class ScannersConfig:
     codeguard: str = ""
 
 
-DEFAULT_SANDBOX_HOME = "/home/sandbox"
-
 # Sandbox profiles, loosest to strictest (mirrors OpenShellProfile* in
 # internal/config/openshell.go).
 OPENSHELL_PROFILES = ("open", "balanced", "strict")
@@ -1626,6 +1648,64 @@ class OpenShellAdminConfig:
     require_copy_for: list[str] = field(default_factory=list)
     max_resources: OpenShellResourcesConfig = field(default_factory=OpenShellResourcesConfig)
     locked: list[str] = field(default_factory=list)
+    # Managed identity-based sandbox floor keys (mirrors the Go fields of
+    # the same names). The same type is ``openshell.admin`` (the organization
+    # floor) and ``guardrail.profiles.<p>.sandbox`` (a tighten-only overlay).
+    # ``None`` is unset (no constraint); the schema refuses an explicit
+    # empty list.
+    allowed: bool | None = None
+    required_for: list[str] | None = None
+    when_unavailable: str = ""  # refuse | alert ("" = refuse)
+    user_approvals: str = ""  # none | session ("" = unset)
+    allowed_credentials: list[str] | None = None  # provider names or ["none"]
+    on_silence: str = ""  # stop | alert
+    max_silence_after: str = ""  # Go duration, >= 1m
+    process_tree: bool | None = None
+    foreign_sandboxes: str = ""  # stop | alert ("" = stop when managed)
+    allow_upstream_telemetry: bool | None = None
+    delete_stopped_after: str = ""  # Go duration or Nd, >= 1h
+    request_access: str = ""  # <= 512 printable bytes
+    # none refuses a Linux sandbox that wants the MicroVM driver where KVM
+    # is not available (no docker fallback); none wins, docker never loosens.
+    driver_fallback: str = ""  # docker | none ("" = unset)
+
+
+# The managed sandbox floor keys of OpenShellAdminConfig, unset when None or
+# "" (Go omitempty): a save never writes them unset.
+_OPENSHELL_ADMIN_FLOOR_KEYS = (
+    "allowed",
+    "required_for",
+    "when_unavailable",
+    "user_approvals",
+    "allowed_credentials",
+    "on_silence",
+    "max_silence_after",
+    "process_tree",
+    "foreign_sandboxes",
+    "allow_upstream_telemetry",
+    "delete_stopped_after",
+    "request_access",
+    "driver_fallback",
+)
+
+
+@dataclass
+class EnterpriseOpenShellConfig:
+    """``enterprise.openshell``: how the lifecycle provides and pins OpenShell.
+
+    Mirrors ``EnterpriseOpenShellConfig`` in internal/config/enterprise.go.
+    Every key is lifecycle (restart-required); DefenseClaw never ships
+    OpenShell.
+    """
+
+    install: str = ""  # prerequisite | setup ("" = prerequisite)
+    driver: str = ""  # docker | vm | auto ("" = vm on macOS, docker on Linux)
+    # Linux, driver vm or auto, KVM not available for the user: docker
+    # (the default) or none (refuse the sandbox).
+    driver_fallback: str = ""  # docker | none ("" = docker)
+    version: str = ""  # "0.1.3" or a range such as ">=0.1.1 <0.2.0"
+    gateway_port: int = 0  # 0 = 17670
+    e2fsprogs_dir: str = ""  # macOS only; absolute, root-owned chain
 
 
 @dataclass
@@ -1636,11 +1716,10 @@ class OpenShellConfig:
     sandbox policy pack governs (``profile``, ``yolo``, ``workdir.mode``, upload
     caps, egress lists, ``mcp.import``) stay empty unless the operator sets
     them, so they inherit the pack. The legacy openshell-sandbox (0.0.x)
-    sub-keys ``policy_dir``, ``version``, ``auto_pair`` and ``host_networking``
-    are accepted and ignored (the v8 save only writes modeled fields that
-    changed, so they stay on disk untouched). ``mode`` and ``sandbox_home`` are
-    read only by :func:`legacy_standalone_api_host` and ``defenseclaw sandbox
-    legacy-cleanup``.
+    sub-keys ``policy_dir``, ``version``, ``auto_pair``, ``host_networking``,
+    ``mode`` and ``sandbox_home`` are accepted and ignored (the v8 save only
+    writes modeled fields that changed, so they stay on disk untouched; the
+    config_version 9 migration drops ``mode`` and ``sandbox_home``).
     """
 
     enabled: bool = False
@@ -1670,15 +1749,6 @@ class OpenShellConfig:
     token_delivery: str = "provider"
     middleware: OpenShellMiddlewareConfig = field(default_factory=OpenShellMiddlewareConfig)
     admin: OpenShellAdminConfig = field(default_factory=OpenShellAdminConfig)
-    # LEGACY(openshell-0.0.x): delete one release after cleanup.
-    mode: str = ""
-    sandbox_home: str = DEFAULT_SANDBOX_HOME
-
-    def is_standalone(self) -> bool:
-        return self.mode == "standalone"
-
-    def effective_sandbox_home(self) -> str:
-        return self.sandbox_home or DEFAULT_SANDBOX_HOME
 
     def effective_ingress_port(self, api_port: int) -> int:
         """Sandbox hook ingress port; 0 means ``api_port + 1``."""
@@ -1693,56 +1763,19 @@ class OpenShellConfig:
         return (api_port if api_port > 0 else 18970) + 2
 
 
-def legacy_standalone_configured(cfg: Any) -> bool:
-    """Whether *cfg* still records the removed openshell-sandbox standalone mode.
-
-    Mirrors ``IsLegacyStandalone`` in internal/config/legacy_openshell.go.
-
-    LEGACY(openshell-0.0.x): delete one release after cleanup.
-    """
-    openshell = getattr(cfg, "openshell", None)
-    is_standalone = getattr(openshell, "is_standalone", None)
-    if callable(is_standalone):
-        return bool(is_standalone())
-    return getattr(openshell, "mode", "") == "standalone"
-
-
-def legacy_standalone_api_host(cfg: Any) -> str | None:
-    """Return the API bind host of a legacy standalone install, or ``None``.
-
-    A host that still runs the removed openshell-sandbox mode keeps
-    ``openshell.mode: standalone`` and points ``guardrail.host`` at the host
-    end of the sandbox veth link. Until ``defenseclaw sandbox legacy-cleanup``
-    resets that, the gateway keeps its API on that host, so every CLI client
-    and health probe must dial it too. An explicit ``gateway.api_bind`` still
-    wins at each call site. Mirrors ``LegacyStandaloneAPIHost`` in
-    internal/config/legacy_openshell.go.
-
-    LEGACY(openshell-0.0.x): delete one release after cleanup.
-    """
-    if not legacy_standalone_configured(cfg):
-        return None
-    host = str(getattr(getattr(cfg, "guardrail", None), "host", "") or "").strip()
-    if not host or host == "localhost":
-        return None
-    return host
-
-
 def api_bind_host(cfg: Any) -> str:
     """Return the address the gateway REST API listens on.
 
-    An explicit ``gateway.api_bind`` wins, then the legacy standalone host,
-    then loopback. Mirrors ``APIBindHost`` in internal/config/config.go, so
-    every CLI caller agrees with the listener. Clients dial
+    An explicit ``gateway.api_bind``, else loopback. Mirrors ``APIBindHost``
+    in internal/config/config.go, so every CLI caller (the upgrade, watchdog
+    and status probes among them) agrees with the listener. Clients dial
     :func:`defenseclaw.gateway.gateway_api_client_host`, which maps an
     unspecified bind to a loopback address.
     """
     if cfg is None:
         return "127.0.0.1"
     bind = str(getattr(getattr(cfg, "gateway", None), "api_bind", "") or "").strip()
-    if bind:
-        return bind
-    return legacy_standalone_api_host(cfg) or "127.0.0.1"
+    return bind or "127.0.0.1"
 
 
 @dataclass
@@ -2419,6 +2452,8 @@ class GuardrailProfile:
     rules: GuardrailRulesConfig | None = None
     block_message: str = ""
     connectors: dict[str, PerConnectorGuardrailConfig] = field(default_factory=dict)
+    # Tightens openshell.admin for subjects of this profile; None adds nothing.
+    sandbox: OpenShellAdminConfig | None = None
     enabled: bool | None = None
     hook_fail_mode: str = ""
 
@@ -2771,6 +2806,327 @@ def validate_guardrail_profiles(gc: GuardrailConfig) -> None:
         raise ValueError(f"guardrail.default_profile: unknown profile {default!r}")
 
 
+# --- Sandbox floors ---------------------------------------------------------
+#
+# openshell.admin is the organization floor and guardrail.profiles.<p>.sandbox
+# tightens it (Go TightenOpenShellAdmin). validate_sandbox_floors mirrors the Go
+# loader's refusals of the managed floor keys message for message (the shared
+# corpus internal/config/testdata/sandbox_floor_cases.yaml pins both). It reads
+# the raw document so an explicit empty list stays apart from an unset key.
+#
+# Python reports the first refusal where Go joins every refusal of a section;
+# the corpus checks that Go's text contains Python's. Only the Go loader (which
+# the gateway, ensure and verify run, so no such config takes effect) checks:
+# the older openshell.admin keys (required_pack_digest, min_profile, egress
+# patterns, require_copy_for, max_resources, locked) in openshell.admin and in
+# profile sandbox sections, the managed required_pack location rule, the pack
+# strictness hook, and enterprise.openshell (the lifecycle owns that block and
+# Python never writes it).
+
+_SANDBOX_INTERSECT_LISTS = ("required_for", "allowed_credentials", "allowed_harnesses", "egress_allow_only")
+_SANDBOX_CREDENTIAL_RE = re.compile(r"^(none|[a-z0-9][a-z0-9_-]{0,63})$")
+_SANDBOX_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_SANDBOX_DAYS_RE = re.compile(r"^([0-9]{1,6})d$")
+_GO_DURATION_RE = re.compile(r"^(?:(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|\u00b5s|\u03bcs|ms|s|m|h))+$")
+_GO_DURATION_PART_RE = re.compile(r"([0-9]*(?:\.[0-9]*)?)(ns|us|\u00b5s|\u03bcs|ms|s|m|h)")
+_GO_DURATION_UNIT_NS = {
+    "ns": 1,
+    "us": 1_000,
+    "\u00b5s": 1_000,
+    "\u03bcs": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60 * 1_000_000_000,
+    "h": 3600 * 1_000_000_000,
+}
+_SANDBOX_SECURE_CLIENT_PROFILES = (
+    "guardrail.profiles, guardrail.profile_assignments and guardrail.default_profile are not supported with "
+    "the Secure Client integration"
+)
+
+
+def _sandbox_floor_duration_ns(value: str) -> int | None:
+    """Nanoseconds of a floor duration (a Go duration or Nd), or None."""
+    from fractions import Fraction
+
+    v = value.strip()
+    days = _SANDBOX_DAYS_RE.match(v)
+    if days:
+        return int(days.group(1)) * 24 * 3600 * 1_000_000_000
+    if v == "0":
+        return 0
+    if not _GO_DURATION_RE.match(v):
+        return None
+    total = Fraction(0)
+    for number, unit in _GO_DURATION_PART_RE.findall(v):
+        total += Fraction(number) * _GO_DURATION_UNIT_NS[unit]
+    return int(total)
+
+
+def _sandbox_duration_error(field_name: str, value: Any, minimum_ns: int, minimum: str, example: str) -> str | None:
+    if value in (None, ""):
+        return None
+    ns = _sandbox_floor_duration_ns(str(value))
+    if ns is None:
+        return f"{field_name} {_go_quote(value)} must be a duration such as {example}"
+    if ns < minimum_ns:
+        return f"{field_name} {_go_quote(value)} must be at least {minimum}"
+    return None
+
+
+def _go_quote(value: Any) -> str:
+    """Go's %q of a plain string (the names these messages quote)."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _sandbox_enum_error(field_name: str, value: Any, *allowed: str) -> str | None:
+    if value in (None, "") or value in allowed:
+        return None
+    return f"{field_name} {_go_quote(value)} must be one of {', '.join(allowed)}"
+
+
+def _sandbox_section_error(section: Mapping[str, Any], prefix: str) -> str | None:
+    """The first refusal of one floor section's managed keys (Go
+    validateManagedFloor), or None."""
+    for key in _SANDBOX_INTERSECT_LISTS:
+        if isinstance(section.get(key), list) and not section[key]:
+            return f"{prefix}.{key}: an empty list is refused; leave the key out for no constraint"
+    for key, allowed in (
+        ("when_unavailable", ("refuse", "alert")),
+        ("user_approvals", ("none", "session")),
+        ("on_silence", ("stop", "alert")),
+        ("foreign_sandboxes", ("stop", "alert")),
+        ("driver_fallback", ("docker", "none")),
+    ):
+        error = _sandbox_enum_error(f"{prefix}.{key}", section.get(key), *allowed)
+        if error:
+            return error
+    required_for = section.get("required_for") if isinstance(section.get("required_for"), list) else []
+    for index, name in enumerate(required_for):
+        if not _SANDBOX_NAME_RE.match(str(name).strip()):
+            return f"{prefix}.required_for[{index}]: invalid name {_go_quote(name)}"
+        if connector_paths.normalize(str(name)) not in connector_paths.KNOWN_CONNECTORS:
+            return f"{prefix}.required_for[{index}]: {_go_quote(name)} is not a known connector"
+    credentials = section.get("allowed_credentials") if isinstance(section.get("allowed_credentials"), list) else []
+    if len(credentials) > 64:
+        return f"{prefix}.allowed_credentials: at most 64 entries"
+    for index, name in enumerate(credentials):
+        if not isinstance(name, str) or not _SANDBOX_CREDENTIAL_RE.match(name):
+            return (
+                f"{prefix}.allowed_credentials[{index}]: {_go_quote(name)} must be none or a provider name "
+                '(lowercase letters, digits, "_" and "-")'
+            )
+    if len(credentials) > 1 and "none" in credentials:
+        return f"{prefix}.allowed_credentials: none cannot be combined with other credentials"
+    for error in (
+        _sandbox_duration_error(
+            f"{prefix}.max_silence_after", section.get("max_silence_after"), 60 * 10**9, "1m", "5m"
+        ),
+        _sandbox_duration_error(
+            f"{prefix}.delete_stopped_after", section.get("delete_stopped_after"), 3600 * 10**9, "1h", "12h or 14d"
+        ),
+    ):
+        if error:
+            return error
+    request_access = section.get("request_access")
+    if request_access not in (None, ""):
+        text = str(request_access)
+        if len(text.encode("utf-8", "surrogatepass")) > 512:
+            return f"{prefix}.request_access must be at most 512 bytes"
+        if not text.isprintable():
+            return f"{prefix}.request_access must be printable text on one line"
+    if section.get("allowed") is False and required_for:
+        return (
+            f"{prefix}: allowed: false contradicts required_for [{', '.join(str(n) for n in required_for)}]: "
+            "a required agent could not run anywhere"
+        )
+    harnesses = section.get("allowed_harnesses")
+    if isinstance(harnesses, list):
+        outside = _sandbox_connectors_outside(required_for, harnesses)
+        if outside:
+            return (
+                f"{prefix}: required_for [{', '.join(outside)}] is outside allowed_harnesses "
+                f"[{', '.join(str(n) for n in harnesses)}]: a required agent could not run anywhere"
+            )
+    return None
+
+
+def _sandbox_connectors_outside(required: list[Any], allowed: list[Any]) -> list[str]:
+    """Go connectorsOutside: the names of required (as written, once each)
+    that allowed does not admit by the normalized connector name."""
+    admitted = {connector_paths.normalize(str(v)) for v in allowed}
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in required:
+        key = connector_paths.normalize(str(name))
+        if key not in admitted and key not in seen:
+            seen.add(key)
+            out.append(str(name))
+    return out
+
+
+def _sandbox_canonical_names(names: list[Any]) -> list[str]:
+    """Go canonicalConnectorNames: normalized names, each once, in order."""
+    out: list[str] = []
+    for name in names:
+        key = connector_paths.normalize(str(name))
+        if key not in out:
+            out.append(key)
+    return out
+
+
+def _sandbox_pack_key(ref: Any) -> str:
+    """Go sandboxPackKey: a pack name as written, a path cleaned with a
+    trailing pack.yaml dropped."""
+    text = str(ref or "").strip()
+    if "/" not in text and "\\" not in text:
+        return text
+    clean = os.path.normpath(text)
+    if os.sep == "/" and clean.startswith("//"):
+        clean = "/" + clean.lstrip("/")
+    if os.path.basename(clean) == "pack.yaml":
+        clean = os.path.dirname(clean)
+    return clean
+
+
+def _sandbox_egress_pattern(pattern: str) -> tuple[str, Any] | None:
+    """("net", ip_network) or ("wild" | "host", name) for an egress pattern
+    (Go ParseOpenShellEgressPattern, for coverage only), or None."""
+    import ipaddress
+
+    p = str(pattern).strip().lower()
+    if p.startswith("*."):
+        return ("wild", p[2:].removesuffix("."))
+    candidate = p[1:-1] if p.startswith("[") and p.endswith("]") else p
+    try:
+        net = ipaddress.ip_network(candidate, strict=False)
+    except ValueError:
+        return ("host", p.removesuffix(".")) if p and "*" not in p else None
+    if isinstance(net, ipaddress.IPv6Network) and net.network_address.ipv4_mapped is not None and net.prefixlen >= 96:
+        net = ipaddress.ip_network(f"{net.network_address.ipv4_mapped}/{net.prefixlen - 96}", strict=False)
+    return ("net", net)
+
+
+def _sandbox_egress_covers(outer: tuple[str, Any], inner: tuple[str, Any]) -> bool:
+    """Go OpenShellEgressPattern.Covers."""
+    if outer[0] == "net" or inner[0] == "net":
+        return (
+            outer[0] == "net"
+            and inner[0] == "net"
+            and outer[1].version == inner[1].version
+            and outer[1].prefixlen <= inner[1].prefixlen
+            and inner[1].network_address in outer[1]
+        )
+    if outer[0] == "wild":
+        return (inner[0] == "wild" and inner[1] == outer[1]) or inner[1].endswith("." + outer[1])
+    return inner[0] == "host" and inner[1] == outer[1]
+
+
+def _sandbox_union(base: list[Any], overlay: list[Any]) -> list[str]:
+    """Go unionStrings keyed by the normalized connector name."""
+    out = [str(v) for v in base]
+    seen = {connector_paths.normalize(v) for v in out}
+    for v in overlay:
+        key = connector_paths.normalize(str(v))
+        if key not in seen:
+            seen.add(key)
+            out.append(str(v))
+    return out
+
+
+def _sandbox_tighten_error(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> str | None:
+    """The contradiction Go TightenOpenShellAdmin reports for base tightened
+    by overlay, or None."""
+
+    def intersection_error(key: str, noun: str, left: list[Any], right: list[Any]) -> str:
+        return (
+            f"sandbox: combined with openshell.admin, {key} [{', '.join(str(v) for v in right)}] leaves no {noun} "
+            f"(openshell.admin allows [{', '.join(str(v) for v in left)}])"
+        )
+
+    pack, pin = str(overlay.get("required_pack") or "").strip(), str(overlay.get("required_pack_digest") or "")
+    base_pin = str(base.get("required_pack_digest") or "")
+    same_pack = _sandbox_pack_key(pack) == _sandbox_pack_key(base.get("required_pack"))
+    if pack and pin and base_pin and pin != base_pin and same_pack:
+        return (
+            f"sandbox: combined with openshell.admin, required_pack_digest {pin} contradicts {base_pin} "
+            f"for the same pack {_go_quote(pack)}: no pack content matches both"
+        )
+    harnesses_base, harnesses = base.get("allowed_harnesses"), overlay.get("allowed_harnesses")
+    if isinstance(harnesses_base, list) and isinstance(harnesses, list):
+        allowed = {connector_paths.normalize(str(v)) for v in harnesses}
+        if not any(connector_paths.normalize(str(v)) in allowed for v in harnesses_base):
+            return intersection_error("allowed_harnesses", "harness", harnesses_base, harnesses)
+    creds_base, creds = base.get("allowed_credentials"), overlay.get("allowed_credentials")
+    if isinstance(creds_base, list) and isinstance(creds, list) and "none" not in creds_base and "none" not in creds:
+        if not any(v in creds for v in creds_base):
+            return intersection_error("allowed_credentials", "credential", creds_base, creds)
+    egress_base, egress = base.get("egress_allow_only"), overlay.get("egress_allow_only")
+    if isinstance(egress_base, list) and isinstance(egress, list):
+        left = [p for p in (_sandbox_egress_pattern(v) for v in egress_base) if p]
+        right = [p for p in (_sandbox_egress_pattern(v) for v in egress) if p]
+        if not any(_sandbox_egress_covers(b, o) or _sandbox_egress_covers(o, b) for b in left for o in right):
+            return intersection_error("egress_allow_only", "destination", egress_base, egress)
+    required = _sandbox_union(base.get("required_for") or [], overlay.get("required_for") or [])
+    if (base.get("allowed") is False or overlay.get("allowed") is False) and required:
+        return (
+            f"sandbox: combined with openshell.admin, allowed: false contradicts required_for [{', '.join(required)}]: "
+            "a required agent could not run anywhere"
+        )
+    if isinstance(harnesses_base, list) and isinstance(harnesses, list):
+        admitted = {connector_paths.normalize(str(v)) for v in harnesses}
+        combined: list[Any] | None = [v for v in harnesses_base if connector_paths.normalize(str(v)) in admitted]
+    else:
+        combined = next((v for v in (harnesses_base, harnesses) if isinstance(v, list)), None)
+    if combined is not None:
+        allowed = _sandbox_canonical_names(combined)
+        outside = _sandbox_connectors_outside(_sandbox_canonical_names(required), allowed)
+        if outside:
+            return (
+                f"sandbox: combined with openshell.admin, required_for [{', '.join(outside)}] is outside "
+                f"allowed_harnesses [{', '.join(allowed)}]: a required agent could not run anywhere"
+            )
+    return None
+
+
+def validate_sandbox_floors(raw: Mapping[str, Any] | None) -> None:
+    """Refuse what the Go loader refuses in the sandbox floors of a raw
+    document: every profile ``sandbox`` section (alone and combined with
+    ``openshell.admin``), then ``openshell.admin``'s managed keys, and both
+    under the Secure Client integration. Raises :class:`ValueError` with the
+    Go message after its ``config: `` prefix."""
+    from defenseclaw import config_writer
+
+    if not isinstance(raw, Mapping):
+        return
+    openshell = raw.get("openshell") if isinstance(raw.get("openshell"), Mapping) else {}
+    admin = openshell.get("admin") if isinstance(openshell.get("admin"), Mapping) else {}
+    guardrail = raw.get("guardrail") if isinstance(raw.get("guardrail"), Mapping) else {}
+    profiles = guardrail.get("profiles") if isinstance(guardrail.get("profiles"), Mapping) else {}
+    sections = {
+        str(name): entry["sandbox"]
+        for name, entry in profiles.items()
+        if isinstance(entry, Mapping) and isinstance(entry.get("sandbox"), Mapping)
+    }
+    floor_keys = [key for key in _OPENSHELL_ADMIN_FLOOR_KEYS if admin.get(key) not in (None, "")]
+    if (sections or floor_keys) and config_writer.secure_client_document(dict(raw)):
+        if sections:
+            raise ValueError(f"guardrail: {_SANDBOX_SECURE_CLIENT_PROFILES}")
+        raise ValueError(
+            "openshell: admin."
+            + ", admin.".join(floor_keys)
+            + ": managed sandbox keys are not supported with the Secure Client integration"
+        )
+    for name in sorted(sections):
+        where = f"guardrail: guardrail.profiles[{_go_quote(name)}]: "
+        error = _sandbox_section_error(sections[name], "sandbox") or _sandbox_tighten_error(admin, sections[name])
+        if error:
+            raise ValueError(where + error)
+    error = _sandbox_section_error(admin, "admin")
+    if error:
+        raise ValueError("openshell: " + error)
+
+
 def _validate_guardrail_profile(profile: GuardrailProfile) -> None:
     if profile.enabled is not None:
         raise ValueError("enabled " + _PROFILE_FORBIDDEN_KEY)
@@ -2963,10 +3319,6 @@ class AIRuntimeConfig:
     enable_host_plane: bool = False
     dns_capture: bool = False
     chain_window_min: int = 0
-    # Where the privileged reads come from: "" (auto), "direct", or
-    # "helper". Mirrors Go's AIRuntimeConfig.Acquisition.
-    acquisition: str = ""
-    helper_socket: str = ""
     sanctioned_endpoints: list[str] = field(default_factory=list)
     # None means "not stated", which resolves to enabled. Distinguishing that
     # from an explicit false matters: disabling correlation removes the
@@ -3026,6 +3378,115 @@ def enable_all_runtime_planes(runtime: AIRuntimeConfig) -> list[tuple[str, objec
         changes.append((field_name, current, value))
         setattr(runtime, field_name, value)
     return changes
+
+
+def runtime_plane_c_selected(runtime: Any) -> bool:
+    """Whether Plane C runs: the runtime planes are enabled and Go's
+    ``AIRuntimeConfig.EffectivePlanes`` contains ``c`` (an empty ``planes``
+    list plus ``enable_host_plane``, or ``c`` listed with it)."""
+    if runtime is None or not bool(getattr(runtime, "enabled", False)):
+        return False
+    if not bool(getattr(runtime, "enable_host_plane", False)):
+        return False
+    planes = [str(plane).strip().lower() for plane in (getattr(runtime, "planes", None) or [])]
+    return not planes or "c" in planes
+
+
+# enterprise.tetragon: how the managed Linux sensor helper uses the Tetragon
+# the host already runs. Python has no enterprise mirror (only the lifecycle
+# acts on the block), so these read it as config.yaml writes it, for
+# `config get --effective`. They mirror Go's
+# EnterpriseTetragonConfig.Effective and Config.TetragonMode.
+TETRAGON_DEFAULTS: dict[str, str] = {
+    "mode": "consume",
+    "burn_in": "168h",
+    "enforce_ack": "",
+    "customer_events": "agent",
+}
+
+
+def tetragon_block(document: Any) -> dict[str, Any]:
+    """``enterprise.tetragon`` exactly as a config document writes it ({} when absent)."""
+    enterprise = document.get("enterprise") if isinstance(document, dict) else None
+    block = enterprise.get("tetragon") if isinstance(enterprise, dict) else None
+    return dict(block) if isinstance(block, dict) else {}
+
+
+def _tetragon_text(value: Any) -> str:
+    # A YAML 1.1 loader (PyYAML's safe_load) reads an unquoted ``off`` as
+    # False; the Go loader and the v8 schema read the string "off".
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    return str(value).strip()
+
+
+def _tetragon_acks(value: Any) -> str | list[str]:
+    """``enforce_ack`` as Go's TetragonEnforceAcks marshals it: trimmed, without
+    empty items or repeats, in the order written; one digest is the string
+    (``""`` for none) and several are a list (a ring upgrade approves two
+    builds at once)."""
+    items = value if isinstance(value, list) else [value]
+    out: list[str] = []
+    for item in items:
+        text = _tetragon_text(item) if item is not None else ""
+        if text and text not in out:
+            out.append(text)
+    if not out:
+        return ""
+    return out[0] if len(out) == 1 else out
+
+
+def effective_tetragon(
+    document: Any,
+    *,
+    deployment_mode: str,
+    runtime: Any,
+    os_name: str,
+) -> dict[str, tuple[str, str]]:
+    """Each ``enterprise.tetragon`` key as the managed sensor helper runs it,
+    with its source: ``config:enterprise.tetragon.<key>`` or ``builtin``.
+
+    The mode is capped at ``off`` where the helper does not use Tetragon:
+    macOS and Windows ignore the block, only a managed Linux deployment has
+    the helper, and Plane C must be selected. ``enforce_ack`` (one digest, or a
+    list during a ring upgrade) is marked inert unless the mode is
+    ``enforce``, and ``customer_events`` when the mode is ``off`` (no event
+    stream). The caps that need the helper's own state (a stale ack, the
+    Tetragon version) are reported by
+    ``sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux tetragon verify``.
+    """
+    written = tetragon_block(document)
+    view: dict[str, tuple[Any, str]] = {}
+    for key, default in TETRAGON_DEFAULTS.items():
+        value = written.get(key)
+        if value is None:
+            view[key] = (default, "builtin")
+        elif key == "enforce_ack":
+            view[key] = (_tetragon_acks(value), f"config:enterprise.tetragon.{key}")
+        elif key == "customer_events":
+            view[key] = (_tetragon_text(value).lower(), f"config:enterprise.tetragon.{key}")
+        else:
+            view[key] = (_tetragon_text(value), f"config:enterprise.tetragon.{key}")
+    mode, source = view["mode"]
+    mode = mode.lower()
+    managed = _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)) or _is_managed_enterprise_mode(
+        deployment_mode
+    )
+    cap = ""
+    if os_name != "linux":
+        cap = "macOS and Windows ignore enterprise.tetragon"
+    elif not managed:
+        cap = "only the managed Linux sensor helper uses Tetragon"
+    elif not runtime_plane_c_selected(runtime):
+        cap = "Plane C is off (ai_discovery.runtime.enable_host_plane)"
+    view["mode"] = ("off", f"{source}, capped: {cap}") if cap and mode != "off" else (mode, source)
+    ack, ack_source = view["enforce_ack"]
+    if ack and view["mode"][0] != "enforce":
+        view["enforce_ack"] = (ack, f"{ack_source} (inert: the mode is not enforce)")
+    events, events_source = view["customer_events"]
+    if view["mode"][0] == "off":
+        view["customer_events"] = (events, f"{events_source} (inert: the mode is off)")
+    return view
 
 
 @dataclass
@@ -3300,6 +3761,11 @@ class Config:
     routing: RoutingConfig = field(default_factory=RoutingConfig)
     llm_providers: LLMProvidersConfig = field(default_factory=LLMProvidersConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    # enterprise.openshell as loaded. Load only: Python never writes the
+    # enterprise block (the lifecycle owns it), so saves leave it alone.
+    enterprise_openshell: EnterpriseOpenShellConfig = field(
+        default_factory=EnterpriseOpenShellConfig, repr=False, compare=False
+    )
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -3728,7 +4194,7 @@ class Config:
             expanded = _expand_home_policy_dir(merged)
             if expanded:
                 self.policy_dir = expanded
-            _assert_config_write_allowed(path, merged)
+            _assert_config_write_allowed(path, merged, actor)
             candidate = config_writer.render_document(current, merged, source_name)
             return candidate, config_writer.diff_documents(current, candidate)
 
@@ -3830,7 +4296,7 @@ def write_config_yaml_secure(path: str, data: dict[str, Any], *, actor: str | No
     """
     from defenseclaw import config_writer
 
-    _assert_config_write_allowed(path, data)
+    _assert_config_write_allowed(path, data, actor)
 
     def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
         document = data
@@ -3982,6 +4448,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d.pop("_loaded_owned_nested_values", None)
     d.pop("_source_config_version", None)
     d.pop("_loaded_v8_modeled_snapshot", None)
+    d.pop("enterprise_openshell", None)
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -4219,6 +4686,21 @@ def _strip_empty_keys(block: dict[str, Any], keys: tuple[str, ...]) -> None:
             block.pop(key, None)
 
 
+def _strip_unset_sandbox_keys(section: dict[str, Any]) -> None:
+    """Drop the unset keys of a profile sandbox section, as Go's omitempty
+    tags do: an unset tri-state (None), string, list or max_resources value
+    and block_large_uploads false. An explicit tri-state false stays."""
+    resources = section.get("max_resources")
+    if isinstance(resources, dict):
+        _strip_empty_keys(resources, ("cpu", "memory"))
+        if not resources:
+            section.pop("max_resources", None)
+    for key in list(section):
+        value = section[key]
+        if value is None or value == "" or value == [] or (key == "block_large_uploads" and value is False):
+            section.pop(key, None)
+
+
 def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
     """Mirror Go's ``omitempty`` tags on the guardrail profile fields.
 
@@ -4244,8 +4726,10 @@ def _serialize_guardrail_profiles(cfg: Config, guardrail: Any) -> None:
                 continue
             _strip_empty_keys(
                 profile,
-                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode"),
+                ("description", "mode", "block_message", "hilt", "enabled", "hook_fail_mode", "sandbox"),
             )
+            if isinstance(profile.get("sandbox"), dict):
+                _strip_unset_sandbox_keys(profile["sandbox"])
             _strip_unset_levels(profile)
             _serialize_v9_rules_scope(profile)
             connectors = profile.get("connectors")
@@ -4803,9 +5287,6 @@ def _prune_ai_runtime_fields(ai_discovery: Any) -> None:
         if not runtime.get(field_name):
             runtime.pop(field_name, None)
     for field_name in ("planes", "sanctioned_endpoints"):
-        if not runtime.get(field_name):
-            runtime.pop(field_name, None)
-    for field_name in ("acquisition", "helper_socket"):
         if not runtime.get(field_name):
             runtime.pop(field_name, None)
     if runtime.get("correlate") is None:
@@ -5495,6 +5976,7 @@ def _merge_guardrail_profiles(raw: Any) -> dict[str, GuardrailProfile]:
             rules=_merge_guardrail_rules(entry.get("rules")),
             block_message=str(entry.get("block_message", "") or ""),
             connectors=_merge_guardrail_connectors(entry.get("connectors"), profile=True),
+            sandbox=_merge_openshell_admin(entry["sandbox"]) if isinstance(entry.get("sandbox"), dict) else None,
             enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
             hook_fail_mode=str(entry.get("hook_fail_mode", "") or ""),
         )
@@ -6028,7 +6510,6 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
     approvals = _openshell_mapping(raw.get("approvals"))
     mcp = _openshell_mapping(raw.get("mcp"))
     middleware = _openshell_mapping(raw.get("middleware"))
-    admin = _openshell_mapping(raw.get("admin"))
     harness_versions = _openshell_mapping(image.get("harness_versions"))
     return OpenShellConfig(
         enabled=_coerce_bool(raw.get("enabled", False)),
@@ -6083,25 +6564,64 @@ def _merge_openshell(raw: dict[str, Any] | None, data_dir: str = "") -> OpenShel
         upstream_telemetry=_coerce_bool(raw.get("upstream_telemetry", False)),
         token_delivery=_openshell_str(raw.get("token_delivery")) or "provider",
         middleware=OpenShellMiddlewareConfig(enabled=_coerce_bool(middleware.get("enabled", False))),
-        admin=OpenShellAdminConfig(
-            required_pack=_openshell_str(admin.get("required_pack")),
-            required_pack_digest=_openshell_str(admin.get("required_pack_digest")),
-            min_profile=_openshell_str(admin.get("min_profile")),
-            allow_yolo=_openshell_optional_bool(admin.get("allow_yolo")),
-            allow_mount=_openshell_optional_bool(admin.get("allow_mount")),
-            allow_host_ports=_openshell_optional_bool(admin.get("allow_host_ports")),
-            allow_unblock=_openshell_optional_bool(admin.get("allow_unblock")),
-            allow_learn_mode=_openshell_optional_bool(admin.get("allow_learn_mode")),
-            allowed_harnesses=_openshell_str_list(admin.get("allowed_harnesses")),
-            egress_block=_openshell_str_list(admin.get("egress_block")),
-            egress_allow_only=_openshell_str_list(admin.get("egress_allow_only")),
-            block_large_uploads=_coerce_bool(admin.get("block_large_uploads", False)),
-            require_copy_for=_openshell_str_list(admin.get("require_copy_for")),
-            max_resources=_merge_openshell_resources(admin.get("max_resources")),
-            locked=_openshell_str_list(admin.get("locked")),
-        ),
-        mode=_openshell_str(raw.get("mode")),
-        sandbox_home=_openshell_str(raw.get("sandbox_home")) or DEFAULT_SANDBOX_HOME,
+        admin=_merge_openshell_admin(raw.get("admin")),
+    )
+
+
+def _openshell_optional_str_list(value: Any) -> list[str] | None:
+    """A list whose absence means "no constraint": None when unset, the
+    entries (possibly none) otherwise."""
+    if value is None:
+        return None
+    return _openshell_str_list(value)
+
+
+def _merge_openshell_admin(raw: Any) -> OpenShellAdminConfig:
+    """Parse ``openshell.admin`` or a profile's ``sandbox`` section (one type,
+    as Go ``OpenShellAdminConfig``)."""
+    admin = _openshell_mapping(raw)
+    return OpenShellAdminConfig(
+        required_pack=_openshell_str(admin.get("required_pack")),
+        required_pack_digest=_openshell_str(admin.get("required_pack_digest")),
+        min_profile=_openshell_str(admin.get("min_profile")),
+        allow_yolo=_openshell_optional_bool(admin.get("allow_yolo")),
+        allow_mount=_openshell_optional_bool(admin.get("allow_mount")),
+        allow_host_ports=_openshell_optional_bool(admin.get("allow_host_ports")),
+        allow_unblock=_openshell_optional_bool(admin.get("allow_unblock")),
+        allow_learn_mode=_openshell_optional_bool(admin.get("allow_learn_mode")),
+        allowed_harnesses=_openshell_str_list(admin.get("allowed_harnesses")),
+        egress_block=_openshell_str_list(admin.get("egress_block")),
+        egress_allow_only=_openshell_str_list(admin.get("egress_allow_only")),
+        block_large_uploads=_coerce_bool(admin.get("block_large_uploads", False)),
+        require_copy_for=_openshell_str_list(admin.get("require_copy_for")),
+        max_resources=_merge_openshell_resources(admin.get("max_resources")),
+        locked=_openshell_str_list(admin.get("locked")),
+        allowed=_openshell_optional_bool(admin.get("allowed")),
+        required_for=_openshell_optional_str_list(admin.get("required_for")),
+        when_unavailable=_openshell_str(admin.get("when_unavailable")),
+        user_approvals=_openshell_str(admin.get("user_approvals")),
+        allowed_credentials=_openshell_optional_str_list(admin.get("allowed_credentials")),
+        on_silence=_openshell_str(admin.get("on_silence")),
+        max_silence_after=_openshell_str(admin.get("max_silence_after")),
+        process_tree=_openshell_optional_bool(admin.get("process_tree")),
+        foreign_sandboxes=_openshell_str(admin.get("foreign_sandboxes")),
+        allow_upstream_telemetry=_openshell_optional_bool(admin.get("allow_upstream_telemetry")),
+        delete_stopped_after=_openshell_str(admin.get("delete_stopped_after")),
+        request_access=str(admin.get("request_access") or ""),
+        driver_fallback=_openshell_str(admin.get("driver_fallback")),
+    )
+
+
+def _merge_enterprise_openshell(raw: Any) -> EnterpriseOpenShellConfig:
+    """Parse ``enterprise.openshell`` (load only; Go validates it)."""
+    section = _openshell_mapping(_openshell_mapping(raw).get("openshell"))
+    return EnterpriseOpenShellConfig(
+        install=_openshell_str(section.get("install")),
+        driver=_openshell_str(section.get("driver")),
+        version=_openshell_str(section.get("version")),
+        gateway_port=_openshell_int(section.get("gateway_port")),
+        e2fsprogs_dir=_openshell_str(section.get("e2fsprogs_dir")),
+        driver_fallback=_openshell_str(section.get("driver_fallback")),
     )
 
 
@@ -6113,6 +6633,9 @@ def _serialize_openshell(d: dict[str, Any]) -> None:
     mcp = openshell.get("mcp")
     if isinstance(mcp, dict) and "import_" in mcp:
         mcp["import"] = mcp.pop("import_")
+    admin = openshell.get("admin")
+    if isinstance(admin, dict):
+        _strip_empty_keys(admin, _OPENSHELL_ADMIN_FLOOR_KEYS)
 
 
 def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
@@ -6455,7 +6978,6 @@ def load(
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
             config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
             workspace_dir=raw.get("claw", {}).get("workspace_dir", ""),
-            openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         acp=_merge_acp(raw.get("acp")),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),
@@ -6527,6 +7049,7 @@ def load(
         admission=_merge_admission(raw.get("admission")),
         llm_providers=_merge_llm_providers(raw.get("llm_providers")),
         update=_merge_update(raw.get("update")),
+        enterprise_openshell=_merge_enterprise_openshell(raw.get("enterprise")),
     )
     if not os.path.isabs(cfg.gateway.device_key_file):
         resolved_device_key = _resolve_relative_gateway_device_key_file(
@@ -6545,6 +7068,7 @@ def load(
     # no registry access (see GuardrailConfig.validate).
     cfg.guardrail.validate()
     validate_guardrail_profiles(cfg.guardrail)
+    validate_sandbox_floors(raw)
     # Same value-only guard for the per-connector asset_policy overrides
     # (OTHER-7) — empty/duplicate connector names + bad scalar enums. The
     # global asset_policy fields are intentionally not re-validated here.
@@ -6651,13 +7175,6 @@ def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:
         chain_window_min=int(raw.get("chain_window_min", 0) or 0),
         sanctioned_endpoints=[str(v) for v in (raw.get("sanctioned_endpoints", []) or [])],
         correlate=None if correlate is None else _coerce_bool(correlate),
-        # Reconstructed explicitly, like every other field: this merge
-        # rebuilds the block from a whitelist, so a key absent here is a key
-        # silently erased on the next save. An operator who pinned
-        # acquisition to "direct" while diagnosing would have found it gone
-        # after the next CLI write, with the gateway quietly back on auto.
-        acquisition=str(raw.get("acquisition", "") or ""),
-        helper_socket=str(raw.get("helper_socket", "") or ""),
     )
 
 

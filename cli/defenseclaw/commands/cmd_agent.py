@@ -43,7 +43,7 @@ from defenseclaw.config import (
 )
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.gateway import OrchestratorClient
+from defenseclaw.gateway import OrchestratorClient, SandboxAPIError
 from defenseclaw.inventory import agent_discovery, ai_signatures
 
 
@@ -201,6 +201,23 @@ def discover(
 _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
 
 
+def _usage_payload(client: Any, refresh: bool) -> dict[str, Any]:
+    """The sidecar's AI usage report, scanned first with ``refresh``.
+
+    The scan answers 503 while AI discovery is off, where the cached view
+    says ``enabled: false``: both read the same, so ``--refresh`` gives the
+    disabled message and the enable command too (GAP-0150).
+    """
+    if not refresh:
+        return client.ai_usage()
+    try:
+        return client.scan_ai_usage()
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 503:
+            return {"enabled": False, "signals": []}
+        raise
+
+
 @agent.command("usage")
 @click.option("--refresh", is_flag=True, help="Ask the running sidecar to scan before rendering.")
 @click.option("--json", "as_json", is_flag=True, help="Output AI usage visibility as JSON.")
@@ -243,6 +260,15 @@ _AI_USAGE_STATES: tuple[str, ...] = ("new", "changed", "seen", "active", "gone")
         "Filter by component/SDK name or discovered local model ID "
         "(repeatable, case-insensitive substring). Falls back to "
         "matching against product when a signal has no component block."
+    ),
+)
+@click.option(
+    "--sandbox",
+    "sandboxes",
+    multiple=True,
+    help=(
+        "Show only what AI discovery found inside this OpenShell sandbox "
+        "(repeatable). Rows found in a sandbox are tagged \"(sandbox NAME)\"."
     ),
 )
 @click.option(
@@ -294,6 +320,7 @@ def usage(
     categories: tuple[str, ...],
     products: tuple[str, ...],
     components: tuple[str, ...],
+    sandboxes: tuple[str, ...],
     show_gone: bool,
     by_detector: bool,
     limit: int,
@@ -319,6 +346,17 @@ def usage(
     """
     if limit < 0:
         raise click.BadParameter("--limit must be >= 0", param_hint="--limit")
+    if sandboxes:
+        from defenseclaw.platform_support import host_os
+
+        if host_os() == "windows":
+            # No sandbox can exist here: say so, as `defenseclaw sandbox`
+            # does, instead of an empty table (GAP-0386).
+            from defenseclaw import ux
+            from defenseclaw.commands.cmd_sandbox import UNSUPPORTED_EXIT_CODE, UNSUPPORTED_PLATFORM_MESSAGE
+
+            ux.echo(f"✗ --sandbox: {UNSUPPORTED_PLATFORM_MESSAGE}", err=True)
+            raise SystemExit(UNSUPPORTED_EXIT_CODE)
 
     client = _usage_client(
         app,
@@ -327,7 +365,7 @@ def usage(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.scan_ai_usage() if refresh else client.ai_usage()
+        payload = _usage_payload(client, refresh)
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
@@ -346,6 +384,7 @@ def usage(
         )
         return
 
+    notes = _sandboxes_not_found(client, payload, sandboxes)
     click.echo(
         _render_ai_usage_table(
             payload,
@@ -354,12 +393,48 @@ def usage(
             categories=categories,
             products=products,
             components=components,
+            sandboxes=sandboxes,
             show_gone=show_gone,
             by_detector=by_detector,
             limit=limit,
             wide=wide,
         ).rstrip()
     )
+    for note in notes:
+        click.echo(note)
+
+
+def _sandboxes_not_found(client: Any, payload: Mapping[str, Any], sandboxes: tuple[str, ...]) -> list[str]:
+    """Check each ``--sandbox`` name AI discovery has no signal for (GAP-0386).
+
+    An unknown name was an empty table and exit 0. It is an error now; a
+    sandbox that exists but was not scanned yet gets a note on how to scan
+    it. A daemon that cannot say leaves the table as it is.
+    """
+    signals = [sig for sig in payload.get("signals") or [] if isinstance(sig, Mapping)]
+    seen = {str(sig.get("sandbox_name") or "").strip().lower() for sig in signals}
+    notes: list[str] = []
+    for name in dict.fromkeys(s.strip() for s in sandboxes if s.strip()):
+        if name.lower() in seen:
+            continue
+        try:
+            client.get_sandbox(name)
+        except SandboxAPIError as exc:
+            if exc.code == "not_found":
+                raise click.ClickException(
+                    f"no sandbox {name}: `defenseclaw sandbox list` shows your sandboxes"
+                ) from exc
+            if exc.code == "disabled":
+                raise click.ClickException(
+                    f"no sandbox {name}: OpenShell sandboxes are not set up here (`defenseclaw sandbox setup`)"
+                ) from exc
+            continue
+        except requests.RequestException:
+            continue
+        notes.append(
+            f"AI discovery has found nothing in sandbox {name} yet: `defenseclaw sandbox discover {name}` scans it now."
+        )
+    return notes
 
 
 _IDE_PLUGIN_ENABLED_LABELS = {
@@ -565,7 +640,7 @@ def processes(
         gateway_token_env=gateway_token_env,
     )
     try:
-        payload = client.scan_ai_usage() if refresh else client.ai_usage()
+        payload = _usage_payload(client, refresh)
     except requests.ConnectionError as exc:
         raise click.ClickException(_sidecar_unavailable(exc)) from exc
     except requests.HTTPError as exc:
@@ -2524,6 +2599,7 @@ def _probe_linux_capability(name: str) -> bool | None:
 # ask for, because an incomplete map is better than a stale copy of a header.
 _LINUX_CAPABILITY_BITS = {
     "CAP_DAC_READ_SEARCH": 2,
+    "CAP_NET_ADMIN": 12,
     "CAP_NET_RAW": 13,
     "CAP_SYS_ADMIN": 21,
 }
@@ -2659,12 +2735,14 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         },
         {
             "plane": "agent actions (C), process events",
-            "needs": "nothing",
+            "needs": "CAP_NET_ADMIN",
+            "probe": "cap_net_admin",
             "why": (
-                "the cn_proc netlink connector is readable unprivileged on most "
-                "kernels; a sandbox that blocks AF_NETLINK is the exception"
+                "the cn_proc netlink connector refuses a subscriber without it "
+                "(the bind fails with EPERM), so Plane C sees no exec or exit "
+                "events, including the short-lived processes the /proc poll misses"
             ),
-            "how": None,
+            "how": "run the gateway as root, or grant CAP_NET_ADMIN",
         },
         {
             "plane": "agent actions (C), file events",
@@ -2675,6 +2753,17 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
                 "argv instead of observed, which sees the command but not the read"
             ),
             "how": "run the gateway as root, or grant CAP_SYS_ADMIN",
+        },
+        {
+            "plane": "agent actions (C), Tetragon",
+            "needs": "nothing",
+            "info": True,
+            "why": (
+                "per-user installs do not connect to Tetragon: its socket is root-only "
+                "and grants kernel policy control. The enterprise sensor helper uses it "
+                "on managed Linux hosts"
+            ),
+            "how": None,
         },
     ],
     "windows": [
@@ -2748,6 +2837,8 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
         return bool(granted and _probe_root())
     if probe == "cap_dac":
         return _probe_linux_capability("CAP_DAC_READ_SEARCH")
+    if probe == "cap_net_admin":
+        return _probe_linux_capability("CAP_NET_ADMIN")
     if probe == "cap_net_raw":
         return _probe_linux_capability("CAP_NET_RAW")
     if probe == "cap_sys_admin":
@@ -2771,7 +2862,7 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
 # TCC does not let any process grant to itself or to another, at any
 # privilege level. The command opens the exact settings pane instead and
 # waits for the operator, which is the whole of what is achievable.
-_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep"
+_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_admin,cap_net_raw,cap_sys_admin+ep"
 
 _WINDOWS_AUDIT_SUBCATEGORIES = (
     "Process Creation",
@@ -2942,6 +3033,12 @@ def runtime_permissions(
         # shadowing it left the loop's last dict bound to the name, so the
         # command believed --grant had been passed on every invocation.
         state = entry["granted"]
+        if entry.get("info"):
+            # Nothing to grant and nothing missing: a fact about this
+            # platform an operator would otherwise go looking for.
+            ux.subhead(f"[info] {entry['plane']}", indent="  ")
+            ux.subhead(str(entry["why"]), indent="    ")
+            continue
         if entry.get("off"):
             ux.subhead(f"[off] {entry['plane']}", indent="  ")
             ux.subhead(
@@ -3994,18 +4091,14 @@ def _emit_discovery_report(
 
 
 def _usage_rejected(exc: requests.HTTPError) -> click.ClickException:
-    """The error for an AI usage request the sidecar refused (GAP-0281).
+    """The error for an AI usage request the sidecar refused.
 
-    A refresh with AI discovery off answers 503 "ai discovery disabled"; the
-    bare status gave no hint what to do.
+    A refresh with AI discovery off (503) does not get here: _usage_payload
+    reads it as the disabled view, which says how to enable discovery
+    (GAP-0150, GAP-0281).
     """
     response = exc.response
     status = response.status_code if response is not None else "unknown"
-    if status == 503 and "discovery disabled" in (response.text or "").lower():
-        return click.ClickException(
-            "AI discovery is disabled, so there is nothing to refresh. "
-            "Enable it with: defenseclaw agent discovery enable"
-        )
     return click.ClickException(f"sidecar rejected AI usage request: HTTP {status}")
 
 
@@ -4203,6 +4296,7 @@ def _filter_ai_usage_signals(
     products: tuple[str, ...],
     show_gone: bool,
     components: tuple[str, ...] = (),
+    sandboxes: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Apply the operator-supplied filters to the raw signal list.
 
@@ -4226,14 +4320,20 @@ def _filter_ai_usage_signals(
       ``signal.product`` for legacy signatures that carry neither block). Lets the
       operator type ``--component openai`` and pick out every
       OpenAI-named SDK install across npm/pypi/go, or type a local model ID.
+    * ``sandboxes`` — exact, case-insensitive match against
+      ``signal.sandbox_name``: what AI discovery found inside those OpenShell
+      sandboxes, and nothing found on this machine itself.
     """
     state_set = {_canonical_ai_usage_state(s) for s in states} if states else set()
     category_set = {c.lower() for c in categories} if categories else set()
     product_needles = [p.lower() for p in products] if products else []
     component_needles = [c.lower() for c in components] if components else []
+    sandbox_set = {s.strip().lower() for s in sandboxes if s.strip()} if sandboxes else set()
 
     out: list[dict[str, Any]] = []
     for sig in signals or []:
+        if sandbox_set and str(sig.get("sandbox_name") or "").lower() not in sandbox_set:
+            continue
         state = _canonical_ai_usage_state(sig.get("state", ""))
         if state_set:
             if state not in state_set:
@@ -4467,13 +4567,16 @@ def _summarize_ai_usage_signals_full(
     return rows
 
 
-def _format_runtime(runtime: dict[str, Any]) -> str:
+def _format_runtime(runtime: dict[str, Any], *, live: bool = False) -> str:
     """Render the new ``runtime`` block compactly for the detail view.
 
     Format: ``pid=1234 user=alice up=3h12m`` — fields are dropped when
     the underlying value is missing so signatures from non-process
     detectors (which won't have a runtime block at all) just render an
     empty string and tests that don't seed runtime data stay stable.
+    ``live`` counts the uptime from the process's start: a sandbox's
+    process is as of the sandbox's last read, minutes old, and was running
+    then (GAP-0392).
     """
     if not runtime:
         return ""
@@ -4485,6 +4588,9 @@ def _format_runtime(runtime: dict[str, Any]) -> str:
     if user:
         parts.append(f"user={user}")
     uptime = runtime.get("uptime_sec")
+    started = _parse_iso_ts(runtime.get("started_at")) if live else None
+    if started is not None:
+        uptime = max(0, int(time.time() - started.timestamp()))
     if isinstance(uptime, (int, float)) and uptime > 0:
         parts.append(f"up={_humanize_seconds(int(uptime))}")
     comm = runtime.get("comm")
@@ -4634,6 +4740,37 @@ def _format_ai_usage_scan_diagnostics(summary: dict[str, Any]) -> str:
     return note + "."
 
 
+def _tag_sandbox_signals(signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Tag what AI discovery found inside an OpenShell sandbox with its name.
+
+    The product reads "Claude Code (sandbox myapp-7f3a)", so a component
+    found in a sandbox never folds into the same product on this machine
+    in the grouped view, and every view says where it was found. (Square
+    brackets would read as Rich markup in the table.)
+    """
+    out: list[dict[str, Any]] = []
+    for sig in signals:
+        name = str(sig.get("sandbox_name") or "").strip()
+        if name:
+            sig = dict(sig)
+            product = str(sig.get("product") or sig.get("name") or "").strip()
+            sig["product"] = f"{product} (sandbox {name})" if product else f"(sandbox {name})"
+        out.append(sig)
+    return out
+
+
+def _ai_usage_counts(signals: list[dict[str, Any]]) -> dict[str, int]:
+    """The summary counts of these signals, counted as the sidecar counts the
+    whole machine: active is every signal that is not gone."""
+    states = [_canonical_ai_usage_state(sig.get("state", "")) for sig in signals]
+    return {
+        "active_signals": sum(state != "gone" for state in states),
+        "new_signals": states.count("new"),
+        "changed_signals": states.count("changed"),
+        "gone_signals": states.count("gone"),
+    }
+
+
 def _render_ai_usage_table(
     payload: dict[str, Any],
     *,
@@ -4642,21 +4779,42 @@ def _render_ai_usage_table(
     categories: tuple[str, ...] = (),
     products: tuple[str, ...] = (),
     components: tuple[str, ...] = (),
+    sandboxes: tuple[str, ...] = (),
     show_gone: bool = False,
     by_detector: bool = False,
     limit: int = 0,
     wide: bool = False,
 ) -> str:
     raw_signals = payload.get("signals", []) or []
-    filtered = _filter_ai_usage_signals(
-        raw_signals,
-        states=states,
-        categories=categories,
-        products=products,
-        show_gone=show_gone,
-        components=components,
+    filtered = _tag_sandbox_signals(
+        _filter_ai_usage_signals(
+            raw_signals,
+            states=states,
+            categories=categories,
+            products=products,
+            show_gone=show_gone,
+            components=components,
+            sandboxes=sandboxes,
+        )
     )
     summary = payload.get("summary", {}) or {}
+    if sandboxes or categories or products or components:
+        # The header counts what the filters select, not the whole machine
+        # (GAP-0269: --sandbox showed active=32 above that sandbox's 6).
+        summary = {
+            **summary,
+            **_ai_usage_counts(
+                _filter_ai_usage_signals(
+                    raw_signals,
+                    states=(),
+                    categories=categories,
+                    products=products,
+                    show_gone=True,
+                    components=components,
+                    sandboxes=sandboxes,
+                )
+            ),
+        }
     enabled = payload.get("enabled", True)
 
     try:
@@ -4664,7 +4822,7 @@ def _render_ai_usage_table(
         from rich.table import Table
     except Exception:
         return _render_ai_usage_plain(
-            payload,
+            {**payload, "summary": summary},
             signals=filtered,
             detail=detail,
             by_detector=by_detector,
@@ -4815,7 +4973,7 @@ def _render_ai_usage_table(
                         sig.get("presence_score"), sig.get("presence_band")))
                     prev_conf_key = conf_key
             if has_runtime:
-                row.append(_format_runtime(runtime))
+                row.append(_format_runtime(runtime, live=sig.get("source") == "sandbox"))
             if has_last_active:
                 row.append(_format_relative_time(sig.get("last_active_at", "")))
             # Prefer the richer evidence records (basename + quality
@@ -5010,7 +5168,7 @@ def _render_ai_usage_plain(
                 str(sig.get("detector", "")),
                 _format_confidence(sig.get("identity_score"), sig.get("identity_band")),
                 _format_confidence(sig.get("presence_score"), sig.get("presence_band")),
-                _format_runtime(runtime),
+                _format_runtime(runtime, live=sig.get("source") == "sandbox"),
                 _format_relative_time(sig.get("last_active_at", "")),
                 evidence_cell,
             ])

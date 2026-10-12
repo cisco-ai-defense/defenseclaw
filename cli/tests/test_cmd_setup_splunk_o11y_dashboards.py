@@ -165,6 +165,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                 "token_economics": [],
                 "runtime_reliability": [],
                 "scanners_findings": [],
+                "sandboxes": [],
             },
             "detectors": {},
         }
@@ -291,6 +292,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                 "token_economics": [],
                 "runtime_reliability": [],
                 "scanners_findings": [],
+                "sandboxes": [],
             },
             "detectors": {},
         }

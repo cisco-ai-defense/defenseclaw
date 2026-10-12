@@ -34,6 +34,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -158,9 +159,16 @@ type DoctorReport struct {
 	// its configuration.
 	Driver           ComputeDriver `json:"driver,omitempty"`
 	ConfiguredDriver ComputeDriver `json:"configured_driver,omitempty"`
-	// MicroVM is what OpenShell's MicroVM driver needs on this Mac (nil
-	// off macOS).
+	// MicroVM is what OpenShell's MicroVM driver needs on this Mac, or on
+	// this Linux host when its gateway runs vm or /dev/kvm opens (nil
+	// otherwise).
 	MicroVM *MicroVMHost `json:"microvm,omitempty"`
+	// GatewayPortElsewhere is set when another account holds the gateway's
+	// port: the gateway that answers there is that account's.
+	GatewayPortElsewhere bool `json:"gateway_port_elsewhere,omitempty"`
+	// Managed is set on a managed computer (Doctor.Managed), where the
+	// organization installs OpenShell: nothing is offered to install.
+	Managed bool `json:"managed,omitempty"`
 }
 
 // OK reports whether no check failed.
@@ -207,14 +215,18 @@ func (r *DoctorReport) GatewayUnmanaged() bool {
 // (Installer.Install) would run NVIDIA's installer on this host: no
 // OpenShell CLI, one whose release it cannot read, or one older than
 // SupportedMin, which it upgrades. Over a supported CLI it installs
-// nothing, and one newer than supported it refuses, so there every other
-// failing check (the gateway, its service, the MicroVM driver) is its
-// fix's, not the install's. Setup offers the install only then, and the
+// nothing (an older one than InstallerVersion is offered the upgrade
+// instead: OpenShellUpgradeAvailable), and one newer than supported it
+// refuses, so there every other failing check (the gateway, its service,
+// the MicroVM driver) is its fix's, not the install's. Setup offers the
+// install only then, and the
 // TUI presets it only then (`sandbox doctor --json` reports it as
 // openshell_install).
 func (r *DoctorReport) OpenShellInstallNeeded() bool {
 	cli := r.Get(CheckIDCLI)
 	switch {
+	case r.Managed:
+		return false
 	case cli == nil:
 		return true
 	case cli.Status != StatusFail:
@@ -224,6 +236,22 @@ func (r *DoctorReport) OpenShellInstallNeeded() bool {
 	}
 	v, err := ParseVersion(r.CLIVersion)
 	return err != nil || v.Compare(mustParse(SupportedBelow)) < 0
+}
+
+// OpenShellUpgradeAvailable reports a supported OpenShell older than
+// InstallerVersion that DefenseClaw's install step upgrades in place
+// (Installer.Upgrade): the CLI check warns with that fix. Not for an
+// OpenShell installed another way (GatewayUnmanaged), which its user
+// upgrades. Setup offers the upgrade (no by default) only then, and the
+// TUI shows it with the install toggle off (`sandbox doctor --json`
+// reports it as openshell_upgrade).
+func (r *DoctorReport) OpenShellUpgradeAvailable() bool {
+	cli := r.Get(CheckIDCLI)
+	if cli == nil || cli.Status != StatusWarn || r.GatewayUnmanaged() {
+		return false
+	}
+	v, err := ParseVersion(r.CLIVersion)
+	return err == nil && CheckSupported(v) == nil && v.Compare(mustParse(InstallerVersion)) < 0
 }
 
 // Get returns the check with id, or nil.
@@ -261,21 +289,33 @@ func (r *DoctorReport) String() string {
 }
 
 // FixOutcome reports one ApplyFixes attempt. Title is the check's, which
-// the consent question names it by.
+// the consent question names it by. Skipped says why a fix was not tried.
 type FixOutcome struct {
 	ID      string `json:"id"`
 	Title   string `json:"title"`
 	Applied bool   `json:"applied"`
 	Error   string `json:"error,omitempty"`
+	Skipped string `json:"skipped,omitempty"`
 }
 
 // ApplyFixes runs the automatic fixes of failing and warning checks, in
 // report order, each after consent. A declined fix is skipped; a failed
-// one is reported and the rest still run. Re-run Doctor afterwards.
+// one is reported and the rest still run, except the fixes that need the
+// gateway running (a restart, the registration, the gateway's own) while
+// the Gateway service check failed and its fix did not apply: each would
+// wait for a gateway that does not come up. Re-run Doctor afterwards.
 func (r *DoctorReport) ApplyFixes(ctx context.Context, consent func(Check) (bool, error)) ([]FixOutcome, error) {
 	var out []FixOutcome
+	down := false
+	if c := r.Get(CheckIDGatewayService); c != nil && c.Status == StatusFail {
+		down = true
+	}
 	for _, c := range r.Checks {
 		if c.Fix == nil || c.Fix.Apply == nil || c.Status == StatusPass || c.Status == StatusSkip {
+			continue
+		}
+		if down && (c.Fix.RestartsGateway || c.ID == CheckIDRegistration || c.ID == CheckIDGatewayVersion) {
+			out = append(out, FixOutcome{ID: c.ID, Title: c.Title, Skipped: "the gateway service does not run (see \"Gateway service\")"})
 			continue
 		}
 		ok, err := consent(c)
@@ -290,6 +330,7 @@ func (r *DoctorReport) ApplyFixes(ctx context.Context, consent func(Check) (bool
 			o.Error = err.Error()
 		} else {
 			o.Applied = true
+			down = down && c.ID != CheckIDGatewayService
 		}
 		out = append(out, o)
 	}
@@ -327,6 +368,12 @@ type Doctor struct {
 	// Gateway reads the gateway configuration and service; it defaults to
 	// a configurator over Discover.ConfigDir, Runner and GOOS.
 	Gateway *GatewayConfigurator
+	// Rendered, on a managed computer, is the administrator's rendered
+	// gateway configuration, which the account's managed gateway runs on:
+	// the default Gateway reads it in place of the account's own files, with
+	// the MicroVM identity the exec shim gives the account's gateway
+	// (Geteuid, Getegid).
+	Rendered *RenderedPaths
 	// GatewayApplied hears of each gateway change a fix applied, rolled
 	// back or not, so the caller can record the files it wrote (setup's
 	// receipt, which teardown restores them from).
@@ -339,6 +386,15 @@ type Doctor struct {
 	// DaemonUID is the DefenseClaw daemon's uid when known; the gateway
 	// must run as the same user.
 	DaemonUID *int
+	// Managed limits the report to the checks of this account's own
+	// process (platform and user), for a managed computer: there the
+	// administrator's lifecycle owns OpenShell (its install, gateway
+	// service, port, registration and configuration) and the account's
+	// sandbox daemon reports its state, from the facts the administrator's
+	// verify reads. The other checks would read other accounts' files and
+	// processes and give fixes this account must not apply (GAP-0173,
+	// GAP-0174, GAP-0215).
+	Managed bool
 	// WantTelemetry is openshell.upstream_telemetry; nil only reports.
 	WantTelemetry *bool
 	// BindMountsOptional downgrades disabled bind mounts to a warning
@@ -363,11 +419,18 @@ type Doctor struct {
 	// mke2fs and debugfs, which Homebrew installs keg-only, off PATH
 	// (default the kegs the driver knows).
 	E2fsprogsDirs []string
+	// OpenKVM opens /dev/kvm for reading and writing and closes it (Linux;
+	// default: the real device), which a MicroVM needs.
+	OpenKVM func() error
 	// HostMemory is this machine's memory in bytes (0: unknown), which
 	// the recommended MicroVM memory is sized from.
 	HostMemory func() uint64
 	DiskFree   func(path string) (uint64, error)
 	Listen     func(network, address string) (net.Listener, error)
+	// PortHolder names the process that listens on a local TCP port
+	// (default daemon.FindPortHolder): what holds the gateway's port when
+	// the gateway service does not run.
+	PortHolder func(host string, port int) (daemon.PortHolder, error)
 	Geteuid    func() int
 	// Getegid is the user's group, which with Geteuid the MicroVM driver
 	// must run sandboxes as (DefenseClaw's images are built for them).
@@ -414,7 +477,17 @@ func (d *Doctor) defaults() {
 	}
 	if d.Gateway == nil {
 		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath,
-			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing}
+			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered}
+		if d.Rendered != nil {
+			euid, egid := os.Geteuid(), os.Getegid()
+			if d.Geteuid != nil {
+				euid = d.Geteuid()
+			}
+			if d.Getegid != nil {
+				egid = d.Getegid()
+			}
+			d.Gateway.AccountVM = &VMIdentity{UID: int64(euid), GID: int64(egid)}
+		}
 	}
 	if d.LandlockABI == nil {
 		d.LandlockABI = landlockABI
@@ -426,6 +499,12 @@ func (d *Doctor) defaults() {
 	}
 	if d.E2fsprogsDirs == nil {
 		d.E2fsprogsDirs = e2fsprogsDirs
+		if d.GOOS == "linux" {
+			d.E2fsprogsDirs = linuxE2fsprogsDirs
+		}
+	}
+	if d.OpenKVM == nil {
+		d.OpenKVM = openKVM
 	}
 	if d.HostMemory == nil {
 		d.HostMemory = hostMemory
@@ -435,6 +514,9 @@ func (d *Doctor) defaults() {
 	}
 	if d.Listen == nil {
 		d.Listen = net.Listen
+	}
+	if d.PortHolder == nil {
+		d.PortHolder = daemon.FindPortHolder
 	}
 	if d.Geteuid == nil {
 		d.Geteuid = os.Geteuid
@@ -488,9 +570,10 @@ type doctorRun struct {
 	service *ServiceState
 
 	// config is the gateway configuration read up front (nil when it
-	// cannot be read; checkGatewayConfig says why), configured the compute
-	// driver it selects.
+	// cannot be read: configErr; checkGatewayConfig says why), configured
+	// the compute driver it selects.
 	config     *GatewayConfigState
+	configErr  error
 	configured ComputeDriver
 	// running is the compute driver the answering gateway reports, once
 	// checkGateway has asked (zero Name until then, or when it reports one
@@ -518,6 +601,10 @@ type doctorRun struct {
 	startedDone bool
 	// startedApprox is set when started came from ps (to the second).
 	startedApprox bool
+	// portHeld is set when something else holds the gateway's port while
+	// its service is stopped (checkService); portOther when another
+	// account does (report.GatewayPortElsewhere).
+	portHeld, portOther bool
 }
 
 func (r *doctorRun) add(c Check) { r.report.Checks = append(r.report.Checks, c) }
@@ -548,11 +635,19 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	if !r.checkPlatform() {
 		return r.report
 	}
+	if d.Managed {
+		// The compute driver is the administrator's: the daemon says it.
+		r.report.ConfiguredDriver, r.report.Driver, r.report.Managed = "", "", true
+		r.checkUser()
+		return r.report
+	}
 	if st, err := r.Gateway.Read(); err == nil {
 		r.config = st
 		if st.ComputeDriver != "" {
 			r.configured = st.ComputeDriver
 		}
+	} else {
+		r.configErr = err
 	}
 	r.report.ConfiguredDriver, r.report.Driver = r.configured, r.configured
 	r.checkUser()
@@ -578,8 +673,44 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 	r.stoppedServiceAnswers()
 	r.checkGatewayConfig(ctx)
 	r.checkPorts()
+	r.deferToGatewayOwner()
 	r.report.Driver = r.driver()
 	return r.report
+}
+
+// gatewayOwnedElsewhere is the detail of a check deferToGatewayOwner skips.
+const gatewayOwnedElsewhere = "not checked: the OpenShell gateway on this machine is another account's (see Gateway service)"
+
+// deferToGatewayOwner skips the failed and warned checks that another
+// account's gateway on the port decides. This account can neither reach
+// nor register that gateway, and what those checks would advise (register
+// it again, start Docker Desktop here, restart the gateway) does not help:
+// the doctor counted four failures, three with contradicting fixes, where
+// one cause has one way on, which the Gateway service check gives
+// (GAP-0288, GAP-0296).
+func (r *doctorRun) deferToGatewayOwner() {
+	if !r.portOther {
+		return
+	}
+	for i := range r.report.Checks {
+		c := &r.report.Checks[i]
+		if (c.Status == StatusFail || c.Status == StatusWarn) && gatewayDependent(c.ID) {
+			c.Status, c.Detail, c.Fix = StatusSkip, gatewayOwnedElsewhere, nil
+		}
+	}
+}
+
+// gatewayDependent reports whether a check judges what this account's own
+// gateway would need or does: Docker for its sandboxes, the registration
+// and its credentials, the gateway's answers and configuration.
+func gatewayDependent(id string) bool {
+	switch id {
+	case CheckIDDocker, CheckIDDockerBuildKit, CheckIDDockerHostNetwork, CheckIDDockerFileSharing,
+		CheckIDVMIdentity, CheckIDVMResources, CheckIDRegistration, CheckIDMTLS,
+		CheckIDGatewayVersion, CheckIDGatewayDriver, CheckIDGlobalPolicy, CheckIDBindMounts, CheckIDTelemetry:
+		return true
+	}
+	return false
 }
 
 func (r *doctorRun) checkPlatform() bool {
@@ -857,10 +988,16 @@ func firstJSONLine(out []byte) []byte {
 }
 
 func (r *doctorRun) dockerAccessFix(msg string) *Fix {
-	if !strings.Contains(strings.ToLower(msg), "permission denied") {
-		if r.GOOS == "darwin" {
-			return &Fix{Summary: "start Docker Desktop"}
-		}
+	denied := strings.Contains(strings.ToLower(msg), "permission denied")
+	switch {
+	case r.GOOS == "darwin" && denied:
+		// macOS has no docker group: the socket is another account's
+		// Docker Desktop's, until this account's starts and takes it.
+		return &Fix{Summary: "start Docker Desktop in this account: /var/run/docker.sock leads to another account's Docker Desktop, " +
+			"which this account may not use (Docker Desktop points it at its own when it starts)"}
+	case r.GOOS == "darwin":
+		return &Fix{Summary: "start Docker Desktop"}
+	case !denied:
 		return &Fix{Summary: "start the Docker daemon", Command: "sudo systemctl enable --now docker", Sudo: true}
 	}
 	if r.GOOS == "darwin" {
@@ -984,7 +1121,10 @@ func (r *doctorRun) checkLinger(ctx context.Context) {
 	c := Check{ID: CheckIDLinger, Title: "systemd linger"}
 	defer func() { r.add(c) }()
 	if r.GOOS != "linux" {
-		c.Status, c.Detail = StatusSkip, "Homebrew services run while you are logged in"
+		// A Mac has no systemd: the row says what keeps the gateway
+		// running there (GAP-0193).
+		c.Title = "Login session"
+		c.Status, c.Detail = StatusSkip, "Homebrew services, the OpenShell gateway among them, run while you are logged in"
 		return
 	}
 	name, err := r.Username()
@@ -995,6 +1135,10 @@ func (r *doctorRun) checkLinger(ctx context.Context) {
 	out, err := r.Runner.Output(ctx, Command{Name: "loginctl", Args: []string{"show-user", name, "--property=Linger", "--value"}, Timeout: 10 * time.Second})
 	fix := &Fix{Summary: "let your user services (the OpenShell gateway) keep running after you log out", Command: "sudo loginctl enable-linger " + shellQuote(name), Sudo: true}
 	switch v := strings.TrimSpace(string(out)); {
+	case err != nil && strings.Contains(v, "is not logged in or lingering"):
+		// loginctl knows no user that has neither a session nor linger
+		// (GAP-0317): linger is off.
+		c.Status, c.Detail, c.Fix = StatusWarn, "off: the gateway and its sandboxes stop when you log out", fix
 	case err != nil:
 		c.Status, c.Detail, c.Fix = StatusWarn, "could not query loginctl: "+strings.TrimSpace(v+" "+err.Error()), fix
 	case v == "yes":
@@ -1010,11 +1154,22 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	st, err := r.Gateway.ServiceState(ctx)
 	if err != nil {
 		c.Status, c.Detail = StatusFail, err.Error()
-		if r.GOOS == "linux" {
-			c.Fix = &Fix{Summary: "run doctor from a login session with a systemd user manager (XDG_RUNTIME_DIR set), and enable linger"}
+		if r.GOOS == "linux" && strings.Contains(err.Error(), "Failed to connect to bus") {
+			// systemctl's words for a session without a user manager
+			// (GAP-0317); the fix below says what to do.
+			c.Detail = "cannot read the gateway service: this session reaches no systemd user manager"
 		}
-		if errors.Is(err, ErrBrewNeedsTerminal) {
-			c.Fix = &Fix{Summary: "run this command again from a normal terminal (Terminal.app, or an ssh login), not tmux"}
+		switch {
+		case r.GOOS == "linux":
+			c.Fix = &Fix{Summary: "run doctor from a login session with a systemd user manager (XDG_RUNTIME_DIR set), and enable linger"}
+		case errors.Is(err, ErrBrewServicesTmux):
+			c.Fix = &Fix{Summary: "run the doctor outside tmux, or in a tmux started from Terminal in your desktop session"}
+		}
+		// Whatever the service manager says, another account's gateway on
+		// the port is what keeps this account's from running (GAP-0192).
+		if held, other := r.gatewayPortHeld(); other {
+			c.Detail, c.Fix, r.portHeld, r.portOther = held, r.portHeldFix(true), true, true
+			r.report.GatewayPortElsewhere = true
 		}
 		return
 	}
@@ -1027,6 +1182,17 @@ func (r *doctorRun) checkService(ctx context.Context) {
 	case !st.Active:
 		c.Status, c.Detail = StatusFail, st.Unit+" is "+st.Status
 		c.Fix = &Fix{Summary: "start the gateway and enable it at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, true)}
+		if r.canRegisterLocal() {
+			c.Fix.Summary += ", then register it (" + r.addCommand().String() + ")"
+		}
+		if held, other := r.gatewayPortHeld(); held != "" {
+			// Its gateway would not get the port: started, the service
+			// would only restart over and over.
+			c.Detail += "; " + held
+			c.Fix = r.portHeldFix(other)
+			r.portHeld, r.portOther = true, other
+			r.report.GatewayPortElsewhere = other
+		}
 	case !st.Enabled:
 		c.Status, c.Detail = StatusWarn, st.Unit+" runs but does not start at login"
 		c.Fix = &Fix{Summary: "enable the gateway at login", Command: strings.Join(start.argv(), " "), Automatic: true, Apply: r.runAndWait(start, false)}
@@ -1066,6 +1232,13 @@ func (r *doctorRun) runAndWait(c serviceCommand, starts bool) func(context.Conte
 		}
 		if out, err := r.Runner.Output(ctx, Command{Name: c.name, Args: c.args, Timeout: 2 * time.Minute}); err != nil {
 			return fmt.Errorf("%s: %v: %s", c, err, strings.TrimSpace(string(out)))
+		}
+		// A gateway started for the first time has no registration, which
+		// the wait below needs: NVIDIA's installer registers it next.
+		if starts && r.canRegisterLocal() {
+			if err := r.registerLocal(ctx); err != nil {
+				return err
+			}
 		}
 		if err := r.Gateway.VerifyGateway(ctx); err != nil {
 			return err
@@ -1224,7 +1397,7 @@ func describeRelease(release string) string {
 func (r *doctorRun) otherOpenShellFix(release string) *Fix {
 	return &Fix{Summary: r.serviceName() + " runs another OpenShell's gateway: restarted, it still answers with " + describeRelease(release) +
 		", not the OpenShell " + r.cli.String() + " of the CLI at " + r.report.CLIPath +
-		". Stop that gateway (`" + r.stopCommand().String() + "`) and remove that other OpenShell, then install OpenShell " + SupportedMin,
+		". Stop that gateway (`" + r.stopCommand().String() + "`) and remove that other OpenShell, then install OpenShell " + InstallerVersion,
 		Command: installOpenShellCommand}
 }
 
@@ -1397,7 +1570,7 @@ func credentialFailure(err error) bool {
 func (r *doctorRun) checkCLI(ctx context.Context) {
 	c := Check{ID: CheckIDCLI, Title: "OpenShell CLI"}
 	defer func() { r.add(c) }()
-	install := &Fix{Summary: "install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+	install := &Fix{Summary: "install OpenShell " + InstallerVersion, Command: installOpenShellCommand}
 	path, err := r.LookPath(r.CLI)
 	if err != nil {
 		c.Status, c.Detail, c.Fix = StatusFail, r.CLI+" is not on PATH", install
@@ -1417,11 +1590,37 @@ func (r *doctorRun) checkCLI(ctx context.Context) {
 		if v.Compare(mustParse(SupportedBelow)) >= 0 {
 			// Installer.Install refuses a newer CLI: it does not downgrade.
 			c.Fix = &Fix{Summary: "DefenseClaw's install step does not downgrade OpenShell: remove OpenShell " + v.String() +
-				", then install OpenShell " + SupportedMin, Command: installOpenShellCommand}
+				", then install OpenShell " + InstallerVersion, Command: installOpenShellCommand}
 		}
 		return
 	}
 	c.Status, c.Detail = StatusPass, fmt.Sprintf("%s at %s", v, path)
+	if v.Compare(mustParse(InstallerVersion)) < 0 {
+		// Supported, and still works: a warning, which setup offers to
+		// upgrade in place (OpenShellUpgradeAvailable).
+		c.Status = StatusWarn
+		c.Detail += "; OpenShell " + InstallerVersion + " " + installerUpgradeReason
+		c.Fix = r.upgradeFix()
+	}
+}
+
+// upgradeFix upgrades a supported OpenShell older than InstallerVersion in
+// place. DefenseClaw's install step upgrades only the OpenShell NVIDIA's
+// installer set up, whose gateway service it restarts the gateway through:
+// one installed another way (no gateway service: GatewayUnmanaged) is the
+// user's to upgrade. What the restart does depends on the configured
+// driver (PrepareUpgrade): on the MicroVM driver it would stop the running
+// sandboxes without a flush, so the upgrade waits until none runs.
+func (r *doctorRun) upgradeFix() *Fix {
+	if r.serviceMissing() {
+		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " the way you installed it: DefenseClaw upgrades only the OpenShell NVIDIA's installer installs"}
+	}
+	if r.configured == DriverVM {
+		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway; stop the running MicroVM sandboxes first with `defenseclaw sandbox stop NAME`)",
+			Command: installOpenShellCommand}
+	}
+	return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this pulls its supervisor images from ghcr.io and restarts the gateway, " +
+		"which drops the connections of every sandbox on it)", Command: installOpenShellCommand}
 }
 
 // brewPrefix is the Homebrew prefix on a Mac ("" elsewhere).
@@ -1464,10 +1663,10 @@ func (r *doctorRun) checkRegistration() {
 	case errors.Is(err, ErrUnauthenticatedGateway):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "serve the local gateway over mTLS (the OpenShell package default; remove OPENSHELL_DISABLE_TLS from gateway.env) and register it with its client certificate",
-			Command: registerGatewayCommand(r.brewPrefix())}
+			Command: r.addCommandLine()}
 	case errors.Is(err, ErrNoGateway), errors.Is(err, ErrGatewayNotFound):
 		c.Status, c.Detail = StatusFail, err.Error()
-		c.Fix = &Fix{Summary: "register the local gateway", Command: registerGatewayCommand(r.brewPrefix())}
+		c.Fix = r.registrationFix()
 	case errors.Is(err, ErrRemoteGateway):
 		c.Status, c.Detail = StatusFail, err.Error()
 		c.Fix = &Fix{Summary: "select the local gateway with openshell.gateway.name, or `openshell gateway select " + DefaultGatewayName + "`"}
@@ -1500,6 +1699,29 @@ func (r *doctorRun) checkRegistration() {
 	default:
 		m.Status, m.Detail = StatusPass, "private key is owner-only"
 	}
+}
+
+// registrationFix registers a missing local gateway. The gateway writes
+// the client certificates a registration takes when it starts, so with its
+// service stopped the service's fix comes first: it starts the gateway and
+// registers it.
+func (r *doctorRun) registrationFix() *Fix {
+	add := r.addCommandLine()
+	switch {
+	case r.portHeld:
+		return &Fix{Summary: "nothing to register while this account's gateway cannot run (see Gateway service)"}
+	case r.service != nil && r.service.Installed && !r.service.Active:
+		return &Fix{Summary: "start the gateway first (Gateway service): it writes the client certificates a registration takes; " +
+			"`defenseclaw sandbox doctor --fix` starts and registers it", Command: r.startCommand().String() + " && " + add}
+	case !r.canRegisterLocal():
+		return &Fix{Summary: "register the local gateway", Command: add}
+	}
+	return &Fix{Summary: "register the local gateway", Command: add, Automatic: true, Apply: func(ctx context.Context) error {
+		if _, err := Discover(r.Discover); err == nil {
+			return nil
+		}
+		return r.registerLocal(ctx)
+	}}
 }
 
 func joinWarnings(warnings []modeWarning) string {
@@ -1573,10 +1795,22 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		}
 		version.Status = StatusFail
 		switch {
+		case err != nil && r.portOther:
+			// The gateway on the port is another account's, with its own
+			// CA: no registration of this account's can reach it
+			// (GAP-0201), and the Gateway service check gives the one way
+			// on (GAP-0288).
+			version.Status, version.Detail = StatusSkip, gatewayOwnedElsewhere
+			skipRest(gatewayOwnedElsewhere)
+			return
 		case err != nil && credentialFailure(err):
 			version.Detail = "the gateway refused DefenseClaw's TLS credentials: " + err.Error()
 			version.Fix = &Fix{Summary: "register the local gateway again, so the CLI's client certificate matches the gateway's CA",
 				Command: fmt.Sprintf("openshell gateway remove %s && openshell gateway add %s --local --name %s", r.reg.Name, shellQuote(r.reg.Endpoint), r.reg.Name)}
+		case err != nil && strings.Contains(err.Error(), "connection refused"):
+			// Nothing listens: in words, not the gRPC dial error (GAP-0226).
+			version.Detail = "the gateway is not running: nothing listens on " + r.reg.Endpoint
+			version.Fix = r.gatewayRecoveryFix()
 		case err != nil:
 			version.Detail = "the gateway is not answering: " + err.Error()
 			version.Fix = r.gatewayRecoveryFix()
@@ -1590,7 +1824,7 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 	r.report.GatewayVersion = r.gateway.RawVersion
 	if err := r.gateway.CheckVersion(); err != nil {
 		version.Status, version.Detail = StatusFail, err.Error()
-		version.Fix = r.gatewayVersionFix(&Fix{Summary: "install OpenShell " + SupportedMin, Command: installOpenShellCommand})
+		version.Fix = r.gatewayVersionFix(&Fix{Summary: "install OpenShell " + InstallerVersion, Command: installOpenShellCommand})
 	} else if r.cli != (Version{}) && r.cli.Compare(r.gateway.Version) != 0 {
 		version.Status = StatusWarn
 		version.Detail = fmt.Sprintf("gateway %s but CLI %s; keep them on the same release", r.gateway.Version, r.cli)
@@ -1627,7 +1861,9 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 // driverCheck judges the compute driver the gateway reports (infoErr:
 // GetGatewayInfo failed). On a Mac sandboxes run in MicroVMs: the docker
 // driver passes only on a Docker VM whose kernel has Landlock, and
-// otherwise the fix switches the gateway to vm.
+// otherwise the fix switches the gateway to vm. On Linux vm passes only
+// where /dev/kvm opens for reading and writing and the gateway service's
+// umask lets the guest traverse what the driver builds (linuxDriverCheck).
 func (r *doctorRun) driverCheck(infoErr error) Check {
 	c := Check{ID: CheckIDGatewayDriver, Title: "Gateway compute driver"}
 	mac := r.GOOS == "darwin"
@@ -1640,8 +1876,8 @@ func (r *doctorRun) driverCheck(infoErr error) Check {
 		if mac {
 			c.Fix = r.microVMFix()
 		}
-	case r.running.Name == DriverVM && !mac:
-		c.Status, c.Detail = StatusWarn, "vm (OpenShell MicroVM): not certified by DefenseClaw off macOS"
+	case r.running.Name == DriverVM && r.GOOS == "linux":
+		return r.linuxDriverCheck(c)
 	case r.running.Name == DriverVM:
 		c.Status, c.Detail = StatusPass, "vm (OpenShell MicroVM; experimental upstream)"
 	case r.configured == DriverVM:
@@ -1691,6 +1927,11 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 	if err != nil {
 		mounts.Status, mounts.Detail = StatusFail, err.Error()
 		tele.Status, tele.Detail = StatusSkip, "gateway configuration unreadable"
+		if errors.Is(err, ErrForeignGatewayConfig) {
+			// Nothing this account could change (GAP-0191): the gateway
+			// to run sandboxes on is the other account's.
+			mounts.Status, mounts.Detail = StatusSkip, r.configUnknown()
+		}
 		return
 	}
 	env, envErr := r.Gateway.serviceEnv(r.service)
@@ -1763,6 +2004,16 @@ func (r *doctorRun) checkGatewayConfig(ctx context.Context) {
 	r.telemetryCheck(ctx, &tele, st, envErr)
 }
 
+// configUnknown says why the gateway's settings, its compute driver among
+// them, are not known here: another account's configuration this account
+// may not read, or one that cannot be read at all.
+func (r *doctorRun) configUnknown() string {
+	if errors.Is(r.configErr, ErrForeignGatewayConfig) {
+		return "not known here: " + strings.TrimPrefix(r.configErr.Error(), "openshell: ")
+	}
+	return "not known here: the gateway configuration is unreadable"
+}
+
 // telemetryCheck compares OpenShell's usage telemetry with
 // openshell.upstream_telemetry. The setting is gateway.env's, which a
 // gateway no gateway service runs has loaded only once its user restarted
@@ -1774,23 +2025,34 @@ func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *Gateway
 	// Only gateway.env holds the setting.
 	envOnly := *st
 	envOnly.TOMLModTime = time.Time{}
+	// The Homebrew service's wrapper sources gateway.env before it starts
+	// the gateway, which launchd cannot be asked to confirm: on a Mac the
+	// check says where the setting comes from.
+	where, change := "", "set "+EnvTelemetryEnabled+"=%s in gateway.env"
+	switch {
+	case !st.EnvExists:
+		// Before setup, or after a teardown removed the file DefenseClaw
+		// created: no file holds the setting (GAP-0148).
+		where = ", OpenShell's default (there is no " + st.EnvPath + ")"
+		if r.GOOS == "darwin" {
+			where = ", OpenShell's default (there is no " + st.EnvPath + ", which the Homebrew service would read)"
+		}
+		change = "write " + EnvTelemetryEnabled + "=%s to a new gateway.env"
+	case r.GOOS == "darwin":
+		where = " in " + st.EnvPath + ", which the Homebrew service reads"
+	}
 	switch {
 	case r.GOOS == "darwin" && r.report.GatewayUnmanaged():
 		// No Homebrew service: whoever starts the gateway gives it its
 		// environment.
-		tele.Status, tele.Detail = StatusSkip, "DefenseClaw changes it on Linux only; the gateway reads "+EnvTelemetryEnabled+" from the environment it was started with"
-	case r.GOOS == "darwin":
-		// The Homebrew service's wrapper sources gateway.env before it
-		// starts the gateway, but launchd cannot be asked which one, so
-		// DefenseClaw leaves the telemetry to the user there.
-		tele.Status, tele.Detail = StatusSkip, "DefenseClaw changes it on Linux only; the Homebrew service reads "+EnvTelemetryEnabled+" from "+st.EnvPath
+		tele.Status, tele.Detail = StatusSkip, "the gateway reads "+EnvTelemetryEnabled+" from the environment it was started with, which DefenseClaw does not change"
 	case errors.Is(envErr, ErrGatewayMismatch):
 		tele.Status, tele.Detail = StatusWarn, envErr.Error()
 	case r.WantTelemetry != nil && *r.WantTelemetry != on:
 		want := strconv.FormatBool(*r.WantTelemetry)
 		tele.Status = StatusWarn
-		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s but openshell.upstream_telemetry is %s", state, want)
-		tele.Fix = r.gatewayChangeFix("set "+EnvTelemetryEnabled+"="+want+" in gateway.env", "",
+		tele.Detail = fmt.Sprintf("OpenShell usage telemetry is %s%s but openshell.upstream_telemetry is %s", state, where, want)
+		tele.Fix = r.gatewayChangeFix(fmt.Sprintf(change, want), "",
 			r.applyGateway(GatewayChanges{Env: map[string]string{EnvTelemetryEnabled: want}}))
 	case manual && r.restartPending(ctx, &envOnly):
 		tele.Status = StatusWarn
@@ -1800,7 +2062,7 @@ func (r *doctorRun) telemetryCheck(ctx context.Context, tele *Check, st *Gateway
 		tele.Status, tele.Detail = StatusWarn, "OpenShell usage telemetry is "+state+" in "+st.EnvPath+", "+restartUnknown
 		tele.Fix = r.gatewayChangeFix("", "with the variables in "+filepath.Base(st.EnvPath)+" in its environment, if you have not since it changed", nil)
 	default:
-		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state
+		tele.Status, tele.Detail = StatusPass, "OpenShell usage telemetry is "+state+where
 	}
 }
 

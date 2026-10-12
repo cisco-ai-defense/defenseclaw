@@ -304,10 +304,6 @@ enum ConfigEditorCatalog {
             locked.headerValue = "read-only: \(sandboxAdminMessage); \(reason)"
             return locked
         }
-        if let legacy = config?["openshell.mode"]?.string {
-            fields.append(.init(label: "Legacy Mode", key: "openshell.mode", kind: .header,
-                                headerValue: "\(legacy) — run: defenseclaw sandbox legacy-cleanup --dry-run"))
-        }
         return ConfigEditorSection(
             name: "OpenShell Sandboxes",
             summary: "NVIDIA OpenShell sandboxes: the agent sees only the project folder; DefenseClaw judges every call."

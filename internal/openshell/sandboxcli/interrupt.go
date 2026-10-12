@@ -23,6 +23,7 @@ import (
 	"os/signal"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Interrupts. `run` and `connect` stage, create, upload and probe before
@@ -64,6 +65,8 @@ func (a *App) interruptible(ctx context.Context) (context.Context, func()) {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	in := &interruption{ctx: ctx}
+	// The grace after a harness quit is that command's own.
+	harnessQuitAt.Store(0)
 	ch := make(chan os.Signal, 1)
 	interrupts.ch = ch
 	if interrupts.holds == 0 {
@@ -81,12 +84,18 @@ func (a *App) interruptible(ctx context.Context) (context.Context, func()) {
 		interrupts.mu.Unlock()
 	}
 	go func() {
-		select {
-		case <-ch:
-			in.fired.Store(true)
-			cancel()
-			forget()
-		case <-stopped:
+		for {
+			select {
+			case <-ch:
+				if harnessJustQuit() {
+					continue
+				}
+				in.fired.Store(true)
+				cancel()
+				forget()
+			case <-stopped:
+			}
+			return
 		}
 	}()
 	var once sync.Once
@@ -98,6 +107,26 @@ func (a *App) interruptible(ctx context.Context) (context.Context, func()) {
 			a.intr = nil
 		})
 	}
+}
+
+// harnessQuitGrace is how long after an attached harness exits a Ctrl-C is
+// taken for the rest of the keys that quit it, not for an interrupt of the
+// command: Codex quits on Ctrl-C twice, and a second press that lands after
+// it restored the terminal reached this process, so a session that ended
+// as documented closed with "✗ interrupted" (GAP-0321).
+const harnessQuitGrace = 2 * time.Second
+
+// harnessQuitAt is when the last attached harness exited (UnixNano).
+var harnessQuitAt atomic.Int64
+
+// noteHarnessQuit records that an attached harness just exited.
+func noteHarnessQuit() { harnessQuitAt.Store(time.Now().UnixNano()) }
+
+// harnessJustQuit reports a signal within harnessQuitGrace of an attached
+// harness's exit.
+func harnessJustQuit() bool {
+	at := harnessQuitAt.Load()
+	return at != 0 && time.Since(time.Unix(0, at)) < harnessQuitGrace
 }
 
 // interruptedExit is the result of a command a signal interrupted: its

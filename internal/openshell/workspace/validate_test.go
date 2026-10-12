@@ -209,15 +209,14 @@ func TestSecretNames(t *testing.T) {
 }
 
 // TestNamesAndLabels keeps the workspace name rule and the one OpenShell
-// calls use identical, apart from the reserved layout names ("git" is the
-// shared shadow directory under <data>/snapshots): a name one accepts and
-// the other refuses would write host state for a sandbox that can never
-// be created or addressed. Refusals are openshell.ErrInvalidName, and no
-// refused name reaches a host path.
+// calls use identical: a name one accepts and the other refuses would write
+// host state for a sandbox that can never be created or addressed.
+// Refusals are openshell.ErrInvalidName, and no refused name reaches a host
+// path.
 func TestNamesAndLabels(t *testing.T) {
 	bad := []string{"", ".hidden", "-x", "x-", "a/b", "a..b", "x.lock", "x.", strings.Repeat("a", 64), "sp ace",
-		"A.b_c-1", "Upper", "under_score", "dot.ted", "git"}
-	good := []string{"dc-claude-myapp-7f3a", "fix-tests", "a", "0", "gitx", "my-git", strings.Repeat("a", 63)}
+		"A.b_c-1", "Upper", "under_score", "dot.ted"}
+	good := []string{"dc-claude-myapp-7f3a", "fix-tests", "a", "0", "git", "gitx", "my-git", strings.Repeat("a", 63)}
 	for _, n := range bad {
 		if err := ValidateName(n); !errors.Is(err, openshell.ErrInvalidName) {
 			t.Errorf("ValidateName(%q) = %v, want openshell.ErrInvalidName", n, err)
@@ -229,9 +228,8 @@ func TestNamesAndLabels(t *testing.T) {
 		}
 	}
 	for _, n := range append(append(bad, good...), "z9", "a--b", "ab.c", "AB", "gits", "é", strings.Repeat("x", 62), "0-0", "dc-copy-1") {
-		_, reserved := reservedNames[n]
-		if got, want := ValidateName(n) == nil, openshell.ValidSandboxName(n) && !reserved; got != want {
-			t.Errorf("ValidateName(%q) accepted=%v, openshell.ValidSandboxName=%v reserved=%v", n, got, openshell.ValidSandboxName(n), reserved)
+		if got, want := ValidateName(n) == nil, openshell.ValidSandboxName(n); got != want {
+			t.Errorf("ValidateName(%q) accepted=%v, openshell.ValidSandboxName=%v", n, got, want)
 		}
 	}
 	if k, v := ProjectLabel("/home/u/code/myapp"); k != ProjectLabelKey || len(v) != 32 || v != ProjectKey("/home/u/code/myapp/") {
