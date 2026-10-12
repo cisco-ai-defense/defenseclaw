@@ -13,6 +13,7 @@
 package managed
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -618,6 +619,7 @@ func TestAdoptWindowsGatewayServiceDefaultOwner(t *testing.T) {
 	}
 	enabled := uint32(windows.SE_GROUP_ENABLED | windows.SE_GROUP_ENABLED_BY_DEFAULT | windows.SE_GROUP_MANDATORY)
 	gatewayGroup := []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}}
+	resolve := func() (*windows.SID, error) { return serviceSID, nil }
 	for _, test := range []struct {
 		name    string
 		token   fakeServiceToken
@@ -630,7 +632,7 @@ func TestAdoptWindowsGatewayServiceDefaultOwner(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var set *windows.SID
-			applied, err := adoptWindowsGatewayServiceDefaultOwner(test.token, serviceSID, func(owner *windows.SID) error {
+			applied, err := adoptWindowsGatewayServiceDefaultOwner(test.token, resolve, func(owner *windows.SID) error {
 				set = owner
 				return nil
 			})
@@ -648,10 +650,31 @@ func TestAdoptWindowsGatewayServiceDefaultOwner(t *testing.T) {
 
 	_, err = adoptWindowsGatewayServiceDefaultOwner(
 		fakeServiceToken{user: localSystem, groups: gatewayGroup},
-		serviceSID,
+		resolve,
 		func(*windows.SID) error { return windows.ERROR_INVALID_OWNER },
 	)
 	if err == nil || !strings.Contains(err.Error(), "set token owner to service SID") {
 		t.Fatalf("setter failure error = %v", err)
+	}
+
+	// A pin that does not resolve must not stop a virtual-account gateway or
+	// an interactive process: the token user is checked first.
+	badPin := func() (*windows.SID, error) { return nil, errors.New("unresolvable pin") }
+	for _, token := range []fakeServiceToken{{user: serviceSID}, {user: user, groups: gatewayGroup}} {
+		applied, err := adoptWindowsGatewayServiceDefaultOwner(token, badPin, func(*windows.SID) error {
+			t.Fatal("owner set for a non-LocalSystem token")
+			return nil
+		})
+		if err != nil || applied {
+			t.Fatalf("non-LocalSystem token with bad pin: applied=%v err=%v", applied, err)
+		}
+	}
+	// For a LocalSystem process the resolution error is still reported.
+	if _, err := adoptWindowsGatewayServiceDefaultOwner(
+		fakeServiceToken{user: localSystem, groups: gatewayGroup},
+		badPin,
+		func(*windows.SID) error { return nil },
+	); err == nil || !strings.Contains(err.Error(), "unresolvable pin") {
+		t.Fatalf("LocalSystem bad pin error = %v", err)
 	}
 }

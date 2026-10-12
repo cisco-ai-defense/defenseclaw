@@ -569,10 +569,6 @@ func AdoptWindowsGatewayServiceDefaultOwner() (bool, error) {
 	if account == "" {
 		return false, nil
 	}
-	serviceSID, err := windowsVirtualServiceSID(account)
-	if err != nil {
-		return false, err
-	}
 	var token windows.Token
 	if err := windows.OpenProcessToken(
 		windows.CurrentProcess(),
@@ -582,7 +578,8 @@ func AdoptWindowsGatewayServiceDefaultOwner() (bool, error) {
 		return false, fmt.Errorf("windows gateway default owner: open process token: %w", err)
 	}
 	defer func() { _ = token.Close() }()
-	return adoptWindowsGatewayServiceDefaultOwner(token, serviceSID, func(owner *windows.SID) error {
+	resolveServiceSID := func() (*windows.SID, error) { return windowsVirtualServiceSID(account) }
+	return adoptWindowsGatewayServiceDefaultOwner(token, resolveServiceSID, func(owner *windows.SID) error {
 		value := windowsTokenOwner{Owner: owner}
 		return windows.SetTokenInformation(
 			token,
@@ -593,9 +590,12 @@ func AdoptWindowsGatewayServiceDefaultOwner() (bool, error) {
 	})
 }
 
+// adoptWindowsGatewayServiceDefaultOwner reads the token user before it
+// resolves the pinned service SID, so a pin that does not resolve only fails a
+// LocalSystem process and never a gateway still on its virtual account.
 func adoptWindowsGatewayServiceDefaultOwner(
 	token windowsTokenIdentity,
-	serviceSID *windows.SID,
+	resolveServiceSID func() (*windows.SID, error),
 	setOwner func(*windows.SID) error,
 ) (bool, error) {
 	user, err := token.GetTokenUser()
@@ -605,6 +605,10 @@ func adoptWindowsGatewayServiceDefaultOwner(
 	if !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
 		// Virtual-account logon already owns new objects as the service SID.
 		return false, nil
+	}
+	serviceSID, err := resolveServiceSID()
+	if err != nil {
+		return false, err
 	}
 	isGateway, err := windowsTokenRunsAsService(token, serviceSID)
 	if err != nil {
