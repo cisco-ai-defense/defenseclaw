@@ -176,12 +176,12 @@ if (-not $installGuarded) {
 
     # Exercise the actual fresh-install preparation boundary. A rejected
     # scope must fail before its first durable intent write, which also means
-    # the later transaction and shared connector writers cannot run.
+    # the later transaction and shared connector writers cannot run. The real
+    # guard runs, so this also proves the wrapper forwards the shared-hook
+    # owners and -ActiveOnly; the guard rejects a foreign owner before its SCM
+    # service loop, so no matching service is needed.
     $realGet = (Microsoft.PowerShell.Core\Get-Command `
         -Name Get-DefenseClawInstallRollbackIntent `
-        -CommandType Function).ScriptBlock
-    $realGuard = (Microsoft.PowerShell.Core\Get-Command `
-        -Name Assert-DefenseClawNoForeignManagedService `
         -CommandType Function).ScriptBlock
     $realWrite = (Microsoft.PowerShell.Core\Get-Command `
         -Name Write-DefenseClawInstallRollbackIntent `
@@ -191,9 +191,6 @@ if (-not $installGuarded) {
         -CommandType Function).ScriptBlock
     $script:CrossScopeIntentWrites = 0
     function script:Get-DefenseClawInstallRollbackIntent { return $null }
-    function script:Assert-DefenseClawNoForeignManagedService {
-        throw 'foreign-scope-blocked'
-    }
     function script:Get-DefenseClawSharedManagedHookOwners {
         return @('DefenseClawCertGateway_1165c1ff8a')
     }
@@ -214,7 +211,10 @@ if (-not $installGuarded) {
         catch {
             $preparationFailure = [string]$_.Exception.Message
         }
-        if ($preparationFailure -cne 'foreign-scope-blocked' -or
+        if ($preparationFailure -cne (
+                'refusing managed-hook install while another managed ' +
+                'DefenseClaw scope owns shared hooks: DefenseClawCertGateway_1165c1ff8a'
+            ) -or
             $script:CrossScopeIntentWrites -ne 0) {
             throw (
                 'fresh install crossed the foreign-scope preflight boundary: ' +
@@ -226,9 +226,6 @@ if (-not $installGuarded) {
         Microsoft.PowerShell.Management\Set-Item `
             -LiteralPath 'Function:script:Get-DefenseClawInstallRollbackIntent' `
             -Value $realGet
-        Microsoft.PowerShell.Management\Set-Item `
-            -LiteralPath 'Function:script:Assert-DefenseClawNoForeignManagedService' `
-            -Value $realGuard
         Microsoft.PowerShell.Management\Set-Item `
             -LiteralPath 'Function:script:Write-DefenseClawInstallRollbackIntent' `
             -Value $realWrite
