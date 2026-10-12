@@ -2922,7 +2922,14 @@ function Invoke-DefenseClawProcess {
         $standardError = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             try { $process.Kill() } catch {}
-            try { $process.WaitForExit() } catch {}
+            try {
+                if (Test-DefenseClawStandaloneProfile) {
+                    [void]$process.WaitForExit(5000)
+                }
+                else {
+                    $process.WaitForExit()
+                }
+            } catch {}
             throw "native process timed out after $TimeoutSeconds seconds: $resolved"
         }
         $process.WaitForExit()
@@ -2947,6 +2954,7 @@ function Invoke-DefenseClawNative {
     param(
         [Parameter(Mandatory)][string]$File,
         [Parameter(Mandatory)][string[]]$Arguments,
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 300,
         [switch]$Capture
     )
     $resolved = [IO.Path]::GetFullPath($File)
@@ -2956,7 +2964,8 @@ function Invoke-DefenseClawNative {
     }
     $result = Invoke-DefenseClawProcess `
         -File $resolved `
-        -Arguments $Arguments
+        -Arguments $Arguments `
+        -TimeoutSeconds $TimeoutSeconds
     if ([int]$result.exit_code -ne 0) {
         $detail = ($result.output | Microsoft.PowerShell.Utility\Out-String).Trim()
         throw "$resolved exited $($result.exit_code) while running '$($Arguments -join ' ')': $detail"
@@ -2964,6 +2973,39 @@ function Invoke-DefenseClawNative {
     if ($Capture) {
         return @($result.output)
     }
+}
+
+function Get-DefenseClawGatewayServiceAccount {
+    return 'LocalSystem'
+}
+
+function Get-DefenseClawLegacyGatewayServiceAccount {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    return "NT SERVICE\$GatewayServiceName"
+}
+
+function Get-DefenseClawAcceptedGatewayServiceAccounts {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    return @(
+        (Get-DefenseClawGatewayServiceAccount),
+        (Get-DefenseClawLegacyGatewayServiceAccount -GatewayServiceName $GatewayServiceName)
+    )
+}
+
+function Test-DefenseClawGatewayServiceAccount {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Account,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    foreach ($accepted in @(
+            (Get-DefenseClawAcceptedGatewayServiceAccounts -GatewayServiceName $GatewayServiceName) +
+            @('NT AUTHORITY\SYSTEM')
+        )) {
+        if ([string]::Equals($Account, $accepted, [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Get-DefenseClawServiceSID {
@@ -4697,11 +4739,11 @@ function Stop-DefenseClawService {
                 $_.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped
             })
         if ($running.Count -gt 0) {
-            throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds while $($running[0].ServiceName) depends on it"
+            throw "service $Name failed during stop: $($running[0].ServiceName) still depends on it after $($script:ServiceStopTimeoutSeconds) seconds; stop the dependent service, then run Setup /ensure again"
         }
         Stop-DefenseClawUnresponsiveServiceProcess -Name $Name
         if (-not (Wait-DefenseClawServiceStopped -Service $service -Timeout $budget)) {
-            throw "service $Name did not stop within $($script:ServiceStopTimeoutSeconds) seconds after its process was ended"
+            throw "service $Name failed during stop: it stayed running for $($script:ServiceStopTimeoutSeconds) seconds after its process was ended; inspect the Windows service events, then run Setup /ensure again"
         }
     }
     finally {
@@ -4728,12 +4770,20 @@ function Start-DefenseClawServiceStopRequest {
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
-    return [Diagnostics.Process]::Start($info)
+    try {
+        return [Diagnostics.Process]::Start($info)
+    }
+    catch {
+        throw "service $Name failed during stop request: $($_.Exception.Message). Inspect the Windows service events, then run Setup /ensure again"
+    }
 }
 
 # How long a standalone stop waits before it ends a service process that
 # does not answer (the SCM's own stop budget).
 $script:ServiceStopTimeoutSeconds = 30
+# Standalone start bounds the SCM request and the running-state wait separately.
+$script:ServiceStartRequestTimeoutSeconds = 30
+$script:ServiceStartReadyTimeoutSeconds = 60
 
 # Each service process a standalone lifecycle ended because it did not
 # answer a stop, as "<service> (pid <n>)", for the result.
@@ -4761,7 +4811,12 @@ function Wait-DefenseClawServiceStopped {
 function Get-DefenseClawServiceProcessId {
     param([Parameter(Mandatory)][string]$Name)
     Assert-DefenseClawServiceName -Name $Name
-    $lines = @(Invoke-DefenseClawNative -File $script:ScExe -Arguments @('queryex', $Name) -Capture)
+    try {
+        $lines = @(Invoke-DefenseClawNative -File $script:ScExe -Arguments @('queryex', $Name) -TimeoutSeconds 10 -Capture)
+    }
+    catch {
+        throw "service $Name failed during SCM process lookup: $($_.Exception.Message). Inspect the Windows service events, then run Setup /ensure again"
+    }
     $match = [regex]::Match(($lines -join "`n"), '(?m)^\s*PID\s*:\s*([0-9]+)\s*$')
     if (-not $match.Success) {
         return [uint32]0
@@ -4783,7 +4838,7 @@ function Stop-DefenseClawUnresponsiveServiceProcess {
         return
     }
     if ($processId -eq [uint32]$PID) {
-        throw "service $Name did not stop and runs in this lifecycle's own process $processId; not ending it"
+        throw "service $Name failed during stop: its process is this lifecycle's own process $processId; inspect the service configuration, then run Setup /ensure again"
     }
     $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
     $imagePath = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ImagePath -ErrorAction Stop)
@@ -4818,11 +4873,36 @@ function Start-DefenseClawService {
             $script:DefenseClawServiceLogOffsets[$FailureLogPath] = Get-DefenseClawLogLength -LogPath $FailureLogPath
         }
         try {
-            Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
-            $service.WaitForStatus([ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(60))
+            if (Test-DefenseClawStandaloneProfile) {
+                Assert-DefenseClawServiceName -Name $Name
+                $startResult = Invoke-DefenseClawProcess `
+                    -File $script:ScExe `
+                    -Arguments @('start', $Name) `
+                    -TimeoutSeconds $script:ServiceStartRequestTimeoutSeconds
+                if ([int]$startResult.exit_code -ne 0) {
+                    $service.Refresh()
+                    if ($service.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+                        throw "SCM start request exited $($startResult.exit_code)"
+                    }
+                }
+            }
+            else {
+                Microsoft.PowerShell.Management\Start-Service -Name $Name -ErrorAction Stop
+            }
+            $service.WaitForStatus(
+                [ServiceProcess.ServiceControllerStatus]::Running,
+                [TimeSpan]::FromSeconds($script:ServiceStartReadyTimeoutSeconds)
+            )
         }
         catch {
             $logged = Get-DefenseClawStandaloneServiceLoggedError -LogPath $FailureLogPath
+            if (Test-DefenseClawStandaloneProfile) {
+                $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512
+                if (-not [string]::IsNullOrEmpty($logged)) {
+                    $detail += " The service logged: $logged"
+                }
+                throw "service $Name failed during start or readiness check (SCM request: $($script:ServiceStartRequestTimeoutSeconds)s; running state: $($script:ServiceStartReadyTimeoutSeconds)s). Inspect the service events and log, then run Setup /ensure again. Details: $detail"
+            }
             if ([string]::IsNullOrEmpty($logged)) {
                 throw
             }
@@ -5470,8 +5550,13 @@ function Set-DefenseClawManagedServices {
         [Parameter(Mandatory)][string]$GuardianLogPath,
         [switch]$AgentApplicationControlAttested,
         [switch]$ClaudeEffectivePolicyVerified,
-        [switch]$DeferAutomaticStart
+        [switch]$DeferAutomaticStart,
+        [string]$RestoreGatewayAccount
     )
+    if (-not [string]::IsNullOrEmpty($RestoreGatewayAccount) -and
+        -not $DeferAutomaticStart) {
+        throw 'a recorded gateway account can be restored only while transaction services remain disabled'
+    }
     Assert-DefenseClawServiceName -Name $GatewayServiceName
     Assert-DefenseClawServiceName -Name $GuardianServiceName
     $brokerEnabled = Test-DefenseClawBrokerEnabled
@@ -5506,7 +5591,17 @@ function Set-DefenseClawManagedServices {
     }
     $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName
     Assert-DefenseClawServiceName -Name $enumeratorServiceName
-    $gatewayAccount = "NT SERVICE\$GatewayServiceName"
+    $gatewayAccount = if ([string]::IsNullOrEmpty($RestoreGatewayAccount)) {
+        Get-DefenseClawGatewayServiceAccount
+    }
+    elseif (Test-DefenseClawGatewayServiceAccount `
+            -Account $RestoreGatewayAccount `
+            -GatewayServiceName $GatewayServiceName) {
+        $RestoreGatewayAccount
+    }
+    else {
+        throw "refusing to restore unsupported gateway service account $RestoreGatewayAccount"
+    }
     $gatewayImage = '"{0}"' -f $GatewayPath
     $brokerImage = ''
     if ($brokerEnabled) {
@@ -5641,6 +5736,18 @@ function Set-DefenseClawManagedServices {
     Assert-DefenseClawServiceImagePath `
         -Name $GatewayServiceName `
         -ExpectedImage $gatewayImage
+    $writtenGatewayAccount = [string](
+        Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+            -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$GatewayServiceName" `
+            -Name ObjectName
+    )
+    if (-not [string]::Equals(
+            $writtenGatewayAccount,
+            $gatewayAccount,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "gateway service account is $writtenGatewayAccount after configuration, want $gatewayAccount"
+    }
     if (Test-DefenseClawServiceExists -Name $GuardianServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'config', $GuardianServiceName,
@@ -6038,6 +6145,34 @@ function Set-DefenseClawServiceActivationPhase {
         $timestampProperty.Value = $timestampValue
     }
     Write-DefenseClawJsonAtomic -Value $State -Path $Path
+}
+
+function Get-DefenseClawTransactionGatewayAccount {
+    param([Parameter(Mandatory)]$Snapshot)
+    $gatewayServiceName = [string]$Snapshot.gateway_service
+    $entries = @($Snapshot.services |
+        Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals(
+                [string]$_.name,
+                $gatewayServiceName,
+                [StringComparison]::OrdinalIgnoreCase
+            )
+        })
+    if ($entries.Count -ne 1) {
+        throw 'transaction has invalid prior gateway service metadata'
+    }
+    $property = $entries[0].PSObject.Properties['account']
+    if ($null -eq $property -or [string]::IsNullOrEmpty([string]$property.Value)) {
+        return Get-DefenseClawLegacyGatewayServiceAccount `
+            -GatewayServiceName $gatewayServiceName
+    }
+    $account = [string]$property.Value
+    if (-not (Test-DefenseClawGatewayServiceAccount `
+            -Account $account `
+            -GatewayServiceName $gatewayServiceName)) {
+        throw "transaction records an unsupported gateway service account $account"
+    }
+    return $account
 }
 
 function Get-DefenseClawTransactionServiceStartMode {
@@ -8174,7 +8309,7 @@ function New-DefenseClawDeploymentMetadata {
         state_root = $Layout.StateRoot
         gateway_service = $GatewayServiceName
         guardian_service = $GuardianServiceName
-        gateway_account = "NT SERVICE\$GatewayServiceName"
+        gateway_account = (Get-DefenseClawGatewayServiceAccount)
         guardian_account = 'LocalSystem'
         broker_service = $Layout.BrokerServiceName
         broker_account = 'LocalSystem'
@@ -8452,8 +8587,13 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         throw "refusing to replace foreign Windows service $Name with ImagePath $image"
     }
     $objectName = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ObjectName)
-    $expectedAccount = if ($Guardian -or $SensorHelper -or $Enumerator) { 'LocalSystem' } else { "NT SERVICE\$Name" }
-    if (-not [string]::Equals($objectName, $expectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
+    $ownedAccount = if ($Guardian -or $SensorHelper -or $Enumerator) {
+        [string]::Equals($objectName, 'LocalSystem', [StringComparison]::OrdinalIgnoreCase)
+    }
+    else {
+        Test-DefenseClawGatewayServiceAccount -Account $objectName -GatewayServiceName $Name
+    }
+    if (-not $ownedAccount) {
         throw "refusing to replace service $Name owned by unexpected account $objectName"
     }
 }
@@ -8682,6 +8822,16 @@ function New-DefenseClawTransaction {
         else {
             Get-DefenseClawServiceStartMode -Name $name
         }
+        $account = if ($null -eq $service) {
+            ''
+        }
+        else {
+            [string](
+                Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+                    -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\$name" `
+                    -Name ObjectName
+            )
+        }
         $services.Add([ordered]@{
             name = $name
             existed = ($null -ne $service)
@@ -8691,6 +8841,7 @@ function New-DefenseClawTransaction {
                     [ServiceProcess.ServiceControllerStatus]::Running
             )
             start_mode = [int]$startMode
+            account = $account
         })
     }
     $quiescingIntentPublished = $false
@@ -11023,7 +11174,10 @@ function Restore-DefenseClawTransaction {
             -GuardianLogPath $Layout.GuardianLogPath `
             -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
             -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-            -DeferAutomaticStart
+            -DeferAutomaticStart `
+            -RestoreGatewayAccount (
+                Get-DefenseClawTransactionGatewayAccount -Snapshot $snapshot
+            )
         if ((Test-DefenseClawStandaloneProfile) -and
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.ManagedIPCDirectory)) {
             # A standalone uninstall removes the managed IPC directory once its
@@ -11201,7 +11355,10 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -Layout $Layout `
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
-        -ServicingTransaction
+        -ServicingTransaction `
+        -ExpectedGatewayAccount @(
+            Get-DefenseClawTransactionGatewayAccount -Snapshot $Snapshot
+        )
     return $true
 }
 
@@ -16713,6 +16870,18 @@ function Invoke-DefenseClawCommittedManagedHooksLifecycleRetire {
         $failure = $_
     }
     $message = [string]$failure.Exception.Message
+    if ((Test-DefenseClawStandaloneProfile) -and
+        $message.IndexOf(
+            'managed runtime generation directory is untrusted',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -ge 0) {
+        throw (
+            "gateway service $GatewayServiceName failed while retiring the managed-hook lifecycle snapshot " +
+            'because a per-user hooks folder has untrusted permissions. Have an administrator inspect the ' +
+            'folder named in the error, reset its permissions or remove it, then run Setup /ensure again. ' +
+            $message
+        )
+    }
     if (-not (Test-DefenseClawStandaloneProfile) -or
         -not $message.StartsWith(
             'managed-hook lifecycle snapshot retire failed: retire ',
@@ -17837,7 +18006,7 @@ function Assert-DefenseClawServiceConfiguration {
     param(
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$ExpectedImage,
-        [Parameter(Mandatory)][string]$ExpectedAccount,
+        [Parameter(Mandatory)][string[]]$ExpectedAccount,
         [Parameter(Mandatory)][string]$ExpectedDisplayName,
         [Parameter(Mandatory)][int]$ExpectedSidType,
         [Parameter(Mandatory)][string[]]$ExpectedPrivileges,
@@ -17854,7 +18023,17 @@ function Assert-DefenseClawServiceConfiguration {
     if (-not [string]::Equals([string]$properties.ImagePath, $ExpectedImage, [StringComparison]::OrdinalIgnoreCase)) {
         throw "service $Name ImagePath drift: $($properties.ImagePath)"
     }
-    if (-not [string]::Equals([string]$properties.ObjectName, $ExpectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
+    $accountMatches = @(
+        $ExpectedAccount |
+            Microsoft.PowerShell.Core\Where-Object {
+                [string]::Equals(
+                    [string]$properties.ObjectName,
+                    [string]$_,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($accountMatches.Count -eq 0) {
         throw "service $Name account drift: $($properties.ObjectName)"
     }
     if (-not [string]::Equals([string]$properties.DisplayName, $ExpectedDisplayName, [StringComparison]::Ordinal)) {
@@ -17944,8 +18123,13 @@ function Assert-DefenseClawManagedServiceConfigurations {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
-        [switch]$AnyStartMode
+        [switch]$AnyStartMode,
+        [string[]]$ExpectedGatewayAccount
     )
+    if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
+        $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
+            -GatewayServiceName $GatewayServiceName
+    }
     if ($PendingTransaction -and $ServicingTransaction) {
         throw 'service configuration assertion cannot be both pending-live and servicing'
     }
@@ -18036,7 +18220,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
-        -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
+        -ExpectedAccount $ExpectedGatewayAccount `
         -ExpectedDisplayName 'DefenseClaw Enterprise Gateway' `
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
@@ -18483,8 +18667,13 @@ function Assert-DefenseClawEnterpriseDeployment {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$RequireReadiness,
         [switch]$PendingTransaction,
-        [switch]$ServicingTransaction
+        [switch]$ServicingTransaction,
+        [string[]]$ExpectedGatewayAccount
     )
+    if ($null -eq $ExpectedGatewayAccount -or $ExpectedGatewayAccount.Count -eq 0) {
+        $ExpectedGatewayAccount = Get-DefenseClawAcceptedGatewayServiceAccounts `
+            -GatewayServiceName $GatewayServiceName
+    }
     if ($PendingTransaction -and $ServicingTransaction) {
         throw 'deployment assertion cannot be both pending-live and servicing'
     }
@@ -19130,7 +19319,7 @@ function Assert-DefenseClawEnterpriseDeployment {
     Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
-        -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
+        -ExpectedAccount $ExpectedGatewayAccount `
         -ExpectedDisplayName 'DefenseClaw Enterprise Gateway' `
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `

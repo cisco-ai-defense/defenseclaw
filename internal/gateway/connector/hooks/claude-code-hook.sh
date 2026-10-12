@@ -226,7 +226,21 @@ fail_response() {
   exit 2
 }
 
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{.HookSocketTransportSH}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}# Resolve write operands in the user's hook process; the managed gateway
+# cannot inspect this home under ProtectHome. Keep the payload off argv.
+_DC_RESOLVED_WRITES=
+if [ -z "${DEFENSECLAW_SESSION_FACTS_BIN:-}" ] ||
+   ! _DC_RESOLVED_WRITES="$("${DEFENSECLAW_SESSION_FACTS_BIN}" hook resolve-writes < <(printf '%s' "${PAYLOAD}"))" ||
+   [ -z "${_DC_RESOLVED_WRITES}" ]; then
+  # A truncated fact map makes the gateway evaluate writes with incomplete
+  # evidence; an absent header would incorrectly permit local resolution.
+  _DC_RESOLVED_WRITES=eyJcdTAwMDB0cnVuY2F0ZWQiOiIxIn0
+fi
+RESOLVED_HEADER_ARGS=()
+if [ -n "${_DC_RESOLVED_WRITES}" ]; then
+  RESOLVED_HEADER_ARGS=(-H "X-DefenseClaw-Resolved-Writes: ${_DC_RESOLVED_WRITES}")
+fi
+{{end}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
@@ -276,7 +290,8 @@ defenseclaw_hook_post() {
   defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 10 "$PAYLOAD" \
     -H "Content-Type: application/json" \
     -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
-    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}    "${RESOLVED_HEADER_ARGS[@]+"${RESOLVED_HEADER_ARGS[@]}"}" \
+{{end}}    "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
     "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
     "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"{{if .HookSocketTransportSH}} \
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}

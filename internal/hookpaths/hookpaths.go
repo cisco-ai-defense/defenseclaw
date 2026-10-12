@@ -32,8 +32,17 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
+// OperandFactsKey marks a client that enumerates shell write operands. The
+// gateway can fail closed on an omitted private operand only with this marker;
+// older headers did not promise facts for command destinations.
+const OperandFactsKey = "\x00operand-facts"
+
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
+
+// SedRelinkFactPrefix marks an in-place sed entry whose existing final link
+// has a dot-dot hop. The gateway may not be able to inspect that entry.
+const SedRelinkFactPrefix = "\x00sed-relink:"
 
 // maxWriteTargetLinkDepth matches the Linux kernel limit (MAXSYMLINKS) for
 // one path resolution. Every followed link counts, also in parent components,
@@ -76,10 +85,31 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 	if !parsed {
 		return nil, false, false
 	}
-	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	for _, occurrence := range shellWriteOccurrences(file, cwd, home) {
+		if !occurrence.Static {
+			dynamic = true
+			continue
+		}
+		if occurrence.Path != "" {
+			operands = append(operands, occurrence.Path)
+		}
+	}
+	return operands, true, dynamic
+}
+
+type shellWriteOccurrence struct {
+	Path   string
+	Offset int
+	Static bool
+}
+
+func shellWriteOccurrences(file *syntax.File, cwd, home string) []shellWriteOccurrence {
+	var occurrences []shellWriteOccurrence
+	poison := shellVariablePoisonForFile(file, home)
+	states := shellWordStates(file, home, poison)
 	syntax.Walk(file, func(node syntax.Node) bool {
-		redirect, isRedirect := node.(*syntax.Redirect)
-		if !isRedirect || redirect.Word == nil {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok || redirect.Word == nil {
 			return true
 		}
 		switch redirect.Op {
@@ -87,18 +117,186 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 		default:
 			return true
 		}
-		name, static := staticShellWord(redirect.Word, env, home != "")
-		if !static {
-			dynamic = true
+		offset := -1
+		if redirect.Word != nil {
+			offset = int(redirect.Word.Pos().Offset())
+		}
+		name, static := staticShellWordWithVars(redirect.Word, home, states.varsFor(redirect.Word), poison)
+		if !static || name == "" {
+			occurrences = append(occurrences, shellWriteOccurrence{Offset: offset, Static: false})
 			return true
 		}
-		if name == "" {
-			return true
-		}
-		operands = append(operands, OperandPath(name, cwd))
+		occurrences = append(occurrences, shellWriteOccurrence{
+			Path: OperandPath(name, cwd), Offset: offset, Static: true,
+		})
 		return true
 	})
-	return operands, true, dynamic
+	return occurrences
+}
+
+// ExtraWriteOperand preserves whether a destination belongs to the copy
+// operation itself. Later writers to the same path cannot claim that scope.
+type ExtraWriteOperand struct {
+	Path    string
+	OwnCopy bool
+}
+
+// ShellExtraWriteOperands lists destinations that the command-link proof
+// understands but ActionFacts does not emit as write PathFacts.
+func ShellExtraWriteOperands(command, cwd, home string) []ExtraWriteOperand {
+	file, ok := parseShell(command)
+	if !ok {
+		return nil
+	}
+	var operands []ExtraWriteOperand
+	poison := shellVariablePoisonForFile(file, home)
+	states := shellWordStates(file, home, poison)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		operands = append(operands, shellCallExtraWriteOperands(call, cwd, home, states.varsFor(call.Args[0]), poison)...)
+		return true
+	})
+	return operands
+}
+
+// ShellDynamicWriteOperands lists conservative literal candidates for dynamic
+// redirect targets. unknown reports a dynamic target whose value has no bounded
+// literal candidate, so the caller must fail closed when the target matters.
+func ShellDynamicWriteOperands(command, cwd, home string) (operands []string, unknown bool) {
+	file, ok := parseShell(command)
+	if !ok {
+		return nil, true
+	}
+	poison := shellVariablePoisonForFile(file, home)
+	states := shellWordStates(file, home, poison)
+	candidates := shellVariableCandidates(file, home)
+	seen := map[string]bool{}
+	add := func(name string) {
+		if name == "" || strings.ContainsAny(name, "\x00\r\n") {
+			return
+		}
+		path := OperandPath(name, cwd)
+		if !seen[path] {
+			seen[path] = true
+			operands = append(operands, path)
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok || redirect.Word == nil {
+			return true
+		}
+		switch redirect.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.ClbOut, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+		default:
+			return true
+		}
+		if _, static := staticShellWordWithVars(redirect.Word, home, states.varsFor(redirect.Word), poison); static {
+			return true
+		}
+		names, wordUnknown := shellWordDynamicParamNames(redirect.Word, home)
+		if candidates.allUnknown || wordUnknown {
+			unknown = true
+			return true
+		}
+		if len(names) == 0 {
+			return true
+		}
+		for _, name := range names {
+			values := candidates.values[name]
+			if candidates.unknown[name] || len(values) == 0 {
+				unknown = true
+			}
+			for _, value := range values {
+				add(value)
+			}
+		}
+		return true
+	})
+	return operands, unknown
+}
+
+func shellCallExtraWriteOperands(
+	call *syntax.CallExpr, cwd, home string, vars shellVariables, poison shellVariablePoison,
+) []ExtraWriteOperand {
+	words := make([]string, len(call.Args))
+	for i, arg := range call.Args {
+		var static bool
+		words[i], static = staticShellWordWithVars(arg, home, vars, poison)
+		if !static {
+			return nil
+		}
+	}
+	cmdCWD, programWords, ok := envCommandWords(words, cwd)
+	if !ok || len(programWords) == 0 {
+		return nil
+	}
+	for slices.Contains(multicallPrograms, programBase(programWords[0])) && len(programWords) > 1 {
+		programWords = programWords[1:]
+	}
+	program := programBase(programWords[0])
+	var operands []ExtraWriteOperand
+	var destination string
+	add := func(path string) {
+		operands = append(operands, ExtraWriteOperand{
+			Path: path, OwnCopy: program == "cp" || program == "gcp" || program == "rsync",
+		})
+	}
+	switch program {
+	case "ln", "gln":
+		if len(programWords) < 3 {
+			return nil
+		}
+		for i := 1; i < len(programWords); i++ {
+			if programWords[i] == "-f" || programWords[i] == "--force" ||
+				strings.HasPrefix(programWords[i], "-") && strings.Contains(programWords[i], "f") {
+				destination = programWords[len(programWords)-1]
+				break
+			}
+		}
+	case "rsync":
+		if len(programWords) >= 3 {
+			destination = programWords[len(programWords)-1]
+		}
+	case "tee":
+		for _, target := range teeDestinations(programWords[1:]) {
+			add(OperandPath(target, cmdCWD))
+		}
+	case "cp", "gcp":
+		static := makeStatic(len(programWords) - 1)
+		destination = cpDestination(programWords[1:], static, cmdCWD)
+	case "mv", "gmv", "install":
+		destination = finalOperandDestination(programWords[1:], cmdCWD)
+	case "dd":
+		for _, arg := range programWords[1:] {
+			if output, ok := strings.CutPrefix(arg, "of="); ok && output != "" {
+				add(OperandPath(output, cmdCWD))
+			}
+		}
+	case "sed", "gsed":
+		for _, name := range sedInPlaceFiles(programWords) {
+			if sedFollowsInPlaceLinks(programWords) || sedParentProtected(name, cmdCWD, home) {
+				add(OperandPath(name, cmdCWD))
+			}
+		}
+	case "truncate":
+		for _, name := range truncateFiles(programWords[1:]) {
+			add(OperandPath(name, cmdCWD))
+		}
+	case "tar", "gtar", "bsdtar":
+		for _, path := range tarExplicitExtractMembers(program, programWords[1:], cmdCWD) {
+			add(path)
+		}
+	}
+	if destination != "" && !strings.HasPrefix(destination, "-") &&
+		(program != "rsync" || runtime.GOOS == "windows" || !strings.Contains(destination, ":")) &&
+		!strings.Contains(destination, "://") && !strings.Contains(destination, "::") {
+		add(OperandPath(destination, cmdCWD))
+	}
+	return operands
 }
 
 // OperandPath preserves dot-dot in the command operand until link resolution.
@@ -139,7 +337,12 @@ func parseShell(command string) (*syntax.File, bool) {
 // staticShellWord expands a redirect word that names one fixed path: quotes,
 // escapes, a leading ~/ and $HOME. Anything whose value depends on the
 // runtime (another parameter, a substitution, a glob, ~user) is not static.
-func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (string, bool) {
+func staticShellWord(
+	word *syntax.Word, env expand.Environ, haveHome bool, vars shellVariables, poison shellVariablePoison,
+) (string, bool) {
+	if word == nil {
+		return "", false
+	}
 	for i, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
@@ -156,7 +359,7 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 				switch inner := inner.(type) {
 				case *syntax.Lit:
 				case *syntax.ParamExp:
-					if !homeParam(inner, haveHome) {
+					if !staticShellParam(inner, haveHome, vars, poison) {
 						return "", false
 					}
 				default:
@@ -164,7 +367,7 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 				}
 			}
 		case *syntax.ParamExp:
-			if !homeParam(part, haveHome) {
+			if !staticShellParam(part, haveHome, vars, poison) {
 				return "", false
 			}
 		default:
@@ -177,15 +380,13 @@ func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (stri
 	if err != nil || len(fields) != 1 {
 		return "", false
 	}
+	applyShellParamAssignments(word, fields[0], env, haveHome, vars, poison)
 	return fields[0], true
 }
 
 // StaticWord expands one shell word using only the known home directory.
 func StaticWord(word *syntax.Word, home string) (string, bool) {
-	if word == nil {
-		return "", false
-	}
-	return staticShellWord(word, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")), home != "")
+	return staticShellWordWithVars(word, home, nil, shellVariablePoison{})
 }
 
 func homeParam(param *syntax.ParamExp, haveHome bool) bool {
@@ -193,6 +394,812 @@ func homeParam(param *syntax.ParamExp, haveHome bool) bool {
 		!param.Width && !param.IsSet && param.Index == nil && param.Slice == nil && param.Repl == nil &&
 		param.Names == 0 && param.Exp == nil && param.Flags == nil && param.NestedParam == nil &&
 		len(param.Modifiers) == 0
+}
+
+type shellVariables map[string]string
+
+type shellVariablePoison struct {
+	all   bool
+	names map[string]bool
+}
+
+func (p shellVariablePoison) poisoned(name string) bool {
+	return p.all || p.names[name]
+}
+
+func (p *shellVariablePoison) add(name string) {
+	if name == "" || name == "HOME" || !shellIdentifier(name) {
+		return
+	}
+	if p.names == nil {
+		p.names = map[string]bool{}
+	}
+	p.names[name] = true
+}
+
+func (v shellVariables) clone() shellVariables {
+	if len(v) == 0 {
+		return shellVariables{}
+	}
+	clone := make(shellVariables, len(v))
+	for key, value := range v {
+		clone[key] = value
+	}
+	return clone
+}
+
+func (v shellVariables) environ(home string) expand.Environ {
+	values := make([]string, 0, len(v)+1)
+	if home != "" {
+		values = append(values, "HOME="+strings.TrimRight(home, "/"))
+	}
+	keys := make([]string, 0, len(v))
+	for key := range v {
+		if key != "HOME" {
+			keys = append(keys, key)
+		}
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		values = append(values, key+"="+v[key])
+	}
+	return expand.ListEnviron(values...)
+}
+
+func staticShellWordWithVars(
+	word *syntax.Word, home string, vars shellVariables, poison shellVariablePoison,
+) (string, bool) {
+	if vars == nil {
+		vars = shellVariables{}
+	}
+	return staticShellWord(word, vars.environ(home), home != "", vars, poison)
+}
+
+func staticShellParam(param *syntax.ParamExp, haveHome bool, vars shellVariables, poison shellVariablePoison) bool {
+	if homeParam(param, haveHome) {
+		return true
+	}
+	if param == nil || param.Param == nil || param.Flags != nil || param.Excl ||
+		param.Length || param.Width || param.IsSet || param.NestedParam != nil ||
+		param.Index != nil || len(param.Modifiers) != 0 || param.Slice != nil ||
+		param.Repl != nil || param.Names != 0 {
+		return false
+	}
+	name := param.Param.Value
+	if !shellIdentifier(name) || shellVolatileParam(name) || poison.poisoned(name) {
+		return false
+	}
+	if param.Exp == nil {
+		_, ok := vars[name]
+		return ok
+	}
+	switch param.Exp.Op {
+	case syntax.DefaultUnset, syntax.DefaultUnsetOrNull, syntax.AssignUnset, syntax.AssignUnsetOrNull:
+	default:
+		return false
+	}
+	if param.Exp.Word == nil {
+		return true
+	}
+	_, ok := staticShellWordWithVars(param.Exp.Word, "", vars, poison)
+	return ok
+}
+
+func applyShellParamAssignments(
+	word *syntax.Word, expanded string, env expand.Environ, haveHome bool, vars shellVariables, poison shellVariablePoison,
+) {
+	if word == nil || vars == nil {
+		return
+	}
+	syntax.Walk(word, func(node syntax.Node) bool {
+		param, ok := node.(*syntax.ParamExp)
+		if !ok || param.Param == nil || param.Exp == nil {
+			return true
+		}
+		switch param.Exp.Op {
+		case syntax.AssignUnset, syntax.AssignUnsetOrNull:
+		default:
+			return true
+		}
+		name := param.Param.Value
+		if name == "HOME" || !shellIdentifier(name) || poison.poisoned(name) {
+			return true
+		}
+		current, present := vars[name]
+		if present && (current != "" || param.Exp.Op == syntax.AssignUnset) {
+			return true
+		}
+		if param.Exp.Word == nil {
+			vars[name] = ""
+			return true
+		}
+		value, ok := staticShellWord(param.Exp.Word, env, haveHome, vars, poison)
+		if ok {
+			vars[name] = value
+		} else if expanded != "" {
+			vars[name] = expanded
+		}
+		return true
+	})
+}
+
+func shellApplyAssignments(
+	assigns []*syntax.Assign, home string, vars shellVariables, poison shellVariablePoison,
+) bool {
+	ok := true
+	for _, assign := range assigns {
+		if assign == nil || assign.Append || assign.Naked || assign.Name == nil ||
+			assign.Index != nil || assign.Array != nil || !shellIdentifier(assign.Name.Value) || assign.Name.Value == "HOME" ||
+			poison.poisoned(assign.Name.Value) {
+			ok = false
+			continue
+		}
+		value, static := "", true
+		if assign.Value != nil {
+			value, static = staticShellWordWithVars(assign.Value, home, vars, poison)
+		}
+		if !static || strings.ContainsAny(value, "\x00\r\n") {
+			delete(vars, assign.Name.Value)
+			ok = false
+			continue
+		}
+		vars[assign.Name.Value] = value
+	}
+	return ok
+}
+
+func shellExpandedCallWords(file *syntax.File, home string) map[int]string {
+	expanded := map[int]string{}
+	poison := shellVariablePoisonForFile(file, home)
+	states := shellWordStates(file, home, poison)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		vars := states.varsFor(call.Args[0])
+		for _, arg := range call.Args {
+			if value, ok := staticShellWordWithVars(arg, home, vars, poison); ok {
+				expanded[int(arg.Pos().Offset())] = value
+			}
+		}
+		return true
+	})
+	return expanded
+}
+
+type shellWordStateMap map[int]shellVariables
+
+func (m shellWordStateMap) varsFor(word *syntax.Word) shellVariables {
+	if word == nil {
+		return shellVariables{}
+	}
+	if vars, ok := m[int(word.Pos().Offset())]; ok {
+		return vars.clone()
+	}
+	return shellVariables{}
+}
+
+func shellWordStates(file *syntax.File, home string, poison shellVariablePoison) shellWordStateMap {
+	states := shellWordStateMap{}
+	vars := shellVariables{}
+	for _, stmt := range file.Stmts {
+		shellProcessStraightStmt(stmt, home, vars, poison, states)
+	}
+	return states
+}
+
+func shellProcessStraightStmt(
+	stmt *syntax.Stmt, home string, vars shellVariables, poison shellVariablePoison, states shellWordStateMap,
+) {
+	if stmt == nil {
+		return
+	}
+	if block, ok := stmt.Cmd.(*syntax.Block); ok && shellStraightStmt(stmt) {
+		shellRecordRedirectWords(stmt, vars, states)
+		for _, child := range block.Stmts {
+			shellProcessStraightStmt(child, home, vars, poison, states)
+		}
+		return
+	}
+	shellRecordStmtWords(stmt, vars, states)
+	shellApplyStraightStmt(stmt, home, vars, poison)
+}
+
+func shellRecordStmtWords(stmt *syntax.Stmt, vars shellVariables, states shellWordStateMap) {
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		word, ok := node.(*syntax.Word)
+		if ok {
+			states[int(word.Pos().Offset())] = vars.clone()
+		}
+		return true
+	})
+}
+
+func shellRecordRedirectWords(stmt *syntax.Stmt, vars shellVariables, states shellWordStateMap) {
+	for _, redirect := range stmt.Redirs {
+		if redirect.Word != nil {
+			states[int(redirect.Word.Pos().Offset())] = vars.clone()
+		}
+	}
+}
+
+func shellApplyStraightStmt(stmt *syntax.Stmt, home string, vars shellVariables, poison shellVariablePoison) {
+	if !shellStraightStmt(stmt) {
+		return
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok {
+		return
+	}
+	if len(call.Args) == 0 {
+		shellApplyAssignments(call.Assigns, home, vars, poison)
+		return
+	}
+	if names, ok := shellUnsetNames(call, home, vars, poison); ok {
+		for _, name := range names {
+			if !poison.poisoned(name) {
+				delete(vars, name)
+			}
+		}
+	}
+}
+
+func shellStraightStmt(stmt *syntax.Stmt) bool {
+	return stmt != nil && !stmt.Background && !stmt.Negated
+}
+
+func shellVariablePoisonForFile(file *syntax.File, home string) shellVariablePoison {
+	allowed, allowedUnsets := shellAllowedStraightMutations(file, home)
+	poison := shellVariablePoison{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Assign:
+			name := shellAssignName(node)
+			if name != "" && !allowed[node] {
+				poison.add(name)
+			}
+		case *syntax.ForClause:
+			if iter, ok := node.Loop.(*syntax.WordIter); ok && iter.Name != nil {
+				poison.add(iter.Name.Value)
+			}
+		case *syntax.BinaryArithm:
+			if shellArithmeticAssignOp(node.Op) {
+				poison.add(shellArithmeticName(node.X))
+			}
+		case *syntax.UnaryArithm:
+			if node.Op == syntax.Inc || node.Op == syntax.Dec {
+				poison.add(shellArithmeticName(node.X))
+			}
+		case *syntax.CallExpr:
+			if allowedUnsets[node] || len(node.Args) == 0 {
+				return true
+			}
+			program, static := shellStaticProgram(node, home)
+			if !static {
+				poison.all = true
+				return true
+			}
+			shellPoisonCallMutation(node, programBase(program), home, &poison)
+		}
+		return true
+	})
+	return poison
+}
+
+type shellVariableCandidateSet struct {
+	values     map[string][]string
+	seen       map[string]map[string]bool
+	unknown    map[string]bool
+	allUnknown bool
+}
+
+func shellVariableCandidates(file *syntax.File, home string) shellVariableCandidateSet {
+	candidates := shellVariableCandidateSet{
+		values:  map[string][]string{},
+		seen:    map[string]map[string]bool{},
+		unknown: map[string]bool{},
+	}
+	_, allowedUnsets := shellAllowedStraightMutations(file, home)
+	states := shellWordStates(file, home, shellVariablePoison{})
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.Assign:
+			name := shellAssignName(node)
+			if name == "" {
+				return true
+			}
+			value, ok := shellCandidateAssignValue(node, home, states)
+			if ok {
+				candidates.add(name, value)
+			} else {
+				candidates.unknown[name] = true
+			}
+		case *syntax.ForClause:
+			iter, ok := node.Loop.(*syntax.WordIter)
+			if !ok || iter.Name == nil || !shellIdentifier(iter.Name.Value) {
+				return true
+			}
+			if len(iter.Items) == 0 {
+				candidates.unknown[iter.Name.Value] = true
+				return true
+			}
+			for _, item := range iter.Items {
+				value, ok := staticShellWordWithVars(item, home, states.varsFor(item), shellVariablePoison{})
+				if ok {
+					candidates.add(iter.Name.Value, value)
+				} else {
+					candidates.unknown[iter.Name.Value] = true
+				}
+			}
+		case *syntax.BinaryArithm:
+			if shellArithmeticAssignOp(node.Op) {
+				if name := shellArithmeticName(node.X); name != "" {
+					candidates.unknown[name] = true
+				}
+			}
+		case *syntax.UnaryArithm:
+			if node.Op == syntax.Inc || node.Op == syntax.Dec {
+				if name := shellArithmeticName(node.X); name != "" {
+					candidates.unknown[name] = true
+				}
+			}
+		case *syntax.ParamExp:
+			if node.Param == nil || node.Exp == nil {
+				return true
+			}
+			if node.Exp.Op != syntax.AssignUnset && node.Exp.Op != syntax.AssignUnsetOrNull {
+				return true
+			}
+			name := node.Param.Value
+			if !shellIdentifier(name) || node.Exp.Word == nil {
+				return true
+			}
+			value, ok := staticShellWordWithVars(node.Exp.Word, home, states.varsFor(node.Exp.Word), shellVariablePoison{})
+			if ok {
+				candidates.add(name, value)
+			} else {
+				candidates.unknown[name] = true
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 || allowedUnsets[node] {
+				return true
+			}
+			program, static := shellStaticProgram(node, home)
+			if !static {
+				candidates.allUnknown = true
+				return true
+			}
+			shellCandidateCallMutation(node, programBase(program), home, states, &candidates)
+		}
+		return true
+	})
+	return candidates
+}
+
+func (c *shellVariableCandidateSet) add(name, value string) {
+	if name == "" || !shellIdentifier(name) || strings.ContainsAny(value, "\x00\r\n") {
+		return
+	}
+	if c.seen[name] == nil {
+		c.seen[name] = map[string]bool{}
+	}
+	if c.seen[name][value] {
+		return
+	}
+	c.seen[name][value] = true
+	c.values[name] = append(c.values[name], value)
+}
+
+func shellCandidateAssignValue(assign *syntax.Assign, home string, states shellWordStateMap) (string, bool) {
+	if assign == nil || assign.Naked || assign.Name == nil || assign.Index != nil || assign.Array != nil {
+		return "", false
+	}
+	name := assign.Name.Value
+	value, ok := "", true
+	if assign.Value != nil {
+		value, ok = staticShellWordWithVars(assign.Value, home, states.varsFor(assign.Value), shellVariablePoison{})
+	}
+	if !ok {
+		return "", false
+	}
+	if assign.Append {
+		vars := shellVariables{}
+		if assign.Value != nil {
+			vars = states.varsFor(assign.Value)
+		}
+		prefix, ok := vars[name]
+		if !ok {
+			return "", false
+		}
+		value = prefix + value
+	}
+	return value, true
+}
+
+func shellCandidateCallMutation(
+	call *syntax.CallExpr, program, home string, states shellWordStateMap, candidates *shellVariableCandidateSet,
+) {
+	switch program {
+	case "unset":
+		names, ok := shellUnsetNames(call, home, nil, shellVariablePoison{})
+		if !ok {
+			candidates.allUnknown = true
+			return
+		}
+		for _, name := range names {
+			candidates.unknown[name] = true
+		}
+	case "eval", "source", ".", "trap", "let":
+		candidates.allUnknown = true
+	case "read":
+		names := shellReadTargets(call.Args[1:], home)
+		if len(names) == 0 {
+			names = []string{"REPLY"}
+		}
+		for _, name := range names {
+			candidates.unknown[name] = true
+		}
+	case "mapfile", "readarray":
+		names := shellReadTargets(call.Args[1:], home)
+		if len(names) == 0 {
+			names = []string{"MAPFILE"}
+		}
+		for _, name := range names {
+			candidates.unknown[name] = true
+		}
+	case "getopts":
+		words, ok := shellStaticWords(call.Args[1:], home)
+		if !ok {
+			candidates.allUnknown = true
+			return
+		}
+		if len(words) >= 2 {
+			candidates.unknown[words[1]] = true
+		}
+	case "printf":
+		words, ok := shellStaticWords(call.Args[1:], home)
+		if !ok {
+			return
+		}
+		for i := 0; i+1 < len(words); i++ {
+			if words[i] != "-v" {
+				continue
+			}
+			name := words[i+1]
+			valueIndex := i + 3
+			if valueIndex < len(call.Args) {
+				value, ok := staticShellWordWithVars(
+					call.Args[valueIndex], home, states.varsFor(call.Args[valueIndex]), shellVariablePoison{},
+				)
+				if ok {
+					candidates.add(name, value)
+				} else {
+					candidates.unknown[name] = true
+				}
+			} else {
+				candidates.unknown[name] = true
+			}
+			return
+		}
+	}
+}
+
+func shellAllowedStraightMutations(
+	file *syntax.File, home string,
+) (map[*syntax.Assign]bool, map[*syntax.CallExpr]bool) {
+	allowed := map[*syntax.Assign]bool{}
+	allowedUnsets := map[*syntax.CallExpr]bool{}
+	var walk func(*syntax.Stmt)
+	walk = func(stmt *syntax.Stmt) {
+		if !shellStraightStmt(stmt) {
+			return
+		}
+		if block, ok := stmt.Cmd.(*syntax.Block); ok {
+			for _, child := range block.Stmts {
+				walk(child)
+			}
+			return
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok {
+			return
+		}
+		if len(call.Args) == 0 {
+			for _, assign := range call.Assigns {
+				if _, ok := shellPlainAssignment(assign, home); ok {
+					allowed[assign] = true
+				}
+			}
+			return
+		}
+		if _, ok := shellUnsetNames(call, home, nil, shellVariablePoison{}); ok {
+			allowedUnsets[call] = true
+		}
+	}
+	for _, stmt := range file.Stmts {
+		walk(stmt)
+	}
+	return allowed, allowedUnsets
+}
+
+func shellPlainAssignment(assign *syntax.Assign, home string) (string, bool) {
+	name := shellAssignName(assign)
+	if name == "" || assign.Append || assign.Naked || assign.Index != nil ||
+		assign.Array != nil {
+		return "", false
+	}
+	value, static := "", true
+	if assign.Value != nil {
+		value, static = staticShellWordWithVars(assign.Value, home, nil, shellVariablePoison{})
+	}
+	if !static || strings.ContainsAny(value, "\x00\r\n") {
+		return "", false
+	}
+	return name, true
+}
+
+func shellAssignName(assign *syntax.Assign) string {
+	if assign == nil || assign.Name == nil || assign.Name.Value == "HOME" ||
+		!shellIdentifier(assign.Name.Value) {
+		return ""
+	}
+	return assign.Name.Value
+}
+
+func shellStaticProgram(call *syntax.CallExpr, home string) (string, bool) {
+	if call == nil || len(call.Args) == 0 {
+		return "", false
+	}
+	return StaticWord(call.Args[0], home)
+}
+
+func shellUnsetNames(
+	call *syntax.CallExpr, home string, vars shellVariables, poison shellVariablePoison,
+) ([]string, bool) {
+	if call == nil || len(call.Assigns) != 0 || len(call.Args) == 0 {
+		return nil, false
+	}
+	words := make([]string, len(call.Args))
+	for i, arg := range call.Args {
+		value, ok := staticShellWordWithVars(arg, home, vars, poison)
+		if !ok {
+			return nil, false
+		}
+		words[i] = value
+	}
+	if programBase(words[0]) != "unset" {
+		return nil, false
+	}
+	var names []string
+	options := true
+	functionOnly := false
+	variableOption := false
+	for _, word := range words[1:] {
+		if options && word == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(word, "-") {
+			for _, flag := range word[1:] {
+				switch flag {
+				case 'f':
+					functionOnly = true
+				case 'v', 'n':
+					variableOption = true
+				default:
+					return nil, false
+				}
+			}
+			continue
+		}
+		if !shellIdentifier(word) {
+			return nil, false
+		}
+		names = append(names, word)
+	}
+	if functionOnly && variableOption {
+		return nil, false
+	}
+	if functionOnly {
+		return nil, true
+	}
+	return names, true
+}
+
+func shellPoisonCallMutation(call *syntax.CallExpr, program, home string, poison *shellVariablePoison) {
+	switch program {
+	case "unset":
+		names, ok := shellUnsetNames(call, home, nil, shellVariablePoison{})
+		if !ok {
+			poison.all = true
+			return
+		}
+		for _, name := range names {
+			poison.add(name)
+		}
+	case "eval", "source", ".", "trap", "let":
+		poison.all = true
+	case "read":
+		names := shellReadTargets(call.Args[1:], home)
+		if len(names) == 0 {
+			names = []string{"REPLY"}
+		}
+		for _, name := range names {
+			poison.add(name)
+		}
+	case "mapfile", "readarray":
+		names := shellReadTargets(call.Args[1:], home)
+		if len(names) == 0 {
+			names = []string{"MAPFILE"}
+		}
+		for _, name := range names {
+			poison.add(name)
+		}
+	case "getopts":
+		words, ok := shellStaticWords(call.Args[1:], home)
+		if !ok {
+			poison.all = true
+			return
+		}
+		if len(words) >= 2 {
+			poison.add(words[1])
+		}
+	case "printf":
+		words, ok := shellStaticWords(call.Args[1:], home)
+		if !ok {
+			return
+		}
+		for i := 0; i+1 < len(words); i++ {
+			if words[i] == "-v" {
+				poison.add(words[i+1])
+				return
+			}
+		}
+	}
+}
+
+func shellReadTargets(args []*syntax.Word, home string) []string {
+	words, ok := shellStaticWords(args, home)
+	if !ok {
+		return nil
+	}
+	var names []string
+	for i := 0; i < len(words); i++ {
+		word := words[i]
+		if word == "--" {
+			names = append(names, words[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(word, "-") {
+			if word == "-a" || word == "-d" || word == "-n" || word == "-N" ||
+				word == "-p" || word == "-t" || word == "-u" || word == "-C" ||
+				word == "-c" || word == "-O" || word == "-s" {
+				i++
+			}
+			continue
+		}
+		names = append(names, word)
+	}
+	out := names[:0]
+	for _, name := range names {
+		if shellIdentifier(name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func shellStaticWords(words []*syntax.Word, home string) ([]string, bool) {
+	values := make([]string, len(words))
+	for i, word := range words {
+		value, ok := StaticWord(word, home)
+		if !ok {
+			return nil, false
+		}
+		values[i] = value
+	}
+	return values, true
+}
+
+func shellArithmeticAssignOp(op syntax.BinAritOperator) bool {
+	return op == syntax.Assgn || op == syntax.AddAssgn || op == syntax.SubAssgn ||
+		op == syntax.MulAssgn || op == syntax.QuoAssgn || op == syntax.RemAssgn ||
+		op == syntax.AndAssgn || op == syntax.OrAssgn || op == syntax.XorAssgn ||
+		op == syntax.ShlAssgn || op == syntax.ShrAssgn || op == syntax.AndBoolAssgn ||
+		op == syntax.OrBoolAssgn || op == syntax.XorBoolAssgn || op == syntax.PowAssgn
+}
+
+func shellArithmeticName(expr syntax.ArithmExpr) string {
+	word, ok := expr.(*syntax.Word)
+	if !ok {
+		return ""
+	}
+	name := word.Lit()
+	if !shellIdentifier(name) {
+		return ""
+	}
+	return name
+}
+
+func shellWordDynamicParamNames(word *syntax.Word, home string) ([]string, bool) {
+	seen := map[string]bool{}
+	var names []string
+	unknown := false
+	if word == nil {
+		return nil, true
+	}
+	syntax.Walk(word, func(node syntax.Node) bool {
+		if unknown {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst, *syntax.ArithmExp:
+			unknown = true
+			return false
+		case *syntax.ParamExp:
+			name, ok := shellDynamicParamName(node, home)
+			if !ok {
+				unknown = true
+				return false
+			}
+			if !seen[name] {
+				seen[name] = true
+				names = append(names, name)
+			}
+			return false
+		}
+		return true
+	})
+	return names, unknown
+}
+
+func shellDynamicParamName(param *syntax.ParamExp, home string) (string, bool) {
+	if param == nil || param.Param == nil || param.Flags != nil || param.Excl ||
+		param.Length || param.Width || param.IsSet || param.NestedParam != nil ||
+		param.Index != nil || len(param.Modifiers) != 0 || param.Slice != nil ||
+		param.Repl != nil || param.Names != 0 {
+		return "", false
+	}
+	name := param.Param.Value
+	if !shellIdentifier(name) || shellVolatileParam(name) {
+		return "", false
+	}
+	if param.Exp == nil {
+		return name, true
+	}
+	switch param.Exp.Op {
+	case syntax.DefaultUnset, syntax.DefaultUnsetOrNull, syntax.AssignUnset, syntax.AssignUnsetOrNull:
+	default:
+		return "", false
+	}
+	if param.Exp.Word == nil {
+		return name, true
+	}
+	_, ok := staticShellWordWithVars(param.Exp.Word, home, nil, shellVariablePoison{})
+	return name, ok
+}
+
+func shellVolatileParam(name string) bool {
+	return name == "RANDOM" || name == "SECONDS"
+}
+
+func shellIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i, r := range value {
+		if i == 0 {
+			if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') {
+				return false
+			}
+			continue
+		}
+		if r != '_' && (r < 'A' || r > 'Z') && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // resolveWritePath follows existing links, including a link whose final file
@@ -232,9 +1239,10 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 		}
 		return true
 	}
-	// The stack records the status of components added after base. A link
-	// remains marked even after its target is resolved: the following ".."
-	// would otherwise erase the evidence of that hop.
+	// The stack records whether a component added after base is missing.
+	// A resolved link is a physical directory, so ".." ascends from its
+	// target. A missing component cannot be crossed: it may become a link
+	// before the command executes.
 	var crossed []bool
 	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
 		switch part {
@@ -275,7 +1283,11 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 				}
 				linkDepth = nextDepth
 				forms = append(forms, extra...)
-				crossed = append(crossed, true)
+				_, err = os.Lstat(current)
+				if err != nil && !os.IsNotExist(err) {
+					return "", nil, linkDepth, false
+				}
+				crossed = append(crossed, os.IsNotExist(err))
 			} else {
 				current = candidate
 				crossed = append(crossed, unknown)
@@ -435,6 +1447,8 @@ func Resolve(payload []byte) string {
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded
 	var operands, literalOperands []string
+	var dynamicOperands []string
+	var extraOperands []ExtraWriteOperand
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
@@ -445,6 +1459,7 @@ func Resolve(payload []byte) string {
 		sourceFacts[DirectoryFactPrefix+cwd] = "?"
 	}
 	var safeRedirects []RedirectOccurrence
+	var sedOperands map[string]bool
 	var toolArgs map[string]json.RawMessage
 	if json.Unmarshal(args, &toolArgs) == nil {
 		for _, key := range []string{"command", "cmd"} {
@@ -457,12 +1472,22 @@ func Resolve(payload []byte) string {
 				truncated = truncated || fallbackFacts.Parse.Status == actionfacts.StatusLimitExceeded
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
-				var parsed bool
-				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
+				var parsed, dynamic, dynamicUnknown bool
+				operands, parsed, dynamic = ShellWriteOperands(command, cwd, home)
+				if dynamic {
+					dynamicOperands, dynamicUnknown = ShellDynamicWriteOperands(command, cwd, home)
+				}
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				extraOperands = ShellExtraWriteOperands(command, cwd, home)
+				sedOperands = SedReplacedOperands(command, cwd, home)
+				for path, safe := range sedOperands {
+					if !safe {
+						sourceFacts[SedRelinkFactPrefix+path] = "1"
+					}
+				}
 				directoryOperands, directoryUnknown = ShellDirectoryWriteOperands(command, cwd, home, sourceFacts, true, false)
 				truncated = truncated || directoryUnknown
-				truncated = truncated || !parsed
+				truncated = truncated || !parsed || dynamicUnknown
 				// A link the command creates can make a later write a write
 				// to a protected file (GAP-1505). The command of an
 				// apply_patch tool is a patch envelope, not shell.
@@ -475,11 +1500,13 @@ func Resolve(payload []byte) string {
 			}
 		}
 	}
-	targets := map[string]string{CWDKey: cwd}
+	targets := map[string]string{CWDKey: cwd, OperandFactsKey: "1"}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
 	protected := newProtectedFiles(home)
-	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3
+	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 +
+		len(jsonString(OperandFactsKey)) + 1 + 3 + 1 +
+		len(jsonString(TruncatedKey)) + 1 + 3
 	// A shell operand is already the literal path the shell opens; only a
 	// path fact can still carry unexpanded syntax.
 	add := func(path string, literal, safeRedirect bool) {
@@ -494,7 +1521,7 @@ func Resolve(payload []byte) string {
 			size -= len(jsonString(path)) + 1 + len(jsonString(old)) + 1
 			delete(targets, path)
 		}
-		if len(path) > MaxWriteTargetPathBytes || len(targets)-1 >= MaxWriteTargets {
+		if len(path) > MaxWriteTargetPathBytes || len(targets)-2 >= MaxWriteTargets {
 			truncated = true
 			return
 		}
@@ -524,7 +1551,16 @@ func Resolve(payload []byte) string {
 	for i, operand := range operands {
 		add(operand, true, i < len(safeRedirects) && safeRedirects[i].Safe)
 	}
+	for _, operand := range dynamicOperands {
+		add(operand, true, false)
+	}
 	for _, operand := range literalOperands {
+		add(operand, true, false)
+	}
+	for _, operand := range extraOperands {
+		add(operand.Path, true, false)
+	}
+	for operand := range sedOperands {
 		add(operand, true, false)
 	}
 	for _, operand := range directoryOperands {
@@ -555,7 +1591,7 @@ func Resolve(payload []byte) string {
 	}
 	for key, value := range sourceFacts {
 		entry := len(jsonString(key)) + 1 + len(jsonString(value)) + 1
-		if len(targets)-1 >= MaxWriteTargets || size+entry > maxEncodedTargets {
+		if len(targets)-2 >= MaxWriteTargets || size+entry > maxEncodedTargets {
 			truncated = true
 			break
 		}
@@ -601,8 +1637,9 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+2 ||
-		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") {
+	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+3 ||
+		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
+		(targets[OperandFactsKey] != "" && targets[OperandFactsKey] != "1") {
 		return nil, false
 	}
 	for key, value := range targets {
@@ -610,6 +1647,9 @@ func Decode(value string) (map[string]string, bool) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, SourceLinkFactPrefix) && (value != "0" && value != "1" && value != "?") {
+			return nil, false
+		}
+		if strings.HasPrefix(key, SedRelinkFactPrefix) && value != "1" {
 			return nil, false
 		}
 	}
@@ -782,6 +1822,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		return links
 	}
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
+	expandedWords := shellExpandedCallWords(file, home)
 	renames, cds := false, false
 	var copyScopes []string
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -793,7 +1834,11 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		words := make([]string, len(args))
 		static := make([]bool, len(args))
 		for i, arg := range args {
-			words[i], static[i] = staticShellWord(arg, env, home != "")
+			if value, ok := expandedWords[int(arg.Pos().Offset())]; ok {
+				words[i], static[i] = value, true
+			} else {
+				words[i], static[i] = staticShellWord(arg, env, home != "", nil, shellVariablePoison{})
+			}
 		}
 		program, start := "", call.Pos()
 		if static[0] {
@@ -842,18 +1887,25 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				copyScopes = append(copyScopes, cpDestination(words[1:], static[1:], cwd))
 			}
 		case slices.Contains(archivePrograms, program):
+			destination := archiveDestination(program, words[1:], static[1:], cwd)
+			opaqueIn := links.unknownIn
+			if program == "rsync" && destination != "" {
+				// Its own destination is an ordinary write operand.
+				// A later write into the copied tree still sees the scope.
+				links.copyDestinations = append(links.copyDestinations, destination)
+				opaqueIn = links.unknownCopyIn
+			}
 			if slices.Contains(static[1:], false) {
 				// An option supplied at runtime may select extraction.
-				links.unknownIn(archiveDestination(program, words[1:], static[1:], cwd))
+				opaqueIn(destination)
 			}
 			if archiveMayLink(program, words[1:], static[1:]) {
-				links.unknownIn(archiveDestination(program, words[1:], static[1:], cwd))
+				opaqueIn(destination)
 			}
 			if archiveCopiesLinks(program, words[1:], static[1:]) {
-				destination := archiveDestination(program, words[1:], static[1:], cwd)
 				copyScopes = append(copyScopes, destination)
 				if copiesDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
-					links.unknownIn(destination)
+					opaqueIn(destination)
 				}
 			}
 		case slices.Contains(renamePrograms, program):
@@ -995,8 +2047,9 @@ func linearShellStatements(file *syntax.File) ([]*syntax.Stmt, bool) {
 // RedirectOccurrence is one shell redirect in source order. The safety bit
 // belongs to that occurrence, even when a later writer names the same path.
 type RedirectOccurrence struct {
-	Path string
-	Safe bool
+	Path   string
+	Safe   bool
+	Offset int
 }
 
 // SafeShellRedirectOccurrences reports redirects opened before any command
@@ -1009,23 +2062,26 @@ func SafeShellRedirectOccurrences(command, cwd, home string) []RedirectOccurrenc
 // SafeShellRedirectOccurrencesWithFacts uses client source facts when the
 // gateway cannot inspect a copy source in the user home.
 func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[string]string) []RedirectOccurrence {
-	operands, parsed, _ := ShellWriteOperands(command, cwd, home)
-	if !parsed {
-		return nil
-	}
-	result := make([]RedirectOccurrence, len(operands))
-	for i, path := range operands {
-		result[i].Path = path
-	}
 	file, ok := parseShell(command)
 	if !ok {
-		return result
+		return nil
+	}
+	writeOccurrences := shellWriteOccurrences(file, cwd, home)
+	result := make([]RedirectOccurrence, 0, len(writeOccurrences))
+	for _, occurrence := range writeOccurrences {
+		if occurrence.Static && occurrence.Path != "" {
+			result = append(result, RedirectOccurrence{Path: occurrence.Path, Offset: occurrence.Offset})
+		}
 	}
 	statements, linear := linearShellStatements(file)
 	if !linear {
 		return result
 	}
-	seenLink, index := false, 0
+	seenLink := false
+	byOffset := make(map[int]int, len(result))
+	for i, occurrence := range result {
+		byOffset[occurrence.Offset] = i
+	}
 	for _, stmt := range statements {
 		for _, redirect := range stmt.Redirs {
 			switch redirect.Op {
@@ -1033,15 +2089,13 @@ func SafeShellRedirectOccurrencesWithFacts(command, cwd, home string, facts map[
 			default:
 				continue
 			}
-			path, static := StaticWord(redirect.Word, home)
-			if !static || path == "" {
-				continue
+			offset := -1
+			if redirect.Word != nil {
+				offset = int(redirect.Word.Pos().Offset())
 			}
-			path = OperandPath(path, cwd)
-			if index < len(result) && result[index].Path == path {
+			if index, ok := byOffset[offset]; ok {
 				result[index].Safe = !seenLink
 			}
-			index++
 		}
 		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
 		if start < 0 || end > len(command) || start >= end {
@@ -1286,6 +2340,179 @@ func cpDestination(args []string, static []bool, cwd string) string {
 		destination = filepath.Join(cwd, destination)
 	}
 	return filepath.Clean(destination)
+}
+
+func envCommandWords(words []string, cwd string) (string, []string, bool) {
+	if len(words) == 0 || programBase(words[0]) != "env" {
+		return cwd, words, true
+	}
+	cmdCWD := cwd
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word == "--":
+			if i+1 >= len(words) {
+				return cmdCWD, nil, true
+			}
+			return cmdCWD, words[i+1:], true
+		case word == "-C" || word == "--chdir":
+			i++
+			if i >= len(words) || words[i] == "" {
+				return cmdCWD, nil, false
+			}
+			cmdCWD = OperandPath(words[i], cwd)
+		case strings.HasPrefix(word, "--chdir="):
+			value := strings.TrimPrefix(word, "--chdir=")
+			if value == "" {
+				return cmdCWD, nil, false
+			}
+			cmdCWD = OperandPath(value, cwd)
+		case strings.HasPrefix(word, "-C") && len(word) > 2:
+			cmdCWD = OperandPath(word[2:], cwd)
+		case strings.Contains(word, "=") && !strings.HasPrefix(word, "-"):
+			continue
+		case strings.HasPrefix(word, "-"):
+			return cmdCWD, nil, false
+		default:
+			return cmdCWD, words[i:], true
+		}
+	}
+	return cmdCWD, nil, true
+}
+
+func teeDestinations(args []string) []string {
+	var destinations []string
+	options := true
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if options && arg == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(arg, "--output-error") {
+			if arg == "--output-error" {
+				i++
+			}
+			continue
+		}
+		if options && strings.HasPrefix(arg, "-") && arg != "-" {
+			continue
+		}
+		destinations = append(destinations, arg)
+	}
+	return destinations
+}
+
+func finalOperandDestination(args []string, cwd string) string {
+	destination := ""
+	options := true
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if options && arg == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(arg, "-") && arg != "-" {
+			if arg == "-t" || arg == "--target-directory" {
+				i++
+			}
+			continue
+		}
+		destination = arg
+	}
+	if destination == "" {
+		return ""
+	}
+	return OperandPath(destination, cwd)
+}
+
+func truncateFiles(args []string) []string {
+	var files []string
+	options := true
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if options && arg == "--" {
+			options = false
+			continue
+		}
+		if options && (arg == "-s" || arg == "--size" || arg == "-o" || arg == "--io-blocks") {
+			i++
+			continue
+		}
+		if options && (strings.HasPrefix(arg, "--size=") || strings.HasPrefix(arg, "-s") && len(arg) > 2) {
+			continue
+		}
+		if options && strings.HasPrefix(arg, "-") && arg != "-" {
+			continue
+		}
+		files = append(files, arg)
+	}
+	return files
+}
+
+func tarExplicitExtractMembers(program string, args []string, cwd string) []string {
+	static := makeStatic(len(args))
+	if !archiveMayLink(program, args, static) {
+		return nil
+	}
+	destination, ok := tarDestination(args, static, cwd)
+	if !ok {
+		return nil
+	}
+	if !filepath.IsAbs(destination) {
+		destination = filepath.Join(cwd, destination)
+	}
+	destination = filepath.Clean(destination)
+	var members []string
+	options := true
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if options && arg == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(arg, "--") {
+			name, _, joined := strings.Cut(arg[2:], "=")
+			option, unique := longOption(name, []string{
+				"file", "directory", "dir", "cd", "one-top-level", "strip-components", "exclude",
+				"absolute-names", "get", "extract", "list", "create", "zstd",
+			})
+			if !unique {
+				return nil
+			}
+			switch option {
+			case "file", "directory", "dir", "cd", "one-top-level", "strip-components", "exclude":
+				if !joined {
+					i++
+				}
+			}
+			continue
+		}
+		oldStyle := options && i == 0 && !strings.HasPrefix(arg, "-")
+		if options && (oldStyle || strings.HasPrefix(arg, "-") && arg != "-") {
+			cluster := strings.TrimPrefix(arg, "-")
+			for j := 0; j < len(cluster); j++ {
+				if strings.ContainsRune("fCXTbIKNgVHFL", rune(cluster[j])) {
+					if oldStyle || j+1 == len(cluster) {
+						i++
+					}
+					if !oldStyle {
+						break
+					}
+				}
+			}
+			continue
+		}
+		members = append(members, arg)
+	}
+	operands := make([]string, 0, len(members))
+	for _, member := range members {
+		if member == "" || !shellAuthorizedKeysBase(member) {
+			continue
+		}
+		operands = append(operands, OperandPath(member, destination))
+	}
+	return operands
 }
 
 // CopyDestination returns a statically understood cp destination.

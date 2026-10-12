@@ -13430,8 +13430,8 @@ function Assert-ServiceContract {
         $null -eq $sensorHelper -or $null -eq $guardian) {
         throw 'one or more certification services are missing'
     }
-    if ([string]$gateway.StartName -ne "NT SERVICE\$($script:GatewayServiceName)") {
-        throw "gateway identity is $($gateway.StartName), want NT SERVICE\$($script:GatewayServiceName)"
+    if ([string]$gateway.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
+        throw "gateway identity is $($gateway.StartName), want LocalSystem"
     }
     if ([string]$guardian.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
         throw "guardian identity is $($guardian.StartName), want LocalSystem"
@@ -14451,13 +14451,10 @@ function Get-CertificationServiceTokenSnapshot {
         $gateway = $serviceName -eq $script:GatewayServiceName
         $broker = $serviceName -eq $script:BrokerServiceName
         $sensorHelper = $serviceName -eq $script:SensorHelperServiceName
-        $expectedUserSID = if ($gateway) {
-            [Security.Principal.NTAccount]::new(
-                "NT SERVICE\$serviceName"
-            ).Translate([Security.Principal.SecurityIdentifier]).Value
-        } else {
-            'S-1-5-18'
-        }
+        # Every DefenseClaw service, including the gateway, runs as
+        # LocalSystem. The gateway's restricted service SID and its single
+        # required privilege are what separate it from the other services.
+        $expectedUserSID = 'S-1-5-18'
         $expectedPrivileges = if ($gateway -or $broker -or $sensorHelper) {
             @('SeChangeNotifyPrivilege')
         } else {
@@ -14469,14 +14466,8 @@ function Get-CertificationServiceTokenSnapshot {
                 'SeTcbPrivilege'
             )
         }
-        $expectedIntegritySID = if ($gateway) {
-            # A restricted virtual service account is expected to run High,
-            # not with LocalSystem's System integrity level.
-            'S-1-16-12288'
-        } else {
-            'S-1-16-16384'
-        }
-        $expectedIntegrityName = if ($gateway) { 'high' } else { 'system' }
+        $expectedIntegritySID = 'S-1-16-16384'
+        $expectedIntegrityName = 'system'
         $serviceSID = [Security.Principal.NTAccount]::new(
             "NT SERVICE\$serviceName"
         ).Translate([Security.Principal.SecurityIdentifier]).Value
@@ -14540,13 +14531,14 @@ function Get-CertificationServiceTokenSnapshot {
             $token.Groups |
                 Where-Object { [string]$_.Sid -eq $serviceSID }
         )
-        # The virtual-account gateway already proves the service SID as its
-        # exact TokenUser. Windows does not redundantly duplicate that identity
-        # in TokenGroups. The LocalSystem broker and guardian have a different
-        # TokenUser, so each non-deny-only service SID group remains mandatory.
-        if (-not $gateway -and
-            ($serviceGroups.Count -ne 1 -or [bool]$serviceGroups[0].DenyOnly)) {
-            throw "$serviceName PID $($process.process_id) lacks its non-deny-only service SID group $serviceSID"
+        # Every service runs as LocalSystem, so its TokenUser is S-1-5-18 and
+        # its own service SID must appear exactly once as an enabled,
+        # non-deny-only group. For the gateway this group is what Go-side
+        # identity checks use to recognize the gateway process.
+        if ($serviceGroups.Count -ne 1 -or
+            -not [bool]$serviceGroups[0].Enabled -or
+            [bool]$serviceGroups[0].DenyOnly) {
+            throw "$serviceName PID $($process.process_id) lacks its enabled, non-deny-only service SID group $serviceSID"
         }
         $restrictedSIDs = @(
             $token.RestrictedSids |
@@ -14583,7 +14575,7 @@ function Get-CertificationServiceTokenSnapshot {
             } else {
                 'guardian'
             }
-            service_sid_group_required = -not $gateway
+            service_sid_group_required = $true
             service_sid_group_count = $serviceGroups.Count
             restricted = [bool]$token.IsRestricted
             required_privileges = @($wantedPrivileges)
@@ -21354,7 +21346,7 @@ targets:
         Add-Result `
             'live-service-token-least-privilege' `
             'passed' `
-            'live gateway/broker/sensor-helper/guardian TokenUser, High gateway/System service integrity, role-specific privileges, service-SID identity/group semantics, and restricted-token semantics match the hardened contract' `
+            'live gateway/broker/sensor-helper/guardian LocalSystem TokenUser, System integrity for every service, role-specific privileges, service-SID identity/group semantics, and restricted-token semantics match the hardened contract' `
             @{ service_tokens = @($serviceTokenSnapshot) }
     } catch {
         Add-Result `

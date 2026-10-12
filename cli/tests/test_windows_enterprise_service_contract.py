@@ -2115,17 +2115,20 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     assert "TokenIntegrityLevel" in harness
     assert "TokenRestrictedSids" in harness
     assert "IsTokenRestricted" in harness
-    assert "'S-1-16-12288'" in token_probe
-    assert "'S-1-16-16384'" in token_probe
+    # Every service, the gateway included, runs as LocalSystem at System
+    # integrity and must carry its own service SID as a group.
+    assert "$expectedUserSID = 'S-1-5-18'" in token_probe
+    assert "$expectedIntegritySID = 'S-1-16-16384'" in token_probe
+    assert "'S-1-16-12288'" not in token_probe
     assert "$broker = $serviceName -eq $script:BrokerServiceName" in token_probe
     assert "$sensorHelper = $serviceName -eq $script:SensorHelperServiceName" in token_probe
     assert "$expectedPrivileges = if ($gateway -or $broker -or $sensorHelper)" in token_probe
-    assert "$expectedIntegritySID = if ($gateway)" in token_probe
     assert "integrity $($token.IntegritySid), want $expectedIntegrityName" in token_probe
     assert "expected_integrity_sid = $expectedIntegritySID" in token_probe
-    assert "if (-not $gateway -and" in token_probe
     assert "if (-not $gateway -and -not $broker -and -not $sensorHelper)" in token_probe
-    assert "service_sid_group_required = -not $gateway" in token_probe
+    assert "-not [bool]$serviceGroups[0].Enabled -or" in token_probe
+    assert "[bool]$serviceGroups[0].DenyOnly) {" in token_probe
+    assert "service_sid_group_required = $true" in token_probe
     assert "service_sid_group_count = $serviceGroups.Count" in token_probe
     assert "foreach ($requiredSID in @($serviceSID, 'S-1-1-0', 'S-1-5-33'))" in token_probe
     assert "restricted SID list lacks one exact service-logon SID" in token_probe
@@ -2143,7 +2146,7 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     ):
         assert privilege in harness
     assert "live-service-token-least-privilege" in harness
-    assert "High gateway/System service integrity" in harness
+    assert "LocalSystem TokenUser, System integrity for every service" in harness
     assert "service-SID identity/group semantics" in harness
     assert "service_tokens = @($serviceTokenSnapshot)" in harness
 
@@ -5443,3 +5446,92 @@ def test_only_the_lifecycle_transaction_records_the_installed_config() -> None:
     # Secure Client keeps its validate-only check (GAP-0136, issue #1092).
     assert "-RecordLifecycle:(-not (Test-DefenseClawLayoutBrokerEnabled -Layout $Layout))" in after_snapshot
     assert "Assert-DefenseClawInstalledConfig" in deployment and "-RecordLifecycle" not in deployment
+
+
+def _module_function(module: str, name: str) -> str:
+    start = module.index(f"function {name} {{")
+    end = module.find("\nfunction ", start + 1)
+    return module[start : end if end != -1 else len(module)]
+
+
+def test_gateway_service_logs_on_as_local_system() -> None:
+    """Spec 007: the gateway runs as LocalSystem, keeping its restricted
+    service SID and single required privilege."""
+    module = read(MODULE)
+    assert "function Get-DefenseClawGatewayServiceAccount {\n    return 'LocalSystem'\n}" in module
+
+    setter = _module_function(module, "Set-DefenseClawManagedServices")
+    assert "Get-DefenseClawGatewayServiceAccount" in setter
+    assert setter.count("'obj=', $gatewayAccount,") == 2  # sc config and sc create
+    assert '$gatewayAccount = "NT SERVICE\\$GatewayServiceName"' not in setter
+    # The writer proves the account it configured.
+    assert "gateway service account is $writtenGatewayAccount after configuration" in setter
+
+    configurations = _module_function(module, "Assert-DefenseClawManagedServiceConfigurations")
+    deployment = _module_function(module, "Assert-DefenseClawEnterpriseDeployment")
+    for body in (configurations, deployment):
+        assert "-ExpectedAccount $ExpectedGatewayAccount" in body
+        assert '-ExpectedAccount "NT SERVICE\\$GatewayServiceName"' not in body
+        # Restricted service SID and least privilege are unchanged.
+        assert "-ExpectedSidType 3" in body
+        assert "-ExpectedPrivileges @('SeChangeNotifyPrivilege')" in body
+
+    metadata_writer = _module_function(module, "New-DefenseClawDeploymentMetadata")
+    assert "gateway_account = (Get-DefenseClawGatewayServiceAccount)" in metadata_writer
+    # The service SID remains the gateway's ACL and trust identity.
+    assert '"DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\\$GatewayServiceName"' in module
+
+
+def test_gateway_needs_no_service_logon_right() -> None:
+    """Spec 007: no code grants or asserts SeServiceLogonRight."""
+    sources = [MODULE, INSTALLER, ROOT / "scripts" / "test-windows-enterprise-hardening.ps1"]
+    sources += sorted((ROOT / "internal").rglob("*.go"))
+    sources += sorted((ROOT / "cmd").rglob("*.go"))
+    for path in sources:
+        text = read(path)
+        for needle in ("SeServiceLogonRight", "LsaAddAccountRights"):
+            assert needle not in text, f"{path.relative_to(ROOT)} references {needle}"
+
+
+def test_existing_virtual_account_gateway_migrates_in_place() -> None:
+    """Spec 007: installs whose gateway logs on as the virtual account are
+    upgraded, repaired, reinstalled, rolled back and uninstalled in place."""
+    module = read(MODULE)
+
+    accepted = _module_function(module, "Get-DefenseClawAcceptedGatewayServiceAccounts")
+    assert "Get-DefenseClawGatewayServiceAccount" in accepted
+    assert "Get-DefenseClawLegacyGatewayServiceAccount" in accepted
+    legacy = _module_function(module, "Get-DefenseClawLegacyGatewayServiceAccount")
+    assert 'return "NT SERVICE\\$GatewayServiceName"' in legacy
+
+    # Ownership: the old account is this deployment's own gateway, not foreign.
+    owned = _module_function(module, "Assert-DefenseClawOwnedServiceOrAbsent")
+    assert "Test-DefenseClawGatewayServiceAccount -Account $objectName -GatewayServiceName $Name" in owned
+
+    # Verification and teardown accept both accounts unless narrowed.
+    for name in ("Assert-DefenseClawManagedServiceConfigurations", "Assert-DefenseClawEnterpriseDeployment"):
+        body = _module_function(module, name)
+        assert "[string[]]$ExpectedGatewayAccount" in body
+        assert "Get-DefenseClawAcceptedGatewayServiceAccounts" in body
+    configuration = _module_function(module, "Assert-DefenseClawServiceConfiguration")
+    assert "[Parameter(Mandatory)][string[]]$ExpectedAccount" in configuration
+
+    # The transaction preimage records each service account.
+    transaction = _module_function(module, "New-DefenseClawTransaction")
+    assert "account = $account" in transaction
+    assert "-Name ObjectName" in transaction
+
+    # Rollback restores the recorded account and verifies exactly that one.
+    reader = _module_function(module, "Get-DefenseClawTransactionGatewayAccount")
+    assert "PSObject.Properties['account']" in reader
+    assert "Get-DefenseClawLegacyGatewayServiceAccount" in reader  # preimages from earlier releases
+    assert "transaction records an unsupported gateway service account" in reader
+    restore = _module_function(module, "Restore-DefenseClawTransaction")
+    assert "-RestoreGatewayAccount (\n                Get-DefenseClawTransactionGatewayAccount -Snapshot $snapshot\n            )" in restore
+    ready = _module_function(module, "Assert-DefenseClawRestoredTransactionReadyForActivation")
+    assert "-ExpectedGatewayAccount @(\n            Get-DefenseClawTransactionGatewayAccount -Snapshot $Snapshot\n        )" in ready
+
+    setter = _module_function(module, "Set-DefenseClawManagedServices")
+    assert "[string]$RestoreGatewayAccount" in setter
+    assert "a recorded gateway account can be restored only while transaction services remain disabled" in setter
+    assert "refusing to restore unsupported gateway service account" in setter

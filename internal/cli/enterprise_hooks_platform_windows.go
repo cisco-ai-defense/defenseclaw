@@ -617,6 +617,9 @@ func enterpriseHooksNativePlatformPreflight() error {
 	if enterpriseHooksRuntimeGOOS() != "windows" {
 		return nil
 	}
+	if managed.WindowsCurrentProcessIsGatewayService() {
+		return fmt.Errorf("enterprise hooks cannot run inside the managed gateway service")
+	}
 	token := windows.GetCurrentProcessToken()
 	if token.IsElevated() {
 		return nil
@@ -693,6 +696,9 @@ func enterpriseHooksNativeMutationIdentityPreflight() error {
 	}
 	if user == nil || user.User.Sid == nil || !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
 		return fmt.Errorf("managed enterprise hook mutations require the LocalSystem guardian on native Windows")
+	}
+	if managed.WindowsCurrentProcessIsGatewayService() {
+		return fmt.Errorf("managed enterprise hook mutations cannot run inside the managed gateway service")
 	}
 	return nil
 }

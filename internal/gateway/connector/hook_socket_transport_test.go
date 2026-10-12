@@ -41,7 +41,7 @@ var shellHookSocketConnectorTemplates = []string{
 // socket, without a bearer, when a standalone socket is configured, and
 // contains no trace of it otherwise.
 func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.T) {
-	transport := shellHookSocketTransport("/opt/cisco/defenseclaw/run/hook's.sock", 497, "/opt/defenseclaw/bin/defenseclaw-hook")
+	transport := shellHookSocketTransport("/opt/cisco/defenseclaw/run/hook's.sock", 497, "/opt/cisco/defenseclaw/bin/defenseclaw-hook")
 	for _, name := range shellHookSocketConnectorTemplates {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
@@ -69,8 +69,8 @@ func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.
 		}
 		// The administrator-owned binary that reads the Kerberos cache is
 		// named before the identity headers are built (GAP-0194).
-		if !strings.Contains(socket, "DEFENSECLAW_SESSION_FACTS_BIN='/opt/defenseclaw/bin/defenseclaw-hook'\nexport DEFENSECLAW_SESSION_FACTS_BIN\n") ||
-			strings.Contains(tcp, "DEFENSECLAW_SESSION_FACTS_BIN") {
+		if !strings.Contains(socket, "DEFENSECLAW_SESSION_FACTS_BIN='/opt/cisco/defenseclaw/bin/defenseclaw-hook'\nexport DEFENSECLAW_SESSION_FACTS_BIN\n") ||
+			strings.Contains(tcp, "DEFENSECLAW_SESSION_FACTS_BIN='") {
 			t.Fatalf("%s: session facts binary rendered wrongly", name)
 		}
 		block := strings.Index(socket, "if ! defenseclaw_hook_socket_trusted; then")
@@ -78,6 +78,45 @@ func TestShellHookTemplatesCarryTheSocketTransportOnlyWhenConfigured(t *testing.
 		failDefined := strings.Index(socket, "\nfail_unreachable() {")
 		if block < 0 || auth < block || failDefined < 0 || failDefined > block {
 			t.Fatalf("%s: the socket check must run after fail_unreachable is defined and before the bearer header is built", name)
+		}
+	}
+}
+
+// Managed Linux Claude Code must send the same user-resolved operand facts as
+// Codex. The gateway cannot inspect links in this home under ProtectHome.
+func TestManagedHooksCarryResolvedWriteOperands(t *testing.T) {
+	for _, name := range []string{"claude-code-hook.sh", "codex-hook.sh"} {
+		for _, tc := range []struct {
+			name, want                     string
+			managed, secureClient, sandbox bool
+		}{
+			{name: "managed", managed: true, want: "present"},
+			{name: "per-user", want: "absent"},
+			{name: "secure-client", managed: true, secureClient: true, want: "absent"},
+			{name: "sandbox", managed: true, sandbox: true, want: "absent"},
+		} {
+			t.Run(name+"/"+tc.name, func(t *testing.T) {
+				body, err := renderHookTemplate(name, templateData{
+					APIAddr: "127.0.0.1:18970", FailMode: "closed",
+					Managed: tc.managed, SecureClient: tc.secureClient, Sandbox: tc.sandbox,
+					TokenFile: ".token-claudecode", ScopedToken: true,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				text := string(body)
+				hasResolver := strings.Contains(text, " hook resolve-writes ")
+				hasHeader := strings.Contains(text, "X-DefenseClaw-Resolved-Writes:")
+				hasCurlArg := strings.Contains(text, "RESOLVED_HEADER_ARGS[@]")
+				want := tc.want == "present"
+				if hasResolver != want || hasHeader != want || hasCurlArg != want {
+					t.Fatalf("resolver=%t header=%t curl-arg=%t, want %t", hasResolver, hasHeader, hasCurlArg, want)
+				}
+				if want && (!strings.Contains(text, `"${DEFENSECLAW_SESSION_FACTS_BIN}" hook resolve-writes`) ||
+					!strings.Contains(text, "eyJcdTAwMDB0cnVuY2F0ZWQiOiIxIn0")) {
+					t.Fatal("managed resolver must use the installed hook binary and send incomplete evidence on failure")
+				}
+			})
 		}
 	}
 }

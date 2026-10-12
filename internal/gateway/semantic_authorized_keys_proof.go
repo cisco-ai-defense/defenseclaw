@@ -739,6 +739,18 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	}
 	cannotResolveLocally := request.ProtectedHomeHook || request.SkipLocalFilesystemResolution
 	truncated := request.ResolvedWriteTargets[hookpaths.TruncatedKey] == "1"
+	privateOperand := func(target string) bool {
+		if filepath.Separator != '/' {
+			return false
+		}
+		for _, root := range []string{facts.ActiveHome, "/home", "/tmp", "/var/tmp"} {
+			root = filepath.Clean(root)
+			if root != "." && (target == root || strings.HasPrefix(target, root+string(filepath.Separator))) {
+				return true
+			}
+		}
+		return false
+	}
 	// The links the command creates, read as the hook reads them; set once
 	// the command is known, before the first writeTarget call.
 	var links hookpaths.Links
@@ -785,6 +797,12 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// into the protected home, in or outside the home. Its target
 				// is unknown, so fail closed.
 				return !windowsLocationOrdinaryWriteTarget(target)
+			case !present && cannotResolveLocally &&
+				request.ResolvedWriteTargets[hookpaths.OperandFactsKey] == "1" && privateOperand(target):
+				// A current user-side hook promises a fact for each write
+				// operand. Its absence under an unreadable home or tmp root
+				// cannot establish that the basename is an ordinary file.
+				return true
 			}
 		}
 		if request.SkipLocalFilesystemResolution {
@@ -834,6 +852,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			input.Command = args.Cmd
 		}
 	}
+	// ProtectHome can make the gateway discard the event CWD before its
+	// first ActionFacts pass. Rebuild path facts with the authenticated
+	// client CWD so relative command destinations key the client's physical
+	// write-operand facts, just as redirect operands already do.
+	if filepath.IsAbs(clientCWD) && !filepath.IsAbs(facts.CWD) {
+		facts = actionfacts.Analyze(input)
+	}
 	links = hookpaths.CommandLinksWithFacts(request.Input.Tool, input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	safeRedirects = hookpaths.SafeShellRedirectOccurrencesWithFacts(input.Command, input.CWD, facts.ActiveHome, request.ResolvedWriteTargets)
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
@@ -841,13 +866,22 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if input.Command != "" {
 		var parsed, dynamic bool
 		operands, parsed, dynamic = hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		var dynamicOperands []string
+		var dynamicUnknown bool
+		if dynamic {
+			dynamicOperands, dynamicUnknown = hookpaths.ShellDynamicWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		}
 		// A truncated client map is not complete, so a nonempty target in it
 		// proves only its own operand. When the gateway cannot list every
 		// redirect target either (the command does not parse, or a target is
 		// not a static word) and cannot resolve one itself, the protected-path
 		// decision is unknown: fail closed (GAP-1395). Every write redirect
 		// operator contains a greater-than sign.
-		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
+		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") &&
+			(!parsed || dynamic && dynamicUnknown) {
+			return true
+		}
+		if dynamicUnknown && truncated {
 			return true
 		}
 		for i, operand := range operands {
@@ -856,8 +890,24 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		for _, operand := range dynamicOperands {
+			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
 		for _, operand := range hookpaths.LiteralWriteOperands(input.Command, input.CWD, input.ActiveHome) {
 			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
+		for _, operand := range hookpaths.ShellExtraWriteOperands(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand.Path, false, operand.OwnCopy) {
+				return true
+			}
+		}
+		for operand, safe := range replacedBySed {
+			if (!safe || request.ResolvedWriteTargets[hookpaths.SedRelinkFactPrefix+operand] == "1") &&
+				writeTarget(operand, false, false) {
 				return true
 			}
 		}
@@ -906,7 +956,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if slices.Contains(operands, target) && integrityCommandOwnsStaticRedirect(command, candidate) {
 			continue
 		}
-		if replacedBySed[target] && !isProtected(target) {
+		if replacedBySed[target] && request.ResolvedWriteTargets[hookpaths.SedRelinkFactPrefix+target] != "1" &&
+			!isProtected(target) {
 			continue
 		}
 		if writeTarget(target, false, ownCopy) {

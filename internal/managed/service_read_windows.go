@@ -53,7 +53,7 @@ func ValidateServiceCanReadTree(root, label, serviceAccount string) error {
 	}
 	// The gateway itself reads the tree directly; the DACL check is for a
 	// preflight that runs as another account.
-	if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil && user.User.Sid.Equals(serviceSID) {
+	if runs, err := WindowsCurrentProcessRunsAsService(serviceSID); err == nil && runs {
 		return nil
 	}
 	sids, err := serviceTokenSIDs(serviceSID)
@@ -113,7 +113,7 @@ func ValidateServiceCanWriteFile(path, serviceAccount string) error {
 	if serviceSID == nil {
 		return nil
 	}
-	if user, err := windows.GetCurrentProcessToken().GetTokenUser(); err == nil && user.User.Sid.Equals(serviceSID) {
+	if runs, err := WindowsCurrentProcessRunsAsService(serviceSID); err == nil && runs {
 		return nil
 	}
 	folder := filepath.Dir(filepath.Clean(path))

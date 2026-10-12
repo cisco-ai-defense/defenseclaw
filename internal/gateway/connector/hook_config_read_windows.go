@@ -8,6 +8,7 @@ package connector
 import (
 	"os"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -19,6 +20,9 @@ import (
 // the file it opened. Like os.Open, this follows links and opens directories
 // so readHookConfigFile can report a non-regular path precisely.
 func openHookConfigForRead(path string) (*os.File, error) {
+	if err := managed.RequireWindowsGatewayPathOutsideUserProfiles(path); err != nil {
+		return nil, err
+	}
 	name, err := winpath.UTF16Ptr(path)
 	if err != nil {
 		return nil, err
