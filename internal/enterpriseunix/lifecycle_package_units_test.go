@@ -42,7 +42,11 @@ func TestPackageUserUnitsSurviveLaterEnsureRuns(t *testing.T) {
 		units[path] = string(data)
 		writeHostFile(t, h.testHost, path, units[path])
 	}
-	// The package installs the launcher as well.
+	// The package installs the launcher and the directory of the rendered
+	// gateway configuration as well.
+	if err := os.MkdirAll(h.env.P(h.env.openshellDir()), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	launcher := h.env.P(h.env.launcherPath())
 	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
 		t.Fatal(err)
@@ -58,10 +62,16 @@ func TestPackageUserUnitsSurviveLaterEnsureRuns(t *testing.T) {
 				t.Fatalf("%s = %q after ensure, want the package's %q", path, got, want)
 			}
 		}
+		if !h.exists(h.env.openshellDir()) {
+			t.Fatalf("ensure removed the package's %s", h.env.openshellDir())
+		}
 	}
 	on := sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker"})
 	run(on)
 	run(on)
 	run(sandboxConfig(t, "linux", false, nil))
 	run(on)
+	// A package install with sandboxes off from the start (the package
+	// default) keeps the directory too.
+	run(sandboxConfig(t, "linux", false, nil))
 }

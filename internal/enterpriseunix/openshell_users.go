@@ -1165,11 +1165,14 @@ func (e *Env) sandboxImageLogRels(a SandboxAccount) ([]string, error) {
 }
 
 // removeOpenShellMachineState removes the lifecycle's own sandbox files that
-// no deployment record lists.
-func (e *Env) removeOpenShellMachineState() {
+// no deployment record lists, and their directory unless the package owns it
+// (the package erase removes it then).
+func (e *Env) removeOpenShellMachineState(channel string) {
 	_ = removeFile(e.P(e.prerequisitesPath()))
 	_ = removeFile(e.openshellStatePath())
-	_ = removeDirIfEmpty(e.P(e.openshellDir()))
+	if !e.packageOwnsOpenShellDir(channel) {
+		_ = removeDirIfEmpty(e.P(e.openshellDir()))
+	}
 }
 
 // removeEmptyBelowHome removes the folder rel below the account's home when

@@ -197,6 +197,16 @@ func (s openshellSettings) fallbackSettings() openshellSettings {
 
 // Paths of the sandbox pieces on this host.
 func (e *Env) openshellDir() string { return filepath.Join(e.Layout.ConfigDir, "openshell") }
+
+// packageOwnsOpenShellDir reports whether the package manager owns
+// openshellDir: the rpm and deb ship it (.goreleaser.yaml) so an erase leaves
+// no empty one behind. The lifecycle writes into it but never removes it there;
+// an ensure with sandboxes off removed the empty directory the package had
+// just installed, and the package database then listed a directory the host
+// no longer had.
+func (e *Env) packageOwnsOpenShellDir(channel string) bool {
+	return e.GOOS == "linux" && channel == ChannelPackage
+}
 func (e *Env) renderedTOMLPath() string {
 	return filepath.Join(e.openshellDir(), openshell.GatewayTOMLFile)
 }
@@ -490,7 +500,9 @@ func (l *lifecycle) applyOpenShellLinks(p *plan) error {
 	if !p.openshell.settings.Enabled {
 		// What the lifecycle derived while the subsystem was on goes with it.
 		_ = removeFile(env.P(env.prerequisitesPath()))
-		_ = removeDirIfEmpty(env.P(env.openshellDir()))
+		if !env.packageOwnsOpenShellDir(p.channel) {
+			_ = removeDirIfEmpty(env.P(env.openshellDir()))
+		}
 	}
 	return nil
 }
@@ -773,5 +785,5 @@ func (l *lifecycle) removeOpenShellFiles(record *Deployment) {
 			_ = removeDirIfEmpty(env.P(filepath.Join("/etc/systemd/user", u.Name+".d")))
 		}
 	}
-	env.removeOpenShellMachineState()
+	env.removeOpenShellMachineState(channel)
 }

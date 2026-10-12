@@ -311,11 +311,18 @@ directive_minimum() {
 # Any other diagnostic about a DefenseClaw unit, or a failed verify, fails.
 unit_diagnostics() {
     local version unit line key minimum output rc=0 unexpected="" ignored=""
-    local units=() dir=$unit_dir scope=()
-    # --user: the user units of the per-user sandbox daemon.
+    local units=() dir=$unit_dir scope=() runtime="" kind=""
+    # --user: the user units of the per-user sandbox daemon, verified in a
+    # user manager. That manager resolves %t (the socket's ListenStream) from
+    # XDG_RUNTIME_DIR, which root has no value for in a container or under
+    # sudo, and refuses to start without it ("Failed to initialize manager:
+    # No such device or address" on systemd 239 and 252). A scratch runtime
+    # directory stands in for the account's /run/user/<uid>.
     if [ "${1:-}" = --user ]; then
         dir=$user_unit_dir
         scope=(--user)
+        runtime=$(mktemp -d)
+        kind="user "
     fi
     version=$(systemctl --version | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p')
     [ -n "$version" ] || die "cannot read the systemd version from systemctl --version"
@@ -323,7 +330,12 @@ unit_diagnostics() {
         case "$unit" in *.service | *.socket | *.path | *.timer) units+=("$unit") ;; esac
     done
     [ "${#units[@]}" -gt 0 ] || die "no DefenseClaw units in $dir"
-    output=$(systemd-analyze ${scope[@]+"${scope[@]}"} verify "${units[@]}" 2>&1) || rc=$?
+    if [ -n "$runtime" ]; then
+        output=$(XDG_RUNTIME_DIR=$runtime systemd-analyze "${scope[@]}" verify "${units[@]}" 2>&1) || rc=$?
+        rm -rf "$runtime"
+    else
+        output=$(systemd-analyze verify "${units[@]}" 2>&1) || rc=$?
+    fi
     while IFS= read -r line; do
         case "$line" in *defenseclaw*) ;; *) continue ;; esac
         key=$(printf '%s\n' "$line" |
@@ -338,7 +350,7 @@ unit_diagnostics() {
         printf 'systemd-analyze verify exited %s on systemd %s:\n%s\n' "$rc" "$version" "$output" >&2
         die "unit diagnostics outside the systemd $version allow list:"$'\n'"${unexpected:-  (none; verify failed)}"
     fi
-    echo "${#units[@]} DefenseClaw units load on systemd $version"
+    echo "${#units[@]} DefenseClaw ${kind}units load on systemd $version"
     if [ -n "$ignored" ]; then
         echo "systemd $version ignores these directives (added in a later release):"
         printf '%s' "$ignored" | sort -u | sed 's/^/  /'
