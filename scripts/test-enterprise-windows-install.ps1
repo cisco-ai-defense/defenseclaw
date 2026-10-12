@@ -311,6 +311,19 @@ function Get-TreeSha([string]$Path) {
     return [BitConverter]::ToString([Security.Cryptography.SHA256]::HashData($bytes)).Replace('-', '')
 }
 
+# The targets the guardian ledger protects: account, connector and outcome.
+# Every guardian reconcile rewrites the ledger's updated_at and each target's
+# install details (backups, contract lock times); the restarted guardian of
+# an upgrade does too, so the file's hash is no measure of what it protects.
+function Get-LedgerTargets([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'absent' }
+    $ledger = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $targets = foreach ($target in @($ledger.protected_targets)) {
+        '{0}|{1}|{2}|{3}|{4}' -f $target.sid, $target.user, $target.user_home, $target.connector, $target.ok
+    }
+    return (@($targets) | Sort-Object) -join "`n"
+}
+
 function Get-ConfigGeneration([string]$Result) {
     $document = Get-Content -LiteralPath $Result -Raw | ConvertFrom-Json
     if ($null -eq $document.PSObject.Properties['policy'] -or $null -eq $document.policy) { return 0 }
@@ -447,7 +460,7 @@ try {
         $generationFloor = if ($sourceConfigVersion -eq 8) { $previousGeneration } else { $previousGeneration - 1 }
         $previousConfigSha = Get-FileSha $installedConfig
         $previousSecretsSha = Get-TreeSha $secretsDirectory
-        $previousLedgerSha = Get-FileSha $guardianLedger
+        $previousLedgerTargets = Get-LedgerTargets $guardianLedger
 
         Step "Setup /ensure upgrades to $Version"
         $run = Invoke-Lifecycle -Name '01-setup-ensure-upgrade' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
@@ -462,7 +475,7 @@ try {
         }
         Copy-Item -LiteralPath $installedConfig -Destination (Join-Path $ResultsRoot 'config-upgraded.yaml')
         if ((Get-TreeSha $secretsDirectory) -ne $previousSecretsSha) { Fail "the upgrade changed the secrets under $secretsDirectory" }
-        if ((Get-FileSha $guardianLedger) -ne $previousLedgerSha) { Fail "the upgrade changed the guardian ledger $guardianLedger" }
+        if ((Get-LedgerTargets $guardianLedger) -ne $previousLedgerTargets) { Fail "the upgrade changed the protected targets in the guardian ledger $guardianLedger" }
     }
     else {
         Step 'Setup /ensure with an administrator config (installs the services, enrolls Claude Code and Codex)'
