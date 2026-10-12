@@ -301,8 +301,8 @@
   {
     "path": "sandbox image rm",
     "use": "rm \u003charness\u003e...",
-    "short": "Remove the harnesses' images (on a Mac also their MicroVM disks)",
-    "long": "Removes the images DefenseClaw built for the named harnesses under this data\ndirectory: the harness images and, on the MicroVM driver, the run images and\naliases made from them, and forgets their records. On a Mac it also removes the\nMicroVM disks OpenShell prepared from them (about 5 GB each), once Docker no\nlonger has their images; that needs the DefenseClaw daemon's list of sandboxes.\nIt refuses, removing nothing, while a sandbox is recorded with one of the\nimages: delete that sandbox first. The next run of the harness builds its image\nagain.",
+    "short": "Remove the harnesses' images (on a MicroVM gateway also their disks)",
+    "long": "Removes the images DefenseClaw built for the named harnesses under this data\ndirectory: the harness images and, on the MicroVM driver, the run images and\naliases made from them, and forgets their records. On a MicroVM gateway (a Mac,\nor Linux on the vm driver) it also removes the MicroVM disks OpenShell prepared\nfrom them (about 5 GB each), once Docker no longer has their images; that needs\nthe DefenseClaw daemon's list of sandboxes.\nIt refuses, removing nothing, while a sandbox is recorded with one of the\nimages: delete that sandbox first. The next run of the harness builds its image\nagain.",
     "flags": [
       {
         "name": "dry-run",
@@ -470,6 +470,11 @@
       {
         "name": "sandbox",
         "type": "string"
+      },
+      {
+        "name": "sources",
+        "type": "bool",
+        "default": "false"
       },
       {
         "name": "unmask",
@@ -993,7 +998,7 @@
     "path": "sandbox unblock",
     "use": "unblock \u003chost\u003e",
     "short": "Lift an egress block for one sandbox or for every sandbox",
-    "long": "Lifts a block of the blocklist feed or of the profile's default (IP addresses under\nopen, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for\nevery sandbox (--always). It cannot lift a block-list entry: remove your own with\n`defenseclaw sandbox policy block --remove HOST`; a pack's, the repository\npolicy's (.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open\na private network (add the exact host to openshell.egress.allow), this machine (run\nthe sandbox with --host-port PORT) or a cloud metadata or link-local address.",
+    "long": "Lifts a block of the blocklist feed or of the profile's default (IP addresses under\nopen, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for\nevery sandbox (--always). With --always, --sandbox NAME names the sandbox whose policy\nchecks the unblock; on a managed computer, which keeps it for you through one of your\nsandboxes, your only sandbox is used without it. It cannot lift a block-list entry: remove your own with\n`defenseclaw sandbox policy block --remove HOST`; a pack's, the repository\npolicy's (.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open\na private network (add the exact host to openshell.egress.allow), this machine (run\nthe sandbox with --host-port PORT) or a cloud metadata or link-local address.",
     "flags": [
       {
         "name": "always",

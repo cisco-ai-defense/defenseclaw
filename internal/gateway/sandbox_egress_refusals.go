@@ -212,6 +212,12 @@ func sandboxEgressRefusalNotice(refusals []SandboxEgressRefusal) string {
 			// The feed's hint, for the agent too (GAP-0326).
 			return "This sandbox's connection to " + sandboxAskTarget(r) + " was refused (" + r.What + "); " +
 				"a tool sees only a connection error. " + sentence(upperFirst(r.Remedy))
+		case manager.NoteAccessRefused:
+			// Not an ask that waits: nobody on this computer can approve it
+			// (GAP-0468, GAP-0502).
+			return "This sandbox's connection to " + sandboxAskTarget(r) + " was refused by the organization's DefenseClaw policy; " +
+				"a tool sees only a connection error. " + sentence(upperFirst(r.Remedy)) +
+				" Tell the user if the task needs it, and do not try to reach it another way."
 		}
 	}
 	if len(refusals) == 1 {

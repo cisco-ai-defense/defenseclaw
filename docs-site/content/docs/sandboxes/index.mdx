@@ -56,8 +56,10 @@ each line.
 Think of the sandbox as a locked room that holds only your project folder.
 Two layers build it:
 
-- **OpenShell builds the room.** On Linux each sandbox is a container; on a
-  Mac it is a small virtual machine (a MicroVM) with its own Linux kernel.
+- **OpenShell builds the room.** On Linux each sandbox is a container by
+  default, and a MicroVM on a Linux host with KVM that chooses OpenShell's
+  MicroVM driver; on a Mac it is always a small virtual machine (a MicroVM)
+  with its own Linux kernel.
   Either way the workload has no network of its own, runs as your uid with no
   capabilities, and is held in by Landlock filesystem rules and seccomp. Its
   only way out is OpenShell's supervisor.
@@ -125,8 +127,10 @@ host.
 ## Linux and macOS at a glance
 
 Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. They
-are not supported on Windows or WSL2, on Intel Macs, in `managed_enterprise`
-deployments, or when you run DefenseClaw as root.
+are not supported on Windows or WSL2, on Intel Macs, or when you run
+DefenseClaw as root. On a standalone enterprise install an administrator
+decides who may use them and which agents must; see
+[Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 On Windows, DefenseClaw guards your agents through their connector hooks
 instead: Codex, Claude Code and the others run on your machine, and every
@@ -137,9 +141,9 @@ Linux machine or an Apple-silicon Mac. The TUI's Sandboxes tab on Windows says s
 
 ![DefenseClaw TUI on Windows with the Sandboxes tab open: the panel says OpenShell sandboxes run on Linux and macOS only and that Windows and WSL2 are not supported](/images/sandboxes/screens/tui-sandboxes-windows-unsupported.png)
 
-| Topic | Linux | macOS (Apple silicon) |
+| Topic | Linux (Docker driver, the default) | macOS (Apple silicon, MicroVM driver) |
 | --- | --- | --- |
-| OpenShell driver | Docker driver: one container per sandbox | MicroVM driver (`vm`): one virtual machine per sandbox, on Apple's Hypervisor. OpenShell calls it experimental. |
+| OpenShell driver | Docker driver: one container per sandbox. A host with KVM can use the MicroVM driver instead (see below). | MicroVM driver (`vm`): one virtual machine per sandbox, on Apple's Hypervisor. OpenShell calls it experimental. |
 | Isolation | Linux namespaces, Landlock (kernel 6.2 or newer), seccomp, your uid | The same, inside a MicroVM with its own Linux kernel |
 | OpenShell gateway | `openshell-gateway` systemd user service | Homebrew's `nvidia/openshell/openshell` service |
 | Your project folder | Mounted live at `/work/<folder>`. `--copy` works on a copy. | Always a copy, at `/sandbox/work/<folder>`. A MicroVM mounts no host folders. |
@@ -154,6 +158,12 @@ Everything else is the same on both: the hooks, the policy packs, the egress
 proxy and its blocklist, asks, credential placeholders, telemetry and tamper
 detection.
 
+The driver decides these rows, not the operating system. A Linux host with KVM
+can run the MicroVM driver too (see
+[MicroVMs on Linux](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm)),
+and then it behaves like the macOS column for the folder, the end of the
+session, undo, and the first start of an image.
+
 <Callout type="info" title="Why not Docker Desktop on a Mac?">
 OpenShell's supervisor needs Landlock. Docker Desktop's Linux VM kernel does
 not run it, so a sandbox on OpenShell's Docker driver fails to start there.
@@ -167,6 +177,7 @@ images.
 <Cards>
   <Card title="Set up on Linux" href="/docs/sandboxes/linux" description="Docker Engine, Landlock and the OpenShell gateway as a systemd user service. Your project is mounted live, with a snapshot for undo." />
   <Card title="Set up on macOS" href="/docs/sandboxes/macos" description="Apple silicon, Homebrew and OpenShell MicroVMs. Every run works on a copy that you pull back." />
+  <Card title="On a managed computer" href="/docs/enterprise/sandboxes" description="For administrators: the policy of a directory group picks each person's sandbox policy, and required agents run only in a sandbox." />
   <Card title="Your first session" href="/docs/sandboxes/first-session" description="A guided tour: the banner, the activity feed, a block and its unblock, the end-of-session review, then undo or pull." />
   <Card title="Network and egress" href="/docs/sandboxes/network" description="How the egress proxy decides each site, the open, balanced and strict packs, unblocks, asks and large uploads." />
   <Card title="TUI and macOS app" href="/docs/sandboxes/apps" description="Watch and manage sandboxes from the terminal UI's Sandboxes panel or the macOS app." />
@@ -198,9 +209,10 @@ images.
    activity feed.
 4. **At the end** you get a summary and a review of the changed files that
    could run code on your machine.
-5. **Keep, undo or pull.** On Linux you keep the changes or undo them. On a
-   Mac, or with `--copy`, you apply them, put them on a branch, write a
-   patch, or leave them in the sandbox for `sandbox pull`.
+5. **Keep, undo or pull.** On Linux with the Docker driver you keep the
+   changes or undo them. On a Mac, on a MicroVM, or with `--copy`, you apply
+   them, put them on a branch, write a patch, or leave them in the sandbox for
+   `sandbox pull`.
 6. **Stop or delete.** The sandbox is stopped and kept, so
    `defenseclaw sandbox connect NAME` resumes it. `defenseclaw sandbox delete NAME`
    removes it.

@@ -43,7 +43,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -96,6 +95,9 @@ type IO struct {
 	OutTTY, ErrTTY bool
 	// Color enables ANSI styling of Out.
 	Color bool
+	// Width is the width of the terminal Out is, in columns; 0 when Out is
+	// not a terminal or its width is unknown: nothing then wraps.
+	Width int
 }
 
 // Terminal runs an interactive openshell invocation as a foreground child
@@ -116,9 +118,14 @@ type App struct {
 	Cfg *config.Config
 	// ConfigPath is the config.yaml policy and setup changes write.
 	ConfigPath string
-	// API is the daemon's sandbox API (default: built from Cfg).
+	// API is the daemon's sandbox API (default: the caller's own sandbox
+	// daemon on a standalone managed computer, else built from Cfg).
 	API API
-	IO  IO
+	// HostClient is the client of the caller's sandbox daemon on a
+	// standalone managed computer (default sandboxapi.ClientForHost); it
+	// returns sandboxapi.ErrNotManagedHost on any other computer.
+	HostClient func(goos string) (API, error)
+	IO         IO
 
 	Terminal Terminal
 	Streamer Streamer
@@ -126,9 +133,14 @@ type App struct {
 	ExecProcess func(path string, argv, env []string) error
 	LookPath    func(string) (string, error)
 	Getenv      func(string) string
-	Environ     func() []string
-	Getwd       func() (string, error)
-	Home        func() (string, error)
+	// AccountCheck reports an *openshell.AccountLookupError when the ssh the
+	// OpenShell CLI runs cannot find the calling account (default
+	// openshell.CheckAccountLookup over PATH). Only a managed computer's run
+	// asks, before it copies the project.
+	AccountCheck func() error
+	Environ      func() []string
+	Getwd        func() (string, error)
+	Home         func() (string, error)
 	// Executable is the DefenseClaw binary the shell wrappers call.
 	Executable func() (string, error)
 	Now        func() time.Time
@@ -164,6 +176,10 @@ type App struct {
 	Gateway    GatewayService
 	Installer  func(consent func(*openshell.InstallPlan) (bool, error)) Installer
 	OpenShell  func(ctx context.Context) (openshell.Client, *openshell.Registration, error)
+	// OpenShellCLI is the openshell CLI a managed computer's sandbox daemon
+	// installed for the account in setup mode ("" for none), read again
+	// after the daemon readied OpenShell for a first run.
+	OpenShellCLI func() string
 	// GitConfig is the value of a git configuration key as the host's git
 	// reads it in dir (the repository's, the user's and the system's), ""
 	// when unset.
@@ -185,6 +201,10 @@ type App struct {
 	// asked is the last question ask showed, to the question mark: what a
 	// Ctrl-C there interrupted.
 	asked string
+	// managedSeen is the managed part of the daemon's last status on a
+	// managed computer: the caller's profile and request-access contact a
+	// refusal names (ManagedError).
+	managedSeen *sandboxapi.ManagedStatus
 }
 
 // ErrUnsupported is returned on platforms and setups sandboxes do not run
@@ -251,6 +271,9 @@ func (a *App) defaults() {
 		if a.Environ == nil {
 			a.Environ = os.Environ
 		}
+		if a.AccountCheck == nil {
+			a.AccountCheck = func() error { return openshell.CheckAccountLookup(a.Getenv("PATH")) }
+		}
 		if a.Getwd == nil {
 			a.Getwd = os.Getwd
 		}
@@ -271,6 +294,15 @@ func (a *App) defaults() {
 		}
 		if a.Sleep == nil {
 			a.Sleep = sleepCtx
+		}
+		if a.HostClient == nil {
+			a.HostClient = func(goos string) (API, error) {
+				c, err := sandboxapi.ClientForHost(goos)
+				if err != nil {
+					return nil, err
+				}
+				return c, nil
+			}
 		}
 		if a.WSL == nil {
 			a.WSL = IsWSL
@@ -354,11 +386,26 @@ func executable() (string, error) {
 	return p, nil
 }
 
-// api returns the daemon client.
+// ManagedHost reports a standalone managed computer, where the organization
+// sets up the sandbox service and the user's commands hold no configuration
+// of their own: nothing here writes the user's config.yaml or runs the
+// per-user setup (internal/cli marks the configuration of such a computer).
+func (a *App) ManagedHost() bool { return a.Cfg != nil && a.Cfg.StandaloneEnterprise() }
+
+// api returns the daemon client. On a standalone managed computer that is
+// the caller's own sandbox daemon, whatever config.yaml says: a managed
+// computer never falls back to a per-user gateway, and a runtime descriptor
+// that cannot be trusted refuses.
 func (a *App) api() (API, error) {
 	a.defaults()
 	if a.API != nil {
 		return a.API, nil
+	}
+	if c, err := a.HostClient(a.GOOS); err == nil {
+		a.API = c
+		return c, nil
+	} else if !errors.Is(err, sandboxapi.ErrNotManagedHost) {
+		return nil, err
 	}
 	if a.Cfg == nil {
 		return nil, errors.New("no DefenseClaw configuration is loaded; run `defenseclaw setup` first")
@@ -385,9 +432,6 @@ func (a *App) CheckSupported() error {
 	if err := openshell.CheckHost(a.GOOS, a.GOARCH); err != nil {
 		// A Mac that is not Apple silicon.
 		return fmt.Errorf("%w: %s", ErrUnsupported, strings.TrimPrefix(err.Error(), "openshell: "))
-	}
-	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
-		return fmt.Errorf("%w: sandboxes are not supported in managed_enterprise deployments yet", ErrUnsupported)
 	}
 	if a.Geteuid() == 0 {
 		return fmt.Errorf("%w: run sandboxes as your own user, not root: the OpenShell gateway is a per-user service", ErrUnsupported)
@@ -432,6 +476,23 @@ func (a *App) dataDir() string {
 		return a.Cfg.DataDir
 	}
 	return config.DefaultDataPath()
+}
+
+// imageDataDir is the data directory whose store holds the harness images
+// the sandboxes start from. On a managed computer the images are the sandbox
+// daemon's: it builds them in its own state directory, and the user's
+// DefenseClaw data directory never holds one, so `image list` and the doctor
+// said no image existed after a run had built one (GAP-0548).
+func (a *App) imageDataDir() string {
+	if a.ManagedHost() || onManagedHost() {
+		a.defaults()
+		if home, err := a.Home(); err == nil {
+			if dir := sandboxapi.ManagedStateDir(a.GOOS, home); dir != "" {
+				return dir
+			}
+		}
+	}
+	return a.dataDir()
 }
 
 func (a *App) dialOpenShell(ctx context.Context) (openshell.Client, *openshell.Registration, error) {
@@ -496,19 +557,41 @@ func apiError(err error) error {
 		if daemonUnreachable(e) {
 			// The HTTP client's error, with the loopback API port, is no
 			// news to the user (GAP-0336); `sandbox doctor` has the detail.
+			if onManagedHost() {
+				// A managed computer disables per-user gateways: the way on
+				// is the organization's service, never a gateway command
+				// (GAP-0451).
+				return errors.New("your sandbox service does not answer; " + managedServiceFix)
+			}
 			return errors.New("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)")
 		}
 	case sandboxapi.CodeDisabled:
 		return &DisabledError{Message: e.Message}
 	case sandboxapi.CodeAdminViolation:
-		return errors.New(violationMessage(e.Violation, e.Message, e.Detail, true))
+		if sandboxapi.IsPolicyRefusal(e.Message) {
+			// A managed refusal is complete (sandboxapi.AccessRefusedWhy):
+			// framing it again named the openshell.admin key (GAP-0508).
+			return &refusalError{text: e.Message, err: e}
+		}
+		return &refusalError{text: violationMessage(e.Violation, e.Message, e.Detail, true), err: e}
 	case sandboxapi.CodePolicyViolation:
 		if e.Violation != nil {
-			return errors.New(violationMessage(e.Violation, e.Message, e.Detail, e.Violation.Admin))
+			return &refusalError{text: violationMessage(e.Violation, e.Message, e.Detail, e.Violation.Admin), err: e}
 		}
 	}
 	return e
 }
+
+// refusalError is a daemon refusal as apiError words it. It keeps the
+// daemon's error, which a managed computer words its own way
+// (App.ManagedError).
+type refusalError struct {
+	text string
+	err  *sandboxapi.Error
+}
+
+func (e *refusalError) Error() string { return e.text }
+func (e *refusalError) Unwrap() error { return e.err }
 
 // daemonUnreachable reports the client's error for a daemon that does not
 // answer at all (sandboxapi.Client).
@@ -572,6 +655,30 @@ func violationMessage(v *sandboxapi.Violation, message, detail string, admin boo
 		return message + ": " + detail
 	}
 	return message
+}
+
+// tuiOffered reports that `defenseclaw tui` can be suggested: it is not on a
+// managed computer, where it exits saying only the sandbox commands are
+// available (GAP-0590).
+func (a *App) tuiOffered() bool {
+	return !(a.ManagedHost() || onManagedHost() || a.managedSeen != nil)
+}
+
+// violationText is violationMessage for a user on a managed computer: the
+// openshell.admin key that refused or limited the setting is the
+// organization's file, which the user does not have, so the text names the
+// caller's own profile and the rule instead ("(profile contractors, rule
+// allow_host_ports)"). It is violationMessage elsewhere (GAP-0628).
+func (a *App) violationText(v *sandboxapi.Violation, message, detail string, admin bool) string {
+	msg := violationMessage(v, message, detail, admin)
+	if v == nil || a.managedSeen == nil || a.managedSeen.Profile == "" {
+		return msg
+	}
+	rule := strings.TrimPrefix(v.Constraint, "openshell.admin.")
+	if rule == v.Constraint || rule == "" {
+		return msg
+	}
+	return strings.Replace(msg, " ("+v.Constraint+")", " (profile "+a.managedSeen.Profile+", rule "+rule+")", 1)
 }
 
 // harnessCommands names the harnesses in a policy's text by the command

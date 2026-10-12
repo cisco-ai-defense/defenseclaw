@@ -85,8 +85,9 @@ defenseclaw sandbox run claude -- --model sonnet
 ```
 
 The first run of a harness builds its image if setup did not. That takes a
-few minutes and downloads about 3 GB. On a Mac, the first start of each
-image also prepares a MicroVM disk, which takes about a minute.
+few minutes and downloads about 3 GB. On a Mac, or wherever the gateway runs
+the MicroVM driver, the first start of each image also prepares a MicroVM disk,
+which takes about a minute.
 
 </Step>
 
@@ -454,8 +455,14 @@ If DefenseClaw's daemon stops during a session (or is restarting), the
 reason the agent shows is:
 
 ```text
-defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs `defenseclaw-gateway start` there if it is stopped, and after a start retries in a minute (`defenseclaw sandbox doctor` says what is wrong)
+defenseclaw: gateway unreachable, blocking claude-code tool (fail mode closed): DefenseClaw on the user's machine does not answer (its daemon is stopped or restarting, or was started less than a minute ago), so every tool call is blocked until it is back: the user runs `defenseclaw sandbox doctor` there, which says what is wrong and how to bring it back, and retries in a minute
 ```
+
+On a managed computer the daemon answers for your organization's DefenseClaw
+gateway service. When that service does not answer, the reason says so and
+asks you to try again in a moment and to ask your administrator if it goes
+on; when the service refuses the call (your account can't be looked up
+right now, for example), the reason quotes its answer.
 
 The run also rings the bell and puts
 `[defenseclaw] ⚠ the DefenseClaw daemon is not reachable, so the hooks fail closed: …`

@@ -68,6 +68,9 @@ func (e *Effective) EgressOptions(unblocks egress.Unblocks) (egress.DeciderOptio
 	if e == nil {
 		return egress.DeciderOptions{}, errors.New("sandbox policy: not resolved")
 	}
+	if e.view {
+		return egress.DeciderOptions{}, errViewOnly
+	}
 	eg := e.Egress
 	opts := egress.DeciderOptions{
 		Mode:       egress.ModeOpen,
@@ -207,8 +210,10 @@ const (
 	RuleBlock          EgressRule = "block"
 	// RuleUnblock: allowed by an unblock decision.
 	RuleUnblock EgressRule = "unblock"
-	RuleAllow   EgressRule = "allow"
-	RuleFeed    EgressRule = "feed"
+	// RuleApproval: allowed by an ask the user approved for the sandbox.
+	RuleApproval EgressRule = "approval"
+	RuleAllow    EgressRule = "allow"
+	RuleFeed     EgressRule = "feed"
 	// RuleNetworkOpen allows a name in the open network mode.
 	RuleNetworkOpen EgressRule = "network_open"
 	// RuleIPLiteral refuses an IP address in the open network mode: it would
@@ -303,6 +308,8 @@ func (e *Effective) ruleSource(host string, out EgressDecision, raw egress.Decis
 		return "openshell.egress.block"
 	case RuleUnblock:
 		return "an unblock (defenseclaw sandbox unblock)"
+	case RuleApproval:
+		return "an approved ask (defenseclaw sandbox approve)"
 	case RuleFeed:
 		return "the " + raw.Feed + " blocklist feed (entry " + raw.Entry + ")"
 	case RuleAllow:
@@ -376,6 +383,8 @@ func egressRuleOf(dec egress.Decision) EgressRule {
 		switch dec.Source {
 		case egress.SourceUnblock:
 			return RuleUnblock
+		case egress.SourceApproval:
+			return RuleApproval
 		case egress.SourceOperator, egress.SourceFeed:
 			return RuleAllow
 		case egress.SourceAdmin:

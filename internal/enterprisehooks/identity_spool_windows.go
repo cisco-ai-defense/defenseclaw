@@ -119,14 +119,28 @@ func WriteWindowsIdentitySpool(dir string, cache *WindowsEnrollmentGroupCache, e
 
 // windowsIdentitySpoolUser names a record's account DOMAIN\account, as the
 // Linux and macOS records name theirs, so a record maps to an account
-// without a SID lookup; "" when the SID no longer resolves.
+// without a SID lookup; "" when the SID no longer resolves. While the user
+// is signed in with a UPN the LSA names the account by that UPN as typed;
+// the record then takes the sAMAccountName the directory translates it to
+// (windowsSettledAccountName), which the gateway's service account cannot
+// ask for itself (GAP-0382).
 func windowsIdentitySpoolUser(sid string) string {
 	names := useridentity.WindowsGroupNames([]string{sid}, 1, windowsIdentityGroupNameBudget)
-	if len(names) == 1 && names[0] != sid {
-		return names[0]
+	if len(names) != 1 || names[0] == sid {
+		return ""
 	}
-	return ""
+	domain, account, qualified := strings.Cut(names[0], `\`)
+	if qualified && strings.Contains(account, "@") {
+		if sam := windowsSettledAccountName(sid, account, domain); sam != "" {
+			return domain + `\` + sam
+		}
+	}
+	return names[0]
 }
+
+// windowsSettledAccountName is useridentity.SettledWindowsAccountName; tests
+// replace it.
+var windowsSettledAccountName = useridentity.SettledWindowsAccountName
 
 // windowsConnectorEmailWarned keeps an unreadable connector file from being
 // reported at every enumerator cycle.

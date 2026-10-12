@@ -612,12 +612,15 @@ func openshellReason(r ocsf.Record, host string) string {
 }
 
 // modelEndpointHost reports whether host is one of the sandbox's model
-// endpoints (its --llm credential's), which its provider rule opens.
+// endpoints (its --llm credential's) that its provider rule opens now: a
+// provider the policy detached (enforceProviderEndpoints) opens nothing,
+// and a refusal there is not "outside the model channel, which stays open"
+// (GAP-0466).
 func (m *Manager) modelEndpointHost(b *box, host string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, ep := range b.rec.ProviderEndpoints {
-		if ep.Role == roleLLM && strings.EqualFold(ep.Host, host) {
+		if ep.Role == roleLLM && strings.EqualFold(ep.Host, host) && !slices.Contains(b.rec.DetachedProviders, ep.Provider) {
 			return true
 		}
 	}

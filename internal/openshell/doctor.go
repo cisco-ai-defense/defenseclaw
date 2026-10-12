@@ -159,12 +159,16 @@ type DoctorReport struct {
 	// its configuration.
 	Driver           ComputeDriver `json:"driver,omitempty"`
 	ConfiguredDriver ComputeDriver `json:"configured_driver,omitempty"`
-	// MicroVM is what OpenShell's MicroVM driver needs on this Mac (nil
-	// off macOS).
+	// MicroVM is what OpenShell's MicroVM driver needs on this Mac, or on
+	// this Linux host when its gateway runs vm or /dev/kvm opens (nil
+	// otherwise).
 	MicroVM *MicroVMHost `json:"microvm,omitempty"`
 	// GatewayPortElsewhere is set when another account holds the gateway's
 	// port: the gateway that answers there is that account's.
 	GatewayPortElsewhere bool `json:"gateway_port_elsewhere,omitempty"`
+	// Managed is set on a managed computer (Doctor.Managed), where the
+	// organization installs OpenShell: nothing is offered to install.
+	Managed bool `json:"managed,omitempty"`
 }
 
 // OK reports whether no check failed.
@@ -221,6 +225,8 @@ func (r *DoctorReport) GatewayUnmanaged() bool {
 func (r *DoctorReport) OpenShellInstallNeeded() bool {
 	cli := r.Get(CheckIDCLI)
 	switch {
+	case r.Managed:
+		return false
 	case cli == nil:
 		return true
 	case cli.Status != StatusFail:
@@ -362,6 +368,12 @@ type Doctor struct {
 	// Gateway reads the gateway configuration and service; it defaults to
 	// a configurator over Discover.ConfigDir, Runner and GOOS.
 	Gateway *GatewayConfigurator
+	// Rendered, on a managed computer, is the administrator's rendered
+	// gateway configuration, which the account's managed gateway runs on:
+	// the default Gateway reads it in place of the account's own files, with
+	// the MicroVM identity the exec shim gives the account's gateway
+	// (Geteuid, Getegid).
+	Rendered *RenderedPaths
 	// GatewayApplied hears of each gateway change a fix applied, rolled
 	// back or not, so the caller can record the files it wrote (setup's
 	// receipt, which teardown restores them from).
@@ -374,6 +386,15 @@ type Doctor struct {
 	// DaemonUID is the DefenseClaw daemon's uid when known; the gateway
 	// must run as the same user.
 	DaemonUID *int
+	// Managed limits the report to the checks of this account's own
+	// process (platform and user), for a managed computer: there the
+	// administrator's lifecycle owns OpenShell (its install, gateway
+	// service, port, registration and configuration) and the account's
+	// sandbox daemon reports its state, from the facts the administrator's
+	// verify reads. The other checks would read other accounts' files and
+	// processes and give fixes this account must not apply (GAP-0173,
+	// GAP-0174, GAP-0215).
+	Managed bool
 	// WantTelemetry is openshell.upstream_telemetry; nil only reports.
 	WantTelemetry *bool
 	// BindMountsOptional downgrades disabled bind mounts to a warning
@@ -398,6 +419,9 @@ type Doctor struct {
 	// mke2fs and debugfs, which Homebrew installs keg-only, off PATH
 	// (default the kegs the driver knows).
 	E2fsprogsDirs []string
+	// OpenKVM opens /dev/kvm for reading and writing and closes it (Linux;
+	// default: the real device), which a MicroVM needs.
+	OpenKVM func() error
 	// HostMemory is this machine's memory in bytes (0: unknown), which
 	// the recommended MicroVM memory is sized from.
 	HostMemory func() uint64
@@ -453,7 +477,17 @@ func (d *Doctor) defaults() {
 	}
 	if d.Gateway == nil {
 		d.Gateway = &GatewayConfigurator{Dir: d.Discover.ConfigDir, Runner: d.Runner, GOOS: d.GOOS, Discover: d.Discover, CLI: d.CLI, LookPath: d.LookPath,
-			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing}
+			ServiceDockerGroupMissing: d.ServiceDockerGroupMissing, Rendered: d.Rendered}
+		if d.Rendered != nil {
+			euid, egid := os.Geteuid(), os.Getegid()
+			if d.Geteuid != nil {
+				euid = d.Geteuid()
+			}
+			if d.Getegid != nil {
+				egid = d.Getegid()
+			}
+			d.Gateway.AccountVM = &VMIdentity{UID: int64(euid), GID: int64(egid)}
+		}
 	}
 	if d.LandlockABI == nil {
 		d.LandlockABI = landlockABI
@@ -465,6 +499,12 @@ func (d *Doctor) defaults() {
 	}
 	if d.E2fsprogsDirs == nil {
 		d.E2fsprogsDirs = e2fsprogsDirs
+		if d.GOOS == "linux" {
+			d.E2fsprogsDirs = linuxE2fsprogsDirs
+		}
+	}
+	if d.OpenKVM == nil {
+		d.OpenKVM = openKVM
 	}
 	if d.HostMemory == nil {
 		d.HostMemory = hostMemory
@@ -593,6 +633,12 @@ func (d *Doctor) Run(ctx context.Context) *DoctorReport {
 		}
 	}()
 	if !r.checkPlatform() {
+		return r.report
+	}
+	if d.Managed {
+		// The compute driver is the administrator's: the daemon says it.
+		r.report.ConfiguredDriver, r.report.Driver, r.report.Managed = "", "", true
+		r.checkUser()
 		return r.report
 	}
 	if st, err := r.Gateway.Read(); err == nil {
@@ -1815,7 +1861,9 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 // driverCheck judges the compute driver the gateway reports (infoErr:
 // GetGatewayInfo failed). On a Mac sandboxes run in MicroVMs: the docker
 // driver passes only on a Docker VM whose kernel has Landlock, and
-// otherwise the fix switches the gateway to vm.
+// otherwise the fix switches the gateway to vm. On Linux vm passes only
+// where /dev/kvm opens for reading and writing and the gateway service's
+// umask lets the guest traverse what the driver builds (linuxDriverCheck).
 func (r *doctorRun) driverCheck(infoErr error) Check {
 	c := Check{ID: CheckIDGatewayDriver, Title: "Gateway compute driver"}
 	mac := r.GOOS == "darwin"
@@ -1828,8 +1876,8 @@ func (r *doctorRun) driverCheck(infoErr error) Check {
 		if mac {
 			c.Fix = r.microVMFix()
 		}
-	case r.running.Name == DriverVM && !mac:
-		c.Status, c.Detail = StatusWarn, "vm (OpenShell MicroVM): not certified by DefenseClaw off macOS"
+	case r.running.Name == DriverVM && r.GOOS == "linux":
+		return r.linuxDriverCheck(c)
 	case r.running.Name == DriverVM:
 		c.Status, c.Detail = StatusPass, "vm (OpenShell MicroVM; experimental upstream)"
 	case r.configured == DriverVM:

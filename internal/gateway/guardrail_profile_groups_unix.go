@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -74,6 +75,36 @@ var profileGroupQualifiedName = func(ctx context.Context, name string) string {
 			return listed
 		}
 	}
+	if runtime.GOOS == "darwin" {
+		return darwinDirectoryNamesake(ctx, resolver, name)
+	}
+	return ""
+}
+
+// darwinDirectoryNamesake returns DOMAIN\name of the directory group a bare
+// name of a local-node group shares, or "": a bound Mac matches a bare
+// assignment group to its local group and, by the name part, to the AD group
+// DOMAIN\name alike (GAP-0356). The domains are the NetBIOS account domains
+// of the guardian's identity records.
+func darwinDirectoryNamesake(ctx context.Context, resolver unixidentity.Resolver, name string) string {
+	local, err := unixidentity.LocalGroups(ctx)
+	if err != nil {
+		return ""
+	}
+	if _, ok := local[name]; !ok {
+		return ""
+	}
+	seen := map[string]bool{}
+	for _, record := range enterprisehooks.ReadIdentitySpoolRecords(currentIdentitySpoolDir(), validateManagedGuardianAuthorization, 64) {
+		domain := strings.TrimSpace(record.AccountDomain)
+		if domain == "" || strings.ContainsAny(domain, `\/@ `) || seen[strings.ToUpper(domain)] || ctx.Err() != nil {
+			continue
+		}
+		seen[strings.ToUpper(domain)] = true
+		if listed := unixidentity.GroupSpelling(resolver, domain+`\`+name); listed != "" {
+			return listed
+		}
+	}
 	return ""
 }
 
@@ -111,6 +142,48 @@ var bareGroupsDirectorySilent = func(ctx context.Context) bool {
 	return asked > 0
 }
 
+// matchedGroupSource says whether the group of the account an assignment
+// matched by is a local group of this host or a directory group, for explain
+// (GAP-0356): a name with a domain is a directory group; a bare name matches
+// a DOMAIN\name group by its name part (directory) or a group named exactly
+// so, which is local when the local group database holds it. "" when the
+// local groups cannot be read.
+func matchedGroupSource(_ *guardrailProfileSet, subject *profileSubject, group string) string {
+	group = strings.TrimSpace(group)
+	if strings.ContainsAny(group, `@\`) {
+		return "directory"
+	}
+	exact, tail := false, false
+	if subject != nil {
+		for _, have := range subject.Groups {
+			have = strings.TrimSpace(have)
+			if useridentity.EqualFold(have, group) {
+				exact = true
+			} else if i := strings.LastIndexByte(have, '\\'); i >= 0 && useridentity.EqualFold(have[i+1:], group) {
+				tail = true
+			}
+		}
+	}
+	if !exact {
+		return "directory"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	local, err := unixidentity.LocalGroups(ctx)
+	if err != nil {
+		return ""
+	}
+	for name := range local {
+		if useridentity.EqualFold(name, group) {
+			if tail {
+				return "local and directory"
+			}
+			return "local"
+		}
+	}
+	return "directory"
+}
+
 // accountGroupIDs lists an OS account's group ids: os/user's listing, which
 // on macOS is read again with `id -G` when it failed or filled its 256-group
 // buffer (an account in more groups, GAP-0201).
@@ -118,44 +191,23 @@ var accountGroupIDs = func(account *osuser.User) ([]string, error) {
 	return unixidentity.AccountGroupIDs(context.Background(), account)
 }
 
-// profileUserEntryUnmatched returns the check that says why a DOMAIN\user
-// users entry selects nobody (GAP-1095): it names an account the host
-// resolves the way profile-explain does, but the domain written is neither
-// the account's verified NetBIOS account domain nor its DNS domain, which an
-// entry must name; or getent passwd finds no account by it, in a domain the
-// host answers for (its Domain Users group resolves) or in none. The check
-// answers "" when the entry selects its account or a lookup fails. It takes
-// the lookups when it is made, since the background pass can outlive its
-// caller.
-func profileUserEntryUnmatched() func(context.Context, string) string {
-	lookupAccount, lookupFacts, groupExists := profileExplainAccount, profileExplainDirectoryFacts, profileGroupExists
-	return func(ctx context.Context, entry string) string {
-		domain, account, qualified := strings.Cut(strings.TrimSpace(entry), `\`)
-		if !qualified || domain == "" || domain == "." || account == "" || ctx.Err() != nil {
+// profileUserEntryUnresolved says why a DOMAIN\user users entry that names
+// no account selects nobody (GAP-1095): getent passwd finds no account by
+// it, in a domain the host answers for (its Domain Users group resolves) or
+// in none; "" when the lookup failed for another reason. It takes the
+// lookup when it is made, since the background pass can outlive its caller.
+func profileUserEntryUnresolved() func(ctx context.Context, domain string, err error) string {
+	groupExists := profileGroupExists
+	return func(ctx context.Context, domain string, err error) string {
+		if !unixidentity.IsNotFound(err) {
 			return ""
 		}
-		id, _, err := lookupAccount(entry)
-		if unixidentity.IsNotFound(err) {
-			if known, probeErr := groupExists(ctx, domain+`\domain users`); probeErr != nil {
-				return ""
-			} else if known {
-				return "names no account this host knows (getent passwd finds none)"
-			}
-			return fmt.Sprintf("names %s, a domain this host does not answer for (another prefix than its NetBIOS or DNS "+
-				"name, or the directory is unavailable)", domain)
-		}
-		if err != nil || id == "" {
+		if known, probeErr := groupExists(ctx, domain+`\domain users`); probeErr != nil {
 			return ""
+		} else if known {
+			return "names no account this host knows (getent passwd finds none), so it selects nobody; write the domain this host confirms, or the uid"
 		}
-		facts, err := lookupFacts(id)
-		if err != nil || facts.ResolvedAt.IsZero() ||
-			useridentity.EqualFold(domain, facts.AccountDomain) || useridentity.EqualFold(domain, facts.Domain) {
-			return ""
-		}
-		confirmed := firstNonEmpty(facts.AccountDomain, facts.Domain)
-		if confirmed == "" {
-			return fmt.Sprintf("names uid %s, but this host confirms no domain for that account", id)
-		}
-		return fmt.Sprintf("names uid %s, but this host confirms that account's domain as %s, not %s", id, confirmed, domain)
+		return fmt.Sprintf("names %s, a domain this host does not answer for (another prefix than its NetBIOS or DNS "+
+			"name, or the directory is unavailable), so it selects nobody; write the domain this host confirms, or the uid", domain)
 	}
 }

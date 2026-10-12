@@ -4058,6 +4058,20 @@ attributes:
     overrides: {enum: [docker, podman, vm, k8s]}
     notes: The OpenShell gateway compute driver; DefenseClaw supports only docker today
   introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.driver_reason
+  type: string
+  brief: Why a managed sandbox runs on its compute driver
+  examples: [kvm_missing]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [configured, kvm_available, kvm_missing, kvm_access, cpu_virtualization, vm_driver_missing, vm_prerequisite_missing]}
+    notes: configured (the organization set the driver), kvm_available (driver auto and the per-user KVM probe passed), or the probe's reason when the Linux docker fallback replaced the MicroVM driver (enterprise.openshell.driver_fallback docker)
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.image.digest
   type: string
   brief: Content digest of the sandbox workload image
@@ -4071,6 +4085,22 @@ attributes:
     id: digest-v1
     overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
     notes: Digest of the DefenseClaw overlay (or bring-your-own) image the workload runs; never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.container.image
+  type: string
+  brief: Image reference of a container that runs an agent outside DefenseClaw
+  examples: ['ghcr.io/example/dev-agent:1.4']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 256
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:/@-]*$'
+    notes: The image the container engine reports for the container (repository and tag, a digest-pinned reference, or the image ID of an untagged image); dropped when it is not a plain reference. Never a metric label
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.policy.version
   type: int64
@@ -4449,6 +4479,226 @@ attributes:
     id: identifier-v1
     overrides: {max_utf8_bytes: 128}
     notes: Opaque DefenseClaw-assigned binding identifier (never the binding token); it joins a sandbox's hook verdicts, egress and findings. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.digest
+  type: string
+  brief: Content digest of the effective sandbox policy the managed gateway resolved for the sandbox
+  examples: ['sha256:aeef1c63b8d64c0f9f4d8a7d2f0c3b1e6a5d4c3b2a1f0e9d8c7b6a5f4e3d2c1b']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: digest-v1
+    overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+    notes: Digest of the organization floor combined with the matched guardrail profile's sandbox section; present only on a sandbox the managed gateway governs, so a fleet can tie each sandbox to the exact policy it was held to
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.generation
+  type: int64
+  brief: Configuration generation of the managed gateway that resolved the sandbox policy
+  examples: [4]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 1, max: 9223372036854775807}
+    notes: The managed gateway's applied generation counter at the last resolve or re-match of this sandbox; it increments on every configuration swap. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.provisional
+  type: boolean
+  brief: Whether the sandbox runs on an offline floor while the directory lookup is outstanding
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: True from a create made before the identity lookup resolved until a re-match with the resolved facts; absent when the sandbox is not governed by the managed gateway
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.registration.id
+  type: string
+  brief: Managed gateway registration the sandbox's hooks and policy requests are bound to
+  examples: [reg-q7x2mfd3k5b4oznwj6lhc2ypea]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Opaque gateway-assigned identifier of one sandbox registration (never the sandbox binding token); it joins the sandbox's hook verdicts, asks and policy records to a person's profile. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.previous_digest
+  type: string
+  brief: Effective sandbox policy digest in force before a re-match
+  examples: ['sha256:0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: digest-v1
+    overrides: {max_utf8_bytes: 71, pattern: '^sha256:[0-9a-f]{64}$'}
+    notes: The value defenseclaw.sandbox.policy.digest had before the re-match recorded by the same occurrence
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.previous_profile
+  type: string
+  brief: Guardrail profile that governed the sandbox before a re-match
+  examples: [contractors]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+    notes: The value defenseclaw.guardrail.profile.name had before the re-match; absent when the sandbox was held to the organization floor alone
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.rematch.reason
+  type: string
+  brief: Why the managed gateway matched a sandbox's profile again
+  examples: [generation]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [generation, facts, lookup_resolved]}
+    notes: generation is a configuration change; facts is a refresh that changed the principal, directory, tenant or groups; lookup_resolved is a provisional sandbox whose directory lookup has now resolved
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.policy.rule
+  type: string
+  brief: Policy rule that decided a managed sandbox record
+  examples: [required_for]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+    notes: The operator-configured name of the rule behind the decision (a network policy rule, or the required_for entry a host run matched); the caller's own match only, never another user's. Never a metric label
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.managed.reason
+  type: string
+  brief: Machine-readable reason a managed sandbox record was written
+  examples: [no_kvm]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z][a-z0-9_]{0,63}$'
+    notes: A registered snake_case code such as required_group, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, offline_floor or floor_denied; display text never goes here
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.managed.action
+  type: string
+  brief: What the managed layer did about a managed sandbox record
+  examples: [stop]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [refuse, allow, stop, alert, remove]}
+    notes: refuse and allow are for a host run, stop and alert for a foreign sandbox, container or rule that was found, and remove for a network rule taken out of a sandbox policy
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.sandbox.decision.stored
+  type: boolean
+  brief: Whether the managed gateway kept an ask decision
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: True for an always allow, an unblock or a user block kept in the decision store; false for a session-only decision
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.openshell.version
+  type: string
+  brief: OpenShell release serving the sandbox
+  examples: [0.1.3]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$'
+    notes: The version the daemon verified for the user's OpenShell gateway and driver
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.openshell.install_mode
+  type: string
+  brief: How OpenShell is provided on a managed host
+  examples: [prerequisite]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides: {enum: [prerequisite, setup]}
+    notes: enterprise.openshell.install; prerequisite means the administrator installed OpenShell, setup means the daemon installed NVIDIA's release for the user
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.openshell.settings.field
+  type: string
+  brief: OpenShell setting that differs from enterprise.openshell
+  examples: [compute_driver]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 64
+      pattern: '^[a-z][a-z0-9_.]{0,63}$'
+    notes: The key name only (never its value); a setting the user changed in their own OpenShell configuration
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.subject.key
+  type: string
+  brief: Keyed pseudonym of the account behind a managed sandbox registration
+  examples: ['hmac-sha256:3f2a9c0d5b7e41f68a0c2d9e4b1f7a65c8d3e0b2a4f6918d7c5e3b1a09f8d7c6']
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 128
+      pattern: '^hmac-sha256:[0-9a-f]{64}$'
+    notes: HMAC-SHA-256 over the kernel and account-database facts of the account, keyed like the other redaction identifiers so a dictionary of names cannot reverse it; it names the same person across hosts only under the same key. Never a metric label
   introduced_in: telemetry-registry-v2
 - id: defenseclaw.sandbox.process.event
   type: string
@@ -10527,10 +10777,11 @@ groups:
       disposition: preserved
 - id: correlation.sandbox
   type: attribute_group
-  brief: OpenShell sandbox identity, image, policy revision, profile, pack, phase, and workspace mode carried by every sandbox-originated log; never a metric label set.
+  brief: OpenShell sandbox identity, image, policy revision, profile, pack, phase, workspace mode and, on a managed host, the matched guardrail profile, effective sandbox policy and registration carried by every sandbox-originated log; never a metric label set.
   stability: stable
   introduced_in: telemetry-registry-v2
-  extends: []
+  extends:
+  - correlation.guardrail.profile
   attributes:
   - ref: defenseclaw.sandbox.id
     requirement_level: recommended
@@ -10539,6 +10790,8 @@ groups:
   - ref: defenseclaw.sandbox.runtime
     requirement_level: recommended
   - ref: defenseclaw.sandbox.driver
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.driver_reason
     requirement_level: recommended
   - ref: defenseclaw.sandbox.image.digest
     requirement_level: recommended
@@ -10553,6 +10806,20 @@ groups:
   - ref: defenseclaw.sandbox.workdir.mode
     requirement_level: recommended
   - ref: defenseclaw.sandbox.binding.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.registration.id
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.digest
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.generation
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.provisional
+    requirement_level: recommended
+  - ref: defenseclaw.openshell.version
+    requirement_level: recommended
+  - ref: defenseclaw.openshell.install_mode
+    requirement_level: recommended
+  - ref: defenseclaw.subject.key
     requirement_level: recommended
   body_fields: []
 - id: body.policy.updated
@@ -10900,6 +11167,416 @@ groups:
     allowed_outcomes: []
     route_selector: true
     mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.managed
+  type: body_group
+  brief: 'Common body of the managed sandbox records: the person behind the sandbox, the matched guardrail profile, the effective sandbox policy and the registration.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - correlation.sandbox
+  - correlation.policy.effective
+  attributes:
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.principal
+    requirement_level: recommended
+  body_fields: []
+- id: body.sandbox.policy.resolved
+  type: body_group
+  brief: 'Managed sandbox policy resolution body: the profile and effective sandbox policy the gateway held a registration to.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+- id: log.sandbox.policy.resolved
+  type: log
+  brief: 'Canonical sandbox.policy.resolved log identity; one record when the managed gateway resolves the sandbox policy for a registration, including the offline floor of a provisional one.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.policy.resolved
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.policy.resolved
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - failed
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.policy.rematched
+  type: body_group
+  brief: 'Managed sandbox re-match body: the profile and policy digest before and after the gateway matched a live registration again.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.rematch.reason
+    requirement_level: required
+  - ref: defenseclaw.sandbox.policy.previous_profile
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.previous_digest
+    requirement_level: recommended
+- id: log.sandbox.policy.rematched
+  type: log
+  brief: 'Canonical sandbox.policy.rematched log identity; one record when a configuration change or an identity refresh changes the profile or policy of a live registration.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.policy.rematched
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.policy.rematched
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    route_selector: true
+    mandatory_floor:
+    - control_plane_mutation
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.policy.foreign_rule
+  type: body_group
+  brief: 'Foreign sandbox policy rule body: a network rule the managed layer did not render, and what it did about it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes:
+  - ref: server.address
+    requirement_level: optional
+  - ref: server.port
+    requirement_level: optional
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: required
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+  - ref: defenseclaw.sandbox.policy.rule
+    requirement_level: recommended
+- id: log.sandbox.policy.foreign_rule
+  type: log
+  brief: 'Canonical sandbox.policy.foreign_rule log identity; one record per network rule found in a managed sandbox that no stored decision or rendered policy accounts for.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.policy.foreign_rule
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.policy.foreign_rule
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    - skipped
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.ask.decided
+  type: body_group
+  brief: 'Managed sandbox ask decision body: the gateway''s answer to a user''s access request, bounded by the administrator''s floor.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes:
+  - ref: defenseclaw.sandbox.approval.kind
+    requirement_level: optional
+  - ref: defenseclaw.sandbox.approval.scope
+    requirement_level: optional
+  - ref: server.address
+    requirement_level: optional
+  - ref: server.port
+    requirement_level: optional
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.approval.id
+    requirement_level: recommended
+  - ref: defenseclaw.approval.result
+    requirement_level: required
+  - ref: defenseclaw.sandbox.decision.stored
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+- id: log.sandbox.ask.decided
+  type: log
+  brief: 'Canonical sandbox.ask.decided log identity; one record when the managed gateway decides a user''s ask, an unblock or a user block.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.ask.decided
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.ask.decided
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - approved
+    - cancelled
+    - denied
+    - timed_out
+    route_selector: true
+    mandatory_floor:
+    - approval_resolution
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.host_run_refused
+  type: body_group
+  brief: 'Required-sandbox refusal body: a host agent run refused because the user''s profile requires a sandbox for it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: required
+  - ref: defenseclaw.sandbox.policy.rule
+    requirement_level: recommended
+- id: log.sandbox.host_run_refused
+  type: log
+  brief: 'Canonical sandbox.host_run_refused log identity; one record when a hook of an agent running on the host is refused because the matched profile requires a sandbox.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.host_run_refused
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.host_run_refused
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.host_run_unavailable
+  type: body_group
+  brief: 'Required-sandbox unavailability body: a required sandbox cannot run on this host, and whether the host run was refused or allowed with an alert.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: required
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+  - ref: defenseclaw.sandbox.policy.rule
+    requirement_level: recommended
+- id: log.sandbox.host_run_unavailable
+  type: log
+  brief: 'Canonical sandbox.host_run_unavailable log identity; one record when a host agent run needs a sandbox this computer cannot provide.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.host_run_unavailable
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.host_run_unavailable
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - allowed
+    - blocked
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.access_refused
+  type: body_group
+  brief: 'Access refusal body: a destination a managed sandbox may not reach, with the rule that refused it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes:
+  - ref: server.address
+    requirement_level: optional
+  - ref: server.port
+    requirement_level: optional
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.policy.rule
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.reason
+    requirement_level: recommended
+- id: log.sandbox.access_refused
+  type: log
+  brief: 'Canonical sandbox.access_refused log identity; one record when the managed policy refuses a destination to a sandbox or an ask for one.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.access_refused
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.access_refused
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.foreign_sandbox
+  type: body_group
+  brief: 'Foreign sandbox body: a sandbox on the user''s OpenShell gateway that DefenseClaw did not create, and what the managed layer did about it.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+- id: log.sandbox.foreign_sandbox
+  type: log
+  brief: 'Canonical sandbox.foreign_sandbox log identity; one record per foreign sandbox found on a managed user''s OpenShell gateway.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.foreign_sandbox
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.foreign_sandbox
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - applied
+    - failed
+    - skipped
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.foreign_container
+  type: body_group
+  brief: 'Foreign container body: an agent container started outside DefenseClaw, reported and never stopped.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.sandbox.name
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.container.image
+    requirement_level: recommended
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: required
+- id: log.sandbox.foreign_container
+  type: log
+  brief: 'Canonical sandbox.foreign_container log identity; one alert-only record per agent container found running outside DefenseClaw.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.foreign_container
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.foreign_container
+  x-defenseclaw:
+    bucket: compliance.activity
+    family_schema_version: 1
+    outcome_requirement: forbidden
+    allowed_outcomes: []
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: body.sandbox.settings_drift
+  type: body_group
+  brief: 'OpenShell settings drift body: a user-changed OpenShell setting that no longer matches enterprise.openshell, which pauses the user''s sandboxes.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.managed
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.openshell.settings.field
+    requirement_level: required
+  - ref: defenseclaw.sandbox.managed.action
+    requirement_level: recommended
+- id: log.sandbox.settings_drift
+  type: log
+  brief: 'Canonical sandbox.settings_drift log identity; one record when the daemon finds OpenShell settings that differ from enterprise.openshell and refuses sandboxes.'
+  stability: stable
+  introduced_in: telemetry-registry-v2
+  extends:
+  - body.sandbox.settings_drift
+  attributes: []
+  body_fields: []
+  log:
+    event_name: sandbox.settings_drift
+  x-defenseclaw:
+    bucket: enforcement.action
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - blocked
+    route_selector: true
+    mandatory_floor:
+    - enforced_outcome
     compatibility_profiles:
     - local-observability-v1
 - id: metric.defenseclaw.sandbox.transitions
@@ -13110,11 +13787,47 @@ producer_identity_sets:
   - event_name: approval.resolved
     bucket: compliance.activity
     family: log.approval.resolved
+  - event_name: sandbox.ask.decided
+    bucket: compliance.activity
+    family: log.sandbox.ask.decided
 - id: identity_set.sandbox_policy
   identities:
   - event_name: policy.updated
     bucket: compliance.activity
     family: log.policy.updated
+  - event_name: sandbox.policy.resolved
+    bucket: compliance.activity
+    family: log.sandbox.policy.resolved
+- id: identity_set.sandbox_policy_rematched
+  identities:
+  - event_name: sandbox.policy.rematched
+    bucket: compliance.activity
+    family: log.sandbox.policy.rematched
+- id: identity_set.sandbox_policy_foreign_rule
+  identities:
+  - event_name: sandbox.policy.foreign_rule
+    bucket: enforcement.action
+    family: log.sandbox.policy.foreign_rule
+- id: identity_set.sandbox_managed
+  identities:
+  - event_name: sandbox.host_run_refused
+    bucket: enforcement.action
+    family: log.sandbox.host_run_refused
+  - event_name: sandbox.host_run_unavailable
+    bucket: enforcement.action
+    family: log.sandbox.host_run_unavailable
+  - event_name: sandbox.access_refused
+    bucket: enforcement.action
+    family: log.sandbox.access_refused
+  - event_name: sandbox.foreign_sandbox
+    bucket: enforcement.action
+    family: log.sandbox.foreign_sandbox
+  - event_name: sandbox.foreign_container
+    bucket: compliance.activity
+    family: log.sandbox.foreign_container
+  - event_name: sandbox.settings_drift
+    bucket: enforcement.action
+    family: log.sandbox.settings_drift
 - id: identity_set.sandbox_health
   identities:
   - event_name: subsystem.lifecycle
@@ -16257,6 +16970,7 @@ producer_mappings:
   severity_policy: canonical_or_info
   mandatory_rules:
   - control_plane_mutation
+  - enforced_outcome
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v2
@@ -16281,6 +16995,42 @@ producer_mappings:
   mandatory_rules:
   - enforced_outcome
   - enforcement_state_change
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox.managed
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_managed
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox.policy.foreign_rule
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_policy_foreign_rule
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - enforced_outcome
+  companion_rules: []
+  compatibility:
+    introduced_in: telemetry-registry-v2
+    disposition: translate_to_v8
+- producer: audit_action
+  key: sandbox.policy.rematched
+  source: internal/audit/actions.go
+  event_name_policy: context_required
+  allowed_context_identity_set: identity_set.sandbox_policy_rematched
+  severity_policy: canonical_or_info
+  mandatory_rules:
+  - control_plane_mutation
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v2

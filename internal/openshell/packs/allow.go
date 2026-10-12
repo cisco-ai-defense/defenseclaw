@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -86,6 +87,9 @@ type Action struct {
 func (e *Effective) Allow(action Action) error {
 	if e == nil {
 		return errors.New("sandbox policy: not resolved")
+	}
+	if e.view {
+		return errViewOnly
 	}
 	switch action.Kind {
 	case ActionUnblock:
@@ -633,8 +637,11 @@ func (e *Effective) hostPortAllowed(port int) error {
 		}
 	}
 	if isFalse(e.admin.AllowHostPorts) {
-		return e.adminViolation(key, attempted, "openshell.admin.allow_host_ports",
-			"host ports cannot be opened to sandboxes")
+		detail := "host ports cannot be opened to sandboxes"
+		if e.floorProfile != "" {
+			detail = "your profile " + e.floorProfile + " doesn't let sandboxes reach ports on this computer"
+		}
+		return e.adminViolation(key, attempted, "openshell.admin.allow_host_ports", detail)
 	}
 	if e.Pack != nil && !e.Pack.MCP.HostPorts {
 		return &Violation{
@@ -651,7 +658,10 @@ func (e *Effective) hostPortAllowed(port int) error {
 // missing project as covered. The path is matched lexically and after
 // resolving symbolic links, and each pattern's literal prefix is matched both
 // as written and resolved, so a symlinked spelling of a covered project still
-// matches.
+// matches. For the run's project, Flags.ProjectReal is matched too: the
+// daemon resolved its links as the user, which this process may not be able
+// to. A "~/" pattern without a home directory to expand it covers every
+// path, toward copy mode.
 func (e *Effective) requiresCopy(path string) string {
 	if path == "" || len(e.admin.RequireCopyFor) == 0 {
 		return ""
@@ -660,7 +670,14 @@ func (e *Effective) requiresCopy(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != candidates[0] {
 		candidates = append(candidates, resolved)
 	}
+	if real := filepath.Clean(e.projectReal); e.projectReal != "" && !slices.Contains(candidates, real) &&
+		(e.project == "" || filepath.Clean(e.project) == candidates[0]) {
+		candidates = append(candidates, real)
+	}
 	for _, pattern := range e.admin.RequireCopyFor {
+		if p := strings.TrimSpace(pattern); e.home == "" && (p == "~" || strings.HasPrefix(p, "~/")) {
+			return p
+		}
 		for _, spelled := range patternSpellings(pattern, e.home) {
 			for _, candidate := range candidates {
 				if matchProjectPath(spelled, candidate, e.home) {

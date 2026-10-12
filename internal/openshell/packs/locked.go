@@ -18,6 +18,7 @@ package packs
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -145,10 +146,14 @@ func (r *resolver) configuredPack(o config.OpenShellConfig) (*Pack, error) {
 	if required := strings.TrimSpace(r.admin.RequiredPack); required != "" {
 		return r.loadPack(required, o.PackDir, r.managed)
 	}
-	return r.loadPack(o.Pack, o.PackDir, false)
+	ref := strings.TrimSpace(o.Pack)
+	if ref == "" {
+		ref = r.defaultPack()
+	}
+	return r.loadPack(ref, o.PackDir, false)
 }
 
-// loadPack loads a pack reference at most once per Resolve (LoadTrusted when
+// loadPack loads a pack reference at most once per Resolve (loadTrusted when
 // trusted). dropLockedFlags compares the configured pack with a --pack, and
 // selectPack must run exactly the pack that was compared, not a second read
 // of a file the user can rewrite in between.
@@ -157,24 +162,100 @@ func (r *resolver) loadPack(ref, packDir string, trusted bool) (*Pack, error) {
 	if pack, ok := r.loaded[key]; ok {
 		return pack, nil
 	}
-	load := Load
-	if trusted {
-		load = LoadTrusted
-	}
-	pack, err := load(key.ref, packDir)
+	pack, err := loadFor(r.subject, key.ref, packDir, trusted)
 	if err != nil {
 		return nil, err
 	}
+	r.remember(key, pack)
+	return pack, nil
+}
+
+func (r *resolver) remember(key packCacheKey, pack *Pack) {
 	if r.loaded == nil {
 		r.loaded = make(map[packCacheKey]*Pack)
 	}
 	r.loaded[key] = pack
-	return pack, nil
 }
 
 type packCacheKey struct {
 	ref     string
 	trusted bool
+	// bytes: the pack was parsed from Flags.UserPack.
+	bytes bool
+}
+
+// loadSelected loads a pack the run selects. byFlag says ref is --pack:
+// only then do the bytes the daemon read as the user (Flags.UserPack)
+// stand in for it, never a second read of the file here. They never stand
+// in for openshell.pack or a required pack, whose files are the
+// administrator's (GAP-0073); every other reference is loadPack. The bytes
+// are the file at the --pack path (checkSubjectPack keeps it a path
+// outside the administrator's pack folders), which this process does not
+// even inspect. A custom parent they extend is looked up in
+// openshell.pack_dir, must be the administrator's in managed_enterprise,
+// and must be in the chain of the pack the subject's own policy runs
+// without --pack (offeredParent): bytes cannot pull another profile's pack
+// into the subject's Effective.
+func (r *resolver) loadSelected(o config.OpenShellConfig, ref string, byFlag bool) (*Pack, error) {
+	ref = strings.TrimSpace(ref)
+	if !byFlag || r.packBytes == nil || ref != r.packBytesRef {
+		return r.loadPack(ref, o.PackDir, false)
+	}
+	key := packCacheKey{ref: ref, bytes: true}
+	if pack, ok := r.loaded[key]; ok {
+		return pack, nil
+	}
+	file, err := expandHome(ref, r.subject.Home)
+	if err != nil {
+		return nil, packErr(ref, "", "not_found", "%v", err)
+	}
+	if !filepath.IsAbs(file) {
+		return nil, packErr(ref, "", "relative_path", "pack paths must be absolute (or start with ~/)")
+	}
+	source := filepath.Clean(file)
+	l := &loader{packDir: o.PackDir, trusted: r.managed, subject: r.subject, chain: []string{source}}
+	parent := func(name string) (*Pack, error) {
+		if !IsBuiltin(name) && !r.offeredParent(o, name) {
+			return nil, packErr(source, "extends", "extends_not_offered",
+				"%q is not a pack your sandbox policy includes; extend a built-in pack (%s) or the pack your policy runs",
+				name, strings.Join(BuiltinNames(), ", "))
+		}
+		return l.parent(name)
+	}
+	pack, err := parse(r.packBytes, source, parent)
+	switch {
+	case err != nil:
+		return nil, err
+	case IsBuiltin(pack.Name):
+		return nil, packErr(source, "name", "reserved_name", "%q is a built-in pack name; custom packs need their own name", pack.Name)
+	}
+	r.remember(key, pack)
+	return pack, nil
+}
+
+// offeredParent reports whether name, a custom pack in openshell.pack_dir,
+// is in the chain of the pack the run uses without --pack (configuredPack:
+// the floor's required pack, else openshell.pack): the subject's own policy
+// includes it already, so bytes that extend it reveal nothing new.
+func (r *resolver) offeredParent(o config.OpenShellConfig, name string) bool {
+	dir, err := expandHome(strings.TrimSpace(o.PackDir), r.subject.Home)
+	if err != nil || dir == "" || !filepath.IsAbs(dir) {
+		return false
+	}
+	file := filepath.Join(dir, name, PackFileName)
+	configured, err := r.configuredPack(o)
+	if err != nil || configured.Builtin {
+		return false
+	}
+	if configured.Source == file {
+		return true
+	}
+	for _, link := range configured.Chain {
+		if !link.Builtin && link.Source == file {
+			return true
+		}
+	}
+	return false
 }
 
 // lockedPackKeys returns the locked keys whose configured value the pack
@@ -220,7 +301,7 @@ func (r *resolver) packFlagAllowed(o config.OpenShellConfig, flags Flags, ref st
 	if baseline == nil {
 		return keys[0], "", false
 	}
-	candidate, err := r.loadPack(ref, o.PackDir, false)
+	candidate, err := r.loadSelected(o, ref, true)
 	if err != nil {
 		return keys[0], "the pack could not be loaded to compare it with the configured " + baseline.Name + " pack", false
 	}

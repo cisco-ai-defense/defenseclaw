@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
@@ -54,7 +55,10 @@ type V8SchemaError struct {
 	// Value is the rejected scalar of an enum violation (at most 60 bytes),
 	// so the CLI can say 'mode is "x"; allowed values: ...' as config validate
 	// does (GAP-1914). Error() never prints it.
-	Value   string
+	Value string
+	// Missing names the keys a required violation found absent, in the
+	// schema's order, so a message can name them (GAP-0498).
+	Missing []string
 	Version int
 }
 
@@ -184,6 +188,16 @@ func validateV8Schema(source string, document *V8YAMLDocument) error {
 			result.Line, result.Column = key.Line, key.Column
 		} else if node != nil {
 			result.Line, result.Column = node.Line, node.Column
+		}
+		if keyword == "required" {
+			result.Missing = v8SchemaMissingKeys(leaf)
+			if hint := v8SchemaRequiredExpectation(leaf, result.Missing); hint != "" {
+				result.Expected = hint
+			}
+		}
+		if size := v8SchemaNodeSize(node, keyword); size >= 0 {
+			// The size the value has, next to the limit (GAP-0514).
+			result.Expected += fmt.Sprintf(" (it has %d)", size)
 		}
 		if node != nil {
 			if keyword == "enum" && node.Kind == yaml.ScalarNode {
@@ -449,33 +463,42 @@ func v8SchemaExpectation(validation *jsonschema.ValidationError, unknown string)
 	return "a declared field name", v8SchemaNearestName(unknown, properties)
 }
 
-func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string {
+// v8SchemaKeywordValue is the value of the schema keyword validation failed
+// (current), the schema object that holds it (parent) and the keyword's
+// name; ok is false when the location does not resolve.
+func v8SchemaKeywordValue(validation *jsonschema.ValidationError) (current any, parent map[string]any, keyword string, ok bool) {
 	location := validation.AbsoluteKeywordLocation
 	if marker := strings.Index(location, "#"); marker >= 0 {
 		location = location[marker+1:]
 	}
 	segments := v8SchemaPointerSegments(location)
-	var current any = observabilityV8SchemaDoc
-	var parent map[string]any
+	current = observabilityV8SchemaDoc
 	for _, segment := range segments {
 		// allOf, anyOf and oneOf are arrays (GAP-0940).
-		if list, ok := current.([]any); ok {
+		if list, isList := current.([]any); isList {
 			index, err := strconv.Atoi(segment)
 			if err != nil || index < 0 || index >= len(list) {
-				return ""
+				return nil, nil, "", false
 			}
 			current = list[index]
 			continue
 		}
-		mapping, ok := current.(map[string]any)
-		if !ok {
-			return ""
+		mapping, isMap := current.(map[string]any)
+		if !isMap {
+			return nil, nil, "", false
 		}
 		parent, current = mapping, mapping[segment]
 	}
-	keyword := ""
 	if len(segments) > 0 {
 		keyword = segments[len(segments)-1]
+	}
+	return current, parent, keyword, true
+}
+
+func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string {
+	current, parent, keyword, ok := v8SchemaKeywordValue(validation)
+	if !ok {
+		return ""
 	}
 	switch keyword {
 	case "not":
@@ -503,12 +526,137 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 		return "a value matching the schema-declared pattern"
 	case "minimum", "maximum":
 		return v8SchemaNumberRange(parent)
-	case "minLength", "minItems", "minProperties":
-		return "a nonempty value meeting the declared minimum"
-	case "maxLength", "maxItems", "maxProperties":
+	case "minLength", "minItems", "minProperties", "maxLength", "maxItems", "maxProperties":
+		// The limit itself, not "the declared minimum" (GAP-0498, GAP-0514).
+		if limit, isNumber := current.(float64); isNumber {
+			return v8SchemaSizeExpectation(keyword, int(limit), parent)
+		}
+		if strings.HasPrefix(keyword, "min") {
+			return "a nonempty value meeting the declared minimum"
+		}
 		return "a value within the declared size limit"
 	}
 	return ""
+}
+
+// v8SchemaSizeExpectation words a length, item or key count limit: "a string
+// of at most 512 characters", "a mapping that sets at least one of agents,
+// connectors, groups, users".
+func v8SchemaSizeExpectation(keyword string, limit int, schema map[string]any) string {
+	bound := "at least"
+	if strings.HasPrefix(keyword, "max") {
+		bound = "at most"
+	}
+	switch strings.TrimPrefix(strings.TrimPrefix(keyword, "min"), "max") {
+	case "Length":
+		if bound == "at least" && limit == 1 {
+			return "a nonempty string"
+		}
+		return fmt.Sprintf("a string of %s %d characters", bound, limit)
+	case "Items":
+		if bound == "at least" && limit == 1 {
+			return "a nonempty list"
+		}
+		return fmt.Sprintf("a list of %s %d items", bound, limit)
+	}
+	if names := v8SchemaPropertyNames(schema); bound == "at least" && len(names) > 0 {
+		count := strconv.Itoa(limit)
+		if limit == 1 {
+			count = "one"
+		}
+		return fmt.Sprintf("a mapping that sets %s %s of %s", bound, count, strings.Join(names, ", "))
+	}
+	return fmt.Sprintf("a mapping of %s %d keys", bound, limit)
+}
+
+// v8SchemaPropertyNames lists the declared keys of an object schema, sorted;
+// a $ref to a local definition is followed once.
+func v8SchemaPropertyNames(schema map[string]any) []string {
+	if ref, ok := schema["$ref"].(string); ok {
+		target, resolved := v8SchemaDefinition(ref)
+		if !resolved {
+			return nil
+		}
+		schema = target
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	names := make([]string, 0, len(properties))
+	for name := range properties {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// v8SchemaDefinition resolves a local "#/$defs/name" reference.
+func v8SchemaDefinition(ref string) (map[string]any, bool) {
+	name, ok := strings.CutPrefix(ref, "#/$defs/")
+	if !ok {
+		return nil, false
+	}
+	defs, _ := observabilityV8SchemaDoc["$defs"].(map[string]any)
+	target, ok := defs[name].(map[string]any)
+	return target, ok
+}
+
+// v8SchemaMissingKeys names the keys a required violation reports absent
+// (the validator's "missing properties: 'a', 'b'").
+func v8SchemaMissingKeys(validation *jsonschema.ValidationError) []string {
+	_, list, found := strings.Cut(validation.Message, "missing properties:")
+	if !found {
+		return nil
+	}
+	var names []string
+	for _, quoted := range observabilityV8QuotedPropertyPattern.FindAllStringSubmatch(list, -1) {
+		names = append(names, strings.ReplaceAll(quoted[1], `\'`, `'`))
+	}
+	return names
+}
+
+// v8SchemaRequiredExpectation names the missing required keys and, for one
+// key whose schema is a mapping of declared keys, what it takes: "the
+// required key match: a mapping that sets at least one of agents, ...".
+func v8SchemaRequiredExpectation(validation *jsonschema.ValidationError, missing []string) string {
+	if len(missing) == 0 {
+		return ""
+	}
+	expected := "the required key " + missing[0]
+	if len(missing) > 1 {
+		return "the required keys " + strings.Join(missing, ", ")
+	}
+	_, parent, _, ok := v8SchemaKeywordValue(validation)
+	if !ok {
+		return expected
+	}
+	properties, _ := parent["properties"].(map[string]any)
+	schema, _ := properties[missing[0]].(map[string]any)
+	if ref, isRef := schema["$ref"].(string); isRef {
+		schema, _ = v8SchemaDefinition(ref)
+	}
+	if names := v8SchemaPropertyNames(schema); len(names) > 0 {
+		if minimum, _ := schema["minProperties"].(float64); minimum >= 1 {
+			return expected + ": " + v8SchemaSizeExpectation("minProperties", int(minimum), schema)
+		}
+		return expected + ": a mapping of " + strings.Join(names, ", ")
+	}
+	return expected
+}
+
+// v8SchemaNodeSize is the size a maxLength, maxItems or maxProperties
+// violation counts in node, or -1.
+func v8SchemaNodeSize(node *yaml.Node, keyword string) int {
+	if node == nil {
+		return -1
+	}
+	switch {
+	case keyword == "maxLength" && node.Kind == yaml.ScalarNode:
+		return utf8.RuneCountInString(node.Value)
+	case keyword == "maxItems" && node.Kind == yaml.SequenceNode:
+		return len(node.Content)
+	case keyword == "maxProperties" && node.Kind == yaml.MappingNode:
+		return len(node.Content) / 2
+	}
+	return -1
 }
 
 // v8SchemaNumberRange names the bounds a schema number declares (its

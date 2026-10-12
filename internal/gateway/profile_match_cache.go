@@ -61,6 +61,15 @@ func profileMatchKey(subject *profileSubject, source, connectorName, agent strin
 		put(subject.UPN)
 		put(subject.Domain)
 		put(subject.AccountDomain)
+		// A local account and a directory account of one name select apart
+		// (GAP-0305), as do a confirmed and an unconfirmed name.
+		put(string(subject.Directory))
+		if subject.localAccount {
+			put("local-account")
+		}
+		if subject.nameUnconfirmed {
+			put("name-unconfirmed")
+		}
 		if subject.LookupFailed {
 			put("lookup-failed")
 		} else {

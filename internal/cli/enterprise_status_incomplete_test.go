@@ -83,6 +83,16 @@ func TestEnterpriseSecurityIncompleteIgnoresInformationalWarnings(t *testing.T) 
 		t.Fatalf("warnings = %+v", result.Warnings)
 	}
 
+	// GAP-0536: the sandbox policy notes Windows now prints do not hide why
+	// security is incomplete.
+	result.Warnings = nil
+	result.AddWarning(enterprisestatus.CodeSandboxDefaultProfile, "default_profile lacks required_for [claudecode] from contractors")
+	result.AddWarning(enterprisestatus.CodeSandboxAdvisory, "openshell.admin.request_access is empty")
+	addEnterpriseSecurityIncompleteReasons(result, false)
+	if len(result.Warnings) != 3 || result.Warnings[2].Code != "security_incomplete" {
+		t.Fatalf("sandbox notes suppressed the reason: %+v", result.Warnings)
+	}
+
 	result.Warnings = nil
 	result.AddWarning("cursor_adapter_restored", "restored")
 	result.AddWarning("user_registrations_pending", "pending")

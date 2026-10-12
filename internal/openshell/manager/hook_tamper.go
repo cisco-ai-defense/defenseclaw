@@ -254,13 +254,15 @@ func idRef(id string) toolCallRef {
 	return toolCallRef{key: "sha256:" + hex.EncodeToString(sum[:])}
 }
 
-// contentRef names a call by the digest of its session, tool name and
-// canonical tool input (object keys sorted, numbers verbatim). A call
-// without a tool name or input names none.
-func contentRef(session, tool string, input json.RawMessage) toolCallRef {
+// ContentRef is the content reference of a tool call: the digest of its
+// session, tool name and canonical tool input (object keys sorted, numbers
+// verbatim), "call:" and 64 hex digits. A call without a tool name or input
+// has none (""). A managed gateway sends it in a relayed verdict
+// (HookDecision.CallRef) in place of the tool input.
+func ContentRef(session, tool string, input json.RawMessage) string {
 	tool = strings.TrimSpace(tool)
 	if tool == "" || len(bytes.TrimSpace(input)) == 0 {
-		return toolCallRef{}
+		return ""
 	}
 	canonical := []byte(input)
 	dec := json.NewDecoder(bytes.NewReader(input))
@@ -276,16 +278,33 @@ func contentRef(session, tool string, input json.RawMessage) toolCallRef {
 		_, _ = h.Write(part)
 		_, _ = h.Write([]byte{0})
 	}
-	return toolCallRef{key: "call:" + hex.EncodeToString(h.Sum(nil)), byContent: true}
+	return contentRefPrefix + hex.EncodeToString(h.Sum(nil))
 }
 
-// ref names the call a decision concerns, as the connector's hooks do.
+const contentRefPrefix = "call:"
+
+// callRef names the call a content reference names; anything but a
+// ContentRef value names none.
+func callRef(ref string) toolCallRef {
+	digest, ok := strings.CutPrefix(ref, contentRefPrefix)
+	if !ok || len(digest) != hex.EncodedLen(sha256.Size) || strings.Trim(digest, "0123456789abcdef") != "" {
+		return toolCallRef{}
+	}
+	return toolCallRef{key: ref, byContent: true}
+}
+
+// ref names the call a decision concerns, as the connector's hooks do. A
+// relayed decision carries the content reference the managed gateway
+// computed instead of the tool input.
 func (h toolCallHooks) ref(d HookDecision) toolCallRef {
 	switch h.keying {
 	case keyByID:
 		return idRef(d.ToolUseID)
 	case keyByContent:
-		return contentRef(d.SessionID, d.Tool, d.ToolInput)
+		if len(bytes.TrimSpace(d.ToolInput)) == 0 {
+			return callRef(d.CallRef)
+		}
+		return callRef(ContentRef(d.SessionID, d.Tool, d.ToolInput))
 	}
 	return toolCallRef{}
 }

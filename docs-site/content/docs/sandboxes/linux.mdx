@@ -11,10 +11,14 @@ keywords:
   - sandbox undo
 ---
 
-On Linux, each sandbox is a container that OpenShell's Docker driver runs.
-Your project folder is mounted into it live, so you see the agent's edits in
-your editor as they happen, and a snapshot taken at the start of each session
-lets `defenseclaw sandbox undo` put the folder back.
+On Linux, each sandbox is by default a container that OpenShell's Docker
+driver runs. Your project folder is mounted into it live, so you see the
+agent's edits in your editor as they happen, and a snapshot taken at the start
+of each session lets `defenseclaw sandbox undo` put the folder back. A host
+with KVM can run OpenShell's MicroVM driver instead (see
+[MicroVMs with KVM](#run-sandboxes-in-microvms-with-kvm)). On a computer your
+organization manages, an administrator sets the policy: see
+[Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 ## How it fits together
 
@@ -154,7 +158,7 @@ Switch your local OpenShell gateway to the docker compute driver? (its configura
       …
       set [openshell.gateway] compute_driver = "docker"
     …
-    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again unless it is switched back (one gateway runs one driver)
+    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back
   ✓ gateway configured and restarted
   Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):
   …
@@ -197,7 +201,7 @@ real run:
     { type: 'out', text: "        + enabled = false" },
     { type: 'out', text: "    create ~/.config/openshell/gateway.env" },
     { type: 'out', text: "      set OPENSHELL_TELEMETRY_ENABLED=false" },
-    { type: 'out', text: "    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again unless it is switched back (one gateway runs one driver)" },
+    { type: 'out', text: "    then restart the gateway (systemctl --user restart openshell-gateway) on the docker compute driver; running sandboxes stop, and sandboxes made on the podman driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back" },
     { type: 'ok', text: "  ✓ gateway configured and restarted" },
     { type: 'out', text: "  Harnesses (add another with `defenseclaw sandbox setup --harness NAME`):" },
     { type: 'out', text: "    Claude Code (claude)  model credential AWS_BEARER_TOKEN_BEDROCK ✓" },
@@ -338,6 +342,49 @@ Continue with [your first session](/docs/sandboxes/first-session).
 You can run the same setup from the TUI (`defenseclaw tui`, press `0` for
 Setup, then choose **Sandboxes (OpenShell)**). See
 [TUI and macOS app](/docs/sandboxes/apps#set-up-from-the-tui).
+
+## Run sandboxes in MicroVMs with KVM
+
+On a Linux host with KVM, OpenShell's MicroVM driver (`vm`) runs each sandbox
+as a small virtual machine with a Linux kernel of its own, as it does on a Mac.
+The Docker driver stays the default. MicroVMs are the way on where the host
+kernel has no usable Landlock, because the MicroVM's own kernel enforces it,
+and an option elsewhere. OpenShell calls the driver experimental, and NVIDIA
+tests it on Ubuntu 24.04 on amd64; DefenseClaw has also run it on RHEL 9.8 with
+nested KVM. `sandbox setup` offers the switch on a host where `/dev/kvm`
+exists, and the answer defaults to yes only when Landlock is missing.
+
+On a managed computer the organization chooses the driver. With
+`driver: auto` or `vm`, a sandbox that starts where KVM does not work for you
+falls back to the Docker driver under the same policy, unless the organization
+requires MicroVMs. The banner says so, for example
+`Driver docker (fallback: KVM not available on this computer)`. See
+[The docker fallback](/docs/enterprise/sandboxes#the-docker-fallback).
+
+A MicroVM host needs, besides Docker (which still builds the harness images):
+
+| Needs | Details |
+| --- | --- |
+| KVM | `/dev/kvm` that your user can open for reading and writing. Some distributions make it world-writable; where it belongs to the `kvm` group, add yourself (`sudo usermod -aG kvm $USER`) and log in again. On a cloud VM, use an instance type with nested virtualization enabled (on EC2, for example, an m8i type) or a `.metal` size; Graviton needs metal. |
+| `e2fsprogs` | Version 1.43 or newer, whose `mke2fs` and `debugfs` format each MicroVM's disks. |
+| The driver | `openshell-driver-vm`, which NVIDIA's package does not install. Download it from the OpenShell release with its `.sha256` file, check the digest and put it in `~/.local/libexec/openshell`. The doctor prints the commands for your architecture. |
+| The service umask | The `openshell-gateway` service must run with a umask no stricter than `0022`. With the `0077` of some packages, the directories the driver builds each MicroVM's disk from are unreadable to the sandbox's own user, and every MicroVM fails with `read /proc/self/status: Permission denied`. Setup writes a systemd drop-in (`zz-defenseclaw-umask.conf`) with `UMask=0022` as part of the gateway change. |
+
+Setup installs none of this for you. KVM access and `e2fsprogs` need an
+administrator, and the driver is a download you verify, so setup stops with the
+way on and asks you to run it again. If the driver's cache was built while the
+gateway ran with a stricter umask, the doctor's **MicroVM driver** check warns
+and prints the command that removes the cache (it deletes the MicroVM
+sandboxes' disks, none of which could start).
+
+What changes against the Docker driver is the list in the macOS column of
+[the guide's driver table](/docs/sandboxes/guide#macos): every run works on a
+copy, `--context` is refused, `--cpu` and `--memory` have no effect (every
+MicroVM gets the gateway's `vcpus` and `mem_mib`), and the first start of an
+image prepares a disk of about 5 GB, which takes about a minute. Sandboxes made
+on the Docker driver cannot start on the MicroVM driver; setup lists them first,
+they can be deleted, and they start again if you switch the gateway back. The doctor replaces its Docker network and Landlock
+rows with the MicroVM checks.
 
 ## Keep or undo
 

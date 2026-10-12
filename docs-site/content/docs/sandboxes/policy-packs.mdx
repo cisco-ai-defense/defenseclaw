@@ -29,12 +29,14 @@ To see the policy a run would get, and where each setting comes from, run
 also the [complete sandbox guide](/docs/sandboxes/guide).
 
 <Callout title="Sandboxes and managed installs">
-Sandboxes run on Linux, and on Macs with Apple silicon in OpenShell
-MicroVMs (see [macOS](/docs/sandboxes/guide#macos)), as your own user. They
-don't run on Windows, and in a `managed_enterprise` install `sandbox setup`,
-`sandbox run`, and `sandbox teardown` refuse to start. Sandboxes
-therefore run only on installs where the user owns `config.yaml`, and there
-the admin block is enforced but advisory. See
+Sandboxes run on Linux (Docker, or MicroVMs where the host has KVM), and on
+Macs with Apple silicon in OpenShell MicroVMs (see
+[macOS](/docs/sandboxes/guide#macos)), as the user who runs them. They don't
+run on Windows. On a per-user install the user owns `config.yaml`, so the
+admin block is enforced but advisory. On a standalone `managed_enterprise`
+install the administrator owns `config.yaml`, the block is authoritative, and
+each guardrail profile can add a tighter `sandbox` section of its own: see
+[Sandboxes on managed computers](/docs/enterprise/sandboxes). See
 [Authoritative and advisory admin blocks](#authoritative-and-advisory-admin-blocks).
 </Callout>
 
@@ -544,6 +546,17 @@ defenseclaw sandbox pack show team-web
 defenseclaw sandbox pack list --output json
 ```
 
+On a managed computer those commands ask your own sandbox daemon, which root
+does not have. An administrator reads the digest to pin with the gateway
+binary instead. It reads only the file and the packs it extends, and says
+whether the gateway would accept the file where it is:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux sandbox pack-digest /etc/defenseclaw/policies/sandbox/contractors/pack.yaml
+```
+
+On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos`.
+
 Any change to the file, including a comment or whitespace, changes the
 digest, so `sha256sum` (or `shasum -a 256` on macOS) of the file gives the
 same hex value. A built-in pack's digest can change with each DefenseClaw
@@ -951,10 +964,17 @@ defenseclaw sandbox policy test --sandbox myapp-7f3a --host api.example.com:443
 ```
 
 With `--sandbox` the daemon answers with that sandbox's policy, its unblocks
-included. Without it, the policy a run in this folder would get with
-`--pack`, `--profile`, and `--harness` is resolved without the daemon, with
-`config.yaml` (or the defaults when there is none) and the folder's
-repository policy. The proxy decides by destination, the same for every
+included. On an unmanaged computer, without `--sandbox`, the policy a run in
+this folder would get with `--pack`, `--profile`, and `--harness` is resolved
+without the daemon, with `config.yaml` (or the defaults when there is none)
+and the folder's repository policy.
+
+On a managed computer, omit `--pack` and `--profile`: without `--sandbox`,
+the daemon tests your own policy for a new run in this folder, optionally
+for the agent named with `--harness`. No sandbox is needed. With `--sandbox`,
+omit all three selection flags. See [managed policy tests](/docs/enterprise/sandboxes#what-users-see).
+
+The proxy decides by destination, the same for every
 program in the sandbox; `--binary` only names the program in the report.
 
 For example, what the policy of a running sandbox decides for a paste site:
@@ -968,7 +988,7 @@ Four destinations under three packs, replayed from a real machine:
   speed={1.5}
   height={480}
   ariaLabel="Animated terminal replay of four policy test runs: registry.npmjs.org allowed by the balanced pack's curated allowlist, api.openai.com blocked by balanced's allowlist mode, pastebin.com blocked by a blocklist feed entry on the open pack, and registry.npmjs.org blocked by the strict profile."
-  caption="Recorded on Linux with DefenseClaw 1.0.35; `policy test` resolves a pack without the daemon, so it runs anywhere `defenseclaw-gateway` is installed."
+  caption="Recorded on Linux with DefenseClaw 1.0.35; on an unmanaged computer, `policy test` resolves a pack without the daemon."
   frames={[
     { type: 'cmd', text: "defenseclaw sandbox policy test --pack balanced --host registry.npmjs.org:443", pauseMs: 600 },
     { type: 'out', text: "  pack balanced · profile balanced · network allowlist" },
@@ -1092,7 +1112,8 @@ openshell:
 <Callout title="Pinning a built-in pack">
 A built-in pack's digest can change when DefenseClaw is upgraded. If you pin
 `open`, `balanced`, or `strict` with `required_pack_digest`, read the new
-digest with `defenseclaw sandbox pack show <name>` after every upgrade and
+digest with `defenseclaw sandbox pack show <name>` (on a managed computer,
+`defenseclaw-gateway enterprise <os> sandbox pack-digest <name>` as root) after every upgrade and
 update the pin, or no sandbox starts. Pin a custom pack when you need content
 that stays fixed.
 </Callout>
@@ -1366,9 +1387,9 @@ What happens next depends on the refusal:
 
 ## Authoritative and advisory admin blocks
 
-Sandboxes run only on installs where the user owns `config.yaml`. There the
-admin block applies to every run, but the user can edit or remove it. Use it
-for team defaults and to prevent mistakes, not to stop a determined user.
+On a per-user install the user owns `config.yaml`. There the admin block
+applies to every run, but the user can edit or remove it. Use it for team
+defaults and to prevent mistakes, not to stop a determined user.
 `defenseclaw sandbox doctor`, `sandbox status`, and `sandbox policy explain`
 say which kind of block applies on a machine. The doctor's **Organization
 policy** row also names each constraint in force, for example:
@@ -1377,7 +1398,18 @@ policy** row also names each constraint in force, for example:
   ✓ Organization policy        advisory (you own config.yaml and can change it): profile balanced or stricter, harnesses claudecode, codex only, copy mode for ~/customers/**, 1 blocked host, at most 4 CPUs and 8Gi memory, locked: profile
 ```
 
-See [Sandbox policy pushdown](/docs/enterprise/configuration#sandbox-policy-pushdown)
+On a standalone managed install the block is authoritative: the
+administrator owns `config.yaml`, so the user cannot change it, and every
+constraint above is enforced by the managed gateway, which resolves each run's
+policy for the user's verified identity. There, `openshell.admin` is the floor
+for everyone, and a guardrail profile's `sandbox` section can only tighten it.
+That section takes the keys above plus those that managed sandboxes add:
+`allowed`, `required_for`, `when_unavailable`, `user_approvals`,
+`allowed_credentials`, `on_silence`, `max_silence_after`, `process_tree`,
+`foreign_sandboxes`, `allow_upstream_telemetry`, `delete_stopped_after` and
+`request_access`. [Sandboxes on managed computers](/docs/enterprise/sandboxes)
+explains each one and how they combine. See also
+[Sandbox policy pushdown](/docs/enterprise/configuration#sandbox-policy-pushdown)
 for rolling the admin block out to managed machines.
 
 ## Example: a balanced organization

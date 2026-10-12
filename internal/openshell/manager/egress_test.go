@@ -553,10 +553,19 @@ func TestUnblockRefusals(t *testing.T) {
 		got.Violation.Constraint == "openshell.admin.allow_unblock" || !strings.Contains(got.Violation.Detail, "defenseclaw sandbox approvals") {
 		t.Fatalf("strict sandbox = %+v", got)
 	}
+	// GAP-0508: the refusal has the managed shape of every other one: the
+	// rule in words, "You can't approve this", the contact and the Quote
+	// line, and no openshell.admin key the profile may have set.
+	want := "Blocked by your organization's DefenseClaw policy: webhook.site can't be unblocked under your profile (rule allow_unblock). " +
+		"You can't approve this.\nRequest access: your IT help desk. Quote: rule allow_unblock, host webhook.site, sandbox openbox."
 	for _, req := range []sandboxapi.UnblockRequest{{Host: "webhook.site", Sandbox: "openbox"}, {Host: "webhook.site", Always: true}} {
-		if got := unblock(req); got.Code != sandboxapi.CodeAdminViolation || !strings.Contains(got.Message, sandboxapi.AdminMessage) ||
+		got := unblock(req)
+		if got.Code != sandboxapi.CodeAdminViolation || !sandboxapi.IsPolicyRefusal(got.Message) ||
 			got.Violation == nil || got.Violation.Constraint != "openshell.admin.allow_unblock" {
 			t.Fatalf("blocklisted host with unblocks off = %+v", got)
+		}
+		if req.Sandbox != "" && got.Message != want {
+			t.Fatalf("unblock refusal under allow_unblock: false =\n%s\nwant\n%s", got.Message, want)
 		}
 	}
 	if len(e.persist.allowed()) != 0 {
@@ -1246,7 +1255,7 @@ func TestCredentialEndpointsFollowThePolicy(t *testing.T) {
 			if got, err := e.client.GetSandbox(t.Context(), "credbox"); err != nil || slices.Contains(got.Spec.Providers, provider) {
 				t.Fatalf("providers after enforcement = %v, %v; want %s detached", got.Spec.Providers, err, provider)
 			}
-			if !e.tel.removed(provider, tc.reason) || len(e.events("credbox", sandboxapi.ActivityEgressBlocked, tc.reason)) == 0 {
+			if !e.tel.removed(provider, tc.reason) || len(e.events("credbox", sandboxapi.ActivityLifecycle, tc.reason)) == 0 {
 				t.Fatal("the detach is not recorded or not on the feed")
 			}
 			e.stopBox("credbox")
@@ -1274,6 +1283,61 @@ func TestModelProviderEndpointsFollowTheAdminLists(t *testing.T) {
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressBlock = []string{"api.anthropic.com"} })
 	_, err = e.m.Start(t.Context(), "llmbox", sandboxapi.StartRequest{})
 	wantCode(t, err, sandboxapi.CodeAdminViolation)
+}
+
+// GAP-0466: a tightening that refuses a running sandbox's model endpoint
+// detached its provider with a blank feed line ("✗  (admin policy)"), later
+// refusals there still said the model channel stays open, and taking the
+// tightening back left the channel cut until the sandbox was created again.
+// The line now says the model channel closed and why; the refusals no
+// longer call the channel open; and the provider is attached again once the
+// policy allows its endpoint again.
+func TestTheModelChannelClosesAndReopensWithThePolicy(t *testing.T) {
+	llm := &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test"}}
+	e := newEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "mcbox", LLM: llm})
+	provider := providerName("mcbox", roleLLM, 0)
+	attached := func() bool {
+		got, err := e.client.GetSandbox(t.Context(), "mcbox")
+		return err == nil && slices.Contains(got.Spec.Providers, provider)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.EgressAllowOnly = []string{"registry.example.org"} })
+	if !e.m.enforceAll(t.Context()) || attached() {
+		t.Fatal("the model provider stayed attached under an allow-only list without its endpoint")
+	}
+	closed := e.events("mcbox", sandboxapi.ActivityLifecycle, policyReasonAdmin)
+	const closedWant = "✗ model channel closed: api.anthropic.com is not on your organization's list of allowed destinations; " +
+		"the agent can't reach its model until the policy allows api.anthropic.com again, then the channel opens again by itself"
+	if len(closed) != 1 || closed[0].Message != closedWant || closed[0].Host != "api.anthropic.com" {
+		t.Fatalf("feed = %+v, want %q", closed, closedWant)
+	}
+	e.ocsf("mcbox", "NET:OPEN [MED] DENIED /usr/bin/node(42) -> api.anthropic.com:443/tcp [policy:- engine:opa] [reason:transparent_tcp_mapping_denied]", time.Now())
+	for _, ev := range e.events("mcbox", sandboxapi.ActivityEgressBlocked, "") {
+		if ev.Reason == sandboxapi.ReasonModelHostSide {
+			t.Fatalf("a refusal on the detached model host says the channel stays open: %+v", ev)
+		}
+	}
+
+	e.setConfig(func(c *config.Config) {
+		c.OpenShell.Admin.EgressAllowOnly = []string{"registry.example.org", "api.anthropic.com"}
+	})
+	if !e.m.enforceAll(t.Context()) || !attached() {
+		t.Fatal("the model provider was not attached again once the policy allows its endpoint")
+	}
+	reopened := e.events("mcbox", sandboxapi.ActivityLifecycle, policyReasonRestored)
+	if len(reopened) != 1 || reopened[0].Message != "✓ model channel open again: the policy allows api.anthropic.com again" {
+		t.Fatalf("feed = %+v", reopened)
+	}
+	b := e.boxOf("mcbox")
+	e.m.mu.Lock()
+	got := b.rec.DetachedProviders
+	e.m.mu.Unlock()
+	if len(got) != 0 {
+		t.Fatalf("detached providers after the reattach = %v", got)
+	}
+	if e.m.enforceAll(t.Context()); len(e.events("mcbox", sandboxapi.ActivityLifecycle, policyReasonRestored)) != 1 {
+		t.Fatal("an unchanged policy attached the provider again")
+	}
 }
 
 // GAP-0361: in a strict session one connection to the model host outside

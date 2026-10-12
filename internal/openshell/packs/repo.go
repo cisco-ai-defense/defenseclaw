@@ -392,6 +392,18 @@ func (r *resolver) refuseRepoLoosening(rp *RepoPolicy) {
 	}
 	r.repo, r.repoRequested, r.eff.RepoPolicy = rp, map[string]string{}, rp
 	for _, ref := range rp.Refused {
+		if r.managed && ref.Key == "workspace.mode" && ref.Value == config.OpenShellWorkdirMount {
+			// A managed computer runs every sandbox on a copy (SPEC D2):
+			// the repository's mount is clamped to copy like any other,
+			// not a loosening that refuses the run (GAP-0537).
+			r.repoMount = true
+			r.violate(Violation{
+				Key: "workdir.mode", Source: SourceRepo, Attempted: ref.Value, Enforced: config.OpenShellWorkdirCopy,
+				Constraint: ConstraintManagedCopyOnly, Message: ReasonManagedCopyOnly,
+				Detail: "the repository policy " + RepoPolicyPath + " asks for workspace.mode: mount",
+			})
+			continue
+		}
 		r.violate(Violation{
 			Key: ref.Key, Source: SourceRepo, Attempted: ref.Value, Constraint: RepoPolicyConstraint, Fatal: true,
 			Message: "the repository policy " + RepoPolicyPath + " would loosen the sandbox policy: " + ref.Key + " " + ref.Value,

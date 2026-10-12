@@ -1450,8 +1450,8 @@ func TestRequireCopyForMatching(t *testing.T) {
 		})
 	}
 	eff := &Effective{admin: config.OpenShellAdminConfig{RequireCopyFor: []string{"~/x"}}}
-	if eff.requiresCopy("/x") != "" {
-		t.Fatal("a tilde pattern without a home directory must not match")
+	if eff.requiresCopy("/x") != "~/x" {
+		t.Fatal("a tilde pattern without a home directory to expand it must cover every path (toward copy mode)")
 	}
 	if eff.requiresCopy("") != "" {
 		t.Fatal("an empty path must not match (Resolve handles a missing project)")

@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -81,9 +82,25 @@ type profileSubject struct {
 	// nameUnconfirmed marks a UserName that kept a domain the directory facts
 	// do not confirm (profileUserName): no users entry matches it by name.
 	nameUnconfirmed bool
+	// localAccount marks an account the verified directory facts place in the
+	// machine's own account database (/etc/passwd, the computer's SAM, the
+	// local Open Directory node). A bare users entry names the directory
+	// account of that name, never a local namesake: a root-created local
+	// ent-alice got the domain ent-alice's profile (GAP-0305, GAP-0313,
+	// GAP-0418). Such an account is selected by its uid or SID, or as
+	// .\name (COMPUTER\name on Windows).
+	localAccount bool
 	// cachedFactsAge is set when explain serves an account the directory
 	// cannot name now from the facts its hooks still apply (GAP-0899).
 	cachedFactsAge time.Duration
+	// refreshed is set when explain's own lookup fetched the facts the hooks
+	// of the account use from their next call (GAP-0336), and not when it
+	// failed and both use the facts cached before it; explain only.
+	refreshed bool
+	// accountName is the account's name as the account database gives it
+	// (alice@corp.example.com with SSSD fully qualified names), which
+	// enterprise.enrollment.exempt_users entries name; explain only.
+	accountName string
 }
 
 // The verified subject comes from S1's VerifiedSubject
@@ -575,8 +592,16 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 func profileRequestSubject(ctx context.Context) (*profileSubject, string) {
 	// A sandbox bearer names a host user for attribution, but it does not
 	// authenticate the process calling the loopback ingress. Never inherit
-	// the gateway owner's verified subject for these requests.
+	// the gateway owner's verified subject for these requests. The one
+	// exception is a call the managed gateway took over its hook socket from
+	// the sandbox's own daemon and whose registration it matched to the
+	// kernel peer (sandboxRelayAdmit): it carries that peer's subject.
 	if isSandboxHookRequest(ctx) {
+		if isRelayVerifiedSandboxRequest(ctx) {
+			if subject, ok := profileSubjectSource(ctx); ok && !subject.viaProcessOwner {
+				return &subject, profileSubjectVerified
+			}
+		}
 		return nil, ""
 	}
 	if subject, ok := profileSubjectSource(ctx); ok {
@@ -692,6 +717,7 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 				s.Directory.Source == useridentity.SourceWindowsIdentityStore) && awaitingSpool(s.Directory) && !s.Directory.GroupsPartial),
 		viaProcessOwner: s.Source == subjectSourceProcessOwner,
 		nameUnconfirmed: nameUnconfirmed,
+		localAccount:    s.Directory.Directory == useridentity.DirectoryLocal,
 	}
 }
 
@@ -735,9 +761,47 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		return profileSubject{UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, LookupFailed: identityLookupBlocking.Load()},
 			fmt.Errorf("the operating system returned no directory facts for %s", id)
 	}
-	return profileSubjectFromVerified(VerifiedSubject{
+	subject := profileSubjectFromVerified(VerifiedSubject{
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: userName, Directory: facts,
-	}, identityLookupBlocking.Load()), nil
+	}, identityLookupBlocking.Load())
+	_, _, failing := cachedDirectoryRefreshFailure(id)
+	subject.refreshed, subject.accountName = !failing, userName
+	return subject, nil
+}
+
+// explainEnrollmentExempt reports whether enterprise.enrollment.exempt_users
+// lists the explained account, matched as the gateway matches a caller:
+// on Linux and macOS by its uid or its account name as the account database
+// gives it (managedHookAuthorizer.exempt); on Windows by SID, account name or
+// DOMAIN\account (requireSandboxAccountListed). Explain names the exemption
+// and what it does not change (GAP-0328).
+func explainEnrollmentExempt(cfg *config.Config, subject *profileSubject) bool {
+	if cfg == nil || subject == nil || subject.UserID == "" || !cfg.StandaloneEnterprise() ||
+		len(cfg.Enterprise.Enrollment.ExemptUsers) == 0 {
+		return false
+	}
+	if subject.IDKind == useridentity.KindWindowsSID {
+		return requireSandboxAccountListed(cfg.Enterprise.Enrollment.ExemptUsers, VerifiedSubject{
+			UserID: subject.UserID, IDKind: subject.IDKind, UserName: subject.UserName,
+			Directory: useridentity.DirectoryFacts{
+				AccountDomain: subject.AccountDomain, Directory: subject.Directory, Domain: subject.Domain,
+				UPN: subject.UPN, Principal: subject.Principal,
+			},
+		})
+	}
+	uid, err := strconv.Atoi(subject.UserID)
+	if err != nil {
+		return false
+	}
+	name := firstNonEmpty(subject.accountName, subject.UserName)
+	if (&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).exempt(managedHookPeer{UID: uid, Name: name}) {
+		return true
+	}
+	// The explained subject's own facts, which the hook cache takes from
+	// explain (GAP-0336), match as the hook socket matches them (GAP-0494).
+	return !subject.LookupFailed && subject.Directory != "" && anyMatches(cfg.Enterprise.Enrollment.ExemptUsers, func(entry string) bool {
+		return userEntryMatches(subject, entry)
+	})
 }
 
 // lookupLocalProfileSubject resolves an account name or uid/SID through the
@@ -1030,7 +1094,13 @@ func profileUserName(name string, facts useridentity.DirectoryFacts) (string, bo
 // or SID, its account name without the domain, its principal or UPN, or its
 // account in DOMAIN\user form, the name winbind and Windows report. The
 // subject's name is bare and its principal is a UPN or user@REALM, so that
-// form matched none of them (GAP-0316).
+// form matched none of them (GAP-0316). It is the one matcher: requests,
+// `explain` and the unmatched-entry warnings all call it (GAP-0310).
+//
+// A bare name selects directory accounts only. A local account of the same
+// name is another person (a local ent-alice next to the domain ent-alice),
+// so it is selected by its uid or SID, or as .\name or COMPUTER\name
+// (GAP-0305, GAP-0313, GAP-0418).
 func userEntryMatches(subject *profileSubject, entry string) bool {
 	// A name that kept its unconfirmed domain (profileUserName) is matched
 	// by no entry: an entry with an @ is a principal or a UPN.
@@ -1038,7 +1108,11 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 	if subject.nameUnconfirmed {
 		userName = ""
 	}
-	if anyEqualFold([]string{subject.UserID, userName}, entry) ||
+	bareName := userName
+	if subject.localAccount {
+		bareName = ""
+	}
+	if anyEqualFold([]string{subject.UserID, bareName}, entry) ||
 		useridentity.PrincipalsEqual(subject.Principal, entry) || useridentity.PrincipalsEqual(subject.UPN, entry) {
 		return true
 	}
@@ -1049,12 +1123,12 @@ func userEntryMatches(subject *profileSubject, entry string) bool {
 // subjectInDomain compares only verified account namespaces. Guessing a
 // NetBIOS name from a DNS first label can select a different trusted domain.
 // ".\user", the form Windows tools use for an account of this computer,
-// names a local account whose verified namespace is the computer
-// (GAP-0636).
+// names an account the verified facts place in the local account database,
+// on every platform (GAP-0636, GAP-0305).
 func subjectInDomain(subject *profileSubject, domain string) bool {
 	domain = strings.TrimSpace(domain)
 	if domain == "." {
-		return subject.Directory == useridentity.DirectoryLocal && subject.AccountDomain != ""
+		return subject.localAccount
 	}
 	return domain != "" && (useridentity.EqualFold(domain, subject.AccountDomain) ||
 		useridentity.EqualFold(domain, subject.Domain))
@@ -1566,6 +1640,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	// install (GAP-0280).
 	var subject *profileSubject
 	source := ""
+	refreshedFacts := false
 	if user != "" {
 		found, err := profileExplainSubjectLookup(user)
 		var ambiguous *useridentity.AmbiguousAccountError
@@ -1587,12 +1662,23 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			out["lookup_error"] = err.Error()
 		} else if found.LookupError != "" {
 			out["lookup_error"] = found.LookupError
+		} else if found.refreshed && found.UserID != "" {
+			// Explain's lookup refreshed the cache the hooks read, so they use
+			// the facts it resolved from their next call and the cache block
+			// below states what they use now (GAP-0336). It used to store the
+			// facts again, which also restarted the hour of facts kept
+			// through a failed lookup and cleared the failure: polled
+			// explains kept an outage's stale facts in use indefinitely
+			// (GAP-0496, GAP-0517).
+			refreshedFacts = true
 		}
 		subject, source = &found, profileSubjectLookup
+		// directory says where the account lives (local, active_directory,
+		// ...): a bare users entry selects a directory account only (GAP-0305).
 		out["subject"] = map[string]any{
 			"user_id": found.UserID, "user_name": found.UserName,
 			"principal": found.Principal, "upn": found.UPN, "groups": found.Groups,
-			"group_count": identityGroupCount(found.Groups),
+			"group_count": identityGroupCount(found.Groups), "directory": string(found.Directory),
 		}
 	}
 	if set == nil {
@@ -1613,6 +1699,13 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	out["digest"] = decision.Digest
 	out["match"] = decision.Match
 	out["matched_group"] = decision.MatchedGroup
+	if decision.Match == profileMatchGroup && decision.MatchedGroup != "" {
+		// A bare group name matches a local group and a directory group of
+		// that name alike; explain names which one the account is in (GAP-0356).
+		if source := matchedGroupSource(set, subject, decision.MatchedGroup); source != "" {
+			out["matched_group_source"] = source
+		}
+	}
 	out["subject_source"] = decision.SubjectSource
 	out["assignment"] = decision.Assignment
 	warnings := profileExplainWarnings(set, decision, subject)
@@ -1627,11 +1720,19 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 			}
 		}
 		if subject != nil && !subject.LookupFailed && slices.ContainsFunc(set.assignments, func(a config.ProfileAssignment) bool { return len(a.Match.Groups) > 0 }) {
-			warnings = append(warnings, "after a group membership change, hooks can use the previous profile for up to 15 minutes while the gateway refreshes cached identity facts; restart the gateway to refresh sooner")
+			warnings = append(warnings, profileCacheWindowNote(refreshedFacts, runtime.GOOS))
 		}
 	}
 	if view, _ := directoryHealthView(directoryCacheHealth(), time.Now()); view != nil {
 		out["directory"] = view
+	}
+	if explainEnrollmentExempt(base, subject) {
+		// exempt_users skips enrollment and the sandbox requirement only;
+		// the profile still inspects and blocks (GAP-0328).
+		out["enrollment"] = map[string]any{"exempt": true}
+		warnings = append(warnings, "this account is in enterprise.enrollment.exempt_users: it is not enrolled and required_for never refuses "+
+			"its host runs, but its calls are still inspected under the profile above, which blocks findings at its block_at, and logged "+
+			"(defenseclaw.user.enrollment: exempt)")
 	}
 	effective := set.base
 	if derived, ok := set.profiles[decision.Name]; ok {
@@ -1650,6 +1751,23 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	digests := guardrailProfileDigests(set)
 	out["profiles"] = digests
 	a.writeJSON(w, http.StatusOK, out)
+}
+
+// profileCacheWindowNote says how long a group membership change takes to
+// reach the hooks. Explain hands the facts it resolved to the hook cache, so
+// the explained account's hooks follow at once; other accounts' within the
+// cache lifetime. On macOS, Open Directory's own cache held a removed member
+// in the group for ten minutes and more (GAP-0336).
+func profileCacheWindowNote(refreshed bool, goos string) string {
+	note := "after a group membership change, hooks can use the previous profile for up to 15 minutes while the gateway refreshes cached identity facts; restart the gateway to refresh sooner"
+	if refreshed {
+		note = "explain refreshed this account's cached identity facts, so its hooks use the profile above from their next call; after a group " +
+			"membership change, other accounts' hooks can use the previous profile for up to 15 minutes (explain the account, or restart the gateway, to refresh sooner)"
+	}
+	if goos == "darwin" {
+		note += "; macOS Open Directory caches group membership itself: after a change in the directory run sudo dscacheutil -flushcache; sudo dsmemberutil flushcache"
+	}
+	return note
 }
 
 // profileEffectiveView is the explain summary of the policy cfg applies to

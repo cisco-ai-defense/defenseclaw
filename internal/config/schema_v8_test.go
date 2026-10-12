@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -198,5 +199,30 @@ func TestConfigV8SchemaRetentionMaximumMatchesCompiler(t *testing.T) {
 	got, ok := retentionDays["maximum"].(float64)
 	if !ok || got != float64(ObservabilityV8MaxRetentionDays) {
 		t.Fatalf("observability.local.retention_days maximum = %v, want %d", retentionDays["maximum"], ObservabilityV8MaxRetentionDays)
+	}
+}
+
+// GAP-0498, GAP-0514: a schema violation names what is wrong: the required
+// key an assignment lacks and what it takes, the minimum an empty match
+// misses, and a size limit with the size the value has.
+func TestV8SchemaNamesMissingKeysAndLimits(t *testing.T) {
+	base := "config_version: 9\nguardrail:\n  profiles:\n    engineering: {}\n"
+	for _, tc := range []struct{ name, doc, keyword, expected string }{
+		{"no match", base + "  profile_assignments:\n    - profile: engineering\n", "required",
+			"the required key match: a mapping that sets at least one of agents, connectors, groups, users"},
+		{"empty match", base + "  profile_assignments:\n    - profile: engineering\n      match: {}\n", "minProperties",
+			"a mapping that sets at least one of agents, connectors, groups, users"},
+		{"empty groups", base + "  profile_assignments:\n    - profile: engineering\n      match: {groups: []}\n", "minItems", "a nonempty list"},
+		{"long request_access", base + "    contractors:\n      sandbox:\n        request_access: " + strings.Repeat("x", 600) + "\n",
+			"maxLength", "a string of at most 512 characters (it has 600)"},
+	} {
+		err := ValidateV8SchemaBytes("admin.yaml", []byte(tc.doc))
+		var schemaErr *V8SchemaError
+		if !errors.As(err, &schemaErr) || schemaErr.Keyword != tc.keyword || schemaErr.Expected != tc.expected {
+			t.Fatalf("%s: %v (%+v)", tc.name, err, schemaErr)
+		}
+		if tc.keyword == "required" && !slices.Equal(schemaErr.Missing, []string{"match"}) {
+			t.Fatalf("%s: missing = %q", tc.name, schemaErr.Missing)
+		}
 	}
 }

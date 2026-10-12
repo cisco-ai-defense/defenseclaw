@@ -31,6 +31,15 @@ import (
 // writableByCaller reports whether the caller can create entries in dir.
 func writableByCaller(dir string) bool { return unix.Access(dir, unix.W_OK|unix.X_OK) == nil }
 
+// fileUID is the uid that owns info (false when that is unknown).
+func fileUID(info fs.FileInfo) (int, bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(st.Uid), true
+}
+
 // ownedByCaller reports whether info belongs to the effective user.
 func ownedByCaller(info fs.FileInfo) bool {
 	st, ok := info.Sys().(*syscall.Stat_t)

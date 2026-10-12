@@ -191,7 +191,12 @@ TRUNCATE = 0
 ```
 
 This is the stanza the bundled local-mode app ships in its
-`default/props.conf`. DefenseClaw does not ship a separate add-on for Splunk
+`default/props.conf`, which sets `KV_MODE = json` the same way for every
+sourcetype its macros search (`otel:log`, `otel:metric`, `otel:trace`,
+`openclaw:gateway:json` and `openclaw:diagnostics:json` as well). Splunk then
+extracts each field once, so do not add `| spath` to a search on these
+sourcetypes: it extracts every field a second time and doubles multivalue
+fields and counts. DefenseClaw does not ship a separate add-on for Splunk
 Cloud or Enterprise; copy the stanza and any macros you need from the app.
 
 ## Splunk Observability Cloud (`--o11y`)
@@ -243,6 +248,10 @@ They use metrics only, because the dashboards read no logs.
   when blocked sandbox egress (sources `openshell` and `dc-egress-proxy`) stays
   above 30 a minute for 10 minutes, for either source. The local Prometheus rule
   `DefenseClawSandboxEgressBlocksSustained` has the same threshold and sources.
+- **Detector.** `DefenseClaw - Sandbox errors sustained` (warning) fires when
+  sandbox lifecycle changes into the error phase stay above 0.2 a minute for
+  10 minutes on a harness connector. The local Prometheus rule
+  `DefenseClawSandboxErrorsSustained` has the same threshold.
 
 The dashboard variable named `source` on Security and Policy also matches the
 egress source, because both use the dimension name `source`.

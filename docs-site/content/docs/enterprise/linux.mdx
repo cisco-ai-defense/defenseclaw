@@ -68,6 +68,9 @@ lists each directive and the version it needs.
 | Authorization ledger | `/var/lib/defenseclaw-hook-guardian`, with each enrolled user's latest AI Discovery scan in `ai-discovery/` | `root:defenseclaw`, `0750` |
 | Logs | `/var/log/defenseclaw`: empty unless a `jsonl` destination writes there; the services log to the journal ([Logs and events](/docs/enterprise/operations#logs-and-events)) | `defenseclaw`, `0750` |
 | Hook socket | `/run/defenseclaw-hook/hook.sock` | Directory `defenseclaw`, `0755`. Socket `0666`: every user may connect, and the gateway authorizes each caller by uid. |
+| Sandbox launcher | `/usr/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| Rendered OpenShell gateway settings | `/etc/defenseclaw/openshell/gateway.toml`, written by `ensure` when `enterprise.openshell` is set | `root` |
+| Sandbox registrations and saved decisions | `/var/lib/defenseclaw/sandbox/` | `defenseclaw`, `0600` files |
 
 The gateway runs as the `defenseclaw` system account. The lifecycle creates
 it with `systemd-sysusers`, or `useradd` as a fallback, and reuses an
@@ -90,6 +93,7 @@ The units:
 | `defenseclaw-sensor-helper.service` | root, acquisition capabilities | Answers the gateway's fixed AI Discovery requests |
 | `defenseclaw-enterprise-apply.path` | PID 1 | Runs `ensure --reason path` when `/etc/defenseclaw/config.yaml`, `/etc/defenseclaw/secrets` or `/etc/defenseclaw/policies` changes. `enterprise secret set` and `remove` pause it while they write the credential, because they apply the change themselves |
 | `defenseclaw-enterprise-verify.timer` | PID 1 | Runs `verify` daily, with up to one hour of random delay |
+| `defenseclaw-sandbox.socket`, `defenseclaw-sandbox.service`, `defenseclaw-openshell-gateway.service` | Each user (systemd user units) | The user's sandbox daemon and, in `setup` mode, the user's OpenShell gateway. See [Sandboxes on managed computers](/docs/enterprise/sandboxes). |
 
 The package installs the units in `/usr/lib/systemd/system`. A tarball install
 writes them to `/etc/systemd/system`. Either way, host-specific drop-ins go
@@ -485,6 +489,22 @@ Start the agent from your normal login session", and the gateway records the
 refusal as an `api-auth-failure` audit row with reason
 `enterprise_managed_user_namespace` and a `hook socket refused` line in its
 journal, as it does for an account that is not enrolled.
+
+## Sandboxes
+
+A Linux standalone install can run coding agents in OpenShell sandboxes, under
+the sandbox policy of each person's directory group. They are off until
+`openshell.enabled` is on. The rpm and deb package the `defenseclaw` launcher
+and the user units; you provide OpenShell (`install: prerequisite`) or let each
+person's daemon download it (`install: setup`). The Docker driver needs Docker
+Engine 28 or newer with BuildKit, Landlock (kernel 6.2 or newer) and the person
+in the `docker` group. The optional MicroVM driver also needs `/dev/kvm`, the
+`kvm` group and `e2fsprogs`, and falls back to Docker where KVM does not work.
+`ensure` and `verify` print a row for each piece.
+
+The full guide covers the config keys, the recipes for both install modes, the
+MicroVM checks, requiring sandboxes per group, and what people see:
+[Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 ## Per-user installs
 

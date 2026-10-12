@@ -17,6 +17,7 @@
 package packs
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"net"
@@ -123,6 +124,36 @@ type Flags struct {
 	// the run read it (LoadRepoPolicy), nil when it has none. It only
 	// tightens; a key that would loosen refuses the run.
 	RepoPolicy *RepoPolicy
+	// Subject is not a flag: the account the run is for. nil is the
+	// caller's own account (OSS); the managed gateway passes the peer's
+	// uid and home, never its own. With a Subject this process reads no
+	// pack the subject named: a custom Pack is either UserPack's bytes or
+	// one of the administrator's own references, openshell.pack and the
+	// floor's required pack (checkSubjectPack).
+	Subject *Subject
+	// Floor is not a flag: F, the organization's floor for the run's
+	// guardrail profile (config.Config.SandboxFloor); nil is
+	// openshell.admin alone (OSS). It replaces openshell.admin in every
+	// clamp, and a required pack it names must be at least as strict as
+	// openshell.admin's (checkFloorPack). Only the managed gateway has a
+	// floor, so it needs a Subject.
+	Floor *config.OpenShellAdminConfig
+	// FloorProfile is not a flag either: the caller's own guardrail
+	// profile whose sandbox section Floor is ("" for the organization's
+	// floor alone). A refusal of the floor's required pack names it.
+	FloorProfile string
+	// UserPack is not a flag: in managed mode, the bytes of the --pack
+	// file the sandbox daemon read as the user (at most MaxPackBytes),
+	// parsed instead of reading the file Pack names. It needs a Subject,
+	// and Pack must then be the path of that file, outside the
+	// administrator's pack folders. The bytes stand only for --pack, never
+	// for openshell.pack or a required pack.
+	UserPack []byte
+	// ProjectReal is not a flag: in managed mode, Project with its
+	// symbolic links resolved by the daemon, as the user.
+	// require_copy_for matches it as well as Project and the links of
+	// Project this process can resolve itself.
+	ProjectReal string
 }
 
 // Authority says how far the admin block can be trusted to bind the user.
@@ -147,26 +178,7 @@ type AdminStatus struct {
 // AdminStatusFor reports whether cfg carries admin constraints and whether
 // they are authoritative.
 func AdminStatusFor(cfg *config.Config) AdminStatus {
-	status := AdminStatus{Authority: AuthorityAdvisory}
-	if cfg == nil {
-		status.Detail = "no configuration"
-		return status
-	}
-	status.Configured = !cfg.OpenShell.Admin.IsZero()
-	switch {
-	case managed.IsManagedEnterprise(cfg.DeploymentMode):
-		status.Authority = AuthorityAuthoritative
-		if status.Configured {
-			status.Detail = "openshell.admin is authoritative: config.yaml is administrator-owned (managed_enterprise)"
-		} else {
-			status.Detail = "no openshell.admin constraints in the administrator-owned config.yaml"
-		}
-	case status.Configured:
-		status.Detail = "openshell.admin is enforced but advisory: you own config.yaml and can edit it"
-	default:
-		status.Detail = "no openshell.admin constraints"
-	}
-	return status
+	return adminStatusFor(cfg, BaseFloor(cfg))
 }
 
 // Setting is one resolved setting and where its value came from.
@@ -332,11 +344,27 @@ type Effective struct {
 	RepoPolicy    *RepoPolicy `json:"repo_policy,omitempty"`
 	RepoTightened []string    `json:"repo_tightened,omitempty"`
 
+	// admin is the floor F (Floor).
 	admin config.OpenShellAdminConfig
 	// requiredPack: Pack is openshell.admin.required_pack, whose posture is
-	// a floor for runtime actions too.
-	requiredPack  bool
+	// a floor for runtime actions too (or a pack at least as strict that
+	// runs in its place on a managed computer, in which case requiredLoaded
+	// is the required pack itself: RequiredPackContent).
+	requiredPack   bool
+	requiredLoaded *Pack
+	// project and projectReal are Flags.Project and Flags.ProjectReal
+	// (requiresCopy), and digest is Digest.
+	project, projectReal string
+	digest               string
+	// view: decoded from the wire form (UnmarshalJSON), without the host
+	// facts runtime decisions need; Allow and the egress decider refuse.
+	view          bool
 	reservedPorts map[int]string
+	// floorProfile is the guardrail profile whose openshell floor applies to
+	// the caller (Flags.FloorProfile; "" outside a managed computer): the
+	// name a refusal of a profile-set rule gives instead of the
+	// openshell.admin key.
+	floorProfile string
 	// policySources: see PolicySources.
 	policySources []string
 	home          string
@@ -353,6 +381,18 @@ type Effective struct {
 	// decider is the egress decider without unblocks (EgressDecider(nil))
 	// that DecideEgress and the unblock and approval checks ask.
 	decider *egress.Decider
+}
+
+// RequiredPackContent is openshell.admin.required_pack when the run uses a
+// pack at least as strict in its place (nil when the run's pack is the
+// required one, or none is required). A managed computer's sandbox daemon
+// cannot read the administrator's pack folder, so the gateway sends it the
+// required pack with the answer (AuthorityPack).
+func (e *Effective) RequiredPackContent() *Pack {
+	if e == nil || !e.requiredPack || e.requiredLoaded == nil || e.requiredLoaded == e.Pack {
+		return nil
+	}
+	return e.requiredLoaded
 }
 
 // explainOrder is the order Explain reports settings in.
@@ -405,12 +445,21 @@ type resolver struct {
 	packLayer layer
 	userPack  bool // the pack was selected by the user or a flag
 	// required: the pack is openshell.admin.required_pack, whose posture
-	// is a floor for user keys and flags.
-	required bool
+	// is a floor for user keys and flags; requiredLoaded is that pack.
+	required       bool
+	requiredLoaded *Pack
 	// managed: managed_enterprise, where a custom required pack must be an
 	// administrator-owned file.
-	managed    bool
-	violations []Violation
+	managed bool
+	// subject is the account the run is for (Flags.Subject), and explicit
+	// says the caller named it: the managed gateway resolving for a peer.
+	subject  Subject
+	explicit bool
+	// packBytes are Flags.UserPack, read for the --pack reference
+	// packBytesRef (loadSelected) while the run keeps that --pack.
+	packBytes    []byte
+	packBytesRef string
+	violations   []Violation
 	// loaded caches the packs this Resolve read (loadPack).
 	loaded map[packCacheKey]*Pack
 	// firewallFile is the host egress firewall configuration
@@ -421,7 +470,21 @@ type resolver struct {
 	// repoRequested the value each setting it tightened had before.
 	repo          *RepoPolicy
 	repoRequested map[string]string
+	// repoMount: on a managed computer the repository policy asked for a
+	// live mount, which the copy-only rule clamps (refuseRepoLoosening).
+	repoMount bool
+	// floorProfile is Flags.FloorProfile.
+	floorProfile string
 }
+
+// ConstraintManagedCopyOnly is the constraint of a managed computer's
+// workdir.mode: managed computers run every sandbox on a copy of the
+// project (SPEC D2). A live mount asked for (a repository policy, a pack, a
+// configuration key) is clamped to copy with ReasonManagedCopyOnly.
+const ConstraintManagedCopyOnly = "defenseclaw.managed.copy_only"
+
+// ReasonManagedCopyOnly is the text of the managed copy-only clamp.
+const ReasonManagedCopyOnly = "this computer is managed by your organization: sandboxes work on a copy of the project, never a live mount"
 
 const requiredPackConstraint = "openshell.admin.required_pack"
 
@@ -450,27 +513,58 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 	if err := validateWorkdirGlobs(o); err != nil {
 		return nil, nil, err
 	}
-	home, _ := userHomeDir()
+	subject, err := subjectOf(flags.Subject)
+	if err != nil {
+		return nil, nil, err
+	}
+	floor := BaseFloor(cfg)
+	if flags.Floor != nil {
+		floor = cloneFloor(*flags.Floor)
+	}
 	r := &resolver{
-		admin:        o.Admin,
+		admin:        floor,
 		managed:      managed.IsManagedEnterprise(cfg.DeploymentMode),
+		subject:      subject,
+		explicit:     flags.Subject != nil,
 		firewallFile: cfg.Firewall.ConfigFile,
+		floorProfile: strings.TrimSpace(flags.FloorProfile),
 		eff: &Effective{
-			Admin:         AdminStatusFor(cfg),
-			admin:         o.Admin,
-			home:          home,
+			Admin:         adminStatusFor(cfg, floor),
+			admin:         floor,
+			home:          subject.Home,
+			project:       flags.Project,
+			projectReal:   flags.ProjectReal,
 			hostNames:     ownHostNames(),
 			settings:      make(map[string]Setting),
 			reservedPorts: reservedPorts(cfg, flags),
+			floorProfile:  strings.TrimSpace(flags.FloorProfile),
 		},
 	}
+	if flags.UserPack != nil {
+		r.packBytes, r.packBytesRef = flags.UserPack, strings.TrimSpace(flags.Pack)
+	}
+	if err := r.checkSubjectPack(cfg, flags); err != nil {
+		return nil, nil, err
+	}
+	if flags.Floor != nil {
+		// Each create re-checks what ensure and the load checked: the
+		// pack files may have changed since.
+		if err := r.checkFloorPack(o, cfg.OpenShell.Admin); err != nil {
+			return nil, nil, err
+		}
+	}
 	flags = r.dropLockedFlags(o, flags)
+	if strings.TrimSpace(flags.Pack) == "" {
+		// A dropped --pack takes its bytes with it: they never stand in
+		// for the configured pack the run falls back to (GAP-0073).
+		r.packBytes, r.packBytesRef = nil, ""
+	}
 
 	pack, err := r.selectPack(o, flags)
 	if err != nil {
 		return nil, nil, err
 	}
-	r.eff.Pack, r.eff.requiredPack = pack, r.required
+	r.eff.Pack, r.eff.requiredPack, r.eff.requiredLoaded = pack, r.required, r.requiredLoaded
 	r.refuseRepoLoosening(flags.RepoPolicy)
 	r.resolveProfile(o, flags)
 	r.resolveYolo(o, flags)
@@ -505,8 +599,14 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 		r.eff.HookOnSilence = OnSilenceStop
 		r.set("hooks.on_silence", OnSilenceStop, r.tightened("hooks.on_silence"))
 	}
+	if err := r.applyFloor(); err != nil {
+		return nil, nil, err
+	}
 	r.finishRepo()
 	r.eff.policySources = r.policySources(o)
+	if r.eff.digest, err = r.eff.computeDigest(); err != nil {
+		return nil, nil, err
+	}
 	return r.eff, r.violations, nil
 }
 
@@ -529,14 +629,14 @@ func (e *Effective) PolicySources() []string {
 
 func (r *resolver) policySources(o config.OpenShellConfig) []string {
 	var sources []string
-	if dir, err := expandHome(strings.TrimSpace(o.PackDir)); err == nil && filepath.IsAbs(dir) {
+	if dir, err := expandHome(strings.TrimSpace(o.PackDir), r.subject.Home); err == nil && filepath.IsAbs(dir) {
 		sources = append(sources, filepath.Clean(dir))
 	}
 	for _, ref := range []string{o.Pack, r.admin.RequiredPack} {
 		if ref = strings.TrimSpace(ref); ref == "" || IsBuiltin(ref) {
 			continue
 		}
-		if file, err := packFilePath(ref, o.PackDir); err == nil {
+		if file, err := packFilePath(ref, o.PackDir, r.subject.Home); err == nil {
 			sources = appendUnique(sources, file)
 		}
 	}
@@ -565,6 +665,24 @@ func validateFlags(flags Flags) error {
 	}
 	if flags.Project != "" && !filepath.IsAbs(flags.Project) {
 		return fmt.Errorf("sandbox policy: project path %q must be absolute", flags.Project)
+	}
+	if flags.ProjectReal != "" && !filepath.IsAbs(flags.ProjectReal) {
+		return fmt.Errorf("sandbox policy: resolved project path %q must be absolute", flags.ProjectReal)
+	}
+	if flags.Floor != nil && flags.Subject == nil {
+		// A floor comes from the managed gateway, which resolves for a
+		// peer: never judge "~/" and pack ownership as its own account.
+		return errors.New("sandbox policy: an organization floor needs the account it is for")
+	}
+	if flags.UserPack != nil {
+		switch ref := strings.TrimSpace(flags.Pack); {
+		case flags.Subject == nil:
+			return errors.New("sandbox policy: pack bytes need the account that read them")
+		case ref == "" || IsBuiltin(ref):
+			return errors.New("sandbox policy: pack bytes need the --pack reference of a custom pack")
+		case len(flags.UserPack) > MaxPackBytes:
+			return packErr(ref, "", "too_large", "pack exceeds %d bytes", MaxPackBytes)
+		}
 	}
 	for _, port := range flags.HostPorts {
 		if port < 1 || port > 65535 {
@@ -788,7 +906,7 @@ func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, err
 	}
 	if required := strings.TrimSpace(r.admin.RequiredPack); required != "" {
 		// In managed_enterprise config.yaml is administrator-owned; a pack
-		// file the user can write must not stand in for it (LoadTrusted).
+		// file the user can write must not stand in for it (loadTrusted).
 		pack, err := r.loadPack(required, o.PackDir, r.managed)
 		if err != nil {
 			return nil, fmt.Errorf("sandbox policy: openshell.admin.required_pack: %w", err)
@@ -797,31 +915,72 @@ func (r *resolver) selectPack(o config.OpenShellConfig, flags Flags) (*Pack, err
 			return nil, fmt.Errorf("sandbox policy: openshell.admin.required_pack %s has digest %s, not the pinned openshell.admin.required_pack_digest %s",
 				pack.Name, pack.Digest, digest)
 		}
-		r.required = true
-		r.packLayer = layer{SourcePack, "pack " + pack.Name}
+		r.required, r.requiredLoaded = true, pack
 		if ref != "" && ref != required {
 			// Another reference to the same content (a path to the
 			// required file) is not a loosening.
-			chosen, err := r.loadPack(ref, o.PackDir, false)
-			if err != nil || chosen.Digest != pack.Digest {
-				r.violate(Violation{
-					Key: "pack", Source: from.source, Attempted: ref, Enforced: pack.Name,
-					Constraint: requiredPackConstraint,
-					Detail:     "your organization requires the " + pack.Name + " sandbox pack",
-				})
+			chosen, err := r.loadSelected(o, ref, from.source == SourceFlag)
+			switch {
+			case err == nil && chosen.Digest == pack.Digest:
+			case err == nil && r.managed && looserPackKey(chosen, pack, networkForProfile(chosen.Profile())) == "":
+				// On a managed computer a pack at least as strict as the
+				// required one in every setting runs instead: it only
+				// tightens, and its posture is the floor (GAP-0537).
+				r.packLayer = layer{SourcePack, "pack " + chosen.Name}
+				r.set("pack", chosen.Name, from)
+				return chosen, nil
+			default:
+				r.violate(r.requiredPackRefusal(from.source, ref, pack, chosen, err))
 			}
 		}
+		r.packLayer = layer{SourcePack, "pack " + pack.Name}
 		r.setClamped("pack", pack.Name, ref, requiredPackConstraint)
 		return pack, nil
 	}
-	pack, err := r.loadPack(ref, o.PackDir, false)
+	if ref == "" {
+		ref = r.defaultPack()
+	}
+	pack, err := r.loadSelected(o, ref, from.source == SourceFlag)
 	if err != nil {
-		return nil, fmt.Errorf("sandbox policy: %s: %w", from.origin, err)
+		err = fmt.Errorf("sandbox policy: %s: %w", from.origin, err)
+		if from.source == SourceFlag {
+			// The pack the subject named could not be loaded: theirs to fix.
+			err = &InputError{Err: err}
+		}
+		return nil, err
 	}
 	r.userPack = from.source == SourceUser || from.source == SourceFlag
 	r.packLayer = layer{SourcePack, "pack " + pack.Name}
 	r.set("pack", pack.Name, from)
 	return pack, nil
+}
+
+// requiredPackRefusal is the Violation of a pack the run selected (ref,
+// loaded as chosen unless loadErr) in place of the required pack. Outside
+// managed computers the run goes ahead with the required pack. On a managed
+// computer only a pack at least as strict may replace it, so a looser one
+// refuses the run, naming the caller's own profile and the setting it
+// loosens (GAP-0537).
+func (r *resolver) requiredPackRefusal(from Source, ref string, required, chosen *Pack, loadErr error) Violation {
+	who := "your organization requires"
+	if r.floorProfile != "" {
+		who = "your profile " + r.floorProfile + " requires"
+	}
+	v := Violation{
+		Key: "pack", Source: from, Attempted: ref, Enforced: required.Name, Constraint: requiredPackConstraint,
+		Detail: who + " the " + required.Name + " sandbox pack",
+	}
+	if !r.managed {
+		return v
+	}
+	v.Fatal, v.Enforced = true, ""
+	if loadErr != nil {
+		v.Detail += " or a stricter one, and " + ref + " could not be loaded to compare it"
+		return v
+	}
+	v.Detail += " or a stricter one; the " + chosen.Name + " pack is looser in " +
+		looserPackKey(chosen, required, networkForProfile(chosen.Profile()))
+	return v
 }
 
 func (r *resolver) resolveProfile(o config.OpenShellConfig, flags Flags) {
@@ -1029,6 +1188,22 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 	}
 	mount := mode == config.OpenShellWorkdirMount
 	switch {
+	case r.managed:
+		// Managed computers are copy-only (SPEC D2): whatever asked for a
+		// live mount, the agent works on a copy.
+		requested := ""
+		if mount || r.repoMount {
+			requested = config.OpenShellWorkdirMount
+		}
+		r.eff.settings["workdir.mode"] = Setting{Key: "workdir.mode", Value: config.OpenShellWorkdirCopy, Source: SourceAdmin,
+			Origin: ConstraintManagedCopyOnly, Requested: requested}
+		if mount && r.attempted(from) {
+			r.violate(Violation{
+				Key: "workdir.mode", Source: from.source, Attempted: mode, Enforced: config.OpenShellWorkdirCopy,
+				Constraint: ConstraintManagedCopyOnly, Message: ReasonManagedCopyOnly,
+			})
+		}
+		mode = config.OpenShellWorkdirCopy
 	case mount && flags.MountUnsupported != "":
 		// Before the administrator's clamps: whatever they say, the
 		// gateway's compute driver cannot mount the project.
@@ -1042,14 +1217,14 @@ func (r *resolver) resolveWorkspace(o config.OpenShellConfig, flags Flags) {
 		r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, requiredPackConstraint,
 			"the required "+pack.Name+" sandbox pack works on a copy of the project")
 		mode = config.OpenShellWorkdirCopy
-	case mount && len(r.admin.RequireCopyFor) > 0 && flags.Project == "":
+	case mount && len(r.admin.RequireCopyFor) > 0 && flags.Project == "" && flags.ProjectReal == "":
 		// Without the project path the require_copy_for check cannot
 		// pass, so fail toward copy mode.
 		r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, "openshell.admin.require_copy_for",
 			"no project folder was given to check against the folders your organization requires copy mode for")
 		mode = config.OpenShellWorkdirCopy
 	case mount:
-		if pattern := r.eff.requiresCopy(flags.Project); pattern != "" {
+		if pattern := r.eff.requiresCopy(cmp.Or(flags.Project, flags.ProjectReal)); pattern != "" {
 			r.clamp("workdir.mode", mode, config.OpenShellWorkdirCopy, from, "openshell.admin.require_copy_for",
 				"your organization requires copy mode for projects matching "+pattern)
 			mode = config.OpenShellWorkdirCopy
@@ -1424,6 +1599,12 @@ func (r *resolver) resolveMCP(o config.OpenShellConfig, flags Flags) {
 		for _, port := range req.ports {
 			if err := r.eff.hostPortAllowed(port); err != nil {
 				r.record(err, req.from.source)
+				if r.managed && req.from.source == SourceFlag && len(r.violations) > 0 {
+					// A managed computer refuses a --host-port its policy does
+					// not open instead of starting the sandbox without it
+					// (GAP-0558, GAP-0580).
+					r.violations[len(r.violations)-1].Fatal = true
+				}
 				refused = true
 				continue
 			}

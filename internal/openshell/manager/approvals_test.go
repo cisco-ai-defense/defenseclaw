@@ -296,7 +296,7 @@ func TestApprovalAlwaysDecisions(t *testing.T) {
 		t.Fatalf("unknown id: %v", err)
 	}
 	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.AllowUnblock = boolPtr(false) })
-	if apiErr := wantCode(t, e.decide(byHost["c.example.org"], approveAlways), sandboxapi.CodeAdminViolation); !strings.Contains(apiErr.Message, sandboxapi.AdminMessage) {
+	if apiErr := wantCode(t, e.decide(byHost["c.example.org"], approveAlways), sandboxapi.CodeAdminViolation); !sandboxapi.IsPolicyRefusal(apiErr.Message) {
 		t.Fatalf("message = %q", apiErr.Message)
 	}
 	if len(e.persist.allowed()) != 1 {
@@ -1003,6 +1003,38 @@ func TestHostPortAsksReachTheAgent(t *testing.T) {
 	}
 	if got := e.m.EgressRefusals(b.ID, "hpbox"); len(got) != 1 || got[0].Note != NoteDeclined {
 		t.Fatalf("refusals after the reject = %+v", got)
+	}
+}
+
+// GAP-0468: under user_approvals: none a declared host port raises no ask
+// the user can't answer: no ask is listed, the feed line names the port and
+// carries the organization's refusal, the agent hears that nobody here can
+// approve it, and the sandbox view says asks are refused.
+func TestHostPortUnderApprovalsNoneIsRefused(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) {
+		c.OpenShell.Admin.UserApprovals = config.OpenShellUserApprovalsNone
+		c.OpenShell.Admin.RequestAccess = "it-security@example.com"
+	})
+	e.live(sandboxapi.CreateRequest{Name: "nonebox", HostPorts: []int{38830}})
+	b := e.binding("nonebox")
+	e.ocsf("nonebox", "CONFIG:PUBLISHED [INFO] Policy DNS mapped host.openshell.internal resolved=127.0.0.1 synthetic=198.18.0.2 ports=18971,18972 mapping_id=m1", time.Now())
+	e.ocsf("nonebox", "NET:OPEN [MED] DENIED /usr/bin/curl(0) -> 198.18.0.2:38830 [reason:transparent_tcp_mapping_denied]", time.Now())
+	if asks, _ := e.m.Approvals(t.Context(), "nonebox"); len(asks) != 0 {
+		t.Fatalf("asks under user_approvals: none = %+v", asks)
+	}
+	quote := "\nRequest access: it-security@example.com. Quote: rule user_approvals, host host.openshell.internal:38830, sandbox nonebox."
+	got := e.m.EgressRefusals(b.ID, "nonebox")
+	if len(got) != 1 || got[0].Note != NoteAccessRefused || !strings.Contains(got[0].Remedy, "the user can't approve this. "+quote[1:]) {
+		t.Fatalf("refusals = %+v", got)
+	}
+	if !slices.ContainsFunc(e.events("nonebox", sandboxapi.ActivityEgressBlocked, ""), func(ev sandboxapi.ActivityEvent) bool {
+		return ev.Port == 38830 && strings.Contains(ev.Message, "stays closed: your profile doesn't let you approve") &&
+			sandboxapi.IsPolicyRefusal(ev.Refusal) && strings.HasSuffix(ev.Refusal, quote)
+	}) {
+		t.Fatalf("feed = %+v", e.events("nonebox", sandboxapi.ActivityEgressBlocked, ""))
+	}
+	if v := e.get("nonebox"); v.UserApprovals != config.OpenShellUserApprovalsNone {
+		t.Fatalf("view user_approvals = %q", v.UserApprovals)
 	}
 }
 

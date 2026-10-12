@@ -80,19 +80,33 @@ func lsaAccountByName(name string) (windowsAccount, error) {
 }
 
 func lsaAccount(sid *windows.SID) (windowsAccount, error) {
-	account, _, use, err := sid.LookupAccount("")
+	account, domain, use, err := sid.LookupAccount("")
 	if err != nil {
 		return windowsAccount{}, err
 	}
+	// The name the hook path gives the account, not the UPN its user signed
+	// in with (GAP-0533).
+	account = useridentity.CanonicalWindowsAccountName(sid.String(), account, domain)
 	return windowsAccount{SID: sid.String(), Name: sanitizeLLMEventUser(account), User: use == windows.SidTypeUser}, nil
 }
 
-// profileExplainUPNWait is how long explain waits for an AD account's UPN, so
-// a users assignment by UPN is reported as a request would match it.
+// profileExplainUPNWait is how long explain waits for TranslateNameW: for an
+// AD account's UPN, and to turn a UPN it was given into
+// DOMAIN\sAMAccountName.
 const profileExplainUPNWait = 5 * time.Second
 
-// profileExplainDirectoryFacts resolves the facts a verified request from
-// sid carries: the Windows identity store plus the guardian identity spool.
+// profileExplainDirectoryFacts returns the facts a verified request from sid
+// carries (the Windows identity store plus the guardian identity spool) from
+// the cache requests read, after a lookup of explain's own
+// (explainDirectoryFacts). A new sign-in token's groups replace the cached
+// ones first, as they do for a request (GAP-1027). An AD account's UPN is
+// asked for first, within profileExplainUPNWait: the answer is kept, so the
+// lookup that refreshes the cache has it even where requests do not wait
+// for it (no users or groups assignment).
 var profileExplainDirectoryFacts = func(id string) (useridentity.DirectoryFacts, error) {
-	return resolveWindowsDirectoryFacts(id, profileExplainUPNWait)
+	sid := strings.ToUpper(strings.TrimSpace(id))
+	useridentity.WindowsDirectoryFacts(sid, profileExplainUPNWait)
+	cache := peerDirectoryCache()
+	forgetOnSpoolGroupChange(cache, sid, time.Now())
+	return explainDirectoryFacts(cache, sid)
 }

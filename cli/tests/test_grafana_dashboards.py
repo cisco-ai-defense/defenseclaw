@@ -1046,6 +1046,27 @@ def test_low_risk_dashboard_labels_match_their_queries() -> None:
     assert vendors["transformations"][0]["options"]["renameByName"]["Value"] == "signals/$__range"
 
 
+def test_local_rules_alert_on_sustained_sandbox_errors() -> None:
+    # GAP-0078: the Splunk Observability detector had a local Prometheus twin
+    # for egress blocks only. The phase label is not projected, so it keeps
+    # its canonical name defenseclaw_sandbox_phase_to.
+    import yaml
+
+    rules = yaml.safe_load(
+        (DASHBOARD_DIR.parents[1] / "prometheus/rules/alerts.yml").read_text(encoding="utf-8")
+    )
+    alerts = {r["alert"]: r for group in rules["groups"] for r in group["rules"] if "alert" in r}
+    errors = alerts["DefenseClawSandboxErrorsSustained"]
+    assert errors["expr"] == (
+        "sum by (connector) (rate(defenseclaw_sandbox_transitions_total"
+        '{defenseclaw_sandbox_phase_to="error"}[5m])) * 60 > 0.2'
+    )
+    assert errors["for"] == "10m"
+    assert errors["labels"] == {"severity": "warning", "surface": "sandbox"}
+    assert "{{ $labels.connector }}" in errors["annotations"]["summary"]
+    assert errors["annotations"]["description"].strip()
+
+
 def test_ai_discovery_dashboard_shows_sandbox_signals() -> None:
     # GAP-0109, GAP-0114: what discovery found inside a sandbox is told apart
     # from the host's signals, by the sandbox name the records carry.

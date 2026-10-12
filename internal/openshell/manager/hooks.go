@@ -67,6 +67,11 @@ type HookDecision struct {
 	// (authentication_failed, rate_limit, ...) and the HTTP status.
 	ModelError  string
 	ModelStatus int
+	// CallRef is the content reference of the call (ContentRef of session,
+	// tool and tool input) when a managed relay delivered the decision:
+	// the tool input stays on the managed gateway, so ToolInput is empty
+	// and content-keyed connectors pair calls by CallRef.
+	CallRef string
 }
 
 // ObserveIngress records an authenticated ingress request, the hook-coverage
@@ -207,7 +212,7 @@ func (m *Manager) ObserveHookDecision(d HookDecision) {
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityToolAsked, Sandbox: d.SandboxName, Tool: d.Tool,
 			Event: d.Event, Severity: d.Severity, Reason: truncate(reason, 300), Message: msg})
 	}
-	if severity := flaggedSeverity(d.Severity); severity != "" && !blocked && !asked {
+	if severity := flaggedSeverity(d.Severity); severity != "" && !blocked && !asked && flaggedVerdict(d.Action, reason) {
 		// A verdict that let the tool call run but flagged it (an alert,
 		// or a block the event could not enforce) is a finding of the
 		// session: the feed shows every one.
@@ -368,6 +373,15 @@ func isConfirmAction(action string) bool {
 		return true
 	}
 	return false
+}
+
+// flaggedVerdict reports a verdict that let the call run but flagged it: an
+// alert action, or a reason the gateway wrote for a flagged allow
+// (sandboxapi.FlaggedReason). A MEDIUM call that stayed below the profile's
+// alert threshold is an allow like any other and no finding of the session
+// (GAP-0634, GAP-0640).
+func flaggedVerdict(action, reason string) bool {
+	return strings.EqualFold(strings.TrimSpace(action), "alert") || sandboxapi.FlaggedReason(reason)
 }
 
 // flaggedSeverity is a verdict's severity when it carries a finding of the

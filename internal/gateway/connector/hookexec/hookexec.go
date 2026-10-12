@@ -1485,11 +1485,17 @@ const unixUnenrolledAccountExplanation = "this account is not enrolled in Defens
 	"DefenseClaw enrolls a new account within about five minutes of its first sign-in, so try again then; " +
 	"if this continues, the policy may exclude this account, so ask your administrator"
 
-// unenrolledAccountExplanation is why an unenrolled account's call is blocked.
-const unenrolledAccountExplanation = "this account is not enrolled in DefenseClaw on this computer; the administrator's " +
-	"policy has not enrolled it yet or excludes it. Windows enrolls an account while it is signed in to the desktop " +
-	"(at the console or over Remote Desktop); an SSH, scheduled-task or runas session does not enroll it, so sign " +
-	"in to the desktop once, or ask your administrator if this continues"
+// unenrolledAccountExplanation is why an unenrolled Windows account's call is
+// blocked. It leads with the next step and the wait, because Claude Code
+// shows only the first line's first 80-odd characters (GAP-0385): a new
+// account waited 4-7 minutes behind "this account is not enrolled in
+// DefenseClaw on t...". Enrollment follows the desktop sign-in and, for
+// Claude Code, its first start, which records the build the enumerator
+// verifies; the next cycle (within five minutes) then enrolls the account.
+const unenrolledAccountExplanation = "this account is not enrolled yet; restart the agent in 5 minutes. " +
+	"DefenseClaw enrolls an account within 5 minutes of its desktop sign-in (console or Remote Desktop; " +
+	"not SSH, a scheduled task or runas) and, for Claude Code, of its first start. " +
+	"If this continues, the policy may exclude this account: ask your administrator"
 
 // failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
 // an account the administrator has not enrolled (yet) or excludes, and says
@@ -1516,7 +1522,9 @@ func failUnenrolled(opts Options, sp spec, reason string) int {
 	if sp.connector == "claudecode" && managedStandaloneHook(opts) {
 		return emitManagedClaudeBlock(opts, explanation)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s (%s)\n", sp.subject, why, reason)
+	// The agent shows this line as the hook error, cut short: the explanation
+	// leads, and the reason code stays in the hook-failure log (GAP-0385).
+	fmt.Fprintln(opts.Stderr, explanation)
 	if sp.connector == "codex" {
 		return emitCodexBlock(opts, explanation)
 	}

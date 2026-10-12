@@ -32,6 +32,14 @@ var verdictLeads = []string{
 // GAP-1885 ("Blocked by DefenseClaw rule ID: Title. ...").
 var verdictVerbs = []string{"Blocked by", "Held for approval by", "Allowed but flagged by", "Flagged by"}
 
+// FlaggedReason reports a verdict reason that says the call was allowed but
+// flagged ("Allowed but flagged by DefenseClaw ...", or the older "Flagged
+// by DefenseClaw ...").
+func FlaggedReason(reason string) bool {
+	r := strings.TrimSpace(reason)
+	return strings.HasPrefix(r, "Allowed but flagged by DefenseClaw") || strings.HasPrefix(r, "Flagged by DefenseClaw")
+}
+
 // VerdictRule reads the leading rule out of a sandbox hook verdict's
 // reason: its ID and title (title "" when the reason leaves it out). ok is
 // false for a reason that is no DefenseClaw verdict reason; id is "" for

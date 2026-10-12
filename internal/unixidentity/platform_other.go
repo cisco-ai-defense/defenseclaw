@@ -40,4 +40,16 @@ func platformLocalAccounts(context.Context) (map[string]int, error) {
 	return nil, errors.New("unixidentity: no local account reader on this platform")
 }
 
+func platformLocalGroups(context.Context) (map[string]int, error) {
+	return nil, errors.New("unixidentity: no local group reader on this platform")
+}
+
 func platformDirectoryConfigured() bool { return true }
+
+func platformOpenDirectoryNodeStates(context.Context) (string, error) {
+	return "", errors.New("unixidentity: no Open Directory on this platform")
+}
+
+func platformMobileAccounts(context.Context) (map[string]string, error) {
+	return nil, errors.New("unixidentity: no local directory node on this platform")
+}

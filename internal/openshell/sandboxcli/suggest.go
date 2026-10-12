@@ -682,6 +682,11 @@ func (a *App) suggestionDiff(ctx context.Context, api API, sandbox string, s *su
 	if err != nil {
 		return nil, apiError(err)
 	}
+	if current.Managed != nil {
+		// The organization's floor lives in a configuration the user cannot
+		// read: compare the reached hosts with the floor the daemon reports.
+		return managedSuggestionDiff(against, current, s), nil
+	}
 	dir, err := os.MkdirTemp("", "dc-suggest-")
 	if err != nil {
 		return nil, err

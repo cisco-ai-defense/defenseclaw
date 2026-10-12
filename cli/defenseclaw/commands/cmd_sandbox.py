@@ -484,7 +484,9 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         long=(
             "Lifts a block of the blocklist feed or of the profile's default (IP addresses under open, "
             "hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for every "
-            "sandbox (--always). It cannot lift a block-list entry: remove your own with "
+            "sandbox (--always). With --always, --sandbox NAME names the sandbox whose policy checks the "
+            "unblock; on a managed computer, which keeps it for you through one of your sandboxes, your only "
+            "sandbox is used without it. It cannot lift a block-list entry: remove your own with "
             "`defenseclaw sandbox policy block --remove HOST`; a pack's, the repository policy's "
             "(.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open a private network "
             "(add the exact host to openshell.egress.allow), this machine (run the sandbox with --host-port "
@@ -492,7 +494,12 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
         ),
         args=(_Arg("host"),),
         flags=(
-            _Flag("sandbox", "string", "unblock for this sandbox only", metavar="NAME"),
+            _Flag(
+                "sandbox",
+                "string",
+                "unblock for this sandbox only (with --always: the sandbox whose policy checks it)",
+                metavar="NAME",
+            ),
             _Flag("always", "bool", "unblock for every sandbox from now on"),
         ),
     ),
@@ -551,7 +558,10 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     _Cmd(
         ("policy", "explain"),
         "Show every resolved setting and where it comes from (pack, config, flag, organization)",
-        flags=_policy_flags(),
+        flags=(
+            *_policy_flags(),
+            _Flag("sources", "bool", "on a managed computer, say where each value of your policy comes from"),
+        ),
     ),
     _Cmd(
         ("policy", "test"),
@@ -645,13 +655,14 @@ SANDBOX_COMMANDS: tuple[_Cmd, ...] = (
     ),
     _Cmd(
         ("image", "rm"),
-        "Remove the harnesses' images (on a Mac also their MicroVM disks)",
+        "Remove the harnesses' images (on a MicroVM gateway also their disks)",
         long=(
             "Removes the images DefenseClaw built for the named harnesses under this data directory: the "
             "harness images and, on the MicroVM driver, the run images and aliases made from them, and "
-            "forgets their records. On a Mac it also removes the MicroVM disks OpenShell prepared from them "
-            "(about 5 GB each), once Docker no longer has their images; that needs the DefenseClaw daemon's "
-            "list of sandboxes. It refuses, removing nothing, while a sandbox is recorded with one of the "
+            "forgets their records. On a MicroVM gateway (a Mac, or Linux on the vm driver) it also removes the "
+            "MicroVM disks OpenShell prepared from them (about 5 GB each), once Docker no longer has their "
+            "images; that needs the DefenseClaw daemon's list of sandboxes. It refuses, removing nothing, "
+            "while a sandbox is recorded with one of the "
             "images: delete that sandbox first. The next run of the harness builds its image again."
         ),
         args=(_Arg("harnesses", many=True),),

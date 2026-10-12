@@ -330,9 +330,10 @@ function Initialize-WrapperLog {
     try {
         if (-not (Test-Path -LiteralPath $directory)) {
             # Same descriptor the lifecycle uses: SYSTEM and Administrators
-            # write, users read.
+            # write, Administrators and Event Log Readers read. The results
+            # name other accounts, so standard users may not read them.
             $security = [System.Security.AccessControl.DirectorySecurity]::new()
-            $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)')
+            $security.SetSecurityDescriptorSddlForm('O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;S-1-5-32-573)')
             [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($directory), $security)
         }
         if (Test-DefenseClawAdminOnlyItem -Path $directory) {

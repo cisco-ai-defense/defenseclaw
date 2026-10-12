@@ -175,7 +175,7 @@ func TestGatewayConfigSwitchesToMicroVMs(t *testing.T) {
 	for _, want := range []string{"edit " + path + " (a timestamped backup is kept)", `set [openshell.gateway] compute_driver = "vm"`,
 		"set [openshell.drivers.vm] sandbox_uid = 501", "set [openshell.drivers.vm] overlay_disk_mib = 16384", `+ compute_driver = "vm"`, "+ sandbox_gid = 20",
 		"then restart the gateway (brew services restart nvidia/openshell/openshell) on the vm compute driver; running sandboxes stop, and sandboxes " +
-			"made on the docker driver cannot start again unless it is switched back (one gateway runs one driver)"} {
+			"made on the docker driver cannot start again (one gateway runs one driver), and OpenShell drops them a few minutes later with any work not brought back"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("plan lacks %q:\n%s", want, text)
 		}

@@ -33,7 +33,8 @@ const (
 	// daemon.
 	DriverDocker ComputeDriver = "docker"
 	// DriverVM runs each sandbox in its own MicroVM (libkrun on Apple's
-	// Hypervisor), the driver a Mac runs sandboxes with. OpenShell calls it
+	// Hypervisor on a Mac, on KVM on Linux), the driver a Mac runs sandboxes
+	// with and a Linux host with /dev/kvm may. OpenShell calls it
 	// experimental.
 	DriverVM ComputeDriver = "vm"
 )

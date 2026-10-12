@@ -88,6 +88,7 @@ locals {
       { property = "connector", alias = "harness connector" },
       { property = "source", alias = "egress source" },
       { property = "decision", alias = "egress decision" },
+      { property = "os.type", alias = "operating system" },
     ])
   }
 
@@ -669,6 +670,23 @@ locals {
         D = (A if C is not None else B).sum().sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Sandbox egress blocked')
       EOT
     }
+    sandbox_hosts_reporting = {
+      name        = "Hosts reporting sandbox gauge"
+      description = "Hosts whose gateway reports the sandbox gauge (latest value), including hosts whose value is 0 (sandbox-capable, none running). A managed computer that cannot run OpenShell sandboxes reports none."
+      program     = <<-EOT
+        A = data('defenseclaw.sandbox.active', rollup='latest').sum(by=['host.name']).count().publish(label='Hosts reporting sandbox gauge')
+      EOT
+    }
+    sandbox_error_transitions_31d = {
+      name        = "Sandbox errors"
+      description = "Sandbox lifecycle transitions into the error phase in the selected time range, summed over harness connectors."
+      program     = <<-EOT
+        A = data('defenseclaw.sandbox.transitions', filter=filter('defenseclaw.sandbox.phase.to', 'error'), extrapolation='zero', rollup='delta')
+        B = data('defenseclaw.sandbox.transitions', filter=filter('defenseclaw.sandbox.phase.to', 'error'), extrapolation='zero', rollup='latest')
+        C = A.delta()
+        D = (A if C is not None else B).sum().sum(over=Args.get('ui.dashboard_window', '31d')).publish(label='Sandbox errors')
+      EOT
+    }
     alerts_per_min = {
       name        = "Alerts / min"
       description = "Runtime alert count per minute."
@@ -1129,6 +1147,36 @@ locals {
         A = data('defenseclaw.egress.events', filter=filter('decision', 'block') and filter('source', 'openshell', 'dc-egress-proxy'), rollup='rate').sum(by=['source']).scale(60).publish(label='Sandbox egress blocks / min')
       EOT
     }
+    sandbox_active_by_os = {
+      name        = "Active sandboxes by operating system"
+      description = "Active sandbox gauge grouped by the operating system of the host (os.type). Sandbox and person identities are never metric dimensions."
+      plot_type   = "LineChart"
+      stacked     = false
+      axis_label  = "sandboxes"
+      program     = <<-EOT
+        A = data('defenseclaw.sandbox.active', rollup='latest').sum(by=['os.type']).publish(label='Active sandboxes')
+      EOT
+    }
+    sandbox_active_by_host = {
+      name        = "Active sandboxes by host"
+      description = "Active sandbox gauge grouped by host. A host missing here either runs no sandbox or its gateway stopped reporting."
+      plot_type   = "LineChart"
+      stacked     = false
+      axis_label  = "sandboxes"
+      program     = <<-EOT
+        A = data('defenseclaw.sandbox.active', rollup='latest').sum(by=['host.name']).publish(label='Active sandboxes')
+      EOT
+    }
+    sandbox_error_transitions = {
+      name        = "Sandbox errors by connector"
+      description = "Sandbox lifecycle transitions into the error phase per minute grouped by harness connector."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "errors / min"
+      program     = <<-EOT
+        A = data('defenseclaw.sandbox.transitions', filter=filter('defenseclaw.sandbox.phase.to', 'error'), rollup='rate').sum(by=['connector']).scale(60).publish(label='Sandbox errors / min')
+      EOT
+    }
     egress_by_decision = {
       name        = "Egress decisions"
       description = "Egress event rate grouped by decision."
@@ -1578,6 +1626,9 @@ locals {
     sandbox_egress_source_decision  = "source"
     sandbox_blocks_by_connector     = "connector"
     sandbox_blocks_by_source        = "source"
+    sandbox_active_by_os            = "os.type"
+    sandbox_active_by_host          = "host.name"
+    sandbox_error_transitions       = "connector"
     alerts_by_type_severity         = "alert.severity"
     judge_errors_by_reason          = "judge.reason"
     guardrail_cache                 = "plot_label"
@@ -1725,6 +1776,11 @@ locals {
       { type = "time", key = "sandbox_blocks_by_source", row = 3, column = 6, width = 6, height = 2 },
       { type = "time", key = "sandbox_blocks_by_connector", row = 5, column = 0, width = 6, height = 2 },
       { type = "table", key = "sandbox_egress_mix", row = 5, column = 6, width = 6, height = 2 },
+      { type = "time", key = "sandbox_active_by_os", row = 7, column = 0, width = 6, height = 2 },
+      { type = "time", key = "sandbox_active_by_host", row = 7, column = 6, width = 6, height = 2 },
+      { type = "time", key = "sandbox_error_transitions", row = 9, column = 0, width = 6, height = 2 },
+      { type = "single", key = "sandbox_hosts_reporting", row = 9, column = 6, width = 3, height = 1 },
+      { type = "single", key = "sandbox_error_transitions_31d", row = 9, column = 9, width = 3, height = 1 },
     ]
     executive = [
       { type = "single", key = "executive_verdicts_31d", row = 0, column = 0, width = 2, height = 1 },
@@ -2156,7 +2212,7 @@ resource "signalfx_dashboard" "scanners_findings" {
 
 resource "signalfx_dashboard" "sandboxes" {
   name            = "Sandboxes${local.display_name_suffix}"
-  description     = "OpenShell sandboxes: active sandboxes by connector, phase transitions, and egress decisions by source (OpenShell vs the DefenseClaw egress proxy). Hosts, bytes, findings and health are in the Grafana Sandboxes dashboard."
+  description     = "OpenShell sandboxes: active sandboxes by connector, operating system and host, phase transitions and errors, and egress decisions by source (OpenShell vs the DefenseClaw egress proxy). Profiles, required-sandbox refusals, asks, foreign sandboxes, provisional resolutions and OpenShell drift on managed hosts are log records: see the Grafana Sandboxes dashboard (Managed fleet rows) and the Splunk saved searches DefenseClaw Sandboxes."
   dashboard_group = signalfx_dashboard_group.defenseclaw_o11y.id
   time_range      = "-1h"
   tags            = ["defenseclaw", "sandbox", "openshell", "egress", "otel"]

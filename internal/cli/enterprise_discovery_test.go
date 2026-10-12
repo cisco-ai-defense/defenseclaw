@@ -628,8 +628,8 @@ func TestSecureClientKeepsTheEnterpriseViews(t *testing.T) {
 	root.AddCommand(hook)
 	secureClientHost = func() bool { return false }
 	keepCommandTreeOfMainOnSecureClient(root)
-	if got := len(group.Commands()); got != 1+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || len(hook.Commands()) != 2 {
-		t.Fatalf("standalone groups have %d and %d commands, want the identity views and setup too", got, len(acpGroup.Commands()))
+	if got := len(group.Commands()); got != 3+len(enterpriseIdentityViews) || len(acpGroup.Commands()) != 2 || len(hook.Commands()) != 2 {
+		t.Fatalf("standalone groups have %d and %d commands, want the identity, sandbox and policy views and setup too", got, len(acpGroup.Commands()))
 	}
 	if len(policyGroup.Commands()) != 2 || len(scanGroup.Commands()) != 4 {
 		t.Fatalf("standalone policy %v, scan %v: want policy digest and scan skill|mcp|plugin", policyGroup.Commands(), scanGroup.Commands())

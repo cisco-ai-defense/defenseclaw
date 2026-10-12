@@ -44,15 +44,29 @@ func awaitingSpool(facts useridentity.DirectoryFacts) bool {
 	return currentIdentitySpoolDir() != "" && len(facts.Groups) == 0
 }
 
-// awaitingSpoolUPN marks guardian-backed facts that lack a UPN. On Linux,
-// SSSD names the account before the guardian can read InfoPipe; on a managed
-// Mac, Open Directory supplies groups even when the guardian record is absent.
-// Refresh these answers after the short incomplete lifetime so a restored
-// guardian record does not leave a users-by-UPN assignment on the default
-// profile for the full directory TTL.
+// awaitingSpoolUPN marks guardian-backed facts that are not complete yet, on
+// a gateway that takes them from the guardian's identity spool. On Linux,
+// SSSD names the account before the guardian can read InfoPipe, so the facts
+// lack the UPN (GAP-0334). On a managed Mac, Open Directory supplies groups
+// even when the guardian record is absent, and names an Active Directory
+// account of a bound Mac without its directory, domain or UPN until the
+// guardian's record is merged in; the users entries written as a UPN or
+// DOMAIN\name match through them (GAP-0575). Refresh these answers after the
+// short incomplete lifetime so a restored guardian record does not leave a
+// users-by-UPN assignment on the default profile for the full directory TTL.
+// An account the guardian never names keeps refreshing at that pace, which
+// costs a directory cache read.
 func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
-	return currentIdentitySpoolDir() != "" && facts.UPN == "" &&
-		(facts.Source == useridentity.SourceSSSD || facts.Source == useridentity.SourceMacOSOpenDirectory)
+	if currentIdentitySpoolDir() == "" {
+		return false
+	}
+	switch facts.Source {
+	case useridentity.SourceSSSD:
+		return facts.UPN == ""
+	case useridentity.SourceMacOSOpenDirectory:
+		return facts.UPN == "" || facts.Directory == ""
+	}
+	return false
 }
 
 // spoolRecordNote is the explain note for an account the enumerator has no
@@ -106,6 +120,17 @@ func identitySpoolConnectorEmail(sid, connector string) string {
 		return ""
 	}
 	return record.ConnectorEmails[connector]
+}
+
+// identitySpoolAccountName is the DOMAIN\name the SYSTEM enumerator recorded
+// for sid in its current identity record, or "". It only spells a name the
+// LSA already confirmed for sid (useridentity.SetKnownAccountNameLookup).
+func identitySpoolAccountName(sid string) string {
+	record, ok := readIdentitySpoolFacts(strings.ToUpper(strings.TrimSpace(sid)), time.Now())
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(record.User)
 }
 
 // readIdentitySpoolFactsForAccount rejects a reused uid's old record. A
@@ -357,14 +382,86 @@ func spoolUPNAssignmentWarnings(assignments []config.ProfileAssignment, now time
 // gateway keeps the facts it cached (for up to an hour), status and verify
 // warn directory_lookups_failing, and the reason names the flush.
 
-// openDirectoryGroupsUnavailable is the lookup error for the account of
-// record whose primary group primaryGID Open Directory may not name, or nil.
-// named is asked only for an Active Directory account.
-func openDirectoryGroupsUnavailable(record enterprisehooks.IdentitySpoolRecord, primaryGID string, named func(gid string) bool) error {
-	if record.Facts.Directory != useridentity.DirectoryActiveDirectory || primaryGID == "" || named(primaryGID) {
+//
+// A mobile account keeps the name of its primary group through an outage,
+// though, and lost only its other domain groups: the user got the default
+// profile as "default", explain called its assignment group renamed or
+// deleted, a new sandbox run was refused as a policy change, and the facts
+// held for the full 15 minutes after the domain controller answered again
+// (GAP-0496, GAP-0517). Open Directory itself lists the domain's node Offline
+// then (odutil show nodenames), so an Active Directory account's lookup also
+// fails while it does: requests keep the facts cached before the outage (for
+// up to an hour, then default_lookup_failed, provisional for sandboxes), and
+// a lookup is retried every 15 s. Right after the outage Open Directory may
+// still list the account without its groups for a minute or two, so facts
+// resolved within openDirectorySettleWindow of the node last seen offline are
+// refreshed every 15 s (openDirectorySettling) instead of held for 15 minutes.
+
+// openDirectorySettleWindow is how long after the node was last seen offline
+// an answer is refreshed at the retry pace.
+const openDirectorySettleWindow = 5 * time.Minute
+
+// openDirectoryOfflineAt is when a lookup last found the Active Directory
+// node offline (Unix nanoseconds), 0 when never.
+var openDirectoryOfflineAt atomic.Int64
+
+// openDirectorySettling marks Open Directory facts resolved shortly after the
+// Active Directory node was last seen offline.
+func openDirectorySettling(facts useridentity.DirectoryFacts) bool {
+	at := openDirectoryOfflineAt.Load()
+	if at == 0 || facts.Source != useridentity.SourceMacOSOpenDirectory || facts.ResolvedAt.IsZero() {
+		return false
+	}
+	since := facts.ResolvedAt.Sub(time.Unix(0, at))
+	return since >= 0 && since < openDirectorySettleWindow
+}
+
+// openDirectoryGroupsUnavailable is the lookup error for an Active Directory
+// account whose domain groups Open Directory cannot list now, or nil: the
+// domain's node is offline (offline), or its primary group primaryGID has no
+// name (named). directory says the account is an Active Directory one: the
+// guardian's record says so (record), or, without a record, the account is
+// not one of the local node (a mobile account is not, GAP-0496). A failure is
+// noted for openDirectorySettling; without a current record on a managed Mac
+// it also ends the facts cached before it (identityFactsUnconfirmedError).
+//
+// The unnamed primary group is read with or without the guardian's record.
+// The record is trusted for an hour (identitySpoolMaxAge), so a Mac whose
+// domain controller stayed away longer lost it exactly when Open Directory's
+// own caches ran out (about 45 minutes in): the account then showed its
+// primary group as a bare number, the lookup stopped failing, and the account
+// moved to the default profile as plain "default", not default_lookup_failed,
+// while a new sandbox run was refused as a policy change (GAP-0496, GAP-0517).
+func openDirectoryGroupsUnavailable(record *enterprisehooks.IdentitySpoolRecord, localNode bool, primaryGID string, named func(gid string) bool,
+	offline func() bool, now time.Time) error {
+	if record != nil && record.Facts.Directory != useridentity.DirectoryActiveDirectory || record == nil && localNode {
 		return nil
 	}
-	return fmt.Errorf("the Mac's Open Directory lists this Active Directory account without its domain groups (its primary group %s has "+
-		"no name): the domain controller does not answer, or the Mac still answers from the caches it filled while it did not; "+
-		"once the domain controller answers, run sudo dscacheutil -flushcache; sudo dsmemberutil flushcache", primaryGID)
+	var err error
+	switch {
+	case offline != nil && offline():
+		err = fmt.Errorf("the Mac's Open Directory lists its Active Directory node offline (odutil show nodenames): the domain "+
+			"controller does not answer, so this account's domain groups are unknown; the lookup is retried every %s", identityDirectoryRetry)
+	case primaryGID != "" && !named(primaryGID):
+		err = fmt.Errorf("the Mac's Open Directory lists this directory account without its domain groups (its primary group %s has "+
+			"no name): the domain controller does not answer, or the Mac still answers from the caches it filled while it did not; "+
+			"once the domain controller answers, run sudo dscacheutil -flushcache; sudo dsmemberutil flushcache", primaryGID)
+	default:
+		return nil
+	}
+	openDirectoryOfflineAt.Store(now.UnixNano())
+	if record == nil && currentIdentitySpoolDir() != "" {
+		// The guardian has not confirmed the account for identitySpoolMaxAge:
+		// its own lookups fail while the domain controller does not answer,
+		// and its record ages out. Open Directory answered from its caches
+		// until now, so the facts cached from those answers are no older
+		// than a few minutes, and keeping them for another hour left the
+		// account on its group profile almost two hours into an outage, or
+		// (with explain refreshing them) on plain "default". They go now:
+		// directory-dependent assignments use default_lookup_failed and
+		// sandboxes start provisional (GAP-0496, GAP-0517).
+		return &identityFactsUnconfirmedError{err: fmt.Errorf("the facts cached before are no longer used: the hook guardian has not "+
+			"confirmed this account for %s, and %w", identitySpoolMaxAge, err)}
+	}
+	return err
 }

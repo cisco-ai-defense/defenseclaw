@@ -11,8 +11,36 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
+
+// GAP-0414: the Windows administrator views must resolve the command and
+// parse --user before the existing platform and elevation checks run.
+func TestWindowsEnterpriseAdminUserFiltersAreRegistered(t *testing.T) {
+	resetEnterprisePolicyFlags(t)
+	for _, path := range [][]string{{"sandbox", "list"}, {"policy", "verify"}} {
+		t.Run(strings.Join(path, " "), func(t *testing.T) {
+			group := &cobra.Command{Use: "windows"}
+			group.AddCommand(newEnterpriseIdentityViewCommands("windows")...)
+			cmd, rest, err := group.Find(path)
+			if err != nil || len(rest) != 0 || cmd.Name() != path[1] || cmd.RunE == nil {
+				t.Fatalf("command %v: cmd=%v rest=%v err=%v", path, cmd, rest, err)
+			}
+			if err := cmd.ParseFlags([]string{"--user", `CORP\bob`, "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := cmd.Flags().GetString("user"); err != nil || got != `CORP\bob` {
+				t.Fatalf("--user = %q, %v", got, err)
+			}
+			parent := cmd.Parent()
+			if parent.Annotations[enterpriseIdentityViewAnnotation] == "" && parent.Annotations[secureClientAbsentAnnotation] == "" {
+				t.Fatal("the managed administrator view lacks its Secure Client exclusion")
+			}
+		})
+	}
+}
 
 // A managed host has no Python CLI: `enterprise <platform> profile-explain`
 // asks the managed gateway for the same answer as `defenseclaw guardrail

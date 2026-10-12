@@ -899,6 +899,24 @@ func objectsIn(t *testing.T, home, dir string) map[string]bool {
 	return set
 }
 
+// GAP-0596: a secret only staged in the project (git add, never committed)
+// is held back and the copy starts; the project's index keeps it staged.
+func TestCopyHoldsBackAStagedOnlySecret(t *testing.T) {
+	e := newEnv(t)
+	e.initRepo()
+	writeFile(t, e.project, ".env", "DECOY=1\n")
+	writeFile(t, e.project, "config/server.key", "decoy\n")
+	e.git(e.project, "add", "-f", ".env", "config/server.key")
+	rec, fs := launchCopy(t, e, "c1", nil)
+	if held := strings.Join(rec.HeldBack, ","); !strings.Contains(held, ".env") || !strings.Contains(held, "config/server.key") {
+		t.Fatalf("held back = %v", rec.HeldBack)
+	}
+	wantFiles(t, fs.local(remoteRepo), ".env", absent, "config/server.key", absent)
+	if staged := e.git(e.project, "diff", "--cached", "--name-only"); !strings.Contains(staged, ".env") || !strings.Contains(staged, "config/server.key") {
+		t.Fatalf("project index lost the staged files: %q", staged)
+	}
+}
+
 // TestCopyKeepsHeldBackSecretsOutOfHistory: a held-back file is missing
 // from the copy's working tree, and every committed version of it, or of
 // any other secret-named path, is missing from the shipped history too.

@@ -440,6 +440,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	include := stringSet(enrollment.IncludeUsers)
 	exclude := stringSet(enrollment.ExcludeUsers)
 	exempt := stringSet(enrollment.ExemptUsers)
+	addQualifiedSpellings(ctx, opts.Resolver, exempt)
 
 	var targets []ManifestTarget
 	emitted := map[string]struct{}{}
@@ -1439,6 +1440,39 @@ func hasKey(set map[string]struct{}, key string) bool {
 	_, ok := set[key]
 	return ok
 }
+
+// addQualifiedSpellings adds to an exempt_users set the account each bare
+// name selects on a host whose directory accounts NSS knows only by their
+// fully qualified name (SSSD use_fully_qualified_names): ent-alice exempts
+// ent-alice@dclab.test, as the gateway exempts its hooks and a users entry
+// selects it (GAP-0494). A bare name NSS answers itself is left alone, so a
+// local account of that name is never traded for a directory one, and a
+// failed lookup adds nothing (the entry keeps its exact meaning this cycle).
+func addQualifiedSpellings(ctx context.Context, r unixidentity.Resolver, set map[string]struct{}) {
+	if r == nil {
+		return
+	}
+	for entry := range set {
+		if strings.ContainsAny(entry, `@\`) || strings.Trim(entry, "0123456789") == "" {
+			continue
+		}
+		if _, err := r.LookupUser(entry); !unixidentity.IsNotFound(err) {
+			continue
+		}
+		qualified := enrollmentQualifiedUserName(ctx, r, entry)
+		if qualified == "" {
+			continue
+		}
+		if account, err := r.LookupUser(qualified); err == nil {
+			set[account.Name] = struct{}{}
+			set[strconv.Itoa(account.UID)] = struct{}{}
+		}
+	}
+}
+
+// enrollmentQualifiedUserName is the spelling NSS takes for a bare account
+// name on a host requiring fully qualified names; tests replace it.
+var enrollmentQualifiedUserName = unixidentity.QualifiedUserName
 
 // MarshalUnixTargetsManifest renders the deterministic manifest bytes.
 func MarshalUnixTargetsManifest(m Manifest) ([]byte, error) {

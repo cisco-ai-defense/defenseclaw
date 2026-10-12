@@ -320,6 +320,28 @@ func TestProvisioningTimeoutNamesTheDisk(t *testing.T) {
 	}
 }
 
+// GAP-0005: a MicroVM whose driver lacks the hypervisor entitlement showed
+// only "VM process exited with status 1"; the error now names the cause,
+// and on a managed computer sends the user to IT.
+func TestVMExitNamesTheHypervisorEntitlement(t *testing.T) {
+	vm, _ := openshell.LookupDriver("vm")
+	docker, _ := openshell.LookupDriver("docker")
+	exited := func() error {
+		return upstream("wait for sandbox x", errors.New(`sandbox "x" is in error state; OpenShell says: ProcessExited: VM process exited with status 1`))
+	}
+	if err := vmExitFailure("darwin", false, vm, exited()); !strings.Contains(err.Error(), "com.apple.security.hypervisor") ||
+		!strings.Contains(err.Error(), "defenseclaw sandbox doctor") {
+		t.Fatalf("darwin: %v", err)
+	}
+	if err := vmExitFailure("linux", true, vm, exited()); !strings.Contains(err.Error(), "/dev/kvm") ||
+		!strings.Contains(err.Error(), "IT help desk") || strings.Contains(err.Error(), "sandbox doctor") {
+		t.Fatalf("managed linux: %v", err)
+	}
+	if err := vmExitFailure("darwin", false, docker, exited()); strings.Contains(err.Error(), "usual cause") {
+		t.Fatalf("hint on the docker driver: %v", err)
+	}
+}
+
 // A sandbox's policy is re-resolved with the driver it was created on, not
 // the connected gateway's, and a new one with the connected gateway's.
 func TestResolutionUsesTheRecordsDriver(t *testing.T) {

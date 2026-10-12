@@ -117,6 +117,25 @@ func skipAsRoot(t *testing.T) {
 	}
 }
 
+// RegistrationNames lists the user's and the computer's registrations once
+// each: a managed daemon looks at every gateway but its own (GAP-0678).
+func TestRegistrationNames(t *testing.T) {
+	skipOnWindows(t)
+	user, system := t.TempDir(), t.TempDir()
+	for _, name := range []string{"managed", "bob-private"} {
+		writeRegistration(t, user, name, nil, nil)
+	}
+	writeRegistration(t, system, "managed", nil, nil)
+	writeRegistration(t, system, "fleet", nil, nil)
+	got := openshell.RegistrationNames(openshell.DiscoverOptions{ConfigDir: user, SystemDir: system})
+	if strings.Join(got, ",") != "bob-private,fleet,managed" {
+		t.Fatalf("RegistrationNames = %v", got)
+	}
+	if got := openshell.RegistrationNames(openshell.DiscoverOptions{ConfigDir: filepath.Join(user, "none"), SystemDir: filepath.Join(system, "none")}); len(got) != 0 {
+		t.Fatalf("RegistrationNames of empty directories = %v", got)
+	}
+}
+
 func TestDiscoverSelection(t *testing.T) {
 	skipOnWindows(t)
 	cases := []struct {

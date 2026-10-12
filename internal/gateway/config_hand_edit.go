@@ -42,17 +42,9 @@ func recordHandEdit(ctx context.Context, cfg *config.Config, path string, raw []
 	if _, recorded := readConfigGeneration(path, raw); recorded {
 		return
 	}
-	sum := configwrite.SHA256Hex(raw)
-	_, err := configwrite.Locked(ctx, path, configwrite.Options{
+	_, err := configwrite.RecordUnrecorded(ctx, path, raw, configwrite.Options{
 		Actor:  configwrite.CurrentActor(configwrite.ActorPrefixHandEdit),
 		Reason: "config.yaml edited outside the config writer",
-	}, func() (bool, error) {
-		current, err := os.ReadFile(path)
-		if err != nil || configwrite.SHA256Hex(current) != sum {
-			return false, err
-		}
-		state, err := configwrite.ReadGenerationState(path)
-		return err != nil || !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), sum), nil
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[config] could not record the hand edit of %s: %v\n", path, err)

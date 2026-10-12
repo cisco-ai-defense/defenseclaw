@@ -395,13 +395,13 @@ func TestUnblock(t *testing.T) {
 	if err := ta.Unblock(bg, UnblockOptions{Host: "webhook.site"}); err == nil {
 		t.Fatal("an unscoped unblock was accepted")
 	}
-	if err := ta.Unblock(bg, UnblockOptions{Host: "webhook.site", Sandbox: "box", Always: true}); err == nil {
-		t.Fatal("--sandbox with --always was accepted")
-	}
 	ta.ok(t, ta.Unblock(bg, UnblockOptions{Host: "webhook.site", Sandbox: "box"}))
 	ta.ok(t, ta.Unblock(bg, UnblockOptions{Host: "paste.example", Always: true}))
-	has(t, ta.output(), "unblocked webhook.site in box", "unblocked paste.example for every sandbox")
-	if n := strings.Count(ta.output(), "\n"); n != 2 {
+	// GAP-0609: --sandbox with --always names the sandbox whose policy
+	// checks it (a managed computer's spelling).
+	ta.ok(t, ta.Unblock(bg, UnblockOptions{Host: "files.example", Sandbox: "box", Always: true}))
+	has(t, ta.output(), "unblocked webhook.site in box", "unblocked paste.example for every sandbox", "unblocked files.example for every sandbox")
+	if n := strings.Count(ta.output(), "\n"); n != 3 {
 		t.Fatalf("output (one line each):\n%s", ta.output())
 	}
 	ta.daemon.errors["POST "+sandboxapi.PathEgressUnblock] = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
@@ -641,6 +641,17 @@ func TestReviewMergesAFilesReasons(t *testing.T) {
 	}
 	if line := riskLine(&workspace.ReviewReport{Flags: flags}); line != "⚠ Changed files that can run code on your machine: Makefile, package.json  → review before running" {
 		t.Fatalf("risk line = %q", line)
+	}
+}
+
+// GAP-0584: the copy `run` staged in the user's own data directory goes with
+// the sandbox the daemon deleted; the daemon of a managed computer keeps
+// another data directory and leaves it (copy.json, base.git) behind.
+func TestDeleteDiscardsTheStagedCopy(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("gone"))
+	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"gone"}, Yes: true}))
+	if !slices.Contains(ta.copy.steps, "discard gone") {
+		t.Fatalf("copy steps = %v, want the staged copy discarded", ta.copy.steps)
 	}
 }
 
@@ -1471,6 +1482,7 @@ func TestPolicyEdit(t *testing.T) {
 	}{
 		{"a catch-all", config.OpenShellAdminConfig{}, "*", ""},
 		{"a managed install", config.OpenShellAdminConfig{}, "x.example", sandboxapi.AdminMessage},
+		{"a Secure Client install", config.OpenShellAdminConfig{}, "x.example", sandboxapi.AdminMessage},
 		{"egress_block", config.OpenShellAdminConfig{EgressBlock: []string{"example.net"}}, "example.net",
 			"blocked by your organization's DefenseClaw policy: egress.allow — example.net is on your organization's blocklist (example.net) (openshell.admin.egress_block)"},
 		{"egress_block wildcard", config.OpenShellAdminConfig{EgressBlock: []string{"*.example.net"}}, "*.api.example.net", "openshell.admin.egress_block"},
@@ -1487,8 +1499,16 @@ func TestPolicyEdit(t *testing.T) {
 			ta := newTestApp(t, "")
 			writeConfig(t, ta, "")
 			ta.Cfg.OpenShell.Admin = c.admin
-			if c.name == "a managed install" {
-				ta.Cfg.DeploymentMode = "managed_enterprise"
+			managedInstall := strings.HasSuffix(c.name, "install")
+			switch c.name {
+			case "a managed install":
+				// A standalone managed document: the config writer refuses it.
+				writeConfig(t, ta, "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
+				ta.Cfg.DeploymentMode, ta.Cfg.Enterprise.Profile = "managed_enterprise", "standalone"
+			case "a Secure Client install":
+				// The writer does not refuse a Secure Client document; the
+				// sandbox CLI does, before it.
+				ta.Cfg.DeploymentMode, ta.Cfg.Enterprise.Profile = "managed_enterprise", "secure_client"
 			}
 			before, _ := os.ReadFile(ta.ConfigPath)
 			err := ta.PolicyEdit(bg, "allow", []string{c.host})
@@ -1496,7 +1516,7 @@ func TestPolicyEdit(t *testing.T) {
 			if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
 				t.Fatal("a refused entry was written")
 			}
-			if c.name == "a managed install" {
+			if managedInstall {
 				// GAP-0052: the refusal exits 3, like every other local writer on a managed device.
 				var exit *ExitError
 				if !errors.As(err, &exit) || exit.Code != 3 {
@@ -1637,7 +1657,7 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{Key: "profile", Value: "balanced", Source: "admin",
 		Origin: "openshell.admin.min_profile", Requested: "open"})
 	ta.ok(t, ta.PolicyShow(bg, PolicyOptions{Harness: "claude"}))
-	has(t, ta.output(), "Pack          open (builtin:open) sha256:", "advisory: config.yaml is yours")
+	has(t, strings.Join(strings.Fields(ta.output()), " "), "Pack open (builtin:open) sha256:", "Network profile open", "advisory: config.yaml is yours")
 	if q := ta.daemon.callsTo("GET", sandboxapi.PathPolicyExplain); len(q) != 1 || !strings.Contains(q[0].Query, "harness=claudecode") {
 		t.Fatalf("explain query = %+v", q)
 	}
@@ -1760,7 +1780,7 @@ func TestPackChainIsShown(t *testing.T) {
 	ta.ok(t, ta.fresh().PackShow("team", PackOptions{}))
 	has(t, ta.output(), "# extends balanced (", "the settings below are the merged result", "example.org", "registry.npmjs.org")
 	ta.ok(t, ta.fresh().PackValidate(file))
-	has(t, ta.output(), "valid pack team (profile balanced)", "extends balanced")
+	has(t, ta.output(), "valid pack team (network profile balanced)", "extends balanced")
 	ta.daemon.explain.Pack = "team"
 	ta.daemon.explain.PackChain = []sandboxapi.PackLink{{Name: "balanced", Builtin: true, Source: "builtin:balanced", Digest: "sha256:" + strings.Repeat("b", 64)}}
 	ta.ok(t, ta.fresh().PolicyShow(bg, PolicyOptions{}))
@@ -1840,7 +1860,7 @@ func TestWrappersInACustomRCFile(t *testing.T) {
 	if c := loadConfig(t, ta); !slices.Equal(c.OpenShell.Wrappers, []string{"claudecode"}) {
 		t.Fatalf("openshell.wrappers = %v", c.OpenShell.Wrappers)
 	}
-	has(t, ta.wrappersCheck().Detail, "~/dotfiles/shell.rc")
+	has(t, ta.wrappersCheck(bg, false).Detail, "~/dotfiles/shell.rc")
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
 	has(t, ta.output(), "claude in ~/dotfiles/shell.rc")
 	ta.ok(t, ta.Disable(WrapperOptions{Harness: "claude"}))

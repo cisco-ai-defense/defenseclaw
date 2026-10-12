@@ -230,6 +230,68 @@ func TestManagedRestartRequiredCountsTheEnterpriseBlockOutsideInspection(t *test
 	}
 }
 
+// enterprise.openshell is lifecycle and restart-required on every host;
+// openshell.* (the sandbox floor included) stays hot.
+func TestEnterpriseOpenShellRestartsAndSandboxFloorStaysHot(t *testing.T) {
+	changed := []string{"enterprise.openshell.install", "enterprise.openshell.gateway_port", "openshell.admin.required_for",
+		"guardrail.profiles.contractors.sandbox.allowed"}
+	want := "enterprise.openshell.install,enterprise.openshell.gateway_port"
+	if got := RestartRequired(changed); strings.Join(got, ",") != want {
+		t.Fatalf("RestartRequired = %v, want %s", got, want)
+	}
+	if got := ManagedRestartRequired(changed); strings.Join(got, ",") != want {
+		t.Fatalf("ManagedRestartRequired = %v, want %s", got, want)
+	}
+}
+
+// GAP-0617: bytes written outside the writer (an administrator's content
+// write on Windows, which the gateway hot reloads) are recorded as the next
+// generation, once, and only while they are still the bytes on disk.
+func TestRecordUnrecordedAdvancesTheGenerationForAnUnrecordedWrite(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	path := writeTestConfig(t, "guardrail:\n  mode: observe\n")
+	opt := Options{Actor: ActorUnattributedHandEdit, Reason: "edited outside the lifecycle"}
+	ctx := context.Background()
+
+	// No state file yet: the first write is generation 1.
+	raw, _ := os.ReadFile(path)
+	recorded, err := RecordUnrecorded(ctx, path, raw, opt)
+	state, stateErr := ReadGenerationState(path)
+	if err != nil || !recorded || stateErr != nil || state.Generation != 1 || state.ConfigSHA256 != SHA256Hex(raw) ||
+		state.Actor != ActorUnattributedHandEdit || !IsHandEditActor(state.Actor) {
+		t.Fatalf("first record: recorded=%t err=%v state=%+v (%v)", recorded, err, state, stateErr)
+	}
+	// The same bytes again: already recorded, the generation stays.
+	if recorded, err = RecordUnrecorded(ctx, path, raw, opt); err != nil || recorded {
+		t.Fatalf("a recorded write was recorded again: recorded=%t err=%v", recorded, err)
+	}
+	// A writer's own generation is not a hand edit.
+	if _, err := Apply(ctx, path, []Change{{Path: "guardrail.mode", Value: "action"}}, Options{Actor: "cli:test"}); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ = ReadGenerationState(path); state.Generation != 2 || IsHandEditActor(state.Actor) {
+		t.Fatalf("writer generation = %+v", state)
+	}
+	// An edit in an editor is the next generation.
+	edited := []byte(strings.Replace(string(raw), "observe", "action\n  block_at: HIGH", 1))
+	if err := os.WriteFile(path, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err = RecordUnrecorded(ctx, path, edited, opt); err != nil || !recorded {
+		t.Fatalf("edit: recorded=%t err=%v", recorded, err)
+	}
+	if state, _ = ReadGenerationState(path); state.Generation != 3 || state.ConfigSHA256 != SHA256Hex(edited) {
+		t.Fatalf("edit generation = %+v", state)
+	}
+	// Bytes that are no longer on disk are left to the next reload.
+	if recorded, err = RecordUnrecorded(ctx, path, raw, opt); err != nil || recorded {
+		t.Fatalf("stale bytes were recorded: recorded=%t err=%v", recorded, err)
+	}
+	if state, _ = ReadGenerationState(path); state.Generation != 3 {
+		t.Fatalf("stale bytes advanced the generation: %+v", state)
+	}
+}
+
 // A block added or removed whole names its leaves, so the Windows hot path
 // sees an enrollment list and not an unknown enterprise key: the first
 // enterprise.enrollment block took the restart transaction (GAP-0887).

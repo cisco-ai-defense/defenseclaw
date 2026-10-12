@@ -32,6 +32,26 @@ func TestAuditCallerIdentityTrustsOnlyVerifiedCallersOnAStandaloneGateway(t *tes
 	}
 }
 
+// GAP-0382: the connector-hook row names the account as its hook_decision
+// record does; a UPN-form name, which that record leaves out, is not
+// written raw on the connector-hook row.
+func TestAuditCallerNameMatchesTheDecisionRecord(t *testing.T) {
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(false) })
+	const sid = "S-1-5-21-602989718-809138714-1982218064-4077"
+	for name, want := range map[string]string{"ENT-BOB@DCLAB.TEST": "", "ent-bob": "ent-bob"} {
+		ctx := ContextWithAgentIdentity(context.Background(), AgentIdentity{UserID: sid, UserIDKind: "windows_sid", UserName: name})
+		ctx = context.WithValue(withServiceAccountGateway(ctx), verifiedUserScopedIdentityContextKey{}, sid)
+		if got := auditCallerIdentity(ctx).Name; got != want {
+			t.Errorf("connector-hook name for %q = %q, want %q", name, got, want)
+		}
+		decision, _ := v8UserName(name, hookV8OptionalIdentifier).Get()
+		if decision != want {
+			t.Errorf("hook_decision name for %q = %q, want %q", name, decision, want)
+		}
+	}
+}
+
 func TestAuthenticationFailureFactsNameOnlyAVerifiedCaller(t *testing.T) {
 	claimed := ContextWithAgentIdentity(context.Background(), AgentIdentity{UserID: "1001", UserName: "claimed"})
 	if facts := apiAuthenticationFailureFactsFor(claimed, "/api/v1/inspect/tool", ""); facts.Principal != "" || facts.AuthnMethod != "" || facts.Caller.ID != "" {

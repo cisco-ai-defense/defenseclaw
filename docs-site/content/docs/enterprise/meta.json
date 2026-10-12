@@ -16,6 +16,7 @@
     "---Configure---",
     "enrollment",
     "machine-policy",
+    "sandboxes",
     "identity-and-authentication",
     "identity-sources",
     "identity-okta",

@@ -27,6 +27,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
@@ -133,7 +134,7 @@ func TestSandboxVerdictReason(t *testing.T) {
 		{"no rules", "block", nil, nil, generic},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sandboxVerdictReason("claudecode", tc.action, tc.ruleIDs, tc.finding)
+			got := sandboxVerdictReason(context.Background(), "claudecode", tc.action, tc.ruleIDs, tc.finding)
 			if got != tc.want {
 				t.Fatalf("reason =\n  %q\nwant\n  %q", got, tc.want)
 			}
@@ -157,12 +158,12 @@ func TestSandboxBlockReadsAsHostBlock(t *testing.T) {
 		rule := firstBuiltinRule(t, category)
 		host := agentVerdictReason("block", builtInMatchReasonPrefix+rule.ID+":"+rule.Title, "<redacted>",
 			redaction.SinkPolicyDefault)
-		if sandbox := sandboxVerdictReason("claudecode", "block", []string{rule.ID}, nil); sandbox != host {
+		if sandbox := sandboxVerdictReason(context.Background(), "claudecode", "block", []string{rule.ID}, nil); sandbox != host {
 			t.Fatalf("%s rule %s:\n  sandbox %q\n  host    %q", category, rule.ID, sandbox, host)
 		}
 		host = agentVerdictReason("confirm", builtInMatchReasonPrefix+rule.ID+":"+rule.Title, "<redacted>",
 			redaction.SinkPolicyDefault)
-		if sandbox := sandboxVerdictReason("claudecode", "confirm", []string{rule.ID}, nil); sandbox != host {
+		if sandbox := sandboxVerdictReason(context.Background(), "claudecode", "confirm", []string{rule.ID}, nil); sandbox != host {
 			t.Fatalf("%s rule %s confirm:\n  sandbox %q\n  host    %q", category, rule.ID, sandbox, host)
 		}
 	}
@@ -229,6 +230,30 @@ func TestApplySandboxVerdictReasonLeavesHostAndAllowAlone(t *testing.T) {
 	got = apply(ctx, blocked)
 	if !strings.HasPrefix(got.Reason, "DefenseClaw policy blocked this action (rule E2E-SANDBOX-MARKER") || hookSourceReason(got) != blocked.Reason {
 		t.Fatalf("sandbox verdict: reason %q source %q", got.Reason, hookSourceReason(got))
+	}
+}
+
+// GAP-0634, GAP-0640: an allowed call whose severity stays below the
+// connector's alert threshold (a MEDIUM call under alert_at HIGH) is no
+// flagged call: its reason is kept, so the session summary does not list it.
+func TestSandboxAllowBelowAlertThresholdIsNotFlagged(t *testing.T) {
+	installSandboxMarkerRules(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.BlockAt, cfg.Guardrail.AlertAt = "CRITICAL", "HIGH"
+	api := &APIServer{scannerCfg: cfg}
+	profile := connector.NewClaudeCodeConnector().HookProfile(connector.SetupOpts{})
+	req := agentHookRequest{ConnectorName: "claudecode", HookEventName: "PreToolUse"}
+	body := []byte(`{"hook_event_name":"PreToolUse","tool_name":"Bash"}`)
+	ctx := sandboxCtx(sandboxTestBinding("claudecode"))
+	apply := func(severity string) agentHookResponse {
+		resp := agentHookResponse{Action: "allow", RawAction: "allow", Severity: severity, Reason: "kept", RuleIDs: []string{"E2E-SANDBOX-MARKER"}}
+		return api.applySandboxVerdictReason(ctx, profile, "claudecode", req, body, map[string]interface{}{"hook_event_name": "PreToolUse"}, resp)
+	}
+	if got := apply("MEDIUM"); got.Reason != "kept" {
+		t.Fatalf("a MEDIUM allow below alert_at HIGH was flagged: %q", got.Reason)
+	}
+	if got := apply("HIGH"); !strings.HasPrefix(got.Reason, "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-MARKER") {
+		t.Fatalf("a HIGH allow at alert_at HIGH was not flagged: %q", got.Reason)
 	}
 }
 

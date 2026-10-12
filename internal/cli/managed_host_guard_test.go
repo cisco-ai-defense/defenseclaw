@@ -504,6 +504,10 @@ func TestManagedHostHelpDescribesTheManagedGateway(t *testing.T) {
 	for _, command := range root.Commands() {
 		sub[command.Name()] = command
 	}
+	// Each user's sandbox daemon serves `sandbox` on a managed computer.
+	if sub["sandbox"].Hidden || strings.Contains(root.Long, "watchdog, sandbox") {
+		t.Fatalf("managed help hides or refuses sandbox:\n%s", root.Long)
+	}
 	for _, name := range []string{"status", "enterprise"} {
 		if !strings.Contains(sub[name].Long, "enterprise windows status --profile standalone") ||
 			strings.Contains(sub[name].Long, "sidecar") || strings.Contains(sub[name].Long, "root/MDM/systemd") {

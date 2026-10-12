@@ -117,6 +117,12 @@ const (
 	SandboxWorkdirCopy  = "copy"
 )
 
+// SandboxDriverReasons are the registered values of
+// defenseclaw.sandbox.driver_reason (openshell.DriverReasons).
+var SandboxDriverReasons = []string{
+	"configured", "kvm_available", "kvm_missing", "kvm_access", "cpu_virtualization", "vm_driver_missing", "vm_prerequisite_missing",
+}
+
 // SandboxIdentity is the correlation.sandbox attribute group shared by every
 // sandbox record. Empty fields are omitted, never inferred. Identity values
 // are log attributes only; the registry forbids them as metric labels.
@@ -134,6 +140,10 @@ type SandboxIdentity struct {
 	Runtime string
 	// Driver is the OpenShell compute driver (SandboxDriver*).
 	Driver string
+	// DriverReason is why a managed sandbox runs on Driver
+	// (SandboxDriverReasons: configured, kvm_available, or the KVM probe's
+	// reason when the Linux docker fallback replaced the MicroVM driver).
+	DriverReason string
 	// ImageDigest is the workload image digest, sha256:<64 hex>.
 	ImageDigest string
 	// PolicyVersion is the OpenShell policy revision in force; 0 is unknown.
@@ -149,6 +159,10 @@ type SandboxIdentity struct {
 	// BindingID is the DefenseClaw ingress binding the sandbox's hooks and
 	// egress proxy credential authenticate with (never its token).
 	BindingID string
+	// Managed is what the managed gateway stamps on a sandbox of a managed
+	// host: registration, guardrail profile, effective sandbox policy and
+	// OpenShell provision. The zero value omits all of it.
+	Managed SandboxManaged
 }
 
 // SandboxLifecycleTrigger is what caused a lifecycle transition.
@@ -734,10 +748,16 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 			return builder.BuildLogSandboxLifecycle(observability.LogSandboxLifecycleInput{
 				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: identity.Name,
-				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: string(identity.Phase), DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+				DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+				DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+				DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+				DefenseClawSubjectKey:           fields.subjectKey,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 				UserID:                             optionalNetworkIdentifier(input.UserID),
 				DefenseClawUserIDKind:              optionalNetworkUserIDKind(useridentity.KindForID(input.UserID)),
 				DefenseClawUserName:                observability.UserName(input.UserName, optionalNetworkIdentifier),
@@ -893,11 +913,17 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				DefenseClawSandboxProcessPid: actorPID, DefenseClawSandboxProcessExecutable: actorExe,
 				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
-				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
-				DefenseClawSandboxBindingID: fields.bindingID,
+				DefenseClawSandboxBindingID:      fields.bindingID,
+				DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+				DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+				DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+				DefenseClawSubjectKey:           fields.subjectKey,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 			}
 			switch eventName {
 			case observability.TelemetryEventEgressCompleted:
@@ -922,12 +948,18 @@ func (recorder *SandboxRecorder) RecordSandboxEgress(ctx context.Context, input 
 				DefenseClawSandboxProcessPid: actorPID, DefenseClawSandboxProcessExecutable: actorExe,
 				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
-				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
-				DefenseClawSandboxBindingID: fields.bindingID,
-				MandatoryEnforcedOutcome:    true,
+				DefenseClawSandboxBindingID:      fields.bindingID,
+				DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+				DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+				DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+				DefenseClawSubjectKey:           fields.subjectKey,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
+				MandatoryEnforcedOutcome: true,
 			})
 		},
 	}
@@ -1021,10 +1053,16 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 					ServerAddress: host, ServerPort: port,
 					DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
-					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+					DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+					DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+					DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+					DefenseClawSubjectKey:           fields.subjectKey,
+					DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+					DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 				})
 			}
 			return builder.BuildLogApprovalResolved(observability.LogApprovalResolvedInput{
@@ -1040,10 +1078,16 @@ func (recorder *SandboxRecorder) RecordSandboxApproval(ctx context.Context, inpu
 				ServerAddress:                   host, ServerPort: port,
 				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
-				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+				DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+				DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+				DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+				DefenseClawSubjectKey:           fields.subjectKey,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 				MandatoryApprovalResolution: true,
 			})
 		},
@@ -1119,10 +1163,16 @@ func (recorder *SandboxRecorder) RecordSandboxPolicy(ctx context.Context, input 
 				DefenseClawAdminChangeCount:      observability.Present(int64(input.ChangeCount)),
 				DefenseClawPolicyEffectiveDigest: policyDigest, DefenseClawPolicyGeneration: policyGeneration,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
-				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+				DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+				DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+				DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+				DefenseClawSubjectKey:           fields.subjectKey,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 				MandatoryControlPlaneMutation: true,
 			})
 		},
@@ -1190,10 +1240,16 @@ func (recorder *SandboxRecorder) RecordSandboxHealth(ctx context.Context, input 
 				DefenseClawHealthSubsystem: subsystem, DefenseClawHealthState: healthState,
 				DefenseClawHealthErrorSummary: errorSummary, DefenseClawSchemaErrorCode: errorCode,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: fields.name,
-				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+				DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+				DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+				DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+				DefenseClawSubjectKey:           fields.subjectKey,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 				MandatoryDurableHealthTransition: true,
 			}
 			switch eventName {
@@ -1208,10 +1264,16 @@ func (recorder *SandboxRecorder) RecordSandboxHealth(ctx context.Context, input 
 					DefenseClawHealthState: healthState, DefenseClawHealthErrorSummary: errorSummary,
 					DefenseClawSchemaErrorCode: errorCode,
 					DefenseClawSandboxID:       fields.id, DefenseClawSandboxName: fields.name,
-					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+					DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+					DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+					DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+					DefenseClawSubjectKey:           fields.subjectKey,
+					DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+					DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 					MandatoryDurableHealthTransition: true,
 				})
 			default:
@@ -1285,10 +1347,16 @@ func (recorder *SandboxRecorder) RecordSandboxFinding(ctx context.Context, input
 				DefenseClawUserIDKind:               optionalNetworkUserIDKind(useridentity.KindForID(input.UserID)),
 				DefenseClawUserName:                 optionalNetworkIdentifier(input.UserName),
 				DefenseClawSandboxID:                fields.id, DefenseClawSandboxName: fields.name,
-				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+				DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+				DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+				DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+				DefenseClawSubjectKey:           fields.subjectKey,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 			})
 		},
 	}
@@ -1376,10 +1444,16 @@ func (recorder *SandboxRecorder) RecordSandboxWorkspace(ctx context.Context, inp
 			return builder.BuildLogSandboxWorkspace(observability.LogSandboxWorkspaceInput{
 				Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 				DefenseClawSandboxID: fields.id, DefenseClawSandboxName: identity.Name,
-				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+				DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 				DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 				DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 				DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode, DefenseClawSandboxBindingID: fields.bindingID,
+				DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+				DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+				DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+				DefenseClawSubjectKey:           fields.subjectKey,
+				DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+				DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 				DefenseClawEnforcementEffectiveAction:   observability.Present(string(input.Operation)),
 				DefenseClawEnforcementInitiator:         optionalSandboxEnum(initiator),
 				DefenseClawEnforcementFailureClass:      optionalSandboxEnum(input.FailureClass),
@@ -1491,11 +1565,17 @@ func (recorder *SandboxRecorder) RecordSandboxActivity(ctx context.Context, inpu
 				return builder.BuildLogSandboxProcess(observability.LogSandboxProcessInput{
 					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: identity.Name,
-					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
-					DefenseClawSandboxBindingID:          fields.bindingID,
+					DefenseClawSandboxBindingID:      fields.bindingID,
+					DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+					DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+					DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+					DefenseClawSubjectKey:           fields.subjectKey,
+					DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+					DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 					DefenseClawSandboxProcessEvent:       input.ProcessEvent,
 					DefenseClawSandboxProcessSource:      observability.Present(source),
 					DefenseClawSandboxProcessPid:         optionalSandboxPID(input.PID),
@@ -1509,11 +1589,17 @@ func (recorder *SandboxRecorder) RecordSandboxActivity(ctx context.Context, inpu
 				return builder.BuildLogSandboxSsh(observability.LogSandboxSshInput{
 					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: identity.Name,
-					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
-					DefenseClawSandboxBindingID:   fields.bindingID,
+					DefenseClawSandboxBindingID:      fields.bindingID,
+					DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+					DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+					DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+					DefenseClawSubjectKey:           fields.subjectKey,
+					DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+					DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 					DefenseClawSandboxSshActivity: strings.TrimSpace(input.SSHActivity),
 					DefenseClawSandboxSshAuth:     optionalSandboxToken(input.SSHAuth, maxSandboxActivityTokenBytes),
 					ClientAddress:                 optionalSandboxPeer(input.Peer),
@@ -1527,11 +1613,17 @@ func (recorder *SandboxRecorder) RecordSandboxActivity(ctx context.Context, inpu
 				return builder.BuildLogSandboxInference(observability.LogSandboxInferenceInput{
 					Envelope: envelope, Severity: severity, LogLevel: logLevel, Outcome: outcome,
 					DefenseClawSandboxID: fields.id, DefenseClawSandboxName: identity.Name,
-					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver,
+					DefenseClawSandboxRuntime: fields.runtime, DefenseClawSandboxDriver: fields.driver, DefenseClawSandboxDriverReason: fields.driverReason,
 					DefenseClawSandboxImageDigest: fields.imageDigest, DefenseClawSandboxPolicyVersion: fields.policyVersion,
 					DefenseClawSandboxProfile: fields.profile, DefenseClawSandboxPack: fields.pack,
 					DefenseClawSandboxPhase: fields.phase, DefenseClawSandboxWorkdirMode: fields.workdirMode,
-					DefenseClawSandboxBindingID:          fields.bindingID,
+					DefenseClawSandboxBindingID:      fields.bindingID,
+					DefenseClawSandboxRegistrationID: fields.registrationID, DefenseClawSandboxPolicyDigest: fields.policyDigest,
+					DefenseClawSandboxPolicyGeneration: fields.policyGeneration, DefenseClawSandboxPolicyProvisional: fields.provisional,
+					DefenseClawOpenshellVersion: fields.openshellVersion, DefenseClawOpenshellInstallMode: fields.installMode,
+					DefenseClawSubjectKey:           fields.subjectKey,
+					DefenseClawGuardrailProfileName: fields.guardrailProfile, DefenseClawGuardrailProfileDigest: fields.guardrailDigest,
+					DefenseClawGuardrailProfileMatch: fields.guardrailMatch, DefenseClawGuardrailProfileMatchedGroup: fields.guardrailGroup,
 					GenAIProviderName:                    optionalSandboxText(strings.ToLower(input.Provider), maxSandboxOperationBytes),
 					GenAIRequestModel:                    optionalSandboxToken(input.Model, 256),
 					DefenseClawSandboxInferenceStatus:    optionalSandboxToken(input.Status, maxSandboxActivityTokenBytes),
@@ -1754,23 +1846,77 @@ type sandboxActiveCount struct {
 // sandboxV8Fields is the correlation.sandbox projection of one identity.
 type sandboxV8Fields struct {
 	id, name, runtime, driver, imageDigest observability.Optional[string]
+	driverReason                           observability.Optional[string]
 	profile, pack, phase, workdirMode      observability.Optional[string]
 	bindingID                              observability.Optional[string]
 	policyVersion                          observability.Optional[int64]
+	// The managed stamps (SandboxManaged).
+	registrationID, policyDigest, subjectKey observability.Optional[string]
+	openshellVersion, installMode            observability.Optional[string]
+	guardrailProfile, guardrailDigest        observability.Optional[string]
+	guardrailMatch, guardrailGroup           observability.Optional[string]
+	policyGeneration                         observability.Optional[int64]
+	provisional                              observability.Optional[bool]
 }
 
 func sandboxV8FieldsFor(identity SandboxIdentity) sandboxV8Fields {
 	fields := sandboxV8Fields{
 		id: optionalSandboxEnum(identity.ID), name: optionalSandboxEnum(identity.Name),
 		runtime: optionalSandboxEnum(identity.Runtime), driver: optionalSandboxEnum(identity.Driver),
-		imageDigest: optionalSandboxEnum(identity.ImageDigest), profile: optionalSandboxEnum(identity.Profile),
+		driverReason: optionalSandboxEnum(identity.DriverReason),
+		imageDigest:  optionalSandboxEnum(identity.ImageDigest), profile: optionalSandboxEnum(identity.Profile),
 		pack: optionalSandboxEnum(identity.Pack), phase: optionalSandboxEnum(string(identity.Phase)),
 		workdirMode: optionalSandboxEnum(identity.WorkdirMode), bindingID: optionalSandboxEnum(identity.BindingID),
 	}
 	if identity.PolicyVersion > 0 {
 		fields.policyVersion = observability.Present(int64(identity.PolicyVersion))
 	}
+	// A descriptive stamp that does not fit the registry is dropped, never
+	// the record (the managed-only families refused it before they got here).
+	managed := identity.Managed.lenient()
+	fields.registrationID, fields.policyDigest = optionalSandboxEnum(managed.RegistrationID), optionalSandboxEnum(managed.PolicyDigest)
+	fields.subjectKey = optionalSandboxEnum(managed.SubjectKey)
+	fields.openshellVersion, fields.installMode = optionalSandboxEnum(managed.OpenShellVersion), optionalSandboxEnum(managed.InstallMode)
+	fields.guardrailProfile, fields.guardrailDigest = optionalSandboxEnum(managed.GuardrailProfile), optionalSandboxEnum(managed.ProfileDigest)
+	fields.guardrailMatch, fields.guardrailGroup = optionalSandboxEnum(managed.ProfileMatch), optionalSandboxEnum(managed.MatchedGroup)
+	fields.policyGeneration, fields.provisional = observability.Absent[int64](), observability.Absent[bool]()
+	if managed.PolicyGeneration > 0 {
+		fields.policyGeneration = observability.Present(managed.PolicyGeneration)
+	}
+	if managed.Provisional != nil {
+		fields.provisional = observability.Present(*managed.Provisional)
+	}
 	return fields
+}
+
+// SandboxManagedV8 is the managed stamp of a sandbox in record form, for a
+// record family built outside this package: the hook decision of a relayed
+// or registered sandbox hook carries the registration, the effective sandbox
+// policy, the person's keyed pseudonym and the OpenShell provision, as the
+// managed sandbox records do (spec 2.10, GAP-0317).
+type SandboxManagedV8 struct {
+	Driver, RegistrationID, PolicyDigest, SubjectKey observability.Optional[string]
+	OpenShellVersion, InstallMode                    observability.Optional[string]
+	PolicyGeneration                                 observability.Optional[int64]
+	Provisional                                      observability.Optional[bool]
+}
+
+// ManagedV8 renders identity's driver and managed stamps for a record. A
+// descriptive stamp the registry does not take is left out; an identifying
+// stamp that does not fit leaves every managed stamp out, never the record.
+func (identity SandboxIdentity) ManagedV8() SandboxManagedV8 {
+	if identity.Managed.validateIdentifying() != nil {
+		return SandboxManagedV8{}
+	}
+	fields := sandboxV8FieldsFor(identity)
+	if !containsSandboxValue([]string{SandboxDriverDocker, SandboxDriverPodman, SandboxDriverVM, SandboxDriverK8s}, identity.Driver) {
+		fields.driver = observability.Absent[string]()
+	}
+	return SandboxManagedV8{
+		Driver: fields.driver, RegistrationID: fields.registrationID, PolicyDigest: fields.policyDigest,
+		SubjectKey: fields.subjectKey, OpenShellVersion: fields.openshellVersion, InstallMode: fields.installMode,
+		PolicyGeneration: fields.policyGeneration, Provisional: fields.provisional,
+	}
 }
 
 // validate rejects DefenseClaw-owned identity values that do not fit the
@@ -1800,12 +1946,16 @@ func (identity SandboxIdentity) validate(requireName bool) error {
 	if identity.Phase != "" && !identity.Phase.Valid() {
 		return fmt.Errorf("audit: sandbox phase %q is not registered", identity.Phase)
 	}
+	if err := identity.Managed.validateIdentifying(); err != nil {
+		return err
+	}
 	for _, check := range []struct {
 		field, value string
 		allowed      []string
 	}{
 		{"runtime", identity.Runtime, []string{SandboxRuntimeOpenShell}},
 		{"driver", identity.Driver, []string{SandboxDriverDocker, SandboxDriverPodman, SandboxDriverVM, SandboxDriverK8s}},
+		{"driver reason", identity.DriverReason, SandboxDriverReasons},
 		{"profile", identity.Profile, []string{SandboxProfileOpen, SandboxProfileBalanced, SandboxProfileStrict}},
 		{"workdir mode", identity.WorkdirMode, []string{SandboxWorkdirMount, SandboxWorkdirCopy}},
 	} {

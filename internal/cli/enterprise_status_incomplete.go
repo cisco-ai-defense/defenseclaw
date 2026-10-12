@@ -35,10 +35,15 @@ const windowsEnterpriseNoAgentTargetReason = "no account is enrolled for Codex, 
 	"and apply the config with Setup /ensure CONFIG=<path>"
 
 // enterpriseInformationalWarningCodes are warnings that say what the lifecycle
-// restored by itself, not why security is incomplete.
+// restored by itself, a privacy note (a rule pack standard users can read,
+// GAP-0386) or a sandbox policy note (GAP-0536), not why security is
+// incomplete.
 var enterpriseInformationalWarningCodes = map[string]bool{
-	"cursor_adapter_restored":         true,
-	"stale_lifecycle_journal_removed": true,
+	"cursor_adapter_restored":                  true,
+	"stale_lifecycle_journal_removed":          true,
+	"rule_pack_readable_by_users":              true,
+	enterprisestatus.CodeSandboxDefaultProfile: true,
+	enterprisestatus.CodeSandboxAdvisory:       true,
 }
 
 // addEnterpriseSecurityIncompleteReasons names why security is not complete

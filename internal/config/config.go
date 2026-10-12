@@ -1757,6 +1757,10 @@ type GuardrailConfig struct {
 	// derived configuration; EffectiveRulesForConnector layers it over the
 	// global and connector rules. Unexported like profileConnectors.
 	profileRules *GuardrailRulesConfig
+	// profileMode is the profile's own guardrail.profiles.<p>.mode on a
+	// derived configuration ("" when it inherits). ProfileModeForConnector
+	// reads it. Unexported like profileConnectors.
+	profileMode string
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -2977,7 +2981,7 @@ func loadConfigSourceChecked(
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "openshell_invalid")
 		}
-		return nil, fmt.Errorf("config: openshell: %w", err)
+		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI

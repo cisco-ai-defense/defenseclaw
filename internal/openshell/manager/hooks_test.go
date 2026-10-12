@@ -696,6 +696,28 @@ func TestLowAlertsAreNoSessionFinding(t *testing.T) {
 	}
 }
 
+// GAP-0634, GAP-0640: an allow with a MEDIUM severity whose reason is no
+// flagged one (the profile's alert threshold is above MEDIUM) is no finding
+// of the session; an alert action still is.
+func TestAllowBelowAlertThresholdIsNoSessionFinding(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "belowbox"})
+	binding, d := e.binding("belowbox"), e.decider("belowbox", "Bash")
+	e.m.ObserveIngress(binding, sandboxauth.RouteHook)
+	allow := d("PreToolUse", "", "allow")
+	allow.Severity, allow.Reason = "MEDIUM", "kept"
+	e.m.ObserveHookDecision(allow)
+	if got := e.events("belowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 0 {
+		t.Fatalf("a MEDIUM allow below the alert threshold is on the feed: %+v", got)
+	}
+	alert := d("PreToolUse", "", "alert")
+	alert.Severity = "MEDIUM"
+	e.m.ObserveHookDecision(alert)
+	if got := e.events("belowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 1 {
+		t.Fatalf("findings = %+v, want the alert", got)
+	}
+}
+
 // Every verdict counts under its hook event, the harness's name for it, tool
 // events or not (#956). The counts live as long as the sandbox's other hook
 // counters: a stop and start keep them, as a daemon restart does
@@ -824,6 +846,12 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	}
 	if n := silence(); n != 0 {
 		t.Fatalf("commands outside the harness raised %d hook_silence finding(s)", n)
+	}
+	// The native OTLP an idle harness keeps exporting at its prompt is no
+	// activity (GAP-0214).
+	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteOTLP)
+	if n := silence(); n != 0 {
+		t.Fatalf("an idle harness's OTLP export raised %d hook_silence finding(s)", n)
 	}
 	// The harness's own connection to the proxy is its activity. Idle for
 	// 16 minutes, it wakes (a harness such as Kiro CLI sends no hook when it

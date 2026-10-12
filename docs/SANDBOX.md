@@ -43,7 +43,11 @@ Overview and a Sandboxes panel. Still to come:
   driver, since no sandbox can start on Docker Desktop, whose Linux VM kernel
   has no Landlock (see [compute drivers](#compute-drivers) and
   [macOS and Docker Desktop](#macos-and-docker-desktop)). Every run there
-  works on a copy. OpenShell calls the driver experimental.
+  works on a copy. OpenShell calls the driver experimental. A Linux host with
+  KVM can run the same driver (see [compute drivers](#compute-drivers)).
+- **Managed hosts.** On a standalone enterprise install each user's sandbox
+  daemon asks the managed gateway for the policy of every run, under the
+  user's verified identity (see [Managed hosts](#managed-hosts)).
 
 ## Why OpenShell
 
@@ -112,7 +116,9 @@ port forwarding, gateway registration and install.
 
 On a Mac the gateway is the `nvidia/openshell` Homebrew service (launchd),
 and each sandbox is a MicroVM (libkrun on Apple's Hypervisor) instead of a
-container; the rest of the picture is the same.
+container; the rest of the picture is the same. On a Linux host that runs the
+MicroVM driver the sandbox is a MicroVM on KVM, and the gateway is the
+`openshell-gateway` user service with `UMask=0022`.
 
 A sandbox-only install needs no agent connector on the host, so its config
 often names no connector and keeps `claw.mode`'s `openclaw` default. With
@@ -128,7 +134,11 @@ daemon decides when it starts (`gatewayShouldConnectForConfiguredConnector`,
 
 One OpenShell gateway runs one compute driver. DefenseClaw drives two:
 `docker` (Linux, and any Docker host) and `vm`, OpenShell's MicroVM driver,
-which a Mac runs sandboxes with. `internal/openshell/driver.go` holds the
+which a Mac always runs sandboxes with and a Linux host with KVM can run them
+with (`/dev/kvm` opened read-write by the gateway's user, `e2fsprogs`, the
+`openshell-driver-vm` binary, and a gateway service umask of `0022` or lower:
+a stricter umask makes every MicroVM fail with `read /proc/self/status:
+Permission denied`, OpenShell issue 4014). `internal/openshell/driver.go` holds the
 one table of what differs, and code asks its fields (`HostMounts`,
 `RunFilesInImage`, `SandboxLimits`, `GatewayIdentity`, `ImageRepository`),
 not the driver's name or `runtime.GOOS`.
@@ -2755,7 +2765,14 @@ at most 25 MiB or the required pack's threshold),
 `managed_enterprise` install the administrator owns `config.yaml`, so the
 constraints are authoritative and a custom required pack must be an
 administrator-owned file. Elsewhere they are enforced but advisory, because
-the user can edit the file.
+the user can edit the file. The same type also carries the keys managed
+sandboxes add (`allowed`, `required_for`, `when_unavailable`,
+`user_approvals`, `allowed_credentials`, `on_silence`, `max_silence_after`,
+`process_tree`, `foreign_sandboxes`, `allow_upstream_telemetry`,
+`delete_stopped_after`, `request_access`), and a guardrail profile's `sandbox`
+section is the same type: `openshell.admin` is the floor, the profile can only
+tighten it (`config.TightenOpenShellAdmin`, `Config.SandboxFloor`). See
+[Managed hosts](#managed-hosts).
 
 `Effective.Allow` checks runtime actions against the same policy: unblock,
 approve, approve always, host port, mount, skip-permissions, learn mode and
@@ -2779,6 +2796,168 @@ No policy, input or approval ever opens these host ports to a sandbox:
 DefenseClaw's API, sandbox ingress, egress proxy, guardrail proxy and model
 router, the OpenShell gateway the run uses (17670 when unknown), and the
 OpenClaw gateway (18789 by default).
+
+## Managed hosts
+
+A standalone enterprise install (rpm, deb, pkg; Linux and macOS) runs sandboxes
+for standard users, with the policy chosen by the same identity rules as the
+guardrail profile. The user documentation is
+[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/)
+(`docs-site/content/docs/enterprise/sandboxes.mdx`). This section is the
+contributor view.
+
+### Processes and trust
+
+| Process | Runs as | Role |
+| --- | --- | --- |
+| Managed gateway | The service account | Policy authority: subject, profile, `packs.Resolve`, MCP filter, registrations, decisions, relayed hooks, re-match, telemetry. No sandboxes, docker or KVM. |
+| Sandbox daemon, `defenseclaw-gateway sandbox-daemon` (hidden) | The user | The sandbox runtime (manager, bindings, images, ingress, egress proxy, discovery, process tree) without an API listener, guardrails or a config file (`internal/gateway/sandbox_daemon_runtime.go`). The CLI reaches it on a 0600 Unix socket whose peer uid must equal the daemon's. |
+| OpenShell gateway | The user | Our unit (`setup` install mode, started through the hidden `sandbox-openshell-exec` shim that sets `umask 0022`, `OPENSHELL_GATEWAY_CONFIG` and a pinned `PATH`) or NVIDIA's (`prerequisite`, verified, refused on drift). |
+| Lifecycle (`internal/enterpriseunix`) | root | Renders `gateway.toml`, verifies the install mode, enables the user units, checks group membership, defers restarts, tears down per user. |
+
+Boundaries: B1, the sandbox to the daemon (the agent is untrusted; a
+per-sandbox binding bearer). B2, the daemon to the managed gateway
+(kernel-verified peer uid; every body field is a claim; the client first checks
+that the hook socket and its directory are owned by root or the service
+account and not group- or world-writable). B3, the gateway to its config and
+packs (root-owned, loaded with `LoadTrusted`; the packs directory is 0750
+root:service). B4, the user to the host: trusted but bounded. A user owns the
+daemon, their OpenShell gateway and, through docker, root equivalence; the
+design contains agents and keeps honest users inside the policy, it does not
+stop a hostile local user.
+
+### Policy
+
+`openshell.admin` and `guardrail.profiles.<p>.sandbox` share one type,
+`config.OpenShellAdminConfig`. The profile is chosen by the #1085 rules
+(first matching assignment for the verified subject and the harness
+connector, else `default_profile`, else the floor alone; `match.agents` is
+ignored). `Config.SandboxFloor(profile)` returns F and its digest;
+`TightenOpenShellAdmin` combines the layers (contradictions are load errors).
+Unset means no constraint, and an empty intersect list is refused by the schema
+(`minItems: 1`). `packs.Resolve` takes an explicit `Subject` (peer uid and
+home), a `Floor`, the daemon-read `UserPack` bytes and the daemon's
+`EvalSymlinks`'d `ProjectReal`; ambient `os.Getuid`, `user.Current` and
+`os.UserHomeDir` are banned in `packs` by a go/ast test. Precedence for one
+run, lowest first: pack (F's `required_pack`, `--pack`, `openshell.pack`,
+`balanced`), operational `openshell.*`, run flags (a locked key only tightens),
+the repository overlay (tighten only), then the clamp by F plus the saved
+decisions F caps. Managed hosts are copy-only: `sandbox run` has no mount flag,
+and `workspace.mode: mount` from a pack or the repository overlay
+(`.defenseclaw/sandbox.yaml`) is clamped to copy. The repository overlay uses
+`workspace: {mode: mount}`; sandbox registrations still use `workdir_mode`.
+
+### Registrations and the relay
+
+The daemon calls the hook-socket routes of the managed gateway
+(`internal/gateway/sandbox_authority.go`, served only on the standalone hook
+socket mux, never on the TCP API). Every route runs the peer decision first,
+refuses uid 0, applies its own budget key per peer uid (`<uid>|sandbox-hook`,
+`|sandbox-policy`, `|sandbox-events`; the host hook budget `<uid>` is separate),
+and answers `sandbox_*` reasons. A resolve creates a pending registration
+(`internal/sandboxreg`, `<DataDir>/sandbox/registrations/<uid>.json`, 0600,
+service-owned) that the daemon binds to the sandbox; a registration holds the
+`subject_key` (an HMAC of `v1|uid|account|sid`, so directory facts never turn a
+create into `sandbox_subject_changed`) and a `facts_digest` whose change
+triggers a re-match. Lookups are scoped to the caller's uid, so another uid's id
+behaves as unknown, and tombstones keep a deleted binding from registering
+again.
+
+A hook in a sandbox goes to the daemon's ingress as before. In managed mode the
+daemon has no local evaluation path: it forwards the body unchanged to
+`/api/v1/sandbox/hook/{connector}` (or `notify` or `inspect`) with an allowlist
+of headers (`sandboxrelay.ForwardHeaders`; nothing that carries a credential or
+an identity claim is forwarded) and the headers it sets itself
+(`X-DefenseClaw-Sandbox-Registration`, `X-DefenseClaw-Client: sandbox-relay`,
+`X-DefenseClaw-Agent-Surface: cli`). The gateway rebuilds the request context
+from the registration alone (`internal/gateway/sandbox_relay.go`), so the
+handlers run unchanged under the peer's verified subject. The verdict returns
+in the HTTP trailer `X-DefenseClaw-Sandbox-Decision` (`sandboxrelay.HookDecision`,
+declared before the handler runs and filled from a request-scoped sink that
+`observeSandboxHookDecision` writes to), which is why no handler on the relay
+path may set `Content-Length`. An unreachable gateway or a broken relay is a 502
+to the sandbox, so its hook fails closed. `X-DefenseClaw-Sandbox-Files` is
+reserved for mount-mode file bytes and is refused with 400
+`sandbox_relay_files_unsupported`.
+
+### Asks, foreign items and the gate
+
+The gateway decides and stores asks (`sandboxreg.CheckDecision`, the truth table
+over `user_approvals` and `allow_unblock`; `<DataDir>/sandbox/decisions/<uid>.json`),
+capped by F at every resolve. The daemon reconciles every sandbox on the user's
+OpenShell gateway: an unlabelled or unregistered one is stopped or alerted per
+`foreign_sandboxes`, a network rule neither rendered nor decided is removed,
+and an agent in a container DefenseClaw did not create is only alerted on. The
+require-sandbox gate (`internal/gateway/require_sandbox.go`, called from
+`agent_hook.go` before evaluation) refuses a host run of a `required_for`
+connector with the message builders in `sandboxapi/refusals.go`, and skips only
+requests whose context was rebuilt from a live registration.
+
+### OpenShell under management
+
+`ensure` renders `<ConfigDir>/openshell/gateway.toml` from `enterprise.openshell`
+(`openshell.RenderedGateway`; root-owned, no secrets, a loopback bind). In
+`setup` mode `internal/openshell/install_tarball.go` installs NVIDIA's release
+tarballs as the user after checking NVIDIA's SHA-256 file and a digest pinned in
+`openshell/version.go`. macOS finds `e2fsprogs` only in
+`enterprise.openshell.e2fsprogs_dir` (root-owned chain) or the user's own
+`~/.local/opt/e2fsprogs`. Switching mode or driver, and every daemon restart,
+waits until the user's sandboxes have stopped.
+
+Foreground `sandbox run` and `connect` sessions on Linux and macOS forward
+SIGHUP and SIGTERM to the harness (a terminal close, SSH drop or logout),
+then run normal session cleanup. A sandbox the session started normally
+stops; one already running, with a live detached run or another attached
+session normally keeps running. Its work is kept unless removal was
+requested. `defenseclaw sandbox connect NAME` starts a stopped sandbox and
+attaches a new harness session. To preserve the same interactive terminal,
+run inside your own tmux session (`tmux new -s sandbox`), detach with Ctrl-B
+then D, and reattach with `tmux attach -t sandbox`.
+`sandbox run --detach --prompt "TASK"` is independent of the launching terminal; follow it with
+`sandbox logs NAME -f`.
+
+Both tmux and detached runs depend on the user services remaining running.
+On Linux, stopping the user's service manager at last logout stops the
+account's sandboxes; `loginctl enable-linger USER` keeps that manager running
+after logout. On macOS, the services use the account's launchd `gui` domain
+when available, otherwise its `user` domain. Logout that removes that domain
+ends its services; keeping a tmux session or using `--detach` alone does not
+guarantee survival of logout.
+
+On Linux, `enterprise.openshell.driver: vm` or `auto` with
+`driver_fallback: docker` (the default) falls back to the docker driver where
+KVM does not work for the user (owner decision 2026-10-10). The daemon
+(`SandboxDaemon.selectDriver`, `openshell.SelectDriver`) probes as the user at
+each sandbox start, never at login: the CPU's `vmx`/`svm` flags, an `O_RDWR`
+open of `/dev/kvm`, and `openshell-driver-vm` (`openshell.VMProbe`). It sends
+the choice and the reason in the resolve (`driver`, `driver_reason`). The
+managed gateway checks that choice against the configuration and the caller's
+floor (`sandboxDriverClaim`: a profile's `sandbox.driver_fallback: none`
+refuses the fallback) and records it on the registration. The bind refuses
+another driver (`sandboxreg.ErrDriverMismatch`), and the manager refuses a
+create on a gateway that runs another driver (`manager.WithDriverChoice`), so a
+running sandbox never switches. In setup mode `ensure` also renders
+`gateway-docker.toml`, and `sandbox-openshell-exec` starts the user's gateway on
+it when the probe fails and the user's fallback is docker. The gate's
+availability probe (`sandbox_availability.go`) judges the same fallback by the
+uid's device modes and groups. The fallback needs the same docker access, and
+the lifecycle's prerequisite record carries the fallback's readiness under
+`fallback`. The driver and the reason are on the sandbox record, the banner,
+`status`, `policy explain`, `doctor` (`managed-driver`) and the telemetry
+(`defenseclaw.sandbox.driver_reason`).
+
+The enterprise packages install
+`defenseclaw` as a root-owned link to `defenseclaw-gateway`, which under that
+name exposes only the `sandbox` tree (`internal/cli/launcher.go`).
+
+### Privacy and telemetry
+
+A user sees only their own policy: the routes build every answer from the
+caller's match, refusals and the banner name only the caller's profile, another
+account on the sandbox ports is "another account" with no name or PID, and the
+stores and daemon state are 0600 and 0700. Telemetry adds the managed stamps
+and records listed in [OPENSHELL_SANDBOX_EVENTS.md](OPENSHELL_SANDBOX_EVENTS.md)
+(`audit.SandboxManagedTelemetry`).
 
 ## Telemetry
 
@@ -2986,11 +3165,11 @@ nothing of the vm driver, but the names of its caches carry the release
 
 - OpenShell `>=0.1.1 <0.2.0`, checked against the CLI and the gateway. The
   installer code (`openshell.Installer`) runs the upstream installer from the
-  v0.1.2 tag (`InstallerVersion`) only after checking it against a pinned
-  SHA-256 (the v0.1.1 and v0.1.2 scripts are byte-identical; the release
-  comes from `OPENSHELL_VERSION`). Releases before 0.0.37 must be cleaned up
+  v0.1.3 tag (`InstallerVersion`) only after checking it against a pinned
+  SHA-256 for that tag; the release comes from `OPENSHELL_VERSION`.
+  Releases before 0.0.37 must be cleaned up
   with the old CLI first; later ones upgrade in place. A supported release
-  older than `InstallerVersion` (0.1.1) still works: the doctor's
+  older than `InstallerVersion` (0.1.3) still works: the doctor's
   `openshell-cli` check warns, and setup upgrades it in place only with
   consent (`Installer.Upgrade`: `--install-openshell`, or yes to its
   question, whose default is no). NVIDIA's script restarts the gateway only
@@ -3017,11 +3196,14 @@ nothing of the vm driver, but the names of its caches carry the release
   OpenShell config directory that are symbolic links. The CA and client
   certificate may be readable by others, and group-writable files and entries
   only produce a warning.
-- Linux amd64 and arm64 on the docker driver, and macOS on Apple silicon on
-  the vm driver (see [compute drivers](#compute-drivers)). Windows, WSL2 and
-  Intel Macs are unsupported: `openshell.CheckHost` refuses them before any
-  sandbox command runs, except `teardown`. The vm driver on Linux and a
-  Docker VM with Landlock on a Mac (Colima, OrbStack) may work, untested.
+- Linux amd64 and arm64 on the docker driver, Linux with KVM on the vm driver
+  (`/dev/kvm` read-write for the gateway's user, `e2fsprogs`, the
+  `openshell-driver-vm` binary and a gateway service umask of `0022` or lower;
+  upstream tests the driver only on Ubuntu 24.04 amd64), and macOS on Apple
+  silicon on the vm driver (see [compute drivers](#compute-drivers)). Windows,
+  WSL2 and Intel Macs are unsupported: `openshell.CheckHost` refuses them
+  before any sandbox command runs, except `teardown`. A Docker VM with
+  Landlock on a Mac (Colima, OrbStack) may work, untested.
 - The daemon and the gateway run as the same non-root user.
 - `internal/openshell` doctor checks cover the platform, user, Landlock (ABI 3
   or newer), Docker (Engine 28 or newer, BuildKit through the buildx plugin,
@@ -3063,6 +3245,11 @@ nothing of the vm driver, but the names of its caches carry the release
 | Python sandbox API client (REST and the activity stream) | [`../cli/defenseclaw/gateway.py`](../cli/defenseclaw/gateway.py) |
 | TUI Sandboxes panel, launch dialog and setup wizard | [`../cli/defenseclaw/tui/sandbox_panel.py`](../cli/defenseclaw/tui/sandbox_panel.py), [`../cli/defenseclaw/tui/services/sandbox_state.py`](../cli/defenseclaw/tui/services/sandbox_state.py), [`../cli/defenseclaw/tui/panels/setup.py`](../cli/defenseclaw/tui/panels/setup.py) |
 | macOS app sandboxes (menu bar, Overview, panel) | [`../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift`](../macos/DefenseClawMac/DefenseClawMac/DataLayer/SandboxModels.swift), [`../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift`](../macos/DefenseClawMac/DefenseClawMac/Features/SandboxesView.swift) |
+| Managed sandbox policy: floor, tighten, profile section | [`../internal/config/openshell_tighten.go`](../internal/config/openshell_tighten.go), [`../internal/config/guardrail_profiles.go`](../internal/config/guardrail_profiles.go), [`../internal/config/enterprise.go`](../internal/config/enterprise.go) |
+| Managed registrations, decisions and the relay wire types | [`../internal/sandboxreg/`](../internal/sandboxreg/), [`../internal/sandboxrelay/`](../internal/sandboxrelay/), [`../internal/gateway/sandbox_authority.go`](../internal/gateway/sandbox_authority.go), [`../internal/gateway/sandbox_relay.go`](../internal/gateway/sandbox_relay.go) |
+| Per-user sandbox daemon and the launcher | [`../internal/gateway/sandbox_daemon_runtime.go`](../internal/gateway/sandbox_daemon_runtime.go), [`../internal/cli/launcher.go`](../internal/cli/launcher.go) |
+| Require-sandbox gate and managed refusal messages | [`../internal/gateway/require_sandbox.go`](../internal/gateway/require_sandbox.go), [`../internal/openshell/sandboxapi/refusals.go`](../internal/openshell/sandboxapi/refusals.go) |
+| Rendered OpenShell gateway settings and the tarball install | [`../internal/openshell/gatewaycfg_rendered.go`](../internal/openshell/gatewaycfg_rendered.go), [`../internal/openshell/install_tarball.go`](../internal/openshell/install_tarball.go) |
 | Reset of a retired standalone install (config_version 9 migration) | [`../internal/config/migrate_v9.go`](../internal/config/migrate_v9.go) (`migrateRetiredStandaloneSandbox`) |
 
 ## Testing
@@ -3073,6 +3260,13 @@ Unit tests need no OpenShell or Docker:
 go test ./internal/openshell/... ./internal/sandboxauth/...
 go test -run Sandbox ./internal/gateway/ ./internal/gateway/connector/ \
   ./internal/audit/
+```
+
+The managed-host packages have their own unit tests:
+
+```bash
+go test ./internal/sandboxrelay/... ./internal/sandboxreg/... ./internal/config/...
+go test -run 'Sandbox|Launcher|Relay|RequireSandbox' ./internal/gateway/ ./internal/cli/
 ```
 
 On macOS, `TestSandboxHooksScrubInheritedEnvironment` in

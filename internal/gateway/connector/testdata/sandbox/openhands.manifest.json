@@ -40,38 +40,38 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 10127,
-      "sha256": "60a1abf74491009d00dc22fc69f8ac194fdf36c1471a90966e4d2e7d875e28ec"
+      "size": 12549,
+      "sha256": "0012d90e6c0a4c12a0d191b4a19ac0335ae6f3dd9f22aa5b7673eecb707326b5"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6076,
-      "sha256": "690611eadb4af43ffb7bc115345829a59a3db743d9d97c8444e7de3429682690"
+      "size": 6106,
+      "sha256": "3ba4c84b1f68cfede03e2ff113ccab5b0294b9acc7a0267b1de6c4180ba39d42"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5344,
-      "sha256": "16758b9ee447c6a278ee5413c4f33af1aa49deda3fc5c5b1b24e2a31e97d0aaf"
+      "size": 5374,
+      "sha256": "a29f4e9ac49ca208c8e685a815d514a8ecb89fbdc2a1ce7fc1b0b98c5c311cab"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5862,
-      "sha256": "97bab8eb73897066613ff0f909df896fc1c4d838a30ab9813b5efecd3e9b4c88"
+      "size": 5892,
+      "sha256": "67360d3d64182545c032caf8bf7a3d4b3d2ce7caf06029fa85dccfe069ff07da"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6246,
-      "sha256": "8452ad96e0ca242f330c3df0d921809fc95d6296912039c0587cf4393b7abbd0"
+      "size": 6276,
+      "sha256": "c832d56a7a3926e595f385fea6730542eac0f74cfa8c559cae66f952023cfa74"
     },
     "/usr/local/lib/defenseclaw/hooks/openhands-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6343,
-      "sha256": "fd0e9302e7830c8107939d3b089dcad58ad2358cf398a6511bf1180f4311cb09"
+      "size": 6373,
+      "sha256": "e99926727f4bfbf92c22fd249c0149207319e38b2ddeb1d48c1e4584fde4653f"
     },
     "/usr/local/lib/defenseclaw/openhands/hooks.json": {
       "mode": "-rw-r--r--",

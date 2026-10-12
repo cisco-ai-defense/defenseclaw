@@ -133,3 +133,21 @@ func TestPolicyStateLineNamesGenerationDigestAndWhetherTheGatewayAppliedIt(t *te
 		}
 	}
 }
+
+// GAP-0564: the policy line of a run that refused the submitted config is the
+// running deployment's, and says so; every other run keeps the plain line.
+func TestPolicyLineLabelsTheRunningPolicyOfARefusedConfig(t *testing.T) {
+	state := &PolicyState{EffectiveDigest: "sha256:0123456789abcdef0123456789abcdef", ConfigGeneration: 7, Applied: true}
+	r := &Result{Policy: state}
+	if got, want := r.PolicyLine(), state.Line(); got != want {
+		t.Fatalf("PolicyLine() = %q, want %q", got, want)
+	}
+	r.ConfigRefused = true
+	want := "running policy (the refused config changed nothing): config generation 7, effective digest sha256:0123456789ab; applied by the gateway"
+	if got := r.PolicyLine(); got != want {
+		t.Fatalf("PolicyLine() = %q, want %q", got, want)
+	}
+	if got := (&Result{}).PolicyLine(); got != "" {
+		t.Fatalf("PolicyLine() without a policy = %q", got)
+	}
+}

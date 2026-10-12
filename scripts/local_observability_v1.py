@@ -179,6 +179,9 @@ LOKI_BUILTIN_FIELDS = {
     # OTLP host.name is exposed by Loki as the normalized resource field.
     "host_name",
     "level",
+    # host.name's sibling: the operating system of the host (os.type), which the
+    # Sandboxes board's OS box and Managed fleet rows filter on.
+    "os_type",
     "severity_text",
     "service_name",
     "span_id",

@@ -8,6 +8,157 @@ for released versions and assets, and the
 [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
 for current behavior.
 
+## [Unreleased] — Sandboxes on managed computers
+
+A standalone enterprise install (rpm, deb, pkg; Linux and macOS) now runs
+OpenShell sandboxes for standard users, and the directory group that picks a
+person's guardrail profile also picks their sandbox policy. Everything is set
+in the admin `config.yaml`; there is no MDM step. See
+[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/).
+
+### Fixed
+
+- **A refused sandbox profile now names the setting and the profile.** `config-v8 validate`, the gateway and Windows Setup `/ensure` reported a profile's semantic sandbox error (`allowed: false` with `required_for`, an empty egress intersection, `none` with other credentials, an unknown connector, a value below a minimum) only as "configuration could not be compiled safely" at `$`, and reported `config_version` 8 for a version 9 file. They now report `guardrail.profiles["<name>"]` with the rule text and the file's own version. New read-only `defenseclaw-gateway config validate <file>` checks a candidate before it is applied (GAP-0337, GAP-0323, GAP-0252).
+
+### Added
+
+- **A `sandbox` section in each guardrail profile.** It has the type of
+  `openshell.admin` and the same assignments and `default_profile`, and it can
+  only tighten the floor: `openshell.admin` is the loosest anyone gets, and the
+  one key a profile replaces is `request_access`. New keys, usable in both
+  places: `allowed`, `required_for`, `when_unavailable`, `user_approvals`,
+  `allowed_credentials`, `on_silence`, `max_silence_after`, `process_tree`,
+  `foreign_sandboxes`, `allow_upstream_telemetry`, `delete_stopped_after` and
+  `request_access`. Contradictions, an unknown `required_for` connector, a pack
+  outside `<policy_dir>/sandbox/` and a pack looser than the floor's are load
+  errors; every `sandbox` key is refused under Secure Client. `ensure` and
+  `verify` warn when `default_profile` is looser than an assigned profile.
+- **`enterprise.openshell`**: `install` (`prerequisite` or `setup`, no
+  bundling: DefenseClaw never ships OpenShell), `driver`, `driver_fallback`,
+  `version`, `gateway_port` and, on macOS, `e2fsprogs_dir`. `ensure` renders the
+  OpenShell gateway settings into a root-owned `gateway.toml` and verifies or
+  reports the install.
+- **Linux falls back to docker when KVM is not available.** `driver: auto` is
+  the MicroVM driver where the user's KVM probe passes when a sandbox starts,
+  else the docker driver; `driver: vm` falls back the same way. The probe reads
+  the CPU's virtualization flags, opens `/dev/kvm` read-write as the user and
+  looks for the MicroVM driver. It runs per user at sandbox start, never at
+  login. The fallback needs the same Docker access as the docker driver and
+  keeps every profile floor, and a running sandbox never switches driver.
+  `driver_fallback: none` refuses the sandbox instead, with the reason and the
+  contact. A profile may set `sandbox.driver_fallback: none` (tighten only).
+  The banner (`Driver docker (fallback: KVM not available on this computer)`),
+  `status`, `policy explain`, `doctor`, the registration, the audit record and
+  the telemetry (`defenseclaw.sandbox.driver`, `defenseclaw.sandbox.driver_reason`)
+  show the driver and why. macOS is unchanged: MicroVM only.
+- **Require sandboxes per group and agent.** An agent in `required_for` that
+  starts on the host is refused with a command to paste (or alerted, with
+  `when_unavailable: alert`, where sandboxes cannot run: Windows, an Intel Mac,
+  no OpenShell, no Docker or KVM for the user).
+- **A per-user sandbox daemon and a `defenseclaw` launcher.** The daemon runs as
+  the user and asks the managed gateway for the policy of each run under the
+  user's verified identity; every hook the agent sends is relayed to the managed
+  gateway and fails closed. The launcher (`/usr/bin/defenseclaw`,
+  `/usr/local/bin/defenseclaw`) offers only the `sandbox` commands. Managed
+  sandboxes work on a copy of the project.
+- **Asks bounded by the administrator.** The managed gateway decides and stores
+  a person's ask, unblock and "always" against `user_approvals` and
+  `allow_unblock`, and records who answered. Sandboxes DefenseClaw did not
+  start are stopped or alerted (`foreign_sandboxes`), and network rules it did
+  not render are removed.
+- **What users see.** A `Policy` banner line, `defenseclaw sandbox policy
+  explain` (with `--sources`), status and doctor rows, and neutral refusal
+  texts that name only the caller's own profile and end with the
+  request-access contact. Administrators get `enterprise <os> sandbox list`,
+  `sandbox explain --registration`, `effective.sandbox` in `profile-explain`
+  and sandbox rows in `policy verify --user`.
+- **MicroVM sandboxes on Linux with KVM.** On a per-user install, `sandbox
+  setup` offers OpenShell's MicroVM driver on a Linux host where `/dev/kvm`
+  exists, and `sandbox doctor` checks KVM access, `e2fsprogs`, the driver binary
+  and the gateway service's umask (a stricter umask than `0022` made every
+  MicroVM fail to start). On a managed Linux host, `enterprise.openshell.driver:
+  vm` selects it; in `install: prerequisite` mode you install the driver tarball
+  yourself (the recipe is on the managed sandboxes page), and DefenseClaw's own
+  user unit runs the gateway in both install modes.
+- **Telemetry.** New attributes (`defenseclaw.sandbox.policy.digest`,
+  `.generation`, `.provisional`, `defenseclaw.sandbox.registration.id`,
+  `defenseclaw.openshell.version`, `.install_mode`, `defenseclaw.subject.key`)
+  and records (`log.sandbox.policy.resolved`, `.rematched`, `.foreign_rule`,
+  `log.sandbox.ask.decided`, `log.sandbox.host_run_refused`,
+  `.host_run_unavailable`, `.access_refused`, `.foreign_sandbox`,
+  `.foreign_container`, `.settings_drift`), a managed fleet section on the
+  Grafana Sandboxes board, Splunk saved searches and Splunk Observability
+  charts.
+- An Active Directory example, `packaging/identity/ad/sandbox-profiles.example.yaml`.
+- **Administrator views.** `enterprise <os> sandbox pack-digest <pack>` prints,
+  as root and offline, the digest that `required_pack_digest` pins and says
+  whether the gateway would accept the file where it is. `profile-explain`
+  shows an `enrollment.exempt` flag and where a matched group came from
+  (directory, local group database or both). The same `enterprise windows
+  sandbox` views exist from an elevated prompt on Windows, where `pack-digest`
+  is the one with something to show.
+- **One sandbox account at a time.** The first account to run a sandbox holds the
+  sandbox ports; another account is told that sandboxes aren't available for it
+  right now, without the first account's name, and it clears when that account
+  has no sandbox running.
+- **Reasons you can quote.** A required agent that can't be sandboxed (Windows,
+  an Intel Mac, no Docker or KVM for the person, OpenShell missing) is refused
+  with a short reason code (`os_unsupported`, `no_docker_group`, `no_kvm_group`,
+  `prerequisite_missing` and the rest), also the `reason` of
+  `log.sandbox.host_run_unavailable`. The managed sandboxes page lists every
+  reason code, the `ensure` and `verify` codes and the relay refusals.
+- **Documentation.** The managed sandboxes page has real screenshots of the
+  refusals, the banner, `policy explain`, the driver fallback, privacy, the
+  administrator views and the Windows refusal; a recipe for `setup` mode, the
+  MicroVM checks per platform, and how to check a candidate config before you
+  apply it. `sandbox policy explain` prints the policy and the table of every
+  setting by default; `--sources` only tags each row of the summary. The
+  OpenShell version and install mode are in `sandbox status` and `sandbox
+  doctor`, not in `policy explain`. The support matrix lists managed sandboxes
+  as supported on Linux and macOS.
+
+### Changed
+
+- A standalone managed install no longer refuses `defenseclaw sandbox`
+  (the `managed_enterprise` refusals are gone). Sandboxes still refuse on
+  Windows, under WSL2, on an Intel Mac and when run as root, and Secure Client
+  is unchanged.
+- The standalone managed document now refuses every non-lifecycle write from
+  the Python CLI, as the Go side already did; Secure Client is untouched.
+- The sandbox docs no longer say the MicroVM driver means a Mac, and the
+  guide, reference, telemetry page and `docs/SANDBOX.md` describe managed
+  computers.
+- `exempt_users` exempts a person from enrollment and from `required_for`
+  only. Their guardrail profile still inspects and blocks their calls; the
+  documentation no longer says exempt calls are allowed.
+- A profile's `when_unavailable: alert` loosens the default `refuse` only when
+  `openshell.admin.when_unavailable` is `alert` too.
+- `DEFENSECLAW_NO_SANDBOX=1` is a one-time bypass of the shell wrapper where
+  the organization allows a host run. It is not an exemption: on a managed
+  computer whose policy lists the agent in `required_for`, the host run is
+  refused.
+- Managed `sandbox run` has no mount flag and no skip-permissions flag to
+  loosen the policy: it works on a copy, `--safe` keeps the agent's prompts,
+  and `--context`, `--host-port` and `--pack` are checked against the policy.
+  `sandbox policy test` on a managed computer judges your own sandbox and
+  takes `--sandbox NAME`; it refuses `--pack`, `--profile` and `--harness`.
+- The Windows rule-pack folder is documented with a read grant for the
+  gateway service's SID instead of the `Users` group, so standard users cannot
+  list the packs. A bare group name in `profile_assignments` also selects a
+  local group of the same name; the docs recommend the fully qualified
+  spelling. macOS shows other accounts' sandbox daemons in the process list
+  (no `hidepid`); the docs state this residual.
+
+### Removed
+
+- The Python standalone admin-write exception, the `configwrite.ErrNotImplemented`
+  sentinel that nothing returned, the managed-host refusal of `sandbox`, the
+  config-wide unblocks and the "operator" approval actor on managed hosts, the
+  direct reads of `openshell.admin` outside `Effective`, and the stale
+  documentation statements that sandboxes do not run in `managed_enterprise`.
+  Each was dead or superseded by the managed path; the 0.8.x upgrade bridge is
+  kept because the 1.x line still supports upgrades from 0.8.x.
+
 ## [1.0.0] — Release-owned upgrades
 
 1.0 replaces the 0.x upgrade system. `defenseclaw upgrade` now downloads the

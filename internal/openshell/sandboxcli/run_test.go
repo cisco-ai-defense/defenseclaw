@@ -41,6 +41,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/profiles"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 func TestRunMountSessionKeepsChanges(t *testing.T) {
@@ -357,6 +358,18 @@ func TestRunRefusals(t *testing.T) {
 			ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{Key: "pack", Value: "strict", Source: "admin",
 				Origin: "openshell.admin.required_pack"})
 		}, want: []string{"--host-port 38790: not allowed by the strict sandbox pack your organization requires (openshell.admin.required_pack)"}},
+		// GAP-0558, GAP-0580, GAP-0628: on a managed computer a flag the
+		// caller's profile forbids is refused before the copy and the
+		// create, naming the profile and the rule, not the organization's
+		// key.
+		{name: "a managed profile that opens no host port", opts: RunOptions{Harness: "claude", HostPorts: []int{8080}}, setup: func(ta *testApp) {
+			ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, RequestAccess: "it@example.invalid"}
+		}, want: []string{"--host-port 8080 isn't allowed: your profile doesn't let sandboxes reach ports on this computer", "(profile contractors)",
+			"(quote rule allow_host_ports)", "it@example.invalid"}, not: "openshell.admin"},
+		{name: "a managed --context", opts: RunOptions{Harness: "claude", Context: []string{"/tmp/x"}}, setup: func(ta *testApp) {
+			ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true, RequestAccess: "it@example.invalid"}
+		}, want: []string{"--context mounts a folder into the sandbox", "work on a copy of the project only", "(profile contractors)",
+			"(quote rule allow_mount)"}, not: "openshell.admin"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -385,6 +398,77 @@ func TestRunRefusals(t *testing.T) {
 		Violation: &sandboxapi.Violation{Key: "yolo", Admin: true, Message: "skip-permissions mode is not allowed"}}
 	if err := ta.Run(bg, RunOptions{Harness: "claude"}); err == nil || err.Error() != "blocked by your organization's DefenseClaw policy: yolo (skip-permissions mode is not allowed)" {
 		t.Fatalf("Run = %v", err)
+	}
+}
+
+// GAP-0595: a managed run during a directory outage says so once, at its
+// start, in the text of the managed gateway's own refusal, before the project
+// is copied; an upload that fails on the lookup says the same instead of
+// advising a change to the ssh configuration.
+func TestRunSaysTheDirectoryIsDownBeforeCopying(t *testing.T) {
+	outage := &openshell.AccountLookupError{Err: errors.New("ssh -G: No user exists for uid 94404076")}
+	ta := newTestApp(t, "")
+	ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true, RequestAccess: "it@example.invalid"}
+	ta.AccountCheck = func() error { return outage }
+	err := ta.Run(bg, RunOptions{Harness: "claude", Copy: true})
+	wantErr(t, err, "Your account can't be looked up on this computer right now. Try again in a moment.", "Need an exception? Contact it@example.invalid")
+	if strings.Contains(err.Error(), "ssh") || ta.creates() != 0 || len(ta.copy.steps) != 0 {
+		t.Fatalf("err = %v, creates %d, copy steps %v; want a refusal before any copy", err, ta.creates(), ta.copy.steps)
+	}
+	// An unmanaged computer is not asked.
+	ta = newTestApp(t, "s\n")
+	ta.AccountCheck = func() error { return outage }
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude", Copy: true}))
+	// The same lookup failure at the upload reads the same.
+	ta = newTestApp(t, "")
+	ta.daemon.explain.Managed = &sandboxapi.ManagedExplain{Profile: "contractors", Allowed: true, AllowHostPorts: true}
+	ta.copy.uploadErr = fmt.Errorf("openshell upload: %w", outage)
+	err = ta.Run(bg, RunOptions{Harness: "claude", Copy: true})
+	wantErr(t, err, "Your account can't be looked up on this computer right now. Try again in a moment.")
+	if strings.Contains(err.Error(), "ssh configuration") || strings.Contains(err.Error(), "upload the project copy") {
+		t.Fatalf("upload err = %v", err)
+	}
+}
+
+// GAP-0669: a label that fills the banner column still needs a separator.
+func TestBannerSeparatesRepositoryLabelFromPolicyText(t *testing.T) {
+	sb := sampleSandbox("box")
+	ta := newTestApp(t, "")
+	ta.banner(&sb, bannerInfo{managed: &sandboxapi.ManagedStatus{Profile: "contractors"},
+		repo: &sandboxapi.RepoPolicy{Tightened: []string{"network.mode"}}})
+	has(t, ta.output(), "Repository  repo policy", "Policy    contractors")
+	out := strings.Join(strings.Fields(ta.output()), " ")
+	has(t, out, "Repository repo policy .defenseclaw/sandbox.yaml: tightened 1 setting (network.mode)")
+	lacks(t, out, "Repositoryrepo")
+}
+
+// GAP-0590: the launch banner answers asks with the sandbox commands only on
+// a managed computer, where `defenseclaw tui` exits saying it is unavailable.
+func TestBannerOffersNoTUIOnAManagedComputer(t *testing.T) {
+	sb := sampleSandbox("m1")
+	ta := newTestApp(t, "")
+	ta.banner(&sb, bannerInfo{})
+	has(t, ta.output(), "defenseclaw sandbox approvals", "`defenseclaw tui`: 7, then t")
+	ta = newTestApp(t, "")
+	ta.banner(&sb, bannerInfo{managed: &sandboxapi.ManagedStatus{Profile: "contractors"}})
+	has(t, ta.output(), "defenseclaw sandbox approvals")
+	lacks(t, ta.output(), "defenseclaw tui")
+}
+
+// GAP-0628: a limit or refusal that comes from the caller's profile names
+// the profile and the rule on a managed computer, not the organization's
+// openshell.admin key the user has no file for.
+func TestViolationTextNamesTheProfileOnAManagedComputer(t *testing.T) {
+	ta := newTestApp(t, "")
+	v := &sandboxapi.Violation{Key: "mcp.host_ports", Admin: true, Constraint: "openshell.admin.allow_host_ports",
+		Detail: "host ports cannot be opened to sandboxes", Attempted: "8080", Enforced: "(none)"}
+	if got := ta.violationText(v, "", "", true); !strings.Contains(got, "(openshell.admin.allow_host_ports)") {
+		t.Fatalf("unmanaged text = %q", got)
+	}
+	ta.managedSeen = &sandboxapi.ManagedStatus{Profile: "contractors"}
+	got := ta.violationText(v, "", "", true)
+	if !strings.Contains(got, "(profile contractors, rule allow_host_ports)") || strings.Contains(got, "openshell.admin") {
+		t.Fatalf("managed text = %q", got)
 	}
 }
 
@@ -1617,5 +1701,22 @@ func TestOpenCodeLauncherRefusalNamesTheSandboxCommands(t *testing.T) {
 		if !strings.Contains(script, CommandName+" "+verb+" $dc_sandbox") {
 			t.Errorf("the OpenCode launcher's refusal does not name `%s %s`", CommandName, verb)
 		}
+	}
+}
+
+// TestVMDiskHintOnlyForStartFailures pins GAP-0496: a run the gateway
+// refused (a conflict with the running sandboxes, a policy refusal) does not
+// end with the MicroVM first-start disk hint, which a create that failed to
+// start keeps.
+func TestVMDiskHintOnlyForStartFailures(t *testing.T) {
+	hint := func(err error) bool { return !policyRefusal(err) && firstStartFailure(err) }
+	if hint(&sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "differs"}) {
+		t.Fatal("a conflict refusal got the disk hint")
+	}
+	if hint(&sandboxapi.Error{Code: sandboxapi.CodeUpstream, Detail: sandboxrelay.ReasonPolicyUnloadable}) {
+		t.Fatal("an unloadable policy got the disk hint")
+	}
+	if !hint(&sandboxapi.Error{Code: sandboxapi.CodeUpstream}) || !hint(errors.New("timeout")) {
+		t.Fatal("a start failure lost the disk hint")
 	}
 }

@@ -75,6 +75,10 @@ type MicroVMHost struct {
 	// which the driver does not search for e2fsprogs (empty for
 	// /opt/homebrew and /usr/local).
 	OwnBrewPrefix string `json:"homebrew_prefix,omitempty"`
+	// RefusedE2fsprogs names, on a managed host, an e2fsprogs the driver
+	// would find that another account can change, which a managed sandbox
+	// does not use.
+	RefusedE2fsprogs string `json:"e2fsprogs_refused,omitempty"`
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
@@ -98,16 +102,47 @@ type MicroVMHost struct {
 	// Recommended is what DefenseClaw sets up every MicroVM with, within
 	// the organization's openshell.admin.max_resources.
 	Recommended VMResources `json:"recommended"`
+	// KVM says why /dev/kvm cannot be opened for reading and writing by
+	// this user (Linux; empty: it can, or this is a Mac).
+	KVM string `json:"kvm_problem,omitempty"`
+	// ServiceUMask is the umask the gateway service runs with, as systemd
+	// reports it (Linux; empty: not known), and UMaskTooStrict says that it
+	// hides directories from the guest (UMaskTooStrict).
+	ServiceUMask   string `json:"service_umask,omitempty"`
+	UMaskTooStrict bool   `json:"service_umask_too_strict,omitempty"`
+	// StateDir is the driver's state directory, and StaleCache the
+	// directories of its cache built under a gateway umask stricter than
+	// 0022, which no MicroVM prepared from them survives (Linux).
+	StateDir   string   `json:"state_dir,omitempty"`
+	StaleCache []string `json:"stale_cache,omitempty"`
+	// Linux marks a Linux host, whose needs are not a Mac's; kvmFix is the
+	// way on from a KVM problem.
+	Linux  bool `json:"linux,omitempty"`
+	kvmFix *Fix
 }
+
+// KVMUsable reports a Linux host where a MicroVM can start as far as KVM
+// goes: it can offer the MicroVM driver.
+func (m *MicroVMHost) KVMUsable() bool { return m != nil && m.Linux && m.KVM == "" }
 
 // Problems are what keeps the driver from starting a MicroVM here.
 func (m *MicroVMHost) Problems() []string {
+	if m.Linux {
+		var out []string
+		if m.KVM != "" {
+			out = append(out, m.KVM)
+		}
+		return append(out, m.toolProblems()...)
+	}
 	var out []string
 	if m.E2fsprogs == "" {
 		problem := "e2fsprogs is not installed where the MicroVM driver looks for it, Homebrew's keg (opt/e2fsprogs under /opt/homebrew or /usr/local): " +
 			"the driver formats every MicroVM's disks with its mke2fs and debugfs"
 		if m.OwnBrewPrefix != "" {
 			problem += "; it does not look in your Homebrew at " + m.OwnBrewPrefix
+		}
+		if m.RefusedE2fsprogs != "" {
+			problem += "; a managed sandbox does not use the one in " + m.RefusedE2fsprogs + ", which another account can change"
 		}
 		out = append(out, problem)
 	}
@@ -120,13 +155,18 @@ func (m *MicroVMHost) Problems() []string {
 	return out
 }
 
-// macChecks makes, once, the machine checks of a Mac, which depend on the
+// macChecks makes, once, the machine checks of a Mac (on Linux
+// linuxMicroVMChecks adjusts the ones made before), which depend on the
 // compute driver: on vm sandboxes run in OpenShell MicroVMs, with their
 // own kernel and disks; on docker they run on the kernel of the Linux VM
 // Docker runs in. They go where the Landlock check would, in the order
 // the check list gives.
 func (r *doctorRun) macChecks(ctx context.Context) {
-	if r.GOOS == "linux" || r.machineDone {
+	if r.GOOS == "linux" {
+		r.linuxMicroVMChecks(ctx)
+		return
+	}
+	if r.machineDone {
 		return
 	}
 	r.machineDone = true
@@ -241,7 +281,11 @@ func (r *doctorRun) vmFileSharingCheck() Check {
 func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 	m := &MicroVMHost{Identity: VMIdentity{UID: int64(r.Geteuid()), GID: int64(r.Getegid())},
 		Recommended: RecommendedVMResources(r.HostMemory()).Within(r.MaxCPUMillis, r.MaxMemoryBytes)}
-	m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
+	if r.Gateway.managedHost() {
+		m.E2fsprogs, m.RefusedE2fsprogs = r.managedE2fsprogs()
+	} else {
+		m.E2fsprogs = e2fsprogsIn(r.E2fsprogsDirs)
+	}
 	if prefix := r.brewPrefix(); driverSkipsHomebrew(prefix, r.E2fsprogsDirs) {
 		m.OwnBrewPrefix = prefix
 	}
@@ -273,11 +317,71 @@ func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 // mkfs.ext4 name) and debugfs.
 func e2fsprogsIn(dirs []string) string {
 	for _, dir := range dirs {
-		if (executable(filepath.Join(dir, "mke2fs")) || executable(filepath.Join(dir, "mkfs.ext4"))) && executable(filepath.Join(dir, "debugfs")) {
+		if hasE2fsprogs(dir) {
 			return dir
 		}
 	}
 	return ""
+}
+
+func hasE2fsprogs(dir string) bool {
+	return (executable(filepath.Join(dir, "mke2fs")) || executable(filepath.Join(dir, "mkfs.ext4"))) && executable(filepath.Join(dir, "debugfs"))
+}
+
+// managedE2fsprogs is the e2fsprogs a managed sandbox uses (spec D5): the
+// user's own build in ~/.local/opt/e2fsprogs, else the first of
+// E2fsprogsDirs whose tools only root or this user can change. A keg in
+// another account's Homebrew (the Cellar is that account's, and writable by
+// the admin group) is refused, never used silently (GAP-0004); refused
+// names it.
+func (r *doctorRun) managedE2fsprogs() (dir, refused string) {
+	var dirs []string
+	if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
+		dirs = append(dirs, filepath.Join(home, ".local", "opt", "e2fsprogs", "sbin"))
+	}
+	for _, d := range append(dirs, r.E2fsprogsDirs...) {
+		if !hasE2fsprogs(d) {
+			continue
+		}
+		if err := ownedByRootOrUser(filepath.Join(d, "debugfs"), os.Geteuid()); err != nil {
+			if refused == "" {
+				refused = fmt.Sprintf("%s (%v)", d, err)
+			}
+			continue
+		}
+		return d, refused
+	}
+	return "", refused
+}
+
+// ownedByRootOrUser checks that path, after its links, and every folder
+// above it belong to root or uid and that no other account can write them
+// (a root-owned sticky folder such as /tmp aside).
+func ownedByRootOrUser(path string, uid int) error {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	for p := real; ; p = filepath.Dir(p) {
+		info, err := os.Stat(p)
+		if err != nil {
+			return err
+		}
+		owner, ok := fileUID(info)
+		if !ok {
+			return fmt.Errorf("%s: owner unknown", p)
+		}
+		rootSticky := info.IsDir() && owner == 0 && info.Mode()&os.ModeSticky != 0
+		switch {
+		case owner != 0 && owner != uid:
+			return fmt.Errorf("%s belongs to uid %d", p, owner)
+		case info.Mode().Perm()&0o022 != 0 && !rootSticky:
+			return fmt.Errorf("%s can be changed by other accounts (mode %04o)", p, info.Mode().Perm())
+		}
+		if parent := filepath.Dir(p); parent == p {
+			return nil
+		}
+	}
 }
 
 func executable(p string) bool {
@@ -321,7 +425,7 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 			return p
 		}
 	}
-	if r.running.Name != DriverVM || r.GOOS != "darwin" {
+	if r.running.Name != DriverVM {
 		return ""
 	}
 	parent := 0
@@ -336,6 +440,20 @@ func (r *doctorRun) findVMDriver(ctx context.Context) string {
 		return p.path
 	}
 	return ""
+}
+
+// ManagedMicroVMFix is what a user of a managed computer does about a MicroVM
+// driver that lacks something: ask the administrator, who sets
+// enterprise.openshell. It names no Homebrew command, which a standard user
+// of a managed computer cannot run.
+func ManagedMicroVMFix(m *MicroVMHost, unsigned bool) string {
+	switch {
+	case m.E2fsprogs == "":
+		return "ask your administrator to install e2fsprogs 1.43 or newer and set enterprise.openshell.e2fsprogs_dir (or build it yourself into ~/.local/opt/e2fsprogs)"
+	case unsigned:
+		return "ask your administrator for an OpenShell whose MicroVM driver is signed for Apple's Hypervisor (OpenShell 0.1.3 ships it signed), or for enterprise.openshell.install: setup"
+	}
+	return "ask your administrator to install OpenShell (enterprise.openshell.install)"
 }
 
 // VMDriverSigningFix is what to do about a MicroVM driver outside the
@@ -417,12 +535,13 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 	problems := m.Problems()
 	var cmds []string
 	var steps []func(context.Context) error
-	if m.E2fsprogs == "" && m.OwnBrewPrefix == "" {
+	managed := r.Gateway.managedHost()
+	if m.E2fsprogs == "" && m.OwnBrewPrefix == "" && !managed {
 		cmds, steps = append(cmds, InstallE2fsprogsCommand), append(steps, func(ctx context.Context) error { return brewTerminal(ctx, r.Runner, "install", "e2fsprogs") })
 	}
 	// The formula's post-install step signs the formula's driver only.
 	unsigned := m.DriverBinary != "" && !m.HypervisorSigned && m.SignatureUnknown == ""
-	if unsigned && m.DriverFromFormula {
+	if unsigned && m.DriverFromFormula && !managed {
 		cmds, steps = append(cmds, ResignVMDriverCommand), append(steps, func(ctx context.Context) error { return brew(ctx, r.Runner, "postinstall", GatewayFormula) })
 	}
 	switch {
@@ -439,6 +558,10 @@ func (r *doctorRun) vmDriverCheck(ctx context.Context) Check {
 		c.Detail = fmt.Sprintf("e2fsprogs in %s; %s signed for Apple's Hypervisor", m.E2fsprogs, m.DriverBinary)
 	}
 	switch {
+	case managed && (m.E2fsprogs == "" || unsigned || (m.DriverBinary == "" && !m.DriverRunning)):
+		// No Homebrew on a managed host (spec D4, D5): the administrator
+		// provides it.
+		c.Fix = &Fix{Summary: ManagedMicroVMFix(m, unsigned)}
 	case len(steps) > 0:
 		c.Fix = &Fix{Summary: "install what the MicroVM driver needs with Homebrew", Command: strings.Join(cmds, " && "), Automatic: true,
 			Apply: func(ctx context.Context) error {

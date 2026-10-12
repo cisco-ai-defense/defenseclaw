@@ -29,6 +29,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -692,6 +693,11 @@ func newWindowsEnrollmentAccountLookup() windowsEnrollmentAccountLookup {
 		lookup := windowsEnrollmentLookupAccountSID
 		go func() {
 			account, domain, err := lookup(sid)
+			if err == nil {
+				// The sAMAccountName, also while its user is signed in with a
+				// UPN, as the gateway names the account (GAP-0533).
+				account = useridentity.CanonicalWindowsAccountName(sid, account, domain)
+			}
 			done <- result{account, domain, err}
 		}()
 		timer := time.NewTimer(remaining)

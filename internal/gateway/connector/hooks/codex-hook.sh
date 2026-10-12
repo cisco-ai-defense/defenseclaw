@@ -269,7 +269,7 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/codex/hook" "$PAYLOAD" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
-  fail_unreachable "$DC_SANDBOX_UNREACHABLE"
+  fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
 }
 API_TOKEN=
 PAYLOAD=

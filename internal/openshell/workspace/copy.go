@@ -639,10 +639,25 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 		}
 	}
 	// Tracked secrets are held back: mark them skip-worktree so neither
-	// the agent's git nor the pull capture treats them as deleted.
+	// the agent's git nor the pull capture treats them as deleted. Only a
+	// path the copy's index holds (HEAD's tree) can be marked: one only
+	// staged in the project (git add, never committed) is in trackedSet but
+	// not in the copy's index, and marking it failed the whole run with
+	// "Unable to mark file .env" (GAP-0596). Held back, it is simply absent
+	// from the copy.
+	inCopy := map[string]bool{}
+	if len(heldBack) > 0 && head != "" {
+		listed, err := sg.output(ctx, "ls-files", "-z", "--cached")
+		if err != nil {
+			return err
+		}
+		for _, p := range splitNUL(listed) {
+			inCopy[p] = true
+		}
+	}
 	var heldTracked []string
 	for _, p := range heldBack {
-		if _, ok := trackedSet[p]; ok {
+		if _, ok := trackedSet[p]; ok && inCopy[p] {
 			heldTracked = append(heldTracked, p)
 		}
 	}

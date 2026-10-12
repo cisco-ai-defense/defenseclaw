@@ -53,7 +53,7 @@ func TestHostHooksTreatAlertAsAdvisory(t *testing.T) {
 		t.Skip("jq is required")
 	}
 	dir := t.TempDir()
-	if err := WriteHookScriptsWithToken(dir, "127.0.0.1:18970", "tok-test"); err != nil {
+	if err := WriteHookScriptsWithToken(dir, freeAPIAddr(t), "tok-test"); err != nil {
 		t.Fatalf("WriteHookScriptsWithToken: %v", err)
 	}
 	stubDir := t.TempDir()

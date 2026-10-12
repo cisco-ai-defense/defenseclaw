@@ -331,6 +331,39 @@ func TestEarlierGatewayIsProbedOnTheAPIPort(t *testing.T) {
 	}
 }
 
+// GAP-0564: an ensure that refuses the submitted config changed nothing, so
+// the advisories and the policy line that follow the error are the running
+// deployment's. They say so, instead of reading as the refused file's.
+func TestRefusedEnsureLabelsTheRunningDeploymentAdvisories(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"profile_assignment_warnings":["assignment 1: group \"dc-sbx-*\" is not known to this host, so it selects nobody"]}`), nil
+	}
+	bad := filepath.Join(t.TempDir(), "refused.yaml")
+	raw := strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: bogus", 1)
+	if err := os.WriteFile(bad, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: bad})
+	requireError(t, r, codeConfig)
+	got := messagesOf(r.Warnings, codeProfileAssignments)
+	if !strings.HasPrefix(got, runningDeploymentPrefix) || !strings.Contains(got, `group "dc-sbx-*"`) {
+		t.Fatalf("the active config's advisory is not labelled as the running deployment's: %q", got)
+	}
+	if !r.ConfigRefused {
+		t.Fatal("the refused run is not marked, so its policy line reads as the refused file's")
+	}
+	if r.Policy != nil && !strings.HasPrefix(r.PolicyLine(), "running policy (the refused config changed nothing): config generation") {
+		t.Fatalf("policy line = %q", r.PolicyLine())
+	}
+	// A successful status of the same host keeps the plain wording.
+	status := h.run(Options{Action: ActionStatus})
+	if got := messagesOf(status.Warnings, codeProfileAssignments); strings.Contains(got, runningDeploymentPrefix) || status.ConfigRefused {
+		t.Fatalf("status is labelled as a refused run: %q", got)
+	}
+}
+
 // Enabled AI Defense that fails (a rejected key) leaves the local engine
 // deciding, so status stays ok, but it must say so. So must directory lookups
 // that fail, which leave the accounts without cached facts on the default

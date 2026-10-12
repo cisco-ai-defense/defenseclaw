@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Error codes. They are stable machine tokens; Message is for people.
@@ -64,7 +65,15 @@ const DisabledMessage = "OpenShell sandboxes are off; run `defenseclaw sandbox s
 // OffMessage is DisabledMessage for st, which reports sandboxes off: for an
 // account whose setup would stop at another account's gateway it says so,
 // with the way on, instead of sending the user to setup first (GAP-0307).
+//
+// On a managed computer (Status.Managed set) the user can neither run setup
+// nor see another account's gateway: the message says what the user may know
+// (another account, or the unavailable reason), never the other account's
+// name, uid or PID, and ends with the organization's contact.
 func (st *Status) OffMessage() string {
+	if st != nil && st.Managed != nil {
+		return st.managedOffMessage()
+	}
 	if st == nil || st.GatewayElsewhere == "" {
 		return DisabledMessage
 	}
@@ -72,6 +81,39 @@ func (st *Status) OffMessage() string {
 		st.GatewayElsewhere + "); one gateway runs on a machine, under the account that started it: run sandboxes from " +
 		"that account, or have it hand its gateway over, then run `defenseclaw sandbox setup` here " +
 		"(`defenseclaw sandbox doctor` names the hand-over command)"
+}
+
+// AccountBusyMessage is what a user on a single-sandbox-account computer is
+// told while another account holds the sandbox ports (Q2): neutral, without
+// the other account's name, uid or PID.
+const AccountBusyMessage = "Sandboxes aren't available for your account on this computer right now: another account is using them"
+
+// managedOffMessage is OffMessage for a managed computer.
+func (st *Status) managedOffMessage() string {
+	m := st.Managed
+	var msg string
+	switch {
+	case st.GatewayElsewhere != "":
+		msg = AccountBusyMessage + "; try again when it has no sandbox running."
+	case m.Unavailable != "":
+		msg = UnavailableSentence(m.Unavailable)
+	default:
+		msg = "Sandboxes are off on this computer; your organization manages this setting."
+	}
+	return msg + " " + AccessContact(m.RequestAccess)
+}
+
+// UnavailableSentence is the sentence for why, the caller-facing reason
+// sandboxes can't run for the caller ("OpenShell is not installed"): the
+// reason travels bare (ManagedStatus.Unavailable, the managed gateway's
+// settings) and only this sentence frames it, so it is never framed twice
+// (GAP-0175).
+func UnavailableSentence(why string) string {
+	why = strings.TrimRight(strings.TrimSpace(DisplayText(why)), ". ")
+	if why == "" {
+		return "Sandboxes aren't available on this computer."
+	}
+	return "Sandboxes aren't available on this computer: " + why + "."
 }
 
 // AdminMessage is the sentence every admin refusal starts with.

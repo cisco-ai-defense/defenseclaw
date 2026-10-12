@@ -32,12 +32,52 @@ so they join that session's hook decisions.
 | `defenseclaw.sandbox.runtime` | `openshell` |
 | `defenseclaw.sandbox.driver` | OpenShell compute driver: `docker`, `podman`, `vm`, `k8s` |
 | `defenseclaw.sandbox.image.digest` | Workload image digest (`sha256:<64 hex>`) |
+| `defenseclaw.sandbox.container.image` | Image reference of an agent container started outside DefenseClaw (`log.sandbox.foreign_container` only); dropped when it is not a plain reference |
 | `defenseclaw.sandbox.policy.version` | OpenShell policy revision in force; omitted when unknown, never reported as 0 |
 | `defenseclaw.sandbox.profile` | `open`, `balanced`, or `strict` |
 | `defenseclaw.sandbox.pack` | Policy pack name |
 | `defenseclaw.sandbox.phase` | Lifecycle phase (below) |
 | `defenseclaw.sandbox.workdir.mode` | `mount` or `copy` |
 | `defenseclaw.sandbox.binding.id` | The DefenseClaw ingress binding the sandbox's hooks and egress proxy credential authenticate with (`sb_<hex>`; never the token) |
+
+On a managed host (enterprise packages, identity-based sandbox policy) the
+same group also carries what the managed gateway knows about the sandbox's
+governance. They are omitted on an unmanaged sandbox, and they are never
+metric labels.
+
+| Attribute | Meaning |
+| --- | --- |
+| `defenseclaw.sandbox.registration.id` | The managed gateway registration the sandbox's hooks and policy requests are bound to (`reg-...`; never the binding token) |
+| `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The guardrail profile that governs the sandbox, with the digest of its configuration and why it matched (the same attributes the hook decisions carry) |
+| `defenseclaw.sandbox.policy.digest` | Digest of the effective sandbox policy (organization floor combined with the profile's `sandbox` section) |
+| `defenseclaw.sandbox.policy.generation` | The managed gateway's configuration generation at the last resolve or re-match. It is not `defenseclaw.policy.generation`, which every record also carries for the live policy stamp (the generation of the policy the process is enforcing); the two advance independently |
+| `defenseclaw.sandbox.policy.provisional` | `true` while the sandbox runs on the offline floor because the directory lookup has not resolved |
+| `defenseclaw.openshell.version`, `defenseclaw.openshell.install_mode` | The OpenShell release the daemon verified and how it was provided (`prerequisite` or `setup`) |
+| `defenseclaw.subject.key` | `hmac-sha256:` keyed pseudonym of the account, so a person can be followed across records without the principal (which is recorded only when `ai_discovery.include_user_principal` is on) |
+
+A malformed descriptive stamp (`defenseclaw.openshell.version`,
+`defenseclaw.openshell.install_mode`, `defenseclaw.guardrail.profile.match`,
+`.matched_group`) is left off the records of the existing sandbox families
+(egress, approval, policy update, lifecycle), so a mandatory record is never
+lost to a metadata format error. The managed-only records below refuse such a
+stamp instead, because it means the managed gateway built it wrongly.
+
+The managed records also name the person (`user.id`, `defenseclaw.user.id_kind`,
+`defenseclaw.user.name` and, when allowed, `defenseclaw.user.principal`). They
+go through `audit.SandboxManagedTelemetry`
+([`internal/audit/sandbox_policy_v8.go`](../internal/audit/sandbox_policy_v8.go)):
+
+- `log.sandbox.policy.resolved`: a registration's profile and sandbox policy were resolved (reason `offline_floor` for a provisional one). A resolution the gateway refused is recorded too, as failed, with the refusal's reason (`sandbox_not_allowed`, `sandbox_unavailable` or `sandbox_policy_unloadable`) and the profile it was judged under.
+- `log.sandbox.policy.rematched`: a live registration was matched again (`defenseclaw.sandbox.policy.rematch.reason` `generation`, `facts` or `lookup_resolved`), with the previous profile and policy digest.
+- `log.sandbox.policy.foreign_rule`: a network rule that neither the rendered policy nor a stored decision accounts for was removed, its sandbox stopped, or only reported (`defenseclaw.sandbox.managed.action` `remove`, `stop`, `alert`).
+- `log.sandbox.ask.decided`: the managed gateway decided a user's ask, unblock or block, and whether it kept the decision.
+- `log.sandbox.host_run_refused`, `log.sandbox.host_run_unavailable`: a host agent run was refused because the profile requires a sandbox, or because this computer cannot provide one (`defenseclaw.sandbox.managed.reason` such as `required_group`, `os_unsupported`, `no_docker_group`, `no_kvm`, `prerequisite_missing`, `account_busy` for a run refused because another account is using the sandboxes of the computer); an alert-only unavailability has action `allow`.
+- `log.sandbox.access_refused`: a destination the managed policy refused, with the rule (`defenseclaw.sandbox.policy.rule`) and `server.address`; the rule is the caller's own match only.
+- `log.sandbox.foreign_sandbox`, `log.sandbox.foreign_container`: a sandbox on the user's OpenShell gateway that DefenseClaw did not create (stopped, deleted when it cannot stop, or reported) and an agent container started outside DefenseClaw (reported only). Both carry the account's own profile match and the detected agent connector, including without a registered sandbox. Deletion is recorded as action `stop`, including a failed deletion.
+- `log.sandbox.settings_drift`: an OpenShell setting differs from `enterprise.openshell` (`defenseclaw.openshell.settings.field` names the key, never the value), which pauses the user's sandboxes.
+
+A refusal (including a failed policy resolution), a removal or stop, a re-match and an ask decision are mandatory and
+reach the audit floor whatever a route's collection settings say.
 
 Phases are the OpenShell `SandboxPhase` values (`provisioning`, `starting`,
 `ready`, `stopping`, `stopped`, `completed`, `error`, `deleting`, `unknown`)
@@ -57,6 +97,16 @@ sandbox) and `deleted` (after it is gone).
 | `RecordSandboxFinding` | `sandbox-finding` | `log.finding.observed` | `security.finding` | No |
 | `RecordSandboxActivity` | `sandbox-activity` | `log.sandbox.process`, `log.sandbox.ssh`, `log.sandbox.inference` | `tool.activity`, `compliance.activity`, `model.io` | No |
 | `RecordSandboxProcess` | `sandbox-process` | `log.sandbox.process_tree` | `agent.lifecycle` | No |
+| `RecordSandboxPolicyResolved` | `sandbox-policy` | `log.sandbox.policy.resolved` | `compliance.activity` | A failed resolution, which refuses the registration (`enforced_outcome`) |
+| `RecordSandboxPolicyRematched` | `sandbox.policy.rematched` | `log.sandbox.policy.rematched` | `compliance.activity` | Always (`control_plane_mutation`) |
+| `RecordSandboxPolicyForeignRule` | `sandbox.policy.foreign_rule` | `log.sandbox.policy.foreign_rule` | `enforcement.action` | A removal or stop (`enforced_outcome`) |
+| `RecordSandboxAskDecided` | `sandbox-approval` | `log.sandbox.ask.decided` | `compliance.activity` | Always (`approval_resolution`) |
+| `RecordSandboxHostRunRefused` | `sandbox.managed` | `log.sandbox.host_run_refused` | `enforcement.action` | Always (`enforced_outcome`) |
+| `RecordSandboxHostRunUnavailable` | `sandbox.managed` | `log.sandbox.host_run_unavailable` | `enforcement.action` | A refusal (`enforced_outcome`) |
+| `RecordSandboxAccessRefused` | `sandbox.managed` | `log.sandbox.access_refused` | `enforcement.action` | Always (`enforced_outcome`) |
+| `RecordSandboxForeignSandbox` | `sandbox.managed` | `log.sandbox.foreign_sandbox` | `enforcement.action` | A stop (`enforced_outcome`) |
+| `RecordSandboxForeignContainer` | `sandbox.managed` | `log.sandbox.foreign_container` | `compliance.activity` | No (alert only) |
+| `RecordSandboxSettingsDrift` | `sandbox.managed` | `log.sandbox.settings_drift` | `enforcement.action` | Always (`enforced_outcome`) |
 
 The manager stamps every record with what it knows of the sandbox and the
 producer does not: the launching host account as `user.id`,
@@ -447,13 +497,3 @@ record:
   1,024). SSH and inference tokens
   (activity, auth, status, operation, model) that are not identifiers are
   omitted, and an SSH peer that is not an IP address is.
-
-## Retired legacy events
-
-The legacy standalone sandbox's events were retired with it: the
-`init-sandbox` audit action and the `defenseclaw.openshell.exit` metric
-(`metric.defenseclaw.openshell.exit` family, with its
-`defenseclaw.metric.command` attribute) are no longer emitted, and the gateway
-no longer reports a degraded `sandbox` health subsystem for a host that still
-has the legacy config (the upgrade to 1.0 resets that config). See
-[SANDBOX.md](SANDBOX.md#hosts-that-still-have-the-legacy-install).

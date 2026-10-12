@@ -1,0 +1,14 @@
+admin.allowed: managed sandbox keys are not supported with the Secure Client integration
+admin.required_for: managed sandbox keys are not supported with the Secure Client integration
+admin.when_unavailable: managed sandbox keys are not supported with the Secure Client integration
+admin.user_approvals: managed sandbox keys are not supported with the Secure Client integration
+admin.allowed_credentials: managed sandbox keys are not supported with the Secure Client integration
+admin.on_silence: managed sandbox keys are not supported with the Secure Client integration
+admin.max_silence_after: managed sandbox keys are not supported with the Secure Client integration
+admin.process_tree: managed sandbox keys are not supported with the Secure Client integration
+admin.foreign_sandboxes: managed sandbox keys are not supported with the Secure Client integration
+admin.allow_upstream_telemetry: managed sandbox keys are not supported with the Secure Client integration
+admin.delete_stopped_after: managed sandbox keys are not supported with the Secure Client integration
+admin.request_access: managed sandbox keys are not supported with the Secure Client integration
+admin.driver_fallback: managed sandbox keys are not supported with the Secure Client integration
+admin.allowed, admin.request_access: managed sandbox keys are not supported with the Secure Client integration

@@ -30,6 +30,21 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 
+# How long the panel waits before asking again after the daemon did not give it the policy.
+MANAGED_EXPLAIN_RETRY_SECONDS = 30
+# How long a live policy change stays on the panel as a chip.
+POLICY_CHIP_SECONDS = 90
+# The match kinds of a managed explain, in the user's words.
+_MATCH_TEXT = {
+    "agent": "your agent is assigned to it",
+    "user": "you are assigned to it",
+    "connector": "this agent is assigned to it",
+    "default": "the default for everyone",
+    "default_unverified": "the default (your identity could not be verified)",
+    "default_lookup_failed": "the default (your directory couldn't be reached)",
+    "none": "no profile applies; your organization's floor does",
+}
+
 SANDBOX_VIEWS: tuple[str, ...] = ("sandboxes", "activity", "asks")
 VIEW_TITLES = {"sandboxes": "Sandboxes", "activity": "Activity", "asks": "Asks"}
 # Keys that act on the selected row in every view (a, A and x act on the
@@ -327,7 +342,13 @@ def harness_command(name: str) -> str:
 
 
 def sandbox_keys_hint(
-    view: str, *, unblock: bool = True, always: bool = True, has_rows: bool = True, copy: bool = False
+    view: str,
+    *,
+    unblock: bool = True,
+    always: bool = True,
+    has_rows: bool = True,
+    copy: bool = False,
+    policy: bool = False,
 ) -> str:
     """The hint bar's keys for a Sandboxes view (one line at 80 columns).
 
@@ -336,9 +357,12 @@ def sandbox_keys_hint(
     sandbox rows the row keys (connect, stop, delete...) can only answer
     "Select a sandbox first", so the hint lists what does work. ``copy``
     (the selected sandbox works on a copy) offers pull instead of review.
+    ``policy`` (a managed computer) offers ``e`` for the user's own policy in
+    the Sandboxes view, in place of ``u unblock`` (the organization decides
+    what may be unblocked; ``u`` still works and explains).
     """
     if view == "sandboxes" and not has_rows:
-        return "KEYS  t view | n new run | w sandboxed on/off | r refresh"
+        return "KEYS  t view | n new run | w sandboxed on/off | " + ("e policy | " if policy else "") + "r refresh"
     if view == "asks":
         return "KEYS  t view | Enter detail | a approve | " + ("A always | " if always else "") + "x reject | r refresh"
     if view == "activity":
@@ -348,11 +372,54 @@ def sandbox_keys_hint(
             + "n new run | w sandboxed | r refresh"
         )
     workspace = "P pull" if copy else "R review"
-    return f"KEYS  t view | c connect | s stop | d delete | U undo | {workspace} | u unblock"
+    last = "e policy" if policy else "u unblock"
+    return f"KEYS  t view | c connect | s stop | d delete | U undo | {workspace} | {last}"
 
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value)
+
+
+# Bidirectional controls, as the Go side (sandboxapi.DisplayText) replaces them.
+_BIDI_CONTROLS = frozenset({0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)})
+_REPLACEMENT = chr(0xFFFD)
+# The longest request-access contact any surface shows (sandboxapi.MaxRequestAccessBytes).
+MAX_REQUEST_ACCESS_BYTES = 512
+
+
+def _safe(value: Any, limit: int = 0) -> str:
+    """Text a person or the sandbox wrote, safe for the terminal.
+
+    Like ``sandboxapi.DisplayText``: tabs and line breaks become spaces, the
+    other control characters and bidirectional marks become U+FFFD. ``limit``
+    cuts the text to that many UTF-8 bytes at a character boundary.
+    """
+    out: list[str] = []
+    for ch in _text(value):
+        code = ord(ch)
+        if ch in "\t\n\r" or code in (0x2028, 0x2029):
+            out.append(" ")
+        elif code < 0x20 or code == 0x7F or 0x80 <= code <= 0x9F or code in _BIDI_CONTROLS:
+            out.append(_REPLACEMENT)
+        else:
+            out.append(ch)
+    text = "".join(out)
+    if limit:
+        raw = text.encode("utf-8", "replace")
+        if len(raw) > limit:
+            text = raw[:limit].decode("utf-8", "ignore")
+    return text
+
+
+def _safe_tree(value: Any) -> Any:
+    """``_safe`` applied to every string of a decoded JSON value."""
+    if isinstance(value, str):
+        return _safe(value)
+    if isinstance(value, list):
+        return [_safe_tree(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _safe_tree(item) for key, item in value.items()}
+    return value
 
 
 def _int(value: Any) -> int:
@@ -1069,6 +1136,46 @@ def decode_ask(raw: Any) -> AskRow | None:
 
 
 @dataclass(frozen=True)
+class ManagedPolicy:
+    """The ``managed`` part of the status: the caller's own sandbox policy.
+
+    It is the policy as the managed gateway resolved it for this account; it
+    names no other account (sandboxapi.ManagedStatus).
+    """
+
+    profile: str = ""
+    description: str = ""
+    provisional: bool = False
+    effective_digest: str = ""
+    updated_at: datetime | None = None
+    request_access: str = ""
+    install_mode: str = ""
+    driver: str = ""
+    openshell_version: str = ""
+    pending_restart: bool = False
+    unavailable: str = ""
+
+
+def decode_managed(raw: Any) -> ManagedPolicy | None:
+    """The status's ``managed`` object, or None when the computer is not managed."""
+    if not isinstance(raw, dict):
+        return None
+    return ManagedPolicy(
+        profile=_safe(raw.get("profile")),
+        description=_safe(raw.get("description")),
+        provisional=bool(raw.get("provisional")),
+        effective_digest=_text(raw.get("effective_digest")),
+        updated_at=_time(raw.get("updated_at")),
+        request_access=_safe(raw.get("request_access"), MAX_REQUEST_ACCESS_BYTES),
+        install_mode=_safe(raw.get("install_mode")),
+        driver=_safe(raw.get("driver")),
+        openshell_version=_safe(raw.get("openshell_version")),
+        pending_restart=bool(raw.get("pending_restart")),
+        unavailable=_safe(raw.get("unavailable")),
+    )
+
+
+@dataclass(frozen=True)
 class SandboxStatus:
     """``GET /api/v1/sandbox/status``."""
 
@@ -1093,6 +1200,9 @@ class SandboxStatus:
     # gateway.driver: the compute driver the gateway runs ("docker", "vm");
     # empty from a daemon older than the field, or before a gateway answered.
     driver: str = ""
+    # The caller's own policy on a managed computer (``managed`` of the
+    # status), None everywhere else.
+    managed: ManagedPolicy | None = None
 
     @property
     def copy_only_note(self) -> str:
@@ -1134,6 +1244,7 @@ def decode_status(raw: Any) -> SandboxStatus:
         sandboxes=_int(item.get("sandboxes")),
         running=_int(item.get("running")),
         pending_approvals=_int(item.get("pending_approvals")),
+        managed=decode_managed(item.get("managed")),
     )
 
 
@@ -1143,7 +1254,6 @@ class AdminPolicy:
 
     allow_unblock: bool | None = None
     allowed_harnesses: tuple[str, ...] = ()
-    authoritative: bool = False
 
     @property
     def unblock_refused(self) -> bool:
@@ -1151,18 +1261,167 @@ class AdminPolicy:
 
 
 def admin_policy_from_config(cfg: object | None) -> AdminPolicy:
+    """The openshell.admin switches of a computer the user administers.
+
+    A managed computer's policy is not the user's to read from config.yaml:
+    there the daemon answers (``admin_policy_from_explain``), so this reads
+    nothing.
+    """
+    mode = str(getattr(cfg, "deployment_mode", "") or "").strip().lower()
+    if mode in {"managed_enterprise", "managed"}:
+        return AdminPolicy()
     openshell = getattr(cfg, "openshell", None)
     admin = getattr(openshell, "admin", None)
     if admin is None:
         return AdminPolicy()
     allow_unblock = getattr(admin, "allow_unblock", None)
     harnesses = getattr(admin, "allowed_harnesses", None) or ()
-    mode = str(getattr(cfg, "deployment_mode", "") or "").strip().lower()
     return AdminPolicy(
         allow_unblock=allow_unblock if isinstance(allow_unblock, bool) else None,
         allowed_harnesses=tuple(str(h) for h in harnesses if str(h).strip()),
-        authoritative=mode in {"managed_enterprise", "managed"},
     )
+
+
+def admin_policy_from_explain(managed: Any) -> AdminPolicy:
+    """The caller's own switches from the daemon's managed explain."""
+    item = _dict(managed)
+    allow_unblock = item.get("allow_unblock")
+    return AdminPolicy(
+        allow_unblock=allow_unblock if isinstance(allow_unblock, bool) else None,
+        allowed_harnesses=tuple(_text(h) for h in _list(item.get("allowed_harnesses")) if _text(h).strip()),
+    )
+
+
+def _ago(when: datetime | None, now: datetime | None = None) -> str:
+    """"2 min ago" for a time, or "" without one."""
+    if when is None:
+        return ""
+    seconds = int(((now or datetime.now(timezone.utc)) - when).total_seconds())
+    if seconds < 60:
+        return "just now"
+    if seconds < 3600:
+        return f"{seconds // 60} min ago"
+    if seconds < 48 * 3600:
+        return f"{seconds // 3600} h ago"
+    return f"{seconds // 86400} days ago"
+
+
+def _and_list(words: list[str]) -> str:
+    if len(words) <= 1:
+        return "".join(words)
+    return ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _host_list(hosts: list[str], limit: int = 4) -> str:
+    shown = ", ".join(hosts[:limit])
+    return shown + (f" (+{len(hosts) - limit} more)" if len(hosts) > limit else "")
+
+
+def managed_policy_pairs(explain: dict[str, Any], now: datetime | None = None) -> tuple[tuple[str, str], ...]:
+    """The caller's own sandbox policy as label/value pairs.
+
+    The same rows ``defenseclaw sandbox policy explain`` prints (plan section
+    7.1); ``explain`` is the ``managed`` object of ``policy/explain``. Rows with
+    nothing to say are left out.
+    """
+    if not explain:
+        return ()
+    explain = _safe_tree(explain)
+    pairs: list[tuple[str, str]] = []
+    profile = _text(explain.get("profile")) or "(your organization's floor)"
+    match = _text(explain.get("match"))
+    group = _text(explain.get("matched_group"))
+    how = f"your group {group}" if match == "group" and group else ("one of your groups" if match == "group" else _MATCH_TEXT.get(match, match))
+    text = f"{profile}   matched: {how}"
+    if explain.get("provisional"):
+        text += "; provisional until your directory answers"
+    pairs.append(("Profile", text))
+    if description := _text(explain.get("description")).strip():
+        pairs.append(("", description))
+
+    required = [harness_command(_text(name)) for name in _list(explain.get("required_for"))]
+    if explain.get("allowed") is False:
+        pairs.append(("Sandboxes", "your organization doesn't allow sandboxes for you"))
+    elif required:
+        required_text = f"{_and_list(required)} run only in a sandbox on this computer"
+        if explain.get("when_unavailable") == "alert":
+            required_text += "; where sandboxes can't run they are allowed and your administrators are alerted"
+        pairs.append(("Required", required_text))
+    else:
+        pairs.append(("Required", "no agent has to run in a sandbox"))
+    harnesses = [harness_command(_text(name)) for name in _list(explain.get("allowed_harnesses"))]
+    if harnesses:
+        pairs.append(("Agents", f"only {_and_list(harnesses)} may run in a sandbox"))
+    credentials = [_text(name) for name in _list(explain.get("allowed_credentials"))]
+    if credentials == ["none"]:
+        pairs.append(("Credentials", "no credentials go into a sandbox"))
+    elif credentials:
+        pairs.append(("Credentials", f"only {_and_list(credentials)} may go into a sandbox"))
+
+    allow_only = [_text(h) for h in _list(explain.get("egress_allow_only"))]
+    blocked = [_text(h) for h in _list(explain.get("egress_block"))]
+    egress: list[str] = []
+    if allow_only:
+        noun = "host is" if len(allow_only) == 1 else "hosts are"
+        egress.append(f"only {len(allow_only)} {noun} reachable ({_host_list(allow_only)})")
+    if blocked:
+        noun = "host is" if len(blocked) == 1 else "hosts are"
+        egress.append(f"{len(blocked)} {noun} always blocked ({_host_list(blocked)})")
+    pairs.append(("Egress", "; ".join(egress) or "your organization limits no hosts; the pack's network rules apply"))
+
+    approvals = {
+        "none": "you can't approve asks; they are refused",
+        "session": "you may approve asks for this session only",
+    }.get(_text(explain.get("user_approvals")), "you may approve asks for a session or for good")
+    if explain.get("allow_unblock") is False:
+        approvals += "; you can't unblock destinations"
+    pairs.append(("Approvals", approvals))
+
+    included = _list(explain.get("mcp_included"))
+    mcp_blocked = [_dict(b) for b in _list(explain.get("mcp_blocked"))]
+    if included or mcp_blocked:
+        by_asset = sum(1 for b in mcp_blocked if _text(b.get("reason")) == "asset_policy")
+        by_org = len(mcp_blocked) - by_asset
+        mcp = f"{len(included)} of your servers included"
+        if by_org:
+            mcp += f"; {by_org} blocked by your organization"
+        if by_asset:
+            mcp += f"; {by_asset} left out by your organization's asset policy"
+        pairs.append(("MCP", mcp))
+
+    mode = _text(explain.get("workdir_mode"))
+    workspace = ["copy mode" if mode in ("", "copy") else f"{mode} mode"]
+    if not explain.get("allow_mount"):
+        workspace.append("no mounts")
+    if not explain.get("allow_host_ports"):
+        workspace.append("no host ports")
+    if not explain.get("allow_yolo"):
+        workspace.append("skip-permissions off")
+    pairs.append(("Workspace", "; ".join(workspace)))
+
+    hooks: list[str] = []
+    on_silence, silence_after = _text(explain.get("on_silence")), _text(explain.get("max_silence_after"))
+    if on_silence or silence_after:
+        who = harnesses or required
+        prefix = f"{_and_list(who)}: " if who else ""
+        what = "a stop" if on_silence == "stop" else "an alert"
+        hooks.append(f"{prefix}{what} after {silence_after or 'a while'} of agent work without hooks")
+    if explain.get("process_tree"):
+        hooks.append("the process tree is watched")
+    if hooks:
+        pairs.append(("Hooks", "; ".join(hooks)))
+    if cleanup := _text(explain.get("delete_stopped_after")):
+        pairs.append(("Cleanup", f"a stopped sandbox is deleted after {cleanup}"))
+
+    digest = _text(explain.get("policy_digest"))
+    policy_id = (digest[:19] + "…" if digest.startswith("sha256:") and len(digest) > 19 else digest) or "(none)"
+    policy_id += " (yours)"
+    if ago := _ago(_time(explain.get("updated_at")), now):
+        policy_id += f", updated {ago}"
+    contact = _safe(explain.get("request_access"), MAX_REQUEST_ACCESS_BYTES).strip()
+    policy_id += f"; access: {contact or 'contact your IT help desk'}"
+    pairs.append(("Policy id", policy_id))
+    return tuple(pairs)
 
 
 @dataclass(frozen=True)
@@ -1228,6 +1487,15 @@ class SandboxesPanelModel:
     # (set_alert_events): the Alerts cell named only health alerts, so a
     # sandbox whose tool call a rule blocked showed "-" (GAP-0311).
     finding_alerts: dict[str, dict[str, int]] = field(default_factory=dict)
+    # The caller's own policy on a managed computer, as the daemon explained
+    # it (the ``managed`` object of ``policy/explain``); empty until fetched.
+    managed_explain: dict[str, Any] = field(default_factory=dict)
+    # time.monotonic() of the last failed read of it (None = none failed).
+    managed_explain_failed_at: float | None = None
+    # A live change of that policy seen while the panel was open: when, and
+    # what changed (the chip).
+    policy_changed_at: datetime | None = None
+    policy_change_note: str = ""
 
     def set_processes(self, name: str, payload: Any) -> None:
         """Keep a sandbox's process tree for its detail."""
@@ -1245,7 +1513,9 @@ class SandboxesPanelModel:
     ) -> None:
         """Replace the snapshot with a successful fetch."""
         selection = self._selection()
+        previous = self.status.managed
         self.status = decode_status(status)
+        self._note_policy_change(previous, self.status.managed, now)
         if sandboxes is not None:
             rows = [row for row in (decode_sandbox(raw) for raw in _list(sandboxes)) if row is not None]
             rows.sort(key=lambda row: (not row.running, row.name))
@@ -1301,8 +1571,103 @@ class SandboxesPanelModel:
         counts = ", ".join(f"{n} {severity}" for severity, n in ranked)
         return f"{sum(by_severity.values())} ({counts}): Alerts (2), then / {row.name}, lists them; or run defenseclaw alerts"
 
+    # ---- the caller's own policy (managed computers) ------------------------
+
+    def _note_policy_change(self, before: ManagedPolicy | None, after: ManagedPolicy | None, now: datetime | None) -> None:
+        """Remember a policy that changed under the open panel (a regroup, an update).
+
+        The first sight of a policy is no change; neither is a digest that
+        comes and goes with the daemon.
+        """
+        if before is None or after is None or not before.effective_digest or not after.effective_digest:
+            return
+        if before.effective_digest == after.effective_digest:
+            return
+        self.policy_changed_at = now or datetime.now(timezone.utc)
+        if before.profile != after.profile:
+            self.policy_change_note = f"{before.profile or 'organization floor'} → {after.profile or 'organization floor'}"
+        else:
+            self.policy_change_note = "updated"
+
+    def policy_chip(self, now: datetime | None = None) -> str:
+        """The chip for a live policy change, or "" once it is old."""
+        if self.policy_changed_at is None or self.status.managed is None:
+            return ""
+        age = ((now or datetime.now(timezone.utc)) - self.policy_changed_at).total_seconds()
+        if age > POLICY_CHIP_SECONDS:
+            return ""
+        return f"policy changed: {self.policy_change_note}"
+
+    @property
+    def managed(self) -> bool:
+        return self.status.managed is not None
+
+    def managed_explain_stale(self) -> bool:
+        """Whether the cached explain is not of the policy the status reports."""
+        current = self.status.managed
+        if current is None:
+            return False
+        return _text(self.managed_explain.get("policy_digest")) != current.effective_digest
+
+    def managed_explain_due(self, now: float | None = None) -> bool:
+        """Whether the panel should ask the daemon for the policy now.
+
+        The cached explain is stale and the last attempt, if it failed, was
+        long enough ago (MANAGED_EXPLAIN_RETRY_SECONDS): a daemon that does
+        not answer is not asked on every 2 s refresh.
+        """
+        if not self.managed_explain_stale():
+            return False
+        if self.managed_explain_failed_at is None:
+            return True
+        return (now if now is not None else time.monotonic()) - self.managed_explain_failed_at >= MANAGED_EXPLAIN_RETRY_SECONDS
+
+    def note_managed_explain_failed(self, now: float | None = None) -> None:
+        """Remember that the policy could not be read, to back off before the next try."""
+        self.managed_explain_failed_at = now if now is not None else time.monotonic()
+
+    def set_managed_explain(self, payload: Any) -> bool:
+        """Keep the managed part of a ``policy/explain`` answer and the switches in it.
+
+        Only an answer with a ``managed`` object is the user's policy: an
+        older daemon's plain explain (OpenShell settings, no ``managed`` key)
+        is not rendered as one. Returns whether the answer was kept.
+        """
+        item = _dict(payload)
+        managed = _dict(item.get("managed")) if "managed" in item else {}
+        if not managed:
+            self.note_managed_explain_failed()
+            return False
+        self.managed_explain = managed
+        self.managed_explain_failed_at = None
+        self.admin = admin_policy_from_explain(managed)
+        return True
+
+    def policy_line(self, now: datetime | None = None) -> str:
+        """The panel's one Policy line on a managed computer, or ""."""
+        current = self.status.managed
+        if current is None:
+            return ""
+        name = current.profile or "your organization's policy"
+        if current.provisional:
+            name += " (provisional: your directory couldn't be reached)"
+        parts = [f"Your policy: {name}"]
+        ago = _ago(current.updated_at, now)
+        if ago:
+            parts.append(f"updated {ago}")
+        chip = self.policy_chip(now)
+        if chip:
+            parts.append(f"● {chip}")
+        parts.append("e explains")
+        return " · ".join(parts)
+
+    def policy_pairs(self, now: datetime | None = None) -> tuple[tuple[str, str], ...]:
+        """The user's own policy as label/value pairs (``e``), or ()."""
+        return managed_policy_pairs(self.managed_explain, now)
+
     def set_config(self, cfg: object | None) -> None:
-        self.admin = admin_policy_from_config(cfg)
+        if not self.managed_explain:
+            self.admin = admin_policy_from_config(cfg)
         openshell = getattr(cfg, "openshell", None)
         self.wrappers = tuple(str(w) for w in (getattr(openshell, "wrappers", None) or ()) if str(w).strip())
         self.harnesses = tuple(str(h) for h in (getattr(openshell, "harnesses", None) or ()) if str(h).strip())
@@ -1670,6 +2035,12 @@ class SandboxesPanelModel:
             return SandboxPanelAction("refresh")
         if key == "n":
             return SandboxPanelAction("new_run")
+        if key == "e":
+            if not self.managed:
+                return SandboxPanelAction(
+                    "hint", hint="Your organization manages sandbox policy on managed computers; see: defenseclaw sandbox policy explain"
+                )
+            return SandboxPanelAction("explain")
         if key == "w":
             return SandboxPanelAction("wrappers")
         if key in {"U", "R", "P", "s", "d", "c"}:
@@ -1794,8 +2165,24 @@ class SandboxesPanelModel:
             return "unavailable"
         return "ready"
 
+    def managed_off_text(self) -> str:
+        """Why sandboxes are off or unavailable on a managed computer (no setup advice, no other account's details)."""
+        current = self.status.managed
+        if current is None:
+            return ""
+        if self.status.gateway_elsewhere:
+            text = "Sandboxes aren't available for your account right now: another account is using them"
+        elif current.unavailable:
+            text = f"Sandboxes aren't available on this computer: {current.unavailable}"
+        else:
+            text = "Sandboxes are off on this computer; your organization manages this setting"
+        contact = current.request_access.strip()
+        return f"{text}. " + (f"Need an exception? Contact {contact}" if contact else "Need an exception? Please contact your IT help desk.")
+
     def off_hint(self) -> str:
         """What an action that needs sandboxes says while they are off."""
+        if self.status.managed is not None:
+            return self.managed_off_text()
         if self.status.gateway_elsewhere:
             return (
                 "Sandboxes are off for this account: another account runs this machine's OpenShell gateway; "
@@ -1810,6 +2197,10 @@ class SandboxesPanelModel:
             return "Loading sandboxes from the DefenseClaw daemon..."
         if state == "unreachable":
             return f"The DefenseClaw daemon is not answering: {self.error}"
+        if state in {"off", "unavailable"} and self.status.managed is not None and (
+            state == "off" or self.status.managed.unavailable or self.status.gateway_elsewhere
+        ):
+            return self.managed_off_text()
         if state == "off":
             if self.status.gateway_elsewhere:
                 # Setup would stop at the other account's gateway (GAP-0307).
@@ -1847,18 +2238,24 @@ class SandboxesPanelModel:
         return f"Showing the last good snapshot{age}: {self.error}"
 
     def admin_line(self) -> str:
+        if self.status.managed is not None:
+            # The daemon's answer for this account, never the local file.
+            return self.policy_line()
         if not self.status.admin_configured:
             return ""
         return f"Organization policy: {self.status.admin_detail or self.status.admin_authority}"
 
     def keys_line(self) -> str:
         """The hint bar's keys for the view and the selected row."""
+        policy = self.managed
         if self.view == "activity":
             return sandbox_keys_hint(self.view, unblock=self.unblock_offered())
         if self.view == "asks":
             return sandbox_keys_hint(self.view, always=self.selected_ask() is None or self.always_offered())
         selected = self.selected_sandbox()
-        return sandbox_keys_hint(self.view, has_rows=bool(self.rows), copy=selected is not None and selected.copy_mode)
+        return sandbox_keys_hint(
+            self.view, has_rows=bool(self.rows), copy=selected is not None and selected.copy_mode, policy=policy
+        )
 
     def data_table_columns(self, compact: bool = False) -> tuple[str, ...]:
         """``compact`` (a narrow terminal) leaves out what the Enter detail shows."""
@@ -2086,6 +2483,7 @@ class SandboxesPanelModel:
             ("Phase", row.phase or "-"),
             ("Up", row.uptime_text),
             ("Policy", row.policy_label),
+            *((("Your policy", self.policy_line().replace("Your policy: ", "")),) if self.managed else ()),
             *((("Repo policy", row.repo_policy_text),) if row.repo_policy else ()),
             ("Skip-permissions", "on" if row.yolo else "off"),
             ("Project", f"{row.project} → {row.workdir} ({row.workdir_mode or '-'})" if row.project else "-"),

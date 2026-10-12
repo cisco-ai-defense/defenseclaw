@@ -117,8 +117,21 @@ arguments, 75 another lifecycle run holds the lock.`,
 	}
 	group.AddCommand(newUnixDiscoveryCommand(name))
 	group.AddCommand(newEnterpriseIdentityViewCommands(name)...)
+	// `enterprise <os> policy`, as the other administrator views are spelled
+	// (GAP-0201, GAP-0240).
+	policy, _, _, _ := newEnterprisePolicyGroup(name)
+	group.AddCommand(policy)
 	return group
 }
+
+// sandboxRowsHelp documents the sandbox rows of status and verify.
+const sandboxRowsHelp = "\n\nWhen sandboxes are on (openshell.enabled), the services list also has the sandbox rows: the install mode and driver, " +
+	"each prerequisite that mode needs (OpenShell, its MicroVM driver, e2fsprogs, Docker or /dev/kvm) as ok or missing with what to run, " +
+	"the docker or kvm group membership of the users that run sandboxes, the OpenShell users installed themselves (setup mode: user-installed, unmanaged), " +
+	"and the changes waiting for a user's sandboxes to stop (pending). A missing prerequisite is a warning, openshell_prerequisite_missing: " +
+	"DefenseClaw itself is healthy, and the gateway refuses the sandbox runs of users until it is fixed. On Linux, with driver vm or auto and " +
+	"driver_fallback docker, the docker fallback has its own rows (fallback ...), and a missing MicroVM prerequisite while the fallback is ready " +
+	"is the warning openshell_driver_fallback: users get docker sandboxes with every profile floor unchanged."
 
 // lockWaitUsage documents --lock-wait on every action that takes the
 // lifecycle lock.
@@ -195,6 +208,9 @@ func newUnixLifecycleCommand(platform, action, summary string) *cobra.Command {
 		cmd.Long = summary + ".\n\nverify first waits up to 5s for another lifecycle run to finish. If that run is still going, it checks nothing and exits 75 (lifecycle_busy)."
 	case "status":
 		cmd.Long = summary + ".\n\nRun as root, status first waits up to 5s for another lifecycle run to finish. If that run is still going, it reports the installed version, checks nothing else and exits 75 (lifecycle_busy)."
+	}
+	if action == "status" || action == "verify" {
+		cmd.Long += sandboxRowsHelp
 	}
 	// An unknown flag or a malformed value fails before RunE; the documented
 	// exit code for it is invalid arguments, not cobra's generic 1.

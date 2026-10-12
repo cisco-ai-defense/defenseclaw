@@ -23,10 +23,14 @@ site it contacts.
 Sandboxes run on Linux (amd64 and arm64) and on Macs with Apple silicon. On
 a Mac each sandbox is a small virtual machine of its own (OpenShell's
 MicroVM driver), and every run works on a copy of your folder that you pull
-the changes back from (see [macOS](#macos)). Sandboxes are not supported on
-Windows or WSL2, on Intel Macs, in `managed_enterprise` deployments, or when
-you run DefenseClaw as root. On Windows the connector hooks guard your agents
-instead; see [Windows](/docs/get-started/windows).
+the changes back from (see [macOS](#macos)). A Linux host with KVM can run
+the MicroVM driver too, and then behaves the same way (see
+[MicroVMs on Linux](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm)).
+Sandboxes are not supported on Windows or WSL2, on Intel Macs, or when you run
+DefenseClaw as root. On Windows the connector hooks guard your agents
+instead; see [Windows](/docs/get-started/windows). On a computer your
+organization manages with a standalone enterprise install, an administrator
+sets the policy: see [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 This page is the full reference. For a shorter, guided path, start with
 [OpenShell sandboxes](/docs/sandboxes): setup on
@@ -36,8 +40,9 @@ This page is the full reference. For a shorter, guided path, start with
 ## How it works
 
 The sandbox is a locked room that holds only your project folder.
-**OpenShell** builds the room: a container on Linux, or a MicroVM with a
-kernel of its own on a Mac, with no network of its own, Landlock filesystem
+**OpenShell** builds the room: a container on Linux (or a MicroVM where the
+host chooses that driver), or a MicroVM with a kernel of its own on a Mac, with
+no network of its own, Landlock filesystem
 rules, seccomp, and your own uid. **DefenseClaw** adds the judgment: its
 hooks check every tool call, its egress proxy decides and logs every site,
 and it hides secret files, protects git internals, snapshots the folder and
@@ -80,9 +85,13 @@ Measured on Apple silicon with Docker Desktop (engine 29.1.5) and OpenShell
 modules are `capability,bpf`, so every sandbox fails the supervisor's
 Landlock check and ends in an error state, whatever its policy.
 
-What is different on a Mac:
+What differs is the driver, not the operating system. The right-hand column
+below describes OpenShell's MicroVM driver: a Mac always runs it, and a Linux
+host with KVM runs it when the gateway is set to it (see
+[MicroVMs on Linux](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm)).
+Where a row names Apple's Hypervisor, a Linux host uses KVM instead.
 
-| Topic | Linux (Docker driver) | macOS (MicroVM driver) |
+| Topic | Docker driver (Linux) | MicroVM driver (every Mac, optionally Linux with KVM) |
 | --- | --- | --- |
 | Your folder | Mounted live, with a snapshot for undo. | Always a copy: a MicroVM mounts no host folders. `run` says so in one line (`copy mode: the OpenShell MicroVM (vm) driver mounts no host folders; …`), and the changes come back through the end-of-session question or `defenseclaw sandbox pull` (see [work on a copy](#work-on-a-copy)). |
 | End of a session | Keep or undo the changes. | Bring the changes back (apply, branch or patch) or leave them in the sandbox. Without a terminal, or with `--yes`, nothing is applied: the run ends with `N files changed; nothing was applied` and the `pull` command, and `--rm` keeps a sandbox whose work was not brought back. |
@@ -851,8 +860,8 @@ is in them verbatim. To mask secrets there, apply the `sensitive` or
 
 The sandbox hooks fail closed: a hook that cannot reach DefenseClaw blocks
 the tool call, and its block message, which the harness shows, says the
-daemon on your machine does not answer and to run `defenseclaw-gateway
-start` there. If none of the session's hooks gets through (the daemon is
+daemon on your machine does not answer and to run `defenseclaw sandbox
+doctor` there, which names the fix. If none of the session's hooks gets through (the daemon is
 stopped, or the ingress is unreachable), every tool call is blocked. The
 run tells you three times:
 
@@ -1580,7 +1589,11 @@ that defines a `claude` function, which starts `sandbox run claude` with the
 DefenseClaw gateway binary. Everything you type after `claude` is passed
 through to the harness.
 
-- `DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness directly, once.
+- `DEFENSECLAW_NO_SANDBOX=1 claude` runs the harness directly, once, where
+  your organization allows it. On a managed computer whose policy lists the
+  agent in `required_for`, the host run is refused by the agent's machine-owned
+  hook and the variable changes nothing (see
+  [Require sandboxes](/docs/enterprise/sandboxes#require-sandboxes)).
 - Inside a sandbox the wrapper runs the harness directly, since it is
   already sandboxed.
 - If the DefenseClaw launcher is missing, the wrapper prints how to fix it
@@ -1680,8 +1693,8 @@ daemon or gateway listed them, it keeps the disks and says why. It never
 removes anything else of OpenShell's state there.
 
 OpenShell itself stays installed. `defenseclaw uninstall` runs teardown too,
-and stops if teardown fails (where sandboxes are not supported, such as a
-`managed_enterprise` deployment, it skips it). When Docker or OpenShell are
+and stops if teardown fails (where sandboxes are not supported, such as
+Windows, it skips it). When Docker or OpenShell are
 gone or broken, `defenseclaw uninstall --skip-sandbox-teardown` leaves the
 sandboxes in place; `defenseclaw sandbox teardown` removes them later, as
 long as the data directory is kept (no `--all`).
@@ -1903,7 +1916,7 @@ sharing checks and says why: no setting there lets a sandbox start, and
 MicroVMs, the way on, use neither.
 The command exits 1 when a check fails, and its last line then reads
 **✗ not ready for sandboxes: N checks failed**. With `--json` it prints the
-report as JSON and always exits 0; the report's `ok` field says whether every check
+report as JSON and exits the same way; the report's `ok` field says whether every check
 passed, and `ready` says that sandboxes are also turned on. While
 `openshell.enabled` is false the last line reads **not ready for sandboxes
 yet** instead. The image check warns about a configured harness whose image
@@ -2041,7 +2054,7 @@ which runs NVIDIA's installer and sets up the service.
 | The integration's health reads `openshell_egress_auth_failed`, and the daemon log says ``the sandbox egress proxy refused N request(s) with an invalid proxy credential`` | Something presented the egress proxy a malformed, unknown or revoked proxy credential: a sandbox that kept an environment from before a restart, or another program on this machine trying the proxy. The log line names the last destination. It ends by itself after a minute without a refusal; if it repeats, run `defenseclaw sandbox doctor`. See [sandbox telemetry](/docs/observability/sandbox-telemetry#health). |
 
 Exit statuses: 3 means the platform or deployment is unsupported (Windows,
-WSL2, an Intel Mac, `managed_enterprise`, or running as root), 4 means `pull --apply` left
+WSL2, an Intel Mac, or running as root), 4 means `pull --apply` left
 your working tree alone and put the changes on a branch and in a patch file
 (a conflict, or git older than 2.38), 69 means no hook of the session reached
 DefenseClaw, and a harness's own non-zero status is passed through.

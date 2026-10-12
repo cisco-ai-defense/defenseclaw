@@ -5083,6 +5083,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     ("U / R", "Undo the session / review its changes"),
                     ("P", "Pull a copy's work back (show, apply or branch); U then reverts the last apply"),
                     ("w", "Sandboxed on/off for claude and codex (shell wrapper)"),
+                    ("e", "On a managed computer: your own sandbox policy (what is required, allowed and blocked for you)"),
                     ("r", "Refresh"),
                 ]
                 if self._sandbox_supported()

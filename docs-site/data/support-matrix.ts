@@ -85,7 +85,7 @@ export const generated: GeneratedStatus = {
     'mcp-scanner': { oss: 'SPS', enterprise: 'SSP' },
     judge: { oss: 'SSP', enterprise: 'PPP' },
     redaction: { oss: 'SSP', enterprise: 'NNN' },
-    sandboxes: { oss: 'PPU', enterprise: 'UUU' },
+    sandboxes: { oss: 'PPU', enterprise: 'SSU' },
     acp: { oss: 'PSP', enterprise: 'NNN' },
     'ai-discovery': { oss: 'SSS', enterprise: 'SSP' },
     'runtime-discovery': { oss: 'SSS', enterprise: 'SSP' },
@@ -400,7 +400,7 @@ const featureSources: FeatureSource[] = [
     label: 'OpenShell sandboxes',
     href: '/docs/sandboxes',
     group: 'Protect',
-    note: 'Linux and macOS only. Managed installs don’t start the sandbox runtime yet.',
+    note: 'Linux and macOS only. A standalone managed install runs sandboxes under the policy of the person’s directory group; Windows is refused. See Sandboxes on managed computers.',
   },
   {
     id: 'acp',

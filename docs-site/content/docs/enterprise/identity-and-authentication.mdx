@@ -268,10 +268,13 @@ with four differences.
   agents, and the `agt-` of the host install does not name a sandboxed run.
   `defenseclaw agent identities` lists one per sandbox, and they stay listed
   after the sandbox is gone.
-- **Its hooks always enforce.** A sandbox's hooks run in `action` mode
-  whatever `guardrail.mode` or the profile's `mode` says, because DefenseClaw
-  launched the harness and its hooks are the only gate on the tool calls. The
-  selected profile's thresholds and rule pack still apply.
+- **Its hooks enforce unless the profile says observe.** A sandbox's hooks
+  run in `action` mode whatever `guardrail.mode` says, because DefenseClaw
+  launched the harness and its hooks are the only gate on the tool calls. A
+  mode the person's own guardrail profile sets (`mode`, or
+  `connectors.<agent>.mode`) applies in their managed sandboxes as on their
+  host: an `observe` profile alerts and records "would block" there too. The
+  selected profile's thresholds and rule pack apply either way.
 - **Its web egress follows the sandbox's network profile.** The egress proxy
   decides each site by the sandbox's OpenShell profile (`open`, `balanced` or
   `strict`) and its policy pack, not by a guardrail profile. See
@@ -526,6 +529,31 @@ identities by the name they are listed under, by its uid or by its SID.
 `profiles`, in place of `profile list` and `profile show`. For fleet-wide
 views, use the Grafana **Identity & Users** board.
 
+#### Sandboxes the users registered
+
+Two read-only views show the sandboxes the users of a managed Linux or macOS
+computer registered with the managed gateway, and the policy each one runs
+under. They read the gateway's registration store, which only the service
+account and root can read, so run them as root. A standard user is told so
+and sees nothing; a user sees only their own policy, with
+`defenseclaw sandbox policy explain`.
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux sandbox list --user alice
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux sandbox explain --registration reg-1a2b3c
+```
+
+`sandbox list` prints one row per registration, oldest first (id, account,
+state, profile, how the profile matched, agent, sandbox, driver, created).
+`--user` takes an account name (any case) or a uid, `--state` takes `pending`,
+`live` or `revoked`, and `--json` prints the rows. `sandbox explain` prints
+the organization's keys and the profile's keys with where each value comes
+from (the organization's rule for everyone, or the profile), the resolved
+policy and its digest, and what the user sees. `profile-explain` also gains
+an `effective.sandbox` object with the same view for the profile it explains.
+On a Mac use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos
+sandbox ...`.
+
 ### Turn off the principal or the IDE inventory
 
 Two settings decide how much personal data leaves the host:
@@ -569,16 +597,55 @@ none of these facts.
 | No UPN, the principal reads `account@realm` | InfoPipe is off or does not whitelist `userPrincipalName`, or this is a per-user install: only the standalone enterprise guardian reads InfoPipe. Add `ifp` to `services`, set `[ifp] user_attributes`, restart SSSD and run the `dbus-send` check. |
 | No `defenseclaw.user.directory` for an SSSD account | The directory type comes from realmd: run `realm list` as that user. It is expected to be missing when the account's domain is not a joined realm or a child domain of one (a plain LDAP domain, for example), or when the host has several realms and the account name carries no DNS domain. The gateway refreshes directory facts every 15 minutes. The domain and groups are still verified. |
 | First request after a start got the default profile (`default_lookup_failed`) | A cold SSSD or AD lookup took more than two seconds, so the default profile applied and the lookup retries after 15 seconds. Time `getent passwd alice@corp.example.com` on the host; a slow answer means an SSSD, DNS or domain controller problem. Later requests use the cache. |
-| `doctor` or `guardrail status` warns "directory lookups are failing" (on a managed host, `enterprise linux status` and `verify` warn `directory_lookups_failing`) | The gateway could not resolve some users in the last 15 minutes (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). Users without cached facts get the default profile (`default_lookup_failed`); users with cached facts keep them for at most an hour, then fall back the same way. The gateway log has the reason (`[identity] directory lookup for 1201 failed: ...`). On the host, `sssctl domain-status` and `getent passwd alice@corp.example.com` show whether the directory answers. Their audit rows carry no principal or directory but always `user.id`; on a managed Linux or macOS host `defenseclaw.user.name` is the name the guardian recorded for the uid when the account lookup itself failed (a record up to an hour old). Set a strict `default_profile` so a failed lookup is never more lenient than a known user. |
+| `doctor` or `guardrail status` warns "directory lookups are failing" (on a managed host, `enterprise linux status` and `verify` warn `directory_lookups_failing`) | The gateway could not resolve some users in the last 15 minutes (a domain controller or SSSD that does not answer, or an account in more than 2,048 groups). On Linux and macOS, users without cached facts get the default profile (`default_lookup_failed`); cached facts expire at most 60 minutes after the last successful lookup. On macOS, see the Open Directory outage timing below. The gateway log has the reason (`[identity] directory lookup for 1201 failed: ...`). On the host, `sssctl domain-status` and `getent passwd alice@corp.example.com` show whether the directory answers. Their audit rows carry no principal or directory but always `user.id`; on a managed Linux or macOS host `defenseclaw.user.name` is the name the guardian recorded for the uid when the account lookup itself failed (a record up to an hour old). Set a strict `default_profile` so a failed lookup is never more lenient than a known user. |
 | No Kerberos principal, or an old one | The principal is read from the credential cache as a claim: it is the cache's default principal, and its tickets are not checked, so an expired TGT still reports it (`klist` shows the end time). With KCM the caches belong to the uid, not to one login: `kdestroy` removes the session's own cache, and another cache of the same uid (another login) becomes the default, so the record keeps naming a principal; `kdestroy -A` empties the uid's collection. Run `klist` yourself to see the cache, then `kinit` again. The hook reuses its answer for 5 minutes (`~/.defenseclaw/session-facts.json`; a new `kinit` into a `FILE:` cache is picked up at once, a KCM or macOS `API:` change within 5 minutes). A `KEYRING:` cache cannot be read. The first hook after `sssd-kcm` idles out can miss the principal; the next one retries within 30 seconds. The OpenCode plugin, the Amp plugin and the Omnigent bridge never send it: they do not read the ticket cache. |
 | `principal.assurance` is `claimed` | The gateway resolved no directory facts, so the record carries what the hook reported and profiles ignore it. On Linux check `getent passwd alice@corp.example.com`; on macOS, `id alice`. |
 | `defenseclaw.session.kind` is missing or the SSH session is not verified | A verified SSH session needs the login to have a logind session: `loginctl show-session "$XDG_SESSION_ID"` must show `Remote=yes` and the user. `sudo -iu alice` and `su` create no logind session. The kind is also dropped when its assurance differs from the directory facts' (any Windows or macOS record: their session is claimed). |
 | Every decision shows `default_unverified` | No verified user reached the gateway. Check that the hook runs as the signed-in user and that the gateway accepts its credential (`defenseclaw doctor`). |
 | A group assignment never matches | Run `defenseclaw guardrail profile explain --user alice@corp.example.com --json` and compare `subject.groups` with your spelling. If the group was renamed or deleted in the directory, `explain`, `profile list`, `status` and `doctor` warn `group "..." is not known to this host`, and so does the gateway log at start and reload. Use the SID to avoid name ambiguity. On managed Windows, group assignments require an active desktop session; after sign-out they use the default profile until the next desktop sign-in, including for SSH and scheduled-task agents. On a per-user Windows install the subject has no groups, so only `users`, `connectors` and `agents` assignments can match: Windows groups come from the SYSTEM enumerator on the standalone enterprise profile only. |
-| A user's new group has no effect, or `explain` shows it and the audit rows do not yet | Three layers sit between the directory and a decision. SSSD caches the account (`entry_cache_timeout`, 90 minutes by default); `sudo sss_cache -u alice@corp.example.com` drops it, and `id alice@corp.example.com` shows when the new group is visible. The gateway keeps the user's directory facts for 15 minutes from the user's first request. The first request after those 15 minutes still uses the old facts while one background lookup replaces them. `guardrail profile explain` asks the operating system directly, so it shows the profile requests get after the next refresh. The per-user CLI's `cache:` line gives the age of the facts requests use now; managed `enterprise linux profile-explain` does not print that age. Restart the gateway to drop its cache and use the new group at once. On Windows a user's groups come from their sign-in token, so a user who is signed in keeps the old groups, in `explain` and in requests, until they sign out and sign in again; requests then use the new groups within seconds of the enumerator recording that sign-in, without the 15-minute wait. |
+| A user's new group has no effect, or `explain` shows it and the audit rows do not yet | SSSD caches the account (`entry_cache_timeout`, 90 minutes by default); `sudo sss_cache -u alice@corp.example.com` drops it, and `id alice@corp.example.com` shows when the new group is visible. The gateway keeps directory facts for up to 15 minutes from the last successful lookup. `guardrail profile explain`, or managed `enterprise linux profile-explain` / `enterprise macos profile-explain`, asks the operating system directly. A successful account lookup refreshes that account's cached facts, so its hooks use the explained profile from their next call; no gateway restart is needed. Other accounts' hooks can use the previous profile for up to 15 minutes unless you explain those accounts too. On macOS, Open Directory also caches group membership: flush its caches, then run explain again as below. On Windows a user's groups come from their sign-in token, so a user who is signed in keeps the old groups, in `explain` and in requests, until they sign out and sign in again; requests then use the new groups within seconds of the enumerator recording that sign-in, without the 15-minute wait. |
 | A new session ID after a restart | Expected only for a new chat. A resumed chat keeps its `ais-` ID and the agent ID (`agt-`) stays the same; if the agent ID changed, the connector's config root moved. |
 | `profile explain --user alice` answers `default_lookup_failed` | With SSSD fully qualified names the short name `alice` is not an account on the host. Pass the name `getent passwd` shows (`alice@corp.example.com`, in any case, so the upper-case realm form Kerberos reports works too) or the uid. |
 | `profile explain` says the gateway did not answer within 35 s (status and doctor: "running but did not answer in time"; on a managed host `enterprise linux profile-explain` says the gateway "took the connection but did not answer within 35 s") | The gateway is running and still resolving the user, which a cold SSSD or a slow domain controller causes (an account in several hundred groups can need about 20 seconds the first time). Time `getent initgroups alice@corp.example.com` on the host, then ask again: the answer is quick once SSSD has the groups. Only `Could not ask the gateway ... Start it with` (on a managed host, `did not answer; check the deployment with`) means the gateway is not running. |
+
+### Refresh a managed macOS account
+
+`enterprise macos profile-explain` refreshes the named account's cached
+identity facts when its lookup succeeds. The output says "explain refreshed
+this account's cached identity facts"; that account's hooks use the explained
+profile from their next call, without restarting the gateway.
+
+Open Directory keeps its own membership cache. After a directory group
+change, flush the Open Directory caches with the commands the explain output
+prints, then explain the account again (after an outage the guardian flushes
+them itself once the directory answers). Replace `alice` with the account to
+refresh:
+
+```bash
+sudo dscacheutil -flushcache; sudo dsmemberutil flushcache
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user alice
+```
+
+**macOS outage timing.** Directory facts refresh every 15 minutes. While
+lookups fail, the facts cached before are kept for at most 60 minutes after
+the last successful lookup, and no longer than the guardian's identity record
+of the account: the guardian rewrites it every 15 minutes while it reaches the
+directory, and the gateway trusts it for an hour. Open Directory answers from
+its own caches for much of an outage, and those answers are no confirmation:
+once the record has expired, an answer without the account's domain groups
+ends the cached facts at once. Cached group facts therefore last 45–60 minutes
+after an outage begins, and `profile-explain` during the outage does not
+extend them. After that, the default profile applies with match reason
+`default_lookup_failed` (sandboxes start provisional), also when Open
+Directory has stopped naming the account's primary group (Domain Users), which
+is how an unreachable domain shows on a Mac whose `odutil show nodenames`
+still lists the node `Online`. Failed lookups retry every 15 seconds. When the
+domain controller answers again, the guardian's next identity pass (it retries
+every minute while the directory does not answer) flushes the Open Directory
+caches, and for five minutes after the Active Directory account was last seen
+without its groups successful answers also refresh every 15 seconds, so the
+group profile returns within about a minute and a half without a manual
+flush. Open Directory's own timing can add a few minutes to these intervals.
 
 ## IDE plugin inventory
 

@@ -2072,6 +2072,38 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	}
 }
 
+// GAP-0385: Claude Code shows only the first 80-odd characters of the hook's
+// stderr line, so the Windows refusal of a new account leads with the wait
+// and the next step instead of "defenseclaw: blocking claude-code tool: this
+// account is not enrolled in DefenseClaw on t...".
+func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
+	const lead = "DefenseClaw: this account is not enrolled yet; restart the agent in 5 minutes."
+	for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
+		var out, errb bytes.Buffer
+		home := t.TempDir()
+		rt := ok(`{"action":"allow"}`)
+		code := Run(context.Background(), Options{
+			Connector:                "claudecode",
+			Event:                    "PreToolUse",
+			APIAddr:                  "127.0.0.1:1",
+			Home:                     home,
+			HookDir:                  filepath.Join(home, "hooks"),
+			FailMode:                 "open",
+			ManagedEnterprise:        true,
+			ManagedRuntimeFailure:    reason,
+			ExplainUnenrolledAccount: true,
+			Stdin:                    strings.NewReader("{}"),
+			Stdout:                   &out,
+			Stderr:                   &errb,
+			HTTPClient:               &http.Client{Transport: rt},
+		})
+		first, _, _ := strings.Cut(errb.String(), "\n")
+		if code == 0 || rt.requests != 0 || !strings.HasPrefix(first, lead) || len(lead) > 80 {
+			t.Fatalf("%s: code %d requests %d first stderr line %q, want a block that starts %q", reason, code, rt.requests, first, lead)
+		}
+	}
+}
+
 func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
 	for _, tc := range []struct {
 		name string

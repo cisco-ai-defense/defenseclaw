@@ -181,6 +181,18 @@ locals {
         detect(when(A > 30, '10m')).publish('DefenseClawSandboxEgressBlocksSustained')
       EOT
     }
+    sandbox_errors_sustained = {
+      name             = "DefenseClaw - Sandbox errors sustained"
+      severity         = "Warning"
+      detect_label     = "DefenseClawSandboxErrorsSustained"
+      description      = "Sandbox lifecycle transitions into the error phase stay above 0.2/min for 10 minutes."
+      rule_description = "Sandboxes keep failing to start or stay up on some harness connector: a missing OpenShell prerequisite, a driver fault or a policy the driver cannot apply. Open Sandboxes -> Sandbox errors by connector, then the Grafana Sandboxes dashboard -> Recent lifecycle changes and Integration health."
+      tags             = ["correctness", "sandbox"]
+      program          = <<-EOT
+        A = data('defenseclaw.sandbox.transitions', filter=filter('defenseclaw.sandbox.phase.to', 'error'), rollup='rate').sum(by=['connector']).scale(60).publish(label='Sandbox errors / min')
+        detect(when(A > 0.2, '10m')).publish('DefenseClawSandboxErrorsSustained')
+      EOT
+    }
     webhook_failures = {
       name             = "DefenseClaw - Webhook failures sustained"
       severity         = "Warning"

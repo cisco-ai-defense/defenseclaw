@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
@@ -361,7 +362,7 @@ func workloadProblems(want verifyRecord, got workloadFacts, d openshell.Driver, 
 // checked, is refused with CodePolicyRejected: the caller deletes or stops
 // it, so one not as prepared never keeps running, and outcome (what the
 // caller does with it, "it was deleted") ends the refusal's message.
-func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, outcome string) (workloadFacts, error) {
+func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, want verifyRecord, eff *packs.Effective, outcome string) (workloadFacts, error) {
 	res, err := m.ownExec(ctx, gw, name, verifyArgv(want), openshell.ExecOptions{
 		Timeout: verifyTimeout, Idempotent: true, MaxOutputBytes: verifyMaxOutput,
 	})
@@ -379,7 +380,7 @@ func (m *Manager) verifyWorkload(ctx context.Context, gw *Gateway, name string, 
 	case res.ExitCode != 0:
 		problems = []string{fmt.Sprintf("the check exited with status %d", res.ExitCode)}
 	default:
-		problems = workloadProblems(want, facts, gw.Driver, adminLimits(m.config().OpenShell.Admin.MaxResources))
+		problems = workloadProblems(want, facts, gw.Driver, adminLimits(eff.MaxResources()))
 	}
 	if len(problems) == 0 {
 		return facts, nil
@@ -405,7 +406,10 @@ func (m *Manager) verifyStarted(ctx context.Context, gw *Gateway, b *box, rec re
 			Message: "sandbox " + rec.Name + " does not run as DefenseClaw prepared it; " + outcome,
 			Detail:  "its record does not say what its create delivered, so it cannot be checked: pull its work, delete it and run it again"}
 	}
-	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, outcome)
+	m.mu.Lock()
+	eff := b.eff
+	m.mu.Unlock()
+	facts, err := m.verifyWorkload(ctx, gw, rec.Name, *rec.Verify, eff, outcome)
 	if err != nil {
 		m.stopUnverified(ctx, gw, b)
 		return err

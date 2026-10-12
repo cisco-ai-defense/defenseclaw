@@ -14,9 +14,11 @@ keywords:
 `defenseclaw sandbox` runs Claude Code, Codex, and other hook-based coding
 agents in NVIDIA OpenShell 0.1 sandboxes on Linux, and on Macs with Apple
 silicon in OpenShell MicroVMs, where every run works on a copy (see
-[macOS](/docs/sandboxes/guide#macos)). This page lists every
-`sandbox` command and flag; for the walkthrough, see the
-[complete sandbox guide](/docs/sandboxes/guide).
+[macOS](/docs/sandboxes/guide#macos)). A Linux host with KVM can run the
+MicroVM driver too. This page lists every `sandbox` command and flag; for the
+walkthrough, see the [complete sandbox guide](/docs/sandboxes/guide). On a
+computer your organization manages, the same commands run under the policy of
+your directory group: see [On a managed computer](#on-a-managed-computer).
 Packs and organization limits are covered in
 [Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs), and
 the `openshell:` keys in
@@ -35,13 +37,15 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 - **Linux and macOS only.** On Windows every command stops with exit status 3
   before doing anything; there the connector hooks guard your agents (see
   [Windows](/docs/get-started/windows)). `setup`, `run`, `image build`, and `enable` also stop with status
-  3 under WSL2, in a `managed_enterprise` install, and when run as root:
-  sandboxes run as your own user. `teardown` also stops with status 3 in a
-  `managed_enterprise` install. On a Mac sandboxes run in OpenShell
+  3 under WSL2 and when run as root: sandboxes run as your own user. On a Mac
+  sandboxes run in OpenShell
   MicroVMs, on Apple silicon only: on an Intel Mac every command except
   `teardown` stops with exit status 3. A MicroVM mounts
-  no host folders, so every run on a Mac works on a copy (see
-  [macOS](/docs/sandboxes/guide#macos)).
+  no host folders, so every run on a MicroVM works on a copy, which includes
+  every run on a Mac (see [macOS](/docs/sandboxes/guide#macos)).
+- **Managed computers.** On a standalone enterprise install the same commands
+  work, through your own sandbox daemon and under your organization's policy
+  (see [On a managed computer](#on-a-managed-computer)).
 - **The daemon does the work.** Commands that create, change, or read
   sandboxes call the DefenseClaw daemon's
   [sandbox API](/docs/reference/gateway-api#sandbox-api) on the main API
@@ -112,6 +116,71 @@ tree, and a test keeps them in step with it. `defenseclaw sandbox <command>
 | [`sandbox policy`](#sandbox-policy) | Show, explain, suggest, test, and edit the sandbox policy. |
 | [`sandbox pack`](#sandbox-pack) | List, show, and validate policy packs. |
 
+## On a managed computer
+
+On a computer with a standalone enterprise install, an administrator sets the
+sandbox policy for every person (see
+[Sandboxes on managed computers](/docs/enterprise/sandboxes)), and the
+commands change in these ways. Everything else on this page works as written.
+
+- **The command is a launcher.** Enterprise packages install `defenseclaw`
+  (`/usr/bin/defenseclaw` on Linux, `/usr/local/bin/defenseclaw` on macOS) as
+  a root-owned link that offers only the `sandbox` commands. Any other command
+  prints "This computer is managed; only `defenseclaw sandbox` commands are
+  available here." and exits `2`. The launcher starts your own sandbox daemon
+  when it is not running.
+- **Your daemon, not a shared one.** The commands talk to your sandbox daemon
+  over a Unix socket that only you can use, not to the main API port and not
+  with a gateway token. The daemon asks the managed gateway, as you, for the
+  policy of each run. There is no per-user `config.yaml` to read.
+- **Run postures.** `sandbox run --safe` keeps the agent's permission prompts;
+  the default requests skip-permissions mode, subject to your policy.
+  `--copy` requests a copy; the unmanaged default requests a mount where the
+  driver supports it. A managed sandbox always works on a copy: a repository
+  overlay's `workspace.mode: mount` request is clamped to copy with the reason.
+  Changes come back with [`sandbox pull`](#sandbox-pull).
+- **Setup is the administrator's.** `sandbox setup` is hidden from managed
+  help and refuses a managed invocation with the administrator's contact.
+  The administrator turns sandboxes on with `openshell.enabled` and decides how
+  OpenShell is provided; in `setup` install mode your daemon installs NVIDIA's
+  release into `~/.local` at your first sandbox. The first-use progress line is
+  "Installing OpenShell 0.1.3 for your account and starting it (first run only)…".
+- **`sandbox policy allow` and `block`** change `config.yaml`, so they are
+  refused. Asks you may answer are decided by the managed gateway against your
+  profile; an answer past your profile is refused with the request-access
+  contact, and "always" is stored only when your profile allows it.
+- **The banner** shows `Policy` and `Driver`: your own profile and its
+  description, and the selected compute driver with a fallback reason when
+  one applies. A project's `.defenseclaw/sandbox.yaml` then shows as
+  `Repository`. Use `sandbox status` or `sandbox doctor` for the OpenShell
+  version and install mode.
+- **`sandbox policy explain`** prints your own policy in plain words: your
+  profile and the group that matched, which agents must run in a sandbox, the
+  egress, approvals, MCP and workspace rules, the hook silence response, and the
+  policy id with the access contact. `--sources` says whether each value comes
+  from your organization, your profile, the pack, the repository or a flag. It
+  never names another profile or group. `policy show`, `policy test`,
+  `policy suggest`, `pack list` and `pack show` use the same route and show
+  only your own chain.
+- **`sandbox status` and `sandbox doctor`** add managed rows: the profile (marked
+  provisional when your directory could not be reached), the install mode, the
+  OpenShell version and driver, and whether a daemon restart is pending. The
+  doctor's organization row reads the daemon's answer instead of the
+  configuration.
+- **What you are told stays yours.** When another account holds the sandbox
+  ports, the commands say sandboxes aren't available for your account right now
+  and name no one. A configuration error says only that your organization's
+  policy can't be loaded. Policy refusals give the request-access contact
+  your profile sets.
+
+```text
+Policy   contractors: Contractors. Coding agents only in a sandbox. Details: defenseclaw sandbox policy explain
+```
+
+Exit statuses are unchanged: `3` for an unsupported platform (Windows, WSL2, an
+Intel Mac, or running as root), and `2` from the launcher for a command it does
+not offer.
+
 ## Set up and maintain
 
 ### `sandbox setup`
@@ -127,7 +196,10 @@ gateway to the MicroVM driver and sets its sandbox identity to your uid and
 gid, in one backed-up change with one restart. It then records the harnesses
 in `openshell.harnesses`, sets `openshell.enabled: true`, offers the shell
 wrappers and builds the harness images (the first build downloads about
-3 GB).
+3 GB). On a Linux host where `/dev/kvm` exists it asks the same MicroVM
+question, with a default of yes only when the kernel lacks Landlock; if the
+host cannot start a MicroVM yet (KVM access, `e2fsprogs`, the driver binary),
+it stops with the way on and installs none of those itself.
 
 ```bash
 defenseclaw sandbox setup
@@ -155,15 +227,17 @@ defenseclaw sandbox setup --non-interactive --skip-images
 Checks the platform, Landlock, Docker, the OpenShell service, CLI,
 registration, version and compute driver, bind mounts, telemetry, ports, the
 DefenseClaw daemon, harness images, shell wrappers, and the organization
-policy. On a Mac it checks the MicroVM driver too (`e2fsprogs` and the
-driver's Hypervisor signature, the sandbox identity, the gateway-wide
-resources and the disk of its prepared images) and skips the checks that
+policy. On a MicroVM gateway it checks the MicroVM driver too (on a Mac
+`e2fsprogs` and the driver's Hypervisor signature; on Linux KVM access,
+`e2fsprogs`, the driver binary and the gateway service's umask; then the
+sandbox identity, the gateway-wide resources and the disk of its prepared
+images) and skips the checks that
 only matter for the Docker driver, with the reason. While the
 daemon serves sandboxes, it also checks that the hooks of running sandboxes
 reach DefenseClaw, and fails when a sandbox's hooks don't. Each failed check
 names its fix. `--fix` applies the fixes it can make as your user, after
-asking. Doctor exits `1` when a check fails. With `--output json` it prints the
-result and exits `0`, so read the `ok` field instead. The JSON holds `ok`,
+asking. Doctor exits `1` when a check fails, with `--output json` too, after it
+prints the result (so `ok` is `false` exactly when it exits `1`). The JSON holds `ok`,
 `ready` (`ok`, with sandboxes turned on), `openshell_install` (setup would offer
 to install OpenShell), `openshell_upgrade` (setup would offer to upgrade a
 supported OpenShell older than 0.1.2 in place) and `openshell_install_version`
@@ -206,7 +280,7 @@ defenseclaw sandbox image list
 | [`sandbox image build`](#sandbox-image-build) | Build and hook-verify harness images (default: the configured harnesses). |
 | [`sandbox image list`](#sandbox-image-list) | List the harness images. |
 | [`sandbox image prune`](#sandbox-image-prune) | Remove superseded harness images. |
-| [`sandbox image rm`](#sandbox-image-rm) | Remove the harnesses' images (on a Mac also their MicroVM disks). |
+| [`sandbox image rm`](#sandbox-image-rm) | Remove the harnesses' images (on a MicroVM gateway also their disks). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ### `sandbox image build`
@@ -240,7 +314,7 @@ Lists the recorded harness images, newest first. An image removed from Docker
 (with `docker rmi`, say) is not in the table: a note names it, the next run of
 its harness builds the image again, and `sandbox image prune` forgets its
 record. The FOR column says which compute driver an image is for: `MicroVM`
-for the vm driver (a Mac's gateway), `docker` for the docker driver. Images
+for the vm driver (a Mac's gateway, or a Linux host with KVM that chose it), `docker` for the docker driver. Images
 recorded before DefenseClaw built MicroVM images are `docker`. A gateway boots
 only the images for its driver, and when the list can tell which driver that
 is, a note names the images the gateway does not use. The doctor does not
@@ -317,7 +391,8 @@ Removes the images this data directory recorded for the named harnesses,
 current ones included, and forgets their records: the harness image and, on a
 MicroVM (vm) gateway, the run images and aliases made from it. For an image
 already removed from Docker (with `docker rmi`, say) only the record goes. On
-a Mac it also removes the MicroVM disks OpenShell prepared from these images
+a MicroVM gateway (a Mac, or Linux on the vm driver) it also removes the
+MicroVM disks OpenShell prepared from these images
 (about 5 GB each), by the rules of `sandbox image prune`: only
 `sandbox-prepared-rootfs-*` directories of image IDs Docker no longer has, and
 only with the daemon's list of sandboxes. When the daemon does not answer and
@@ -431,9 +506,10 @@ Runs a harness in a new sandbox on the current folder. On Linux (OpenShell's
 Docker driver) the folder is mounted live by default, secret files are
 masked, `.git/hooks` and `.git/config` are read-only, and a snapshot is taken
 first so that `undo` can restore the folder. `--copy` works on a copy with
-secrets held back instead, and you bring its work back with `pull`. On a Mac
-(OpenShell's MicroVM driver, which mounts no host folders) every run works
-on a copy, and `run` says so in one line before it copies anything.
+secrets held back instead, and you bring its work back with `pull`. On a Mac,
+or wherever the gateway runs OpenShell's MicroVM driver (which mounts no host
+folders), every run works on a copy, and `run` says so in one line before it
+copies anything.
 Skip-permissions mode is on by default, and `--safe` keeps the harness's own
 prompts. The harness gets your terminal. Arguments after `--` go to the
 harness.
@@ -680,8 +756,8 @@ A few rules the flags follow:
 - A copy larger than `openshell.workdir.max_upload_mb` (500 MB by default)
   is refused before a sandbox exists, and the refusal names the setting; on
   a Mac it also says that a copy is the only way the project runs there.
-- On a gateway whose compute driver mounts no host folders (a Mac's MicroVM
-  driver), `--context` is refused before anything is copied, `--no-snapshot`
+- On a gateway whose compute driver mounts no host folders (the MicroVM
+  driver, which every Mac runs), `--context` is refused before anything is copied, `--no-snapshot`
   is said not to apply, and `--cpu` and `--memory` are said to have no
   effect: every MicroVM gets the gateway's `vcpus` and `mem_mib`, so an
   organization's limit on the flags is not applied to them. The first start
@@ -736,6 +812,17 @@ harness to your terminal, or a login shell in the project folder with
 - **The end.** Both kinds of session end the same way as a `run` session,
   with the summary and the keep-or-undo question (a `--shell` session exits
   `0`).
+- **Terminal hang-up.** On Linux and macOS a terminal close, SSH drop or
+  logout that sends SIGHUP or SIGTERM ends the foreground harness session
+  and runs its normal cleanup. A sandbox the session started normally stops;
+  one already running, with a live detached run or another attached session
+  normally keeps running. `defenseclaw sandbox connect NAME` starts a stopped
+  sandbox and attaches a new session. To keep the same interactive terminal,
+  launch in your own tmux session (`tmux new -s sandbox`), detach with Ctrl-B
+  then D, and reattach with `tmux attach -t sandbox`. A `run --detach --prompt`
+  run is independent of the launching terminal; follow it with
+  `sandbox logs NAME -f`. Both approaches depend on the user services remaining
+  running; see [logout and Linux linger](/docs/enterprise/sandboxes#per-os-prerequisites).
 - **A terminal** is needed, except with `--prompt TEXT` (or the harness's
   own print flag after `--`), which runs one prompt headless.
 - **Stopping.** A session stops the sandbox at its end only when it started
@@ -1145,8 +1232,11 @@ defenseclaw sandbox reject myapp-7f3a ap_5f2c9a1e7b3d4c60 --reason "not needed"
 ### `sandbox unblock`
 
 Lifts an egress block for one sandbox (`--sandbox NAME`) or for every sandbox
-(`--always`, saved to `openshell.egress.unblocked`). Choose exactly one of
-the two. Only blocks from the blocklist feed or the profile's default can be
+(`--always`, saved to `openshell.egress.unblocked`). With `--always`,
+`--sandbox NAME` names the sandbox whose policy checks the unblock. On a
+managed computer your organization's DefenseClaw gateway keeps an `--always`
+unblock for you through one of your sandboxes: with one running, it is used;
+with several, name one with `--sandbox`. Only blocks from the blocklist feed or the profile's default can be
 lifted: IP addresses under `open`, and hosts off the allowlist under
 `balanced`. Your own block list (remove an entry with
 [`sandbox policy block --remove`](#sandbox-policy-block)), private networks,
@@ -1180,7 +1270,7 @@ defenseclaw sandbox unblock docs.example.com --always
 | Flag | Takes | Default | Description |
 | --- | --- | --- | --- |
 | `--always` | switch |  | Unblock for every sandbox from now on. |
-| `--sandbox` | text |  | Unblock for this sandbox only. |
+| `--sandbox` | text |  | Unblock for this sandbox only (with --always: the sandbox whose policy checks it). |
 {/* AUTOGEN-END: sandbox-flags */}
 
 ## After a session
@@ -1470,6 +1560,12 @@ origin, such as `openshell.admin.min_profile`. A clamped setting also shows
 the value that was asked for, and a setting the project's repository policy
 tightened shows the value it replaced. The header names the pack and its
 digest, every pack it extends, and the repository policy the run applies.
+On a managed computer it starts with your own policy in plain words, and
+`--sources` labels each value as coming from your organization, your profile,
+the pack, the repository or a flag (see
+[On a managed computer](#on-a-managed-computer)).
+
+![defenseclaw sandbox policy explain on a managed computer: Your sandbox policy in plain words with the organization profile and matched group, then the pack and its digest and a table of settings with their value, source and origin](/images/sandboxes/managed/policy-explain.png)
 
 ```bash
 defenseclaw sandbox policy explain
@@ -1487,6 +1583,7 @@ defenseclaw sandbox policy explain --sandbox myapp-7f3a --output json
 | `--profile` | text |  | Resolve with this profile. |
 | `--safe` | switch |  | Resolve for a --safe run. |
 | `--sandbox` | text |  | The policy of this sandbox. |
+| `--sources` | switch |  | On a managed computer, say where each value of your policy comes from. |
 | `--unmask` | text, repeatable |  | Resolve with these --unmask globs. |
 {/* AUTOGEN-END: sandbox-flags */}
 
@@ -1548,10 +1645,18 @@ the daemon, and names a provider of the sandbox (its model endpoint, a
 A port the sandbox was started with `--host-port` (on
 `host.openshell.internal`) reads `asks` until you approve its first
 connection, then `allowed` (rule `host_port`).
-Without it, `--pack`, `--profile`, and `--harness` resolve the policy a run in
-this folder would get, with this machine's `config.yaml` (or the defaults)
-and the folder's repository policy, and no daemon is needed, so CI can check
-a pack. The proxy decides by destination, the same for every program in the
+On an unmanaged computer, without `--sandbox`, `--pack`, `--profile`, and
+`--harness` resolve the policy a run in this folder would get, with this
+machine's `config.yaml` (or the defaults) and the folder's repository policy,
+and no daemon is needed, so CI can check a pack.
+
+On a managed computer, without `--sandbox`, the daemon tests your own policy
+for a new run in this folder. No sandbox is needed. `--harness` selects the
+agent to test your own policy for; `--pack` and `--profile` are refused, so
+omit them. With `--sandbox`, omit all three selection flags and test that
+sandbox's policy. See [managed policy tests](/docs/enterprise/sandboxes#what-users-see).
+
+The proxy decides by destination, the same for every program in the
 sandbox; `--binary` names the program in the report.
 
 `--fixture FILE` checks a YAML or JSON list of destinations, each
@@ -1622,8 +1727,8 @@ defenseclaw sandbox policy block --remove files.example.net
 {/* AUTOGEN-END: sandbox-flags */}
 
 Both commands check each pattern and refuse a change that would make
-`config.yaml` invalid. In a `managed_enterprise` install they are refused,
-because the administrator owns `config.yaml`.
+`config.yaml` invalid. On a managed computer they are refused, because the
+administrator owns `config.yaml`.
 
 ### `sandbox pack`
 

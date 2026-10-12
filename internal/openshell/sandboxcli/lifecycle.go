@@ -51,6 +51,7 @@ func (a *App) List(ctx context.Context, format OutputFormat) error {
 		}
 		return writeJSON(a.IO.Out, map[string]any{"sandboxes": list})
 	}
+	a.printStoppedNotices(ctx, api)
 	if len(list) == 0 {
 		a.note("no sandboxes; start one with `" + CommandName + " run claude` in a project folder")
 		return nil
@@ -58,12 +59,65 @@ func (a *App) List(ctx context.Context, format OutputFormat) error {
 	rows := make([][]string, 0, len(list))
 	for _, sb := range list {
 		rows = append(rows, []string{
-			sb.Name, firstNonEmpty(sb.HarnessName, sb.Harness), phaseText(sb), sb.WorkdirMode, profileText(sb),
+			sb.Name, firstNonEmpty(sb.HarnessName, sb.Harness), phaseText(sb), sb.WorkdirMode, networkText(sb),
 			humanDuration(time.Duration(sb.UptimeSeconds) * time.Second), hooksText(sb), a.tildePath(sb.Project),
 		})
 	}
-	a.table([]string{"NAME", "HARNESS", "PHASE", "MODE", "PROFILE", "UPTIME", "HOOKS", "PROJECT"}, rows)
+	a.table([]string{"NAME", "HARNESS", "PHASE", "MODE", "NETWORK", "UPTIME", "HOOKS", "PROJECT"}, rows)
+	if st, err := api.Status(ctx); err == nil && st.Gateway != nil {
+		if note := otherDriverNote(list, st.Gateway.Driver); note != "" {
+			a.note(note)
+		}
+	}
 	return nil
+}
+
+// createdDriver is the compute driver sb was created on: docker for a
+// record from before the driver was kept.
+func createdDriver(sb sandboxapi.Sandbox) string {
+	return firstNonEmpty(sb.Driver, string(openshell.DriverDocker))
+}
+
+// otherDriverSandboxes are the sandboxes created on another compute driver
+// than the one the gateway runs now (live): one gateway runs one driver, so
+// after a switch the others cannot start, and OpenShell lists them as
+// missing or in error (GAP-0455).
+func otherDriverSandboxes(list []sandboxapi.Sandbox, live string) []sandboxapi.Sandbox {
+	if live == "" {
+		return nil
+	}
+	var out []sandboxapi.Sandbox
+	for _, sb := range list {
+		if sb.Phase != "deleted" && createdDriver(sb) != live {
+			out = append(out, sb)
+		}
+	}
+	return out
+}
+
+// otherDriverNote says which sandboxes belong to a driver the gateway no
+// longer runs, and what that means ("" when none does).
+func otherDriverNote(list []sandboxapi.Sandbox, live string) string {
+	other := otherDriverSandboxes(list, live)
+	if len(other) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(other))
+	for _, sb := range other {
+		names = append(names, sb.Name+" ("+createdDriver(sb)+")")
+	}
+	was := "was"
+	if len(other) > 1 {
+		was = "were"
+	}
+	// OpenShell's gateway drops a sandbox its driver does not run a few
+	// minutes after the switch, and a switch back does not bring it back:
+	// promising that it can run again lost a stopped sandbox's work
+	// (GAP-0663).
+	return strings.Join(names, ", ") + " " + was + " created on a compute driver the gateway no longer runs: the gateway runs " + live +
+		" now, and one gateway runs one driver, so " + itThem(names) + " cannot start, and OpenShell drops " + itThem(names) +
+		" a few minutes after the switch, with any work in " + itThem(names) + " that was not brought back; `" + CommandName +
+		" delete NAME` releases DefenseClaw's side"
 }
 
 func phaseText(sb sandboxapi.Sandbox) string {
@@ -77,14 +131,22 @@ func phaseText(sb sandboxapi.Sandbox) string {
 	return p
 }
 
-// profileText is the PROFILE cell: the profile the sandbox runs, and the
-// pack when it is another one, named as the pack: "balanced (open)" left the
-// reader to guess what the parenthesis held (GAP-0359).
-func profileText(sb sandboxapi.Sandbox) string {
+// networkText is the NETWORK cell: the sandbox's network profile, and the
+// pack when its name differs. The assigned organization profile is separate.
+func networkText(sb sandboxapi.Sandbox) string {
+	if sandboxPolicyPending(sb) {
+		return "pending"
+	}
 	if sb.Pack != "" && sb.Pack != sb.Profile {
 		return sb.Profile + " (pack " + sb.Pack + ")"
 	}
 	return sb.Profile
+}
+
+// sandboxPolicyPending reports a creation that has not received a complete
+// resolved policy yet. Empty fields do not imply an open policy.
+func sandboxPolicyPending(sb sandboxapi.Sandbox) bool {
+	return sb.Phase == "creating" && (sb.Pack == "" || sb.Profile == "" || sb.NetworkMode == "" || sb.Approvals == "")
 }
 
 func hooksText(sb sandboxapi.Sandbox) string {
@@ -130,8 +192,9 @@ func (a *App) Status(ctx context.Context, name string, format OutputFormat) erro
 			return apiError(err)
 		}
 		if format == OutputJSON {
-			return writeJSON(a.IO.Out, st)
+			return writeJSON(a.IO.Out, neutralStatus(st))
 		}
+		a.printStoppedNotices(ctx, api)
 		a.printStatus(st)
 		return nil
 	}
@@ -184,7 +247,10 @@ func (a *App) printDetachedRun(ctx context.Context, sb *sandboxapi.Sandbox) {
 func (a *App) printStatus(st *sandboxapi.Status) {
 	row := func(k, v string) { a.line(fmt.Sprintf("%-16s%s", k, v)) }
 	state := "off (run `" + CommandName + " setup`)"
-	if st.GatewayElsewhere != "" {
+	switch {
+	case st.Managed != nil:
+		state = managedOffState(st)
+	case st.GatewayElsewhere != "":
 		// Setup would stop at the other account's gateway (GAP-0307).
 		state = "off: another account runs this machine's OpenShell gateway (" + st.GatewayElsewhere + "); see `" + CommandName + " doctor`"
 	}
@@ -195,6 +261,10 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 	if st.Enabled {
 		if st.Available {
 			row("OpenShell", "connected")
+		} else if st.Managed != nil && st.GatewayElsewhere != "" {
+			row("OpenShell", managedAccountBusyText)
+		} else if st.Managed != nil && st.Managed.Unavailable == "" {
+			row("OpenShell", a.managedFirstRunText(st.Managed))
 		} else {
 			row("OpenShell", "unavailable: "+firstNonEmpty(st.Reason, "not connected"))
 		}
@@ -213,10 +283,15 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 		row("Egress proxy", st.EgressAddr)
 	}
 	if st.Pack != "" || st.Profile != "" {
-		row("Policy", "pack "+firstNonEmpty(st.Pack, "open")+", profile "+firstNonEmpty(st.Profile, "open"))
+		row("Policy", "pack "+firstNonEmpty(st.Pack, "open")+", network "+firstNonEmpty(st.Profile, "open"))
 	}
-	if st.Admin.Configured {
+	if st.Admin.Configured && st.Managed == nil {
 		row("Organization", adminText(st.Admin))
+	}
+	if m := st.Managed; m != nil {
+		for _, r := range managedStatusRows(m, a.Now()) {
+			row(r[0], r[1])
+		}
 	}
 	row("Running", fmt.Sprintf("%d of %d", st.Running, st.Sandboxes))
 	if st.PendingApprovals > 0 {
@@ -254,7 +329,16 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		yolo = "skip-permissions off (harness prompts kept)"
 	}
 	row("Permissions", yolo)
-	row("Policy", fmt.Sprintf("profile %s, pack %s %s, network %s, approvals %s", sb.Profile, firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest), networkLabel(sb), sb.Approvals))
+	approvals := sb.Approvals
+	if refusesAsks(sb) {
+		// The floor refuses every ask, whatever triage's mode (GAP-0468).
+		approvals = "refused (your profile doesn't let you approve asks)"
+	}
+	if sandboxPolicyPending(*sb) {
+		row("Policy", "pending (resolving policy)")
+	} else {
+		row("Policy", fmt.Sprintf("pack %s, network %s, approvals %s", joinNonEmpty(" ", firstNonEmpty(sb.Pack, "open"), shortDigest(sb.PackDigest)), networkLabel(sb), approvals))
+	}
 	// What it was created with beyond the policy, which a resume keeps.
 	for _, c := range grantTexts(sb.Credentials) {
 		row("Secret", c)
@@ -264,7 +348,11 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 		for _, p := range sb.HostPorts {
 			hosts = append(hosts, fmt.Sprintf("localhost:%d", p))
 		}
-		row("Host ports", strings.Join(hosts, " ")+" (each an ask at the sandbox's first connection)")
+		if refusesAsks(sb) {
+			row("Host ports", strings.Join(hosts, " ")+" (closed: your profile doesn't let you approve them)")
+		} else {
+			row("Host ports", strings.Join(hosts, " ")+" (each an ask at the sandbox's first connection)")
+		}
 	}
 	row("Hooks", fmt.Sprintf("%s tier, contract %s", firstNonEmpty(sb.TamperTier, "unknown"), firstNonEmpty(sb.HookContract, "-")))
 	cov := plural(sb.Hooks.HookRequests, "request", "requests") + ", " + plural(sb.Hooks.ToolCalls, "tool call", "tool calls") +
@@ -349,7 +437,7 @@ func (a *App) printSandbox(sb *sandboxapi.Sandbox) {
 	}
 	(&session{app: a}).printNested(sb)
 	for _, v := range sb.Violations {
-		a.warn(violationMessage(&v, v.Message, v.Detail, v.Admin))
+		a.warn(a.violationText(&v, v.Message, v.Detail, v.Admin))
 	}
 	for _, w := range sb.Warnings {
 		a.warn(w)
@@ -495,10 +583,11 @@ func (a *App) Connect(ctx context.Context, o ConnectOptions) (err error) {
 	// daemon that cannot say leaves the line out.
 	var policy []sandboxapi.Setting
 	var repo *sandboxapi.RepoPolicy
+	var managedPolicy *sandboxapi.ManagedStatus
 	if ex, err := api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: sb.Name}); err == nil {
-		policy, repo = ex.Settings, ex.RepoPolicy
+		policy, repo, managedPolicy = ex.Settings, ex.RepoPolicy, managedStatusOfExplain(ex.Managed)
 	}
-	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept, policy: policy, repo: repo})
+	a.banner(sb, bannerInfo{llm: a.sandboxLLM(spec, sb, run), o: shown, keptSnapshot: kept, policy: policy, repo: repo, managed: managedPolicy})
 	var code int
 	if o.Shell {
 		// A shell in the project, reviewed at its end like a harness
@@ -532,8 +621,17 @@ func (a *App) refreshCopy(ctx context.Context, s *session) error {
 	if err != nil {
 		return err
 	}
+	var ws *sandboxapi.WorkspacePolicy
+	if a.ManagedHost() {
+		// The sandbox's copy policy, as its daemon resolves it (GAP-0478).
+		ex, err := s.api.Explain(ctx, sandboxapi.ExplainRequest{Sandbox: s.sb.Name})
+		if err != nil {
+			return apiError(err)
+		}
+		ws = ex.Workspace
+	}
 	stage, err := a.copyStageOptions(packs.Flags{Pack: s.sb.Pack, Harness: s.sb.Harness, Project: s.sb.Project, Profile: s.sb.Profile,
-		RepoPolicy: repo}, s.sb.Name)
+		RepoPolicy: repo}, s.sb.Name, ws)
 	if err != nil {
 		return err
 	}

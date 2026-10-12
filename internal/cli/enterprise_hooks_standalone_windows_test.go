@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -92,5 +93,12 @@ func TestEnterpriseHookStandaloneConfigRefreshTakesAChangedConfig(t *testing.T) 
 	enterpriseHookStandaloneConfigRefresh(io.Discard)
 	if len(cfg.Enterprise.Enrollment.ExcludeUsers) != 3 {
 		t.Fatalf("unchanged digest was not retried after load recovered: %v", cfg.Enterprise.Enrollment.ExcludeUsers)
+	}
+	// GAP-0617: every config the guardian loaded was recorded as a config
+	// generation (the unchanged start config, [a b] and [a b c]); the one
+	// that did not load was not.
+	state, err := configwrite.ReadGenerationState(path)
+	if err != nil || state.Generation != 3 || !configwrite.IsHandEditActor(state.Actor) {
+		t.Fatalf("generation state = %+v, %v; want generation 3 recorded as a hand edit", state, err)
 	}
 }

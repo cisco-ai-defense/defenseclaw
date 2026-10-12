@@ -27,12 +27,16 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/user"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Client is a typed client of the daemon's sandbox API.
@@ -77,6 +81,121 @@ func ClientForConfig(cfg *config.Config) (*Client, error) {
 	}
 	host := config.APIBindHost(cfg)
 	return NewClient("http://"+net.JoinHostPort(host, strconv.Itoa(port)), token), nil
+}
+
+// ErrNotManagedHost is returned by ClientForHost on a computer without a
+// standalone managed DefenseClaw deployment: the caller uses
+// ClientForConfig there.
+var ErrNotManagedHost = errors.New("sandboxapi: this computer has no standalone managed DefenseClaw deployment")
+
+// managedDaemonBaseURL is the base URL of requests to the per-user sandbox
+// daemon; the host part is never resolved (the transport dials the socket).
+const managedDaemonBaseURL = "http://sandbox-daemon"
+
+// managedHostDescriptor and managedRuntimeDir are seams for tests.
+var (
+	managedHostDescriptor = managed.LoadRuntimeDescriptor
+	managedRuntimeDir     = func() string { return os.Getenv("XDG_RUNTIME_DIR") }
+)
+
+// ManagedSocketPath is the per-user sandbox daemon's socket for the account
+// uid with home directory home: on Linux $XDG_RUNTIME_DIR/defenseclaw/
+// sandbox.sock (the systemd user socket unit's %t), falling back to
+// /run/user/<uid>/defenseclaw/sandbox.sock; on macOS
+// ~/Library/Application Support/DefenseClaw Sandbox/sandbox.sock. It is
+// "" where no daemon runs (other systems, a macOS account without a home,
+// root).
+func ManagedSocketPath(goos string, uid int, home string) string {
+	if uid <= 0 {
+		return ""
+	}
+	switch goos {
+	case "linux":
+		dir := managedRuntimeDir()
+		if dir == "" || !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+			dir = "/run/user/" + strconv.Itoa(uid)
+		}
+		return filepath.Join(dir, "defenseclaw", "sandbox.sock")
+	case "darwin":
+		if home == "" || !filepath.IsAbs(home) {
+			return ""
+		}
+		return filepath.Join(ManagedStateDir(goos, home), "sandbox.sock")
+	}
+	return ""
+}
+
+// ManagedStateDir is the per-user sandbox daemon's state directory for the
+// account with home directory home: where it keeps the harness images it
+// builds, its registrations and its sandboxes' records. On Linux
+// ~/.local/state/defenseclaw-sandbox, on macOS
+// ~/Library/Application Support/DefenseClaw Sandbox; "" elsewhere or without
+// an absolute home. The user's own commands read the images from here too: the
+// daemon builds them, and the user's DefenseClaw data directory holds none
+// (GAP-0548).
+func ManagedStateDir(goos, home string) string {
+	if home == "" || !filepath.IsAbs(home) {
+		return ""
+	}
+	switch goos {
+	case "linux":
+		return filepath.Join(filepath.Clean(home), ".local", "state", "defenseclaw-sandbox")
+	case "darwin":
+		return filepath.Join(filepath.Clean(home), "Library", "Application Support", "DefenseClaw Sandbox")
+	}
+	return ""
+}
+
+// NewUnixClient returns a client of the per-user sandbox daemon listening
+// on the unix socket at path. It sends no token: before every dial it
+// checks that the socket is a socket owned by the caller in a directory
+// nobody else can write, and the daemon checks the caller's uid in turn.
+func NewUnixClient(path string) *Client {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			if err := checkDaemonSocket(path); err != nil {
+				return nil, err
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, "unix", path)
+		},
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     30 * time.Second,
+	}
+	return &Client{BaseURL: managedDaemonBaseURL, HTTP: &http.Client{Transport: transport}}
+}
+
+// ClientForHost returns the client of the caller's own sandbox daemon when
+// this computer's runtime descriptor (managed/runtime_descriptor.go) says it
+// is a standalone managed deployment, and ErrNotManagedHost otherwise. An
+// untrusted descriptor is an error: a managed host never falls back to a
+// per-user gateway.
+func ClientForHost(goos string) (*Client, error) {
+	layout, err := managed.StandaloneLayoutFor(goos)
+	if err != nil {
+		return nil, ErrNotManagedHost
+	}
+	if _, err := managedHostDescriptor(layout.DescriptorPath); err != nil {
+		if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
+			return nil, ErrNotManagedHost
+		}
+		return nil, fmt.Errorf("sandboxapi: the managed runtime descriptor is not trusted: %w", err)
+	}
+	uid := os.Getuid()
+	home := ""
+	if u, err := user.LookupId(strconv.Itoa(uid)); err == nil {
+		home = u.HomeDir
+	}
+	if home == "" {
+		// A directory account the pure-Go account lookup cannot see
+		// (CGO_ENABLED=0 release builds read only the local files).
+		home, _ = os.UserHomeDir()
+	}
+	path := ManagedSocketPath(goos, uid, home)
+	if path == "" {
+		return nil, errors.New("sandboxapi: sandboxes run under your own account, which has no sandbox daemon here")
+	}
+	return NewUnixClient(path), nil
 }
 
 func (c *Client) httpClient() *http.Client {
@@ -129,7 +248,11 @@ func (c *Client) newRequest(ctx context.Context, method, path string, query url.
 	if err != nil {
 		return nil, fmt.Errorf("sandboxapi: build request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	if c.Token != "" {
+		// The managed host's per-user daemon takes no token: its socket is
+		// 0600 and checks the peer's uid instead (NewUnixClient).
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
 	req.Header.Set(ClientHeader, ClientName)
 	ua := c.UserAgent
 	if ua == "" {
@@ -191,6 +314,16 @@ func sandboxPath(name string, verb ...string) string {
 func (c *Client) Status(ctx context.Context) (*Status, error) {
 	var out Status
 	if err := c.do(ctx, http.MethodGet, PathStatus, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// Ready asks a managed computer's sandbox daemon to ready the account's
+// OpenShell for a run and returns the status after it (PathReady).
+func (c *Client) Ready(ctx context.Context) (*Status, error) {
+	var out Status
+	if err := c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -396,6 +529,9 @@ func (r ExplainRequest) Query() url.Values {
 	if r.Yolo {
 		q.Set("yolo", "true")
 	}
+	if r.Sources {
+		q.Set("sources", "true")
+	}
 	for _, u := range r.Unmask {
 		q.Add("unmask", u)
 	}
@@ -427,7 +563,7 @@ func ParseExplainQuery(q url.Values) ExplainRequest {
 	req := ExplainRequest{
 		Sandbox: q.Get("sandbox"), Harness: q.Get("harness"), Pack: q.Get("pack"),
 		Profile: q.Get("profile"), Project: q.Get("project"),
-		Copy: b("copy"), Safe: b("safe"), Yolo: b("yolo"), Unmask: q["unmask"],
+		Copy: b("copy"), Safe: b("safe"), Yolo: b("yolo"), Unmask: q["unmask"], Sources: b("sources"),
 	}
 	if b("run") {
 		run := &ExplainRun{EnvWithheld: q["run_env_withheld"], Credentials: q["run_credential"],

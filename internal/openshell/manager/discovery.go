@@ -22,10 +22,13 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -33,10 +36,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // In-sandbox AI discovery. While a sandbox is ready, what its agent installed
@@ -91,6 +97,270 @@ func (c *discoveryCatalog) get(cfg *config.Config) ([]inventory.AISignature, err
 		c.catalog, c.err = inventory.LoadAISignaturesForConfig(cfg)
 	}
 	return c.catalog, c.err
+}
+
+// scanDocker is the docker CLI the container scan runs, found as harness
+// image builds find it (image.DockerBinary): the PATH's, else a known
+// install. A macOS LaunchAgent's PATH has no docker, so a managed Mac's
+// daemon found none, scanned nothing and reported no foreign container
+// (GAP-0582). ok is false where there is no docker.
+func scanDocker(goos string, lookPath func(string) (string, error), stat func(string) (os.FileInfo, error)) (string, bool) {
+	bin, _ := image.DockerBinary(goos, lookPath, stat)
+	return bin, bin != "docker"
+}
+
+// foreignContainer is a running container of the user's container engine
+// that runs an agent harness and that DefenseClaw did not create.
+type foreignContainer struct {
+	ID, Image, Name, Agent string
+	// UID is the host account the agent process runs as, where the engine
+	// says (containerUIDsAreHost): 0 for root, -1 when unknown.
+	UID int
+}
+
+// containerScan lists the foreign containers (a seam for tests).
+var containerScan = dockerAgentContainers
+
+// maxScannedContainers bounds the containers one scan looks into.
+const maxScannedContainers = 64
+
+// dockerAgentContainers lists the running docker containers not made from
+// a DefenseClaw sandbox image whose processes include an agent harness's
+// command (claude, codex, opencode, ...), or, renamed, a harness by its
+// content (contentScan: GAP-0689). No docker CLI, or no engine, lists none.
+func dockerAgentContainers(ctx context.Context) ([]foreignContainer, error) {
+	bin, ok := scanDocker(runtime.GOOS, exec.LookPath, os.Stat)
+	if !ok {
+		return nil, nil
+	}
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+	defer cancel()
+	// docker opens no ssh session: the plain runner, as image builds use.
+	run := openshell.ExecRunner{}
+	out, err := run.Output(ctx, openshell.Command{Name: bin, Timeout: discoveryTimeout,
+		Args: []string{"ps", "--no-trunc", "--format", "{{.ID}}\t{{.Image}}\t{{.Names}}\t{{.Labels}}"}})
+	if err != nil {
+		return nil, nil // no engine reachable: nothing runs there
+	}
+	commands := map[string]string{}
+	for _, name := range harness.Names() {
+		if spec, ok := harness.Get(name); ok && spec.Command != "" {
+			commands[spec.Command] = name
+		}
+	}
+	// Where a container's processes run under host uids, the agent's uid
+	// names the account whose container it is.
+	columns := "pid,args"
+	if containerUIDsAreHost(ctx, run, bin) {
+		columns = "pid,uid,args"
+	}
+	var found []foreignContainer
+	// The containers no process of which runs a harness's command by name
+	// are looked into by content afterwards (GAP-0689), on a budget of
+	// their own, so the listing's timeout is not spent on them.
+	type unnamed struct {
+		c       foreignContainer
+		top     string
+		withUID bool
+	}
+	var rest []unnamed
+	live := map[string]bool{}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for i, line := range lines {
+		if i == maxScannedContainers || ctx.Err() != nil {
+			break
+		}
+		f := strings.SplitN(line, "\t", 4)
+		if len(f) < 4 || f[0] == "" || strings.Contains(","+f[3]+",", ","+image.LabelSandboxImage+"=1,") {
+			continue
+		}
+		live[f[0]] = true
+		withUID := columns != "pid,args"
+		top, err := run.Output(ctx, openshell.Command{Name: bin, Args: []string{"top", f[0], "-eo", columns}, Timeout: discoveryTimeout})
+		if err != nil && withUID {
+			withUID = false
+			top, err = run.Output(ctx, openshell.Command{Name: bin, Args: []string{"top", f[0], "-eo", "pid,args"}, Timeout: discoveryTimeout})
+		}
+		if err != nil {
+			continue
+		}
+		c := foreignContainer{ID: f[0], Image: f[1], Name: f[2]}
+		if agent, uid := agentProcess(string(top), commands, withUID); agent != "" {
+			c.Agent, c.UID = agent, uid
+			found = append(found, c)
+			continue
+		}
+		rest = append(rest, unnamed{c: c, top: string(top), withUID: withUID})
+	}
+	scan := newContentScan(parent, bin)
+	defer scan.end(live)
+	for _, u := range rest {
+		if agent, uid := scan.agent(u.c.ID, u.top, u.withUID); agent != "" {
+			u.c.Agent, u.c.UID = agent, uid
+			found = append(found, u.c)
+		}
+	}
+	return found, nil
+}
+
+// containerUIDsAreHost reports a Linux engine whose container processes run
+// under the host's uids: rootful, without user namespace remapping. A
+// rootless engine is the user's own (it runs only their containers), a
+// remapped one shows uids no account has, and Docker Desktop's run in its
+// VM: none of them says whose container it is.
+func containerUIDsAreHost(ctx context.Context, run openshell.ExecRunner, bin string) bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	out, err := run.Output(ctx, openshell.Command{Name: bin, Timeout: discoveryTimeout,
+		Args: []string{"info", "--format", "{{json .SecurityOptions}}"}})
+	if err != nil {
+		return false
+	}
+	opts := string(out)
+	return strings.HasPrefix(strings.TrimSpace(opts), "[") && !strings.Contains(opts, "name=rootless") && !strings.Contains(opts, "name=userns")
+}
+
+// agentProcess is the harness whose command one of top's processes runs
+// (docker top output: a header, then "PID ARGS" lines, or "PID UID ARGS"
+// with withUID), or "", and the uid that process runs as (-1 without
+// withUID or a uid). A command counts as the program or its first argument
+// (an interpreter's script).
+func agentProcess(top string, commands map[string]string, withUID bool) (string, int) {
+	first := 1
+	if withUID {
+		first = 2
+	}
+	for _, line := range strings.Split(top, "\n")[1:] {
+		fields := strings.Fields(line)
+		if len(fields) <= first {
+			continue
+		}
+		for _, arg := range fields[first:min(len(fields), first+2)] {
+			h, ok := commands[path.Base(arg)]
+			if !ok {
+				continue
+			}
+			uid := -1
+			if withUID {
+				if n, err := strconv.Atoi(fields[1]); err == nil && n >= 0 {
+					uid = n
+				}
+			}
+			return h, uid
+		}
+	}
+	return "", -1
+}
+
+// othersContainer reports a container whose agent runs as another account
+// of this host, whose own sandbox daemon runs (daemons: sandboxDaemonUIDs,
+// read once a scan): on a rootful engine every account in the docker group
+// sees every container, and that daemon reports it as its person's alert,
+// so this one reporting it too stamped it with the wrong person
+// (GAP-0503). Root (0), an unknown uid (-1) and an account no daemon runs
+// for name no person who reports it: each daemon that sees it reports it,
+// under its own person (the documented cross-visibility).
+func (m *Manager) othersContainer(c foreignContainer, daemons func() map[int]bool) bool {
+	return c.UID > 0 && c.UID != m.host.UID && daemons()[c.UID]
+}
+
+// sandboxDaemonUIDs lists the accounts a DefenseClaw sandbox daemon runs as
+// on this host, from /proc (Linux; none elsewhere, or where /proc hides
+// other accounts' processes). A seam for tests.
+var sandboxDaemonUIDs = func() map[int]bool {
+	out := map[int]bool{}
+	if runtime.GOOS != "linux" {
+		return out
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		dir := filepath.Join("/proc", e.Name())
+		raw, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+		if err != nil {
+			continue
+		}
+		args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if len(args) < 2 || !strings.HasPrefix(filepath.Base(args[0]), "defenseclaw") || !slices.Contains(args[1:], "sandbox-daemon") {
+			continue
+		}
+		if uid, ok := procRealUID(filepath.Join(dir, "status")); ok {
+			out[uid] = true
+		}
+	}
+	return out
+}
+
+// procRealUID is the real uid on the Uid: line of a /proc/<pid>/status file.
+func procRealUID(status string) (int, bool) {
+	raw, err := os.ReadFile(status)
+	if err != nil {
+		return 0, false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if rest, ok := strings.CutPrefix(line, "Uid:"); ok {
+			if f := strings.Fields(rest); len(f) > 0 {
+				uid, err := strconv.Atoi(f[0])
+				return uid, err == nil
+			}
+		}
+	}
+	return 0, false
+}
+
+// reportForeignContainers reports, once each, the containers that run an
+// agent outside DefenseClaw's sandboxes (a managed daemon): plain
+// containers are alerted on, never stopped, so dev containers keep
+// working (event.sandbox.foreign_container).
+func (m *Manager) reportForeignContainers(ctx context.Context) {
+	st := m.managedSide()
+	st.mu.Lock()
+	st.containersAt = m.now()
+	st.mu.Unlock()
+	list, err := containerScan(ctx)
+	if err != nil {
+		m.logf("look for agents in containers: %v", err)
+		return
+	}
+	registration := m.anyRegistration()
+	var daemons map[int]bool
+	daemonsOnce := func() map[int]bool {
+		if daemons == nil {
+			daemons = sandboxDaemonUIDs()
+		}
+		return daemons
+	}
+	for _, c := range list {
+		if m.othersContainer(c, daemonsOnce) {
+			continue
+		}
+		key := "container:" + c.ID
+		st.mu.Lock()
+		seen := st.reported[key]
+		st.reported[key] = true
+		st.mu.Unlock()
+		if seen {
+			continue
+		}
+		id := c.ID
+		if len(id) > 12 {
+			id = id[:12]
+		}
+		m.logf("%s: container %s (%s) runs %s outside a DefenseClaw sandbox", gatewaylog.ErrCodeOpenShellAdminViolation,
+			id, truncate(c.Image, 128), c.Agent)
+		m.managedEvent(ctx, registration, sandboxrelay.EventForeignContainer, map[string]any{
+			// The image the alert names (GAP-0677): a digest-pinned reference
+			// runs past 128 bytes, and a cut one names no image.
+			"container_id": id, "image": truncate(c.Image, 256), "name": truncate(c.Name, 128), "harness": c.Agent,
+		})
+	}
 }
 
 // syncObserve runs the sandbox's observer while it is ready and ends it

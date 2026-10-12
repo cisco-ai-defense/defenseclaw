@@ -81,8 +81,10 @@ type fakeDaemon struct {
 	// onExplain, when set, edits the explain answer to a request.
 	onExplain func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain)
 	// createMCP and createWarnings are what create reports.
-	createMCP        *sandboxapi.MCPSummary
-	createWarnings   []string
+	createMCP      *sandboxapi.MCPSummary
+	createWarnings []string
+	// createNetwork is the network mode create reports (open when empty).
+	createNetwork    string
 	createViolations []sandboxapi.Violation
 	// live are events only a followed activity stream delivers (they
 	// happen during the session).
@@ -109,6 +111,11 @@ type fakeDaemon struct {
 	destinations map[string]*sandboxapi.Destinations
 	// policyTest answers POST /policy/test.
 	policyTest func(req sandboxapi.PolicyTestRequest) *sandboxapi.PolicyTestResult
+	// onReady is what POST /ready does to the status (a managed daemon
+	// readies OpenShell).
+	onReady func(st *sandboxapi.Status)
+	// explainErr, when set, may refuse an explain request.
+	explainErr func(req sandboxapi.ExplainRequest) *sandboxapi.Error
 }
 
 // timeline is the ordered record of what the fakes did.
@@ -235,12 +242,22 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 			d.onStatus(&d.status)
 		}
 		reply(d.status)
+	case path == sandboxapi.PathPolicyExplain && d.explainErr != nil && d.explainErr(sandboxapi.ParseExplainQuery(r.URL.Query())) != nil:
+		e := d.explainErr(sandboxapi.ParseExplainQuery(r.URL.Query()))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(e.HTTPStatus())
+		_ = json.NewEncoder(w).Encode(e)
 	case path == sandboxapi.PathPolicyExplain:
 		ex := d.explain
 		if d.onExplain != nil {
 			d.onExplain(sandboxapi.ParseExplainQuery(r.URL.Query()), &ex)
 		}
 		reply(ex)
+	case path == sandboxapi.PathReady && r.Method == http.MethodPost:
+		if d.onReady != nil {
+			d.onReady(&d.status)
+		}
+		reply(d.status)
 	case path == sandboxapi.PathPolicyTest && d.policyTest != nil:
 		var req sandboxapi.PolicyTestRequest
 		_ = json.Unmarshal(body, &req)
@@ -351,6 +368,9 @@ func (d *fakeDaemon) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if d.createMCP != nil {
 			sb.MCP = d.createMCP
+		}
+		if d.createNetwork != "" {
+			sb.NetworkMode = d.createNetwork
 		}
 		sb.Warnings = append(sb.Warnings, d.createWarnings...)
 		sb.Violations = append(sb.Violations, d.createViolations...)
@@ -733,6 +753,8 @@ type fakeCopy struct {
 	pull     *workspace.PullResult
 	apply    []workspace.ApplyOptions
 	timeline *timeline
+	// uploadErr fails the upload.
+	uploadErr error
 	// applied and applyErr replace what Apply returns.
 	applied  *workspace.ApplyResult
 	applyErr error
@@ -819,6 +841,9 @@ func (f *fakeCopy) Stage(_ context.Context, o workspace.StageOptions) (*workspac
 
 func (f *fakeCopy) Upload(_ context.Context, _, name string, _ workspace.Uploader, _ workspace.Execer) (*workspace.CopyRecord, error) {
 	f.step("upload " + name)
+	if f.uploadErr != nil {
+		return nil, f.uploadErr
+	}
 	return &workspace.CopyRecord{Name: name, Files: 3, Bytes: 1024, HeldBack: []string{".env"}, Warnings: []string{"nested repository vendor/lib is not copied"}}, nil
 }
 
@@ -884,6 +909,9 @@ type fakeGateway struct {
 	restarts  int
 	// stateErr, when set, fails State (a configuration that cannot be read).
 	stateErr error
+	// upToDate has Plan find nothing to change, as it does for a gateway
+	// whose configuration already says what a change would write.
+	upToDate bool
 }
 
 func (f *fakeGateway) Restart(context.Context) error { f.restarts++; return nil }
@@ -898,6 +926,9 @@ func (f *fakeGateway) State() (*openshell.GatewayConfigState, error) {
 
 func (f *fakeGateway) Plan(_ context.Context, ch openshell.GatewayChanges) (*openshell.GatewayPlan, error) {
 	f.planned = append(f.planned, ch)
+	if f.upToDate {
+		return &openshell.GatewayPlan{}, nil
+	}
 	return &openshell.GatewayPlan{Files: []*openshell.FileChange{{Path: "/cfg/gateway.toml", Summary: []string{"enable_bind_mounts = true"}}}, Restart: "systemctl --user restart openshell-gateway"}, nil
 }
 
@@ -989,18 +1020,20 @@ func newTestApp(t *testing.T, input string, sandboxes ...sandboxapi.Sandbox) *te
 			ta.execs = append(ta.execs, append([]string{path}, argv...))
 			return nil
 		},
-		LookPath:   func(name string) (string, error) { return "/usr/bin/" + name, nil },
-		Getenv:     func(k string) string { return ta.env[k] },
-		Environ:    func() []string { return nil },
-		Getwd:      func() (string, error) { return ta.project, nil },
-		Home:       func() (string, error) { return ta.home, nil },
-		Executable: func() (string, error) { return "/usr/local/bin/defenseclaw-gateway", nil },
-		Now:        func() time.Time { return time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC) },
-		GOOS:       "linux",
-		GOARCH:     "arm64", // a test that makes this a Mac makes it an Apple-silicon one
-		WSL:        func() bool { return false },
-		Geteuid:    func() int { return 1000 },
-		DiskFree:   func(p string) (uint64, error) { ta.diskProbed = p; return ta.diskFree, nil },
+		LookPath: func(name string) (string, error) { return "/usr/bin/" + name, nil },
+		Getenv:   func(k string) string { return ta.env[k] },
+		Environ:  func() []string { return nil },
+		// Never the developer's real ssh.
+		AccountCheck: func() error { return nil },
+		Getwd:        func() (string, error) { return ta.project, nil },
+		Home:         func() (string, error) { return ta.home, nil },
+		Executable:   func() (string, error) { return "/usr/local/bin/defenseclaw-gateway", nil },
+		Now:          func() time.Time { return time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC) },
+		GOOS:         "linux",
+		GOARCH:       "arm64", // a test that makes this a Mac makes it an Apple-silicon one
+		WSL:          func() bool { return false },
+		Geteuid:      func() int { return 1000 },
+		DiskFree:     func(p string) (uint64, error) { ta.diskProbed = p; return ta.diskFree, nil },
 		DockerEngine: func(context.Context) (string, error) {
 			ta.dockerAsked++
 			return ta.dockerEngine, nil

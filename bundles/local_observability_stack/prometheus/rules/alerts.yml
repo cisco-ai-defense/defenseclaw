@@ -188,6 +188,22 @@ groups:
             Open Sandboxes -> "Top blocked hosts" and "Egress by source and
             decision".
 
+      - alert: DefenseClawSandboxErrorsSustained
+        expr: sum by (connector) (rate(defenseclaw_sandbox_transitions_total{defenseclaw_sandbox_phase_to="error"}[5m])) * 60 > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          surface: sandbox
+        annotations:
+          summary: "Sandbox errors above 0.2/min on {{ $labels.connector }}"
+          description: |
+            Sandboxes keep failing to start or stay up on this harness
+            connector: a missing OpenShell prerequisite, a driver fault or a
+            policy the driver cannot apply. The rate counts lifecycle
+            transitions into the error phase. Open Sandboxes -> "Phase
+            transitions" and "Recent lifecycle changes", then "Integration
+            health".
+
       - alert: DefenseClawJudgeErrorRate
         expr: |
           sum(rate(defenseclaw_gateway_judge_errors_total[5m]))

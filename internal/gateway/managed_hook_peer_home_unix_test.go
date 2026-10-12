@@ -235,6 +235,12 @@ func TestExplainAndLiveRequestsBuildTheSameSubject(t *testing.T) {
 	ctx := attachVerifiedSubject(context.Background(), nil, "94401103", "dcad-alice@dclab.test", subjectSourcePeerCredentials)
 	live, ok := profileSubjectSource(ctx)
 	explained, err := lookupDirectoryProfileSubject("dcad-alice")
+	if !explained.refreshed {
+		t.Fatalf("explain's lookup succeeded, but the subject does not say it refreshed the hook cache: %+v", explained)
+	}
+	// explain-only: whether its lookup refreshed the hook cache (GAP-0336)
+	// and the account name exempt_users entries name (GAP-0328)
+	explained.refreshed, explained.accountName = false, ""
 	if !ok || err != nil || !reflect.DeepEqual(live, explained) {
 		t.Fatalf("live subject %+v (%t) and explained subject %+v (%v) differ", live, ok, explained, err)
 	}

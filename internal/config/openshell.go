@@ -355,8 +355,9 @@ type OpenShellAdminConfig struct {
 	// required pack must be an administrator-owned file users cannot modify.
 	RequiredPack string `mapstructure:"required_pack" yaml:"required_pack,omitempty"`
 	// RequiredPackDigest pins RequiredPack's content ("sha256:<hex>", the
-	// pack digest `defenseclaw sandbox pack show` reports); a pack with any
-	// other content refuses to run.
+	// pack digest `defenseclaw sandbox pack show` reports, or on a managed
+	// computer `defenseclaw-gateway enterprise <os> sandbox pack-digest`);
+	// a pack with any other content refuses to run.
 	RequiredPackDigest string `mapstructure:"required_pack_digest" yaml:"required_pack_digest,omitempty"`
 	// MinProfile is the loosest profile allowed (strict > balanced > open).
 	MinProfile     string `mapstructure:"min_profile"      yaml:"min_profile,omitempty"`
@@ -391,7 +392,78 @@ type OpenShellAdminConfig struct {
 	// --copy, --no-mcp, a stricter --pack or --profile, a smaller resource
 	// request) still apply.
 	Locked []string `mapstructure:"locked" yaml:"locked,omitempty"`
+
+	// The keys below serve managed identity-based sandboxes. The same type
+	// is openshell.admin (the organization floor: the loosest anyone gets)
+	// and guardrail.profiles.<p>.sandbox (a tighten-only overlay, combined
+	// by TightenOpenShellAdmin). Intersect lists (AllowedHarnesses,
+	// AllowedCredentials, EgressAllowOnly, RequiredFor) are unset = no
+	// constraint; the schema refuses an explicit empty list.
+
+	// Allowed false refuses sandboxes for the subject; nil allows them.
+	Allowed *bool `mapstructure:"allowed" yaml:"allowed,omitempty"`
+	// RequiredFor lists connectors refused on the host: they run only in a
+	// sandbox.
+	RequiredFor []string `mapstructure:"required_for" yaml:"required_for,omitempty"`
+	// WhenUnavailable is what a RequiredFor host run does where sandboxes
+	// can't run: refuse (OpenShellWhenUnavailableRefuse, also "") or alert.
+	WhenUnavailable string `mapstructure:"when_unavailable" yaml:"when_unavailable,omitempty"`
+	// UserApprovals is none or session; "" leaves approvals to
+	// AllowUnblock.
+	UserApprovals string `mapstructure:"user_approvals" yaml:"user_approvals,omitempty"`
+	// AllowedCredentials lists the provider names a sandbox may receive, or
+	// [none] (exclusive) for no credentials.
+	AllowedCredentials []string `mapstructure:"allowed_credentials" yaml:"allowed_credentials,omitempty"`
+	// OnSilence (stop or alert) and MaxSilenceAfter (a Go duration, at
+	// least a minute) bind user-tier harnesses whose hooks fall silent.
+	OnSilence       string `mapstructure:"on_silence"        yaml:"on_silence,omitempty"`
+	MaxSilenceAfter string `mapstructure:"max_silence_after" yaml:"max_silence_after,omitempty"`
+	// ProcessTree true turns the process tree on for every sandbox.
+	ProcessTree *bool `mapstructure:"process_tree" yaml:"process_tree,omitempty"`
+	// ForeignSandboxes is stop or alert for sandboxes on the user's
+	// OpenShell gateway that DefenseClaw did not register ("" = stop when
+	// managed).
+	ForeignSandboxes string `mapstructure:"foreign_sandboxes" yaml:"foreign_sandboxes,omitempty"`
+	// AllowUpstreamTelemetry lets OpenShell's own telemetry on (nil = false
+	// when managed).
+	AllowUpstreamTelemetry *bool `mapstructure:"allow_upstream_telemetry" yaml:"allow_upstream_telemetry,omitempty"`
+	// DeleteStoppedAfter deletes a sandbox stopped this long (a Go
+	// duration or Nd, at least an hour).
+	DeleteStoppedAfter string `mapstructure:"delete_stopped_after" yaml:"delete_stopped_after,omitempty"`
+	// RequestAccess is the contact refusals end with (at most 512
+	// printable bytes). A profile's non-empty value replaces the base's.
+	RequestAccess string `mapstructure:"request_access" yaml:"request_access,omitempty"`
+	// DriverFallback is none or docker ("" = unset): none refuses a Linux
+	// sandbox that wants the MicroVM driver where KVM is not available for
+	// the user, instead of the host's enterprise.openshell.driver_fallback
+	// (docker by default). none wins; docker never loosens a none.
+	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
 }
+
+// Values of the managed sandbox floor keys of OpenShellAdminConfig.
+const (
+	OpenShellWhenUnavailableRefuse = "refuse"
+	OpenShellWhenUnavailableAlert  = "alert"
+
+	OpenShellUserApprovalsNone    = "none"
+	OpenShellUserApprovalsSession = "session"
+
+	OpenShellOnSilenceStop  = "stop"
+	OpenShellOnSilenceAlert = "alert"
+
+	OpenShellForeignSandboxesStop  = "stop"
+	OpenShellForeignSandboxesAlert = "alert"
+
+	// OpenShellCredentialsNone, alone in AllowedCredentials, allows no
+	// credentials.
+	OpenShellCredentialsNone = "none"
+
+	// OpenShellRequestAccessMaxBytes bounds RequestAccess.
+	OpenShellRequestAccessMaxBytes = 512
+	// OpenShellRequestAccessFallback is the contact text when no
+	// RequestAccess is configured.
+	OpenShellRequestAccessFallback = "contact your IT help desk"
+)
 
 // IsZero reports whether no administrator constraint is configured.
 func (a OpenShellAdminConfig) IsZero() bool {
@@ -400,7 +472,11 @@ func (a OpenShellAdminConfig) IsZero() bool {
 		a.AllowLearnMode == nil && len(a.AllowedHarnesses) == 0 &&
 		len(a.EgressBlock) == 0 && len(a.EgressAllowOnly) == 0 && !a.BlockLargeUploads &&
 		len(a.RequireCopyFor) == 0 && a.MaxResources == (OpenShellResourcesConfig{}) &&
-		len(a.Locked) == 0
+		len(a.Locked) == 0 &&
+		a.Allowed == nil && len(a.RequiredFor) == 0 && a.WhenUnavailable == "" && a.UserApprovals == "" &&
+		len(a.AllowedCredentials) == 0 && a.OnSilence == "" && a.MaxSilenceAfter == "" &&
+		a.ProcessTree == nil && a.ForeignSandboxes == "" && a.AllowUpstreamTelemetry == nil &&
+		a.DeleteStoppedAfter == "" && a.RequestAccess == "" && a.DriverFallback == ""
 }
 
 // IsLocked reports whether key is listed in Locked.
@@ -872,6 +948,12 @@ func (c *Config) ValidateOpenShell() error {
 	if err := c.OpenShell.Validate(); err != nil {
 		return err
 	}
+	if err := c.validateSecureClientOpenShell(); err != nil {
+		return err
+	}
+	if err := c.validateManagedSandboxPack("admin", c.OpenShell.Admin.RequiredPack); err != nil {
+		return err
+	}
 	if !c.OpenShell.Enabled {
 		return nil
 	}
@@ -962,11 +1044,13 @@ func (o *OpenShellConfig) Validate() error {
 		}
 	}
 	check(validateOpenShellResources("resources", o.Resources))
-	check(o.Admin.validate())
+	check(o.Admin.validateAs("admin"))
 	return errors.Join(errs...)
 }
 
-func (a *OpenShellAdminConfig) validate() error {
+// validateAs checks one floor section: openshell.admin (prefix "admin") or a
+// profile's sandbox section (prefix "sandbox", the same type).
+func (a *OpenShellAdminConfig) validateAs(prefix string) error {
 	var errs []error
 	check := func(err error) {
 		if err != nil {
@@ -975,29 +1059,30 @@ func (a *OpenShellAdminConfig) validate() error {
 	}
 	if a.RequiredPackDigest != "" {
 		if !openShellPackDigest.MatchString(a.RequiredPackDigest) {
-			check(fmt.Errorf("admin.required_pack_digest %q must be sha256:<64 lowercase hex digits>", a.RequiredPackDigest))
+			check(fmt.Errorf("%s.required_pack_digest %q must be sha256:<64 lowercase hex digits>", prefix, a.RequiredPackDigest))
 		}
 		if strings.TrimSpace(a.RequiredPack) == "" {
-			check(errors.New("admin.required_pack_digest needs admin.required_pack"))
+			check(fmt.Errorf("%s.required_pack_digest needs %s.required_pack", prefix, prefix))
 		}
 	}
-	check(validateOpenShellEnum("admin.min_profile", a.MinProfile, true,
+	check(validateOpenShellEnum(prefix+".min_profile", a.MinProfile, true,
 		OpenShellProfileOpen, OpenShellProfileBalanced, OpenShellProfileStrict))
-	check(validateOpenShellNames("admin.allowed_harnesses", a.AllowedHarnesses))
-	check(validateOpenShellEgressPatterns("admin.egress_block", a.EgressBlock))
-	check(validateOpenShellEgressPatterns("admin.egress_allow_only", a.EgressAllowOnly))
+	check(validateOpenShellNames(prefix+".allowed_harnesses", a.AllowedHarnesses))
+	check(validateOpenShellEgressPatterns(prefix+".egress_block", a.EgressBlock))
+	check(validateOpenShellEgressPatterns(prefix+".egress_allow_only", a.EgressAllowOnly))
 	for i, pattern := range a.RequireCopyFor {
 		if err := ValidateOpenShellCopyPattern(pattern); err != nil {
-			check(fmt.Errorf("admin.require_copy_for[%d]: %w", i, err))
+			check(fmt.Errorf("%s.require_copy_for[%d]: %w", prefix, i, err))
 		}
 	}
-	check(validateOpenShellResources("admin.max_resources", a.MaxResources))
+	check(validateOpenShellResources(prefix+".max_resources", a.MaxResources))
 	for i, key := range a.Locked {
 		if !isOpenShellLockableKey(strings.TrimSpace(key)) {
-			check(fmt.Errorf("admin.locked[%d]: %q is not a lockable key (want one of %s)",
-				i, key, strings.Join(OpenShellLockableKeys, ", ")))
+			check(fmt.Errorf("%s.locked[%d]: %q is not a lockable key (want one of %s)",
+				prefix, i, key, strings.Join(OpenShellLockableKeys, ", ")))
 		}
 	}
+	check(a.validateManagedFloor(prefix))
 	return errors.Join(errs...)
 }
 

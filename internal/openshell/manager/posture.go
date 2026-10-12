@@ -60,8 +60,11 @@ func postureOf(eff *packs.Effective) *posture {
 const maxListedHosts = 5
 
 // changes lists how q differs from p, and whether an organization's
-// constraint took part in any of it.
-func (p *posture) changes(q *posture) (out []string, org bool) {
+// constraint took part in any of it. Under a managed floor the OpenShell
+// profile (open, balanced, strict: the built-in packs' names) is left out:
+// there "profile" is the organization's profile the user was matched to,
+// which policy explain names (GAP-0458).
+func (p *posture) changes(q *posture, managed bool) (out []string, org bool) {
 	orgKey := func(key string) bool { return p.admin[key] || q.admin[key] }
 	add := func(key, what string) {
 		out = append(out, what)
@@ -73,7 +76,7 @@ func (p *posture) changes(q *posture) (out []string, org bool) {
 	case p.digest != q.digest:
 		add("pack", "pack "+firstNonEmpty(q.pack, "-")+" changed")
 	}
-	if p.profile != q.profile {
+	if p.profile != q.profile && !managed {
 		add("profile", "profile "+p.profile+" → "+q.profile)
 	}
 	if p.network != q.network {
@@ -154,7 +157,8 @@ func hostList(hosts []string) string {
 // and whether the organization's policy did it. The first policy a box is
 // seen with is its baseline.
 func (m *Manager) announcePosture(b *box, eff *packs.Effective) {
-	if eff == nil {
+	managed := m.managedMode()
+	if eff == nil || (managed && placeholderFloor(eff)) {
 		return
 	}
 	now := postureOf(eff)
@@ -166,7 +170,7 @@ func (m *Manager) announcePosture(b *box, eff *packs.Effective) {
 	if before == nil || !ready {
 		return
 	}
-	changes, org := before.changes(now)
+	changes, org := before.changes(now, managed)
 	if len(changes) == 0 {
 		return
 	}
@@ -174,6 +178,23 @@ func (m *Manager) announcePosture(b *box, eff *packs.Effective) {
 	if org {
 		who = "your organization's sandbox policy changed"
 	}
+	tail := "; applied to " + name
+	if managed {
+		tail += "; details: defenseclaw sandbox policy explain"
+	}
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: sandboxapi.ReasonPolicyChanged,
-		Message: truncate(who+": "+strings.Join(changes, "; ")+"; applied to "+name, 512)})
+		Message: truncate(who+": "+strings.Join(changes, "; ")+tail, 512)})
+}
+
+// placeholderFloor reports a managed policy resolved under a floor that
+// allows no sandbox at all: the closed floor a managed daemon holds before
+// the managed gateway named the caller's (after a restart, say), or a
+// profile whose re-match stops the sandbox anyway. No running sandbox runs
+// under it, so it is no baseline for a policy-change line: the daemon
+// re-adopting the real floor after a restart announced "profile strict →
+// open; network deny → open; approvals manual → auto", a loosening that
+// never happened (GAP-0458).
+func placeholderFloor(eff *packs.Effective) bool {
+	f, ok := effectiveFloor(eff)
+	return ok && f.Allowed != nil && !*f.Allowed
 }

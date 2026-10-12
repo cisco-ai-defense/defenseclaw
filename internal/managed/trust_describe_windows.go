@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -49,9 +50,11 @@ func DescribeUntrustedSource(label, source string, err error) (string, bool) {
 // administrator rule pack was refused: the account by name, the file or
 // folder it can change, and the icacls commands that fix it. Setup refused
 // such a pack only after it had stopped every service, with a SID and no fix
-// (GAP-0668). ok is false when err is not an ownership or write-access
-// refusal.
-func DescribeUntrustedRulePack(label, pack string, err error) (string, bool) {
+// (GAP-0668). The fix grants read to the gateway service account alone, not
+// BUILTIN\Users: a pack is one profile's policy, and a standard user may see
+// only their own (GAP-0386). ok is false when err is not an ownership or
+// write-access refusal.
+func DescribeUntrustedRulePack(label, pack, serviceAccount string, err error) (string, bool) {
 	var principal *UntrustedPrincipalError
 	if !errors.As(err, &principal) {
 		return "", false
@@ -73,8 +76,80 @@ func DescribeUntrustedRulePack(label, pack string, err error) (string, bool) {
 	if !inside {
 		return text + `. Copy the pack into a folder that only administrators can write, such as C:\ProgramData\DefenseClaw-RulePacks, set that path in the config, and run it again (nothing was changed)`, true
 	}
-	fix := untrustedFolderFix(pack, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "*S-1-5-32-545:(OI)(CI)RX")
+	fix := untrustedFolderFix(pack, principal, "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", RulePackServiceReadGrant(serviceAccount))
 	return text + ". From an elevated prompt run " + strings.Join(fix, ", then ") + ", and run it again (nothing was changed)", true
+}
+
+// DefaultGatewayServiceAccount is the standalone gateway's virtual account.
+const DefaultGatewayServiceAccount = `NT SERVICE\DefenseClawGateway`
+
+// RulePackServiceReadGrant is the icacls grant that lets the gateway service
+// account, and no standard user, read a rule pack folder: "*<service
+// SID>:(OI)(CI)RX". The SID is derived from the service name, so the grant
+// works before the service exists (a first install).
+func RulePackServiceReadGrant(serviceAccount string) string {
+	if strings.TrimSpace(serviceAccount) == "" {
+		serviceAccount = DefaultGatewayServiceAccount
+	}
+	account := serviceAccount
+	if sid, err := windowsVirtualServiceSID(serviceAccount); err == nil && sid != nil {
+		account = "*" + sid.String()
+	}
+	return account + ":(OI)(CI)RX"
+}
+
+// StandardUserReadersOf returns the SIDs of the groups every standard user is in (Users,
+// Authenticated Users, Everyone, INTERACTIVE, a domain's Domain Users) that
+// an allow entry of path lets list or read it. A rule pack is one profile's
+// policy, so a pack folder they can read shows every user the policy of
+// other profiles (GAP-0386). It reads the folder's own DACL; an error means
+// the DACL could not be read.
+func StandardUserReadersOf(path string) ([]string, error) {
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		return nil, err
+	}
+	if dacl == nil {
+		return []string{"S-1-1-0"}, nil // a NULL DACL grants everyone access
+	}
+	const read = windows.ACCESS_MASK(windows.FILE_LIST_DIRECTORY) | windows.GENERIC_READ | windows.GENERIC_ALL
+	denied := map[string]bool{}
+	var readers []string
+	seen := map[string]bool{}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil ||
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || ace.Mask&read == 0 {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String()
+		if !standardUserGroupSID(sid) {
+			continue
+		}
+		switch ace.Header.AceType {
+		case windows.ACCESS_DENIED_ACE_TYPE:
+			denied[sid] = true
+		case windows.ACCESS_ALLOWED_ACE_TYPE:
+			if !denied[sid] && !seen[sid] {
+				seen[sid] = true
+				readers = append(readers, sid)
+			}
+		}
+	}
+	return readers, nil
+}
+
+// standardUserGroupSID reports a group every standard account is in.
+func standardUserGroupSID(sid string) bool {
+	switch sid {
+	case "S-1-5-32-545", "S-1-5-11", "S-1-1-0", "S-1-5-4":
+		return true
+	}
+	return strings.HasPrefix(sid, "S-1-5-21-") && strings.HasSuffix(sid, "-513")
 }
 
 // untrustedFolderFix is the icacls commands that leave folder, and the files

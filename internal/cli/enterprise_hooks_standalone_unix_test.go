@@ -1641,7 +1641,7 @@ func TestIdentitySpoolCanonicalizesManifestAlias(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil)
+	_, _ = enterprisehooks.WriteIdentitySpool(canceled, dir, accounts, nil, nil)
 	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, "4242", nil)
 	if err != nil || record.Facts.UPN != "alice@example.test" {
 		t.Fatalf("failed refresh lost the verified UPN: record=%+v err=%v", record, err)

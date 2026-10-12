@@ -31,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -228,7 +229,7 @@ func assetDigestComponents(cfg *config.Config) map[string]string {
 		return out
 	}
 	dataDir := dataDirOf(cfg)
-	if digest := strings.TrimSpace(cfg.OpenShell.Admin.RequiredPackDigest); digest != "" {
+	if digest := strings.TrimSpace(packs.BaseFloor(cfg).RequiredPackDigest); digest != "" {
 		out["sandbox_pack"] = digest
 	}
 	for key, digest := range signaturePackDigests(cfg) {

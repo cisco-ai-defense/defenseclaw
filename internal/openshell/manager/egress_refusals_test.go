@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -220,7 +221,10 @@ func TestEgressRefusalRemedies(t *testing.T) {
 	for _, tc := range []struct {
 		target, what, remedy string
 	}{
-		{"x.corp-banned.example:443", "blocked by the organization's policy", "only the user's administrator can allow it"},
+		// The organization's list: the managed refusal's contact and Quote
+		// line, not "only the user's administrator" (GAP-0502).
+		{"x.corp-banned.example:443", "blocked by the organization's policy",
+			"the user can't approve this. Request access: your IT help desk. Quote: rule egress_block, host x.corp-banned.example, sandbox rembox."},
 		{"drop.example.org:443", "on the sandbox's block list", "only removing it from the block list allows it"},
 		{"10.1.2.3:443", "private network", "only the user's DefenseClaw operator can open it (openshell.egress.allow)"},
 		{"169.254.169.254:443", "this machine or a metadata address", "sandboxes never reach it"},
@@ -236,6 +240,19 @@ func TestEgressRefusalRemedies(t *testing.T) {
 			t.Errorf("CONNECT %s: refusals = %+v, want %q / %q", tc.target, got, tc.what, tc.remedy)
 		}
 	}
+	// GAP-0502: the feed's line of the organization's block carries the
+	// managed refusal: the rule, that the user can't approve it, the Quote.
+	managed := func(ev sandboxapi.ActivityEvent) bool {
+		return ev.Host == "x.corp-banned.example" && ev.Refusal == "Blocked by your organization's DefenseClaw policy: "+
+			"x.corp-banned.example is blocked by your organization (rule egress_block). You can't approve this.\n"+
+			"Request access: your IT help desk. Quote: rule egress_block, host x.corp-banned.example, sandbox rembox."
+	}
+	// The proxy's event as the sink hands it to the manager.
+	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventBlocked, SandboxName: "rembox", BindingID: b.ID, Host: "x.corp-banned.example",
+		Port: 443, Method: http.MethodConnect, Category: egress.CategoryAdminBlock, Source: egress.SourceAdmin, Time: time.Now()}, 0)
+	if !slices.ContainsFunc(e.events("rembox", sandboxapi.ActivityEgressBlocked, ""), managed) {
+		t.Fatalf("feed = %+v", e.events("rembox", sandboxapi.ActivityEgressBlocked, ""))
+	}
 	// A refusal an unblock would have lifted offers no unblock once the
 	// organization turns unblocking off.
 	if status, _ := proxy.connect(t, "rembox", "webhook.site:443"); status != http.StatusForbidden {
@@ -245,6 +262,26 @@ func TestEgressRefusalRemedies(t *testing.T) {
 	e.m.refreshEgress()
 	if got := e.m.EgressRefusals(b.ID, b.SandboxName); len(got) != 1 || got[0].Remedy != "only the user's administrator can allow it" {
 		t.Fatalf("under allow_unblock: false = %+v", got)
+	}
+}
+
+// The proxy's refusal of a site whose ask waits, or that the user
+// declined, keeps telling the agent that, not the refusal's unblock hint:
+// the sink raises the ask after the first refusal, so a second CONNECT can
+// be noted after it.
+func TestRefusalMemoryKeepsTheAskOverARepeat(t *testing.T) {
+	at := time.Date(2026, 10, 11, 21, 0, 0, 0, time.UTC)
+	ev := egress.Event{Kind: egress.EventBlocked, Method: http.MethodConnect, BindingID: "b1", SandboxName: "sb-b1",
+		Host: "example.org", Port: 443, Category: egress.CategoryNotAllowlisted, Unblockable: true}
+	for _, note := range []string{NoteAsked, NoteDeclined} {
+		r := newRefusalMemory()
+		r.note(ev, at)
+		r.forgetNote("b1", "example.org", 443, "")
+		r.noteDirect("b1", "sb-b1", "example.org", 443, note, at)
+		r.note(ev, at.Add(time.Second))
+		if got := r.take("b1", "sb-b1", at.Add(time.Second)); len(got) != 1 || got[0].note != note {
+			t.Fatalf("%s, then a refusal again: %+v", note, got)
+		}
 	}
 }
 

@@ -520,6 +520,12 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 						if tc.driver != "" {
 							r.Driver = tc.driver
 						}
+						if tc.driver == openshell.DriverVM {
+							// A Linux host whose gateway already runs MicroVMs.
+							r.MicroVM = &openshell.MicroVMHost{Linux: true, E2fsprogs: "/usr/sbin", DriverBinary: "/home/dev/.local/libexec/openshell/openshell-driver-vm",
+								Identity: openshell.VMIdentity{UID: 1000, GID: 1000}}
+							ta.gateway.upToDate = true
+						}
 					})(ctx, d)
 				}
 				return hostReport(nil)(ctx, d)
@@ -595,30 +601,6 @@ func TestSetupStartsAStoppedGatewayService(t *testing.T) {
 	has(t, ta.output(), "✗ Gateway service: openshell-gateway is inactive (dead)", `Fix "Gateway service" now: start the gateway and enable it at login, then register it?`,
 		`fixed "Gateway service"`, "Upgrade OpenShell 0.1.1 to "+openshell.InstallerVersion)
 	lacks(t, ta.output(), "Gateway registration:")
-}
-
-// TestSetupSaysWhoOwnsHomebrew (GAP-0048): a Homebrew prefix this account
-// cannot write to stops the install before anything runs, naming its owner
-// and the way on, not Xcode.
-func TestSetupSaysWhoOwnsHomebrew(t *testing.T) {
-	ta := setupApp(t, "", "", false)
-	ta.GOOS = "darwin"
-	ta.HostDoctor = hostReport(func(r *openshell.DoctorReport) {
-		r.CLIVersion = ""
-		r.Get(openshell.CheckIDCLI).Status = openshell.StatusFail
-	})
-	inst := &fakeInstaller{err: &openshell.HomebrewPrefixError{Prefix: "/opt/homebrew", Path: "/opt/homebrew/Library/Taps", Owner: "admin2"}}
-	ta.Installer = func(consent func(*openshell.InstallPlan) (bool, error)) Installer {
-		inst.consent = consent
-		return inst
-	}
-	err := ta.Setup(bg, SetupOptions{NonInteractive: true, InstallOpenShell: true, SkipImages: true})
-	if !errors.Is(err, openshell.ErrHomebrewPrefix) {
-		t.Fatalf("Setup = %v", err)
-	}
-	has(t, ta.output(), "✗ install OpenShell: this account cannot write to /opt/homebrew/Library/Taps, which admin2 owns,",
-		"Homebrew installs formulas only as the account that owns its prefix (admin2)")
-	lacks(t, ta.output(), "Xcode")
 }
 
 // TestSetupSaysWhatToDoWhenHomebrewFails: on macOS the installer fails when
@@ -896,7 +878,7 @@ func TestSetupOffersTheInstallOnlyForTheCLI(t *testing.T) {
 	}{{nil, false}, {stopped, false}, {older, true}} {
 		ta := newTestApp(t, "")
 		ta.HostDoctor = hostReport(tc.edit)
-		ta.ok(t, ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+		_ = ta.RunDoctor(bg, DoctorOptions{Output: OutputJSON}) // exits 1 where the CLI check failed
 		var rep struct {
 			OpenShellInstall *bool `json:"openshell_install"`
 		}
@@ -1552,8 +1534,8 @@ func TestSetupListsTheSandboxesASwitchStrands(t *testing.T) {
 			wantExit(t, err, 1)
 		}
 		out := ta.output()
-		has(t, out, tc.want, "the 2 sandboxes on it (dc-a, theirs) were made on the docker driver, stop if running, and cannot start again "+
-			"unless the gateway is switched back", "Restart the OpenShell gateway now? [y/N]",
+		has(t, out, tc.want, "the 2 sandboxes on it (dc-a, theirs) were made on the docker driver, stop if running, and cannot start again: "+
+			"OpenShell drops them a few minutes after the switch", "Restart the OpenShell gateway now? [y/N]",
 			"skipped: the OpenShell gateway change above")
 		if strings.Index(out, tc.want) > strings.Index(out, "Run sandboxes in OpenShell MicroVMs?") {
 			t.Fatalf("the sandboxes were listed after the question:\n%s", out)
@@ -1725,7 +1707,8 @@ func TestDoctorReportsDefenseClawChecks(t *testing.T) {
 	wantExit(t, ta.RunDoctor(bg, DoctorOptions{}), 1) // the broken wrapper
 	has(t, ta.output(), "DefenseClaw daemon", "connected to OpenShell 0.1.1 gateway openshell", "Harness images",
 		"not built yet: codex", "calls /nonexistent/defenseclaw-gateway, which is missing", "Organization policy")
-	ta.ok(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+	// JSON exits as text does when a check failed (GAP-0308).
+	wantExit(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}), 1)
 	var rep struct {
 		OK     bool
 		Checks []openshell.Check
@@ -2003,7 +1986,7 @@ func TestDoctorVerdict(t *testing.T) {
 		t.Fatalf("a failing doctor ends:\n%s", out)
 	}
 	lacks(t, ta.output(), "✓ ready for sandboxes")
-	ta.ok(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}))
+	wantExit(t, ta.fresh().RunDoctor(bg, DoctorOptions{Output: OutputJSON}), 1) // as text does (GAP-0308)
 	if err := json.Unmarshal(ta.out.Bytes(), &rep); err != nil || rep.OK || rep.Ready {
 		t.Fatalf("failing doctor json ok/ready = %+v, %v", rep, err)
 	}
@@ -2063,7 +2046,7 @@ func TestDoctorWrapperHintNamesAConfiguredHarness(t *testing.T) {
 	} {
 		ta := newTestApp(t, "")
 		ta.Cfg.OpenShell.Harnesses = tc.harnesses
-		if c := ta.wrappersCheck(); c.Detail != tc.want {
+		if c := ta.wrappersCheck(bg, false); c.Detail != tc.want {
 			t.Errorf("harnesses %v: wrappers check = %q, want %q", tc.harnesses, c.Detail, tc.want)
 		}
 	}

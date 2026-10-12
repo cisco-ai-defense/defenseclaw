@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -40,6 +41,63 @@ type EnterpriseConfig struct {
 	Trust         EnterpriseTrustConfig         `mapstructure:"trust"          yaml:"trust,omitempty"`
 	Coexistence   EnterpriseCoexistenceConfig   `mapstructure:"coexistence"    yaml:"coexistence,omitempty"`
 	Network       EnterpriseNetworkConfig       `mapstructure:"network"        yaml:"network,omitempty"`
+	// OpenShell is how the lifecycle provides and pins OpenShell for
+	// managed sandboxes. Every key is lifecycle (restart-required).
+	OpenShell EnterpriseOpenShellConfig `mapstructure:"openshell" yaml:"openshell,omitempty"`
+}
+
+// enterprise.openshell values.
+const (
+	// EnterpriseOpenShellInstallPrerequisite: the administrator installs
+	// OpenShell; DefenseClaw verifies it (the default).
+	EnterpriseOpenShellInstallPrerequisite = "prerequisite"
+	// EnterpriseOpenShellInstallSetup: the user's sandbox daemon installs
+	// the pinned NVIDIA release into the user's home at first use.
+	EnterpriseOpenShellInstallSetup = "setup"
+
+	EnterpriseOpenShellDriverDocker = "docker"
+	EnterpriseOpenShellDriverVM     = "vm"
+	// EnterpriseOpenShellDriverAuto: the MicroVM driver where the per-user
+	// KVM probe passes at sandbox start, else docker (Linux; vm on macOS).
+	EnterpriseOpenShellDriverAuto = "auto"
+
+	// enterprise.openshell.driver_fallback (and the tighten-only
+	// openshell.admin / profile sandbox key of the same name): what a Linux
+	// sandbox gets when the MicroVM driver is wanted and KVM is not
+	// available for the user. docker (the default) falls back to the docker
+	// driver with every profile floor unchanged; none refuses the sandbox.
+	EnterpriseOpenShellFallbackDocker = "docker"
+	EnterpriseOpenShellFallbackNone   = "none"
+
+	// DefaultEnterpriseOpenShellGatewayPort is the OpenShell gateway's
+	// default bind port.
+	DefaultEnterpriseOpenShellGatewayPort = 17670
+)
+
+// EnterpriseOpenShellConfig is enterprise.openshell. DefenseClaw never
+// ships OpenShell: Install chooses who installs it.
+type EnterpriseOpenShellConfig struct {
+	// Install is prerequisite or setup ("" = prerequisite).
+	Install string `mapstructure:"install" yaml:"install,omitempty"`
+	// Driver is docker, vm or auto ("" = vm on macOS, docker on Linux). auto
+	// is vm where the user's KVM probe passes at sandbox start, else docker;
+	// on macOS every value but docker is the MicroVM driver.
+	Driver string `mapstructure:"driver" yaml:"driver,omitempty"`
+	// DriverFallback is docker or none ("" = docker): what a Linux sandbox
+	// gets when driver is vm or auto and KVM is not available for the user.
+	// none refuses the sandbox with the reason and the request-access
+	// contact. A profile's sandbox.driver_fallback: none tightens it per
+	// user; nothing loosens none.
+	DriverFallback string `mapstructure:"driver_fallback" yaml:"driver_fallback,omitempty"`
+	// Version is an exact version ("0.1.3") or a range inside
+	// ">=0.1.1 <0.2.0"; setup needs an exact pin.
+	Version string `mapstructure:"version" yaml:"version,omitempty"`
+	// GatewayPort is the OpenShell gateway's bind port (0 =
+	// DefaultEnterpriseOpenShellGatewayPort).
+	GatewayPort int `mapstructure:"gateway_port" yaml:"gateway_port,omitempty"`
+	// E2fsprogsDir is the administrator's e2fsprogs directory (macOS only;
+	// absolute, with a root-owned chain).
+	E2fsprogsDir string `mapstructure:"e2fsprogs_dir" yaml:"e2fsprogs_dir,omitempty"`
 }
 
 // EnterpriseInspectionConfig chooses the optional remote inspection of a
@@ -483,7 +541,128 @@ func resolveEnterpriseConfig(cfg *Config, goos, pinnedProfile string) error {
 		standalonePolicyDirDefault(cfg, cfg.DataDir, goos)
 		standaloneRulePackDefault(cfg, cfg.DataDir, goos)
 	}
-	return validateEnterpriseConfig(cfg)
+	if err := validateEnterpriseConfig(cfg); err != nil {
+		return enterpriseSettingError(err)
+	}
+	// The schema takes only the lowercase values; every reader compares them
+	// exactly, so a loader without the schema keeps them lowercase too.
+	o := &cfg.Enterprise.OpenShell
+	o.Install, o.Driver = strings.ToLower(strings.TrimSpace(o.Install)), strings.ToLower(strings.TrimSpace(o.Driver))
+	o.DriverFallback = strings.ToLower(strings.TrimSpace(o.DriverFallback))
+	return enterpriseSettingError(validateEnterpriseOpenShell(cfg, goos))
+}
+
+var (
+	enterpriseOpenShellExactVersion = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)$`)
+	enterpriseOpenShellVersionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.[0-9]+\.[0-9]+))?$`)
+)
+
+// validateEnterpriseOpenShell checks enterprise.openshell (standalone only;
+// Secure Client refuses the key with the rest of the block). Whether the
+// host meets the mode, driver and version is judged by ensure and the
+// sandbox daemon, not here: driver vm with install prerequisite on Linux is
+// accepted.
+func validateEnterpriseOpenShell(cfg *Config, goos string) error {
+	o := cfg.Enterprise.OpenShell
+	if err := oneOf("enterprise.openshell.install", o.Install, EnterpriseOpenShellInstallPrerequisite, EnterpriseOpenShellInstallSetup); err != nil {
+		return err
+	}
+	if err := oneOf("enterprise.openshell.driver", o.Driver, EnterpriseOpenShellDriverDocker, EnterpriseOpenShellDriverVM, EnterpriseOpenShellDriverAuto); err != nil {
+		return err
+	}
+	if err := oneOf("enterprise.openshell.driver_fallback", o.DriverFallback, EnterpriseOpenShellFallbackDocker, EnterpriseOpenShellFallbackNone); err != nil {
+		return err
+	}
+	if v := strings.TrimSpace(o.Version); v != "" {
+		exact := enterpriseOpenShellExactVersion.MatchString(v)
+		bounds := enterpriseOpenShellVersionRange.FindStringSubmatch(v)
+		switch {
+		case !exact && bounds == nil:
+			return fmt.Errorf("config: enterprise.openshell.version %q must be an exact version such as 0.1.3 or a range such as \">=0.1.1 <0.2.0\"", o.Version)
+		case bounds != nil && bounds[2] != "" && compareDottedVersions(bounds[1], bounds[2]) >= 0:
+			return fmt.Errorf("config: enterprise.openshell.version %q is an empty range", o.Version)
+		case bounds != nil && o.Install == EnterpriseOpenShellInstallSetup:
+			return fmt.Errorf("config: enterprise.openshell.version %q is a range; install: setup needs an exact version such as 0.1.3", o.Version)
+		}
+	}
+	if dir := o.E2fsprogsDir; dir != "" {
+		if goos != "darwin" {
+			return fmt.Errorf("config: enterprise.openshell.e2fsprogs_dir applies to macOS only")
+		}
+		if !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+			return fmt.Errorf("config: enterprise.openshell.e2fsprogs_dir %q must be a clean absolute path", dir)
+		}
+	}
+	port, note := o.GatewayPort, ""
+	if port == 0 && cfg.StandaloneEnterprise() {
+		// The gateway binds the default port on every standalone host.
+		port, note = DefaultEnterpriseOpenShellGatewayPort, " (the default; set enterprise.openshell.gateway_port)"
+	}
+	if port != 0 {
+		if port < 1024 || port > 65535 {
+			return fmt.Errorf("config: enterprise.openshell.gateway_port %d must be between 1024 and 65535", port)
+		}
+		for _, other := range []struct {
+			name string
+			port int
+		}{
+			{"gateway.api_port", effectiveAPIPort(cfg.Gateway.APIPort)}, {"guardrail.port", cfg.Guardrail.Port},
+			{"openshell.ingress_port", cfg.OpenShellIngressPort()}, {"openshell.egress_port", cfg.OpenShellEgressPort()},
+		} {
+			if other.port == port {
+				return fmt.Errorf("config: enterprise.openshell.gateway_port %d collides with %s%s", port, other.name, note)
+			}
+		}
+	}
+	return nil
+}
+
+// SandboxDriver is the compute driver managed sandboxes want on goos:
+// enterprise.openshell.driver, else vm on macOS and docker on Linux. macOS
+// runs the MicroVM driver only, so auto is vm there; on Linux auto stays
+// auto (the per-user KVM probe at sandbox start decides).
+func (o EnterpriseOpenShellConfig) SandboxDriver(goos string) string {
+	driver := strings.ToLower(strings.TrimSpace(o.Driver))
+	switch {
+	case driver == "" && goos == "darwin", driver == EnterpriseOpenShellDriverAuto && goos == "darwin":
+		return EnterpriseOpenShellDriverVM
+	case driver == "":
+		return EnterpriseOpenShellDriverDocker
+	}
+	return driver
+}
+
+// SandboxDriverFallback is the fallback a user with floor F gets on goos
+// when the MicroVM driver is wanted and KVM is not available for them:
+// docker or none, the stricter of enterprise.openshell.driver_fallback
+// (default docker) and F's driver_fallback (a profile may only tighten it to
+// none). It is "" where no fallback applies: macOS (MicroVM only) and the
+// docker driver.
+func (o EnterpriseOpenShellConfig) SandboxDriverFallback(goos string, floor OpenShellAdminConfig) string {
+	if goos == "darwin" || o.SandboxDriver(goos) == EnterpriseOpenShellDriverDocker {
+		return ""
+	}
+	if strings.EqualFold(strings.TrimSpace(o.DriverFallback), EnterpriseOpenShellFallbackNone) ||
+		strings.EqualFold(strings.TrimSpace(floor.DriverFallback), EnterpriseOpenShellFallbackNone) {
+		return EnterpriseOpenShellFallbackNone
+	}
+	return EnterpriseOpenShellFallbackDocker
+}
+
+// compareDottedVersions compares two "x.y.z" versions numerically.
+func compareDottedVersions(a, b string) int {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := range pa {
+		x, _ := strconv.Atoi(pa[i])
+		y, _ := strconv.Atoi(pb[i])
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // requireDeclaredStandaloneProfile refuses a standalone-pinned load of a
@@ -735,7 +914,8 @@ func enterpriseBlockEmpty(e EnterpriseConfig) bool {
 		machinePolicyEmpty(e.MachinePolicy) &&
 		strings.TrimSpace(e.Trust.Mode) == "" && len(e.Trust.AllowedSigners) == 0 &&
 		strings.TrimSpace(e.Coexistence.PerUserInstall) == "" && e.Coexistence.DisableSelfUpdate == nil &&
-		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == ""
+		strings.TrimSpace(e.Network.HTTPSProxy) == "" && strings.TrimSpace(e.Network.NoProxy) == "" &&
+		e.OpenShell == (EnterpriseOpenShellConfig{})
 }
 
 // standaloneInlineSecrets lists the inline secret keys cfg sets.

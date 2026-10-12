@@ -227,6 +227,7 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 		}
 		return c.PolicyTest(ctx, req)
 	}))
+	mux.HandleFunc("POST "+sandboxapi.PathReady, a.handleSandboxReady)
 	mux.HandleFunc("GET "+sandboxapi.PathActivity, a.handleSandboxActivity)
 	mux.HandleFunc(sandboxapi.PathPrefix, func(w http.ResponseWriter, r *http.Request) {
 		writeSandboxError(w, sandboxapi.Errorf(sandboxapi.CodeNotFound, "no sandbox API route %s %s", r.Method, r.URL.Path))
@@ -297,6 +298,11 @@ func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	st, err := c.Status(r.Context())
+	a.writeSandboxStatus(w, st, err)
+}
+
+// writeSandboxStatus answers a status, or the error that stopped it.
+func (a *APIServer) writeSandboxStatus(w http.ResponseWriter, st *sandboxapi.Status, err error) {
 	if err != nil {
 		writeSandboxError(w, err)
 		return
@@ -304,6 +310,39 @@ func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) 
 	st.DaemonUID = daemonUID()
 	st.DockerGroupMissing = openshell.DockerGroupMissingInProcess()
 	a.writeJSON(w, http.StatusOK, st)
+}
+
+// sandboxReadier is a controller that readies OpenShell for a first run: a
+// managed computer's sandbox daemon (managedSandboxController.Ready).
+type sandboxReadier interface {
+	Ready(ctx context.Context) (*sandboxapi.Status, error)
+}
+
+// handleSandboxReady serves POST ready: the controller readies OpenShell and
+// answers the status after it. A controller with nothing to ready (the
+// per-user gateway drives the user's own OpenShell) answers the status.
+func (a *APIServer) handleSandboxReady(w http.ResponseWriter, r *http.Request) {
+	c, release := a.leaseSandboxController()
+	defer release()
+	if c == nil {
+		writeSandboxError(w, a.sandboxDisabledError())
+		return
+	}
+	var req struct{}
+	if err := decodeSandboxBody(r, &req, true); err != nil {
+		writeSandboxError(w, err)
+		return
+	}
+	var (
+		st  *sandboxapi.Status
+		err error
+	)
+	if rc, ok := c.(sandboxReadier); ok {
+		st, err = rc.Ready(r.Context())
+	} else {
+		st, err = c.Status(r.Context())
+	}
+	a.writeSandboxStatus(w, st, err)
 }
 
 // daemonUID is the uid this process runs as, for the sandbox doctor's

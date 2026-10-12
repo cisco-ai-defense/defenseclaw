@@ -606,8 +606,10 @@ those computers.
 | macOS | `lifecycle.log` and `verify.log`, same folder | Config-change runs and the daily verify |
 | macOS | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The pkg's own `ensure` |
 
-On Windows, users can read the files and both event logs. Only SYSTEM and
-Administrators can write the files and the `DefenseClaw` log. Any account can
+On Windows, only Administrators and members of Event Log Readers can read
+the files, because the results name other accounts; users can read both event
+logs, whose entries carry only codes. Only SYSTEM and Administrators can write
+the files and the `DefenseClaw` log. Any account can
 write Application-log entries under any source name, so detect from the
 `DefenseClaw` log.
 

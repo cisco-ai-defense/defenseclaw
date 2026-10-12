@@ -1214,8 +1214,11 @@ def test_admin_policy_from_config() -> None:
         deployment_mode="managed_enterprise",
         openshell=SimpleNamespace(admin=SimpleNamespace(allow_unblock=False, allowed_harnesses=["codex"])),
     )
+    # A managed computer's policy is the daemon's to give, not config.yaml's to read.
+    assert admin_policy_from_config(cfg) == AdminPolicy()
+    cfg.deployment_mode = ""
     policy = admin_policy_from_config(cfg)
-    assert policy.unblock_refused and policy.authoritative and policy.allowed_harnesses == ("codex",)
+    assert policy.unblock_refused and policy.allowed_harnesses == ("codex",)
     assert admin_policy_from_config(None) == AdminPolicy()
 
 

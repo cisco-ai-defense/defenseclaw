@@ -857,11 +857,12 @@ Sandboxes run on Linux and on Apple-silicon Macs, with the DefenseClaw
 gateway and the OpenShell gateway both running as your own user. On a Mac
 they are OpenShell MicroVMs, which mount no host folders, so
 `openshell.workdir.mode` is always `copy` there (see
-[macOS](/docs/sandboxes/guide#macos)). In a `managed_enterprise`
-install the gateway doesn't start the sandbox runtime yet: `/health`
-reports the `sandbox` subsystem as `disabled`, and `sandbox setup` and
-`sandbox run` refuse to start. The `openshell` keys, `openshell.admin`
-included, are still validated there.
+[macOS](/docs/sandboxes/guide#macos)). A standalone `managed_enterprise`
+install runs them too, for each signed-in person, under the policy the
+administrator sets in `openshell.admin` and in each guardrail profile (see
+[Sandboxes on managed computers](/docs/enterprise/sandboxes)). On Windows, on
+an Intel Mac and in a Secure Client profile `/health` reports the `sandbox`
+subsystem as `disabled`.
 </Callout>
 
 The posture is layered. The selected **sandbox policy pack** supplies every

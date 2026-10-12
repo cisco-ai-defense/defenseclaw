@@ -15,6 +15,7 @@ package enterprisehooks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
@@ -52,6 +53,33 @@ func collectIdentitySpoolRecord(ctx context.Context, account IdentitySpoolAccoun
 		AccountDomain: facts.AccountDomain,
 		Facts:         facts,
 	}, nil
+}
+
+// FlushDirectoryCaches empties Open Directory's caches (dscacheutil
+// -flushcache, dsmemberutil flushcache), which only root can do. The
+// guardian calls it when its pass resolves accounts again after one that
+// resolved none: once the domain controller answers again, Open Directory
+// kept answering from the caches it filled during the outage, an account
+// without its domain groups, for about 11 more minutes, and the accounts
+// stayed on the default profile until an administrator flushed them by hand
+// (GAP-0680, GAP-0517). The gateway's next lookup of an account then gets its
+// groups from the directory.
+func FlushDirectoryCaches(ctx context.Context) error {
+	var errs []error
+	for _, step := range [][]string{{"/usr/bin/dscacheutil", "-flushcache"}, {"/usr/bin/dsmemberutil", "flushcache"}} {
+		if trustedIdentityTool(step[0]) == "" {
+			errs = append(errs, fmt.Errorf("%s is not a root-owned tool", step[0]))
+			continue
+		}
+		runCtx, cancel := context.WithTimeout(ctx, macOSIdentityToolTimeout)
+		cmd := exec.CommandContext(runCtx, step[0], step[1:]...)
+		cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C"}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			errs = append(errs, fmt.Errorf("%s %s: %w: %s", step[0], step[1], err, strings.TrimSpace(boundedOutput(out))))
+		}
+		cancel()
+	}
+	return errors.Join(errs...)
 }
 
 func runMacOSIdentityTool(ctx context.Context, tool string, args ...string) string {

@@ -399,7 +399,7 @@ func runWindowsEnterpriseStandaloneAction(
 		// Readiness, not the probe: another process on the port answers
 		// /health too (GAP-1029).
 		if result.Readiness.Gateway {
-			if body, err := windowsStandaloneGatewayHealth(); err == nil {
+			if body, err := enterprisestatus.SettledGatewayHealth(ctx, windowsStandaloneGatewayHealth, 500*time.Millisecond, 8); err == nil {
 				appendStandaloneGatewayWarnings(result, body, windowsStandaloneGatewayStatus())
 			}
 		}
@@ -918,6 +918,7 @@ func applyWindowsEnterpriseInstallerReport(
 		applyWindowsEnterpriseUnprotectedAgents(result)
 		applyWindowsEnterpriseEnrolledConnectors(result)
 		applyWindowsEnterpriseAmpMachineFolder(result)
+		applyWindowsEnterpriseInstalledConfigWarnings(result)
 		applyWindowsEnterpriseAccountFolders(result)
 		if result.Action == "status" || result.Action == "verify" {
 			applyWindowsEnterpriseHookRuntimeAccess(result)
@@ -1958,7 +1959,7 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	}
 	writeWindowsEnterpriseScanners(output, result.Scanners)
 	if result.Policy != nil {
-		fmt.Fprintf(output, "  %s\n", result.Policy.Line())
+		fmt.Fprintf(output, "  %s\n", result.PolicyLine())
 	}
 	enterprisestatus.WriteDestinations(output, result.Destinations)
 	for _, message := range result.Errors {

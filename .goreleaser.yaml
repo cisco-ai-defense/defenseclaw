@@ -218,7 +218,10 @@ archives:
 # Standalone managed-enterprise Linux packages. The maintainer scripts call
 # the lifecycle (`enterprise linux ensure --from-package`), which renders the
 # host-specific drop-ins and never fails the package transaction; the units
-# themselves are the reviewed files in packaging/systemd.
+# themselves are the reviewed files in packaging/systemd, the system units in
+# /usr/lib/systemd/system and the per-user sandbox units (kept in
+# packaging/systemd/user so the //go:embed globs of the system units never
+# take them) in /usr/lib/systemd/user.
 nfpms:
   - id: defenseclaw-enterprise
     package_name: defenseclaw-enterprise
@@ -268,6 +271,32 @@ nfpms:
         dst: /usr/lib/systemd/system/defenseclaw-enterprise-verify.timer
       - src: packaging/systemd/defenseclaw-enterprise-verify.service
         dst: /usr/lib/systemd/system/defenseclaw-enterprise-verify.service
+      # The standard user's sandbox launcher: the gateway binary under the name
+      # defenseclaw, which offers only `defenseclaw sandbox ...` on a managed
+      # host (internal/cli/launcher.go). A root-owned link, so no account can
+      # point the name elsewhere.
+      - src: /opt/defenseclaw/bin/defenseclaw-gateway
+        dst: /usr/bin/defenseclaw
+        type: symlink
+      # The user units of the per-user sandbox daemon and, in install mode
+      # setup, of the user's OpenShell gateway. They stay disabled until the
+      # lifecycle enables them for every account (enterprise.openshell.enabled).
+      - src: packaging/systemd/user/defenseclaw-sandbox.socket
+        dst: /usr/lib/systemd/user/defenseclaw-sandbox.socket
+      - src: packaging/systemd/user/defenseclaw-sandbox.service
+        dst: /usr/lib/systemd/user/defenseclaw-sandbox.service
+      - src: packaging/systemd/user/defenseclaw-openshell-gateway.service
+        dst: /usr/lib/systemd/user/defenseclaw-openshell-gateway.service
+      # The rendered OpenShell gateway.toml lives here, world-readable (it
+      # holds no secret): every account's OpenShell gateway reads it. The
+      # lifecycle writes the file; the package owns the directory so an erase
+      # leaves no empty one behind.
+      - dst: /etc/defenseclaw/openshell
+        type: dir
+        file_info:
+          mode: 0755
+          owner: root
+          group: root
       - src: packaging/systemd/defenseclaw.sysusers
         dst: /usr/lib/sysusers.d/defenseclaw.conf
       - src: packaging/systemd/defenseclaw.conf

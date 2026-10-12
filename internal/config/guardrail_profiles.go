@@ -62,6 +62,10 @@ type GuardrailProfile struct {
 	// connector name. Their enabled and hook_fail_mode keys are rejected
 	// like the profile's own.
 	Connectors map[string]PerConnectorGuardrailConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
+	// Sandbox tightens openshell.admin for subjects of this profile (only
+	// request_access overrides); nil adds nothing. See
+	// TightenOpenShellAdmin.
+	Sandbox *OpenShellAdminConfig `mapstructure:"sandbox" yaml:"sandbox,omitempty"`
 
 	// Enabled and HookFailMode are NOT allowed in a profile: both are baked
 	// into the hooks installed on the machine, so they cannot vary by
@@ -124,7 +128,10 @@ func (c *Config) ValidateGuardrailProfiles() error {
 	if c == nil {
 		return nil
 	}
-	return c.Guardrail.validateProfiles(c.SecureClientIntegration())
+	if err := c.Guardrail.validateProfiles(c.SecureClientIntegration()); err != nil {
+		return err
+	}
+	return c.validateSandboxProfiles()
 }
 
 // UnknownGuardrailProfileError is a profile name that an assignment or
@@ -160,7 +167,7 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 			return fmt.Errorf("guardrail.profiles: invalid profile name %q (want lowercase letters, digits, '-' or '_', at most 64)", name)
 		}
 		if err := g.Profiles[name].validate(); err != nil {
-			return fmt.Errorf("guardrail.profiles[%q]: %w", name, err)
+			return profileSettingError(name, err)
 		}
 	}
 	for i, assignment := range g.ProfileAssignments {
@@ -172,11 +179,13 @@ func (g *GuardrailConfig) validateProfiles(secureClient bool) error {
 			}
 		}
 		if assignment.Match.Empty() {
-			return fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors or agents; use guardrail.default_profile for everyone else", i)
+			return settingErrorAt(fmt.Sprintf("guardrail.profile_assignments[%d]", i),
+				fmt.Errorf("guardrail.profile_assignments[%d]: match needs at least one of groups, users, connectors or agents; use guardrail.default_profile for everyone else", i))
 		}
 		for _, agent := range assignment.Match.Agents {
 			if !agentIdentityPattern.MatchString(agent) {
-				return fmt.Errorf("guardrail.profile_assignments[%d].match.agents: %q is not an agent identity (want agt- followed by 16 hex digits)", i, agent)
+				return settingErrorAt(fmt.Sprintf("guardrail.profile_assignments[%d].match.agents", i),
+					fmt.Errorf("guardrail.profile_assignments[%d].match.agents: %q is not an agent identity (want agt- followed by 16 hex digits)", i, agent))
 			}
 		}
 	}
@@ -315,6 +324,11 @@ type DerivedGuardrailProfile struct {
 	Name   string
 	Config *Config
 	Digest string
+	// Sandbox is the profile's sandbox floor F: openshell.admin tightened
+	// by the profile's sandbox section. SandboxDigest is "sha256:..." of
+	// F's canonical JSON and the content of every pack it references.
+	Sandbox       OpenShellAdminConfig
+	SandboxDigest string
 }
 
 // DeriveGuardrailProfiles derives every profile in guardrail.profiles. The
@@ -334,12 +348,23 @@ func (c *Config) DeriveGuardrailProfiles() (map[string]DerivedGuardrailProfile, 
 	}
 	out := make(map[string]DerivedGuardrailProfile, len(names))
 	for _, name := range names {
-		derived := deriveProfileFrom(base, c.Guardrail.Profiles[name])
-		digest, err := GuardrailPolicyDigest(derived)
+		profile := c.Guardrail.Profiles[name]
+		derived := deriveProfileFrom(base, profile)
+		floor, floorDigest, err := c.SandboxFloor(name)
 		if err != nil {
 			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
 		}
-		out[name] = DerivedGuardrailProfile{Name: name, Config: derived, Digest: digest}
+		// Only a profile with its own sandbox section digests it, so the
+		// digest of every other profile is unchanged.
+		sandboxDigest := ""
+		if profile.Sandbox != nil {
+			sandboxDigest = floorDigest
+		}
+		digest, err := guardrailPolicyDigest(derived, sandboxDigest)
+		if err != nil {
+			return nil, fmt.Errorf("guardrail profile %q: %w", name, err)
+		}
+		out[name] = DerivedGuardrailProfile{Name: name, Config: derived, Digest: digest, Sandbox: floor, SandboxDigest: floorDigest}
 	}
 	return out, nil
 }
@@ -366,6 +391,9 @@ type guardrailPolicyDigestView struct {
 	AutoProtection        PerConnectorGuardrailConfig            `json:"application_protection"`
 	AutoConnectors        map[string]PerConnectorGuardrailConfig `json:"application_protection_connectors"`
 	HookModes             map[string]string                      `json:"hook_modes"`
+	// Sandbox is the profile's sandbox floor digest (Config.SandboxFloor),
+	// set only for a profile with a sandbox section.
+	Sandbox string `json:"sandbox,omitempty"`
 }
 
 // GuardrailPolicyDigest returns "sha256:" + the hex SHA-256 of the canonical
@@ -373,6 +401,12 @@ type guardrailPolicyDigestView struct {
 // marshal sorted and struct fields in declaration order, so equal policies
 // always yield the same digest.
 func GuardrailPolicyDigest(cfg *Config) (string, error) {
+	return guardrailPolicyDigest(cfg, "")
+}
+
+// guardrailPolicyDigest is GuardrailPolicyDigest with a profile's sandbox
+// floor digest ("" for none).
+func guardrailPolicyDigest(cfg *Config, sandboxDigest string) (string, error) {
 	if cfg == nil {
 		return "", errors.New("guardrail policy digest: configuration is unavailable")
 	}
@@ -394,6 +428,7 @@ func GuardrailPolicyDigest(cfg *Config) (string, error) {
 			"claude_code": cfg.ClaudeCode.Mode,
 			"codex":       cfg.Codex.Mode,
 		},
+		Sandbox: sandboxDigest,
 	}
 	if !g.Rules.IsZero() {
 		rules := g.Rules
@@ -559,7 +594,8 @@ func applyGuardrailProfile(out *Config, profile GuardrailProfile) {
 		pc.Guardrail = overlayGuardrailPolicy(pc.Guardrail, fields, false)
 		ap.Connectors[name] = pc
 	}
-	if strings.TrimSpace(fields.Mode) != "" {
+	g.profileMode = strings.TrimSpace(fields.Mode)
+	if g.profileMode != "" {
 		clearHookModes(out, "")
 	}
 	g.profileConnectors = nil
@@ -612,6 +648,25 @@ func (g *GuardrailConfig) policyOverride(connector string) (PerConnectorGuardrai
 		return overlayGuardrailPolicy(pc, profile, true), true
 	}
 	return pc, ok
+}
+
+// ProfileModeForConnector is the guardrail mode the profile of a derived
+// configuration sets itself for connector: its connectors[c].mode, else its
+// mode. It is "" when the profile sets neither and on a configuration that
+// is not derived for a profile, where the mode comes from the global
+// settings alone.
+func (g *GuardrailConfig) ProfileModeForConnector(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if strings.TrimSpace(connector) != "" {
+		if pc, ok := g.profileConnectors[normalizeConnectorKey(connector)]; ok {
+			if mode := strings.TrimSpace(pc.Mode); mode != "" {
+				return mode
+			}
+		}
+	}
+	return g.profileMode
 }
 
 // profileConnectorOverlay layers the profile's connectors[c] entry over an

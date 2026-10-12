@@ -89,7 +89,7 @@ defenseclaw guardrail profile explain --user alice@corp.example.com --connector 
 | Key | Meaning |
 | --- | --- |
 | `description` | Free text for operators. |
-| `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. The hooks of a sandboxed agent always enforce, whatever `mode` says. |
+| `mode` | `observe` logs findings and blocks nothing; `action` enforces the thresholds. A profile's own `mode` (or its `connectors.<agent>.mode`) applies inside the person's managed sandboxes too, so an `observe` profile alerts there with "would block" as on the host. A sandbox whose profile sets no mode enforces, whatever `guardrail.mode` says. |
 | `block_at`, `alert_at` | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. These effective thresholds apply to tool calls, prompts, responses and proxy decisions. When unset, the selected rule pack supplies the levels (a `strict` pack blocks MEDIUM and above by default). A profile with `block_at: CRITICAL` can therefore turn a MEDIUM prompt finding from a strict-pack block into an alert, according to its effective `alert_at`. Secure Client rejects profiles and keeps its existing content thresholds. A plain regex rule that only matches text an inert command prints (`echo marker`) is recorded on a tool call but does not block; a rule meant to block a command needs an `expression` over the parsed command ([CEL rules](/docs/policies/cel/authoring)). |
 | `hilt` | `enabled` and `min_severity` (`LOW`, `MEDIUM`, `HIGH` or `CRITICAL`, stored in upper case) for [human approval](/docs/hitl). |
 | `rule_pack` | A rule pack for this profile: `default`, `strict`, `permissive` or a `guardrail.custom_packs` name. When a custom pack's directory does not load as the gateway starts (it is created a moment later, for example by the MDM that delivers it), the profile scans with the base rule set and the gateway retries the pack every 30 seconds; `explain` says so meanwhile. A reload refuses a pack that does not load. |
@@ -116,8 +116,8 @@ Each assignment has a `profile` and a `match` with at least one of four keys.
 
 | Key | Matches | Spell it as |
 | --- | --- | --- |
-| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Write it fully qualified then: the bare name selects nobody, and the warning names the spelling the host knows. `id -Gn` separates groups with spaces, and a space can belong to a name: Active Directory's default group prints as `domain users@corp.example.com`, so copy everything up to and including `@domain`, or read the exact name with `getent group <gid>` (`id -G` lists the gids). Quote such a name in YAML (`'domain users@corp.example.com'`). Case does not matter. Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. A standalone enterprise gateway resolves each name to its SID when it loads the config and matches the SIDs of the caller, so a slow domain controller cannot make a group miss; a name that does not resolve selects nobody, and `profile explain`, `status` and `doctor` name it until it does (the gateway retries it every minute). The gateway also looks each resolved name up again every minute, so a group that is deleted and created again under the same name (it gets a new SID) is followed within a minute, and a deleted one is named as no longer existing. An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: use the exact group name from `dscl` or `dseditgroup`; `id -Gn` splits names containing spaces. For macOS and Windows domain groups in YAML, use single quotes such as `'CORP\ML-Team'` or double the backslash inside double quotes (`"CORP\\ML-Team"`). Obtain Windows names containing spaces from the Windows group tools. Entra groups reach Linux only through Himmelblau or Entra Domain Services, and never reach macOS through Platform SSO ([Entra groups per platform](/docs/enterprise/identity-entra-id#pick-your-setup)). |
-| `users` | The verified user | A uid or SID, the account name, `DOMAIN\user` (`CORP\alice`, the form winbind and Windows report), or the principal or UPN (`alice@CORP.EXAMPLE.COM`). `DOMAIN` is the account's NetBIOS domain (`CORP`) or its DNS domain. On Windows a local account also matches as `COMPUTER\user` or `.\user`, and an Entra ID account as `AzureAD\name`. On macOS an AD account matches as `DOMAIN\user` when it is in the domain the Mac is bound to, the form macOS uses for its groups. On standalone enterprise Linux the UPN of an SSSD account comes from SSSD InfoPipe (`userPrincipalName` listed in the `[ifp]` `user_attributes`); when InfoPipe stops reporting it, the guardian keeps the UPN it read before, and `status`, `verify`, `profile explain` and the gateway log warn (`profile_assignment_unmatched`), as they do when an entry written as a UPN matches no account while InfoPipe reports none. |
+| `groups` | A directory or local group of the verified user | Linux: the name `id -Gn` prints, which is `group@domain` with SSSD fully qualified names (`ml-team@corp.example.com`). Write it fully qualified then: the bare name selects nobody, and the warning names the spelling the host knows. A bare name that is also a local group of the host (`/etc/group`, the local macOS node) selects the members of that local group (on macOS also those of `DOMAIN\name`); the warnings say so and `profile explain` reports `matched_group_source` (`local` or `directory`). A SID or a numeric group id selects nobody on Linux and macOS, and a malformed SID selects nobody anywhere; `ensure`, `status` and `verify` warn about each (`profile_assignment_unmatched`). `id -Gn` separates groups with spaces, and a space can belong to a name: Active Directory's default group prints as `domain users@corp.example.com`, so copy everything up to and including `@domain`, or read the exact name with `getent group <gid>` (`id -G` lists the gids). Quote such a name in YAML (`'domain users@corp.example.com'`). Case does not matter. Windows: `CORP\ML-Team`, the bare name `ML-Team`, or the SID, including Entra `S-1-12-1-...` SIDs. A standalone enterprise gateway resolves each name to its SID when it loads the config and matches the SIDs of the caller, so a slow domain controller cannot make a group miss; a name that does not resolve selects nobody, and `profile explain`, `status` and `doctor` name it until it does (the gateway retries it every minute). The gateway also looks each resolved name up again every minute, so a group that is deleted and created again under the same name (it gets a new SID) is followed within a minute, and a deleted one is named as no longer existing. An Entra group matches only when a built-in local group lists it ([Entra groups on Windows](/docs/enterprise/identity-sources#entra-groups-on-windows)). macOS: use the exact group name from `dscl` or `dseditgroup`; `id -Gn` splits names containing spaces. For macOS and Windows domain groups in YAML, use single quotes such as `'CORP\ML-Team'` or double the backslash inside double quotes (`"CORP\\ML-Team"`). Obtain Windows names containing spaces from the Windows group tools. Entra groups reach Linux only through Himmelblau or Entra Domain Services, and never reach macOS through Platform SSO ([Entra groups per platform](/docs/enterprise/identity-entra-id#pick-your-setup)). |
+| `users` | The verified user | Entries are compared literally, never as patterns: `*` or `?` selects nobody, and `ensure`, `status` and `verify` warn (`profile_assignment_unmatched`); use `default_profile` for everyone no assignment selects. A uid or SID, the account name, `DOMAIN\user` (`CORP\alice`, the form winbind and Windows report), or the principal or UPN (`alice@CORP.EXAMPLE.COM`). `DOMAIN` is the account's NetBIOS domain (`CORP`) or its DNS domain. A bare account name selects directory accounts only; a local account (in `/etc/passwd`, the computer's SAM or the local macOS node) is selected by its uid or SID, or as `.\user` on every platform (also `COMPUTER\user` on Windows). An Entra ID account matches as `AzureAD\name`. On macOS an AD account matches as `DOMAIN\user` when it is in the domain the Mac is bound to, the form macOS uses for its groups. On standalone enterprise Linux the UPN of an SSSD account comes from SSSD InfoPipe (`userPrincipalName` listed in the `[ifp]` `user_attributes`); when InfoPipe stops reporting it, the guardian keeps the UPN it read before, and `status`, `verify`, `profile explain` and the gateway log warn (`profile_assignment_unmatched`), as they do when an entry written as a UPN matches no account while InfoPipe reports none. |
 | `connectors` | The connector the request comes from: the hook route, the connector an inspect call authenticated for, or the connector the LLM proxy serves | `codex`, `claudecode`, `cursor` and the others. |
 | `agents` | One agent install | An agent identity from `defenseclaw agent identities`: `agt-` and 16 hex digits. |
 
@@ -134,10 +134,15 @@ How the keys combine:
   also compare as the same text whether an accented letter is typed
   precomposed (`é`) or as a letter plus a combining accent, as some editors and
   copy-paste sources produce it.
-- **An account name is not unique.** It is the name without its domain, so
-  `alice` matches a local account `alice` and a directory account
-  `alice@corp.example.com` alike, for requests and for `guardrail profile
-  explain` (both build the user the same way). A name whose domain the
+- **A bare name selects directory accounts, never a local namesake.** It is
+  the name without its domain, so `alice` matches the directory account
+  `alice@corp.example.com` (and an `alice` of another directory domain), but
+  not a local account `alice` that someone created on the host: that account
+  is another person and gets the next assignment or the default profile.
+  Select a local account by its uid or SID, or as `.\alice`. Requests and
+  `guardrail profile explain` build the user the same way, and `status`,
+  `verify` and the gateway log warn (`profile_assignment_unmatched`) when a
+  bare entry names a local account of the host. A name whose domain the
   directory does not confirm, such as an `nss_ldap` or plain LDAP account
   named `bob@corp.example.com` or `CORP\bob`, is not matched by name at all,
   only by its uid. Use the principal, the uid or the SID to tell two people of
@@ -283,15 +288,19 @@ What follows when the identity is missing:
   group's profile after the operating system and gateway see the change.
   `guardrail profile
   explain` asks the operating system directly, so it already shows the new
-  profile. The per-user CLI's `cache:` line and warning give the age of the
-  facts requests still use; managed `profile-explain` gives them in its `cache`
-  object (`age_seconds`, `refresh_after_seconds`, `differs`). A config push
+  profile, and it hands the facts it resolved to the gateway's cache: the
+  hooks of the explained account use the new profile from their next call.
+  Its `cache:` line (per-user CLI) or `cache` object (managed
+  `profile-explain`: `age_seconds`, `refresh_after_seconds`, `differs`)
+  states the facts the hooks use now; `differs` is true only when explain
+  could not resolve the account itself. A config push
   that changes `guardrail.profiles`, `guardrail.profile_assignments` or
   `guardrail.default_profile` has each account refresh its facts at its next
   request, so a pushed assignment applies to a group the user already joined.
-  On a bound Mac, flush Open Directory membership with
-  `dscacheutil -flushcache` and `dsmemberutil flushcache`, then restart the
-  gateway or wait for its 15-minute refresh. On Windows, group profiles use a current desktop sign-in token. After sign-out,
+  On a bound Mac the longer delay is Open Directory's own membership cache
+  (a removed member stayed in the group for more than ten minutes): flush it
+  with `dscacheutil -flushcache` and `dsmemberutil flushcache`, then explain
+  the account, restart the gateway, or wait for its 15-minute refresh. On Windows, group profiles use a current desktop sign-in token. After sign-out,
   group membership is unknown: an SSH or scheduled-task agent uses the default
   profile for group-dependent assignments until the user signs in at the desktop
   again. Set a strict default profile. A membership change also needs a new

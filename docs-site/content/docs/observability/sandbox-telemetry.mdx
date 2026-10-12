@@ -25,7 +25,7 @@ from these records; the full attribute registry is
 
 | What happened | Record family | Bucket | Notes |
 | --- | --- | --- | --- |
-| A phase change | `log.sandbox.lifecycle` | `agent.lifecycle` | The phases are `creating`, `provisioning`, `starting`, `ready`, `stopping`, `stopped`, `error`, `deleting` and `deleted`. A record names the trigger (`create`, `start`, `stop`, `delete`, `watch`, `reconcile`), the previous phase and the exit code. |
+| A phase change | `log.sandbox.lifecycle` | `agent.lifecycle` | The phases are `creating`, `provisioning`, `starting`, `ready`, `stopping`, `stopped`, `completed`, `error`, `deleting`, `unknown` and `deleted`. A record names the trigger (`create`, `start`, `stop`, `delete`, `watch`, `reconcile`), the previous phase and the exit code. |
 | A snapshot, undo, mask, review, upload, pull, or the quarantine of a nested repository | `log.sandbox.workspace` | `enforcement.action` | Counts files and lines and lists up to 64 project-relative paths. A state change, and any record that flags files able to run code, is always written to local SQLite. |
 | An egress decision, from the DefenseClaw egress proxy or from OpenShell's own network boundary | `log.egress.allowed`, `log.egress.blocked` | `network.egress` | Source `dc-egress-proxy` or `openshell`. A blocked decision is always written to local SQLite. |
 | The end of a connection the proxy allowed | `log.egress.completed`, `log.egress.failed` | `network.egress` | Bytes up and down and the duration. `failed` is a connection the proxy cut short (`cancelled`, with the bytes), or one whose DNS, connect, TLS or upstream failed (`failed`, a 502) or timed out (`timed_out`, a 504). |
@@ -55,7 +55,8 @@ value is left out, never guessed.
 | --- | --- |
 | `defenseclaw.sandbox.name` | The sandbox's name. Required on every record except the integration's own health. |
 | `defenseclaw.sandbox.id` | OpenShell's id, once the gateway accepted the sandbox. |
-| `defenseclaw.sandbox.driver` | The compute driver: `docker` on Linux, `vm` (MicroVM) on a Mac. |
+| `defenseclaw.sandbox.driver` | The compute driver: `docker` (the Linux default) or `vm` (MicroVM: every Mac, and a Linux host with KVM that chose it). |
+| `defenseclaw.sandbox.driver_reason` | Managed hosts: why the sandbox runs on its driver. `configured` (the organization set it), `kvm_available` (`driver: auto` and the user's KVM probe passed), or, when the Linux docker fallback replaced the MicroVM driver, the probe's reason: `kvm_missing`, `kvm_access`, `cpu_virtualization`, `vm_driver_missing` or `vm_prerequisite_missing`. See [The docker fallback](/docs/enterprise/sandboxes#the-docker-fallback). |
 | `defenseclaw.sandbox.profile`, `.pack` | The network profile and the policy pack. |
 | `defenseclaw.sandbox.workdir.mode` | `mount` or `copy`. |
 | `defenseclaw.sandbox.binding.id` | The ingress binding the sandbox's hooks and egress proxy credential authenticate with (`sb_` and hex; never the token). |
@@ -70,6 +71,45 @@ sandbox that is created and deleted a hundred times does not make a hundred
 series. Per-sandbox views read the logs, which is why the Collector copies
 `defenseclaw.sandbox.name` into Loki structured metadata.
 </Callout>
+
+## Managed computers
+
+On a managed host (the enterprise packages, with
+[identity-based sandbox policy](/docs/enterprise/sandboxes)) the managed gateway
+also stamps each sandbox record with what it knows of the sandbox's governance.
+These attributes are left out on an unmanaged sandbox, and none of them is a
+metric label.
+
+| Attribute | Meaning |
+| --- | --- |
+| `defenseclaw.sandbox.registration.id` | The managed gateway registration the sandbox's hooks and policy requests are bound to (`reg-`; never the binding token). |
+| `defenseclaw.guardrail.profile.name`, `.digest`, `.match`, `.matched_group` | The guardrail profile that governs the sandbox, the digest of its configuration, and why it matched. The same attributes the hook decisions carry. |
+| `defenseclaw.sandbox.policy.digest` | The digest of the effective sandbox policy: the organization floor combined with the profile's `sandbox` section. |
+| `defenseclaw.sandbox.policy.generation` | The managed gateway's configuration generation at the last resolve or re-match. |
+| `defenseclaw.sandbox.policy.provisional` | `true` while the sandbox runs under `default_profile` because the directory lookup had not resolved. |
+| `defenseclaw.openshell.version`, `defenseclaw.openshell.install_mode` | The OpenShell release the daemon verified, and how it was provided: `prerequisite` or `setup`. |
+| `defenseclaw.subject.key` | An `hmac-sha256:` pseudonym of the account, so one person can be followed across records without the principal. The principal itself is recorded only when `ai_discovery.include_user_principal` is on. |
+
+The records the managed computer adds:
+
+| What happened | Record | Notes |
+| --- | --- | --- |
+| A registration's profile and sandbox policy were resolved | `log.sandbox.policy.resolved` | Reason `offline_floor` for a provisional one. |
+| A live registration was matched again | `log.sandbox.policy.rematched` | The reason is `generation`, `facts` or `lookup_resolved`, with the previous profile and policy digest. Always written. |
+| A network rule that nothing accounts for was removed, its sandbox stopped, or only reported | `log.sandbox.policy.foreign_rule` | The action is `remove`, `stop` or `alert`. |
+| The managed gateway decided a person's ask, unblock or block | `log.sandbox.ask.decided` | Says whether the decision was kept. Always written. |
+| A required agent was started on the host | `log.sandbox.host_run_refused` | Always written. |
+| This computer cannot provide a sandbox for a required agent | `log.sandbox.host_run_unavailable` | The reason is one of `os_unsupported`, `no_docker_group`, `no_docker_access`, `no_kvm`, `no_kvm_group`, `no_kvm_access`, `prerequisite_missing` and similar; the refusal asks the person to quote it. An alert-only case has action `allow`. |
+| A sandbox run refused because another account is using the sandboxes of a single-account computer | `log.sandbox.host_run_unavailable` | The reason is `account_busy` and the action `refuse`. The record carries the refused person's own profile and subject key and names no other account. Repeated attempts are recorded at most once every 5 seconds. |
+| The managed policy refused a destination | `log.sandbox.access_refused` | Names the rule and `server.address`; the rule is the caller's own match only. Always written. |
+| A sandbox or an agent container DefenseClaw did not create | `log.sandbox.foreign_sandbox`, `log.sandbox.foreign_container` | A sandbox is stopped, deleted when it cannot stop, or reported; a container is only reported, with its image in `defenseclaw.sandbox.container.image`. Both carry the account's own profile match and the detected agent connector, including when the account has no registered sandbox. |
+| An OpenShell setting differs from `enterprise.openshell` | `log.sandbox.settings_drift` | `defenseclaw.openshell.settings.field` names the key, never the value. Pauses the user's sandboxes. Always written. |
+
+A refusal, a removal or stop, a re-match and an ask decision are mandatory:
+they reach the audit floor whatever a route's collection settings say. The
+Grafana Sandboxes board has a managed fleet section built from these records,
+with matching Splunk saved searches and Splunk Observability charts and a
+sandbox errors detector.
 
 ## Egress records
 

@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // ActivityOptions are the `sandbox activity` flags.
@@ -129,6 +130,62 @@ func (a *App) Activity(ctx context.Context, o ActivityOptions) error {
 	return nil
 }
 
+// stoppedNoticeWindow is how long after a foreign sandbox was stopped the
+// next list, status and doctor still announce it.
+const stoppedNoticeWindow = 24 * time.Hour
+
+// maxStoppedNotices is how many such notices one command prints.
+const maxStoppedNotices = 3
+
+// StoppedNotices prints the notices of sandboxes the daemon stopped (or told
+// the organization about) because they were not started with
+// `defenseclaw sandbox run`, which the organization requires. The notice
+// reached only the activity feed, so a user who ran `list` or `status` after
+// the stop was told nothing (GAP-0265). It prints nothing when the daemon
+// does not answer or has no such event.
+func (a *App) StoppedNotices(ctx context.Context) {
+	a.defaults()
+	api, err := a.api()
+	if err != nil {
+		return
+	}
+	a.printStoppedNotices(ctx, api)
+}
+
+func (a *App) printStoppedNotices(ctx context.Context, api API) {
+	var found []sandboxapi.ActivityEvent
+	since := a.Now().Add(-stoppedNoticeWindow)
+	created := map[string]time.Time{}
+	err := api.Activity(ctx, sandboxapi.ActivityQuery{}, func(ev sandboxapi.ActivityEvent) error {
+		switch {
+		case ev.Kind == sandboxapi.ActivityFinding && ev.Reason == sandboxrelay.EventForeignSandbox && ev.Message != "" && ev.Time.After(since):
+			found = append(found, ev)
+		case ev.Kind == sandboxapi.ActivityLifecycle && ev.Phase == "creating" && ev.Sandbox != "":
+			created[ev.Sandbox] = ev.Time
+		}
+		return nil
+	})
+	if err != nil {
+		return
+	}
+	// A name that was created again since is not the sandbox the notice was
+	// about: the notice is cleared by the reuse (GAP-0557).
+	found = slices.DeleteFunc(found, func(ev sandboxapi.ActivityEvent) bool {
+		at, again := created[ev.Sandbox]
+		return again && at.After(ev.Time)
+	})
+	// The newest of each message, oldest first, at most maxStoppedNotices.
+	var shown []sandboxapi.ActivityEvent
+	for i := len(found) - 1; i >= 0 && len(shown) < maxStoppedNotices; i-- {
+		if !slices.ContainsFunc(shown, func(ev sandboxapi.ActivityEvent) bool { return ev.Message == found[i].Message }) {
+			shown = append(shown, found[i])
+		}
+	}
+	for i := len(shown) - 1; i >= 0; i-- {
+		a.warn(strings.TrimPrefix(shown[i].Message, "⚠ ") + " " + a.dim("("+a.clock(shown[i].Time)+")"))
+	}
+}
+
 // feedHistoryText is where the feed's events from before the daemon's
 // last start are.
 const feedHistoryText = "`defenseclaw-gateway audit export` (and Grafana, with observability on)"
@@ -211,6 +268,14 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 			b.WriteString(a.dim(" (port " + strconv.Itoa(ev.Port) + " on this machine)"))
 		}
 	case sandboxapi.ActivityEgressBlocked:
+		if ev.Host == "" {
+			// A change to the sandbox's rules, not one destination's refusal:
+			// its message names what went ("removed 1 rule(s) you
+			// approved: …"); a reason token alone read "✗  (admin policy)"
+			// (GAP-0468).
+			b.WriteString(a.style("✗", ansiRed) + " " + firstNonEmpty(strings.TrimPrefix(ev.Message, "✗ "), sandboxapi.BlockedText(ev.Reason, "")))
+			break
+		}
 		b.WriteString(a.style("✗", ansiRed) + " " + hostPort(ev))
 		switch why := firstNonEmpty(ev.Category, ev.Reason); {
 		case sshPort(ev):
@@ -283,6 +348,14 @@ func (a *App) activityLine(ev sandboxapi.ActivityEvent, withSandbox bool) string
 		// OpenShell replays what it recorded while the daemon was down,
 		// after newer events.
 		b.WriteString(a.dim(" (while DefenseClaw was down)"))
+	}
+	// The organization's refusal, under the line: who refused it, that the
+	// user can't approve it, and what to quote in an access request
+	// (GAP-0502).
+	for _, line := range strings.Split(strings.TrimSpace(ev.Refusal), "\n") {
+		if line = strings.TrimSpace(sandboxapi.DisplayText(line)); line != "" {
+			b.WriteString("\n         " + line)
+		}
 	}
 	return b.String()
 }
@@ -506,13 +579,13 @@ type UnblockOptions struct {
 	Always  bool
 }
 
-// Unblock lifts an egress block for one sandbox or for every sandbox.
+// Unblock lifts an egress block for one sandbox or for every sandbox. With
+// --always, --sandbox names the sandbox whose policy checks the unblock: a
+// managed computer keeps it for the person through one of their sandboxes
+// (GAP-0609).
 func (a *App) Unblock(ctx context.Context, o UnblockOptions) error {
 	if o.Sandbox == "" && !o.Always {
 		return errors.New("choose where the unblock applies: --sandbox NAME, or --always for every sandbox")
-	}
-	if o.Sandbox != "" && o.Always {
-		return errors.New("--sandbox and --always are exclusive")
 	}
 	api, err := a.api()
 	if err != nil {

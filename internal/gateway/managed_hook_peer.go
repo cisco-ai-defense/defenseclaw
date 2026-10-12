@@ -31,6 +31,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // Stable diagnostics returned to a standalone hook caller the gateway
@@ -206,7 +208,8 @@ func denyManagedHook(status int, reason string) managedHookDecision {
 //     (W-28 parity: an unregistered caller never reaches inspection).
 //   - uid 0 follows enrollment.root.
 //   - enrollment.exempt_users are authorized without enrollment; they are
-//     still inspected and every call is logged.
+//     still inspected under their guardrail profile, which blocks as for
+//     anyone (GAP-0328), and every call is logged.
 type managedHookAuthorizer struct {
 	enrollment    config.EnterpriseEnrollmentConfig
 	machinePolicy map[string]bool
@@ -229,8 +232,17 @@ func newManagedHookAuthorizer(
 	return &managedHookAuthorizer{enrollment: enrollment, machinePolicy: machine, loadLedger: loadLedger}
 }
 
+// exempt reports whether enterprise.enrollment.exempt_users names the
+// caller: by its uid or its account name as the account database gives it,
+// or as a guardrail users entry selects the account (userEntryMatches) from
+// its verified directory facts. A bare ent-alice then exempts the SSSD
+// account ent-alice@dclab.test, as users: [ent-alice] selects it, and
+// DCLAB\ent-alice or the UPN do too where the facts confirm them; it
+// exempted nobody on a host with fully qualified names (GAP-0494). A local
+// namesake is still exempted only by its own exact name or uid (GAP-0305).
 func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 	uid := strconv.Itoa(peer.UID)
+	named := false
 	for _, entry := range z.enrollment.ExemptUsers {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
@@ -239,8 +251,26 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 		if entry == uid || (peer.Name != "" && entry == peer.Name) {
 			return true
 		}
+		named = named || useridentity.KindForID(entry) == ""
 	}
-	return false
+	if !named || peer.Name == "" || !identityFactsEnabled.Load() {
+		return false
+	}
+	facts, _ := managedHookExemptFacts(peer.UID)
+	if facts.ResolvedAt.IsZero() {
+		return false
+	}
+	subject := profileSubjectFromVerified(VerifiedSubject{
+		UserID: uid, IDKind: useridentity.KindPOSIXUID, UserName: peer.Name, Directory: facts,
+	}, false)
+	return anyMatches(z.enrollment.ExemptUsers, func(entry string) bool { return userEntryMatches(&subject, entry) })
+}
+
+// managedHookExemptFacts are the verified directory facts exempt matches a
+// caller's names with, from the cache the caller's hook requests use; tests
+// replace it.
+var managedHookExemptFacts = func(uid int) (useridentity.DirectoryFacts, bool) {
+	return verifiedIdentityDirectory(strconv.Itoa(uid), identityLookupBlocking.Load())
 }
 
 // decide authorizes one hook call. surface is the caller's
@@ -468,6 +498,13 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 		if route == "" {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
+		if strings.HasPrefix(r.URL.Path, sandboxrelay.PathPrefix) {
+			// The managed sandbox routes refuse uid 0 outright, take their
+			// class's budget, and decide once the registration or the
+			// connector claim names the connector (sandbox_authority.go).
+			a.serveSandboxRoute(authorizer, peer, route, w, r, next)
+			return
+		}
 		r, release := a.admitHookCaller(w, r, strconv.Itoa(peer.UID), route)
 		if release == nil {
 			return
@@ -564,7 +601,8 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 
 // managedHookSocketMux registers only the agent-facing routes on the hook
 // socket: connector hook endpoints, the inspect endpoints, the Codex
-// notifier and the refused-write report of a standard user CLI. Management,
+// notifier, the refused-write report of a standard user CLI and the managed
+// sandbox authority routes a user's sandbox daemon calls. Management,
 // status, configuration, policy and scan routes are not reachable through it
 // at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
@@ -580,7 +618,17 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	a.registerConnectorHookRoutes(mux, limiter)
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
-	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
+	a.registerSandboxAuthorityRoutes(mux)
+	a.registerSandboxRelayRoutes(mux)
+	handler := bodyLimitMiddleware(mux, func(r *http.Request) int64 {
+		if limit := sandboxRouteBodyLimit(r.URL.Path); limit > 0 {
+			return limit
+		}
+		if isOTLPEndpointPath(r.URL.Path) {
+			return otlpRequestBodyMaxBytes
+		}
+		return apiRequestBodyMaxBytes
+	})
 	return a.apiCSRFProtect(handler)
 }
 

@@ -68,7 +68,16 @@ func (a *App) printf(format string, args ...any) {
 func (a *App) println(args ...any) { fmt.Fprint(a.IO.Out, terminalText(fmt.Sprintln(args...))) }
 
 // line prints one indented line.
-func (a *App) line(text string) { fmt.Fprintln(a.IO.Out, terminalText("  "+text)) }
+func (a *App) line(text string) {
+	full := "  " + text
+	if w := a.width(); w > 0 && (visibleLen(full) > w || strings.Contains(full, "\n")) {
+		for _, l := range wrapWords(full, w, hangingIndent(full)) {
+			fmt.Fprintln(a.IO.Out, terminalText(l))
+		}
+		return
+	}
+	fmt.Fprintln(a.IO.Out, terminalText(full))
+}
 
 // maxPathText is the most of a file name the workload chose that a list
 // prints (pathText).
@@ -182,6 +191,10 @@ func (a *App) mark(ok bool) string {
 
 // table writes aligned columns.
 func (a *App) table(header []string, rows [][]string) {
+	if w := a.width(); w > 0 && tableWidth(header, rows) > w {
+		a.stackedTable(header, rows)
+		return
+	}
 	w := tabwriter.NewWriter(a.IO.Out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, strings.Join(header, "\t"))
 	for _, r := range rows {

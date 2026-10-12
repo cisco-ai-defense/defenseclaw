@@ -38,6 +38,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/triage"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // unblockIndex serves a sandbox decider's unblock lookups: the unblocks
@@ -59,23 +61,62 @@ func (u unblockIndex) Unblocked(p egress.Principal, host string) (egress.Unblock
 	return u.saved.Unblocked(p, host)
 }
 
-// unblockIndex returns the index with cfg's saved "always" decisions.
-// Configuration validation keeps them parseable; one that is not is
-// skipped.
-func (m *Manager) unblockIndex(cfg *config.Config) unblockIndex {
+// unblockIndex returns the index with the saved "always" decisions: cfg's
+// openshell.egress.unblocked, or in managed mode the registration's saved
+// unblocks and "always" approvals the floor f still allows (the daemon's
+// configuration keeps none there). Configuration validation keeps the
+// saved list parseable; an entry that is not is skipped.
+func (m *Manager) unblockIndex(cfg *config.Config, registration string, f config.OpenShellAdminConfig) unblockIndex {
 	saved, _ := egress.NewMemoryUnblocks()
+	if m.managedMode() {
+		for _, d := range m.savedDecisions(registration, f) {
+			if d.Scope == sandboxrelay.DecisionScopeAlways && d.Kind != sandboxrelay.DecisionEgressBlock {
+				_ = saved.Add(egress.Unblock{Pattern: d.Host})
+			}
+		}
+		return unblockIndex{live: m.unblocks, saved: saved}
+	}
 	for _, host := range cfg.OpenShell.Egress.Unblocked {
 		_ = saved.Add(egress.Unblock{Pattern: host})
 	}
 	return unblockIndex{live: m.unblocks, saved: saved}
 }
 
-// egressDecider builds a sandbox's own egress proxy decider from its
-// resolved policy (packs.Effective.EgressDecider) and the unblock index.
-// Each sandbox's proxy credential carries its own, so one sandbox's pack,
-// admin clamps, ports and unblocks never decide another's egress.
+// egressDecider is egressDeciderFor without a registration (a sandbox
+// being created has none recorded yet).
 func (m *Manager) egressDecider(cfg *config.Config, eff *packs.Effective) (*egress.Decider, error) {
-	d, err := eff.EgressDecider(m.unblockIndex(cfg))
+	return m.egressDeciderFor(cfg, eff, "")
+}
+
+// egressDeciderFor builds a sandbox's own egress proxy decider from its
+// resolved policy (packs.Effective.EgressOptions) and the unblock index.
+// Each sandbox's proxy credential carries its own, so one sandbox's pack,
+// admin clamps, ports and unblocks never decide another's egress. In
+// managed mode the saved decisions are the registration's, capped by the
+// floor: its unblocks and "always" approvals join the index, and its user
+// blocks the block list.
+func (m *Manager) egressDeciderFor(cfg *config.Config, eff *packs.Effective, registration string) (*egress.Decider, error) {
+	f := m.floor(eff)
+	opts, err := eff.EgressOptions(m.unblockIndex(cfg, registration, f))
+	if err == nil && eff.NetworkMode != packs.NetworkDeny &&
+		sandboxreg.CheckApprovals(f, sandboxrelay.DecisionEgressAllow, sandboxrelay.DecisionScopeSession) == nil {
+		// The asks the user approved for a sandbox's session, while the
+		// floor still lets them approve one (GAP-0626).
+		opts.Approved = m.approved
+	}
+	if err == nil && m.managedMode() {
+		for _, d := range m.savedDecisions(registration, f) {
+			if d.Kind == sandboxrelay.DecisionEgressBlock {
+				opts.Block = append(opts.Block, d.Host)
+			}
+		}
+	}
+	var d *egress.Decider
+	if err == nil {
+		if d, err = egress.NewDecider(opts); err != nil {
+			err = fmt.Errorf("sandbox policy: egress decider: %w", err)
+		}
+	}
 	if err != nil {
 		m.logf("%s: %v", gatewaylog.ErrCodeOpenShellPackInvalid, err)
 		return nil, &sandboxapi.Error{Code: sandboxapi.CodePackInvalid, Message: "the sandbox egress policy is invalid", Detail: err.Error()}
@@ -83,12 +124,25 @@ func (m *Manager) egressDecider(cfg *config.Config, eff *packs.Effective) (*egre
 	return d, nil
 }
 
+// managedDefaultDecider refuses every destination. In managed mode every
+// sandbox's proxy credential carries the decider of its own floor and
+// decisions; the daemon's own configuration is no policy, so a principal
+// registered without a decider of its own reaches nothing.
+func managedDefaultDecider() (*egress.Decider, error) {
+	return egress.NewDecider(egress.DeciderOptions{Mode: egress.ModeAllowlist, Blocklists: []*egress.Feed{},
+		Allowlists: []*egress.Feed{}, NoUnblock: true})
+}
+
 // Decider builds the egress proxy's default decider: the configured posture
-// without run flags, with the persistent unblocks. The manager registers
+// without run flags, with the persistent unblocks, or in managed mode one
+// that refuses everything (managedDefaultDecider). The manager registers
 // every sandbox's proxy credential with the sandbox's own decider
-// (egressDecider), so the default decides only for a principal registered
-// without one.
+// (egressDeciderFor), so the default decides only for a principal
+// registered without one.
 func (m *Manager) Decider() (*egress.Decider, error) {
+	if m.managedMode() {
+		return managedDefaultDecider()
+	}
 	cfg := m.config()
 	base, err := m.baseEffective(cfg)
 	if err != nil {
@@ -291,8 +345,89 @@ func (m *Manager) enforceAll(ctx context.Context) bool {
 		}
 		m.enforceApprovedRules(ctx, gw, b, eff)
 		m.enforceProviderEndpoints(ctx, gw, b, eff)
+		m.restoreProviderEndpoints(ctx, gw, b, eff)
 	}
 	return true
+}
+
+// restoreProviderEndpoints attaches again the providers of a ready sandbox
+// that enforceProviderEndpoints detached, once the policy allows every
+// endpoint they open (endpointRefusal) and the floor the credentials they
+// carry (credentialsRefusal): when an administrator takes a tightening
+// back, or the user is regrouped back, the model channel of a running
+// sandbox reopens, which before stayed cut until the sandbox was created
+// again (GAP-0466). Each reattach is recorded and published; one that
+// fails is retried on the next pass. A sandbox whose policy cannot be
+// resolved (eff nil) gets nothing back.
+func (m *Manager) restoreProviderEndpoints(ctx context.Context, gw *Gateway, b *box, eff *packs.Effective) {
+	m.mu.Lock()
+	rec, ready := b.rec, b.phase == audit.SandboxPhaseReady && !b.deleted && !b.creating
+	m.mu.Unlock()
+	if !ready || eff == nil || len(rec.DetachedProviders) == 0 ||
+		credentialsRefusal(m.floor(eff), rec.CredentialProfile, len(rec.Credentials) > 0) != nil {
+		return
+	}
+	for _, provider := range rec.DetachedProviders {
+		var opened []providerEndpoint
+		allowed := true
+		for _, ep := range rec.ProviderEndpoints {
+			if ep.Provider == provider {
+				opened = append(opened, ep)
+				allowed = allowed && endpointRefusal(eff, ep) == nil
+			}
+		}
+		if !allowed || len(opened) == 0 {
+			continue
+		}
+		if _, err := gw.Client.AttachProvider(ctx, rec.Name, provider); err != nil {
+			m.logf("sandbox %s: attach provider %s again, whose endpoint the policy allows again: %v", rec.Name, provider, err)
+			m.dropGateway(gw, err)
+			continue
+		}
+		m.logf("sandbox %s: attached provider %s again: the policy allows %s again", rec.Name, provider, opened[0].Host)
+		m.mu.Lock()
+		b.rec.DetachedProviders = slices.DeleteFunc(slices.Clone(b.rec.DetachedProviders), func(p string) bool { return p == provider })
+		id := b.identity()
+		m.mu.Unlock()
+		if err := m.saveRecord(b); err != nil {
+			m.logf("record the attached provider of %s: %v", rec.Name, err)
+		}
+		m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{Sandbox: id, Operation: audit.SandboxPolicyRuleAdd,
+			Actor: "policy", Origin: "internal", Target: provider, Reason: policyReasonRestored, ChangeCount: 1, Timestamp: m.now()})
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Source: sandboxapi.SourceOpenShell,
+			Host: opened[0].Host, Port: opened[0].Port, Reason: policyReasonRestored, Message: providerReopenedText(opened[0])})
+	}
+}
+
+// policyReasonRestored is the feed and record reason of a provider attached
+// again because the policy allows its endpoints again.
+const policyReasonRestored = "policy_restored"
+
+// providerClosedText is the feed line of a provider detached because the
+// policy refuses its endpoint ep (err, endpointRefusal): which channel
+// closed, why, and that it reopens by itself. The line used to be an
+// egress refusal without a host, which the activity view showed as a blank
+// "✗  (admin policy)" (GAP-0466, GAP-0467).
+func providerClosedText(ep providerEndpoint, err error) string {
+	why := ep.Host + " is on the egress block list now"
+	var v *packs.Violation
+	if errors.As(err, &v) && v.Detail != "" {
+		why = v.Detail
+	}
+	if ep.Role == roleCredential {
+		return truncate("✗ credential "+firstNonEmpty(ep.Name, ep.Provider)+" closed: "+why+
+			"; it opens again when the policy allows "+ep.Host+" again", 512)
+	}
+	return truncate("✗ model channel closed: "+why+"; the agent can't reach its model until the policy allows "+
+		ep.Host+" again, then the channel opens again by itself", 512)
+}
+
+// providerReopenedText is the feed line of a provider attached again.
+func providerReopenedText(ep providerEndpoint) string {
+	if ep.Role == roleCredential {
+		return "✓ credential " + firstNonEmpty(ep.Name, ep.Provider) + " open again: the policy allows " + ep.Host + " again"
+	}
+	return "✓ model channel open again: the policy allows " + ep.Host + " again"
 }
 
 // Unblock lifts an egress block for one sandbox or, with Always, for every
@@ -302,12 +437,29 @@ func (m *Manager) enforceAll(ctx context.Context) bool {
 // defaults, never the guard (this machine, private networks), the
 // administrator's lists or the block list.
 func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error) {
+	return m.unblock(ctx, req, "")
+}
+
+// unblock is Unblock for a decision that may answer an ask (approvalID: the
+// ask a proxy refusal raised, proxyAsk), so the managed gateway's record of
+// it names the ask.
+func (m *Manager) unblock(ctx context.Context, req sandboxapi.UnblockRequest, approvalID string) (*sandboxapi.UnblockResponse, error) {
 	host := triage.NormalizeHost(req.Host)
 	if host == "" || strings.ContainsAny(host, "/ \t") {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a destination host is required")
 	}
 	if req.Sandbox == "" && !req.Always {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "name a sandbox or ask for always")
+	}
+	if req.Sandbox == "" && m.managedMode() {
+		// The managed gateway keeps an "always" for the person, and
+		// learns who that is from one of their sandboxes: the one they
+		// run, else the one they name with --sandbox (GAP-0609).
+		name, err := m.personSandbox()
+		if err != nil {
+			return nil, err
+		}
+		req.Sandbox = name
 	}
 	// `sandbox policy block HOST` writes config.yaml, and the snapshot
 	// follows the file only after the reload watcher: an unblock in that
@@ -341,11 +493,20 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid,
 				"%s is not blocked: the sandbox policy lets the sandbox reach it, so there is nothing to unblock", host)
 		}
-		return nil, m.violationErrorFor(ctx, err, req.Sandbox, audit.SandboxEgressUnblock, host)
+		return nil, m.decisionViolation(ctx, err, b, eff, audit.SandboxEgressUnblock, host)
+	}
+	scope := sandboxrelay.DecisionScopeSession
+	if req.Always {
+		scope = sandboxrelay.DecisionScopeAlways
+	}
+	floor := m.floor(eff)
+	if err := sandboxreg.CheckApprovals(floor, sandboxrelay.DecisionUnblock, scope); err != nil {
+		m.recordAdminRefusal(ctx, req.Sandbox, audit.SandboxEgressUnblock, host)
+		return nil, m.decisionRefusal(err, b, floor, host)
 	}
 	if req.Always {
 		if err := triage.CheckApproval(eff, host, 0, true); err != nil && !triage.IsHostLocal(host) {
-			return nil, m.violationErrorFor(ctx, err, req.Sandbox, audit.SandboxEgressUnblock, host)
+			return nil, m.decisionViolation(ctx, err, b, eff, audit.SandboxEgressUnblock, host)
 		}
 	}
 	resp := &sandboxapi.UnblockResponse{Host: host, Sandbox: req.Sandbox}
@@ -355,16 +516,25 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		if err := probe.Add(egress.Unblock{Pattern: host}); err != nil {
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "%v", err)
 		}
-		// The saved list is the only record of an "always" unblock: the
-		// persister reloads the configuration, and the deciders are
-		// rebuilt from it (configLoop would within two seconds too).
-		if err := m.persistAllow(ctx, host); err != nil {
+		// The saved list (or in managed mode the managed gateway's
+		// decisions store) is the only record of an "always" unblock: the
+		// deciders are rebuilt from it (configLoop would within two
+		// seconds too).
+		if _, err := m.keepDecision(ctx, b, sandboxrelay.DecisionUnblock, host, scope, approvalID); err != nil {
 			return nil, err
 		}
 		m.refreshEgress()
 		resp.Scope, resp.Persisted = string(audit.SandboxApprovalScopeAlways), true
 		resp.Message = "unblocked " + host + " for every sandbox (saved to openshell.egress.unblocked)"
+		if m.managedMode() {
+			resp.Message = "unblocked " + host + " for every sandbox (kept by your organization's DefenseClaw gateway)"
+		}
 	} else {
+		// The managed gateway re-checks a session unblock against the
+		// floor too; it keeps nothing.
+		if _, err := m.keepDecision(ctx, b, sandboxrelay.DecisionUnblock, host, scope, approvalID); err != nil {
+			return nil, err
+		}
 		m.mu.Lock()
 		sandboxID := scopeID(b.rec.ID, b.rec.Name)
 		m.mu.Unlock()
@@ -384,6 +554,9 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		}
 		resp.Scope = string(audit.SandboxApprovalScopeSandbox)
 		resp.Message = "unblocked " + host + " for sandbox " + req.Sandbox
+		if m.managedMode() {
+			resp.Message += " until it stops"
+		}
 	}
 	if b != nil {
 		m.mu.Lock()
@@ -394,12 +567,76 @@ func (m *Manager) Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*
 		ident = audit.SandboxIdentity{Name: "all", Runtime: audit.SandboxRuntimeOpenShell}
 	}
 	m.tel.RecordSandboxPolicy(ctx, audit.SandboxPolicyEvent{
-		Sandbox: ident, Operation: audit.SandboxEgressUnblock, Actor: "operator", Origin: "api", Target: host,
+		Sandbox: ident, Operation: audit.SandboxEgressUnblock, Actor: m.person(), Origin: "api", Target: host,
 		Reason: policyReasonUnblock, ChangeCount: 1, Timestamp: m.now(),
 	})
 	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityEgressUnblocked, Sandbox: req.Sandbox, Host: host,
 		Reason: resp.Scope, Message: resp.Message})
+	if approvalID == "" && req.Sandbox != "" {
+		// The unblock answers the sandbox's ask for the host, if it raised one.
+		m.settleProxyAsks(ctx, req.Sandbox, host, req.Always)
+	}
 	return resp, nil
+}
+
+// personSandbox names the sandbox through which the managed gateway keeps
+// an "always" unblock made without --sandbox: the person's one sandbox.
+// Their sandboxes may match different profiles, whose floors check it, so
+// with several they name one.
+func (m *Manager) personSandbox() (string, error) {
+	var names []string
+	for _, b := range m.liveBoxes() {
+		m.mu.Lock()
+		if !b.creating {
+			names = append(names, b.rec.Name)
+		}
+		m.mu.Unlock()
+	}
+	sort.Strings(names)
+	switch len(names) {
+	case 0:
+		return "", sandboxapi.Errorf(sandboxapi.CodeInvalid,
+			"on a managed computer, your organization's DefenseClaw gateway keeps an unblock for every sandbox through one of your sandboxes, "+
+				"and none is running; start one with `defenseclaw sandbox run`, then unblock again")
+	case 1:
+		return names[0], nil
+	}
+	return "", sandboxapi.Errorf(sandboxapi.CodeInvalid,
+		"you have several sandboxes (%s), whose profiles may differ: name the one whose policy checks the unblock, with --sandbox NAME --always",
+		strings.Join(names, ", "))
+}
+
+// decisionViolation is violationErrorFor for a decision about host in
+// sandbox b (nil: every sandbox) under eff: an unblock or an approval. The
+// organization's refusal by a rule of the floor reads as every managed
+// refusal does (accessRefusal: the rule, "You can't approve this", the
+// contact and the Quote line), not as a setting's refusal that names the
+// openshell.admin key, which the person's profile may have set (GAP-0508).
+func (m *Manager) decisionViolation(ctx context.Context, err error, b *box, eff *packs.Effective, op audit.SandboxPolicyOperation, host string) error {
+	sandbox := ""
+	if b != nil {
+		m.mu.Lock()
+		sandbox = b.rec.Name
+		m.mu.Unlock()
+	}
+	var v *packs.Violation
+	if errors.As(err, &v) {
+		if rule := adminRule(v); rule != "" {
+			m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellAdminViolation, sandbox, v.Error())
+			m.recordAdminRefusal(ctx, sandbox, op, host)
+			// The check's words when they name the host ("… matches
+			// *.example.com on your organization's blocklist"), else the
+			// rule's ("can't be unblocked under your profile").
+			why := ""
+			if host != "" && strings.Contains(v.Detail, host) {
+				why = v.Detail
+			}
+			e := accessRefusedError(m.accessRefusal(b, m.floor(eff), why, rule, host), rule, host)
+			e.Detail, e.Violation.Key, e.Violation.Detail = v.Detail, v.Key, v.Detail
+			return e
+		}
+	}
+	return m.violationErrorFor(ctx, err, sandbox, op, host)
 }
 
 // syncConfig loads config.yaml into the configuration snapshot
@@ -902,15 +1139,29 @@ func (m *Manager) egressEvent(ctx context.Context, e egress.Event, repeats int) 
 			// the same host, which are refused one by one.
 			where := sandboxapi.HostPort(e.Host, e.Port)
 			msg := "✓ " + where
+			refusal := ""
 			if blocked {
 				kind = sandboxapi.ActivityEgressBlocked
 				msg = "✗ " + where + " (" + text + ")" + more
+				if rule := egress.AdminRule(e.Category); rule != "" {
+					// The organization's lists: the line says who refused it,
+					// that the user can't approve it and what to quote
+					// (GAP-0502).
+					refusal = m.accessRefusal(b, m.floor(eff), "", rule, e.Host)
+					m.managedAccessRefused(ctx, b, e.Host, e.Port, rule, accessRefusedByProxy)
+				}
 			}
 			m.publishEgress(sandboxapi.ActivityEvent{
 				Time: e.Time, Kind: kind, Sandbox: e.SandboxName, Host: e.Host, Port: e.Port, Method: e.Method,
 				Source: sandboxapi.SourceProxy, Category: category, Rule: e.Rule, Unblockable: blocked && e.Unblockable,
-				Reason: truncate(e.Reason, 300), Message: msg, Repeats: repeats,
+				Reason: truncate(e.Reason, 300), Message: msg, Repeats: repeats, Refusal: refusal,
 			})
+		}
+		if blocked && e.Category == egress.CategoryNotAllowlisted {
+			// A site outside the allowlist is the user's to allow: it is an
+			// ask they answer, not only a refusal, also where unblocks are
+			// off (GAP-0626).
+			m.proxyAsk(ctx, b, eff, e)
 		}
 		if what, ok := toolHostOf(harnessName, e.Host); ok && blocked && m.firstToolHostRefusal(b, e.Host) {
 			// The refusal of a host a harness tool calls for every site

@@ -79,7 +79,7 @@ type builderImages struct {
 	app *App
 }
 
-func (b *builderImages) store() *image.Store { return image.NewStore(b.app.dataDir()) }
+func (b *builderImages) store() *image.Store { return image.NewStore(b.app.imageDataDir()) }
 
 func (b *builderImages) spec(h *harness.Spec, microVM bool) image.BuildSpec {
 	a := b.app
@@ -235,7 +235,7 @@ func harnessOf(harnesses []string, connector string) bool {
 // once the overlay image's record is gone). A data dir without a store has
 // none, and gets none created.
 func (a *App) storeImageIDs(harnesses ...string) []string {
-	store := image.NewStore(a.dataDir())
+	store := image.NewStore(a.imageDataDir())
 	if _, err := os.Stat(store.Path()); err != nil {
 		return nil
 	}

@@ -206,6 +206,16 @@ type Options struct {
 	// gitsafe).
 	Guard         GuardFunc
 	GuardGitlinks func(ctx context.Context, root string) ([]string, error)
+	// ManagedAccount marks a managed computer's per-user sandbox daemon: a
+	// user service the organization installs, which starts at login. What a
+	// failure tells the user to do names signing in again, never a command
+	// for an unmanaged install (GAP-0556).
+	ManagedAccount bool
+	// OtherGateways connects to the account's OpenShell gateways besides
+	// managed, the one Connect opened, that answer: a managed daemon stops
+	// or reports what they run as foreign sandboxes (GAP-0678). The caller
+	// closes each. nil connects to none.
+	OtherGateways func(ctx context.Context, managed *Gateway) []*Gateway
 }
 
 // Manager implements the gateway's SandboxController.
@@ -227,8 +237,11 @@ type Manager struct {
 	egressFeed *rateGate
 	creds      *egress.CredentialStore
 	unblocks   *egress.MemoryUnblocks
-	batcher    *triage.Batcher
-	sink       *egressSink
+	// approved are the asks for hosts off the allowlist the user approved
+	// for a sandbox's session (approveProxyAsk), scoped to the sandbox.
+	approved *egress.MemoryUnblocks
+	batcher  *triage.Batcher
+	sink     *egressSink
 	// refusals keeps each binding's recent CONNECT refusals for its agent
 	// (EgressRefusals).
 	refusals  *refusalMemory
@@ -250,6 +263,10 @@ type Manager struct {
 	// gwErrAt paces reconnects: requests arriving within connectBackoff of
 	// a failed attempt get its error instead of dialing again.
 	gwErrAt time.Time
+	// gwStopped is set while the caller stopped the gateway on purpose
+	// (GatewayStopped): the failed dials until it runs again are no
+	// degraded health.
+	gwStopped bool
 	// gwPort is the connected gateway's port, and gwDriver its compute
 	// driver (nil until a gateway answered), readable while a connect is
 	// in progress.
@@ -259,8 +276,13 @@ type Manager struct {
 	// runs (UnixNano; recheckDriver).
 	gwCheckedAt atomic.Int64
 
-	mu            sync.Mutex
-	boxes         map[string]*box
+	mu    sync.Mutex
+	boxes map[string]*box
+	// undone are the names of creates this daemon rolled back (a Ctrl-C, a
+	// failure), with when: the OpenShell sandbox of such a create may outlive
+	// its rollback (a MicroVM still provisioning), and is this daemon's own
+	// leftover, not a foreign sandbox (undone.go).
+	undone        map[string]time.Time
 	approvals     map[string]*approval
 	proxy         ProxyControl
 	lastReconcile time.Time
@@ -358,6 +380,7 @@ func New(opts Options) (*Manager, error) {
 		return nil, err
 	}
 	unblocks, _ := egress.NewMemoryUnblocks()
+	approved, _ := egress.NewMemoryUnblocks()
 	m := &Manager{
 		opts:       opts,
 		ws:         opts.Workspace,
@@ -370,9 +393,11 @@ func New(opts Options) (*Manager, error) {
 		egressFeed: newRateGate(feedBurst, feedRate),
 		creds:      egress.NewCredentialStore(),
 		unblocks:   unblocks,
+		approved:   approved,
 		refusals:   newRefusalMemory(),
 		toolCalls:  newHookTamperTracker(),
 		boxes:      map[string]*box{},
+		undone:     map[string]time.Time{},
 		approvals:  map[string]*approval{},
 		startedAt:  opts.Now(),
 		dests:      map[string]*destTable{},
@@ -403,7 +428,15 @@ func resolveHostUser(h *HostUser) (HostUser, error) {
 		if h.UID <= 0 || h.GID <= 0 {
 			return HostUser{}, errors.New("sandbox manager: sandboxes never run as root")
 		}
-		return *h, nil
+		out := *h
+		if out.Name == "" {
+			// A managed host's sandbox daemon passes its own uid and gid;
+			// the account name comes from the account database, as below.
+			if u, err := user.LookupId(strconv.Itoa(out.UID)); err == nil {
+				out.Name = useridentity.BareAccountName(u.Username)
+			}
+		}
+		return out, nil
 	}
 	uid, gid := os.Getuid(), os.Getgid()
 	if uid <= 0 || gid <= 0 {
@@ -509,6 +542,7 @@ func (m *Manager) Run(ctx context.Context) error {
 			}
 		case <-reconcile.C:
 			if _, err := m.gateway(ctx); err != nil {
+				m.reportWithoutGateway(ctx)
 				reconcile.Reset(m.opts.ConnectRetry)
 				continue
 			}
@@ -521,6 +555,30 @@ func (m *Manager) Run(ctx context.Context) error {
 			reconcile.Reset(m.opts.ReconcileInterval)
 		}
 	}
+}
+
+// ForgetGatewayError drops the last failed connection attempt, so the next
+// request dials at once instead of waiting out connectBackoff: the caller
+// (a managed host's sandbox daemon) has just started the gateway.
+func (m *Manager) ForgetGatewayError() {
+	m.gwMu.Lock()
+	defer m.gwMu.Unlock()
+	m.gwErr = nil
+}
+
+// GatewayStopped drops the connection to an OpenShell gateway the caller
+// stopped on purpose (a managed host's sandbox daemon whose account has no
+// sandbox running, which frees the one gateway port for the next account):
+// until a connection succeeds again, a failed dial is no degraded health and
+// no log line.
+func (m *Manager) GatewayStopped() {
+	m.gwMu.Lock()
+	defer m.gwMu.Unlock()
+	if m.gw != nil && m.gw.Close != nil {
+		_ = m.gw.Close()
+	}
+	m.gw, m.gwStopped = nil, true
+	m.goneLocked()
 }
 
 // gateway returns the live connection, connecting when there is none.
@@ -551,7 +609,7 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 	defer cancel()
 	gw, err := m.opts.Connect(cctx)
 	if err != nil {
-		if m.gwErr == nil || m.gwErr.Error() != err.Error() {
+		if !m.gwStopped && (m.gwErr == nil || m.gwErr.Error() != err.Error()) {
 			m.logf("OpenShell gateway unavailable: %v", err)
 			m.health(ctx, audit.SandboxHealthDegraded, gatewaylog.ErrCodeOpenShellUnavailable, gatewayUnavailableSummary(err))
 		}
@@ -561,12 +619,12 @@ func (m *Manager) connection(ctx context.Context) (*Gateway, <-chan struct{}, er
 		}
 		return nil, nil, gatewayUnavailableError(err)
 	}
-	if m.gwErr != nil {
+	if m.gwErr != nil && !m.gwStopped {
 		m.health(ctx, audit.SandboxHealthRestored, "", "")
 	} else {
 		m.health(ctx, audit.SandboxHealthReady, "", "")
 	}
-	m.gw, m.gwGone, m.gwErr = gw, make(chan struct{}), nil
+	m.gw, m.gwGone, m.gwErr, m.gwStopped = gw, make(chan struct{}), nil, false
 	if m.opts.OnGateway != nil {
 		m.opts.OnGateway(nil)
 	}
@@ -750,8 +808,10 @@ func gatewayUnavailableText(err error) (what string, known bool) {
 	raw := err.Error()
 	switch {
 	case strings.Contains(raw, "certificate signed by unknown authority"):
-		return "the OpenShell gateway on this account's port is not this account's (its certificate is not from this account's " +
-			"OpenShell CA; another account's gateway may hold the port)", true
+		// Its certificate is not from this account's OpenShell CA, which says
+		// nothing a user can act on (GAP-0461).
+		return "the OpenShell gateway on this account's port is not this account's: sandboxes run for one account at a time " +
+			"on this computer, and another account may be using them", true
 	case strings.Contains(raw, "connection refused"):
 		if m := dialAddress.FindStringSubmatch(raw); m != nil {
 			return "the OpenShell gateway is not running: nothing listens on " + m[1], true

@@ -120,7 +120,7 @@ func recordSandboxEvent(ctx context.Context, recorder *SandboxRecorder, event an
 	case SandboxProcessEvent:
 		return recorder.RecordSandboxProcess(ctx, event)
 	}
-	panic(fmt.Sprintf("recordSandboxEvent: unsupported event %T", event))
+	return recordManagedEvent(ctx, recorder, event)
 }
 
 func onlySandboxRecord(t *testing.T, runtime *testRuntimeV8Emitter) (router.Metadata, observability.Record) {

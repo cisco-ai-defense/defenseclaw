@@ -40,38 +40,38 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 10127,
-      "sha256": "60a1abf74491009d00dc22fc69f8ac194fdf36c1471a90966e4d2e7d875e28ec"
+      "size": 12549,
+      "sha256": "0012d90e6c0a4c12a0d191b4a19ac0335ae6f3dd9f22aa5b7673eecb707326b5"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6071,
-      "sha256": "f329790d3aa39b80533f3358701b00faccefc65a505d4fa110f52712e29aded6"
+      "size": 6101,
+      "sha256": "a2b410df15823b54536e1073fd47bbd50a37f62e52e124cd224ba6ef9121953c"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5339,
-      "sha256": "a93bc7c207d2c109b18fa0f8cc77b889087617ed321f9884031bc05c8dfa8e3e"
+      "size": 5369,
+      "sha256": "3725b4bd4306d32c025cdb93f594b6781e09933c00288f4a21486c4d0b20376c"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5857,
-      "sha256": "017ac33469215aeaefb8a6f422a8345a603c9355aa116c1893e075851ba137f3"
+      "size": 5887,
+      "sha256": "ee20610e9565291908310e960e9be0ca0fc5f21acf5b770eb364f2a5ff858c0d"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6241,
-      "sha256": "2d18f6a9ef46821d61a9d684b8f7b47f970e48605c45a6f36a78458ce7740679"
+      "size": 6271,
+      "sha256": "d4c8418aeedf625001a1585c2dc31853471889765dd00e4b2a6d313a06d0e886"
     },
     "/usr/local/lib/defenseclaw/hooks/kiro-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7931,
-      "sha256": "02eda05e8d1724508c6493574187560d2ac0e7f7a01d04e7b6447d39f8c32b4d"
+      "size": 7961,
+      "sha256": "50da58f40c67f8eabd8cfe99d676128c7650f6ed11485a25253c90c3b80e8089"
     },
     "/usr/local/lib/defenseclaw/kiro/defenseclaw.json": {
       "mode": "-rw-r--r--",

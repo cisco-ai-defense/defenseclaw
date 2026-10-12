@@ -364,6 +364,10 @@ func (s *session) exit(code int) error {
 		return &ExitError{Code: code}
 	case s.noHooks:
 		return errNoHooks()
+	case s.stopFailed:
+		// The session ended, but its sandbox may still run: a script must not
+		// read success (GAP-0601).
+		return &ExitError{Code: 1, Err: &Silent{Err: errors.New("the sandbox could not be stopped")}}
 	case s.interrupted:
 		return &ExitError{Code: exitInterrupted}
 	}

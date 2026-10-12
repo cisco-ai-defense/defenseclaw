@@ -191,7 +191,13 @@ which files a request to open it. DefenseClaw decides most of those itself.
 It asks you only about doors into your machine or network (a port on this
 machine, a private address, an intranet name) and about requests OpenShell's
 policy advisor flags. `balanced` also asks about sites outside its
-allowlist, and `strict` about every request.
+allowlist: the proxy refuses the first request and DefenseClaw raises the
+ask, which the agent is told waits for you. Approving it opens the site
+for the sandbox (`approve --always`: for every sandbox, the same as
+`defenseclaw sandbox unblock --always`). Under `allow_unblock: false` you
+can still approve it for the sandbox, but not with `--always`. Your
+organization can take the answer from you (`user_approvals: none`), and
+then there is no ask. `strict` asks about every request.
 
 ```bash
 defenseclaw sandbox approvals --watch

@@ -47,9 +47,9 @@ func writePack(t *testing.T, dir, name, body string) string {
 
 func withHome(t *testing.T, home string) {
 	t.Helper()
-	previous := userHomeDir
-	userHomeDir = func() (string, error) { return home, nil }
-	t.Cleanup(func() { userHomeDir = previous })
+	previous := ownHome
+	ownHome = func() (string, error) { return home, nil }
+	t.Cleanup(func() { ownHome = previous })
 }
 
 func TestLoadResolvesReferences(t *testing.T) {
@@ -218,10 +218,10 @@ const testUID = 4242
 // them.
 func fakeOwners(t *testing.T, owner func(fs.FileInfo) int) {
 	t.Helper()
-	previousUID, previousOwner := currentUID, fileOwner
-	currentUID = func() int { return testUID }
+	previousUID, previousOwner := ownUID, fileOwner
+	ownUID = func() int { return testUID }
 	fileOwner = func(info fs.FileInfo) (int, bool) { return owner(info), true }
-	t.Cleanup(func() { currentUID, fileOwner = previousUID, previousOwner })
+	t.Cleanup(func() { ownUID, fileOwner = previousUID, previousOwner })
 }
 
 func TestLoadRefusesPacksOtherUsersOwn(t *testing.T) {

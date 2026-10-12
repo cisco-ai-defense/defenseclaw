@@ -66,7 +66,7 @@ type coldStartHookRun struct {
 func runHookForColdStart(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), extraEnv ...string) coldStartHookRun {
 	t.Helper()
 	hooksDir := t.TempDir()
-	if err := WriteHookScriptsForConnectorObject(hooksDir, "127.0.0.1:18970", "cold-start-scoped-token", c); err != nil {
+	if err := WriteHookScriptsForConnectorObject(hooksDir, freeAPIAddr(t), "cold-start-scoped-token", c); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
 	stubDir := t.TempDir()

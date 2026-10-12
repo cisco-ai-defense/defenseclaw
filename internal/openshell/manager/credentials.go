@@ -19,6 +19,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"sort"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
@@ -190,6 +192,87 @@ func credentialRefusal(eff *packs.Effective, name, host string, port int) error 
 					"credential %s cannot be bound to %s: it is on the egress blocklist", name, host)
 			}
 		}
+	}
+	return nil
+}
+
+// Credential provider names (openshell.admin.allowed_credentials): the
+// provider a --llm credential profile delivers a key for, and
+// credentialProviderCustom for every --credential binding.
+const (
+	credentialProviderBedrock   = "bedrock"
+	credentialProviderAnthropic = "anthropic"
+	credentialProviderOpenAI    = "openai"
+	credentialProviderCustom    = "credential"
+)
+
+// credentialProvider is the provider name of a --llm credential profile:
+// the Bedrock profiles of every harness are bedrock, the Anthropic and
+// OpenAI API keys anthropic and openai, and the others their vendor
+// (claude-oauth, github, amp, cursor, kiro, gemini).
+func credentialProvider(profileID string) string {
+	id := strings.TrimPrefix(strings.TrimSpace(profileID), "defenseclaw-")
+	switch {
+	case id == "":
+		return ""
+	case strings.Contains(id, "bedrock"):
+		return credentialProviderBedrock
+	case id == "anthropic" || strings.HasSuffix(id, "-anthropic"):
+		return credentialProviderAnthropic
+	case id == "openai" || strings.HasSuffix(id, "-openai"):
+		return credentialProviderOpenAI
+	case strings.HasPrefix(id, "copilot-"):
+		return strings.TrimPrefix(id, "copilot-")
+	}
+	return id
+}
+
+// credentialsRefusal is why the floor f refuses the credentials a sandbox
+// receives (nil when it does not): the provider of the --llm credential
+// profile llmProfile ("" for none), and any --credential binding (custom),
+// must each be on openshell.admin.allowed_credentials when it is set;
+// [none] allows no credentials at all.
+func credentialsRefusal(f config.OpenShellAdminConfig, llmProfile string, custom bool) *packs.Violation {
+	if len(f.AllowedCredentials) == 0 {
+		return nil
+	}
+	allowed := map[string]bool{}
+	for _, name := range f.AllowedCredentials {
+		allowed[strings.ToLower(strings.TrimSpace(name))] = true
+	}
+	refuse := func(what, provider string) *packs.Violation {
+		kind := provider
+		if provider == credentialProviderCustom {
+			kind = "custom"
+		}
+		detail := what + " delivers " + sandboxapi.IndefiniteArticle(kind) + " " + kind + " credential, which your organization doesn't allow in sandboxes"
+		if allowed[config.OpenShellCredentialsNone] {
+			detail = what + " delivers a credential, and your organization allows none in sandboxes"
+		} else {
+			names := slices.Sorted(maps.Keys(allowed))
+			detail += " (allowed: " + strings.Join(names, ", ") + ")"
+		}
+		return &packs.Violation{Key: "credentials", Source: packs.SourceFlag, Attempted: provider,
+			Constraint: "openshell.admin.allowed_credentials", Fatal: true, Detail: detail}
+	}
+	if provider := credentialProvider(llmProfile); provider != "" && (!allowed[provider] || allowed[config.OpenShellCredentialsNone]) {
+		return refuse("the --llm credential", provider)
+	}
+	if custom && (!allowed[credentialProviderCustom] || allowed[config.OpenShellCredentialsNone]) {
+		return refuse("a --credential binding", credentialProviderCustom)
+	}
+	return nil
+}
+
+// credentialsAllowed refuses a create whose --llm or --credential the floor
+// does not allow (credentialsRefusal), before anything is imported.
+func (m *Manager) credentialsAllowed(ctx context.Context, eff *packs.Effective, req sandboxapi.CreateRequest, name string) error {
+	profile := ""
+	if req.LLM != nil {
+		profile = req.LLM.Profile
+	}
+	if v := credentialsRefusal(m.floor(eff), profile, len(req.Credentials) > 0); v != nil {
+		return m.violationError(ctx, v, name)
 	}
 	return nil
 }

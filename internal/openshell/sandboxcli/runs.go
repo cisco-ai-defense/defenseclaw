@@ -183,6 +183,13 @@ func (a *App) forgetCLIState(name string) {
 		_ = os.RemoveAll(dir)
 		_ = os.Remove(filepath.Dir(dir))
 	}
+	// The copy `run` staged in this user's data directory: the daemon removes
+	// the copy of its own data directory, and a managed computer's daemon
+	// keeps another one, so the staged project snapshot and its metadata
+	// (copy.json, base.git) stayed in the home after the delete (GAP-0584).
+	if a.Workspace != nil && openshell.ValidSandboxName(name) {
+		_ = a.Workspace.Discard(a.dataDir(), name)
+	}
 }
 
 // Claude Code prints nothing in -p mode until it finishes, so a detached run

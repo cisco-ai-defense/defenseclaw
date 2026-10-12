@@ -116,10 +116,22 @@ type record struct {
 	HookContract   string `json:"hook_contract,omitempty"`
 	TamperTier     string `json:"tamper_tier,omitempty"`
 
+	// RegistrationID is the managed gateway registration of a sandbox a
+	// managed host's daemon created (empty outside managed mode). What the
+	// registration resolved (the guardrail profile, provisional, the
+	// digest) is the daemon's (daemonRegistration), which the manager asks
+	// (ProfileLookup); records written before carry it unread.
+	RegistrationID string `json:"registration_id,omitempty"`
+
 	// Driver is the compute driver of the gateway the sandbox was created
 	// on (openshell.ComputeDriver). Empty in records from before it was
 	// kept, which were all made on docker (openshell.LookupDriver).
 	Driver string `json:"driver,omitempty"`
+	// DriverReason is why the sandbox runs on Driver on a managed host
+	// (openshell.DriverReason*: configured, kvm_available, or the KVM
+	// probe's reason when the docker fallback replaced the MicroVM driver);
+	// empty outside managed mode. A sandbox never switches driver.
+	DriverReason string `json:"driver_reason,omitempty"`
 	// RunImage and RunImageID are the image the sandbox's template names
 	// when that is not Image: on a driver that bakes the per-run files into
 	// an image (openshell.Driver.RunFilesInImage), the run image, or an
@@ -186,6 +198,10 @@ type record struct {
 	// stopping it, so without a flush: what it wrote in its last seconds
 	// may be missing, empty or cut short (GAP-0367).
 	UnflushedAt time.Time `json:"unflushed_at,omitzero"`
+	// StoppedAt is when the sandbox stopped running, by a stop or because
+	// its main process ended (completed); zero while it is in another
+	// phase. delete_stopped_after counts from it (deleteExpired).
+	StoppedAt time.Time `json:"stopped_at,omitzero"`
 	// SessionYolo is the skip-permissions mode the session that began at
 	// ReadyAt was launched with (launchYolo then); nil while the sandbox
 	// is not ready.
@@ -207,6 +223,9 @@ type record struct {
 	HostAlias *hostAliasRecord `json:"host_alias,omitempty"`
 	// Unblocks are sandbox-scoped egress unblock patterns.
 	Unblocks []string `json:"unblocks,omitempty"`
+	// Approved are the hosts off the allowlist the user approved for the
+	// sandbox's session when it asked (approveProxyAsk).
+	Approved []string `json:"approved,omitempty"`
 	// ApprovedRules are the triaged OpenShell rules (allow_*) approvals
 	// applied, each with who approved it: automatic (triage, on its own, for
 	// any part of the rule) or operator (the user, for all of it, whose

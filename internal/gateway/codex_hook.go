@@ -654,19 +654,26 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	if mode != "action" && guardrailSeverityRank(severity) < severityHigh {
+	if mode != "action" && guardrailSeverityRank(severity) < codexObserveContextMinSeverity {
 		return ""
 	}
 	return connector.BuildCodexAdditionalContext(rawAction, severity, reason, wouldBlock)
 }
 
+// codexObserveContextMinSeverity is the lowest severity whose Observe-mode
+// verdict reaches the Codex chat. Claude Code shows every observed alert, so
+// a MEDIUM finding that Codex ran silently looked like a missed detection to
+// the user while the audit row recorded it (GAP-0316, GAP-0320, GAP-0368).
+// LOW stays audit-only to keep the alert-fatigue gate for routine reads.
+const codexObserveContextMinSeverity = severityMedium
+
 // codexObserveContextEnforcementEligible keeps the in-chat Observe warning
 // coupled to a finding that could actually influence enforcement. Opaque
-// managed/judge verdicts may not carry DetailedFindings, so a HIGH/CRITICAL
+// managed/judge verdicts may not carry DetailedFindings, so a MEDIUM-or-higher
 // non-allow verdict with no details remains visible; explicit detection-only
 // details do not.
 func codexObserveContextEnforcementEligible(verdict *ToolInspectVerdict) bool {
-	if verdict == nil || guardrailSeverityRank(verdict.Severity) < severityHigh {
+	if verdict == nil || guardrailSeverityRank(verdict.Severity) < codexObserveContextMinSeverity {
 		return false
 	}
 	if len(verdict.DetailedFindings) == 0 {
@@ -674,7 +681,7 @@ func codexObserveContextEnforcementEligible(verdict *ToolInspectVerdict) bool {
 	}
 	for _, finding := range verdict.DetailedFindings {
 		if finding.contributesToEnforcement() &&
-			guardrailSeverityRank(finding.Severity) >= severityHigh {
+			guardrailSeverityRank(finding.Severity) >= codexObserveContextMinSeverity {
 			return true
 		}
 	}

@@ -252,6 +252,23 @@ def fetch_sandbox_processes(config: object | None, name: str) -> dict[str, Any] 
         client.close()
 
 
+def fetch_managed_explain(config: object | None) -> dict[str, Any] | None:
+    """Blocking read of the caller's own policy (run in a thread); None when it fails.
+
+    On a managed computer the daemon answers with the policy the managed
+    gateway resolved for this account; nothing is read from config.yaml.
+    """
+    client = sandbox_client(config)
+    if client is None:
+        return None
+    try:
+        return client.sandbox_policy_explain()
+    except SandboxAPIError:
+        return None
+    finally:
+        client.close()
+
+
 def probe_sandbox_machine() -> Any:
     """Blocking ``defenseclaw-gateway sandbox doctor --json`` for the Sandbox wizard (run in a thread)."""
     from defenseclaw.commands.cmd_doctor import sandbox_doctor_report
@@ -347,6 +364,15 @@ class SandboxPanelMixin:
             model.set_snapshot(fetch.status, fetch.sandboxes, fetch.approvals)
             if fetch.list_errors:
                 model.set_error(fetch.list_errors[0])
+            if model.managed and model.managed_explain_due():
+                # The policy changed (or is new to this panel): read it once,
+                # not on every 2 s render; a read that failed waits for the
+                # back-off before the next try.
+                explained = await asyncio.to_thread(fetch_managed_explain, getattr(self, "config", None))
+                if explained is None:
+                    model.note_managed_explain_failed()
+                else:
+                    model.set_managed_explain(explained)
             if model.status.enabled:
                 self._ensure_sandbox_stream()
         if render and not getattr(self, "help_open", False):
@@ -671,6 +697,9 @@ class SandboxPanelMixin:
         if kind == "wrappers":
             self.run_worker(self._sandbox_wrappers_menu(), exclusive=False, thread=False)  # type: ignore[attr-defined]
             return True
+        if kind == "explain":
+            self.run_worker(self._sandbox_explain(), exclusive=False, thread=False)  # type: ignore[attr-defined]
+            return True
         if self._sandbox_action_running:
             self._set_status("A sandbox action is still running; wait for it to finish.")  # type: ignore[attr-defined]
             return True
@@ -735,12 +764,34 @@ class SandboxPanelMixin:
         selected = model.selected_sandbox()
         if model.view == "sandboxes" and selected is not None and selected.copy_mode:
             keys, keys_hint = _DETAIL_KEYS["copy"]
+        if model.managed and model.view == "sandboxes":
+            keys, keys_hint = (*keys, "e"), keys_hint.replace(" · Esc close", " · e policy · Esc close")
         if model.view == "activity" and not model.unblock_offered():
             # A tool block, an allowed or lifted destination: u does nothing here.
             return (), "Keys: Esc close"
         if model.view == "asks" and not model.always_offered():
             return ("a", "x"), "Keys: a approve once · x reject · Esc close"
         return keys, keys_hint
+
+    async def _sandbox_explain(self) -> None:
+        """``e``: the user's own policy, as the daemon explains it."""
+        model = self.sandbox_model
+        try:
+            explained = await self._sandbox_call("sandbox_policy_explain")
+        except SandboxAPIError as exc:
+            self._sandbox_report_error(exc)
+            return
+        model.set_managed_explain(explained)  # an answer without the policy keeps what was read before
+        pairs = model.policy_pairs()
+        if not pairs:
+            self.notify_toast("info", "Your organization has not published a sandbox policy for this account.")  # type: ignore[attr-defined]
+            return
+        await self.push_screen_wait(  # type: ignore[attr-defined]
+            SandboxDetailScreen(
+                "Your sandbox policy on this computer", pairs, keys_hint="Esc close", chip=model.policy_chip()
+            )
+        )
+        self._render_chrome()  # type: ignore[attr-defined]
 
     async def _fetch_sandbox_destinations(self, name: str) -> Any:
         """The sandbox's destinations for its detail, or why they are unavailable.
@@ -785,7 +836,7 @@ class SandboxPanelMixin:
         try:
             if pairs:
                 key = await self.push_screen_wait(  # type: ignore[attr-defined]
-                    SandboxDetailScreen(title, pairs, keys=keys, keys_hint=keys_hint)
+                    SandboxDetailScreen(title, pairs, keys=keys, keys_hint=keys_hint, chip=model.policy_chip())
                 )
         finally:
             model.detail_open = False

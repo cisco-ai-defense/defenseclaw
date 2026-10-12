@@ -1,0 +1,47 @@
+# OpenShell gateway for DefenseClaw sandboxes (systemd user unit, one per
+# account; both install modes of enterprise.openshell.install).
+#
+# Runs the OpenShell gateway through DefenseClaw's exec shim: the
+# administrator's openshell-gateway in /usr/bin or /usr/local/bin
+# (prerequisite) or the account's own in ~/.local/bin (setup). The shim sets
+# umask 0022, the administrator's rendered gateway configuration
+# (/etc/defenseclaw/openshell/gateway.toml), the account's MicroVM identity,
+# the per-user TLS directory and a pinned PATH; it first generates the
+# account's local PKI owner-only (generate-certs, as the upstream unit's
+# ExecStartPre does). It shadows no upstream unit: NVIDIA's
+# openshell-gateway.service reads the account's own gateway.toml and sets
+# UMask=0077, which breaks every MicroVM.
+#
+# A static unit: it has no [Install] section and is never started at login,
+# so an account that only logs in never holds the OpenShell gateway port.
+# It is started on demand (systemctl --user start) by the account's sandbox
+# daemon, which registers the gateway with the account's openshell CLI, and
+# stopped by it when the daemon exits with no sandbox running. The shim exits
+# 78 when the administrator has not installed OpenShell or rendered the
+# configuration (or, in setup mode, the account has no OpenShell yet); that
+# is no failure to restart for (RestartPreventExitStatus). Other failures
+# restart, bounded by the start limit.
+#
+# A gateway stop or restart breaks running MicroVMs (their sandboxes end in
+# Error while the VM processes keep running), so ExecStop stops the account's
+# sandboxes through the sandbox daemon first, whoever stops the unit: an
+# administrator, an OpenShell package upgrade or the account. The leading "-"
+# keeps a daemon that cannot answer from holding the stop up. Upgrades wait
+# until the account's sandboxes have stopped.
+
+[Unit]
+Description=OpenShell gateway for DefenseClaw sandboxes
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway sandbox-openshell-exec
+ExecStop=-/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon stop-sandboxes
+Restart=on-failure
+RestartSec=5s
+RestartPreventExitStatus=78
+TimeoutStopSec=2min
+UMask=0022
+NoNewPrivileges=true

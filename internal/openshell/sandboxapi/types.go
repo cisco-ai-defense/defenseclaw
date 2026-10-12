@@ -38,6 +38,11 @@ const (
 	// PathPolicyTest is POST: what a sandbox's egress policy decides for
 	// destinations (PolicyTestRequest).
 	PathPolicyTest = "/api/v1/sandbox/policy/test"
+	// PathReady is POST: a managed computer's sandbox daemon readies the
+	// account's OpenShell for a first run (installs the pinned release in
+	// setup mode, starts and registers the account's gateway) and answers
+	// the Status.
+	PathReady = "/api/v1/sandbox/ready"
 )
 
 // ClientHeader is the CSRF header every mutating request carries, and
@@ -91,6 +96,50 @@ type Status struct {
 	// refused since the daemon started; TelemetryError is the last refusal.
 	TelemetryFailures int64  `json:"telemetry_failures,omitempty"`
 	TelemetryError    string `json:"telemetry_error,omitempty"`
+	// Managed is set by a managed host's per-user sandbox daemon: the
+	// caller's own policy, never another account's.
+	Managed *ManagedStatus `json:"managed,omitempty"`
+}
+
+// ManagedStatus is the managed part of Status: the caller's own sandbox
+// policy as the managed gateway resolved it, and the daemon's OpenShell.
+type ManagedStatus struct {
+	// Profile is the caller's matched guardrail profile ("" = the
+	// organization's floor alone) and Description its description.
+	Profile     string `json:"profile"`
+	Description string `json:"description,omitempty"`
+	// Provisional says the directory could not be reached and the default
+	// profile applies until it can.
+	Provisional bool `json:"provisional,omitempty"`
+	// EffectiveDigest is the caller's effective sandbox policy digest.
+	EffectiveDigest string    `json:"effective_digest,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at,omitzero"`
+	RequestAccess   string    `json:"request_access,omitempty"`
+	// InstallMode (prerequisite or setup), Driver and OpenShellVersion
+	// describe the daemon's OpenShell.
+	InstallMode      string `json:"install_mode,omitempty"`
+	Driver           string `json:"driver,omitempty"`
+	OpenShellVersion string `json:"openshell_version,omitempty"`
+	// GatewayPort is the port the organization gives the caller's OpenShell
+	// gateway (enterprise.openshell.gateway_port; 0 from an older daemon).
+	GatewayPort int `json:"gateway_port,omitempty"`
+	// DriverReason is why Driver (openshell.DriverReason*): the reason of
+	// the caller's last sandbox start, or of the managed gateway's view
+	// before one. DriverFallback is the caller's fallback where the
+	// MicroVM driver can't run (docker, none or "").
+	DriverReason   string `json:"driver_reason,omitempty"`
+	DriverFallback string `json:"driver_fallback,omitempty"`
+	// PendingRestart says an upgrade or setting change waits for the
+	// caller's sandboxes to stop.
+	PendingRestart bool `json:"pending_restart,omitempty"`
+	// OtherGateways are the OpenShell gateways the caller's account runs
+	// besides the one the organization's service runs, each as "pid N:
+	// command": they share the account's MicroVM state with the managed
+	// gateway and stop its sandboxes (GAP-0610).
+	OtherGateways []string `json:"other_gateways,omitempty"`
+	// Unavailable is why sandboxes can't run for the caller ("" = they
+	// can).
+	Unavailable string `json:"unavailable,omitempty"`
 }
 
 // Gateway is the OpenShell gateway the daemon is connected to.
@@ -227,7 +276,11 @@ type Sandbox struct {
 	Profile     string `json:"profile"`
 	NetworkMode string `json:"network_mode,omitempty"`
 	Approvals   string `json:"approvals,omitempty"`
-	Yolo        bool   `json:"yolo"`
+	// UserApprovals is the floor's user_approvals the sandbox runs under
+	// (none, session or ""): under none every ask is refused, whatever
+	// Approvals says triage does (GAP-0468).
+	UserApprovals string `json:"user_approvals,omitempty"`
+	Yolo          bool   `json:"yolo"`
 	// ProcessTree reports that the sandbox's processes are sampled while it
 	// runs (GET /sandboxes/{name}/processes, `sandbox ps`).
 	ProcessTree bool `json:"process_tree,omitempty"`
@@ -257,8 +310,13 @@ type Sandbox struct {
 	// not Image: on the MicroVM (vm) driver, the image its per-run harness
 	// files are baked into, or an alias of Image under a name no registry
 	// serves. Empty on the docker driver.
-	RunImage       string    `json:"run_image,omitempty"`
-	RunImageID     string    `json:"run_image_id,omitempty"`
+	RunImage   string `json:"run_image,omitempty"`
+	RunImageID string `json:"run_image_id,omitempty"`
+	// Driver is the compute driver the sandbox runs on (docker or vm), and
+	// DriverReason why on a managed host (openshell.DriverReason*, such as
+	// kvm_missing when the docker fallback replaced the MicroVM driver).
+	Driver         string    `json:"driver,omitempty"`
+	DriverReason   string    `json:"driver_reason,omitempty"`
 	HarnessVersion string    `json:"harness_version,omitempty"`
 	HookContract   string    `json:"hook_contract,omitempty"`
 	TamperTier     string    `json:"tamper_tier,omitempty"`
@@ -591,11 +649,21 @@ type MCPSummary struct {
 	Project []string `json:"project,omitempty"`
 }
 
-// MCPLeftBehind is a server a run did not bring along.
+// MCPLeftBehind is a server a run did not bring along. Code is set when
+// the organization's policy left it out: MCPCodeOrganizationBlock or
+// MCPCodeAssetPolicy (ManagedMCP's reasons).
 type MCPLeftBehind struct {
 	Name   string `json:"name"`
 	Reason string `json:"reason"`
+	Code   string `json:"code,omitempty"`
 }
+
+// The organization's reasons for an MCP server a managed run leaves out
+// (MCPLeftBehind.Code, ManagedMCP.Reason).
+const (
+	MCPCodeOrganizationBlock = "organization_block"
+	MCPCodeAssetPolicy       = "asset_policy"
+)
 
 // SnapshotInfo describes the pre-session snapshot.
 type SnapshotInfo struct {
@@ -922,6 +990,9 @@ type ExplainRequest struct {
 	// Explain.VMFirstBoot does too. Without it the daemon takes the newest
 	// sandbox of the harness's.
 	Run *ExplainRun `json:"run,omitempty"`
+	// Sources asks a managed host's daemon to label each explained value
+	// with its source (Explain.Managed.Sources); ignored elsewhere.
+	Sources bool `json:"sources,omitempty"`
 }
 
 // ExplainRun is what of a create request the run files of the sandbox
@@ -963,13 +1034,139 @@ type Explain struct {
 	NetworkMode string      `json:"network_mode"`
 	Approvals   string      `json:"approvals"`
 	Admin       AdminStatus `json:"admin"`
-	Settings    []Setting   `json:"settings"`
-	Violations  []Violation `json:"violations,omitempty"`
+	// Workspace is the copy policy of the run or sandbox explained.
+	Workspace  *WorkspacePolicy `json:"workspace,omitempty"`
+	Settings   []Setting        `json:"settings"`
+	Violations []Violation      `json:"violations,omitempty"`
 	// VMFirstBoot says the sandbox would boot an image the gateway's
 	// MicroVM (vm) driver has not prepared yet: the first start of each
 	// image prepares its MicroVM disk, which takes about a minute. Always
 	// false on the docker driver.
 	VMFirstBoot bool `json:"vm_first_boot,omitempty"`
+	// Managed is set on a managed host: the caller's own floor as the
+	// managed gateway explains it.
+	Managed *ManagedExplain `json:"managed,omitempty"`
+}
+
+// Sources of an explained value (ManagedExplain.Sources).
+const (
+	ExplainSourceOrganization = "organization"
+	ExplainSourceProfile      = "profile"
+	ExplainSourcePack         = "pack"
+	ExplainSourceRepo         = "repo"
+	ExplainSourceFlag         = "flag"
+)
+
+// ManagedExplain is the caller's own sandbox policy on a managed host
+// (`defenseclaw sandbox policy explain`). It names only the caller's own
+// profile and match; nothing in it describes another account's.
+// WorkspacePolicy is what an effective policy holds back from and keeps of
+// a project copy: the masks and their exceptions, the git history depth and
+// the size cap. A managed computer's CLI stages a copy with it, because the
+// organization pack that decides it is the administrator's file, which the
+// CLI cannot read (GAP-0478).
+type WorkspacePolicy struct {
+	Masks       []string `json:"masks"`
+	Unmask      []string `json:"unmask,omitempty"`
+	GitDepth    int      `json:"git_depth"`
+	MaxUploadMB int      `json:"max_upload_mb"`
+}
+
+type ManagedExplain struct {
+	// Profile is the caller's matched guardrail profile ("" = the
+	// organization's floor alone); Match is how it matched (agent, user,
+	// group, connector, default, default_unverified,
+	// default_lookup_failed, none) and MatchedGroup the caller's group
+	// that matched.
+	Profile string `json:"profile"`
+	// Workspace is the copy policy of a new run, as the managed gateway
+	// resolves it with the organization's pack (nil for a registration).
+	Workspace    *WorkspacePolicy `json:"workspace,omitempty"`
+	Description  string           `json:"description,omitempty"`
+	Match        string           `json:"match"`
+	MatchedGroup string           `json:"matched_group,omitempty"`
+	Provisional  bool             `json:"provisional,omitempty"`
+	// Allowed is false when the caller may run no sandbox.
+	Allowed bool `json:"allowed"`
+	// RequiredFor lists the connectors that run only in a sandbox on this
+	// computer; WhenUnavailable is refuse or alert.
+	RequiredFor     []string `json:"required_for,omitempty"`
+	WhenUnavailable string   `json:"when_unavailable,omitempty"`
+	// AllowedHarnesses and AllowedCredentials are unset when they
+	// constrain nothing; AllowedCredentials [none] allows no credentials.
+	AllowedHarnesses   []string `json:"allowed_harnesses,omitempty"`
+	AllowedCredentials []string `json:"allowed_credentials,omitempty"`
+	// EgressAllowOnly and EgressBlock are the floor's egress lists.
+	EgressAllowOnly []string `json:"egress_allow_only,omitempty"`
+	EgressBlock     []string `json:"egress_block,omitempty"`
+	// UserApprovals (none, session or "") and AllowUnblock say which asks
+	// and unblocks the caller may approve.
+	UserApprovals string `json:"user_approvals,omitempty"`
+	AllowUnblock  bool   `json:"allow_unblock"`
+	// MCPIncluded names the caller's MCP servers the run includes;
+	// MCPBlocked those it leaves out, with the reason.
+	MCPIncluded []string     `json:"mcp_included,omitempty"`
+	MCPBlocked  []ManagedMCP `json:"mcp_blocked,omitempty"`
+	// WorkdirMode is copy on managed hosts; AllowMount, AllowHostPorts and
+	// AllowYolo are the floor's.
+	WorkdirMode    string `json:"workdir_mode,omitempty"`
+	AllowMount     bool   `json:"allow_mount"`
+	AllowHostPorts bool   `json:"allow_host_ports"`
+	AllowYolo      bool   `json:"allow_yolo"`
+	// OnSilence and MaxSilenceAfter bind user-tier harnesses whose hooks
+	// fall silent.
+	OnSilence          string `json:"on_silence,omitempty"`
+	MaxSilenceAfter    string `json:"max_silence_after,omitempty"`
+	ProcessTree        bool   `json:"process_tree,omitempty"`
+	DeleteStoppedAfter string `json:"delete_stopped_after,omitempty"`
+	// Driver and DriverReason are the compute driver of the explained
+	// sandbox (or the one a sandbox would get now) and why
+	// (openshell.DriverReason*); DriverFallback is the caller's fallback
+	// where the MicroVM driver can't run (docker, none, or "" where none
+	// applies).
+	Driver         string `json:"driver,omitempty"`
+	DriverReason   string `json:"driver_reason,omitempty"`
+	DriverFallback string `json:"driver_fallback,omitempty"`
+	// PolicyDigest is the caller's effective sandbox policy digest.
+	PolicyDigest  string    `json:"policy_digest"`
+	UpdatedAt     time.Time `json:"updated_at,omitzero"`
+	RequestAccess string    `json:"request_access,omitempty"`
+	// Sources maps each explained key to its source (ExplainSourceX) when
+	// the caller asked for sources.
+	Sources map[string]string `json:"sources,omitempty"`
+	// Posture is the explained run as the managed gateway resolves it
+	// under the caller's floor. The daemon moves it into the Explain's own
+	// fields (the pack, the profile and every setting), so the user's
+	// explain shows the authoritative policy: the daemon cannot read the
+	// administrator's packs, and a posture it resolved itself would leave
+	// out the required pack and the profile minimum (GAP-0179, GAP-0438).
+	Posture *ManagedPosture `json:"posture,omitempty"`
+}
+
+// ManagedPosture is the caller's own resolved sandbox posture as the
+// managed gateway resolves it for an explained run (ManagedExplain.Posture):
+// the pack and its chain, the profile, the network and approval modes,
+// every setting with its provenance, and the run's violations. Pack sources
+// name no host path: "organization" for an administrator's pack,
+// "builtin:<name>" for a built-in one.
+type ManagedPosture struct {
+	Pack          string      `json:"pack"`
+	PackSource    string      `json:"pack_source"`
+	PackDigest    string      `json:"pack_digest"`
+	PackChain     []PackLink  `json:"pack_chain,omitempty"`
+	Profile       string      `json:"profile"`
+	NetworkMode   string      `json:"network_mode"`
+	Approvals     string      `json:"approvals"`
+	Settings      []Setting   `json:"settings"`
+	Violations    []Violation `json:"violations,omitempty"`
+	RepoTightened []string    `json:"repo_tightened,omitempty"`
+}
+
+// ManagedMCP is one MCP server a managed run leaves out, and why
+// (organization_block or asset_policy).
+type ManagedMCP struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
 }
 
 // MaxPolicyChecks bounds the destinations of one policy test.
@@ -980,6 +1177,11 @@ const MaxPolicyChecks = 1024
 type PolicyTestRequest struct {
 	Sandbox string        `json:"sandbox"`
 	Checks  []PolicyCheck `json:"checks"`
+	// Project and Harness name a new run when Sandbox is empty: a managed
+	// computer's daemon judges the destinations with the caller's own
+	// policy for that run, before any sandbox exists.
+	Project string `json:"project,omitempty"`
+	Harness string `json:"harness,omitempty"`
 }
 
 // PolicyCheck is one destination of a policy test. Port 0 judges the host
@@ -1273,6 +1475,11 @@ type ActivityEvent struct {
 	// Reason is the machine-readable cause, Message the display line.
 	Reason  string `json:"reason,omitempty"`
 	Message string `json:"message,omitempty"`
+	// Refusal is the organization's access refusal of the destination
+	// (AccessRefused: the rule, "You can't approve this", the
+	// request-access contact and the Quote line), shown under the line;
+	// "" when no managed rule refused it (GAP-0502, GAP-0468).
+	Refusal string `json:"refusal,omitempty"`
 	// Replayed marks an OpenShell record from before the daemon started,
 	// which OpenShell's stream replays when DefenseClaw starts again: it
 	// arrives after newer events.

@@ -78,10 +78,13 @@ type MCPInventory interface {
 	SandboxMCPServers(ctx context.Context, harness string) ([]config.MCPServerEntry, []MCPSkip, error)
 }
 
-// MCPSkip is an MCP server a run leaves behind.
+// MCPSkip is an MCP server a run leaves behind: Reason is the user's text,
+// Code the organization's reason when its policy left the server out
+// (sandboxapi.MCPLeftBehind.Code).
 type MCPSkip struct {
 	Name   string
 	Reason string
+	Code   string
 }
 
 // runConfig is a sandbox's rendered per-run configuration.
@@ -205,7 +208,7 @@ func (m *Manager) deliverRunConfig(ctx context.Context, d openshell.Driver, name
 // runImageError reports a run image or alias that could not be made.
 func (m *Manager) runImageError(img image.Record, err error) error {
 	m.logf("%s: %s: run image: %v", gatewaylog.ErrCodeOpenShellImageBuildFailed, img.Connector, err)
-	return newImageError("the sandbox image with this run's harness settings could not be made from "+img.Tag, err)
+	return newImageError("the sandbox image with this run's harness settings could not be made from "+img.Tag, err, m.opts.ManagedAccount)
 }
 
 // runFileSecretEnv are the variables a harness's run files pin whose value
@@ -459,7 +462,7 @@ func (m *Manager) planRunConfig(ctx context.Context, in runConfigInput) (*runCon
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "list the %s MCP servers to bring along: %v", in.spec.DisplayName, err)
 		}
 		for _, s := range skipped {
-			summary.LeftBehind = append(summary.LeftBehind, sandboxapi.MCPLeftBehind{Name: displayMCPName(s.Name), Reason: s.Reason})
+			summary.LeftBehind = append(summary.LeftBehind, sandboxapi.MCPLeftBehind{Name: displayMCPName(s.Name), Reason: s.Reason, Code: s.Code})
 		}
 		var dropped []string
 		servers, summary.LeftBehind, dropped = importMCPServers(in.spec.Name, entries, summary.LeftBehind, in.eff.MCP.HostPorts)

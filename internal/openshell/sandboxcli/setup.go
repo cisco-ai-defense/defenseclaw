@@ -115,6 +115,14 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	if err := a.CheckSupported(); err != nil {
 		return err
 	}
+	if onManagedHost() {
+		// The administrator's lifecycle installs and runs OpenShell here:
+		// what setup would install, start or change (Homebrew, Docker
+		// Desktop, the gateway service, its configuration) is not this
+		// account's (GAP-0174).
+		return errors.New("sandboxes on this computer are set up by your organization, so there is nothing to set up for your account: run `" +
+			CommandName + " run claude` in a project folder, and `" + CommandName + " doctor` shows where they stand")
+	}
 	if a.Cfg == nil {
 		return errors.New("DefenseClaw is not set up yet; run `defenseclaw init` first")
 	}
@@ -145,8 +153,13 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	// Docker Desktop has none: no reason to stop before the question that
 	// switches the gateway (step 2).
 	macOS := a.GOOS == "darwin"
-	microVM := macOS && rep.Driver == openshell.DriverVM
-	if err := a.machineFailure(rep, macOS && !microVM); err != nil {
+	microVM := rep.Driver == openshell.DriverVM
+	// A Linux host with KVM may run them too; there the docker driver stays
+	// the default, and the kernel's missing Landlock is what makes
+	// MicroVMs the way on.
+	linuxKVM := a.GOOS == "linux" && !microVM && rep.MicroVM.KVMUsable()
+	noLandlock := linuxKVM && failed(rep, openshell.CheckIDLandlock)
+	if err := a.machineFailure(rep, (macOS && !microVM) || noLandlock); err != nil {
 		return err
 	}
 	// An OpenShell installed another way than the one whose service
@@ -160,9 +173,9 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	// Steps left out say so at the end, with the command that does them.
 	var skipped []string
 
-	// 2. The compute driver (macOS): OpenShell's MicroVM driver, whose
-	// MicroVMs have their own kernel with Landlock.
-	if macOS && !microVM {
+	// 2. The compute driver (macOS, and Linux with KVM): OpenShell's MicroVM
+	// driver, whose MicroVMs have their own kernel with Landlock.
+	if (macOS && !microVM) || linuxKVM {
 		if c := rep.Get(openshell.CheckIDLandlock); c != nil && c.Status == openshell.StatusFail {
 			a.note("Landlock: " + c.Detail + "; MicroVMs have their own kernel, which enforces it")
 		}
@@ -178,8 +191,20 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		if unmanaged {
 			restarts = "; you restart the gateway yourself to apply it"
 		}
-		yes, err := a.ask(`Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in `+
-			where+restarts+"; OpenShell calls this driver experimental)", true, assume)
+		question, def := `Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. (sets compute_driver = "vm" in `+
+			where+restarts+"; OpenShell calls this driver experimental)", true
+		if linuxKVM {
+			// The docker driver is a Linux host's default: MicroVMs are the
+			// answer to a kernel without Landlock, and an option otherwise.
+			why := "Each sandbox gets its own kernel and disk through KVM."
+			if noLandlock {
+				why = "This kernel has no usable Landlock, which the docker driver needs, and MicroVMs have their own kernel."
+			}
+			question = "Run sandboxes in OpenShell MicroVMs? " + why + ` (sets compute_driver = "vm" in ` + where + restarts +
+				"; OpenShell calls this driver experimental, and sandboxes made on the docker driver cannot start after the switch)"
+			def = noLandlock
+		}
+		yes, err := a.ask(question, def, assume)
 		if err != nil {
 			return err
 		}
@@ -418,7 +443,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	// leaves it on docker.
 	switching := microVM && rep.Driver != openshell.DriverVM
 	switched := false
-	if changes.EnableBindMounts || changes.ComputeDriver != "" || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 {
+	if changes.EnableBindMounts || changes.ComputeDriver != "" || changes.ServiceUMask != "" || len(changes.Env) > 0 || len(changes.UnsetEnv) > 0 {
 		plan, err := a.Gateway.Plan(ctx, changes)
 		if err != nil {
 			return fmt.Errorf("plan the gateway change: %w", err)
@@ -517,7 +542,11 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 	case onMicroVMs:
 		a.note("every run works on a copy (the MicroVM driver mounts no host folders); `" + CommandName + " pull` brings the changes back")
 	case stuck:
-		a.warn("the gateway still runs the docker driver, where no sandbox can start (the Linux VM Docker runs in has no Landlock); " +
+		kernel := "the Linux VM Docker runs in"
+		if a.GOOS == "linux" {
+			kernel = "this kernel"
+		}
+		a.warn("the gateway still runs the docker driver, where no sandbox can start (" + kernel + " has no Landlock); " +
 			"it runs sandboxes in MicroVMs " + once)
 	case microVM:
 		a.note("the gateway still runs the docker driver; it runs sandboxes in MicroVMs " + once)
@@ -592,7 +621,7 @@ func (a *App) Setup(ctx context.Context, o SetupOptions) (retErr error) {
 		}
 		if wrap {
 			for _, s := range wrappable {
-				if err := a.enableWrapper(s, WrapperOptions{Harness: s.Name}); err != nil {
+				if err := a.enableWrapper(s, WrapperOptions{Harness: s.Name}, true); err != nil {
 					a.warn("wrapper for " + s.Command + ": " + err.Error())
 				}
 			}
@@ -979,9 +1008,10 @@ func (a *App) consentGatewayRestart(ctx context.Context, o SetupOptions, assume,
 	switch {
 	case switching && known:
 		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver: the " + plural(int64(len(sandboxes)), "sandbox", "sandboxes") +
-			" on it (" + shortList(sandboxes) + ") were made on the docker driver, stop if running, and cannot start again unless the gateway is switched back")
+			" on it (" + shortList(sandboxes) + ") were made on the docker driver, stop if running, and cannot start again: OpenShell drops them a few minutes after the switch, " +
+			"with any work in them that was not brought back (`" + CommandName + " pull`), so bring it back first")
 	case switching:
-		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver, and " + what + "; sandboxes made on the docker driver cannot start again after it")
+		a.warn("applying this restarts the OpenShell gateway on the MicroVM driver, and " + what + "; sandboxes made on the docker driver cannot start again after it, and OpenShell drops them a few minutes later with any work not brought back")
 	case microVM:
 		a.warn("applying this restarts the OpenShell gateway: its running MicroVM sandboxes have their disks flushed and stop, and " + what)
 	default:
@@ -1120,6 +1150,10 @@ func microVMChanges(rep *openshell.DoctorReport, state *openshell.GatewayConfigS
 	if res := state.VM.Unset(want); res != (openshell.VMResources{}) {
 		ch.VMResources = &res
 	}
+	if rep.MicroVM != nil && rep.MicroVM.UMaskTooStrict {
+		// Linux: the guests' root disks are built with the gateway's umask.
+		ch.ServiceUMask = openshell.ServiceUMask
+	}
 	return ch
 }
 
@@ -1133,6 +1167,9 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 	m := rep.MicroVM
 	if m == nil {
 		return rep, nil
+	}
+	if a.GOOS == "linux" {
+		return rep, a.prepareLinuxMicroVMs(m)
 	}
 	consent := func(question string) (bool, error) {
 		if o.InstallOpenShell || o.Yes {
@@ -1210,6 +1247,29 @@ func (a *App) prepareMicroVMs(ctx context.Context, o SetupOptions, rep *openshel
 	return rep, nil
 }
 
+// prepareLinuxMicroVMs stops setup, with the way on, where this Linux host
+// cannot start a MicroVM. Nothing is installed for it: KVM access and
+// e2fsprogs need an administrator, and the driver is a download of
+// OpenShell's release that its user verifies. A cache the driver built
+// under a gateway umask stricter than 0022 is warned about, with how to
+// remove it; the umask itself is part of the gateway change setup plans.
+func (a *App) prepareLinuxMicroVMs(m *openshell.MicroVMHost) error {
+	if problems := m.Problems(); len(problems) > 0 {
+		a.bad("MicroVM driver: " + strings.Join(problems, "; "))
+		for _, fix := range m.Fixes(a.GOARCH) {
+			a.note("→ " + fix.Line())
+		}
+		a.note("→ then run `" + CommandName + " setup` again")
+		return &Silent{Err: errors.New("this machine cannot run MicroVM sandboxes yet (MicroVM driver)")}
+	}
+	if fix := m.StaleCacheFix(); fix != nil {
+		a.warn("MicroVM driver: its cache under " + m.StateDir + " was built while the gateway ran with a umask stricter than " + openshell.ServiceUMask +
+			", so no MicroVM prepared from it starts")
+		a.note("→ " + fix.Line())
+	}
+	return nil
+}
+
 // machineFailure prints the first machine check that keeps sandboxes
 // from running, with the way on, and returns it already printed.
 // landlockLater leaves out the Landlock check, which the question that
@@ -1247,7 +1307,7 @@ func (a *App) machineLine(rep *openshell.DoctorReport) string {
 	// reason, and the formula the install brings it with: one mark, not
 	// "✗ MicroVM driver  ✗ OpenShell not installed".
 	cli, driver := rep.Get(openshell.CheckIDCLI), rep.Get(openshell.CheckIDVMDriver)
-	withoutDriver := cli != nil && cli.Status == openshell.StatusFail && rep.CLIVersion == "" && driver != nil && driver.Status == openshell.StatusFail &&
+	withoutDriver := a.GOOS == "darwin" && cli != nil && cli.Status == openshell.StatusFail && rep.CLIVersion == "" && driver != nil && driver.Status == openshell.StatusFail &&
 		rep.MicroVM != nil && rep.MicroVM.DriverBinary == "" && !rep.MicroVM.DriverRunning
 	var parts []string
 	for _, id := range []string{openshell.CheckIDPlatform, openshell.CheckIDLandlock, openshell.CheckIDDocker, openshell.CheckIDVMDriver, openshell.CheckIDCLI} {

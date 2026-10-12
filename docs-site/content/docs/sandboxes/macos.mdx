@@ -17,7 +17,15 @@ kernel of its own, which runs the Landlock rules OpenShell needs. A MicroVM
 mounts no folders from your Mac, so the agent always works on a copy of your
 project, and you bring its changes back when you are happy with them.
 
-OpenShell calls the MicroVM driver experimental.
+OpenShell calls the MicroVM driver experimental. A Linux host with KVM can run
+the same driver; see [MicroVMs with KVM](/docs/sandboxes/linux#run-sandboxes-in-microvms-with-kvm).
+
+On a Mac your organization manages with a standalone enterprise install, an
+administrator sets the policy and provides OpenShell (or lets each user's
+daemon download it at the first sandbox), and `e2fsprogs` must come from the
+administrator's `enterprise.openshell.e2fsprogs_dir` or the user's own
+`~/.local/opt/e2fsprogs`. See
+[Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 ## How it fits together
 

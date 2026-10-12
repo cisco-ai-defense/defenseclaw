@@ -55,6 +55,10 @@ All paths are under `/opt/cisco/defenseclaw` unless shown in full.
 | Hook socket | `run/hook.sock` | Directory `_defenseclaw`, `0755` |
 | Logs | `/Library/Logs/Cisco/DefenseClaw`, with the gateway's logs in `gateway/` | `root`, `0755`; `gateway/` is `_defenseclaw`, `0750` |
 | LaunchDaemons | `/Library/LaunchDaemons/com.cisco.defenseclaw.*.plist` | `root`, `0644` |
+| Sandbox launcher | `/usr/local/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| LaunchAgents for sandboxes | `/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist` and `com.cisco.defenseclaw.openshell-gateway.plist`, which run as each signed-in user. See [Sandboxes on managed computers](/docs/enterprise/sandboxes). | `root`, `0644` |
+| Rendered OpenShell gateway settings | `etc/openshell/gateway.toml`, written by `ensure` when `enterprise.openshell` is set | `root` |
+| Sandbox registrations and saved decisions | `runtime/sandbox/` | `_defenseclaw`, `0600` files |
 
 The daemons:
 
@@ -368,6 +372,23 @@ it. The managed Mac has no `defenseclaw guardrail profile` commands.
 See [Status and verify](/docs/enterprise/operations#status-and-verify) and
 [Logs and events](/docs/enterprise/operations#logs-and-events) for
 monitoring.
+
+## Sandboxes
+
+A macOS standalone install can run coding agents in OpenShell MicroVM sandboxes
+on Apple silicon, under the sandbox policy of each person's directory group.
+They are off until `openshell.enabled` is on. The pkg packages the `defenseclaw`
+launcher and the LaunchAgents; you provide OpenShell and, for the MicroVM
+driver, `e2fsprogs` in a root-owned directory (`enterprise.openshell.e2fsprogs_dir`),
+or let each person's daemon download OpenShell (`install: setup`). Docker
+Desktop must run for the person, because the agent images are built there.
+An Intel Mac is refused with the reason `os_unsupported`. Write directory groups
+in the spelling macOS reports (`DOMAIN\group`) and check them with
+`profile-explain`.
+
+The full guide covers the config keys, the recipes, requiring sandboxes per
+group, and what people see:
+[Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 ## Per-user installs
 

@@ -72,6 +72,12 @@ If you deploy through an MDM, the wrapper scripts run these same actions. See
 
 ## Upgrade
 
+On Linux and macOS, a user's sandbox daemon is not restarted while that user has
+a sandbox running; `ensure` reports "pending restart" and the launcher restarts
+an idle, outdated daemon on the next command. Rollback and uninstall cover the
+sandbox units, the `defenseclaw` launcher and the rendered OpenShell settings.
+See [Upgrade, roll back, uninstall](/docs/enterprise/sandboxes#upgrade-roll-back-uninstall).
+
 ### Windows
 
 Run the new release's Setup with `/ensure`. When the Setup is newer than the
@@ -244,6 +250,17 @@ The managed config is administrator-owned. For what it contains, see
 is still running (usually under a minute), they report `lifecycle_busy`, exit
 `75` and say a configuration change is being applied. That is not a failure and needs no repair: run them again when it
 finishes.
+
+**A hand edit of the config is applied, not reported as drift.** When you edit
+the managed `config.yaml` in place as root (keeping its mode and owner), the
+apply trigger picks the change up and runs `ensure`, so after the trigger
+finishes (about 20 seconds on a Mac, usually under a minute) the new file is the
+applied config and `verify` finds nothing to report. An immediate `verify`
+while the trigger runs answers `lifecycle_busy`, not drift. `verify` reports
+drift for the installed files, binaries and entries the config produces, and
+for a rejected edit (`config_rejected`), not for a valid edit of the config
+itself. `ensure --config` with the reviewed file puts the reviewed version
+back and records it as the applied config.
 
 On Linux and macOS you can also hand the new file to `ensure`. It validates the
 file, installs it as the managed config (mode `0640`, owner root, group of the

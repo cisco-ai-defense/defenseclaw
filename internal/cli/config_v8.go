@@ -79,17 +79,7 @@ var configV8ValidateCmd = &cobra.Command{
 	Short: "Validate configuration v8 and emit a machine-readable result",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		loaded, err := loadConfigV8File(configV8ConfigPath, configV8DataDir)
-		if err == nil {
-			// The writers' validator: the rule packs and rule IDs the
-			// candidate references must load, as the gateway's reload needs.
-			err = config.CheckCandidateAssets(loaded.runtime)
-		}
-		if err == nil {
-			// Every jsonl destination must be a file the gateway may write
-			// (GAP-0890).
-			err = checkJSONLDestinationPaths(loaded.compiled, "")
-		}
+		loaded, err := checkConfigV8Candidate(configV8ConfigPath, configV8DataDir)
 		if err != nil {
 			failure := configV8ValidationFailure(err)
 			if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(failure); encodeErr != nil {
@@ -116,6 +106,25 @@ var configV8ValidateCmd = &cobra.Command{
 	},
 }
 
+// checkConfigV8Candidate is the writers' validator: the file loads through
+// the compiler and the runtime loader, the rule packs and rule IDs it
+// references load as the gateway's reload needs, and every jsonl destination
+// is a file the gateway may write (GAP-0890). It changes nothing.
+func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
+	loaded, err := loadConfigV8File(path, dataDir)
+	if err != nil {
+		return nil, err
+	}
+	err = config.CheckCandidateAssets(loaded.runtime)
+	if err == nil {
+		err = checkJSONLDestinationPaths(loaded.compiled, "")
+	}
+	if err != nil {
+		return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: err}
+	}
+	return loaded, nil
+}
+
 func configV8ValidationFailure(err error) configV8WireFailure {
 	result := configV8WireFailure{
 		WireVersion:   configV8WireVersion,
@@ -129,7 +138,19 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	var semanticError *config.V8SemanticError
 	var secretError *config.V8SecretReferenceError
 	var profileError *config.UnknownGuardrailProfileError
+	var settingError *config.SettingError
+	var sourceError *configV8SourceError
+	if errors.As(err, &sourceError) && sourceError.version >= config.ObservabilityV8ConfigVersion {
+		result.ConfigVersion = sourceError.version
+	}
 	switch {
+	case errors.As(err, &settingError):
+		// A runtime-loader refusal of a profile, its sandbox section or the
+		// openshell section: name the setting and the rule, so the fix is to
+		// that field (GAP-0337, GAP-0323).
+		result.Path = configV8DiagnosticPath("$." + settingError.Path)
+		result.Reason = configV8DiagnosticReason("config_semantic_invalid",
+			configV8SettingRule(settingError.Detail()), "", "")
 	case errors.As(err, &profileError):
 		// The runtime loader's check, after the schema pass: name the setting
 		// and the profile, so the fix is to the assignment (GAP-0288).
@@ -173,6 +194,54 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 		)
 	}
 	return result
+}
+
+// configV8SourceError carries the config_version the source file declares to
+// the diagnostic of a refusal that happens after the file was parsed.
+type configV8SourceError struct {
+	version int
+	err     error
+}
+
+func (e *configV8SourceError) Error() string { return e.err.Error() }
+func (e *configV8SourceError) Unwrap() error { return e.err }
+
+// configV8SourceVersion is the config_version a parsed document declares, or
+// the compiler's own when it declares none that reads as an integer.
+func configV8SourceVersion(document *config.V8YAMLDocument) int {
+	if document == nil {
+		return config.ObservabilityV8ConfigVersion
+	}
+	switch value := document.Plain["config_version"].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case uint64:
+		return int(value)
+	case float64:
+		return int(value)
+	}
+	return config.ObservabilityV8ConfigVersion
+}
+
+// configV8SettingRule is the loader's rule text for a setting as a diagnostic
+// shows it: configured names stay, a long quoted value is shortened, and a
+// text with a URL or user info is withheld.
+func configV8SettingRule(rule string) string {
+	rule = configV8DiagnosticText(rule)
+	if rule == "" || strings.Contains(rule, "://") || strings.Contains(rule, "@") {
+		return "a setting here violates a semantic constraint (the rule text is withheld because it quotes a URL)"
+	}
+	parts := strings.Split(rule, `"`)
+	for i := 1; i < len(parts); i += 2 {
+		parts[i] = configV8ShortName(parts[i])
+	}
+	shown := strings.Join(parts, `"`)
+	if len(shown) > 700 {
+		shown = shown[:697] + "..."
+	}
+	return shown
 }
 
 // configV8ShortName is a configured name as a diagnostic shows it.
@@ -390,7 +459,7 @@ func loadConfigV8FileWithCredentials(path, defaultDataDir, credentialsDir string
 // (managed trust, provenance) the caller runs, instead of an inspection decode
 // the caller would decode again. Each decode is a full pass over every
 // guardrail profile (GAP-0276).
-func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate bool) (*loadedConfigV8File, error) {
+func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate bool) (loaded *loadedConfigV8File, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		path = config.ConfigPath()
@@ -418,6 +487,17 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	if err != nil {
 		return nil, err
 	}
+	// Every later refusal carries the version the file declares, not the
+	// compiler's: a source-9 file failed as config_version 8 (GAP-0337).
+	sourceVersion := configV8SourceVersion(document)
+	if legacyV8 {
+		sourceVersion = config.ObservabilityV8ConfigVersion
+	}
+	defer func() {
+		if err != nil {
+			err = &configV8SourceError{version: sourceVersion, err: err}
+		}
+	}()
 	resolvedDataDir := strings.TrimSpace(defaultDataDir)
 	if sourceDataDir, ok := document.Plain["data_dir"].(string); ok && strings.TrimSpace(sourceDataDir) != "" {
 		resolvedDataDir = strings.TrimSpace(sourceDataDir)

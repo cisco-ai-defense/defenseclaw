@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,8 +39,10 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // The sandbox ingress is a second listener, on 127.0.0.1:<ingress_port>,
@@ -165,6 +168,18 @@ type SandboxIngressConfig struct {
 	// a retried post is not reported again. It runs on the request
 	// goroutine and must not block.
 	OnHookFailure func(SandboxHookFailure)
+	// Relay selects forwarding mode, a standalone managed host's per-user
+	// sandbox daemon: after the ingress middleware (binding auth, the
+	// credential check, CSRF, body limit, idempotency) every admitted hook,
+	// notify, inspect and OTLP call goes to the managed gateway's hook
+	// socket and nothing is evaluated here (sandboxRelayForwarder).
+	// Registration is then required: the managed registration of a
+	// binding's sandbox; a binding without one is refused.
+	Relay        sandboxrelay.Client
+	Registration func(sandboxauth.Binding) (string, bool)
+	// OnGeneration is told the policy generation each relayed answer
+	// carries (sandboxrelay.GenerationHeader). It must not block.
+	OnGeneration func(uint64)
 }
 
 // SandboxHookDecision is one hook verdict for a sandbox binding.
@@ -200,6 +215,10 @@ type SandboxHookDecision struct {
 	// message names. Empty for every other event.
 	ModelError  string
 	ModelStatus int
+	// CallRef is manager.ContentRef of SessionID, Tool and ToolInput, set
+	// for a relayed call's verdict trailer (the tool input itself never
+	// crosses back to the daemon).
+	CallRef string
 }
 
 // SandboxHookFailure is one authenticated sandbox hook or inspect post the
@@ -236,6 +255,11 @@ type sandboxIngressState struct {
 	// egressRefusals is the manager's refusal lookup
 	// (SandboxIngressConfig.EgressRefusals).
 	egressRefusals func(sandboxauth.Binding) []SandboxEgressRefusal
+	// relay, registration and onGeneration are forwarding mode
+	// (SandboxIngressConfig.Relay).
+	relay        sandboxrelay.Client
+	registration func(sandboxauth.Binding) (string, bool)
+	onGeneration func(uint64)
 	// authFailures bounds auth-failure telemetry. Every sandbox shares one
 	// source address, so a flood of bad credentials cannot be told apart
 	// per caller; it still gets 401, just not one event per request.
@@ -264,6 +288,9 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 	if err := validateSandboxIngressAddr(cfg.Addr, a.addr); err != nil {
 		return err
 	}
+	if cfg.Relay != nil && cfg.Registration == nil {
+		return errors.New("sandbox ingress: forwarding mode needs the registration lookup")
+	}
 	otlpMaxBytes := cfg.OTLPMaxBodyBytes
 	switch {
 	case otlpMaxBytes == 0:
@@ -285,6 +312,9 @@ func (a *APIServer) SetSandboxIngress(cfg SandboxIngressConfig) error {
 		onHookFailure:  cfg.OnHookFailure,
 		egressUnblock:  cfg.EgressUnblock,
 		egressRefusals: cfg.EgressRefusals,
+		relay:          cfg.Relay,
+		registration:   cfg.Registration,
+		onGeneration:   cfg.OnGeneration,
 	}
 	if st.limiter == nil {
 		st.limiter = sandboxauth.NewLimiter(sandboxauth.DefaultLimiterConfig())
@@ -352,8 +382,28 @@ func (a *APIServer) RunSandboxIngress(ctx context.Context) error {
 	if st == nil {
 		return errors.New("sandbox ingress is not configured")
 	}
+	if _, err := a.SandboxIngressHandler(); err != nil {
+		return err
+	}
+	ln, err := listenWithRetry(ctx, st.addr, 30*time.Second)
+	if err != nil {
+		return fmt.Errorf("sandbox ingress: listen %s: %w", st.addr, err)
+	}
+	return a.RunSandboxIngressOn(ctx, ln)
+}
+
+// RunSandboxIngressOn is RunSandboxIngress on a listener the caller bound
+// (the managed sandbox daemon binds its ports itself, at the first create).
+// It owns ln and closes it.
+func (a *APIServer) RunSandboxIngressOn(ctx context.Context, ln net.Listener) error {
+	st := a.sandboxIngressState()
+	if st == nil {
+		_ = ln.Close()
+		return errors.New("sandbox ingress is not configured")
+	}
 	handler, err := a.SandboxIngressHandler()
 	if err != nil {
+		_ = ln.Close()
 		return err
 	}
 	srv := &http.Server{
@@ -369,10 +419,6 @@ func (a *APIServer) RunSandboxIngress(ctx context.Context) error {
 		// stopping the ingress must let running hooks finish their verdicts
 		// during the shutdown grace period instead of failing them at once.
 		BaseContext: func(net.Listener) context.Context { return context.WithoutCancel(ctx) },
-	}
-	ln, err := listenWithRetry(ctx, st.addr, 30*time.Second)
-	if err != nil {
-		return fmt.Errorf("sandbox ingress: listen %s: %w", st.addr, err)
 	}
 	if st.onListening != nil {
 		st.onListening()
@@ -394,10 +440,17 @@ func (a *APIServer) RunSandboxIngress(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), sandboxIngressShutdownTimeout)
 		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
+		err := srv.Shutdown(shutdownCtx)
+		if err != nil {
 			// Requests still running after the grace period are cut off;
 			// closing their connections cancels their contexts.
 			_ = srv.Close()
+		}
+		// Serve may not have taken the listener yet when Shutdown ran:
+		// close it here and wait, so the port is free on return.
+		_ = ln.Close()
+		<-errCh
+		if err != nil {
 			return fmt.Errorf("sandbox ingress: shutdown %s: %w", st.addr, err)
 		}
 		return nil
@@ -521,6 +574,10 @@ func (a *APIServer) newSandboxIngressHandler(st *sandboxIngressState) http.Handl
 		reg = InstallSharedAgentRegistry("", "")
 	}
 	var h http.Handler = mux
+	if st.relay != nil {
+		// Forwarding mode: nothing is evaluated on a managed host's daemon.
+		h = a.sandboxRelayForwarder(st)
+	}
 	h = st.idem.middleware(h)
 	h = apiBodyLimitMiddleware(h, apiRequestBodyMaxBytes, st.otlpMaxBytes)
 	h = a.apiCSRFProtect(h)
@@ -867,25 +924,39 @@ func classifySandboxIngressRequest(
 	return sandboxIngressRoute{}, false
 }
 
-// observeSandboxHookDecision hands a sandbox hook verdict to the manager.
+// observeSandboxHookDecision hands a sandbox hook verdict to the manager:
+// the in-process one of a local sandbox ingress, or for a relayed call the
+// sandbox owner's daemon, through the call's decision sink (the verdict
+// trailer, sandbox_relay.go). A relayed verdict never reaches this
+// process's own manager.
 func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHookRequest, resp agentHookResponse) {
 	binding, ok := sandboxauth.FromContext(ctx)
 	if !ok {
 		return
 	}
+	sink := sandboxRelayDecisionSinkFrom(ctx)
 	st := a.sandboxIngressState()
-	if st == nil || st.onHookDecision == nil {
+	if sink == nil && (st == nil || st.onHookDecision == nil) {
 		return
 	}
 	modelError, modelStatus := sandboxModelError(req)
-	st.onHookDecision(SandboxHookDecision{
+	decision := SandboxHookDecision{
 		BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
 		Event: req.HookEventName, Tool: req.ToolName, ToolUseID: req.ToolInvocationID,
 		SessionID: req.SessionID, ToolInput: sandboxDecisionToolInput(req),
 		ResultStatus: strings.TrimSpace(payloadString(req.Payload, "status")),
 		Action:       resp.Action, WouldBlock: resp.WouldBlock, Severity: resp.Severity, Reason: resp.Reason,
 		ModelError: modelError, ModelStatus: modelStatus,
-	})
+	}
+	if sink != nil {
+		// The tool input stays on this gateway: the daemon pairs a
+		// content-keyed call's events by its content reference.
+		decision.CallRef = manager.ContentRef(decision.SessionID, decision.Tool, decision.ToolInput)
+		decision.ToolInput = nil
+		sink.put(decision)
+		return
+	}
+	st.onHookDecision(decision)
 }
 
 // sandboxModelStatus finds the HTTP status in Claude Code's "API Error: 401
@@ -965,4 +1036,117 @@ func requestCarriesSandboxCredential(r *http.Request) bool {
 		return true
 	}
 	return false
+}
+
+// sandboxRelayForwarder is the ingress's last handler in forwarding mode
+// (SandboxIngressConfig.Relay): it sends every admitted call to the managed
+// gateway's hook socket as the binding's registration and answers with the
+// gateway's answer. Hook, notify and inspect calls carry the body unchanged
+// and only the sandboxrelay.ForwardHeaders allowlist; the answer keeps its
+// status and body and only the response headers the relay copies; the
+// verdict trailer of a 2xx answer reaches OnHookDecision (no trailer, no
+// verdict). Every route class is relayed or refused: a managed daemon has
+// no local evaluation path. An unreachable gateway or a broken relay
+// answers 502, so the sandbox's hook fails closed; a non-2xx answer
+// reaches OnHookFailure through sandboxIngressAuthorize.
+func (a *APIServer) sandboxRelayForwarder(st *sandboxIngressState) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		binding, ok := sandboxauth.FromContext(r.Context())
+		route, routed := sandboxIngressRouteFrom(r.Context())
+		if !ok || !routed {
+			writeSandboxIngressError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		registration, ok := st.registration(binding)
+		if !ok || registration == "" {
+			writeSandboxIngressError(w, http.StatusForbidden, "this sandbox is not registered with the managed gateway")
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeSandboxIngressError(w, http.StatusRequestEntityTooLarge, "request body too large")
+				return
+			}
+			writeSandboxIngressError(w, http.StatusBadRequest, "the request body could not be read")
+			return
+		}
+		ctx := r.Context()
+		if route == sandboxauth.RouteOTLP {
+			signal := strings.TrimPrefix(r.URL.Path, "/v1/")
+			err := st.relay.OTLP(ctx, sandboxrelay.OTLPCall{
+				Signal: signal, Registration: registration, Body: body,
+				ContentType: r.Header.Get("Content-Type"), ContentEncoding: r.Header.Get("Content-Encoding"),
+			})
+			if err != nil {
+				writeSandboxRelayError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		call := sandboxrelay.RelayCall{Registration: registration, Header: r.Header, Body: body}
+		switch route {
+		case sandboxauth.RouteHook:
+			call.Class, call.Target = sandboxrelay.RouteHook, binding.Connector
+		case sandboxauth.RouteNotify:
+			call.Class, call.Target = sandboxrelay.RouteNotify, binding.Connector
+		case sandboxauth.RouteInspect:
+			call.Class, call.Target = sandboxrelay.RouteInspect, strings.TrimPrefix(r.URL.Path, "/api/v1/inspect/")
+		default:
+			writeSandboxIngressError(w, http.StatusForbidden, "this route is not relayed")
+			return
+		}
+		resp, err := st.relay.Relay(ctx, call)
+		if err != nil {
+			writeSandboxRelayError(w, err)
+			return
+		}
+		for name, values := range resp.Header {
+			for _, v := range values {
+				w.Header().Add(name, v)
+			}
+		}
+		if st.onGeneration != nil {
+			if g, err := strconv.ParseUint(resp.Header.Get(sandboxrelay.GenerationHeader), 10, 64); err == nil {
+				st.onGeneration(g)
+			}
+		}
+		w.WriteHeader(resp.Status)
+		_, _ = w.Write(resp.Body)
+		if resp.Status < 200 || resp.Status > 299 || resp.Decision == nil || st.onHookDecision == nil {
+			return
+		}
+		d := resp.Decision
+		st.onHookDecision(SandboxHookDecision{
+			BindingID: binding.ID, SandboxName: binding.SandboxName, Connector: binding.Connector,
+			Event: d.Event, Tool: d.Tool, ToolUseID: d.ToolUseID, SessionID: d.SessionID,
+			ResultStatus: d.ResultStatus, Action: d.Action, WouldBlock: d.WouldBlock, Severity: d.Severity,
+			Reason: d.Reason, ModelError: d.ModelError, ModelStatus: d.ModelStatus, CallRef: d.CallRef,
+		})
+	})
+}
+
+// writeSandboxRelayError answers a call the relay could not complete: a
+// gateway refusal of an OTLP export keeps its status (and Retry-After), too
+// many forwarded headers are the sandbox's own 400, and anything else (an
+// unreachable gateway, an untrusted socket, a broken answer) is 502.
+func writeSandboxRelayError(w http.ResponseWriter, err error) {
+	var refused *sandboxrelay.Error
+	switch {
+	case errors.As(err, &refused) && refused.Status >= 400 && refused.Status <= 599:
+		if refused.RetryAfter != "" {
+			w.Header().Set("Retry-After", refused.RetryAfter)
+		}
+		reason := refused.Reason
+		if reason == "" {
+			reason = http.StatusText(refused.Status)
+		}
+		writeSandboxIngressError(w, refused.Status, reason)
+	case errors.Is(err, sandboxrelay.ErrHeadersTooLarge):
+		writeSandboxIngressError(w, http.StatusBadRequest, "the request headers are too large to relay")
+	default:
+		writeSandboxIngressError(w, http.StatusBadGateway, "the managed DefenseClaw gateway is not reachable")
+	}
 }

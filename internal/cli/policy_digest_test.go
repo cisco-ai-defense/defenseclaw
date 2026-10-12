@@ -36,7 +36,13 @@ import (
 func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 	reported := "sha256:" + strings.Repeat("a", 64)
 	other := "sha256:" + strings.Repeat("b", 64)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// A standalone gateway publishes the policy block only to a caller with
+	// the gateway token (GAP-0481).
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-DefenseClaw-Token") != "gw-token" {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"policy":{"effective_digest":"` + reported + `","last_reload_error":"digest mismatch"}}`))
 	}))
 	defer server.Close()
@@ -44,6 +50,9 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Gateway.APIBind = host
 	cfg.Gateway.APIPort, _ = strconv.Atoi(port)
+	cfg.Gateway.Token = "gw-token"
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	if got := gatewayReportedPolicy(cfg); got.EffectiveDigest != reported || got.LastReloadError != "digest mismatch" {
 		t.Fatalf("gateway reported policy = %+v", got)
 	}
@@ -83,6 +92,13 @@ func TestPolicyDigestReportsWhetherTheGatewayAppliedIt(t *testing.T) {
 	if result, state := run(false, strings.Replace(report(reported, reported, ""), `"config_generation_recorded":true`, `"config_generation_recorded":false`, 1)); state == nil ||
 		!state.ConfigUnrecorded || codes(result) != "config_edited_outside_lifecycle" {
 		t.Fatalf("unrecorded config: state=%+v warnings=%s", state, codes(result))
+	}
+	// A content write the hook guardian recorded (GAP-0617) advances the
+	// generation but is still reported as an edit outside the lifecycle.
+	if result, state := run(false, report(reported, reported, `,"config_recorded_as_hand_edit":true`)); state == nil ||
+		!state.ConfigUnrecorded || state.ConfigGeneration != 4 || codes(result) != "config_edited_outside_lifecycle" ||
+		!strings.Contains(result.Warnings[0].Message, "records it as a hand edit") {
+		t.Fatalf("recorded hand edit: state=%+v warnings=%s", state, codes(result))
 	}
 	// No generation recorded yet is not an edit.
 	if result, state := run(false, `{"effective_digest":"`+reported+`","config_generation":0,"config_generation_recorded":false,"gateway_reported_digest":"`+reported+`"}`); state == nil ||

@@ -798,6 +798,7 @@ func TestStartRefusesLimitsAboveALowerMaximum(t *testing.T) {
 			e.create(sandboxapi.CreateRequest{Name: "resbox", Memory: tc.memory})
 			e.stopBox("resbox")
 			e.setConfig(func(c *config.Config) { c.OpenShell.Admin.MaxResources = tc.max })
+			e.m.refreshEgress() // the config loop's re-resolution: the view judges the sandbox's own floor
 			warned := findWarning(e.get("resbox").Warnings, "your organization now caps sandbox") != ""
 			_, err := e.m.Start(t.Context(), "resbox", sandboxapi.StartRequest{})
 			if !tc.refuse {
@@ -1287,6 +1288,37 @@ func TestOperationsLeaveASandboxThatTookTheName(t *testing.T) {
 	}
 }
 
+// delete_stopped_after deletes a sandbox stopped, or completed (its main
+// process ended, which on the MicroVM driver keeps the VM running), longer
+// than the floor allows, and leaves the running one (GAP-0012).
+func TestDeleteStoppedAfterCountsStoppedAndCompleted(t *testing.T) {
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.Admin.DeleteStoppedAfter = "2h" })
+	_, advance := e.fakeClock(time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC))
+	e.create(sandboxapi.CreateRequest{Name: "stopbox"})
+	e.create(sandboxapi.CreateRequest{Name: "donebox", Project: e.otherProject("done")})
+	e.create(sandboxapi.CreateRequest{Name: "upbox", Project: e.otherProject("up")})
+	e.stopBox("stopbox")
+	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "donebox", types.SandboxCompleted))
+	must(t, e.m.Reconcile(t.Context()))
+	advance(time.Hour)
+	must(t, e.m.Reconcile(t.Context()))
+	for _, name := range []string{"stopbox", "donebox", "upbox"} {
+		if e.boxOf(name) == nil {
+			t.Fatalf("%s went before delete_stopped_after", name)
+		}
+	}
+	advance(90 * time.Minute)
+	must(t, e.m.Reconcile(t.Context()))
+	for name, kept := range map[string]bool{"stopbox": false, "donebox": false, "upbox": true} {
+		if _, err := e.client.GetSandbox(t.Context(), name); (err == nil) != kept {
+			t.Errorf("%s in OpenShell: %v, want kept %v", name, err, kept)
+		}
+	}
+	if len(e.events("donebox", sandboxapi.ActivityLifecycle, "delete_stopped_after")) != 1 {
+		t.Error("no feed line says why donebox went")
+	}
+}
+
 // replaceOutside deletes a sandbox outside DefenseClaw and creates another
 // under its name, with labels, in phase. The fake gateway gives sandboxes no
 // IDs: the box records one and the new sandbox gets another.
@@ -1355,6 +1387,25 @@ func TestDeleteFailureKeepsWatching(t *testing.T) {
 		phases := e.tel.phases("stubborn")
 		return phases[len(phases)-1] == audit.SandboxPhaseStopped
 	})
+}
+
+// GAP-0601: a stop or a delete whose connection to the OpenShell gateway
+// closed under the call (the gateway restarted, or another call dropped the
+// connection) goes again on a fresh connection instead of ending the session
+// with gRPC's words.
+func TestStopAndDeleteGoAgainOnAClosedConnection(t *testing.T) {
+	e := liveEnv(t, "flaky", nil)
+	e.fake.FailNext(openshelltest.MethodStopSandbox, &types.StatusError{Code: types.ErrorUnavailable, Message: "error reading from server: EOF"})
+	if _, err := e.m.Stop(t.Context(), "flaky"); err != nil {
+		t.Fatalf("stop after a closed connection: %v", err)
+	}
+	if got := e.get("flaky").Phase; got != "stopped" {
+		t.Fatalf("phase after the stop = %s", got)
+	}
+	e.fake.FailNext(openshelltest.MethodDeleteSandbox, &types.StatusError{Code: types.ErrorUnavailable, Message: "error reading from server: EOF"})
+	if _, err := e.m.Delete(t.Context(), "flaky", sandboxapi.DeleteRequest{}); err != nil {
+		t.Fatalf("delete after a closed connection: %v", err)
+	}
 }
 
 func findWarning(warnings []string, prefix string) string {

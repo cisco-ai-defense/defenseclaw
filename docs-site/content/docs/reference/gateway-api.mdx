@@ -193,8 +193,8 @@ for the OpenShell sandbox runtime:
   `egress`, `manager`, or `openshell` (the connection to the OpenShell
   gateway). Sandbox hooks fail closed while a part is down;
 - `disabled`, with the reason, on a platform or in a deployment that can't
-  run sandboxes: any platform but Linux and macOS, or a `managed_enterprise`
-  install;
+  run sandboxes: Windows, an Intel Mac, a Secure Client profile, or
+  `openshell.enabled: false`;
 - `error`, with the cause in `last_error`, when the sandbox runtime can't be
   set up at all, for example because its binding store or image store can't
   be opened. The sandbox routes then answer 503 `unavailable`, and sandbox
@@ -878,6 +878,7 @@ runtime isn't running (see the `/health` `sandbox` subsystem above).
 | `POST` | `/api/v1/sandbox/egress/unblock` | `UnblockRequest` | `UnblockResponse`: `host`, `sandbox`, `scope` (`sandbox` or `always`), `persisted`, `message` |
 | `GET` | `/api/v1/sandbox/policy/explain` | Query, see below | `Explain` |
 | `POST` | `/api/v1/sandbox/policy/test` | `{"sandbox", "checks": [{"host", "port", "binary"}]}`, at most 1024 checks; `404 not_found` for an unknown sandbox | `PolicyTestResult`, see [Policy test](#policy-test) |
+| `POST` | `/api/v1/sandbox/ready` | Optional `{}` | `Status`. A managed computer's per-user sandbox daemon readies the account's OpenShell first: in setup mode it installs the pinned release into the account's `~/.local`, and in both install modes it starts and registers the account's OpenShell gateway. `sandbox run` calls it before a first run. A failure is `503 unavailable` with the reason. The per-user gateway has nothing to ready and answers the status. |
 | `GET` | `/api/v1/sandbox/activity` | Query `sandbox`, `since`, `follow` | `{"events": [ActivityEvent]}`, or a server-sent event stream |
 
 Any other path under `/api/v1/sandbox/` gets 404 `not_found`.
@@ -1124,8 +1125,10 @@ sandbox. Inside the sandbox, both listeners are addressed as
 
 The gateway starts both listeners, and the sandbox manager behind the
 [Sandbox API](#sandbox-api), with the API when `openshell.enabled` is `true`
-on Linux or macOS. In a `managed_enterprise` install it starts neither, and
-`/health` reports the `sandbox` subsystem as `disabled`. A listener that
+on Linux or macOS, in a standalone `managed_enterprise` install as well
+([Sandboxes on managed computers](/docs/enterprise/sandboxes)). On Windows, on
+an Intel Mac and in a Secure Client profile it starts neither, and `/health`
+reports the `sandbox` subsystem as `disabled`. A listener that
 cannot start marks the subsystem `degraded` (sandbox hooks then fail closed),
 but never stops the API.
 

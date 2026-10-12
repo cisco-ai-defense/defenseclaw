@@ -364,6 +364,7 @@ func (b *box) identity() audit.SandboxIdentity {
 	// "vm"); one this build does not know is left out, not guessed.
 	if d, ok := openshell.LookupDriver(b.rec.Driver); ok {
 		id.Driver = string(d.Name)
+		id.DriverReason = b.rec.DriverReason
 	}
 	// The image that runs: the run image when the driver runs one.
 	digest := b.rec.ImageID
@@ -459,6 +460,15 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	}
 	b.rec.Phase = string(phase)
 	b.rec.PhaseReason = ""
+	if retainedPhase(phase) {
+		// A record from before the field (a restarted daemon's) counts
+		// from now: never longer than the floor allows from when it is seen.
+		if b.rec.StoppedAt.IsZero() || !retainedPhase(previous) {
+			b.rec.StoppedAt = m.now().UTC()
+		}
+	} else {
+		b.rec.StoppedAt = time.Time{}
+	}
 	if phase == audit.SandboxPhaseError {
 		b.rec.PhaseReason = errorPhaseReason(cond)
 	}
@@ -749,27 +759,37 @@ func sharedLimitsOf(b *box) openshell.ComputeDriver {
 
 // sharedLimitsWarnings warns on each view whose driver (drivers[i]) has
 // no per-sandbox limits when the cpu and memory every sandbox of it gets
-// now exceed the organization's openshell.admin.max_resources: the start
-// judges those values (checkStart), not what the record kept at create,
-// and a new sandbox would get them too, so the fix is to lower them.
-// Callers must not hold Manager.mu (the values are read from the
-// gateway's configuration).
+// now exceed the max_resources of the sandbox's own floor
+// (Effective.MaxResources): the start judges those values (checkStart),
+// not what the record kept at create, and a new sandbox would get them
+// too, so the fix is to lower them. Callers must not hold Manager.mu (the
+// values are read from the gateway's configuration).
 func (m *Manager) sharedLimitsWarnings(views []sandboxapi.Sandbox, drivers []openshell.ComputeDriver) {
-	max := m.config().OpenShell.Admin.MaxResources
-	if strings.TrimSpace(max.CPU) == "" && strings.TrimSpace(max.Memory) == "" {
-		return
+	type limit struct {
+		driver openshell.ComputeDriver
+		max    config.OpenShellResourcesConfig
 	}
-	warnings := map[openshell.ComputeDriver]string{}
+	warnings := map[limit]string{}
 	for i := range views {
 		name := drivers[i]
 		if name == "" {
 			continue
 		}
-		w, ok := warnings[name]
+		m.mu.Lock()
+		var eff *packs.Effective
+		if b := m.boxes[views[i].Name]; b != nil {
+			eff = b.eff
+		}
+		m.mu.Unlock()
+		key := limit{name, eff.MaxResources()}
+		if strings.TrimSpace(key.max.CPU) == "" && strings.TrimSpace(key.max.Memory) == "" {
+			continue
+		}
+		w, ok := warnings[key]
 		if !ok {
 			d, _ := openshell.LookupDriver(string(name))
-			w = m.sharedLimitsWarning(d, max)
-			warnings[name] = w
+			w = m.sharedLimitsWarning(d, key.max)
+			warnings[key] = w
 		}
 		if w != "" {
 			views[i].Warnings = append(slices.Clip(views[i].Warnings), w)
@@ -835,7 +855,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Name: r.Name, ID: r.ID, Harness: r.Harness, Pack: r.Pack, PackDigest: r.PackDigest,
 		Profile: r.Profile, NetworkMode: r.NetworkMode, Approvals: r.Approvals, Yolo: launchYolo(b),
 		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
-		RunImage: r.RunImage, RunImageID: r.RunImageID,
+		RunImage: r.RunImage, RunImageID: r.RunImageID, Driver: r.Driver, DriverReason: r.DriverReason,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Session: r.Sessions, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
 		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard), ProcessTree: b.processTreeOn(),
@@ -917,6 +937,9 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		// applies to it; the record keeps what it was created with, and so
 		// do the create-time clamps, which the current ones replace.
 		v.Profile, v.NetworkMode, v.Approvals = e.Profile, e.NetworkMode, e.Approvals
+		if f, ok := effectiveFloor(e); ok {
+			v.UserApprovals = strings.ToLower(strings.TrimSpace(f.UserApprovals))
+		}
 		v.HostPorts = slices.Clone(e.MCP.HostPorts)
 		if e.Pack != nil {
 			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
@@ -934,7 +957,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	// A driver without per-sandbox limits (vm) is judged by what every
 	// sandbox of it gets now, which needs I/O (sharedLimitsWarnings).
 	if d, _ := openshell.LookupDriver(r.Driver); d.SandboxLimits {
-		if res := resourceViolation(r.Resources, m.config().OpenShell.Admin.MaxResources); res != nil && !b.retained {
+		if res := resourceViolation(r.Resources, b.eff.MaxResources()); res != nil && !b.retained {
 			v.Warnings = append(slices.Clip(v.Warnings), res.Message+
 				" (it keeps its current limits until it stops, and cannot start again)")
 		}

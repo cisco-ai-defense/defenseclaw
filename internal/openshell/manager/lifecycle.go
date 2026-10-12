@@ -344,7 +344,21 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	run := m.endHarness(ctx, gw, b)
 	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	m.keepRunLog(ctx, gw, b, run)
-	if _, err := gw.Client.StopSandbox(ctx, name); err != nil {
+	_, err = gw.Client.StopSandbox(ctx, name)
+	if err != nil && transientGatewayError(err) {
+		// The connection closed under the call (the gateway restarted, or
+		// another call dropped the connection): the stop goes again on a fresh
+		// one instead of ending the session with gRPC's words (GAP-0601).
+		if cur, ok := m.reconnect(ctx, gw, err); ok {
+			gw = cur
+			if now, gerr := gw.Client.GetSandbox(ctx, name); gerr == nil && auditPhase(now.Status.Phase) == audit.SandboxPhaseStopped {
+				err = nil
+			} else {
+				_, err = gw.Client.StopSandbox(ctx, name)
+			}
+		}
+	}
+	if err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
 		if e := errorPhaseRefusal(name, mode, reason, err); e != nil {
@@ -361,6 +375,12 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		return upstream("stop sandbox "+name, err)
 	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
+	if err != nil && transientGatewayError(err) {
+		if cur, ok := m.reconnect(ctx, gw, err); ok {
+			gw = cur
+			sb, err = gw.Client.WaitStopped(ctx, name)
+		}
+	}
 	if err != nil {
 		m.stopFailed(ctx, gw, b)
 		return upstream("wait for sandbox "+name+" to stop", err)
@@ -370,6 +390,23 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
 	return nil
+}
+
+// transientGatewayError reports a call that failed because the connection to
+// the OpenShell gateway closed or dropped, not because OpenShell refused it.
+func transientGatewayError(err error) bool {
+	return err != nil && (connectionClosed(err) || openshell.IsUnavailable(err))
+}
+
+// reconnect forgets gw when err says it broke and returns the connection in
+// use now (dialled again when there is none), or false when there is none.
+func (m *Manager) reconnect(ctx context.Context, gw *Gateway, err error) (*Gateway, bool) {
+	m.dropGateway(gw, err)
+	cur, gerr := m.gateway(ctx)
+	if gerr != nil {
+		return gw, false
+	}
+	return cur, true
 }
 
 // stopFailed puts a sandbox whose stop failed back into the phase OpenShell
@@ -457,6 +494,30 @@ func (m *Manager) Start(ctx context.Context, name string, req sandboxapi.StartRe
 	return &v, nil
 }
 
+// endSessionUnblocks drops a managed sandbox's session unblocks (and the
+// session answers to its proxy asks, which are such unblocks) before it
+// starts a new session: on a managed computer a session answer lasts while
+// the sandbox runs, and a stored "always" decision is what outlives a stop
+// (plan section 6.2, GAP-0574, GAP-0676). Outside managed mode an unblock
+// for a sandbox lasts as long as the sandbox.
+func (m *Manager) endSessionUnblocks(b *box) {
+	if !m.managedMode() {
+		return
+	}
+	m.mu.Lock()
+	scope, had := scopeID(b.rec.ID, b.rec.Name), len(b.rec.Unblocks) > 0
+	b.rec.Unblocks = nil
+	name := b.rec.Name
+	m.mu.Unlock()
+	if m.unblocks.RemoveSandbox(scope) == 0 && !had {
+		return
+	}
+	if err := m.saveRecord(b); err != nil {
+		m.logf("drop the session unblocks of %s: %v", name, err)
+	}
+	m.refreshEgress()
+}
+
 func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest) error {
 	if err := m.listenersReady(); err != nil {
 		return err
@@ -494,6 +555,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is %s, not stopped; stop it before starting a new session",
 			rec.Name, strings.ToLower(string(sb.Status.Phase)))
 	}
+	m.endSessionUnblocks(b)
 	eff, violations, err := m.resolveBoxViolations(b)
 	if err != nil {
 		return err
@@ -640,7 +702,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			m.logf("sandbox %s: %v", rec.Name, err)
 			return e
 		}
-		return upstream("wait for sandbox "+rec.Name, err)
+		return vmExitFailure(runtime.GOOS, m.managedMode(), gw.Driver, upstream("wait for sandbox "+rec.Name, err))
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
 		return err
@@ -774,8 +836,13 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 		return nil, err
 	}
 	defer unlock()
+	return m.deleteLocked(ctx, b, req)
+}
+
+// deleteLocked deletes b, whose operation lock the caller holds.
+func (m *Manager) deleteLocked(ctx context.Context, b *box, req sandboxapi.DeleteRequest) (*sandboxapi.DeleteResponse, error) {
 	m.mu.Lock()
-	retained := b.retained
+	retained, name := b.retained, b.rec.Name
 	m.mu.Unlock()
 	// A delete runs to its end once it started, even when the caller goes
 	// away: one cut short would leave the providers, the binding, the mount
@@ -839,12 +906,28 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 		// The watcher keeps running until the sandbox is gone: a delete that
 		// fails leaves it running, still watched and triaged.
 		m.lifecycle(ctx, b, audit.SandboxPhaseDeleting, audit.SandboxTriggerDelete, false, nil, nil)
-		if _, err := gw.Client.DeleteSandbox(ctx, name); err != nil && !openshell.IsNotFound(err) {
+		_, err := gw.Client.DeleteSandbox(ctx, name)
+		if err != nil && !openshell.IsNotFound(err) && transientGatewayError(err) {
+			// The connection closed under the call: the delete goes again on a
+			// fresh one (GAP-0601).
+			if cur, ok := m.reconnect(ctx, gw, err); ok {
+				gw = cur
+				_, err = gw.Client.DeleteSandbox(ctx, name)
+			}
+		}
+		if err != nil && !openshell.IsNotFound(err) {
 			m.dropGateway(gw, err)
 			m.deleteFailed(ctx, gw, b)
 			return nil, upstream("delete sandbox "+name, err)
 		}
-		if err := gw.Client.WaitDeleted(ctx, name); err != nil {
+		err = gw.Client.WaitDeleted(ctx, name)
+		if err != nil && transientGatewayError(err) {
+			if cur, ok := m.reconnect(ctx, gw, err); ok {
+				gw = cur
+				err = gw.Client.WaitDeleted(ctx, name)
+			}
+		}
+		if err != nil {
 			m.deleteFailed(ctx, gw, b)
 			return nil, upstream("wait for sandbox "+name+" deletion", err)
 		}
@@ -866,6 +949,68 @@ func (m *Manager) Delete(ctx context.Context, name string, req sandboxapi.Delete
 	}
 	m.forget(b)
 	return resp, nil
+}
+
+// retainedPhase reports a phase delete_stopped_after counts: the sandbox
+// was stopped, or completed (its main process ended), which on the MicroVM
+// driver keeps its VM running until the sandbox is deleted (GAP-0012). The
+// error phase is not counted: its owner decides (`delete --keep-snapshot`
+// keeps the undo point).
+func retainedPhase(p audit.SandboxPhase) bool {
+	return p == audit.SandboxPhaseStopped || p == audit.SandboxPhaseCompleted
+}
+
+// retention is how long b may stay stopped: its floor's
+// delete_stopped_after (the sandbox's resolved policy, else
+// openshell.admin, which on a managed daemon is the person's floor); 0
+// keeps it.
+func (m *Manager) retention(b *box) time.Duration {
+	m.mu.Lock()
+	eff := b.eff
+	m.mu.Unlock()
+	f, ok := effectiveFloor(eff)
+	if !ok {
+		f = m.config().OpenShell.Admin
+	}
+	if f.DeleteStoppedAfter == "" {
+		return 0
+	}
+	d, err := config.ParseOpenShellFloorDuration(f.DeleteStoppedAfter)
+	if err != nil {
+		return 0
+	}
+	return max(d, config.OpenShellMinDeleteStoppedAfter)
+}
+
+// deleteExpired deletes, as delete_stopped_after asks, every sandbox that
+// has been stopped or completed for longer than its floor allows: nothing
+// deleted them, and a completed MicroVM held about 430 MB until then
+// (GAP-0012). A sandbox busy with an operation waits for the next pass.
+func (m *Manager) deleteExpired(ctx context.Context) {
+	now := m.now()
+	for _, b := range m.liveBoxes() {
+		after := m.retention(b)
+		if after <= 0 || !b.op.TryLock() {
+			continue
+		}
+		m.mu.Lock()
+		phase := b.phase
+		if phase == "" {
+			phase = audit.SandboxPhase(b.rec.Phase)
+		}
+		name, since := b.rec.Name, b.rec.StoppedAt
+		expired := !b.creating && !b.deleted && !b.retained && retainedPhase(phase) && !since.IsZero() && now.Sub(since) >= after
+		m.mu.Unlock()
+		if expired {
+			if _, err := m.deleteLocked(ctx, b, sandboxapi.DeleteRequest{}); err != nil {
+				m.logf("sandbox %s: delete after %s stopped (delete_stopped_after): %v", name, after, err)
+			} else {
+				m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityLifecycle, Sandbox: name, Reason: "delete_stopped_after",
+					Message: "sandbox " + name + " was deleted: it had not run for " + after.String() + ", the longest your policy keeps a stopped sandbox (delete_stopped_after)"})
+			}
+		}
+		b.op.Unlock()
+	}
 }
 
 // otherDriverDeleteWait bounds the wait for a gateway to drop its record
@@ -949,6 +1094,7 @@ func (m *Manager) cleanup(ctx context.Context, gw *Gateway, b *box, keepSnapshot
 		m.recheckEgress(rec.BindingID)
 	}
 	m.unblocks.RemoveSandbox(scopeID(rec.ID, rec.Name))
+	m.approved.RemoveSandbox(scopeID(rec.ID, rec.Name))
 	for _, it := range m.batcher.Forget(rec.Name) {
 		_ = it
 	}
@@ -1076,7 +1222,7 @@ func (m *Manager) retire(b *box) {
 	b.sb, b.eff, b.decider, b.cred = nil, nil, nil, egress.Credential{}
 	b.rec.Retained = true
 	b.rec.BindingID, b.rec.Providers, b.rec.EgressUser, b.rec.Cursor, b.rec.Unblocks = "", nil, "", "", nil
-	b.rec.ApprovedRules = nil
+	b.rec.ApprovedRules, b.rec.Approved = nil, nil
 	name := b.rec.Name
 	m.mu.Unlock()
 	if err := m.saveRecord(b); err != nil {

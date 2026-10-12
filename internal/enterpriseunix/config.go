@@ -140,6 +140,21 @@ func (e *Env) migrateConfigV9(ctx context.Context, raw []byte, v8 *validatedConf
 // needs: the config loader reads the service pins from the environment.
 var envPinMu sync.Mutex
 
+// loadConfigCandidate loads raw as the installed config.yaml the way the
+// gateway does (the service pins set), without checkConfig's compile and
+// layout checks: for the read-only views that describe a config ensure
+// already accepted.
+func (e *Env) loadConfigCandidate(raw []byte) (*config.Config, error) {
+	envPinMu.Lock()
+	defer envPinMu.Unlock()
+	restore := pinEnv(map[string]string{
+		managed.DeploymentModeEnv:    managed.DeploymentModeManagedEnterprise,
+		managed.EnterpriseProfileEnv: managed.ProfileStandalone,
+	})
+	defer restore()
+	return config.LoadRuntimeV8InspectionCandidateFromBytes(e.Layout.ConfigPath, raw)
+}
+
 // validateConfig checks the installed config.yaml bytes; see
 // validateConfigSource.
 func (e *Env) validateConfig(raw []byte) (*validatedConfig, error) {
@@ -542,7 +557,15 @@ func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 // mode, so a pack written under umask 077 passed every other check and
 // failed only when the gateway started; an unset rule_pack_dir resolves to
 // the same <policy_dir>/guardrail/default folder, so the rollback failed too.
+// It also refuses a sandbox packs folder other accounts could read or the
+// gateway cannot (sandboxPackDirProblem). Every ensure plans with it, so a
+// folder opened up while config.yaml stayed the same is refused as well
+// (GAP-0403); the config load already refused a profile pack that is looser
+// than its base or does not match its pin (GAP-0268).
 func (e *Env) checkRulePacksReadable(v *validatedConfig, account Account) error {
+	if problem := e.sandboxPackDirProblem(context.Background(), v.Loaded); problem != "" {
+		return errors.New(problem)
+	}
 	for _, label := range config.RulePackCheckOrder(v.RulePacks) {
 		dir := v.RulePacks[label]
 		// Shipped packs are absent before the first install. Once present,
@@ -585,7 +608,7 @@ func (e *Env) rulePackReadable(dir string, account Account) error {
 	for parent := filepath.Dir(dir); parent != "/" && parent != "."; parent = filepath.Dir(parent) {
 		uid, gid, mode, err := statOwnerMode(e.P(parent))
 		if err == nil && mode.IsDir() && !accountMayAccess(uid, gid, mode, account, 0o1) {
-			return fmt.Errorf("%s is %04o, so the %s service account cannot reach the rule pack below it; make it traversable (for example: chmod o+x %s) and retry", parent, mode.Perm(), e.Layout.ServiceUser, parent)
+			return fmt.Errorf("%s is %04o, so the %s service account cannot reach the rule pack below it; %s", parent, mode.Perm(), e.Layout.ServiceUser, e.serviceGroupTraverseFix(parent))
 		}
 	}
 	root := e.P(dir)
@@ -611,7 +634,10 @@ func (e *Env) rulePackReadable(dir string, account Account) error {
 		if rel, relErr := filepath.Rel(root, full); relErr == nil && rel != "." {
 			shown = filepath.Join(dir, rel)
 		}
-		return fmt.Errorf("%s is %04o, so the %s service account cannot read the rule pack; make it readable (for example: chmod -R u=rwX,go=rX %s) and retry", shown, mode.Perm(), e.Layout.ServiceUser, dir)
+		// The service group reads the pack; other accounts are not given
+		// access (GAP-0258).
+		return fmt.Errorf("%s is %04o, so the %s service account cannot read the rule pack; let the %s service group read it without opening it to other accounts (for example: chown -R root:%s %s && chmod -R u=rwX,g=rX %s) and retry",
+			shown, mode.Perm(), e.Layout.ServiceUser, e.Layout.ServiceGroup, e.Layout.ServiceGroup, dir, dir)
 	})
 }
 

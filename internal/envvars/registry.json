@@ -3303,7 +3303,7 @@
     {
       "name": "DEFENSECLAW_NO_SANDBOX",
       "category": "security_opt_out",
-      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`). The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
+      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`), where your organization allows a host run: on a managed computer whose policy lists the agent in `required_for` the host run is still refused. The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -5429,6 +5429,26 @@
         }
       ],
       "since": "1.0.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LAUNCHER_ARGS",
+      "category": "test_fixture",
+      "purpose": "Passes the arguments of a sandbox launcher test to the child process that runs the real command tree under argv0 defenseclaw, so the in-place cut of the tree stays out of the parent test process.",
+      "default": "unset",
+      "accepted_values": [
+        "test-defined argument list",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/cli/launcher_real_tree_test.go",
+          "description": "The launcher real-tree tests set it when they re-run the test binary as the child that executes the launcher; never read by production runtime paths"
+        }
+      ],
+      "since": "1.1.0"
     },
     {
       "name": "DEFENSECLAW_TEST_LEAK",

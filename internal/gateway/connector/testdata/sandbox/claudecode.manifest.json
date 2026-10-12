@@ -50,38 +50,38 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 10127,
-      "sha256": "60a1abf74491009d00dc22fc69f8ac194fdf36c1471a90966e4d2e7d875e28ec"
+      "size": 12549,
+      "sha256": "0012d90e6c0a4c12a0d191b4a19ac0335ae6f3dd9f22aa5b7673eecb707326b5"
     },
     "/usr/local/lib/defenseclaw/hooks/claude-code-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 10723,
-      "sha256": "452e5ac977ce5f13b0f82825d148a1be494b3019ed6fcba8b6a344851289d600"
+      "size": 10753,
+      "sha256": "96c0b269288f9dd70eb1fa3196ac4f64e7ca2d95d3724497a62d53c54629d8ae"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6077,
-      "sha256": "9c167489a3f308dc6d04c7a4ea714f7e449a126e18c115ce4cd554d58a5b467b"
+      "size": 6107,
+      "sha256": "0cb11f154b2bab985f7f6742065f71435ae7ab7b7cf0f5c12b3953d404fe01bd"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5345,
-      "sha256": "b6a06752cca0d14ef922933f1ed4409f5312aec1bad8748102495e364697335c"
+      "size": 5375,
+      "sha256": "652b0ef00f3f629cde962d8f87227636f69206a801d2ca602f7d2e405808de0f"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 5863,
-      "sha256": "de1b2b2cfa9474cf387654943b6bb5221bbf0e87aa5ae3439b0b91882165d94c"
+      "size": 5893,
+      "sha256": "24783dc480837ac5858fc938cb43d277482df6bd1769d91dc2e8f6ba8f0db9d6"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6247,
-      "sha256": "89397a83e9968d490b3d072396c5027f0a6b4477bbcbe7ac0cd65accac742665"
+      "size": 6277,
+      "sha256": "5fdcabf9a969eda15747921e28c036faf4dd8313efba4b6a0f3eede0cdd2a700"
     },
     "/usr/local/lib/defenseclaw/otel-headers.sh": {
       "mode": "-rwxr-xr-x",

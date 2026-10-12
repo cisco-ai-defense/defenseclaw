@@ -53,8 +53,15 @@ import (
 // FormatVersion is the only pack schema version this release understands.
 const FormatVersion = 1
 
-// DefaultPack is the pack used when neither the config nor a flag selects one.
+// DefaultPack is the pack used when neither the config nor a flag selects
+// one, except on a managed_enterprise computer (DefaultPackFor).
 const DefaultPack = "open"
+
+// ManagedDefaultPack is the default pack on a managed_enterprise computer:
+// the organization's floor (and the profile packs ensure accepts) are
+// judged against balanced, so a run that names no pack gets it as well,
+// not the open pack (GAP-0487).
+const ManagedDefaultPack = "balanced"
 
 // PackFileName is the file a pack directory must contain.
 const PackFileName = "pack.yaml"
@@ -411,7 +418,7 @@ func parse(data []byte, source string, parent parentLoader) (*Pack, error) {
 // ParseIn is Parse for a pack that may extend another: a custom parent is
 // looked up in packDir (`sandbox policy suggest` checks the pack it writes).
 func ParseIn(data []byte, source, packDir string) (*Pack, error) {
-	l := &loader{packDir: packDir, chain: []string{source}}
+	l := &loader{packDir: packDir, subject: callerSubject(), chain: []string{source}}
 	return parse(data, source, l.parent)
 }
 

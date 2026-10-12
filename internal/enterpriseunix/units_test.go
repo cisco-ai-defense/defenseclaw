@@ -66,6 +66,30 @@ func TestSensorHelperSyscallFilterAllowsFanotify(t *testing.T) {
 	}
 }
 
+// GAP-0210: the gateway judges a caller's /dev/kvm access by the device's
+// mode, so the node must be visible in its private /dev (bound read-only)
+// while PrivateDevices' closed device policy still refuses opening it.
+func TestGatewayUnitSeesKVMWithoutDeviceAccess(t *testing.T) {
+	data, err := systemdunits.ReadFile(unitGateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		lines[strings.TrimSpace(line)] = true
+	}
+	for _, want := range []string{"PrivateDevices=true", "BindReadOnlyPaths=-/dev/kvm"} {
+		if !lines[want] {
+			t.Errorf("%s lacks %s", unitGateway, want)
+		}
+	}
+	for line := range lines {
+		if strings.HasPrefix(line, "DeviceAllow=") || strings.HasPrefix(line, "DevicePolicy=") {
+			t.Errorf("%s opens devices to the gateway: %s", unitGateway, line)
+		}
+	}
+}
+
 // GAP-0474: a drop-in that widened the gateway sandbox (User=root,
 // ProtectHome=false) or pointed it at another config was never named; only
 // its symptoms showed. A drop-in that keeps the unit as installed (a site

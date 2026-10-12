@@ -35,7 +35,9 @@ import (
 type PolicyTestOptions struct {
 	// Sandbox tests that sandbox's policy (the daemon's, its unblocks
 	// included); otherwise Pack, Profile and Harness resolve the policy a
-	// run in this folder would get, here, without the daemon.
+	// run in this folder would get, here, without the daemon. On a managed
+	// computer the daemon judges the caller's own policy for that run
+	// (Harness only).
 	Sandbox, Pack, Profile, Harness string
 	Host                            string
 	Port                            int
@@ -86,12 +88,38 @@ func (a *App) PolicyTest(ctx context.Context, o PolicyTestOptions) error {
 		checks[i] = sandboxapi.PolicyCheck{Host: c.Host, Port: c.Port, Binary: c.Binary}
 	}
 	report := &policyTestReport{}
-	if o.Sandbox != "" {
+	// On a managed computer the user cannot read the configuration the
+	// policy is built from: the daemon judges the destinations with the
+	// user's own policy (the managed gateway answers for the caller only).
+	// A managed computer never falls back to the local configuration: with
+	// the daemon down the user gets that error, not a verdict from a
+	// default policy that the organization may contradict. Without
+	// --sandbox the daemon judges the caller's own policy for a new run in
+	// this folder (of --harness's agent), no sandbox needed (GAP-0228).
+	req := sandboxapi.PolicyTestRequest{Sandbox: o.Sandbox, Checks: checks}
+	viaDaemon := o.Sandbox != ""
+	if !viaDaemon && onManagedHost() {
+		if o.Pack != "" || o.Profile != "" {
+			return errors.New("on this computer the policy test judges your own sandbox policy; leave out --pack and --profile, or name a sandbox with --sandbox")
+		}
+		if o.Harness != "" {
+			spec, err := ResolveHarness(o.Harness)
+			if err != nil {
+				return err
+			}
+			req.Harness = spec.Name
+		}
+		if project, err := a.project(); err == nil {
+			req.Project = project
+		}
+		viaDaemon = true
+	}
+	if viaDaemon {
 		api, err := a.api()
 		if err != nil {
 			return err
 		}
-		if report.PolicyTestResult, err = api.PolicyTest(ctx, sandboxapi.PolicyTestRequest{Sandbox: o.Sandbox, Checks: checks}); err != nil {
+		if report.PolicyTestResult, err = api.PolicyTest(ctx, req); err != nil {
 			return apiError(err)
 		}
 	} else if err := a.localPolicyTest(o, checks, report); err != nil {

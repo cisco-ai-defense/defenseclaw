@@ -216,13 +216,14 @@ func TestHeadlessRunDeletesItsSandbox(t *testing.T) {
 			check: func(t *testing.T, ta *testApp) { ta.wantCalls(t, 1, "DELETE", copyName) }},
 		{name: "an interactive session keeps it", input: "", setup: noChanges, opts: RunOptions{Harness: "claude"},
 			check: kept(sbName), not: []string{"deleted"}},
-		// Nobody asked for the delete, so one that fails keeps the sandbox
-		// and the run still succeeds.
+		// Nobody asked for the delete, so the run still succeeds, with an
+		// actionable warning that does not claim a confirmed sandbox state.
 		{name: "a delete that fails", setup: func(ta *testApp) {
 			piped(ta)
 			ta.daemon.errors["DELETE "+sbPath] = sandboxapi.Errorf(sandboxapi.CodeInternal, "the gateway is busy")
 		}, opts: RunOptions{Harness: "claude", Prompt: "reply ok"},
-			want: []string{"Sandbox kept (stopped): it could not be deleted (the gateway is busy) → resume: defenseclaw sandbox connect " + sbName}},
+			want: []string{"could not confirm deletion of " + sbName + " (the gateway is busy)", "defenseclaw sandbox doctor", "then retry `defenseclaw sandbox delete " + sbName + "`"},
+			not:  []string{"Sandbox kept (stopped)", "→ resume:"}},
 	})
 	// A detached run keeps its sandbox: nothing is left to delete it.
 	ta := newTestApp(t, "")
@@ -580,6 +581,28 @@ func TestTheSummaryTellsARefusalApprovedSince(t *testing.T) {
 	lacks(t, ta.output(), "✗ DefenseClaw blocked pypi.org")
 }
 
+// GAP-0635: under network.mode deny no approval opens a destination, so the
+// summary does not say a refused connection was approved since; it says the
+// network is off.
+func TestTheSummaryDoesNotApproveARefusalUnderNetworkDeny(t *testing.T) {
+	ta := newTestApp(t, "")
+	stderr := liveErr(ta)
+	noChanges(ta)
+	ta.daemon.createNetwork = "deny"
+	ta.daemon.live = []sandboxapi.ActivityEvent{
+		{Seq: 1, Kind: sandboxapi.ActivityEgressBlocked, Sandbox: sbName, Host: "github.com", Port: 443,
+			Source: sandboxapi.SourceOpenShell, Reason: "transparent_tcp_policy_denied"},
+		{Seq: 2, Kind: sandboxapi.ActivityApprovalResolved, Sandbox: sbName, Host: "github.com", Port: 443,
+			Reason: sandboxapi.ApprovedByPolicy, Message: "approved github.com"},
+	}
+	ta.term.during = func() {
+		waitFor(t, "the refusal", func() bool { return strings.Contains(stderr.String(), "github.com") })
+	}
+	ta.ok(t, ta.Run(bg, RunOptions{Harness: "claude"}))
+	has(t, ta.output(), "✗ DefenseClaw blocked github.com:443: the network is off for this sandbox (network.mode deny)")
+	lacks(t, ta.output(), "approved since")
+}
+
 // Manual R2-2: while the daemon does not answer, the run says so (the hooks
 // fail closed meanwhile), then, as soon as it answers, that it is back, and
 // the summary keeps the outage.
@@ -674,6 +697,90 @@ func lateContainerStop(at int32) func(*testApp) {
 			}
 			return nil
 		}
+	}
+}
+
+func TestSessionDeletionFailureOffersRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name, code, reason string
+		auto, keepSnapshot bool
+	}{
+		{name: "explicit remove", code: sandboxapi.CodeUpstream, reason: "Cancelled: grpc: the client connection is closing"},
+		{name: "keep undo point", code: sandboxapi.CodeUpstream, reason: "Cancelled: grpc: the client connection is closing", keepSnapshot: true},
+		{name: "automatic remove", code: sandboxapi.CodeUpstream, reason: "Cancelled: grpc: the client connection is closing", auto: true},
+		{name: "unavailable gateway", code: sandboxapi.CodeUnavailable, reason: "the OpenShell gateway is not available"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			sb := sampleSandbox("box")
+			ta.daemon.add(sb)
+			ta.daemon.errors["DELETE "+sandboxapi.PathSandboxes+"/box"] = sandboxapi.Errorf(tc.code, "%s", tc.reason)
+			s := session{app: ta.App, api: ta.daemon.client(), sb: &sb, rm: true, autoRm: tc.auto, keepSnapshot: tc.keepSnapshot}
+			err := s.finish(bg, true)
+			text := ta.output()
+			if tc.auto {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var apiErr *sandboxapi.Error
+				if !errors.As(err, &apiErr) || apiErr.Code != tc.code {
+					t.Fatalf("cleanup error lost its API cause: %v", err)
+				}
+				text += err.Error()
+			}
+			retry := "then retry `defenseclaw sandbox delete box"
+			if tc.keepSnapshot {
+				retry += " --keep-snapshot"
+			}
+			has(t, text, "could not confirm deletion of box", "defenseclaw sandbox doctor", retry+"`", "defenseclaw sandbox list")
+			lacks(t, text, "grpc:", "Sandbox kept", "→ resume:", "sandbox box deleted")
+			ta.wantCalls(t, 1, "DELETE", "box")
+			ta.wantCalls(t, 0, "POST", "box/stop")
+			var req sandboxapi.DeleteRequest
+			if err := json.Unmarshal(ta.daemon.callsTo("DELETE", sandboxapi.PathSandboxes+"/box")[0].Body, &req); err != nil || req.KeepSnapshot != tc.keepSnapshot {
+				t.Fatalf("delete lost the snapshot option: %+v, %v", req, err)
+			}
+		})
+	}
+}
+
+func TestSessionEndNamesRuntimeAndOtherGateway(t *testing.T) {
+	for _, tc := range []struct {
+		name, sandboxDriver, gatewayDriver, managedDriver string
+		others                                            []string
+		want, absent                                      []string
+	}{
+		{name: "MicroVM", sandboxDriver: "vm",
+			want: []string{"MicroVM stopped under the session", "its gateway restarted"}, absent: []string{"Docker", "container stopped", "likely took over"}},
+		{name: "managed gateway took over", managedDriver: "vm", others: []string{"pid 520: gateway marker"},
+			want:   []string{"MicroVM stopped under the session", "likely took over its state", "pid 520: gateway marker", "Stop that process (`kill PID`"},
+			absent: []string{"Docker", "container stopped"}},
+		{name: "gateway driver fallback", gatewayDriver: "vm",
+			want: []string{"MicroVM stopped under the session"}, absent: []string{"Docker", "container stopped"}},
+		{name: "Docker sandbox on a VM default", sandboxDriver: "docker", managedDriver: "vm", others: []string{"pid 520: gateway marker"},
+			want: []string{"container stopped under the session (Docker restarted, or its workload failed)"}, absent: []string{"likely took over", "Stop that process"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runCases(t, []runCase{{name: tc.name, opts: RunOptions{Harness: "claude", Name: sbName}, exit: 1, setup: func(ta *testApp) {
+				noChanges(ta)
+				ta.term.code = 1
+				if tc.gatewayDriver != "" {
+					ta.daemon.status.Gateway = &sandboxapi.Gateway{Name: "default", Driver: tc.gatewayDriver}
+				}
+				if tc.managedDriver != "" {
+					ta.daemon.status.Managed = managedStatusFixture()
+					ta.daemon.status.Managed.Driver = tc.managedDriver
+					ta.daemon.status.Managed.OtherGateways = tc.others
+					ta.daemon.explain.Managed = managedExplainFixture()
+				}
+				ta.term.during = func() {
+					ta.daemon.edit(sbName, func(sb *sandboxapi.Sandbox) {
+						sb.Phase, sb.Driver = "error", tc.sandboxDriver
+					})
+				}
+			}, want: tc.want, not: tc.absent}})
+		})
 	}
 }
 
@@ -796,6 +903,22 @@ func TestSessionSummary(t *testing.T) {
 		{name: "stopped from elsewhere", opts: claude, exit: 255, setup: elsewhere(false), check: noStop,
 			want: []string{sbName + " was stopped from outside this session (`defenseclaw sandbox stop` or the TUI), which ended Claude Code", "Sandbox kept (stopped)"},
 			not:  []string{"the harness itself failed"}},
+		// GAP-0486: on a managed computer the organization stopped it, its
+		// profile no longer allowing sandboxes: not a stop from elsewhere.
+		{name: "the organization revoked sandboxes", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
+			elsewhere(false)(ta)
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.explain.Managed = managedExplainFixture()
+			during := ta.term.during
+			ta.term.during = func() {
+				during()
+				ta.daemon.mu.Lock()
+				ta.daemon.explain.Managed.Allowed = false
+				ta.daemon.mu.Unlock()
+			}
+		}, want: []string{"This sandbox was stopped: your profile no longer allows sandboxes. Request access: it-security@example.com.",
+			"Sandbox kept (stopped) → delete: defenseclaw sandbox delete " + sbName},
+			not: []string{"was stopped from outside this session", "Start it again", "→ resume:", "continue this conversation"}},
 		// GAP-0202: the gateway was stopped (handed to another account)
 		// under the session: not a stop from another terminal.
 		{name: "the gateway went away", opts: claude, exit: 255, check: noStop, setup: func(ta *testApp) {
@@ -1013,6 +1136,13 @@ func TestSessionSummary(t *testing.T) {
 			}
 		}, want: []string{sbName + "'s container stopped under the session (Docker restarted, or its workload failed)"},
 			not: []string{"client connection is closing", "could not stop"}},
+		// GAP-0601: a stop that failed because the connection to the OpenShell
+		// gateway closed leaves a sandbox that may still run: the way to find
+		// out and stop it, and an exit status that is not success.
+		{name: "the stop failed on a closed connection", opts: claude, exit: 1, setup: func(ta *testApp) {
+			ta.daemon.errors["POST "+sandboxapi.PathSandboxes+"/"+sbName+"/stop"] = &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "the connection to the OpenShell gateway closed while " + sbName + " was stopping"}
+		}, want: []string{"could not stop " + sbName, "it may still be running", "defenseclaw sandbox stop " + sbName}},
 		// GAP-0333: a sandbox the session could not stop (OpenShell's error
 		// state after a Docker restart) does not keep running.
 		{name: "keeping when the stop failed", input: "y\n", opts: claude, setup: func(ta *testApp) {

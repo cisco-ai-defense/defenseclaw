@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // The egress proxy refuses a sandbox's HTTPS destination by answering its
@@ -81,6 +83,10 @@ const (
 	NoteDeclined    = "declined"
 	NotePortClosed  = "port_closed"
 	NotePortRefused = "port_refused"
+	// NoteAccessRefused: the organization's floor refused a connection the
+	// user can't approve (a host port under user_approvals: none); Remedy
+	// carries the request-access contact and the Quote line (GAP-0468).
+	NoteAccessRefused = "access_refused"
 )
 
 // refusalMemory is the recent CONNECT refusals of every sandbox binding.
@@ -110,8 +116,10 @@ type refusedHost struct {
 	// (EgressRefusal.Cut).
 	cut  bool
 	sent int64
-	// note is EgressRefusal.Note (noteDirect).
-	note string
+	// note is EgressRefusal.Note (noteDirect), and refusal the managed
+	// refusal a NoteAccessRefused tells (noteRefused).
+	note    string
+	refusal string
 }
 
 func newRefusalMemory() *refusalMemory {
@@ -163,6 +171,15 @@ func (r *refusalMemory) note(e egress.Event, now time.Time) {
 			// Expired: a later refusal of it is told again.
 		case h.host == host && h.port == e.Port:
 			next.told = h.told
+			if h.note != "" && !next.cut {
+				// A repeat of a refusal the manager explained keeps the
+				// explanation, not the bare refusal or its unblock hint: the
+				// agent tried again while its ask waits, after the user
+				// declined it, or after the organization refused it. The ask
+				// is raised by the sink after the first refusal, which races
+				// this one (GAP-0665, GAP-0698).
+				next.note, next.refusal = h.note, h.refusal
+			}
 			if h.cut && !next.cut && next.category == egress.CategoryLargeUpload {
 				// A refusal after the cut: the cut is what to tell.
 				next.cut, next.sent = true, h.sent
@@ -183,6 +200,17 @@ func (r *refusalMemory) note(e egress.Event, now time.Time) {
 // denied", "Couldn't connect") and tried the same again, or said all was
 // well. Its next post-tool hook tells it what happened.
 func (r *refusalMemory) noteDirect(bindingID, sandbox, host string, port int, note string, now time.Time) {
+	r.addDirect(bindingID, sandbox, host, port, note, "", now)
+}
+
+// noteRefused keeps a sandbox binding's connection to host and port that
+// the organization's floor refused, with refusal, its managed refusal
+// text (NoteAccessRefused).
+func (r *refusalMemory) noteRefused(bindingID, sandbox, host string, port int, refusal string, now time.Time) {
+	r.addDirect(bindingID, sandbox, host, port, NoteAccessRefused, refusal, now)
+}
+
+func (r *refusalMemory) addDirect(bindingID, sandbox, host string, port int, note, refusal string, now time.Time) {
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	if bindingID == "" || !refusalHost(host) {
 		return
@@ -198,7 +226,7 @@ func (r *refusalMemory) noteDirect(bindingID, sandbox, host string, port int, no
 		r.byBinding[bindingID] = b
 	}
 	b.sandbox, b.last = sandbox, now
-	next := refusedHost{host: host, port: port, note: note, at: now}
+	next := refusedHost{host: host, port: port, note: note, refusal: refusal, at: now}
 	kept := b.hosts[:0]
 	for _, h := range b.hosts {
 		switch {
@@ -322,9 +350,11 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 		honored = p.Decider == nil || p.Decider.UnblocksAllowed()
 	}
 	harnessName := ""
+	var eff *packs.Effective
 	m.mu.Lock()
-	if b := m.boxes[name]; b != nil {
-		harnessName = b.rec.Harness
+	b := m.boxes[name]
+	if b != nil {
+		harnessName, eff = b.rec.Harness, b.eff
 	}
 	m.mu.Unlock()
 	var out []EgressRefusal
@@ -352,6 +382,10 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: NotePortRefused, Note: NotePortRefused,
 				What: "a port on the user's machine the sandbox policy does not open", Remedy: "do not try it again unless the user says so"})
 			continue
+		case NoteAccessRefused:
+			out = append(out, EgressRefusal{Host: h.host, Port: h.port, Category: NoteAccessRefused, Note: NoteAccessRefused,
+				What: "refused by the organization's DefenseClaw policy", Remedy: accessRemedy(h.refusal)})
+			continue
 		}
 		if _, lifted := m.EgressUnblock(bindingID, name, h.host); lifted {
 			continue
@@ -361,14 +395,29 @@ func (m *Manager) EgressRefusals(bindingID, name string) []EgressRefusal {
 			// Not the site the agent fetched (GAP-0234, GAP-0263).
 			what += "; " + tool
 		}
+		remedy := refusalRemedy(h, name, honored)
+		if rule := egress.AdminRule(h.category); rule != "" && b != nil {
+			// The organization's own lists: the person can't approve it, and
+			// the note says whom to ask and what to quote (GAP-0502).
+			remedy = accessRemedy(m.accessRefusal(b, m.floor(eff), "", rule, h.host))
+		}
 		out = append(out, EgressRefusal{
 			Host: h.host, Port: h.port, Category: string(h.category),
 			What:   what,
-			Remedy: refusalRemedy(h, name, honored),
+			Remedy: remedy,
 			Cut:    h.cut, Sent: h.sent,
 		})
 	}
 	return out
+}
+
+// accessRemedy is a managed refusal (Manager.accessRefusal) as the agent's
+// remedy: the user can't approve it, and how they ask for access.
+func accessRemedy(refusal string) string {
+	if line := sandboxapi.QuoteLine(refusal); line != "" {
+		return "the user can't approve this. " + line
+	}
+	return "only the user's administrator can allow it"
 }
 
 // refusalWhat is the agent's short explanation of a refusal category.

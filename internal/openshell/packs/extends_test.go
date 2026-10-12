@@ -205,7 +205,7 @@ func TestExtendsPolicySourcesAndTrust(t *testing.T) {
 		}
 		return nil
 	}
-	_, err := LoadTrusted("team", root)
+	_, err := loadTrusted(callerSubject(), "team", root)
 	wantPackError(t, err, "untrusted", "")
 	if len(checked) != 2 {
 		t.Fatalf("checked %v", checked)

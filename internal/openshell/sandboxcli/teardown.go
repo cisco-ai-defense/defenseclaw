@@ -27,7 +27,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
@@ -117,9 +116,6 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 	a.defaults()
 	if err := openshell.CheckPlatform(a.GOOS); err != nil {
 		return fmt.Errorf("%w: OpenShell sandboxes run on Linux and macOS only", ErrUnsupported)
-	}
-	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
-		return fmt.Errorf("%w: sandboxes are not supported in managed_enterprise deployments", ErrUnsupported)
 	}
 	p, err := a.planTeardown(ctx, o)
 	if err != nil {

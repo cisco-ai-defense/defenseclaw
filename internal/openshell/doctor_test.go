@@ -84,6 +84,8 @@ type doctorFixture struct {
 	restartedOn openshell.ComputeDriver
 	// env is the environment docker runs in (Doctor.Getenv).
 	env map[string]string
+	// kvm answers OpenKVM: the host has no /dev/kvm until a test gives it one.
+	kvm error
 }
 
 // unit renders the service as systemd reports it, started at f.started
@@ -118,6 +120,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		diskFree: 40 << 30,
 		vmABI:    6,
 		vmKernel: "6.12.65-linuxkit",
+		kvm:      os.ErrNotExist,
 	}
 	f.brew, f.e2fsprogs = filepath.Join(f.home, "homebrew"), filepath.Join(f.home, "homebrew", "opt", "e2fsprogs", "sbin")
 	f.regDir = f.addRegistration("openshell", nil)
@@ -167,6 +170,7 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		LandlockABI:               func() (int, error) { return 6, nil },
 		DockerVMLandlockABI:       func(context.Context) (int, string, error) { f.vmProbes++; return f.vmABI, f.vmKernel, f.vmErr },
 		E2fsprogsDirs:             []string{f.e2fsprogs},
+		OpenKVM:                   func() error { return f.kvm },
 		HostMemory:                func() uint64 { return 32 << 30 },
 		DiskFree:                  func(p string) (uint64, error) { f.diskProbed = p; return f.diskFree, f.diskErr },
 		Listen:                    f.listen,
@@ -181,6 +185,31 @@ func newDoctorFixture(t *testing.T) *doctorFixture {
 		Getenv:                    func(k string) string { return f.env[k] },
 	}
 	return f
+}
+
+// TestDoctorOnAManagedComputerChecksOnlyThisAccount: on a managed computer
+// no host check reads the gateway's files, asks Homebrew, systemd or
+// Docker, or probes OpenShell's default port: those are the
+// administrator's, and the daemon reports them (GAP-0173, GAP-0215).
+func TestDoctorOnAManagedComputerChecksOnlyThisAccount(t *testing.T) {
+	f := newDoctorFixture(t)
+	f.doctor.Managed = true
+	listened := false
+	f.doctor.Listen = func(string, string) (net.Listener, error) { listened = true; return nil, errors.New("not probed") }
+	rep := f.doctor.Run(context.Background())
+	var ids []string
+	for _, c := range rep.Checks {
+		ids = append(ids, c.ID)
+	}
+	if want := []string{openshell.CheckIDPlatform, openshell.CheckIDUser}; !slices.Equal(ids, want) {
+		t.Fatalf("checks = %v, want %v", ids, want)
+	}
+	if calls := f.runner.Calls(); len(calls) > 0 || listened {
+		t.Errorf("probed the host: %v (listen %v)", calls, listened)
+	}
+	if rep.Driver != "" || rep.OpenShellInstallNeeded() || rep.OpenShellUpgradeAvailable() {
+		t.Errorf("driver %q, install %v, upgrade %v", rep.Driver, rep.OpenShellInstallNeeded(), rep.OpenShellUpgradeAvailable())
+	}
 }
 
 // TestDoctorRegistersAGatewayUnderAHomebrewOfYourOwn: the fix for a missing

@@ -291,7 +291,7 @@ actions) carries both in the `policy` object:
 | `applied` | `true` when the running gateway reports the same digest on `/health` and has no `policy.last_reload_error` |
 | `gateway_reported_digest` | The digest `/health` reported. Omitted when the gateway did not answer |
 | `last_reload_error` | `policy.last_reload_error` from `/health`: why the gateway rejected its last reload. Omitted when there is none |
-| `config_unrecorded` | `true` when `config.yaml` was changed outside the lifecycle: `config.generation.json` does not record it, and the running gateway may already enforce it. Omitted otherwise |
+| `config_unrecorded` | `true` when `config.yaml` was changed outside the lifecycle: `config.generation.json` does not record it and the running gateway may already enforce it, or (Windows) the hook guardian recorded the content write as a hand edit within its cycle, which advances `config_generation`. Omitted otherwise |
 
 ```json title="policy (a healthy host)"
 "policy": {
@@ -695,8 +695,13 @@ before keep the old IDs. `status`, `verify` and the hooks are not affected.
 | Guardian and enumerator log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log`. The hook enumerator writes here too, each line prefixed `[hook-enumerator]`; its warnings about one account (an `include_user_email` warning, for example) name the account's SID |
 | Sensor helper log | `C:\ProgramData\Cisco\DefenseClaw\logs\sensor-helper\sensor-helper.log` |
 
-Standard users can read the files in `%WINDIR%\Logs\DefenseClaw`. Only SYSTEM
-and Administrators can write them. The lifecycle writes these logs and events
+Only SYSTEM and Administrators can write the files in `%WINDIR%\Logs\DefenseClaw`,
+and only Administrators and members of Event Log Readers can read them,
+because each result names the accounts it found, their SIDs and guardrail
+profiles. Each lifecycle run sets these permissions again, so a folder an
+earlier release let standard users read is closed on the next run. The events
+list only the code of each error and warning; their text is in the lifecycle
+log. The lifecycle writes these logs and events
 only when it runs elevated.
 
 | Event ID | Meaning |

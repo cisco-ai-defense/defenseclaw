@@ -258,6 +258,17 @@ func TestSandboxEgressRefusalNoticeOfSSH(t *testing.T) {
 		!strings.Contains(got, "Tell the user: running the sandbox again with --host-port 8765") {
 		t.Fatalf("closed note = %q", got)
 	}
+	// GAP-0468: a port the organization refuses is no ask that waits: the
+	// note says nobody here can approve it, and whom the user asks.
+	refused := port
+	refused.Note, refused.What = manager.NoteAccessRefused, "refused by the organization's DefenseClaw policy"
+	refused.Remedy = "the user can't approve this. Request access: it-security@example.com. Quote: rule user_approvals, host host.openshell.internal:8765, sandbox un04n."
+	if got := sandboxEgressRefusalNotice([]SandboxEgressRefusal{refused}); !strings.Contains(got,
+		"connection to port 8765 on the user's machine (host.openshell.internal:8765) was refused by the organization's DefenseClaw policy") ||
+		!strings.Contains(got, "The user can't approve this. Request access: it-security@example.com. Quote: rule user_approvals") ||
+		strings.Contains(got, "waits for the user") {
+		t.Fatalf("refused note = %q", got)
+	}
 }
 
 func TestSandboxEgressRefusalNotice(t *testing.T) {

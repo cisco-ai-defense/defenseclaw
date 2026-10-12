@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -31,7 +32,9 @@ import (
 	"golang.org/x/term"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxcli"
 )
 
@@ -39,7 +42,8 @@ import (
 // tests replace it to inject fakes.
 var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 	return &sandboxcli.App{
-		Cfg: cfg,
+		Cfg:          cfg,
+		OpenShellCLI: setupModeOpenShellCLI,
 		IO: sandboxcli.IO{
 			In: cmd.InOrStdin(), Out: cmd.OutOrStdout(), Err: cmd.ErrOrStderr(),
 			TTY:    term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd())),
@@ -47,8 +51,21 @@ var newSandboxApp = func(cmd *cobra.Command) *sandboxcli.App {
 			OutTTY: term.IsTerminal(int(os.Stdout.Fd())),
 			ErrTTY: term.IsTerminal(int(os.Stderr.Fd())),
 			Color:  ColorEnabled(),
+			Width:  terminalWidth(os.Stdout),
 		},
 	}
+}
+
+// terminalWidth is the width of f in columns when it is a terminal, else 0
+// (the sandbox output then does not wrap).
+func terminalWidth(f *os.File) int {
+	if !term.IsTerminal(int(f.Fd())) {
+		return 0
+	}
+	if w, _, err := term.GetSize(int(f.Fd())); err == nil {
+		return w
+	}
+	return 0
 }
 
 // sandboxConfigOptional marks commands that run without a DefenseClaw
@@ -78,6 +95,67 @@ in a project folder.`,
 	SilenceUsage:      true,
 }
 
+// sandboxHelp uses the same trusted install record as the managed launcher.
+// Help skips pre-run, so cfg has not been loaded when these texts are needed.
+func sandboxHelp(cmd *cobra.Command, args []string) {
+	if _, managed := managedHostUnixRecord(nil); managed {
+		applyManagedSandboxHelp()
+	}
+	// Keep the root's help checks, which are installed after this command tree.
+	rootCmd.HelpFunc()(cmd, args)
+}
+
+func applyManagedSandboxHelp() {
+	sandboxCmd.Long = launcherSandboxLong
+	for _, cmd := range sandboxCmd.Commands() {
+		var hide []string
+		switch cmd.Name() {
+		case "setup":
+			cmd.Hidden = true
+			cmd.Short = "Sandbox setup is managed by your organization"
+			cmd.Long = managedSetupAnswer
+			cmd.Flags().VisitAll(func(flag *pflag.Flag) {
+				if flag.Name != "help" {
+					flag.Hidden = true
+				}
+			})
+		case "doctor":
+			cmd.Long = `Checks that your account can run sandboxes under the policy your organization set
+for you: the platform, sandbox service, OpenShell CLI and compute driver, harness
+images, shell wrappers and organization policy. Exits 1 when a check fails (with
+--output json the result is printed and the exit status is 0; read "ok"). Your
+organization sets up and repairs sandboxes; if a check fails, ask your administrator.`
+		case "run":
+			cmd.Long = launcherRunLong
+			hide = []string{"context", "no-snapshot"}
+			cmd.Flags().Lookup("copy").Usage = "work on a copy of the folder (every run on this computer does)"
+		case "start":
+			cmd.Long = "Starts a stopped sandbox for a new session on its copy of your project folder.\n" +
+				"Your project folder stays unchanged until you review and bring the changes back."
+			hide = []string{"no-snapshot", "new-snapshot"}
+		case "delete":
+			cmd.Short = "Delete your sandboxes with their providers and credentials"
+			hide = []string{"keep-snapshot"}
+		case "review":
+			cmd.Long = `Previews what "sandbox pull" would bring back from the sandbox's copy of your
+project folder, flagging files that can run code on this machine. Applies nothing;
+with --output json it prints the pull's result.`
+		case "undo":
+			cmd.Short = "Revert the last pull from a sandbox's copy of your project folder"
+			cmd.Long = "Reverts this copy-mode sandbox's last `pull --apply`, after a preview. Edits you\n" +
+				"made since stay."
+		}
+		for _, name := range hide {
+			if flag := cmd.Flags().Lookup(name); flag != nil {
+				flag.Hidden = true
+			}
+		}
+		if cmd.Name() == "run" || cmd.Name() == "connect" {
+			cmd.Flags().Lookup("yes").Usage = "take the defaults at the end of the session (leave the changes in the sandbox for pull)"
+		}
+	}
+}
+
 func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 	if err := sandboxHostRefusal(runtime.GOOS, runtime.GOARCH, cmd.Annotations[sandboxConfigOptional] == "true"); err != nil {
 		return withExitCode(err, 3)
@@ -86,6 +164,27 @@ func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 	// needs no configuration (there is none inside the sandbox).
 	if cmd.Name() == "run" && os.Getenv(openshell.EnvSandboxID) != "" {
 		return nil
+	}
+	// On a standalone managed computer the caller's own sandbox daemon holds
+	// the settings the managed gateway gave it, and sandboxcli talks only to
+	// that daemon: no per-user config.yaml is read. A runtime descriptor that
+	// cannot be trusted, or root, refuses (never the per-user gateway).
+	switch _, err := sandboxHostClient(runtime.GOOS); {
+	case err == nil:
+		cfg = managedSandboxCommandConfig()
+		return nil
+	case !errors.Is(err, sandboxapi.ErrNotManagedHost):
+		if cmd.Parent() != nil && cmd.Parent().Name() == "pack" && os.Geteuid() == 0 {
+			// Root has no sandbox daemon here; name its offline digest
+			// command, which `required_pack_digest` needs (GAP-0224).
+			platform := map[string]string{"darwin": "macos"}[runtime.GOOS]
+			if platform == "" {
+				platform = runtime.GOOS
+			}
+			err = fmt.Errorf("%w; an administrator reads a pack's digest with `%s enterprise %s sandbox pack-digest <pack>`",
+				err, managedHostGatewayCommand(), platform)
+		}
+		return withExitCode(err, 3)
 	}
 	if err := loadGatewayCommandConfigOnly(); err != nil {
 		if cmd.Annotations[sandboxConfigOptional] == "true" {
@@ -101,6 +200,43 @@ func sandboxPreRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	return nil
+}
+
+// sandboxHostClient is the client of the caller's sandbox daemon on a
+// standalone managed computer; a seam for tests.
+var sandboxHostClient = sandboxapi.ClientForHost
+
+// managedSandboxCommandConfig is the configuration the sandbox commands run
+// with on a standalone managed computer: the defaults, marked managed, with
+// sandboxes on. The daemon decides everything else and refuses what the
+// organization turned off.
+func managedSandboxCommandConfig() *config.Config {
+	c := config.DefaultConfig()
+	c.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	c.Enterprise.Profile = managed.ProfileStandalone
+	c.OpenShell.Enabled = true
+	if cli := setupModeOpenShellCLI(); cli != "" {
+		c.OpenShell.Binary = cli
+	}
+	return c
+}
+
+// setupModeOpenShellCLI is the openshell CLI the account's sandbox daemon
+// installed into ~/.local in setup mode (its install record is there), which
+// the account's PATH may not hold; "" otherwise, keeping the PATH lookup.
+func setupModeOpenShellCLI() string {
+	home, err := sandboxAccountHome()
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Lstat(filepath.Join(home, filepath.FromSlash(openshell.TarballStateDir), openshell.TarballManifestName)); err != nil {
+		return ""
+	}
+	cli := filepath.Join(home, ".local", "bin", openshell.DefaultBinary)
+	if info, err := os.Lstat(cli); err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return cli
 }
 
 // sandboxHostRefusal refuses, before any sandbox command runs, a machine
@@ -128,6 +264,9 @@ func sandboxRunE(fn func(ctx context.Context, app *sandboxcli.App, cmd *cobra.Co
 		if err == nil {
 			return nil
 		}
+		// A refusal on a managed computer reads in the organization's words
+		// with the caller's contact, never with a bare reason code.
+		err = app.ManagedError(cmd.Context(), err)
 		cmd.SilenceErrors = true
 		var exit *sandboxcli.ExitError
 		var silent *sandboxcli.Silent
@@ -251,6 +390,13 @@ func (v *jsonOutputValue) Type() string { return "bool" }
 
 func parseOutput(s string) (sandboxcli.OutputFormat, error) { return sandboxcli.ParseOutput(s) }
 
+// managedSetupAnswer is what `sandbox setup` says on a managed computer. It
+// ran the per-user setup there (Docker group advice, an OpenShell install,
+// shell and gateway changes); the organization sets sandboxes up, so there
+// is nothing for the user to do (GAP-0249).
+const managedSetupAnswer = "your organization sets up sandboxes on this computer, so `sandbox setup` has nothing to do here. " +
+	"`defenseclaw sandbox doctor` shows whether sandboxes are ready for you; if not, ask your administrator"
+
 func newSandboxSetupCmd() *cobra.Command {
 	var o sandboxcli.SetupOptions
 	cmd := &cobra.Command{
@@ -263,6 +409,9 @@ off unless you keep it; on a Mac it switches the gateway to OpenShell's MicroVM 
 Then it records the harnesses, offers shell wrappers and builds the harness images.`,
 		Args: cobra.NoArgs,
 		RunE: sandboxRunE(func(ctx context.Context, app *sandboxcli.App, _ *cobra.Command, _ []string) error {
+			if app.ManagedHost() {
+				return &sandboxcli.ExitError{Code: 3, Err: errors.New(managedSetupAnswer)}
+			}
 			return app.Setup(ctx, o)
 		}),
 	}
@@ -300,7 +449,11 @@ check fails (with --output json the result is printed and the exit status is 0; 
 				return err
 			}
 			o.Output = out
-			return app.RunDoctor(ctx, o)
+			err = app.RunDoctor(ctx, o)
+			if out != sandboxcli.OutputJSON {
+				app.StoppedNotices(ctx)
+			}
+			return err
 		}),
 	}
 	outputFlag(cmd) // also registers --json
@@ -707,7 +860,9 @@ func newSandboxUnblockCmd() *cobra.Command {
 		Short: "Lift an egress block for one sandbox or for every sandbox",
 		Long: `Lifts a block of the blocklist feed or of the profile's default (IP addresses under
 open, hosts off the allowlist under balanced) for one sandbox (--sandbox NAME) or for
-every sandbox (--always). It cannot lift a block-list entry: remove your own with
+every sandbox (--always). With --always, --sandbox NAME names the sandbox whose policy
+checks the unblock; on a managed computer, which keeps it for you through one of your
+sandboxes, your only sandbox is used without it. It cannot lift a block-list entry: remove your own with
 ` + "`defenseclaw sandbox policy block --remove HOST`" + `; a pack's, the repository
 policy's (.defenseclaw/sandbox.yaml) and your organization's stay. Nor does it open
 a private network (add the exact host to openshell.egress.allow), this machine (run
@@ -718,7 +873,7 @@ the sandbox with --host-port PORT) or a cloud metadata or link-local address.`,
 			return app.Unblock(ctx, o)
 		}),
 	}
-	cmd.Flags().StringVar(&o.Sandbox, "sandbox", "", "unblock for this sandbox only")
+	cmd.Flags().StringVar(&o.Sandbox, "sandbox", "", "unblock for this sandbox only (with --always: the sandbox whose policy checks it)")
 	cmd.Flags().BoolVar(&o.Always, "always", false, "unblock for every sandbox from now on")
 	return cmd
 }
@@ -794,6 +949,9 @@ func newSandboxPolicyCmd() *cobra.Command {
 		})
 		outputFlag(sub)
 		policyFlags(sub, &o)
+		if explain {
+			sub.Flags().BoolVar(&o.Sources, "sources", false, "on a managed computer, say where each value of your policy comes from")
+		}
 		cmd.AddCommand(sub)
 	}
 	var to sandboxcli.PolicyTestOptions
@@ -967,12 +1125,13 @@ func newSandboxImageCmd() *cobra.Command {
 	var ro sandboxcli.ImageRemoveOptions
 	rm := &cobra.Command{
 		Use:   "rm <harness>...",
-		Short: "Remove the harnesses' images (on a Mac also their MicroVM disks)",
+		Short: "Remove the harnesses' images (on a MicroVM gateway also their disks)",
 		Long: `Removes the images DefenseClaw built for the named harnesses under this data
 directory: the harness images and, on the MicroVM driver, the run images and
-aliases made from them, and forgets their records. On a Mac it also removes the
-MicroVM disks OpenShell prepared from them (about 5 GB each), once Docker no
-longer has their images; that needs the DefenseClaw daemon's list of sandboxes.
+aliases made from them, and forgets their records. On a MicroVM gateway (a Mac,
+or Linux on the vm driver) it also removes the MicroVM disks OpenShell prepared
+from them (about 5 GB each), once Docker no longer has their images; that needs
+the DefenseClaw daemon's list of sandboxes.
 It refuses, removing nothing, while a sandbox is recorded with one of the
 images: delete that sandbox first. The next run of the harness builds its image
 again.`,
@@ -1042,4 +1201,5 @@ func init() {
 		newSandboxWrapperCmd(true), newSandboxWrapperCmd(false), newSandboxTeardownCmd(),
 	)
 	rootCmd.AddCommand(sandboxCmd)
+	sandboxCmd.SetHelpFunc(sandboxHelp)
 }
