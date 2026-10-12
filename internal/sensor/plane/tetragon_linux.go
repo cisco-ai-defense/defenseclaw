@@ -124,20 +124,22 @@ var (
 // from the lifecycle's root-owned drop-in, builds one.
 func NewTetragonSource(homeDirs []string, options TetragonOptions) Source {
 	return &tetragonSource{
-		homes:   homeDirs,
-		options: options,
-		buffer:  NewBuffer(),
-		changes: make(chan struct{}, 1),
-		now:     time.Now,
+		homes:     homeDirs,
+		options:   options,
+		buffer:    NewBuffer(),
+		changes:   make(chan struct{}, 1),
+		closeDone: make(chan struct{}),
+		now:       time.Now,
 	}
 }
 
 type tetragonSource struct {
-	homes   []string
-	options TetragonOptions
-	buffer  *Buffer
-	changes chan struct{}
-	now     func() time.Time
+	homes     []string
+	options   TetragonOptions
+	buffer    *Buffer
+	changes   chan struct{}
+	closeDone chan struct{}
+	now       func() time.Time
 
 	mu      sync.Mutex
 	closed  bool
@@ -747,9 +749,11 @@ func (s *tetragonSource) Close() error {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
+		<-s.closeDone
 		return nil
 	}
 	s.closed = true
+	defer close(s.closeDone)
 	cancel, feed, proc, files := s.cancel, s.feed, s.proc, s.files
 	s.feed, s.proc, s.files = nil, nil, nil
 	s.mu.Unlock()
