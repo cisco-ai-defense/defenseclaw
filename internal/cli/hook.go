@@ -520,8 +520,11 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 			managedRuntimeFailure = enterpriseManagedHookRuntimeFailureReason()
 		}
 		opts.ManagedRuntimeFailure = managedRuntimeFailure
-		opts.FailMode = "closed"
-		opts.StrictAvailability = true
+		opts.FailMode = enterpriseManagedHookRuntimeFailMode()
+		if managedRuntimeFailure != "" {
+			opts.FailMode = "closed"
+			opts.StrictAvailability = true
+		}
 	}
 
 	if v := os.Getenv("DEFENSECLAW_HOOK_MAX_BODY"); v != "" {

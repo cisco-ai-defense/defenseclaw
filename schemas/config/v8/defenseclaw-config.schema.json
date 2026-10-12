@@ -1876,7 +1876,7 @@
             "open",
             "closed"
           ],
-          "default": "closed"
+          "default": "open"
         },
         "hook_self_heal": {
           "type": "boolean",

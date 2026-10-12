@@ -358,7 +358,29 @@ func TestWindowsCursorLifecycleRestoreAcceptsExactActivationPrefixes(t *testing.
 		state:         windowsManagedFileSnapshot{path: statePath},
 		receipt:       windowsManagedFileSnapshot{path: receiptPath},
 	}
+	mappedAdapter, err := connector.RenderWindowsCursorEnterpriseAdapterForTargets(hookExecutable, map[string]string{target.SID: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mappedState, err := windowsCursorManagedStateBody(windowsCursorManagedPolicyState{
+		SchemaVersion: 1, HookExecutable: hookExecutable, GatewayAddr: allowed.GatewayAddr,
+		GatewayServiceName: allowed.GatewayServiceName, AdapterSHA256: windowsManagedPolicyDigest(mappedAdapter),
+		ReceiptSHA256: windowsManagedPolicyDigest(receipt), Targets: []WindowsCursorManagedRuntimeTarget{target},
+		HookFailMode: "open", TargetFailModes: map[string]string{target.SID: "open"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, mutate := range map[string]func(*windowsCursorManagedArtifacts){
+		"mapped adapter": func(value *windowsCursorManagedArtifacts) {
+			value.adapter.existed, value.adapter.data = true, mappedAdapter
+		},
+		"mapped adapter receipt and state": func(value *windowsCursorManagedArtifacts) {
+			value.adapter.existed, value.adapter.data = true, mappedAdapter
+			value.receipt.existed, value.receipt.data = true, receipt
+			value.receiptMetadata = privateMetadata
+			value.state.existed, value.state.data = true, mappedState
+		},
 		"unchanged inactive preimage": func(*windowsCursorManagedArtifacts) {},
 		"adapter": func(value *windowsCursorManagedArtifacts) {
 			value.adapter.existed, value.adapter.data = true, adapter

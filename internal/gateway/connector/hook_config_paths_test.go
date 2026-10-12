@@ -202,9 +202,10 @@ func TestOwnedHooksPresent_CursorRequiresExactObserveContract(t *testing.T) {
 func TestOwnedHooksPresent_CursorAcceptsExactActionContract(t *testing.T) {
 	conn, opts, cfgPath := cursorTestSetup(t)
 	opts.GuardrailMode = "action"
-	// The connector derives Cursor failure behavior from the selected mode;
-	// an inherited fail-open value must not weaken action registration.
-	opts.HookFailMode = "open"
+	// Delivery policy, not guardrail mode, selects Cursor's failClosed flag
+	// (release #1163): an explicit closed policy registers every event
+	// fail-closed.
+	opts.HookFailMode = "closed"
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}

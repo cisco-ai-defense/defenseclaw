@@ -1653,7 +1653,7 @@ type GuardrailConfig struct {
 	//     the event with a stderr warning and an entry in
 	//     $DEFENSECLAW_HOME/logs/hook-failures.jsonl.
 	//
-	//   - "closed" (fresh-install default): the same failures BLOCK where
+	//   - "closed" (explicit opt-in): the same failures BLOCK where
 	//     the connector/event exposes a blocking response. Migrated legacy
 	//     configs can retain an explicit "open".
 	//
@@ -2121,39 +2121,27 @@ func validateAllowPrivateUpstreams(ips []string) error {
 }
 
 // EffectiveHookFailMode returns the operator-chosen hook fail mode,
-// defaulting to "closed" when unset (CodeGuard rule
-// codeguard-0-authorization-access-control: deny by default). The
-// canonical "open" sentinel is the only way to get the legacy
-// fail-open behavior; any other value (typo, blank, malformed
-// migration row) collapses to "closed" so the agent never silently
-// fails open at the hook failure boundary. Centralized here so the
-// sidecar and any future config-edit surfaces never disagree on the
-// default.
-//
-// Backwards compatibility: existing operators on v3 are protected by
-// the _migrate_0_4_0_seed_hook_fail_mode migration in
-// cli/defenseclaw/migrations.py, which writes “hook_fail_mode: open“
-// into config.yaml on first upgrade. New installs and explicit-empty
-// values get the safer default.
+// defaulting to "open" when unset. Explicit closed and malformed non-empty
+// values remain closed; existing explicit configuration is not migrated.
 func (g *GuardrailConfig) EffectiveHookFailMode() string {
 	if g == nil {
-		return "closed"
+		return "open"
 	}
-	if g.HookFailMode == "open" {
+	if strings.TrimSpace(g.HookFailMode) == "" || strings.TrimSpace(g.HookFailMode) == "open" {
 		return "open"
 	}
 	return "closed"
 }
 
 // EffectiveHookFailModeFor returns the hook fail mode for the named
-// connector. An explicit connector override wins even in observe mode: it is
-// an operator-selected response-integrity posture, not a policy verdict.
-// Observe-only connectors without an override retain the historical fail-open
-// behavior; action mode falls through to the global value. Pass "" to resolve
+// connector. An explicit connector override wins over the global value.
+// Delivery policy is independent of observe/action enforcement: neither mode
+// may replace an explicit closed setting with open during setup or repair.
+// Unset policy defaults to open. Pass "" to resolve
 // the global connector mode/value. Pure lookup — never errors, never mutates.
 func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 	if g == nil {
-		return "closed"
+		return "open"
 	}
 	if pc, ok := g.connectorOverride(connector); ok {
 		if strings.TrimSpace(pc.HookFailMode) != "" {
@@ -2167,9 +2155,6 @@ func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
 			}
 			return "closed"
 		}
-	}
-	if !strings.EqualFold(strings.TrimSpace(g.EffectiveMode(connector)), "action") {
-		return "open"
 	}
 	return g.EffectiveHookFailMode()
 }
@@ -3607,15 +3592,8 @@ func setDefaults(dataDir string) {
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
-	// "closed" is the safer default — transport, authentication, and
-	// invalid-response failures BLOCK supported events rather than silently
-	// allowing them. Pre-existing operators are protected
-	// by _migrate_0_4_0_seed_hook_fail_mode (migrations.py) which
-	// writes ``hook_fail_mode: open`` to existing config.yaml so prior
-	// behavior is preserved on upgrade. Operators who explicitly want
-	// fail-open run `defenseclaw guardrail fail-mode open` (or set
-	// guardrail.hook_fail_mode: open in YAML).
-	viper.SetDefault("guardrail.hook_fail_mode", "closed")
+	// Availability is fail-open by default; explicit closed policy is preserved.
+	viper.SetDefault("guardrail.hook_fail_mode", "open")
 	// Self-heal connector hook configs by default: if a user deletes
 	// the DefenseClaw hook block while the gateway is running, the
 	// hook config guard re-installs it. Operators can opt out with

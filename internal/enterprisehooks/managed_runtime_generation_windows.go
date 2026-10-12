@@ -352,6 +352,7 @@ func resolveWindowsManagedRuntimeGenerationPlatform(
 			HookExecutable:             bundle.HookExecutable,
 			GatewayAddr:                bundle.GatewayAddr,
 			GatewayServiceName:         bundle.GatewayServiceName,
+			FailMode:                   bundle.FailMode,
 			GenerationID:               bundle.GenerationID,
 			BundleSHA256:               entry.BundleSHA256,
 			HookContractID:             bundle.HookContractID,
@@ -1258,6 +1259,7 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 		HookExecutable:             bundle.HookExecutable,
 		GatewayAddr:                bundle.GatewayAddr,
 		GatewayServiceName:         bundle.GatewayServiceName,
+		FailMode:                   bundle.FailMode,
 		ScopedToken:                bundle.ScopedToken,
 		HookContractID:             bundle.HookContractID,
 		HookContractLockUpdatedAt:  bundle.HookContractLockUpdatedAt,
@@ -1289,6 +1291,10 @@ func loadUnselectedWindowsManagedRuntimeBundle(
 func validateWindowsManagedRuntimeGenerationDesired(
 	desired WindowsManagedRuntimeGenerationDesired,
 ) (WindowsManagedRuntimeGenerationDesired, *windows.SID, error) {
+	if desired.FailMode != "" && desired.FailMode != "open" && desired.FailMode != "closed" {
+		return desired, nil, errors.New("enterprise hooks: managed runtime fail mode is invalid")
+	}
+	desired.FailMode = canonicalHookFailMode(desired.FailMode)
 	target, err := validateWindowsManagedRuntimeGenerationIdentity(desired)
 	if err != nil {
 		return desired, nil, err
@@ -1785,7 +1791,7 @@ func windowsManagedRuntimeBundleFromDesired(
 		HookExecutable:             desired.HookExecutable,
 		GatewayAddr:                desired.GatewayAddr,
 		GatewayServiceName:         desired.GatewayServiceName,
-		FailMode:                   "closed",
+		FailMode:                   canonicalHookFailMode(desired.FailMode),
 		ScopedToken:                desired.ScopedToken,
 		HookContractID:             desired.HookContractID,
 		HookContractLockUpdatedAt:  desired.HookContractLockUpdatedAt,
@@ -1846,6 +1852,7 @@ func validateWindowsManagedRuntimeBundleAgainstSelector(
 		HookExecutable:             bundle.HookExecutable,
 		GatewayAddr:                bundle.GatewayAddr,
 		GatewayServiceName:         bundle.GatewayServiceName,
+		FailMode:                   bundle.FailMode,
 		ScopedToken:                bundle.ScopedToken,
 		HookContractID:             bundle.HookContractID,
 		HookContractLockUpdatedAt:  bundle.HookContractLockUpdatedAt,
@@ -1868,7 +1875,7 @@ func windowsManagedRuntimeBundleMatchesSelectorIdentity(
 		sameWindowsEnterprisePath(bundle.HookExecutable, entry.HookExecutable) && bundle.HookExecutable == entry.HookExecutable &&
 		bundle.GatewayAddr == entry.GatewayAddr &&
 		bundle.GatewayServiceName == entry.GatewayServiceName &&
-		bundle.FailMode == "closed"
+		(bundle.FailMode == "closed" || bundle.FailMode == "open")
 }
 
 func windowsManagedRuntimeBundleMatchesDesired(
@@ -1880,7 +1887,7 @@ func windowsManagedRuntimeBundleMatchesDesired(
 		bundle.HookExecutable == desired.HookExecutable &&
 		bundle.GatewayAddr == desired.GatewayAddr &&
 		bundle.GatewayServiceName == desired.GatewayServiceName &&
-		bundle.FailMode == "closed" &&
+		bundle.FailMode == canonicalHookFailMode(desired.FailMode) &&
 		subtle.ConstantTimeCompare([]byte(bundle.ScopedToken), []byte(desired.ScopedToken)) == 1 &&
 		bundle.HookContractID == desired.HookContractID &&
 		// The lock timestamp is audit metadata for the shared, multi-connector

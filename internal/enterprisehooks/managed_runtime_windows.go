@@ -37,6 +37,7 @@ type WindowsManagedHookRuntime struct {
 	Registered         bool   `json:"registered"`
 	GatewayAddr        string `json:"gateway_addr"`
 	GatewayServiceName string `json:"gateway_service_name"`
+	FailMode           string `json:"fail_mode"`
 	ScopedToken        string `json:"-"`
 	GenerationID       string `json:"generation_id"`
 }
@@ -128,11 +129,24 @@ func resolveWindowsCursorManagedHookRuntime(
 		return result, err
 	}
 	result.GatewayAddr = generation.GatewayAddr
+	if err := verifyWindowsCursorRuntimeDeliveryMode(target.hookFailMode, generation.FailMode); err != nil {
+		return result, err
+	}
 	result.GatewayServiceName = generation.GatewayServiceName
 	result.ScopedToken = generation.ScopedToken()
 	result.GenerationID = generation.GenerationID
+	result.FailMode = generation.FailMode
 	result.Registered = true
 	return result, nil
+}
+
+func verifyWindowsCursorRuntimeDeliveryMode(adapterMode, generationMode string) error {
+	// Legacy singleton adapters had no per-SID mode binding. Reconciliation
+	// migrates them without invalidating previously authenticated generations.
+	if adapterMode != "" && adapterMode != generationMode {
+		return errors.New("enterprise hooks: Cursor adapter mode differs from the authenticated runtime generation")
+	}
+	return nil
 }
 
 func resolveWindowsClaudeManagedHookRuntime(
@@ -201,6 +215,7 @@ func resolveWindowsClaudeManagedHookRuntime(
 	result.GatewayServiceName = generation.GatewayServiceName
 	result.ScopedToken = generation.ScopedToken()
 	result.GenerationID = generation.GenerationID
+	result.FailMode = generation.FailMode
 	result.Registered = true
 	return result, nil
 }
@@ -260,6 +275,7 @@ func resolveWindowsCodexManagedHookRuntime(
 	result.GatewayServiceName = generation.GatewayServiceName
 	result.ScopedToken = generation.ScopedToken()
 	result.GenerationID = generation.GenerationID
+	result.FailMode = generation.FailMode
 	result.Registered = true
 	return result, nil
 }

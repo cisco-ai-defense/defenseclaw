@@ -72,8 +72,9 @@ func TestStandaloneKiroFollowsCLIUpgradesAtOrAboveTheFloor(t *testing.T) {
 	}
 }
 
-// Outside the standalone profile nothing changes: the floor does not apply
-// and a version change is still refused as drift.
+// Outside the standalone profile the floor does not apply, and a version
+// change is no longer refused as drift (#1163): Kiro's hooks are not
+// version-gated, so the repair keeps the configured delivery policy.
 func TestKiroFloorIsStandaloneOnly(t *testing.T) {
 	skipIfRoot(t)
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
@@ -82,9 +83,8 @@ func TestKiroFloorIsStandaloneOnly(t *testing.T) {
 	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.20.0")); err != nil {
 		t.Fatalf("install below the standalone floor outside the standalone profile: %v", err)
 	}
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.25.0")); err == nil ||
-		!strings.Contains(err.Error(), "hook contract drift detected") {
-		t.Fatalf("version change outside the standalone profile = %v, want the drift refusal", err)
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.25.0")); err != nil {
+		t.Fatalf("version change outside the standalone profile = %v, want the repair to follow it", err)
 	}
 }
 

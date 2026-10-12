@@ -1074,6 +1074,105 @@ $payload = [ordered]@{
         $extraEventRejected = $true
     }
     Assert-True $extraEventRejected 'Copilot live harness rejects unreviewed extra events'
+
+    foreach ($code in @(2, 32, 33)) {
+        $cause = [IO.IOException]::new('synthetic transient file access', (-2147024896 + $code))
+        Assert-True (Test-AmpPluginSelfHealReadRetry $cause) `
+            "Amp self-heal retries Win32 file access error $code"
+        $wrapped = [Reflection.TargetInvocationException]::new($cause)
+        Assert-True (Test-AmpPluginSelfHealReadRetry $wrapped) `
+            "Amp self-heal unwraps method invocation errors for Win32 error $code"
+    }
+    foreach ($cause in @(
+        [IO.IOException]::new('synthetic access denied', -2147024891),
+        [IO.IOException]::new('synthetic unrelated I/O failure'),
+        [UnauthorizedAccessException]::new('synthetic access denied'),
+        [ArgumentException]::new('synthetic malformed path')
+    )) {
+        Assert-True (-not (Test-AmpPluginSelfHealReadRetry $cause)) `
+            'Amp self-heal does not hide permission, path or unrelated I/O errors'
+    }
+    foreach ($scenario in @('released-lock', 'persistent-lock', 'wrong-bytes', 'missing-file', 'acl-rejected')) {
+        # Scoped doubles accelerate the unchanged polling budget. Use a real
+        # Windows FileShare.None handle rather than mocking ReadAllBytes so
+        # this reproduces the .NET method-invocation wrapper seen in CI.
+        & {
+            $Connector = 'amp'
+            $fixturePluginPath = Join-Path $temp "amp-self-heal-$scenario.ts"
+            $expectedBytes = [Text.Encoding]::UTF8.GetBytes('synthetic managed plugin')
+            [IO.File]::WriteAllBytes($fixturePluginPath, $expectedBytes)
+            $poll = [pscustomobject]@{
+                Attempts = 0
+                Handle = $null
+                ACLChecks = 0
+                Successes = 0
+            }
+            function Start-Sleep {
+                param([int]$Milliseconds)
+                Assert-True ($Milliseconds -eq 250) 'Amp self-heal retains its polling interval'
+                $poll.Attempts++
+                if ($poll.Attempts -eq 1 -and $scenario -ne 'missing-file') {
+                    $restoredBytes = if ($scenario -eq 'wrong-bytes') {
+                        [Text.Encoding]::UTF8.GetBytes('wrong plugin bytes')
+                    } else { $expectedBytes }
+                    [IO.File]::WriteAllBytes($fixturePluginPath, $restoredBytes)
+                    if ($scenario -in @('released-lock', 'persistent-lock')) {
+                        $poll.Handle = [IO.File]::Open(
+                            $fixturePluginPath, [IO.FileMode]::Open,
+                            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None
+                        )
+                    }
+                } elseif ($poll.Attempts -eq 2 -and $scenario -eq 'released-lock') {
+                    $poll.Handle.Dispose()
+                    $poll.Handle = $null
+                }
+            }
+            function Assert-AmpPluginPrivateACL {
+                param([string]$PluginPath)
+                Assert-True ($PluginPath -ceq $fixturePluginPath) 'Amp self-heal verifies the restored plugin ACL'
+                $poll.ACLChecks++
+                if ($scenario -eq 'acl-rejected') { throw 'synthetic untrusted plugin ACL' }
+            }
+            function Write-Result {
+                param([string]$Name, [string]$Status, [string]$Detail)
+                Assert-True ($Name -ceq 'amp:self-heal' -and $Status -ceq 'pass') `
+                    'Amp self-heal reports success only after verification'
+                $poll.Successes++
+            }
+            $failure = $null
+            try {
+                Assert-AmpPluginSelfHeal $fixturePluginPath $expectedBytes
+            } catch {
+                $failure = $_
+            } finally {
+                if ($null -ne $poll.Handle) { $poll.Handle.Dispose() }
+            }
+            if ($scenario -eq 'released-lock') {
+                Assert-True ($null -eq $failure -and $poll.Attempts -eq 2 -and
+                    $poll.ACLChecks -eq 1 -and $poll.Successes -eq 1) `
+                    'Amp self-heal retries a real sharing violation then verifies exact bytes and ACL'
+            } elseif ($scenario -eq 'acl-rejected') {
+                Assert-True ($null -ne $failure -and
+                    $failure.Exception.Message -ceq 'synthetic untrusted plugin ACL' -and
+                    $poll.Attempts -eq 1 -and $poll.ACLChecks -eq 1 -and
+                    $poll.Successes -eq 0) `
+                    'Amp self-heal still rejects correct bytes with an untrusted ACL'
+            } else {
+                $expectedState = switch ($scenario) {
+                    'persistent-lock' { 'transient-read-error' }
+                    'wrong-bytes' { 'content-mismatch' }
+                    'missing-file' { 'missing' }
+                }
+                Assert-True ($null -ne $failure -and
+                    $failure.Exception.Message -match 'within 20 seconds' -and
+                    $failure.Exception.Message.EndsWith("(last state: $expectedState)") -and
+                    $poll.Attempts -eq 80 -and $poll.ACLChecks -eq 0 -and
+                    $poll.Successes -eq 0) `
+                    "Amp self-heal rejects $scenario within the unchanged polling budget"
+            }
+        }
+    }
+
     $ampBlockFixturePath = Join-Path $ampGoldenRoot 'pre_tool_block.json'
     $ampBlockFixtureText = [IO.File]::ReadAllText($ampBlockFixturePath)
     $ampBlockFixture = $ampBlockFixtureText | ConvertFrom-Json -ErrorAction Stop
@@ -4767,7 +4866,6 @@ threading.Event().wait()
         $doctorContract.Contains('Assert-AmpScopedTokenPluginContract')) `
         'both Windows doctor contracts invoke the Amp scoped-token boundary validator'
     foreach ($marker in @(
-        'const DC_FAIL_MODE: string = "closed"',
         'const DC_TIMEOUT_MS = 10000',
         'new AbortController()'
     )) {
@@ -4775,6 +4873,12 @@ threading.Event().wait()
             $wizardHookValidation.Contains($marker)) `
             "Windows contracts require the Amp fail-safe marker: $marker"
     }
+    Assert-True ($doctorContract.Contains('[string]$ExpectedFailMode = ''open''') -and
+        $doctorContract.Contains('''const DC_FAIL_MODE: string = "'' + $ExpectedFailMode + ''"''') -and
+        $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode closed') -and
+        $harnessText.Contains('Assert-DoctorWindowsHookRegistration -ExpectedFailMode open') -and
+        $wizardHookContract.Contains('const DC_FAIL_MODE: string = "open"')) `
+        'Windows Amp contracts verify the open default and independently exercise explicit closed policy'
     $ampNativeHookPattern = 'defenseclaw-hook(?:\.exe|\.cmd)'
     $ampCompatibilityPattern = '\bwsl\b|\bbash\b|\bchmod\b'
     $hasAmpShellRejectionContract = {
@@ -4821,6 +4925,7 @@ threading.Event().wait()
     Assert-True ($ampSelfHealContract -match 'Remove-Item -LiteralPath \$PluginPath' -and
         $ampSelfHealContract -match '\$attempt -lt 80' -and
         $ampSelfHealContract -match 'Start-Sleep -Milliseconds 250' -and
+        $ampSelfHealContract -match 'Test-AmpPluginSelfHealReadRetry \$_\.Exception' -and
         $ampSelfHealContract -match 'ToBase64String\(\$ExpectedBytes\)' -and
         $ampSelfHealContract -match 'Assert-AmpPluginPrivateACL \$PluginPath') `
         'Amp Windows contract deletes and verifies byte-exact, ACL-safe self-healing within 20 seconds'

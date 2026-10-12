@@ -58,10 +58,15 @@ func TestStandaloneRepairFollowsAnEnrolledUsersAgentUpgrade(t *testing.T) {
 		t.Fatalf("first contract = %q, want codex-hooks-v3-generic", first.HookContractID)
 	}
 
+	// Outside the standalone profile the cross-contract upgrade is no longer
+	// refused (#1163): it installs the new contract in open delivery until a
+	// later reconciliation establishes it.
 	setStandaloneProfileForTest(t, false)
-	if _, err := Install(context.Background(), options("codex-cli 0.150.0")); err == nil ||
-		!strings.Contains(err.Error(), "hook contract drift detected") {
-		t.Fatalf("Secure Client repair after an upgrade = %v, want the drift refusal", err)
+	if _, err := Install(context.Background(), options("codex-cli 0.150.0")); err != nil {
+		t.Fatalf("Secure Client repair after an upgrade = %v, want the fail-open repair", err)
+	}
+	if lock := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "codex"); lock.ContractID != "codex-hooks-v4" || lock.HookFailMode != "open" {
+		t.Fatalf("Secure Client repair lock = %s/%s, want codex-hooks-v4/open", lock.ContractID, lock.HookFailMode)
 	}
 
 	setStandaloneProfileForTest(t, true)
@@ -79,8 +84,12 @@ func TestStandaloneRepairFollowsAnEnrolledUsersAgentUpgrade(t *testing.T) {
 	if err != nil || verified.HookContractID != "codex-hooks-v4" {
 		t.Fatalf("verify after the repair = %+v, %v; want the new contract", verified, err)
 	}
-	if _, err := Install(context.Background(), options("codex-cli 0.100.0")); err == nil ||
-		!strings.Contains(err.Error(), "is not verified against a known hook contract") {
-		t.Fatalf("repair to an unverified version = %v, want the hook_contract_unverified refusal", err)
+	// A version without a verified contract installs the reviewed
+	// best-effort contract in open delivery instead of being refused (#1163).
+	if _, err := Install(context.Background(), options("codex-cli 0.100.0")); err != nil {
+		t.Fatalf("repair to an unverified version = %v, want the best-effort fail-open repair", err)
+	}
+	if lock := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "codex"); lock.HookFailMode != "open" {
+		t.Fatalf("unverified-version repair lock fail mode = %q, want open", lock.HookFailMode)
 	}
 }

@@ -504,7 +504,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             "closed",
         )
 
-    def test_omitting_fail_mode_resolves_to_closed(self):
+    def test_omitting_fail_mode_resolves_to_open(self):
         # Closes when the operator omits ``--fail-mode``
         # at quickstart, the resulting config must default to the safer
         # "closed" sentinel so response-layer failures (4xx, malformed
@@ -525,7 +525,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             cfg = yaml.safe_load(fh)
         from defenseclaw.config import _normalize_hook_fail_mode
         raw = cfg["guardrail"].get("hook_fail_mode", "")
-        self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
+        self.assertEqual(_normalize_hook_fail_mode(raw), "open")
 
     def test_requested_gateway_start_failure_is_nonzero_in_human_and_json(self):
         def invoke(args: list[str]) -> Result:

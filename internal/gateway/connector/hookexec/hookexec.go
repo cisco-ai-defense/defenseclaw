@@ -1248,11 +1248,12 @@ func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	reason := "missing gateway token: " + tokenFile + " not found"
-	logHookFailure(opts, sp, reason, "transport", failMode)
+	blocked := opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed"))
+	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	if opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")) {
+	if blocked {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: %s, applying Antigravity's event-specific failure response\n", reason)
@@ -1286,8 +1287,8 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 	if !sp.failOpenOnly && failMode == "closed" && managedStandaloneStopEvent(opts, sp) {
 		return allowManagedStandaloneStop(opts, sp, "stdin body exceeded cap", "transport")
 	}
-	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode)
 	closes := !sp.failOpenOnly && failMode == "closed"
+	logHookFailure(opts, sp, "stdin body exceeded cap", "transport", failMode, closes || managedCopilotFailsClosed(opts, sp))
 	if closes && managedPlainFailClosed(opts, sp) {
 		fields := payloadPrefixFields(prefix)
 		if strings.TrimSpace(opts.Event) == "" {
@@ -1318,11 +1319,12 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") && managedStandaloneStopEvent(opts, sp) {
 		return allowManagedStandaloneStop(opts, sp, reason, "transport")
 	}
-	logHookFailure(opts, sp, reason, "transport", failMode)
+	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
+	logHookFailure(opts, sp, reason, "transport", failMode, blocked || managedCopilotFailsClosed(opts, sp))
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
-	if !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed") {
+	if blocked {
 		if sp.connector == "antigravity" {
 			fmt.Fprintf(opts.Stderr,
 				"defenseclaw: gateway unreachable, applying Antigravity's event-specific failure response: %s\n", reason)
@@ -1505,7 +1507,7 @@ const unenrolledAccountExplanation = "this account is not enrolled yet; restart 
 // failed-closed text.
 func failUnenrolled(opts Options, sp spec, reason string) int {
 	reportUnenrolledRefusal(opts, sp, reason)
-	logHookFailure(opts, sp, reason, "transport", "closed")
+	logHookFailure(opts, sp, reason, "transport", "closed", true)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
@@ -1619,7 +1621,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	if closes && managedStandaloneStopEvent(opts, sp) {
 		return allowManagedStandaloneStop(opts, sp, reason, "response")
 	}
-	logHookFailure(opts, sp, reason, "response", failMode)
+	logHookFailure(opts, sp, reason, "response", failMode, closes || managedCopilotFailsClosed(opts, sp))
 	if closes && managedPlainFailClosed(opts, sp) {
 		return failManagedStandaloneClosed(opts, sp, sp.responseClosed, "response", reason)
 	}
@@ -1641,6 +1643,21 @@ func responseFailureReason(reason string) string {
 		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
 	}
 	return reason
+}
+
+// managedCopilotFailsClosed reports, without emitting anything, whether
+// managedCopilotFailClosed would answer this event with a managed block. The
+// hook-failure log uses it to record the real outcome before the response.
+func managedCopilotFailsClosed(opts Options, sp spec) bool {
+	if !opts.ManagedEnterprise || sp.connector != "copilot" {
+		return false
+	}
+	switch opts.Event {
+	case "preToolUse", "permissionRequest":
+		return true
+	}
+	return sp.dialect == copilotVSCodeLocalSurface &&
+		copilotVSCodeLocalOutput(opts.Event, "block", "DefenseClaw") != ""
 }
 
 // managedCopilotFailClosed denies an administrator-managed Copilot tool call
@@ -1715,7 +1732,7 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		}
 	}
 	if foreignHookStopEvent(sp.connector, opts.Event) {
-		logHookFailure(opts, sp, reason, "policy", "open")
+		logDeliberateAllow(opts, sp, reason, "policy")
 		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (a block would keep the agent running); tool calls stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
 		return emitHookResult(opts, sp, sp.openAllow)
 	}
@@ -1725,11 +1742,11 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		// "Trusting workspace..." with no message (GAP-1257). The session
 		// block is already recorded, so the first prompt or tool call gets
 		// the block and its reason.
-		logHookFailure(opts, sp, reason, "policy", "open")
+		logDeliberateAllow(opts, sp, reason, "policy")
 		fmt.Fprintf(opts.Stderr, "defenseclaw: not blocking the %s %s event (Cursor cannot show a block there); prompts and tool calls in this session stay blocked: %s\n", sp.errLabel, strings.TrimSpace(opts.Event), reason)
 		return emitHookResult(opts, sp, sp.openAllow)
 	}
-	logHookFailure(opts, sp, reason, "policy", "closed")
+	logHookFailure(opts, sp, reason, "policy", "closed", true)
 	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
 		return code
 	}
@@ -1836,11 +1853,22 @@ func managedStandaloneStopEvent(opts Options, sp spec) bool {
 	return opts.ManagedEnterprise && opts.ManagedStandalone && foreignHookStopEvent(sp.connector, opts.Event)
 }
 
+// logDeliberateAllow records a failure that a reviewed rule answers with the
+// connector's neutral allow (a stop/session-end event, or a Cursor event with
+// no block response). The record carries the fail_open outcome, but the
+// generic "inspection bypassed" warning is left out: the caller prints its own
+// explanation, which is the first line the agent shows.
+func logDeliberateAllow(opts Options, sp spec, reason, category string) {
+	quiet := opts
+	quiet.Stderr = io.Discard
+	logHookFailure(quiet, sp, reason, category, "open", false)
+}
+
 // allowManagedStandaloneStop answers a managed standalone stop event that
 // would have failed closed with the connector's neutral allow; the failure is
 // still logged, with the fail mode it got.
 func allowManagedStandaloneStop(opts Options, sp spec, reason, category string) int {
-	logHookFailure(opts, sp, reason, category, "open")
+	logDeliberateAllow(opts, sp, reason, category)
 	fmt.Fprintf(opts.Stderr,
 		"DefenseClaw is not blocking the %s event, because a block there would keep the agent running; prompts and tool calls stay blocked until DefenseClaw is available. (%s)\n",
 		strings.TrimSpace(opts.Event), reason)

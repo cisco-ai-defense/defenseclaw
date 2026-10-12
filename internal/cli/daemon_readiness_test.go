@@ -225,7 +225,7 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	}
 }
 
-func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) {
+func TestRotationConnectorStatePreservesManagedNativeHooksOpen(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DeploymentMode = "managed_enterprise"
 	cfg.Guardrail.Enabled = true
@@ -244,8 +244,8 @@ func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) 
 		t.Fatalf("connector state rows = %d, want 2: %#v", len(state.Connectors), state.Connectors)
 	}
 	for _, row := range state.Connectors {
-		if row.HookFailMode != "closed" {
-			t.Errorf("managed %s persisted fail mode = %q, want closed", row.Name, row.HookFailMode)
+		if row.HookFailMode != "open" {
+			t.Errorf("managed %s persisted fail mode = %q, want open", row.Name, row.HookFailMode)
 		}
 	}
 }

@@ -85,9 +85,9 @@ func TestApplyStandaloneRowStateDropsKnownRowsWithoutAContract(t *testing.T) {
 	}
 }
 
-// A known contract below the Windows platform minimum still cannot install:
-// Codex 0.125.0 and 0.130.0 resolve to known contracts, but install and verify
-// refuse anything below 0.131.0. Such a row, new or already in the manifest,
+// A known contract below the Windows platform minimum still cannot install
+// in the standalone profile: Codex 0.125.0 and 0.130.0 resolve to known
+// contracts, but the standalone floor refuses anything below 0.131.0. Such a row, new or already in the manifest,
 // is dropped for that user instead of failing every reconcile.
 func TestStandaloneRowAdmissionAppliesTheWindowsPlatformMinimum(t *testing.T) {
 	home := t.TempDir()
@@ -95,8 +95,10 @@ func TestStandaloneRowAdmissionAppliesTheWindowsPlatformMinimum(t *testing.T) {
 		if connector.ResolveHookContract("codex", version).Status != connector.HookCompatibilityKnown {
 			t.Fatalf("fixture codex %s must resolve to a known contract", version)
 		}
-		if err := requireWindowsEnterpriseManagedAgentVersion("codex", version); err == nil {
-			t.Fatalf("fixture codex %s must be below the install minimum", version)
+		// The Secure Client install no longer gates on agent version
+		// (#1163); the standalone floor below still refuses the row.
+		if err := requireWindowsEnterpriseManagedAgentVersion("codex", version); err != nil {
+			t.Fatalf("fixture codex %s: Secure Client install gate = %v, want none", version, err)
 		}
 		ok, reason := windowsStandaloneRowAdmission(home, "codex", version)
 		if ok || !strings.Contains(reason, "below the Windows enterprise minimum 0.131.0") {

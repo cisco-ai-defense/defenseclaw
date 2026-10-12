@@ -368,7 +368,7 @@ func (c *Config) EffectiveRulePackDirForConnector(connector string) string {
 
 func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	if c == nil {
-		return "closed"
+		return "open"
 	}
 	if normalizeConnectorKey(connector) == "cursor" && !c.SecureClientIntegration() {
 		if strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action") {
@@ -392,20 +392,18 @@ func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
 	return effectiveManagedEnterpriseHookFailMode(c.DeploymentMode, connector, configured, c.StandaloneEnterprise())
 }
 
-// effectiveManagedEnterpriseHookFailMode keeps the protected deployment
-// contract and every runtime consumer on the same fail-closed value. Native
-// Codex and Claude hooks are enforcement boundaries in managed enterprise
-// deployments; an observe-mode or legacy fail-open source config must not be
-// allowed to weaken their delivery/response behavior after installation. In
-// the standalone profile Devin runs the administrator-owned
-// `defenseclaw-hook --enterprise-managed`, which always fails closed, so the
-// config, the hook-contract lock and status report the same value.
+// effectiveManagedEnterpriseHookFailMode preserves explicit delivery policy
+// in managed deployments: unset/empty and "open" resolve to open, anything
+// else to closed. Availability does not change policy verdicts (#1163).
+// The one exception is the standalone profile's Devin, which runs the
+// administrator-owned `defenseclaw-hook --enterprise-managed`; on unix that
+// runtime always fails closed, so the config, the hook-contract lock and
+// status report the same value.
 func effectiveManagedEnterpriseHookFailMode(deploymentMode, connector, configured string, standalone bool) string {
-	name := normalizeConnectorKey(connector)
-	if managed.IsManagedEnterprise(deploymentMode) && (name == "codex" || name == "claudecode" || (standalone && name == "devin")) {
+	if standalone && managed.IsManagedEnterprise(deploymentMode) && normalizeConnectorKey(connector) == "devin" {
 		return "closed"
 	}
-	if strings.EqualFold(strings.TrimSpace(configured), "open") {
+	if strings.TrimSpace(configured) == "" || strings.EqualFold(strings.TrimSpace(configured), "open") {
 		return "open"
 	}
 	return "closed"

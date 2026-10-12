@@ -69,9 +69,11 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def normalize_fail_mode(value: object, *, default: str = "closed") -> str:
+def normalize_fail_mode(value: object, *, default: str = "open") -> str:
     raw = str(value or "").strip().lower()
-    return raw if raw in _VALID_MODES else default
+    if not raw:
+        return default
+    return raw if raw in _VALID_MODES else "closed"
 
 
 @dataclass(frozen=True)

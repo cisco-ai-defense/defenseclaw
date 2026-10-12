@@ -121,7 +121,7 @@ targets:
 	}
 }
 
-func TestLoadManifestWindowsRejectsMissingAgentVersion(t *testing.T) {
+func TestLoadManifestWindowsAcceptsMissingAgentVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
 	if err := os.WriteFile(path, []byte(`
 version: 1
@@ -133,8 +133,8 @@ targets:
 		t.Fatal(err)
 	}
 	_, err := LoadManifest(path)
-	if err == nil || !strings.Contains(err.Error(), "requires explicit agent_version") {
-		t.Fatalf("LoadManifest error = %v, want explicit agent_version rejection", err)
+	if err != nil {
+		t.Fatalf("LoadManifest error = %v, want version fallback", err)
 	}
 }
 

@@ -607,7 +607,7 @@ def test_stale_closed_never_reports_already_closed(monkeypatch: pytest.MonkeyPat
     reconcile.assert_called_once()
 
 
-def test_raw_global_closed_observe_runtime_open_creates_scoped_override(
+def test_global_closed_observe_detects_and_reconciles_open_runtime_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
@@ -628,9 +628,10 @@ def test_raw_global_closed_observe_runtime_open_creates_scoped_override(
             ["closed", "--connector", "claudecode", "--yes"],
             obj=app,
         )
-    assert before.desired == "open" and before.current
+    assert before.desired == "closed" and before.runtime == "open" and not before.current
     assert result.exit_code == 0, result.output
     assert "already" not in result.output
+    assert "Reconciling" in result.output
     assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "closed"
     assert cfg.guardrail.connectors["codex"].hook_fail_mode == "open"
     reconcile.assert_called_once_with(cfg, "claudecode")

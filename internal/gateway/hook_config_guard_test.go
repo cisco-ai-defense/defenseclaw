@@ -5,6 +5,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,78 @@ import (
 )
 
 const guardTestDebounce = 40 * time.Millisecond
+
+// Exercise the real rendered Amp artifact and the live policy resolver, not a
+// mock that can conceal installation/repair policy drift. Both boot paths use
+// connectorSetupOptsChecked; repair must reproduce those same bytes.
+func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
+	for _, mode := range []string{"observe", "action"} {
+		for _, tc := range []struct {
+			name, global, override, want string
+		}{
+			{"default-open", "", "", "open"},
+			{"explicit-open", "open", "", "open"},
+			{"global-closed", "closed", "", "closed"},
+			{"override-open", "closed", "open", "open"},
+			{"override-closed", "open", "closed", "closed"},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				root := t.TempDir()
+				pluginPath := filepath.Join(root, "amp", "plugins", "defenseclaw.ts")
+				previous := connector.AMPPluginPathOverride
+				connector.AMPPluginPathOverride = pluginPath
+				t.Cleanup(func() { connector.AMPPluginPathOverride = previous })
+				cfg := config.DefaultConfig()
+				cfg.DataDir = t.TempDir()
+				cfg.Guardrail.Mode = mode
+				cfg.Guardrail.HookFailMode = tc.global
+				cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+					"amp": {HookFailMode: tc.override},
+				}
+				s := &Sidecar{cfg: cfg}
+				conn := connector.NewAMPConnector()
+				opts := mustConnectorSetupOpts(t, s, conn, "", "127.0.0.1:4000", "127.0.0.1:18970")
+				if opts.HookFailMode != tc.want {
+					t.Fatalf("initial delivery mode = %q, want %q", opts.HookFailMode, tc.want)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if err := conn.Setup(ctx, opts); err != nil {
+					t.Fatalf("initial Amp setup: %v", err)
+				}
+				original, err := os.ReadFile(pluginPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Contains(original, []byte(fmt.Sprintf(`const DC_FAIL_MODE: string = "%s"`, tc.want))) {
+					t.Fatal("initial plugin does not contain the selected delivery mode")
+				}
+				guard := NewHookConfigGuard(nil, nil, time.Hour)
+				s.bindHookRuntimePolicyResolver(guard)
+				if !guard.Start(ctx, conn, opts) {
+					t.Fatal("guard did not start")
+				}
+				defer guard.Stop()
+				if err := os.Remove(pluginPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := guard.EnsurePresent(ctx, "amp", cfg.DataDir, "test plugin deletion"); err != nil {
+					t.Fatalf("Amp self-heal: %v", err)
+				}
+				restored, err := os.ReadFile(pluginPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(original, restored) {
+					t.Fatal("self-heal changed the managed Amp artifact")
+				}
+				if present, err := connector.OwnedHooksPresent(conn, opts); err != nil || !present {
+					t.Fatalf("restored plugin contract: present=%t err=%v", present, err)
+				}
+			})
+		}
+	}
+}
 
 type runtimePolicyCaptureConnector struct {
 	stubConnector
@@ -341,10 +414,11 @@ func (*failModeBakedConnector) HookConfigReferenceNeedles(connector.SetupOpts) [
 	return []string{"managed-hook"}
 }
 
-// TestHookConfigGuardRefreshPolicyRerendersStaleFailMode pins GAP-0029:
-// guardrail.mode action implies the global (closed) hook fail mode, and the
-// rendered hooks follow it without a restart; nothing re-renders when the
-// effective fail mode is unchanged.
+// TestHookConfigGuardRefreshPolicyRerendersStaleFailMode pins GAP-0029: the
+// rendered hooks follow a changed effective hook fail mode without a restart;
+// nothing re-renders when the effective fail mode is unchanged. Delivery
+// policy is independent of guardrail.mode (release #1163): unset policy is
+// open in either mode, and an explicit closed policy applies in either mode.
 func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "hooks.json")
@@ -374,18 +448,19 @@ func TestHookConfigGuardRefreshPolicyRerendersStaleFailMode(t *testing.T) {
 	live := config.DefaultConfig()
 	live.DataDir = root
 	live.Guardrail.Mode = "observe"
-	live.Guardrail.HookFailMode = "closed"
+	live.Guardrail.HookFailMode = ""
 	sidecar.publishConfig(live)
 	before := setupCalls()
 	if err := guard.RefreshPolicy(ctx); err != nil || setupCalls() != before {
-		t.Fatalf("observe mode (fail open, as rendered): err=%v, Setup calls %d -> %d, want none", err, before, setupCalls())
+		t.Fatalf("unset policy (fail open, as rendered): err=%v, Setup calls %d -> %d, want none", err, before, setupCalls())
 	}
 
 	action := cloneConfig(live)
 	action.Guardrail.Mode = "action"
+	action.Guardrail.HookFailMode = "closed"
 	sidecar.publishConfig(action)
 	if err := guard.RefreshPolicy(ctx); err != nil {
-		t.Fatalf("refresh after guardrail.mode action: %v", err)
+		t.Fatalf("refresh after explicit closed hook fail mode: %v", err)
 	}
 	if setupCalls() != before+1 {
 		t.Fatalf("Setup calls = %d, want %d (one re-render)", setupCalls(), before+1)
@@ -1014,6 +1089,7 @@ func TestHookConfigGuard_PeriodicClaudePolicyAuditRepairsWithoutFileDebounce(t *
 	// The notifier is the completion barrier for Setup and its effective-policy
 	// verification. Polling OwnedHooksPresent while Setup atomically replaces the
 	// file races the repair on Windows.
+	// Allow extra Windows CI scheduling and protected-file publication headroom.
 	repairNotified := false
 	select {
 	case paths := <-healed:
@@ -1021,7 +1097,7 @@ func TestHookConfigGuard_PeriodicClaudePolicyAuditRepairsWithoutFileDebounce(t *
 		if len(paths) != 1 || paths[0] != "periodic effective-policy audit" {
 			t.Fatalf("heal notifier paths = %v, want periodic effective-policy audit", paths)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		// Join an in-flight serialized repair before diagnosing a missing
 		// notification. The notifier runs before repairMu is released, so this
 		// waits for actual completion without changing the audit-start deadline.

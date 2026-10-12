@@ -3235,9 +3235,7 @@ class TestInitFailModeFlag(unittest.TestCase):
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
-        # Operator passed --fail-mode open explicitly — result must
-        # round-trip as "open" regardless of the new safer default
-        # ("closed"). This pins that operator intent is honored.
+        # Explicit open must round-trip independently of loader defaults.
         from defenseclaw.config import _normalize_hook_fail_mode
         self.assertEqual(
             _normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "")),
@@ -3245,12 +3243,8 @@ class TestInitFailModeFlag(unittest.TestCase):
         )
 
     def test_omitting_flag_is_noninvasive(self):
-        # No --fail-mode means "leave existing alone." On a brand-new
-        # config, that resolves to the secure default ("closed") via
-        # default_config(). The point of this test is to make sure the
-        # wiring does NOT clobber the default with empty string (which
-        # would be a serialization bug) AND that the new install gets
-        # the safer fail-mode.
+        # No --fail-mode preserves operator intent. A new configuration's
+        # unset or explicit open policy must resolve to the open default.
         result = self._invoke([
             "--non-interactive",
             "--yes",
@@ -3270,13 +3264,26 @@ class TestInitFailModeFlag(unittest.TestCase):
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
-        # Whatever the YAML serializer wrote, the loader-level
-        # normalizer must resolve it to "closed" for new installs.
-        # Existing v3 installs are pinned to "open" by
-        # _migrate_0_4_0_seed_hook_fail_mode in migrations.py.
         from defenseclaw.config import _normalize_hook_fail_mode
         raw = cfg["guardrail"].get("hook_fail_mode", "")
-        self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
+        self.assertIn(raw, ("", "open"))
+        self.assertEqual(_normalize_hook_fail_mode(raw), "open")
+
+    def test_omitting_flag_preserves_existing_closed(self):
+        args = [
+            "--non-interactive", "--yes", "--connector", "codex",
+            "--profile", "observe", "--scanner-mode", "local",
+            "--skip-install", "--no-start-gateway", "--no-verify", "--json-summary",
+        ]
+        first = self._invoke([*args, "--fail-mode", "closed"])
+        self.assertEqual(first.exit_code, 0, first.output + (first.stderr or ""))
+        second = self._invoke(args)
+        self.assertEqual(second.exit_code, 0, second.output + (second.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["hook_fail_mode"], "closed")
 
 
 class TestInitHITLFlags(unittest.TestCase):
