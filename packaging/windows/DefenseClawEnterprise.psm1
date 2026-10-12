@@ -14209,6 +14209,15 @@ function New-DefenseClawInstallPreparationIntent {
     if ($null -ne $existing) {
         throw 'refusing to replace an authenticated install preparation receipt'
     }
+    # Codex, Claude, and Cursor machine hooks are shared across installation
+    # roots. A second live enterprise scope cannot safely capture or reclaim
+    # their ownership. Refuse before publishing the install receipt or creating
+    # either managed root; the shared lifecycle lock excludes another
+    # compliant install racing this SCM inventory.
+    Assert-DefenseClawInstallSharedHookScopeExclusive `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName
     $intent = [ordered]@{
         schema_version = 2
         phase = 'preparing_layout'
@@ -17476,11 +17485,170 @@ function Assert-DefenseClawTargetRuntimeProductionChildrenExclusive {
     }
 }
 
-function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
+function Get-DefenseClawSharedManagedHookOwners {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # These singleton machine policies are shared by production and every
+    # certification scope. Their protected state records bind the owning
+    # gateway service to the live policy bytes. A stopped service may still
+    # own the hooks and must not be mistaken for an orphan solely because SCM
+    # reports Stopped.
+    $cursorRoot = [IO.Path]::Combine($script:ProgramData, 'Cursor')
+    $claudeRoot = [IO.Path]::Combine(
+        $script:ProgramFiles, 'ClaudeCode', 'managed-settings.d'
+    )
+    $specifications = @(
+        @{
+            name = 'Codex'
+            state = [string]$Layout.CodexManagedHooksStatePath
+            limit = 4194304
+            bindings = @(@{
+                path = [string]$Layout.CodexMachinePolicyPath
+                field = 'requirements_sha256'
+                prefix = ''
+            })
+        },
+        @{
+            name = 'Cursor'
+            state = [IO.Path]::Combine(
+                $cursorRoot, '.defenseclaw-managed-hooks.state'
+            )
+            limit = 8388608
+            bindings = @(
+                @{
+                    path = [IO.Path]::Combine($cursorRoot, 'defenseclaw-hook.ps1')
+                    field = 'adapter_sha256'
+                    prefix = 'sha256:'
+                },
+                @{
+                    path = [IO.Path]::Combine(
+                        $cursorRoot, '.defenseclaw-managed-hooks.receipt'
+                    )
+                    field = 'receipt_sha256'
+                    prefix = 'sha256:'
+                }
+            )
+        },
+        @{
+            name = 'Claude'
+            state = [IO.Path]::Combine(
+                $claudeRoot, '.defenseclaw-managed-hooks.state'
+            )
+            limit = 65536
+            bindings = @(@{
+                path = [IO.Path]::Combine($claudeRoot, '90-defenseclaw.json')
+                field = 'policy_sha256'
+                prefix = 'sha256:'
+            })
+        }
+    )
+    $owners = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    foreach ($specification in $specifications) {
+        $statePath = [string]$specification.state
+        Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
+        # Test-Path can report false for an ACL-denied protected file. The
+        # no-follow probe returns null only for a missing leaf/ancestor, and
+        # fails closed on access denial, reparse points, or hard links.
+        $stateSnapshot =
+            $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                $statePath
+            )
+        if ($null -eq $stateSnapshot) {
+            continue
+        }
+        Assert-DefenseClawNoReparsePath -Path $statePath
+        Assert-DefenseClawPathAcl `
+            -Path $statePath `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -AllowUsersRead `
+            -AllowInheritance
+        $stateItem = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $statePath -Force
+        if ([int64]$stateItem.Length -gt [int64]$specification.limit) {
+            throw "$($specification.name) managed-hook ownership exceeds its limit"
+        }
+        try {
+            $state = Microsoft.PowerShell.Management\Get-Content `
+                -LiteralPath $statePath -Raw |
+                Microsoft.PowerShell.Utility\ConvertFrom-Json
+        }
+        catch {
+            throw "$($specification.name) managed-hook ownership is invalid: $($_.Exception.Message)"
+        }
+        $owner = [string]$state.gateway_service_name
+        if ([string]::IsNullOrWhiteSpace($owner)) {
+            throw "$($specification.name) managed-hook ownership has no gateway service"
+        }
+        foreach ($binding in @($specification.bindings)) {
+            $boundPath = [string]$binding.path
+            $expectedHash = [string]$state.([string]$binding.field)
+            $prefix = [string]$binding.prefix
+            if ($expectedHash -cnotmatch ('^' + [regex]::Escape($prefix) + '[0-9a-f]{64}$')) {
+                throw "$($specification.name) managed-hook ownership has an incomplete policy binding"
+            }
+            Assert-DefenseClawNoReparsePath -Path $boundPath -AllowMissingLeaf
+            $boundSnapshot =
+                $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                    $boundPath
+                )
+            if ($null -eq $boundSnapshot) {
+                throw "$($specification.name) managed-hook ownership has an incomplete policy binding"
+            }
+            Assert-DefenseClawNoReparsePath -Path $boundPath
+            Assert-DefenseClawPathAcl `
+                -Path $boundPath `
+                -AllowedWriterSIDs @(
+                    $script:SystemSID,
+                    $script:AdministratorsSID,
+                    $script:TrustedInstallerSID
+                ) `
+                -AllowUsersRead `
+                -AllowInheritance
+            $actualHash = $prefix + (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $boundPath -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+            if ($actualHash -cne $expectedHash) {
+                throw "$($specification.name) managed-hook ownership does not bind the live policy"
+            }
+        }
+        [void]$owners.Add($owner)
+    }
+    return @($owners)
+}
+
+function Assert-DefenseClawInstallSharedHookScopeExclusive {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $sharedHookOwners = @(Get-DefenseClawSharedManagedHookOwners -Layout $Layout)
+    Assert-DefenseClawNoForeignManagedService `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Services @(Microsoft.PowerShell.Management\Get-Service -ErrorAction Stop) `
+        -Operation 'managed-hook install' `
+        -ActiveOnly `
+        -SharedHookOwners $sharedHookOwners
+}
+
+function Assert-DefenseClawNoForeignManagedService {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Services,
+        [Parameter(Mandatory)][string]$Operation,
+        [switch]$ActiveOnly,
+        [string[]]$SharedHookOwners = @()
     )
     $excluded = @{}
     foreach ($name in @(
@@ -17499,9 +17667,17 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
     $sensorHelperName = Get-DefenseClawSensorHelperServiceName `
         -GatewayServiceName $GatewayServiceName
     $excluded[$sensorHelperName.ToUpperInvariant()] = $true
-    $allServices = @(Microsoft.PowerShell.Management\Get-Service `
-        -ErrorAction Stop)
-    foreach ($service in @($allServices |
+    if ($ActiveOnly) {
+        foreach ($owner in @($SharedHookOwners)) {
+            if ($owner -ine $GatewayServiceName) {
+                throw (
+                    "refusing $Operation while another managed DefenseClaw " +
+                    "scope owns shared hooks: $owner"
+                )
+            }
+        }
+    }
+    foreach ($service in @($Services |
             Microsoft.PowerShell.Core\Where-Object {
                 ([string]$_.Name).StartsWith(
                     'DefenseClaw',
@@ -17510,12 +17686,29 @@ function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
             })) {
         $name = [string]$service.Name
         if (-not $excluded.ContainsKey($name.ToUpperInvariant())) {
+            if ($ActiveOnly -and [string]$service.Status -ceq 'Stopped') {
+                continue
+            }
             throw (
-                'refusing shared target runtime cleanup while another ' +
+                "refusing $Operation while another " +
                 "managed DefenseClaw scope exists: $name"
             )
         }
     }
+}
+
+function Assert-DefenseClawTargetRuntimeCleanupScopeExclusive {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    Assert-DefenseClawNoForeignManagedService `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Services @(Microsoft.PowerShell.Management\Get-Service -ErrorAction Stop) `
+        -Operation 'shared target runtime cleanup'
     foreach ($receipt in @(Microsoft.PowerShell.Management\Get-ChildItem `
             -LiteralPath ([string]$Layout.LifecycleLockDirectory) `
             -Filter 'install-rollback-*.json' `
@@ -23861,6 +24054,33 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
         -Metadata $metadata `
         -Layout $Layout `
         -Action 'Committed Uninstall finalization'
+    # A crash can occur after the native finalizer durably changes the
+    # authenticated journal to finalized, but before self-uninstall retires
+    # the InstallRoot. Re-entering the native finalizer is unnecessary and
+    # may fail because SCM has already removed the gateway virtual account.
+    # Authenticate both journal and cleanup receipt before treating that
+    # completed phase as the retry boundary. Purge still needs the native
+    # contract-lock action unless its receipt was finalized as well.
+    $teardownPhase = Get-DefenseClawManagedHooksTeardownJournalPhase `
+        -Layout $Layout `
+        -Metadata $metadata `
+        -GatewayServiceName $GatewayServiceName `
+        -AllowLegacyInactive
+    $contractReceipt = Get-DefenseClawManagedHookContractCleanupReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Metadata $metadata `
+        -Required
+    if ($teardownPhase -ceq 'finalized' -and
+        (-not $Purge -or
+            [string]$contractReceipt.phase -ceq 'finalized')) {
+        return
+    }
+    if ($teardownPhase -cne 'prepared' -and
+        $teardownPhase -cne 'finalized') {
+        throw "managed-hook finalization requires a prepared or finalized journal: $teardownPhase"
+    }
     return Invoke-DefenseClawManagedHooksTeardownCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
@@ -31348,6 +31568,15 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         if ($Action -in @('Install', 'Upgrade', 'Repair') -and
             $GatewayServiceName -ceq 'DefenseClawGateway') {
             Assert-DefenseClawNoOtherProfileDeployment
+        }
+
+        if ($Action -eq 'Install') {
+            # Pending and pre-layout recovery can restore shared hooks. Reject
+            # an active foreign owner before entering either recovery path.
+            Assert-DefenseClawInstallSharedHookScopeExclusive `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
         }
 
         if ($recoverProductionUninstallAcl) {

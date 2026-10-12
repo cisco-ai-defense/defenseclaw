@@ -17,8 +17,9 @@ func TestWindowsCursorLegacyAdapterByteIdentity(t *testing.T) {
 	// mode it accepted; open is this renderer's first managed open adapter).
 	// The release branch's v9 template differs, so its digests do not apply
 	// here. Protected legacy policies hash exact bytes; changing their template
-	// would break upgrade and rollback. Normalize checkout line endings only
-	// for this portable golden assertion.
+	// would break upgrade and rollback.
+	// Hash the actual adapter: normalizing it here would conceal CRLF embedded
+	// by a Windows checkout and permit an incompatible gateway build.
 	for mode, want := range map[string]string{
 		"open":   "fa8914cd67252264cf02e7311ea224d76f3d6e51e91010dcd0bca0510e783253",
 		"closed": "e461d759b0d53bc03e8daf8e82c9db470c823a86b715d3cf01103f5bb71231f2",
@@ -27,10 +28,20 @@ func TestWindowsCursorLegacyAdapterByteIdentity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		digest := sha256.Sum256(bytes.ReplaceAll(current, []byte("\r\n"), []byte("\n")))
+		digest := sha256.Sum256(current)
 		if got := hex.EncodeToString(digest[:]); got != want {
 			t.Fatalf("legacy %s adapter hash=%s want=%s", mode, got, want)
 		}
+	}
+}
+
+func TestWindowsCursorEmbeddedTemplateUsesCanonicalLF(t *testing.T) {
+	template, err := hookFS.ReadFile("hooks/cursor-hook.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.ContainsRune(template, '\r') {
+		t.Fatal("embedded Cursor template contains CR; rebuild from an LF checkout")
 	}
 }
 
@@ -39,6 +50,9 @@ func TestWindowsCursorTargetModesCanonicalAdapter(t *testing.T) {
 	adapter, err := RenderWindowsCursorEnterpriseAdapterForTargets(testWindowsHookBinary, modes)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if bytes.ContainsRune(adapter, '\r') {
+		t.Fatal("mapped Cursor adapter contains CR; its identity would differ across platforms")
 	}
 	decoded, err := WindowsCursorEnterpriseAdapterTargetModes(adapter, testWindowsHookBinary)
 	if err != nil || !reflect.DeepEqual(decoded, modes) {

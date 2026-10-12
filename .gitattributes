@@ -66,3 +66,9 @@ internal/openshell/sandboxapi/testdata/*.golden text eol=lf
 # enterprise bundle CLI goldens are compared byte-for-byte with the command
 # output (LF); keep them LF on Windows checkouts too.
 internal/cli/testdata/enterprise_bundle/*.golden.json text eol=lf
+
+# Go embeds these checkout bytes into hook/adaptor renderers. A Windows CRLF
+# checkout would otherwise change protected adapter hashes across platforms
+# and prevent lifecycle snapshot capture during an upgrade.
+internal/gateway/connector/hooks/** text eol=lf
+internal/gateway/connector/shims/*.sh text eol=lf
