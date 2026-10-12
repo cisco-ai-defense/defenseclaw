@@ -25,8 +25,10 @@
     With -UpgradeFrom it is the enterprise upgrade lane instead of step 1:
     the previous release's Setup /ensure installs with the same config, then
     this Setup's /ensure upgrades it. The upgrade must report the applied
-    policy from a newer config generation, keep the secrets and the guardian
-    ledger, and write migration-v9.json plus config.yaml.v8.bak for v8 input.
+    policy, keep the secrets and the guardian ledger, and write
+    migration-v9.json plus config.yaml.v8.bak for v8 input. A v8 config is
+    migrated, so its policy comes from a newer config generation; a v9 one
+    (a 1.x previous release) keeps its bytes and its generation.
     Steps 2-5 then run on the upgraded deployment. The source config, upgraded
     config and any migration record are kept in -ResultsRoot for
     scripts/check_enterprise_upgrade_config.py. The rollback drill of the
@@ -440,6 +442,9 @@ try {
         $run = Invoke-Lifecycle -Name '01-previous-status' -FilePath $cli -Arguments @('enterprise', 'windows', 'status', '--profile', 'standalone', '--json')
         Assert-Result $run 'previous-status' (@('--action', 'status', '--installed', '--version', $PreviousVersion) + $installedChecks)
         $previousGeneration = Get-ConfigGeneration $run.Result
+        # A v8 config is migrated, so the upgrade applies a new config
+        # generation; a v9 one keeps its bytes and its generation.
+        $generationFloor = if ($sourceConfigVersion -eq 8) { $previousGeneration } else { $previousGeneration - 1 }
         $previousConfigSha = Get-FileSha $installedConfig
         $previousSecretsSha = Get-TreeSha $secretsDirectory
         $previousLedgerSha = Get-FileSha $guardianLedger
@@ -447,7 +452,7 @@ try {
         Step "Setup /ensure upgrades to $Version"
         $run = Invoke-Lifecycle -Name '01-setup-ensure-upgrade' -FilePath $Setup -Arguments @('/ensure', "CONFIG=$config", 'JSON=1')
         Assert-Result $run 'setup-ensure-upgrade' (@('--action', 'ensure', '--changed', '--installed', '--version', $Version, '--ready') +
-            $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$previousGeneration))
+            $installedChecks + @('--allow-warning', 'ensure_upgrade', '--policy-applied', '--config-generation-above', [string]$generationFloor))
         Assert-ServicesRunning
         $record = Join-Path (Split-Path -Parent $installedConfig) 'migration-v9.json'
         if ($sourceConfigVersion -eq 8) {

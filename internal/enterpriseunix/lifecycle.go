@@ -326,6 +326,14 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		l.describe(ctx, record, false)
 		return 0
 	}
+	if l.applyRunAfterRolledBackUpgrade(record) {
+		r.Noop = true
+		r.NoopReason = "upgrade_rolled_back"
+		r.AddWarning(codeUpgradeRolledBack, fmt.Sprintf("the upgrade to %s failed and was rolled back to %s, and config.yaml and the protected credentials are still the ones %s applied, so this apply run does not retry the upgrade; install the package again, or run `%s --from-package`",
+			env.ProductVersion, record.ProductVersion, record.ProductVersion, env.lifecycleCommand(ActionEnsure)))
+		l.describe(ctx, record, false)
+		return 0
+	}
 	if l.opts.Mutate != nil {
 		if l.opts.Action != ActionEnsure {
 			r.AddError(codeInvalidArguments, "a protected-state change can only be applied by ensure")
@@ -531,6 +539,80 @@ func (l *lifecycle) supersededApplyRun(record *Deployment) bool {
 	installed := filepath.Join(l.env.Layout.BinDir, binGateway)
 	digest, err := sha256File(l.env.P(installed))
 	return err == nil && record.Files[installed] != "" && digest == record.Files[installed]
+}
+
+// A package upgrade whose ensure fails rolls back to the previous
+// deployment, but the package manager has already installed the new
+// binaries. An apply-trigger run that ran after that rollback (the macOS
+// apply job was running again as soon as the rollback finished) is the new
+// binary against the restored record, so its ensure retried the upgrade
+// that had just failed: a whole transaction under the lifecycle lock, and
+// the next lifecycle command failed lifecycle_busy. Only the package, or an
+// ensure --from-package, retries a failed package upgrade, as on Linux,
+// where the preinstall holds the apply trigger for the transaction. The
+// rollback leaves rolledBackUpgradeName in the lifecycle directory, and an
+// apply-trigger run stands down while the deployment is the restored one
+// and its inputs are still the ones that deployment applied. A changed
+// config.yaml or credential is a new push, which the apply run applies (and
+// that upgrades the deployment); a committed transaction removes the file.
+const (
+	rolledBackUpgradeName = "rolled-back-upgrade.json"
+	codeUpgradeRolledBack = "upgrade_rolled_back"
+)
+
+// rolledBackUpgrade names the failed package upgrade and the deployment the
+// rollback restored.
+type rolledBackUpgrade struct {
+	ProductVersion   string `json:"product_version"`
+	InstalledVersion string `json:"installed_version"`
+}
+
+func (e *Env) rolledBackUpgradePath() string {
+	return filepath.Join(e.P(e.Layout.LifecycleDir), rolledBackUpgradeName)
+}
+
+// recordRolledBackUpgrade records that a failed package upgrade to version
+// was rolled back to record. A run of the apply trigger itself records
+// nothing: its own retries (scheduleApplyRetry) keep running.
+func (l *lifecycle) recordRolledBackUpgrade(record *Deployment, version string) {
+	env := l.env
+	if record == nil || !l.opts.FromPackage || env.SelfUnit != "" ||
+		strings.TrimPrefix(version, "v") == strings.TrimPrefix(record.ProductVersion, "v") {
+		return
+	}
+	data, err := json.Marshal(rolledBackUpgrade{ProductVersion: version, InstalledVersion: record.ProductVersion})
+	if err == nil {
+		err = env.writeFileAtomic(env.rolledBackUpgradePath(), append(data, '\n'), 0o600, rootOwner())
+	}
+	if err != nil {
+		l.result.AddWarning(codeRolledBack, "could not record the rolled-back upgrade, so the apply trigger may retry it: "+err.Error())
+	}
+}
+
+// applyRunAfterRolledBackUpgrade reports an apply-trigger ensure (--reason
+// path) of the binary whose package upgrade rolled back to record, with
+// config.yaml and the protected credentials still as record applied them.
+func (l *lifecycle) applyRunAfterRolledBackUpgrade(record *Deployment) bool {
+	env := l.env
+	if record == nil || l.opts.Action != ActionEnsure || l.opts.Reason != "path" || l.opts.AllowDowngrade {
+		return false
+	}
+	raw, err := readBounded(env.rolledBackUpgradePath(), maxInputBytes)
+	if err != nil {
+		return false
+	}
+	var failed rolledBackUpgrade
+	if json.Unmarshal(raw, &failed) != nil ||
+		strings.TrimPrefix(failed.ProductVersion, "v") != strings.TrimPrefix(env.ProductVersion, "v") ||
+		failed.InstalledVersion != record.ProductVersion {
+		return false
+	}
+	configSHA, err := sha256File(env.P(env.Layout.ConfigPath))
+	if err != nil || configSHA != record.ConfigSHA256 {
+		return false
+	}
+	_, secretsSHA, err := env.listSecrets()
+	return err == nil && secretsSHA == record.SecretsSHA256
 }
 
 func (l *lifecycle) validateOptions() int {
@@ -1442,6 +1524,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		_ = env.clearPending()
 		env.discardSnapshot(snap)
+		l.recordRolledBackUpgrade(record, p.version)
 		if record != nil {
 			// The previous deployment is back and running; report it.
 			l.describe(ctx, record, false)
@@ -1619,6 +1702,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 	_ = env.clearPending()
+	_ = removeFile(env.rolledBackUpgradePath())
 	if err := env.sealHookBinary(newRecord); err != nil {
 		r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
 	}

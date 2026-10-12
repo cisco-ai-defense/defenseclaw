@@ -170,6 +170,9 @@ diagnostics() {
     if [ -f "$lifecycle_dir/last-package-result.log" ]; then
         tail -n 40 "$lifecycle_dir/last-package-result.log" >&2 || true
     fi
+    # The lifecycle runs still alive (a lifecycle_busy step names no holder).
+    echo "--- lifecycle runs" >&2
+    ps -A -o pid,ppid,lstart,command 2>/dev/null | grep '[d]efenseclaw-gateway enterprise' >&2 || true
     if [ "$platform" = linux ]; then
         systemctl --no-pager --full status 'defenseclaw*' 2>&1 | tail -n 60 >&2 || true
         journalctl --no-pager -n 80 -u 'defenseclaw*' 2>&1 | tail -n 80 >&2 || true
