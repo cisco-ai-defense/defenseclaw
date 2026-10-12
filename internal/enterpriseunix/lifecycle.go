@@ -2187,6 +2187,13 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 			}
 		}
 	}
+	// launchd's bootstrap returns before the job listens (systemd waits for
+	// the gateway's READY=1): wait for the restored gateway, so the result
+	// reports the deployment that is back and not one still starting. One
+	// that does not answer is reported not ready.
+	if gateway, ok := gatewayUnitOf(units); ok && contains(previouslyActive, gateway.Name) && env.Services.Active(ctx, gateway) {
+		_ = l.waitGatewayReady(ctx, gateway)
+	}
 	return restoreErr == nil, errors.Join(restoreErr, reloadErr, errors.Join(disableErrs...), errors.Join(startErrs...))
 }
 
