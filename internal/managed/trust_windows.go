@@ -13,12 +13,15 @@
 package managed
 
 import (
+	"crypto/sha1" //nolint:gosec // SCM's service SID derivation.
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf16"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -467,9 +470,28 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 	if len(name) > 128 {
 		return nil, fmt.Errorf("%s service name is too long", WindowsServiceAccountEnv)
 	}
+	derived, err := windowsDerivedServiceSID(name)
+	if err != nil {
+		return nil, fmt.Errorf("derive Windows service SID for %q: %w", account, err)
+	}
 	sid, _, _, err := windows.LookupSID("", account)
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		// A virtual account that logged on stays resolvable after its
+		// service is deleted. The LocalSystem gateway never logs on as
+		// NT SERVICE\<name>, so once Uninstall deletes the service the name
+		// no longer maps, and the managed data_dir check during teardown
+		// finalize failed (Setup /uninstall exit 1603). The service SID is
+		// a pure function of the name, as `sc.exe showsid` computes it.
+		return derived, nil
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve Windows virtual service account %q: %w", account, err)
+	}
+	if !sid.Equals(derived) {
+		return nil, fmt.Errorf(
+			"resolved Windows virtual service account %q is %s, not its service SID %s",
+			account, sidString(sid), sidString(derived),
+		)
 	}
 	// LookupSID resolved the `NT SERVICE\<name>` string, but a compromised
 	// registrar could point the lookup at any SID. Bind trust to the NT
@@ -482,6 +504,32 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 		)
 	}
 	return sid, nil
+}
+
+// windowsDerivedServiceSID computes the service SID SCM assigns to a service
+// name: S-1-5-80 followed by the SHA-1 of the upper-cased UTF-16LE name as
+// five little-endian 32-bit subauthorities. Callers pass a name already
+// limited to ASCII letters, digits, '_', '.' and '-'.
+func windowsDerivedServiceSID(name string) (*windows.SID, error) {
+	upper := strings.ToUpper(name)
+	encoded := make([]byte, 0, 2*len(upper))
+	for _, unit := range utf16.Encode([]rune(upper)) {
+		encoded = binary.LittleEndian.AppendUint16(encoded, unit)
+	}
+	digest := sha1.Sum(encoded) //nolint:gosec // SCM's service SID derivation, not a security hash choice.
+	var sub [5]uint32
+	for index := range sub {
+		sub[index] = binary.LittleEndian.Uint32(digest[4*index:])
+	}
+	var sid *windows.SID
+	if err := windows.AllocateAndInitializeSid(
+		&windows.SECURITY_NT_AUTHORITY, 6, 80,
+		sub[0], sub[1], sub[2], sub[3], sub[4], 0, 0, &sid,
+	); err != nil {
+		return nil, err
+	}
+	defer windows.FreeSid(sid) //nolint:errcheck
+	return sid.Copy()
 }
 
 func sidIsNTService(sid *windows.SID) bool {
