@@ -386,6 +386,26 @@ print(json.dumps(client.scan_skill(target=sys.argv[1], name='lifecycle')))
     Assert-Healthy
 }
 
+# Removes the Everyone deny ACE of a drill and proves the file reads again.
+# If it does not, resets the DACL of the file to its inherited ACEs and fails
+# the lane, so later steps do not fail on the same unreadable file.
+function Clear-ReadDeny([string]$Path) {
+    & icacls.exe $Path /remove:d "*S-1-1-0" | Out-Null
+    try { $null = Get-FileHash -LiteralPath $Path -ErrorAction Stop; return $true }
+    catch { Write-Log "$Path is still unreadable: $($_.Exception.Message)" }
+    $readable = $true
+    try {
+        & takeown.exe /f $Path | Out-Null
+        $acl = [Security.AccessControl.FileSecurity]::new()
+        $acl.SetAccessRuleProtection($false, $false)
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.WindowsIdentity]::GetCurrent().User, "FullControl", "Allow"))
+        [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($Path), $acl)
+        $null = Get-FileHash -LiteralPath $Path -ErrorAction Stop
+    } catch { $readable = $false }
+    Fail "icacls could not remove the deny ACE from $Path (after a DACL reset readable=$readable); stopping the lane"
+    return $false
+}
+
 # Upgrade from the previous 1.x release, `defenseclaw rollback`, then roll forward.
 function Test-UpgradePrevious {
     Enter-Lane upgrade-previous
@@ -403,10 +423,13 @@ function Test-UpgradePrevious {
 
     Write-Log "a rollback that cannot restore the previous install puts the current one back"
     $blocked = Join-Path $DcHome "previous\bin\defenseclaw-gateway.exe"
-    & icacls.exe $blocked /deny "*S-1-1-0:(R)" | Out-Null
+    # (RD) denies only reading the data. (R) also denies READ_CONTROL and
+    # SYNCHRONIZE, and then icacls cannot remove the ACE again.
+    & icacls.exe $blocked /deny "*S-1-1-0:(RD)" | Out-Null
     try {
         Check ((Invoke-Installer (Join-Path $DcHome "installer\install.ps1") @("-Rollback", "-Yes")) -ne 0) "a rollback whose previous gateway cannot be read succeeded"
-    } finally { & icacls.exe $blocked /remove:d "*S-1-1-0" | Out-Null }
+    } finally { $unblocked = Clear-ReadDeny $blocked }
+    if (-not $unblocked) { return }
     Assert-Versions $Target
     Assert-Healthy
     Assert-DataKept
