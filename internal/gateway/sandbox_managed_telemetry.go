@@ -327,6 +327,10 @@ func sandboxManagedAction(action string) string {
 // emitSandboxDaemonEvent records one daemon event of reg, with the person
 // and registration the gateway verified.
 func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
+	if sandboxrelay.EventTelemetry(ev.Kind) {
+		emitSandboxTelemetryClaim(ctx, a, reg, ev)
+		return
+	}
 	var p sandboxEventPayload
 	if len(ev.Payload) > 0 && json.Unmarshal(ev.Payload, &p) != nil {
 		sandboxRecordFailed(ev.Kind, fmt.Errorf("payload is not the event's JSON"))
@@ -393,5 +397,62 @@ func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Re
 	case sandboxrelay.EventAccessRefused:
 		sandboxRecordFailed(ev.Kind, r.RecordSandboxAccessRefused(ctx, audit.SandboxAccessRefusedEvent{
 			Sandbox: identity, Subject: subject, Host: p.Host, Port: p.Port, Rule: p.Rule, Reason: p.Reason, Timestamp: at}))
+	}
+}
+
+// emitSandboxTelemetryClaim records one of the daemon's sandbox telemetry
+// records (daemonRelayTelemetry): a phase change (log.sandbox.lifecycle) or
+// an egress decision or connection end (log.egress.*) of reg's sandbox. The
+// sandbox, its registration, guardrail profile and policy stamp and the
+// person come from reg, which the gateway verified is the peer's own
+// (handleSandboxEvents), as on every other managed sandbox record; the
+// payload only adds what the daemon observed. A record that names another
+// sandbox than reg's is dropped.
+func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
+	var c sandboxTelemetryClaim
+	if len(ev.Payload) == 0 || json.Unmarshal(ev.Payload, &c) != nil {
+		sandboxRecordFailed(ev.Kind, fmt.Errorf("payload is not the event's JSON"))
+		return
+	}
+	identity := sandboxRecordIdentity(reg)
+	switch {
+	case identity.Name == "":
+		// A registration the daemon has not bound yet names no sandbox.
+		identity.Name = c.Sandbox
+	case c.Sandbox != identity.Name:
+		sandboxRecordFailed(ev.Kind, fmt.Errorf("registration %s is not sandbox %q's", reg.ID, c.Sandbox))
+		return
+	}
+	if identity.ID == "" {
+		identity.ID = c.SandboxID
+	}
+	identity.Phase = audit.SandboxPhase(c.Phase)
+	identity.ImageDigest, identity.PolicyVersion, identity.Profile, identity.Pack = c.ImageDigest, c.PolicyVersion, c.Profile, c.Pack
+	subject := sandboxRecordSubject(reg)
+	r := a.managedSandboxRecorder()
+	record := func(identity audit.SandboxIdentity) error {
+		if ev.Kind == sandboxrelay.EventSandboxLifecycle {
+			e := audit.SandboxLifecycleEvent{Sandbox: identity, PreviousPhase: audit.SandboxPhase(c.PreviousPhase),
+				Trigger: audit.SandboxLifecycleTrigger(c.Trigger), ExitCode: c.ExitCode, Severity: c.Severity, Timestamp: ev.Time,
+				UserID: subject.UserID, UserName: subject.UserName}
+			if c.Condition != nil {
+				e.Condition = &audit.SandboxCondition{Type: c.Condition.Type, Status: c.Condition.Status,
+					Reason: c.Condition.Reason, Message: c.Condition.Message}
+			}
+			return r.RecordSandboxLifecycle(ctx, e)
+		}
+		return r.RecordSandboxEgress(ctx, audit.SandboxEgressEvent{Sandbox: identity, Source: audit.SandboxEgressSource(c.Source),
+			End: audit.SandboxEgressEnd(c.End), TimedOut: c.TimedOut, Terminated: c.Terminated, BytesUp: c.BytesUp, BytesDown: c.BytesDown,
+			Duration: time.Duration(c.DurationMS) * time.Millisecond, PID: c.PID, Executable: c.Executable,
+			ConversationID: c.ConversationID, Host: c.Host, Port: c.Port, Scheme: c.Scheme, Path: c.Path, ResolvedIP: c.ResolvedIP,
+			Blocked: c.Blocked, DecisionCode: c.DecisionCode, Reason: c.Reason, PolicyOutcome: c.PolicyOutcome, Severity: c.Severity,
+			Timestamp: ev.Time, UserID: subject.UserID, UserName: subject.UserName})
+	}
+	if err := record(identity); err != nil {
+		// Should the recorder refuse the profile stamp, the record keeps
+		// the registration and the subject key alone.
+		sandboxRecordFailed(ev.Kind+" (stamped)", err)
+		identity.Managed = audit.SandboxManaged{RegistrationID: reg.ID, SubjectKey: reg.SubjectKey}
+		sandboxRecordFailed(ev.Kind, record(identity))
 	}
 }

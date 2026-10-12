@@ -325,6 +325,10 @@ func newSandboxDaemonRuntime(d *SandboxDaemon) (*sandboxRuntime, error) {
 		config:   d.config,
 		health:   d.opts.Health,
 		hostUser: host,
+		// The daemon has no telemetry destination: its lifecycle and egress
+		// records go to the managed gateway, which stamps and exports them
+		// (sandbox_daemon_telemetry.go, GAP-0003).
+		telemetry: newDaemonRelayTelemetry(d.relay, d.telemetryRegistration, d.logf),
 		// The user's own MCP servers, as the managed gateway judged them
 		// for the run (sandbox_daemon_mcp.go).
 		mcp: daemonMCPInventory{},
@@ -476,6 +480,14 @@ func (d *SandboxDaemon) registrationOf(b sandboxauth.Binding) (string, bool) {
 		return "", false
 	}
 	return r.ID, true
+}
+
+// telemetryRegistration is the registration of sandbox name for its
+// telemetry records: also a revoked one, whose records the managed gateway
+// still takes (handleSandboxEvents).
+func (d *SandboxDaemon) telemetryRegistration(name string) (string, bool) {
+	r, ok := d.regs.get(name)
+	return r.ID, ok && r.ID != ""
 }
 
 // observeGeneration learns the policy generation from a relayed answer.

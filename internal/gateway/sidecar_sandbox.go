@@ -202,8 +202,10 @@ type sandboxRuntimeDeps struct {
 	// per-user gateway, the managed gateway's settings for the daemon.
 	config func() *config.Config
 	health *SidecarHealth
-	// telemetry records the v8 sandbox records; nil drops them.
-	telemetry *audit.SandboxRecorder
+	// telemetry records the v8 sandbox records: the per-user gateway's
+	// recorder, or a managed daemon's relay to the managed gateway
+	// (daemonRelayTelemetry). nil drops them.
+	telemetry audit.SandboxTelemetry
 	// mcp lists the user's MCP servers; nil brings none.
 	mcp manager.MCPInventory
 	// persist keeps "always" decisions; nil refuses them.
@@ -245,10 +247,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 	egressAddr := net.JoinHostPort(sandboxListenerHost, strconv.Itoa(egressPort))
 	inflight := sandboxauth.NewInFlight(nil)
 	rt := &sandboxRuntime{api: api, egressAddr: egressAddr, health: deps.health, bindings: store}
-	var telemetry audit.SandboxTelemetry
-	if deps.telemetry != nil {
-		telemetry = deps.telemetry
-	}
+	telemetry := deps.telemetry
 	discoveryRemoved := deps.discoveryRemoved
 	if discoveryRemoved == nil {
 		discoveryRemoved = func(string) {}

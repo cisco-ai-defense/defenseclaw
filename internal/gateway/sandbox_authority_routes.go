@@ -1373,7 +1373,11 @@ func (a *APIServer) handleSandboxDecisions(w http.ResponseWriter, r *http.Reques
 // the identity the gateway verified (emitSandboxDaemonEvent); tests replace
 // it.
 var sandboxEmitEvent = func(ctx context.Context, a *APIServer, peer managedHookPeer, reg sandboxreg.Registration, ev sandboxrelay.Event) {
-	fmt.Fprintf(os.Stderr, "[sandbox-authority] event uid=%d registration=%s kind=%s\n", peer.UID, reg.ID, ev.Kind)
+	if !sandboxrelay.EventTelemetry(ev.Kind) {
+		// The lifecycle and egress records come by the hundred; their own
+		// records are the trail.
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] event uid=%d registration=%s kind=%s\n", peer.UID, reg.ID, ev.Kind)
+	}
 	emitSandboxDaemonEvent(ctx, a, reg, ev)
 }
 
@@ -1400,7 +1404,8 @@ func (a *APIServer) handleSandboxEvents(w http.ResponseWriter, r *http.Request) 
 	for _, ev := range batch.Events {
 		switch ev.Kind {
 		case sandboxrelay.EventForeignSandbox, sandboxrelay.EventForeignRule, sandboxrelay.EventForeignContainer,
-			sandboxrelay.EventSettingsDrift, sandboxrelay.EventAccessRefused, sandboxrelay.EventAccountBusy:
+			sandboxrelay.EventSettingsDrift, sandboxrelay.EventAccessRefused, sandboxrelay.EventAccountBusy,
+			sandboxrelay.EventSandboxLifecycle, sandboxrelay.EventSandboxEgress:
 		default:
 			writeSandboxRefusal(w, http.StatusBadRequest, "invalid_request", sandboxTextBadRequest)
 			return
@@ -1429,8 +1434,16 @@ func (a *APIServer) handleSandboxEvents(w http.ResponseWriter, r *http.Request) 
 		reg = sandboxreg.Registration{UID: peer.UID, UserName: accountName,
 			SubjectKey: sandboxSubjectKey(auth.key, peer.UID, accountName, "")}
 	} else {
+		// A batch of only lifecycle and egress records may name a
+		// registration revoked since: the daemon reports a sandbox deleted
+		// right after recording its deleting and deleted phases, and those
+		// records still describe the caller's own sandbox (GAP-0003).
+		telemetryOnly := true
+		for _, ev := range batch.Events {
+			telemetryOnly = telemetryOnly && sandboxrelay.EventTelemetry(ev.Kind)
+		}
 		var ok bool
-		reg, ok = a.sandboxRegistrationFor(w, auth, peer, batch.Registration, true, false)
+		reg, ok = a.sandboxRegistrationFor(w, auth, peer, batch.Registration, true, telemetryOnly)
 		if !ok || !a.sandboxDecide(w, r, peer, reg.Connector) || !a.sandboxCheckSubject(w, auth, peer, reg) {
 			return
 		}

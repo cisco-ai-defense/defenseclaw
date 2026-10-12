@@ -823,7 +823,7 @@ func TestSandboxAuthorityBudgets(t *testing.T) {
 	}
 	release()
 	events := 0
-	for range 6 {
+	for range sandboxBudgetLimits[sandboxBudgetEvents].Burst + 1 {
 		rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathEvents, sandboxrelay.EventBatch{
 			V: 1, Registration: resp.Registration.ID, Events: []sandboxrelay.Event{{Kind: sandboxrelay.EventSettingsDrift}},
 		}, nil)
@@ -834,7 +834,7 @@ func TestSandboxAuthorityBudgets(t *testing.T) {
 		}
 	}
 	if events != 1 {
-		t.Fatalf("events past burst 5: %d refused, want 1", events)
+		t.Fatalf("events past the burst: %d refused, want 1", events)
 	}
 }
 
@@ -857,7 +857,7 @@ func TestSandboxBudgetKeys(t *testing.T) {
 		}
 	}
 	var l hookCallerLimiter
-	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetEvents); rps != 1 || burst != 5 || inFlight != 2 {
+	if rps, burst, inFlight, _ := l.limits("1001|" + sandboxBudgetEvents); rps != 4 || burst != 10 || inFlight != 2 {
 		t.Fatalf("events limits %d/%d/%d", rps, burst, inFlight)
 	}
 	if rps, burst, _, _ := l.limits("1001"); rps != hookCallerRate || burst != hookCallerBurst {

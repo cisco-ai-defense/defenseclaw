@@ -46,7 +46,9 @@ type sandboxBudgetLimit struct {
 var sandboxBudgetLimits = map[string]sandboxBudgetLimit{
 	sandboxBudgetHook:   {Rate: 100, Burst: 200, InFlight: 32},
 	sandboxBudgetPolicy: {Rate: 10, Burst: 20, InFlight: 8},
-	sandboxBudgetEvents: {Rate: 1, Burst: 5, InFlight: 2},
+	// The daemon posts its lifecycle and egress records every 2 s, one batch
+	// per sandbox (daemonRelayTelemetry), besides its other records.
+	sandboxBudgetEvents: {Rate: 4, Burst: 10, InFlight: 2},
 }
 
 // sandboxBudgetClass is the budget class of a sandbox route path, "" for
