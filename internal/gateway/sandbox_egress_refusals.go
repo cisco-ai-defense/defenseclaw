@@ -76,21 +76,6 @@ const (
 	sandboxEgressNoticeMaxHosts = 3
 )
 
-// sandboxEgressNoticeEvents lists, per connector, the post-tool hook events
-// whose answer carries context the model reads: Claude Code's and Codex's
-// hookSpecificOutput.additionalContext, Copilot's additionalContext,
-// Cursor's additional_context, Devin's hookSpecificOutput.additionalContext.
-// The other harnesses' post-tool hooks have no such field (Hermes, Kiro,
-// OpenCode, OpenHands, Amp, Antigravity, OmniGent), so their agents are not
-// told; the user still is, by the session's live notice.
-var sandboxEgressNoticeEvents = map[string][]string{
-	"claudecode": {"posttooluse", "posttoolusefailure"},
-	"codex":      {"posttooluse"},
-	"copilot":    {"posttooluse", "posttoolusefailure"},
-	"cursor":     {"posttooluse"},
-	"devin":      {"posttooluse"},
-}
-
 // sandboxEgressNoticeTool reports a tool call that reaches the network
 // through the egress proxy: the connector's shell tool, or a fetch tool
 // (Claude Code's WebFetch, Copilot's web_fetch, an MCP server's fetch).
@@ -138,7 +123,10 @@ func (a *APIServer) addSandboxEgressRefusals(
 	if !ok {
 		return resp
 	}
-	if !slices.Contains(sandboxEgressNoticeEvents[binding.Connector], canonicalEvent(req.HookEventName)) ||
+	// postToolContextEvents (kernel_block_notice.go): the post-tool events
+	// whose answer the model reads. The other harnesses' agents are not
+	// told; the user still is, by the session's live notice.
+	if !slices.Contains(postToolContextEvents[binding.Connector], canonicalEvent(req.HookEventName)) ||
 		!sandboxEgressNoticeTool(binding.Connector, req.ToolName) {
 		return resp
 	}

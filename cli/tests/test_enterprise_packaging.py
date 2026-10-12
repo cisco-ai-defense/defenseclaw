@@ -73,7 +73,10 @@ def test_systemd_sockets_and_the_sensor_helper_socket_directory():
     # A stop of the gateway must not take the listeners with it.
     assert not any(line.startswith("PartOf=") for line in api + hook)
     helper = _unit("defenseclaw-sensor-helper.service")
-    assert "RuntimeDirectory=defenseclaw-sensor" in helper
+    # The socket's directory holds no regular file of the helper: systemd
+    # chowns it back from the gateway's group at the next start and fails on
+    # one (GAP-0031); the pause and the policy copies have their own.
+    assert _unit_values(helper, "RuntimeDirectory") == {"defenseclaw-sensor", "defenseclaw-sensor-tetragon"}
     assert "ReadWritePaths=/run" not in helper
     # Plane C's fanotify watch: fanotify_* are in @privileged, not @system-service.
     assert "SystemCallFilter=fanotify_init fanotify_mark" in helper

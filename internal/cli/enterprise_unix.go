@@ -117,6 +117,9 @@ arguments, 75 another lifecycle run holds the lock.`,
 	}
 	group.AddCommand(newUnixDiscoveryCommand(name))
 	group.AddCommand(newEnterpriseIdentityViewCommands(name)...)
+	if name == "linux" {
+		group.AddCommand(newUnixTetragonCommand())
+	}
 	// `enterprise <os> policy`, as the other administrator views are spelled
 	// (GAP-0201, GAP-0240).
 	policy, _, _, _ := newEnterprisePolicyGroup(name)

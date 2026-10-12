@@ -36,9 +36,9 @@ start the stack first with `defenseclaw setup local-observability up`.
 | **Agent identity** (`defenseclaw-agent-identity`) | Which logical agents and instances have been observed? | AI platform, inventory owner | Prometheus, Loki | Runtime Agent Directory, identity confidence, instance churn, and the one-click entry into Agent360. |
 | **Identity & Users** (`defenseclaw-identity`) | Who runs which agents, with what identity assurance, and under which guardrail profile? | Security, identity owner, policy owner | Loki | Users by directory and domain, verified against claimed principals, SSH against local sessions, agent identities (`agt-`) per user and sessions (`ais-`) per agent, decisions by guardrail profile and match reason, the profile-digest timeline and `identity.observed` group counts. See [Identity & Users board](#identity--users-board). |
 | **Agent360** (`defenseclaw-agent-360`) | What happened inside this agent, execution, or full descendant tree? | Developer, SOC, AI platform | Prometheus, Loki, Tempo | The deepest correlated drill-down: lifecycle phases, initial/grouped follow-up prompts, decisions and recovery, tokens, cost, network activity, per-agent provider/model and tool-family summaries, and trace waterfall. |
-| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | What was blocked, which rules drove it, and which events recur? | SOC, policy owner, incident responder | Prometheus, Loki | Enforced versus observe-mode decisions, all exported verdict rule IDs, projected tool context, exact recurring signatures, and correlation pivots into Agent360, Findings, and Policy Decisions. |
+| **Blocked Events & Analysis** (`defenseclaw-blocked-events`) | What was blocked, which rules drove it, and which events recur? | SOC, policy owner, incident responder | Prometheus, Loki | Enforced versus observe-mode decisions, all exported verdict rule IDs, projected tool context, exact recurring signatures, and correlation pivots into Agent360, Findings, and Policy Decisions. A **Kernel denials** stat and table (the `enforcement.block.applied` records with the initiator `kernel`, by control, connector, user and process) and a **Blocked by your Tetragon policies** stat show denials by DefenseClaw's kernel controls and by your own Tetragon policies. |
 | **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Which AI products, skills, MCP servers, IDE plugins, and dependencies exist? | Asset owner, security | Prometheus, Loki, Tempo | Continuous discovery inventory, confidence, detector health, the IDE plugin inventory (by IDE, AI against other, disabled, per user), the AI components found inside each OpenShell sandbox (`$sandbox`), and scan traces. A **Host** box (`$host`) narrows the metric and log panels to one computer. The **Sandbox** box narrows only the sandbox signals table and the per-signal log; the sections and panels it does not narrow say **(all names)** in their titles. |
-| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What did those AI runtimes actually run on this host? | Security, incident responder | Prometheus, Loki | Runtime-plane coverage first, so a blind host is not read as clean, then runtime findings and host-level agent activity next to the discovery inventory. |
+| **AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What did those AI runtimes actually run on this host? | Security, incident responder | Prometheus, Loki | Runtime-plane coverage first, so a blind host is not read as clean, then runtime findings and host-level agent activity next to the discovery inventory. On managed Linux with Tetragon it adds the fleet row, the **Kernel controls (Linux)** row and a row for your own Tetragon policies; see [Kernel controls and your Tetragon policies](#kernel-controls-and-your-tetragon-policies). |
 | **Hook Connectors** (`defenseclaw-connectors`) | Which connectors are active, quiet, slow, or drifting? | Operator, integration owner | Prometheus, Loki | Cross-connector comparison and the route into Connector Detail. |
 | **Connector Detail** (`defenseclaw-connector-detail`) | Why is one connector behaving differently? | Integration owner | Prometheus, Loki | Connector-scoped hooks, latency, outcomes, tokens, findings, and recent events. |
 | **Guardrail Evaluations** (`defenseclaw-security`) | What did guardrails allow, alert, confirm, or block? | SOC, policy owner | Prometheus, Loki | Verdict funnel, severity, latency, connector comparison, and raw decision detail. |
@@ -49,6 +49,59 @@ start the stack first with `defenseclaw setup local-observability up`.
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | What is happening on proxy/router deployments? | Proxy operator, SRE | Prometheus, Loki, Tempo | HTTP, tool, guardrail, GenAI, and trace telemetry that only exists when proxy/router mode is active. |
 | **Sandboxes** (`defenseclaw-sandboxes`) | What are the OpenShell sandboxes doing, what did they reach, and what was refused? | Operator, SOC, platform owner | Prometheus, Loki | Fleet gauge and phase changes, egress decisions by source (OpenShell or the DefenseClaw egress proxy) and outcome, top blocked and allowed hosts, bytes up and down per destination, a destinations table, shadow-AI and other sandbox findings, integration health, and opt-in process starts. See [Sandboxes board](#sandboxes-board). |
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Is the local process, database, exporter, or destination delivery unhealthy? | SRE, operator | Prometheus, Loki | One truthful operations board for runtime, SQLite, exporter freshness/errors, destination delivery, and gateway errors. |
+
+## Kernel controls and your Tetragon policies
+
+On Linux computers that run Tetragon with DefenseClaw's sensor helper,
+**AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) and **Blocked Events
+& Analysis** (`defenseclaw-blocked-events`) show what the kernel layer did.
+The tables are read from the plane C `plane_health` records, the
+`ai.runtime.kernel_policy` and `ai.runtime.kernel_event` records, and the
+`enforcement.block.applied` records with the initiator `kernel`. See
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon) for what each means.
+
+| Where | Panel | What it answers |
+| --- | --- | --- |
+| Runtime Planes, first row | **Fleet: kernel controls per host** | Which computers run which Tetragon version and mode, whether `enforce_ack` approves their build, how many users are enforced, in burn-in or reset, who is paused, and which digest each runs. Stats count stale approvals, computers on fallback and paused computers |
+| Runtime Planes | **Kernel controls (Linux)** | Would-block and denial counts per cycle (complete, even when an event has no attributed record), the burn-in table with covered and needed hours, and the attributed series |
+| Runtime Planes | **Your Tetragon policies: events from AI agents** | Agent events and blocks by your policies, by policy, with the policy, the agent, the action, the outcome and the hook join |
+| Blocked Events | **Kernel denials**, **Blocked by your Tetragon policies** | Denials by control, connector, user and process; blocks by your own policies |
+
+The runtime dashboard has `host`, `user` and `connector` variables like the
+other boards. The local observability stack also ships five Prometheus rules
+over the `defenseclaw_kernel_*` series, each naming the panel to open:
+
+| Alert | Fires when |
+| --- | --- |
+| `DefenseClawKernelDenials` | A DefenseClaw kernel control denied an open (informational) |
+| `DefenseClawKernelAckStale` | A computer's `enforce_ack` no longer matches its build, for 30 minutes |
+| `DefenseClawKernelPausedLong` | Kernel enforcement is paused on a computer for 8 hours |
+| `DefenseClawTetragonFallback` | Tetragon is installed, but the sensor helper runs on `cn_proc` and `fanotify`, for 15 minutes |
+| `DefenseClawCustomerPolicyBlocksAgents` | One of your own Tetragon policies denied an AI agent (informational) |
+
+A real run on a RHEL 9 lab computer with Tetragon 1.7.1, over the last
+stretch of a burn-in round (the computer's name is replaced with `host-a`). The
+fleet row lists each computer once, with its current mode, approval and user
+counts:
+
+![Grafana AI Discovery Runtime Planes, first row Fleet: kernel controls per host. Tiles for hosts reporting kernel controls, hosts with a stale approval, hosts on fallback, paused hosts, kernel denials and would-blocks, and a table of approval, backend, controls digest, host, mode, paused, Tetragon version, enrolled users, enforcing and in burn-in](/images/tetragon/grafana-kernel-fleet.png)
+
+The Kernel controls row counts what the two controls denied and what they
+would have denied in monitor mode, and shows each user's burn-in. This run
+went from observe to enforce and back on the same computer, so the table of
+policies also lists the ones removed along the way:
+
+![Grafana AI Discovery Runtime Planes, row Kernel controls (Linux): tiles for hosts with enforcing controls (1), kernel denials (5), would-blocks in monitor mode (5), agent activity with no hook decision (58), paused hosts and operator overrides (0), and reconcile failures and orphans (0); charts of kernel denials by control and connector and of would-blocks by control; a table of DefenseClaw kernel policies with the change (loaded or removed), family, host, mode, policy and state; and a table of burn-in progress per user with the host, uid, covered and needed hours and progress](/images/tetragon/grafana-kernel-controls-linux.png)
+
+The row for your own policies separates what they saw from what reached an AI
+agent:
+
+![Grafana AI Discovery Runtime Planes, row Your Tetragon policies: events from AI agents, with tiles for agent events, blocks by your policies, would-blocks and every event your policies saw, a chart of agent events by policy, and a table by policy, agent, action, outcome and hook join](/images/tetragon/grafana-kernel-your-policies.png)
+
+**Blocked Events & Analysis** shows the kernel denials by control, connector,
+user and process:
+
+![Grafana Blocked Events and Analysis, row Kernel denials (Linux): 4 kernel denials, 1 block by an administrator's Tetragon policy, and a table of denials by connector, control, process, user and count](/images/tetragon/grafana-blocked-events-kernel.png)
 
 ## Filter by user
 

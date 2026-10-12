@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/ocsf"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // Sandbox activity: OpenShell's OCSF records of what runs in a sandbox and
@@ -65,7 +66,7 @@ func (m *Manager) processEvent(ctx context.Context, id audit.SandboxIdentity, r 
 	// replaced, at most maxCmdlineBytes.
 	var cmdline string
 	if r.CmdLine != "" {
-		cmdline = processCmdline(strings.Fields(r.CmdLine))
+		cmdline = redaction.CommandLine(strings.Fields(r.CmdLine), maxCmdlineBytes)
 	}
 	m.tel.RecordSandboxActivity(ctx, audit.SandboxActivityEvent{
 		Sandbox: id, Kind: audit.SandboxActivityProcess, ProcessEvent: event, ProcessSource: audit.SandboxProcessSourceOCSF,

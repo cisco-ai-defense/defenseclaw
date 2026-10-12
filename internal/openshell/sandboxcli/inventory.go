@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/sandboxfeed"
 )
 
 // DiscoverOptions are `sandbox discover`'s.
@@ -127,8 +128,61 @@ func (a *App) Ps(ctx context.Context, o PsOptions) error {
 	if list.Truncated {
 		a.warn("the last sample stopped at its bound; some processes are not listed")
 	}
-	a.note(fmt.Sprintf("sampled every %ds; a process that starts and ends between two samples is not seen", list.IntervalSeconds))
+	a.processSourceNote(list)
+	if list.RecordsNotSent > 0 {
+		// GAP-0097: the tree has every process; the audit trail does not.
+		a.warn(fmt.Sprintf("%d process records were not sent to the audit trail: it takes", list.RecordsNotSent))
+		a.note(fmt.Sprintf("at most %d a second per sandbox (a burst of %d); the gateway log counts them",
+			sandboxapi.ProcessRecordRate, sandboxapi.ProcessRecordBurst))
+	}
 	return nil
+}
+
+// processSourceNote says where the tree comes from: the sample, or also the
+// sandbox kernel feed's Tetragon records.
+func (a *App) processSourceNote(list *sandboxapi.ProcessList) {
+	sampled := fmt.Sprintf("sampled every %ds; a process that starts and ends between two samples is not seen", list.IntervalSeconds)
+	k := list.Kernel
+	switch {
+	case k == nil:
+	// Short lines: the note sits under a table cut to the terminal's width
+	// and must not wrap mid-word at 80 columns (GAP-0028); a command gets a
+	// line of its own, so it can be copied whole.
+	case k.Connected && k.Tetragon == "connected":
+		a.note("source: kernel (Tetragon, through the sandbox kernel feed): every exec and exit is recorded,")
+		a.note(fmt.Sprintf("%d so far (%d with their pid in the sandbox); the %ds sample fills in the rest", k.Execs, k.Pinned, list.IntervalSeconds))
+		if k.Dropped > 0 {
+			a.warn(fmt.Sprintf("the kernel feed lost %d records (Tetragon's rate limit or a slow reader)", k.Dropped))
+		}
+		if k.UnfoldedHookCalls > 0 {
+			// GAP-0098: the feed folds the calls of a sandbox whose start
+			// it saw; a feed install, update or restart, or a Tetragon
+			// restart, starts it over.
+			a.note(fmt.Sprintf("%d of DefenseClaw's own hook calls are shown in full, with their tools:", k.UnfoldedHookCalls))
+			a.note("the sandbox was running when the feed last connected to Tetragon (a feed")
+			a.note("install, update or restart, or a Tetragon restart); stop and start it to")
+			a.note("fold them (its agent session restarts):")
+			a.note(fmt.Sprintf("  %s stop %s && %s start %s", CommandName, list.Name, CommandName, list.Name))
+		}
+		if k.UpdateCommand != "" {
+			a.note("the kernel feed is older than this gateway; update it:")
+			a.note("  " + k.UpdateCommand)
+		}
+		return
+	case k.Connected:
+		a.warn("the sandbox kernel feed is connected, but its Tetragon is not (" + firstNonEmpty(k.TetragonReason, "unavailable") + ")")
+	case k.UpdateCommand != "":
+		a.warn("the sandbox kernel feed is not used (" + k.Reason + "); update it:")
+		a.note("  " + k.UpdateCommand)
+	case k.Reason == sandboxfeed.ReasonUnavailable:
+		// Stopped, or running and silent: the gateway cannot tell which, and
+		// a restart fixes both (GAP-0101).
+		a.warn("the sandbox kernel feed does not answer (" + k.Reason + "); restart it:")
+		a.note("  " + sandboxfeed.StartCommand)
+	default:
+		a.warn("the sandbox kernel feed is not used (" + k.Reason + ")")
+	}
+	a.note(sampled)
 }
 
 // treeRow is one process of a tree walk and its depth.

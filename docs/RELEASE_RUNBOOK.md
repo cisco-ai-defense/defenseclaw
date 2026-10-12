@@ -93,6 +93,31 @@ and publish:
 gh release edit X.Y.Z --draft=false --latest
 ```
 
+## Release notes: the kernel controls digest
+
+Administrators approve DefenseClaw's two kernel controls with
+`enterprise.tetragon.enforce_ack`, one digest per build. A release that
+changes a control changes the digest, so every approval goes stale at once.
+Put one line in the release notes:
+
+```text
+Kernel controls digest: sha256:<12 hex>, changed since X.Y.Z
+Kernel controls digest: sha256:<12 hex>, unchanged since X.Y.Z
+```
+
+Read the digest from the pin `policies/kernel/testdata/digest.golden`, which
+`go test ./policies/kernel/` checks (a control change fails that test until
+the golden file is updated on purpose), and compare it with the pin at the
+previous tag:
+
+```bash
+git show X.Y.Z:policies/kernel/testdata/digest.golden
+```
+
+When it changed, say so in the CHANGELOG too, and tell administrators to push
+the old and the new digest together as `enforce_ack` while their rings
+upgrade. See [Tetragon on a Linux fleet](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/tetragon#upgrades).
+
 ## The enterprise upgrade gate
 
 The `enterprise-upgrade-gate` job upgrades the standalone enterprise package

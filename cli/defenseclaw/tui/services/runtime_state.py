@@ -602,7 +602,7 @@ class RuntimePanelModel:
         enable = "defenseclaw agent discovery runtime enable --enable-host-plane"
         if self.platform.startswith("linux"):
             return (
-                "Agent actions is optional. Process events need no grant; file events "
+                "Agent actions is optional. Process events need CAP_NET_ADMIN; file events "
                 f"need CAP_SYS_ADMIN (fanotify). Turn it on: {enable}"
             )
         if self.platform == "darwin":

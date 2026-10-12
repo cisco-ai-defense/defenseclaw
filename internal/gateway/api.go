@@ -1518,7 +1518,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if policy, ok := CurrentPolicyHealth(); ok && administrator {
-		body["policy"] = policy
+		body["policy"] = a.policyHealthBody(policy)
 	}
 	if ledger := agentIdentityLedgerHealth(); ledger != nil {
 		body["agent_identities"] = ledger

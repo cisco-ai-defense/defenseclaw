@@ -754,6 +754,11 @@ available on Windows: the deployment config has no
 `ai_discovery.runtime.acquisition` key, and a config that sets one is refused
 with `config_schema_invalid`.
 
+A config that carries `enterprise.tetragon` is accepted and ignored on
+Windows, because Tetragon has no Windows agent, and Windows `status` is
+unchanged. The setting acts only on Linux; see
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon).
+
 The `discovery` view names each skill and MCP server per user, including
 the Devin servers in each user's `%APPDATA%\devin\mcp_config.json`. The
 service may read that one file, not the guardian-protected folder around it;
