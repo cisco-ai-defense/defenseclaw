@@ -108,6 +108,71 @@ func TestWindowsVirtualServiceSIDRejectsBroadOrMalformedAccounts(t *testing.T) {
 	}
 }
 
+func TestWindowsVirtualServiceSIDForDeletedService(t *testing.T) {
+	// This name has no SCM row, but sc.exe showsid computes a stable service
+	// SID. The exact expected value was independently recorded from Windows.
+	const name = "DefenseClawRecoveryNoSuchServiceProbe_48A6"
+	const expected = "S-1-5-80-557343067-3914267301-595778489-1841644181-1709292513"
+	account := `NT SERVICE\` + name
+	if _, _, _, err := windows.LookupSID("", account); !errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		t.Fatalf("absent service LookupSID error = %v, want ERROR_NONE_MAPPED", err)
+	}
+	sid, err := windowsVirtualServiceSID(account)
+	if err != nil {
+		t.Fatalf("resolve absent service SID: %v", err)
+	}
+	if sid.String() != expected {
+		t.Fatalf("absent service SID = %s, want %s", sid, expected)
+	}
+	upper, err := windowsVirtualServiceSID(`NT SERVICE\` + strings.ToUpper(name))
+	if err != nil || upper.String() != expected {
+		t.Fatalf("case-folded absent service SID = %v, %v, want %s", upper, err, expected)
+	}
+	// The config loader calls this exact validator for managed data_dir. Its
+	// trusted Windows system directory has no service writer ACE, so this
+	// exercises the retired-account resolution without changing product ACLs.
+	systemDir, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatalf("GetSystemDirectory: %v", err)
+	}
+	if err := ValidateTrustedServiceRuntimeDir(systemDir, "managed data_dir", account); err != nil {
+		t.Fatalf("config runtime trust check with absent service SID: %v", err)
+	}
+}
+
+func TestWindowsDeterministicServiceSIDMatchesInstalledService(t *testing.T) {
+	const name = "TrustedInstaller"
+	resolved, _, _, err := windows.LookupSID("", `NT SERVICE\`+name)
+	if err != nil {
+		t.Fatalf("LookupSID installed service: %v", err)
+	}
+	computed, err := windowsDeterministicServiceSID(name)
+	if err != nil {
+		t.Fatalf("compute installed service SID: %v", err)
+	}
+	if !resolved.Equals(computed) {
+		t.Fatalf("resolved SID %s differs from deterministic SID %s", resolved, computed)
+	}
+}
+
+func TestParseWindowsServiceSIDOutputRejectsAmbiguousOrPartial(t *testing.T) {
+	const sid = "S-1-5-80-557343067-3914267301-595778489-1841644181-1709292513"
+	for _, output := range []string{
+		"no service SID",
+		sid + "\n" + sid,
+		"SERVICE SID: " + sid + "-1",
+		"SERVICE SID: " + sid + "1",
+	} {
+		if _, err := parseWindowsServiceSIDOutput(output); err == nil {
+			t.Fatalf("accepted ambiguous or partial SID output %q", output)
+		}
+	}
+	parsed, err := parseWindowsServiceSIDOutput("SERVICE SID: " + sid + "\r\nSTATUS: Inactive")
+	if err != nil || parsed.String() != sid {
+		t.Fatalf("valid service SID output = %v, %v", parsed, err)
+	}
+}
+
 func TestRejectWindowsReparsePoint(t *testing.T) {
 	root := t.TempDir()
 	regular := filepath.Join(root, "regular")

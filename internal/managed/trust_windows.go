@@ -13,10 +13,15 @@
 package managed
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -468,6 +473,14 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 		return nil, fmt.Errorf("%s service name is too long", WindowsServiceAccountEnv)
 	}
 	sid, _, _, err := windows.LookupSID("", account)
+	if errors.Is(err, windows.ERROR_NONE_MAPPED) {
+		// SCM removes the virtual account mapping when an uninstall deletes
+		// the service. Committed managed-hook teardown still has to validate
+		// the retained runtime before it can retire its authenticated journal.
+		// Match the installer's recovery path: sc.exe showsid computes the
+		// service SID from the exact validated name without an SCM row.
+		sid, err = windowsDeterministicServiceSID(name)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("resolve Windows virtual service account %q: %w", account, err)
 	}
@@ -482,6 +495,54 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 		)
 	}
 	return sid, nil
+}
+
+var windowsServiceSIDOutput = regexp.MustCompile(
+	`S-1-5-80-(?:[0-9]{1,10}-){4}[0-9]{1,10}`,
+)
+
+func windowsDeterministicServiceSID(name string) (*windows.SID, error) {
+	systemDir, err := windows.GetSystemDirectory()
+	if err != nil {
+		return nil, fmt.Errorf("resolve Windows system directory: %w", err)
+	}
+	scExe := filepath.Join(systemDir, "sc.exe")
+	if err := ValidateTrustedFilePath(scExe, "Windows service SID calculator"); err != nil {
+		return nil, fmt.Errorf("validate Windows service SID calculator: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, scExe, "showsid", name)
+	command.Dir = systemDir
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("compute Windows virtual service SID: %w", err)
+	}
+	if len(output) > 4096 {
+		return nil, errors.New("Windows service SID calculator output exceeds 4096 bytes")
+	}
+	return parseWindowsServiceSIDOutput(string(output))
+}
+
+func parseWindowsServiceSIDOutput(output string) (*windows.SID, error) {
+	matches := windowsServiceSIDOutput.FindAllStringIndex(output, -1)
+	if len(matches) != 1 {
+		return nil, errors.New("Windows service SID calculator did not return exactly one service SID")
+	}
+	start, end := matches[0][0], matches[0][1]
+	if start > 0 && isWindowsSIDChar(output[start-1]) ||
+		end < len(output) && isWindowsSIDChar(output[end]) {
+		return nil, errors.New("Windows service SID calculator returned a partial service SID")
+	}
+	sid, err := windows.StringToSid(output[start:end])
+	if err != nil || !sidIsNTService(sid) || sid.SubAuthorityCount() != 6 {
+		return nil, errors.New("Windows service SID calculator returned an invalid service SID")
+	}
+	return sid, nil
+}
+
+func isWindowsSIDChar(char byte) bool {
+	return char == '-' || char >= '0' && char <= '9'
 }
 
 func sidIsNTService(sid *windows.SID) bool {
