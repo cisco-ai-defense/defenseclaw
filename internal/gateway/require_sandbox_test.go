@@ -172,10 +172,16 @@ func TestRequireSandboxRefusesHostRunPerConnector(t *testing.T) {
 			if out["action"] != "block" || out["reason"] != want {
 				t.Fatalf("host run not refused:\n got action=%v reason=%v\nwant %q", out["action"], out["reason"], want)
 			}
+			// The cd line is a POSIX shell command, so a Windows folder
+			// (C:\...) gets the bare command (sandboxapi.refusalPath).
+			command := "defenseclaw sandbox run "
+			if strings.HasPrefix(project, "/") {
+				command = `cd '` + project + `' && ` + command
+			}
 			var body strings.Builder
 			enc := json.NewEncoder(&body)
 			enc.SetEscapeHTML(false)
-			if err := enc.Encode(out); err != nil || !strings.Contains(body.String(), `cd '`+project+`' && defenseclaw sandbox run `) {
+			if err := enc.Encode(out); err != nil || !strings.Contains(body.String(), command) {
 				t.Fatalf("the agent output lacks the sandbox command: %s", body.String())
 			}
 			if got := requireSandboxAuditOutcome(t, store); got != requireSandboxRefused {
