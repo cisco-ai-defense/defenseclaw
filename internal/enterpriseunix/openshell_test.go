@@ -313,6 +313,72 @@ func TestSandboxOffInstallsNothingAndOffRemovesEverything(t *testing.T) {
 	}
 }
 
+// The macOS pkg installs the launcher and the launch agents whatever
+// openshell.enabled says, and nothing but uninstall removes them: an ensure
+// from the package with sandboxes off keeps them (the postinstall removed the
+// launcher as a stale link), and an uninstall leaves neither behind.
+func TestMacOSPackageKeepsTheLauncherAndAgentsWithSandboxesOff(t *testing.T) {
+	h := newOSHost(t, "darwin")
+	bin := h.env.P(h.env.Layout.BinDir)
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	staged := h.payloadOnce()
+	for _, name := range []string{binGateway, binHook, binSensorHelper} {
+		if err := h.env.copyFileAtomic(filepath.Join(staged, name), filepath.Join(bin, name), 0o755, rootOwner()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var agents []string
+	for _, u := range h.env.userUnits() {
+		data, err := h.env.userUnitBytes(u)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := h.env.userUnitPath(u, ChannelPackage)
+		agents = append(agents, path)
+		writeHostFile(t, h.testHost, path, string(data))
+	}
+	launcher := h.env.P(h.env.launcherPath())
+	if err := os.MkdirAll(filepath.Dir(launcher), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(h.env.launcherTarget(), launcher); err != nil {
+		t.Fatal(err)
+	}
+	present := func(when string) {
+		t.Helper()
+		if got := h.link(h.env.launcherPath()); got != h.env.launcherTarget() {
+			t.Fatalf("%s: launcher points at %q, want %s", when, got, h.env.launcherTarget())
+		}
+		for _, path := range agents {
+			if !h.exists(path) {
+				t.Fatalf("%s: %s is gone", when, path)
+			}
+		}
+	}
+	ensure := func(cfg []byte) *enterprisestatus.Result {
+		t.Helper()
+		return h.run(Options{Action: ActionEnsure, FromPackage: true, Reason: "package", ConfigFile: writeTempConfig(t, cfg)})
+	}
+	off := sandboxConfig(t, "darwin", false, nil)
+	requireOK(t, ensure(off))
+	present("after the package install")
+	if r := ensure(off); !r.Noop {
+		t.Errorf("a second ensure changed %v", r.Changes)
+	}
+	// Sandboxes on and off again keep both.
+	requireOK(t, ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "prerequisite"})))
+	requireOK(t, ensure(off))
+	present("after sandboxes were on and off")
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	for _, path := range append([]string{h.env.launcherPath()}, agents...) {
+		if h.exists(path) {
+			t.Errorf("%s stays after uninstall", path)
+		}
+	}
+}
+
 // A path that is not ours is never replaced by the launcher, and it does not
 // fail the deployment: the link is skipped, the sandbox launcher row is
 // missing and the warning names the file (openshell_launcher_conflict).

@@ -338,6 +338,9 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 
 	managedLinks := env.ownedLinks(p.channel)
 	if !settings.Enabled {
+		if env.GOOS == "darwin" && p.channel == ChannelPackage {
+			return env.planPackagedMacOSSandbox(p, op)
+		}
 		for _, link := range managedLinks {
 			if env.linkIsOurs(link) {
 				op.staleLinks = append(op.staleLinks, link.Path)
@@ -390,6 +393,28 @@ func (l *lifecycle) planOpenShell(p *plan) error {
 		if !wanted[link.Path] && env.linkIsOurs(link) {
 			op.staleLinks = append(op.staleLinks, link.Path)
 		}
+	}
+	return nil
+}
+
+// planPackagedMacOSSandbox keeps, with the sandbox subsystem off, what the
+// macOS pkg installs whatever openshell.enabled says
+// (scripts/build-macos-enterprise-pkg.sh): the launcher and the launch
+// agents as the pkg wrote them. A pkg has no remover, so they are part of the
+// deployment: ensure keeps or restores them, and uninstall removes them with
+// the deployment record and the owned links. A launcher path that holds a
+// foreign file is left alone, as with the subsystem on.
+func (e *Env) planPackagedMacOSSandbox(p *plan, op *openshellPlan) error {
+	root := rootOwner()
+	for _, u := range e.userUnits() {
+		data, err := e.userUnitBytes(u)
+		if err != nil {
+			return fmt.Errorf("this build carries no %s launch agent (%v): reinstall the DefenseClaw enterprise package", u.Name, err)
+		}
+		p.files = append(p.files, desiredFile{Path: e.userUnitPath(u, p.channel), Data: data, SHA: sha256Bytes(data), Mode: 0o644, Owner: root, Kind: "user-unit"})
+	}
+	if !e.foreignLauncher() {
+		op.links = append(op.links, desiredLink{Path: e.launcherPath(), Target: e.launcherTarget(), Kind: "launcher"})
 	}
 	return nil
 }

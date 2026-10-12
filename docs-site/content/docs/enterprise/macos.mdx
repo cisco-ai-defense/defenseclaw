@@ -378,7 +378,8 @@ monitoring.
 A macOS standalone install can run coding agents in OpenShell MicroVM sandboxes
 on Apple silicon, under the sandbox policy of each person's directory group.
 They are off until `openshell.enabled` is on. The pkg packages the `defenseclaw`
-launcher and the LaunchAgents; you provide OpenShell and, for the MicroVM
+launcher and the LaunchAgents, which stay in place while sandboxes are off and
+leave with `uninstall`; you provide OpenShell and, for the MicroVM
 driver, `e2fsprogs` in a root-owned directory (`enterprise.openshell.e2fsprogs_dir`),
 or let each person's daemon download OpenShell (`install: setup`). Docker
 Desktop must run for the person, because the agent images are built there.
