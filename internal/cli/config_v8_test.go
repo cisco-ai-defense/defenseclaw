@@ -20,10 +20,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -273,6 +275,38 @@ func TestConfigV8ValidateNamesTheFieldAndWhatItTakes(t *testing.T) {
 	}
 }
 
+// GAP-0044: a per-user config that carries a managed snippet
+// (enterprise.tetragon from the Tetragon guide) is refused at
+// $.enterprise with the reason and the way out, not as a config that
+// "could not be compiled safely" at $.
+func TestConfigV8ValidateNamesTheEnterpriseBlockOfAPerUserConfig(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "config.yaml")
+	source := "config_version: 8\ndata_dir: " + directory + "\nenterprise:\n  tetragon:\n    mode: observe\n"
+	if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+	previousOutput := configV8ValidateCmd.OutOrStdout()
+	configV8ConfigPath, configV8DataDir = path, directory
+	output := &strings.Builder{}
+	configV8ValidateCmd.SetOut(output)
+	err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+	configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+	configV8ValidateCmd.SetOut(previousOutput)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted an enterprise block in a per-user config")
+	}
+	var failure configV8WireFailure
+	if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+		t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+	}
+	if failure.Path != "$.enterprise" || !strings.Contains(failure.Reason, "requires deployment_mode managed_enterprise") ||
+		!strings.Contains(failure.Reason, "remove the enterprise block") {
+		t.Fatalf("structured validation failure = %+v", failure)
+	}
+}
+
 // GAP-0288: an assignment naming a profile that guardrail.profiles does not
 // define reached the wire only as "configuration could not be compiled
 // safely" at "$". It now names the assignment's field and the profile.
@@ -302,6 +336,48 @@ func TestConfigV8ValidateNamesTheUnknownProfile(t *testing.T) {
 	if failure.Path != "$.guardrail.profile_assignments[0].profile" ||
 		!strings.Contains(failure.Reason, `unknown profile "ihs-nope"`) || !strings.Contains(failure.Reason, "defines ihs-a") {
 		t.Fatalf("structured validation failure = %+v", failure)
+	}
+}
+
+// GAP-0553: a standalone config whose default OpenShell gateway port collides
+// with gateway.api_port was refused only as "configuration could not be
+// compiled safely" at "$". It names enterprise.openshell.gateway_port and the
+// port it collides with, and the same file with another API port validates.
+func TestConfigV8ValidateNamesTheOpenShellPortCollision(t *testing.T) {
+	validate := func(apiPort int) (configV8WireFailure, error) {
+		directory := t.TempDir()
+		path := filepath.Join(directory, "config.yaml")
+		source := fmt.Sprintf("config_version: 9\ndata_dir: %s\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ngateway:\n  api_port: %d\n", directory, apiPort)
+		if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+		previousOutput := configV8ValidateCmd.OutOrStdout()
+		configV8ConfigPath, configV8DataDir = path, directory
+		output := &strings.Builder{}
+		configV8ValidateCmd.SetOut(output)
+		err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+		configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+		configV8ValidateCmd.SetOut(previousOutput)
+		var failure configV8WireFailure
+		if err != nil {
+			if decodeErr := json.Unmarshal([]byte(output.String()), &failure); decodeErr != nil {
+				t.Fatalf("decode structured failure: %v (%s)", decodeErr, output)
+			}
+		}
+		return failure, err
+	}
+	failure, err := validate(config.DefaultEnterpriseOpenShellGatewayPort)
+	if err == nil {
+		t.Fatal("config-v8 validate accepted the default OpenShell port on the API port")
+	}
+	if failure.Path != "$.enterprise.openshell.gateway_port" ||
+		!strings.Contains(failure.Reason, "collides with gateway.api_port") ||
+		!strings.Contains(failure.Reason, strconv.Itoa(config.DefaultEnterpriseOpenShellGatewayPort)) {
+		t.Fatalf("structured validation failure = %+v", failure)
+	}
+	if _, err := validate(config.DefaultEnterpriseOpenShellGatewayPort + 1); err != nil {
+		t.Fatalf("the control with another API port does not validate: %v", err)
 	}
 }
 

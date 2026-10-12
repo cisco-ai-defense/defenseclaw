@@ -592,14 +592,9 @@ func TestStartOnVMComparesTheBakedRunConfig(t *testing.T) {
 }
 
 // On docker a start that rewrites the run files records their new digests,
-// so the session's workload check compares with what was just written
-// (here with the check turned on, as it will be for docker).
+// so the session's workload check compares with what was just written.
 func TestStartOnDockerRecordsTheRewrittenDigests(t *testing.T) {
 	e := newEnv(t, nil)
-	checked, _ := openshell.LookupDriver("docker")
-	checked.SkipWorkloadCheck = false
-	e.gw.Driver = checked
-	e.fake.HandleExec(e.workloadChecks(nil, nil))
 	e.create(sandboxapi.CreateRequest{Name: "dk-yolo", Yolo: true})
 	before := readRecord(t, e, "dk-yolo")
 	e.stopBox("dk-yolo")
@@ -661,6 +656,16 @@ func TestCreateRefusesAFirstBootWithoutDiskRoom(t *testing.T) {
 		t.Fatalf("Explain of a prepared posture = %+v, %v", ex, err)
 	}
 	e.create(sandboxapi.CreateRequest{Name: "vm-cached", Copy: true, Project: e.otherProject("other")})
+	// After an in-place upgrade the gateway prepares its own disk: the one
+	// OpenShell 0.1.1 prepared counts for neither.
+	e.fake.SetRelease(openshell.InstallerVersion)
+	e.gw.Version = openshell.InstallerVersion
+	if ex, err := e.m.Explain(t.Context(), sandboxapi.ExplainRequest{Harness: "claudecode", Copy: true, Project: e.project}); err != nil || !ex.VMFirstBoot {
+		t.Fatalf("Explain on the upgraded gateway = %+v, %v", ex, err)
+	}
+	if _, err := e.tryCreate(sandboxapi.CreateRequest{Name: "vm-upgraded", Copy: true, Project: e.otherProject("upgraded")}); !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable) {
+		t.Fatalf("create on the upgraded gateway's full disk = %v", err)
+	}
 
 	d := newEnv(t, nil)
 	disk(d)

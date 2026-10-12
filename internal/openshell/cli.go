@@ -70,6 +70,10 @@ type Invocation struct {
 	Detaches bool
 	// Timeout bounds non-interactive commands (0: none).
 	Timeout time.Duration
+	// Stderr, when set, takes an interactive command's standard error in
+	// place of the terminal: the CLI's own messages, which a harness's
+	// screen does not want (the sandbox's output comes on the terminal).
+	Stderr io.Writer
 }
 
 // CLIExecOptions tune `sandbox exec`.
@@ -365,6 +369,9 @@ func (inv Invocation) Command(ctx context.Context) (*exec.Cmd, context.CancelFun
 	if inv.Interactive {
 		cmd = exec.CommandContext(ctx, inv.Argv[0], inv.Argv[1:]...)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if inv.Stderr != nil {
+			cmd.Stderr = inv.Stderr
+		}
 	} else {
 		cmd = processutil.CommandContext(ctx, inv.Argv[0], inv.Argv[1:]...)
 		cmd.Stdin = nil // os/exec connects nil stdin to the null device

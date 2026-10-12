@@ -335,6 +335,14 @@ func RouteFor(connector, goos string) string {
 	}
 }
 
+// The sandbox advisories name a required_for connector whose hooks this
+// package does not publish through machine policy (GAP-0535).
+func init() {
+	config.SandboxMachinePolicyRoute = func(connector, goos string) bool {
+		return RouteFor(connector, goos) == RouteMachinePolicy
+	}
+}
+
 // Route is RouteFor with the options that can move a connector onto
 // machine policy (OpenCode needs the trusted managed plugin artifact at
 // OpenCodePluginPath, or the caller's plan to install it).

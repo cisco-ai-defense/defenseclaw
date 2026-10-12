@@ -51,6 +51,7 @@ _DASHBOARD_SPECS = (
     ("token_economics", "DefenseClaw AI Agents Token Economics"),
     ("runtime_reliability", "Runtime and Reliability"),
     ("scanners_findings", "Scanners and Findings"),
+    ("sandboxes", "Sandboxes"),
 )
 
 

@@ -1,0 +1,23 @@
+# DefenseClaw sandbox daemon socket (systemd user unit, one per account).
+#
+# Installed in /usr/lib/systemd/user/ by the enterprise package and enabled
+# globally by `enterprise linux ensure` while openshell.enabled is on. It
+# holds only the account's 0600 CLI socket under $XDG_RUNTIME_DIR: the
+# daemon binds the sandbox ingress and egress ports itself at the first
+# sandbox create and releases them when none runs, so an account that only
+# logs in never holds them (spec D3).
+
+[Unit]
+Description=DefenseClaw sandbox daemon socket
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/
+
+[Socket]
+ListenStream=%t/defenseclaw/sandbox.sock
+FileDescriptorName=sandbox
+Service=defenseclaw-sandbox.service
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

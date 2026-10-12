@@ -147,6 +147,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	l.describe(ctx, record, true)
 	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
+	problems = append(problems, l.describeTetragon(ctx)...)
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
@@ -163,7 +164,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// status reports them as warnings with security_complete false.
 		for _, warning := range r.Warnings {
 			if warning.Code == codeMachinePolicyIncomplete || warning.Code == codeGuardianTargetFailed || warning.Code == codeConfigRejected ||
-				warning.Code == codeNoConnectorsEnabled {
+				warning.Code == codeNoConnectorsEnabled || warning.Code == codeSandboxPackDir {
 				problems = append(problems, warning.Message)
 			}
 		}
@@ -567,6 +568,7 @@ func (l *lifecycle) verifyDeployment(ctx context.Context, record *Deployment, st
 			add("%s", problem)
 		}
 	}
+	problems = append(problems, l.verifyOpenShell(record)...)
 	return problems
 }
 
@@ -946,6 +948,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
 	reportedPolicy, reloadError := "", ""
+	kernelApplied, kernelGeneration := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
 		r.Services = append(r.Services, status)
@@ -963,10 +966,16 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 				if record != nil {
 					serviceUID = record.ServiceUID
 				}
-				if body, err := l.gatewayHealth(ctx, unit, serviceUID); err == nil {
+				// Read again while the gateway's first profile assignment
+				// check runs, so a group or SID that selects nobody is listed
+				// right after an apply (GAP-0306, GAP-0409).
+				if body, err := enterprisestatus.SettledGatewayHealth(ctx, func() ([]byte, error) {
+					return l.gatewayHealth(ctx, unit, serviceUID)
+				}, env.PollInterval, 8); err == nil {
 					r.Readiness.Gateway = true
 					l.readGatewayPosture(body)
 					reportedPolicy, reloadError = gatewayPolicyHealth(body)
+					kernelApplied, kernelGeneration = gatewayKernelPolicy(body)
 				}
 			}
 		case "guardian":
@@ -986,6 +995,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.Enrollment = l.enrollmentCounts()
 	l.describePolicy(ctx, reportedPolicy, reloadError)
+	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
 		// record, and ensure must stay a no-op until config.yaml changes.
@@ -1000,6 +1010,8 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	l.describeDiscoveryHomeDirs()
 	l.describeIdentityRecords()
 	l.describeDestinations()
+	l.describeOpenShell(ctx)
+	l.describeSandboxPolicy(ctx)
 	if record != nil {
 		l.describePerUserGateways(ctx)
 		l.describeAgentSessionsBeforeActivation(ctx, record)
@@ -1019,6 +1031,56 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeAIDefenseUnavailable, "Cisco AI Defense inspection is enabled but reports "+
 			r.Inspection.AIDefense+"; the local policy engine keeps deciding. Check the "+
 			"enterprise.inspection.ai_defense credential and network access")
+	}
+}
+
+// runningDeploymentPrefix starts each warning describeRunning adds.
+const runningDeploymentPrefix = "running deployment (the refused config changed nothing): "
+
+// describeRunning is describe for a run that refused the submitted config
+// before it changed anything. The services, readiness, policy and advisories
+// it reports are the running deployment's, not those of the refused file, so
+// each warning says so and the policy line is labelled the same way. A refused
+// ensure printed the advisories and the policy line of the active config
+// right after the error, as if they described the file that was refused
+// (GAP-0564).
+func (l *lifecycle) describeRunning(ctx context.Context, record *Deployment) {
+	r := l.result
+	before := len(r.Warnings)
+	l.describe(ctx, record, false)
+	r.ConfigRefused = true
+	for i := before; i < len(r.Warnings); i++ {
+		if r.Warnings[i].Code != codeConfigRejected {
+			r.Warnings[i].Message = runningDeploymentPrefix + r.Warnings[i].Message
+		}
+	}
+}
+
+// codeSandboxPackDir warns about a sandbox packs folder other accounts could
+// read (verify fails on it). The default_profile and advisory warnings are
+// enterprisestatus.AddSandboxPolicyWarnings, which Windows shares.
+const codeSandboxPackDir = "sandbox_packs_dir_untrusted"
+
+// describeSandboxPolicy says, on every ensure, status and verify, what the
+// administrator should know about the sandbox floors of the installed
+// config, none of it fatal: each field where default_profile (what offline
+// and unmatched users get) is looser than an assigned profile (GAP-0188,
+// GAP-0331), and the advisories (GAP-0393). Both lists are in a stable
+// order, so a rerun repeats them. A sandbox packs folder ensure would refuse
+// is named too.
+func (l *lifecycle) describeSandboxPolicy(ctx context.Context) {
+	env, r := l.env, l.result
+	raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
+	if err != nil {
+		return
+	}
+	cfg, err := env.loadConfigCandidate(raw)
+	if err != nil || cfg == nil {
+		return
+	}
+	r.AddSandboxPolicyWarnings(cfg, env.GOOS)
+	if problem := env.sandboxPackDirProblem(ctx, cfg); problem != "" {
+		r.AddWarning(codeSandboxPackDir, problem)
 	}
 }
 

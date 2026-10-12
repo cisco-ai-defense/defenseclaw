@@ -260,6 +260,14 @@ func windowsEnterpriseHotConfigApply(
 		result.AddWarning("config_reverted", "config.yaml had been changed outside the lifecycle; ensure put the managed config back and kept the edited file at "+kept)
 	}
 	applyWindowsEnterprisePolicy(ctx, result)
+	// Status and verify listed the profile assignment warnings (a group SID
+	// that resolves to nothing, a malformed one); ensure, which applied the
+	// assignments, said nothing (GAP-0409).
+	if result.Readiness.Gateway {
+		if body, err := enterprisestatus.SettledGatewayHealth(ctx, windowsStandaloneGatewayHealth, 500*time.Millisecond, 8); err == nil {
+			appendStandaloneGatewayWarnings(result, body, windowsStandaloneGatewayStatus())
+		}
+	}
 	applied := strings.Join(changed, ", ")
 	switch {
 	case len(changed) == 0:
@@ -356,7 +364,12 @@ func keepInstalledWindowsEnterpriseEditedConfig() string {
 // control, administrators only.
 func keepWindowsEnterpriseEditedConfig(layout managed.StandaloneLayout, current []byte) string {
 	state, err := configwrite.ReadGenerationState(layout.ConfigPath)
-	if err != nil || state.ConfigSHA256 == "" || strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(current)) {
+	if err != nil || state.ConfigSHA256 == "" {
+		return ""
+	}
+	// A content write the hook guardian recorded as a hand edit is still an
+	// edit the managed config replaces (GAP-0617).
+	if strings.EqualFold(state.ConfigSHA256, configwrite.SHA256Hex(current)) && !configwrite.IsHandEditActor(state.Actor) {
 		return ""
 	}
 	return keepWindowsEnterpriseRejectedConfig(layout, current)

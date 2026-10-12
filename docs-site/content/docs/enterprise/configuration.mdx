@@ -259,7 +259,7 @@ Under `enterprise.enrollment`. See [Enrollment](/docs/enterprise/enrollment).
 | `exclude_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Never enroll these accounts. Wins over every include. |
 | `include_groups` | Linux and macOS: group names or numeric IDs. Windows: group names or SIDs. Default: empty | When not empty, enroll only members of these groups. Windows covers local and Active Directory groups, and the Microsoft Entra ID groups a built-in local group lists; see [Enrollment](/docs/enterprise/enrollment#group-filters-on-windows). |
 | `exclude_groups` | As `include_groups`. Default: empty | Never enroll members. Wins over `include_groups`. |
-| `exempt_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Linux and macOS: not enrolled, but their calls are allowed, inspected and logged. Windows: the machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows. |
+| `exempt_users` | List of user names (Linux and macOS: or numeric uids). Default: empty | Linux and macOS: not enrolled and never refused for enrollment or by a sandbox `required_for`, but their calls are still inspected under their guardrail profile, which blocks as for anyone, and logged. Windows: the machine-policy agents keep their rows, so the user is inspected; per-user agents get no new rows. |
 | `unenrolled_users` | `inspect`, `deny`. Default: `inspect` | **Linux and macOS.** How the gateway treats a user without an enrollment who calls a machine-policy agent's hook. |
 | `unverified_versions` | `report`, `refuse`. Default: `report` | How a desktop app or editor extension whose hook delivery DefenseClaw has not live-verified is treated; see [Desktop apps and editor extensions](/docs/enterprise/enrollment#desktop-apps-and-editor-extensions). |
 | `unverified_versions_by_connector` | map of connector to `report` or `refuse`. Default: empty | Per-connector override of `unverified_versions`. |
@@ -293,6 +293,35 @@ Under `enterprise.machine_policy.windows_wsl`. See [Agent sessions in WSL](/docs
 | `platform` | `leave`, `disable`. Default: `leave` | **Windows.** `disable` sets `HKLM\SOFTWARE\Policies\WSL\AllowWSL=0`, which turns WSL off for every account, including other WSL tooling such as Docker Desktop's WSL backend. |
 | `editor_settings` | `repair`, `report`, `allow`. Default: `repair` | **Windows.** What the guardian does with `chatgpt.runCodexInWindowsSubsystemForLinux: true` in enrolled users' VS Code, VS Code Insiders and Cursor settings: reset it to `false`, only report it, or ignore it. |
 | `claude_desktop_key` | `merge`, `create`. Default: `merge` | **Windows.** `merge` adds `disableWslSessions` only where `HKLM\SOFTWARE\Policies\Claude` already holds machine policy. `create` also writes it to an empty key, which makes Claude Desktop ignore every account's HKCU policy and local third-party configuration. |
+
+### Tetragon (Linux)
+
+Under `enterprise.tetragon`. See
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon).
+The block applies to the standalone profile on Linux. Windows and macOS
+accept it and ignore it (macOS `status` reports `tetragon_not_applicable`),
+and the Secure Client profile refuses a config that carries it.
+
+| Key | Values and default | What it does |
+| --- | --- | --- |
+| `mode` | `off`, `consume`, `observe`, `enforce`. Default: `consume` | **Linux.** `off` keeps `cn_proc` and `fanotify`. `consume` reads the Tetragon the computer already runs as Plane C's process source. `observe` also loads DefenseClaw's read-only policies and the two kernel controls in monitor mode. `enforce` lets the controls deny, once `enforce_ack` matches. With Plane C off (`ai_discovery.runtime.enable_host_plane`), the effective mode is `off` |
+| `burn_in` | `0`, or whole hours from `24h` to `2160h`. Default: `168h` | **Linux.** Covered agent time each enrolled user must accumulate, with no would-block hit, before that user is enforced. `0` skips the wait and status warns `kernel_burn_in_skipped`. It counts hours of agent use, not calendar time: `168h` is about five to six working weeks for a full-time agent user, so a pilot ring uses a shorter value such as `40h` |
+| `enforce_ack` | One `sha256:` and 12 lowercase hex digits, a list of up to 4 of them, or empty. Default: empty | **Linux.** The `kernel_policy` digest you approved, as `enterprise linux tetragon verify --ready-for enforce` prints it. Push a list of the old and the new digest while a ring upgrades, so a release that changes a control does not drop users to monitor mode. A one-item list equals the string. Only `mode: enforce` reads it; with another mode it is kept and ignored. Without a matching value the controls stay in monitor mode |
+| `customer_events` | `agent`, `off`. Default: `agent` | **Linux.** Report the events of your own Tetragon policies (kprobe and LSM) when they hit an AI agent, tagged with the policy name and tied to the agent, the user and the hook decision. `off` forwards nothing and keeps the counts. DefenseClaw never manages, changes or deletes your policies. Works in `consume`, `observe` and `enforce` |
+
+An absent block and `mode: consume` with the default `burn_in` are the same
+policy and produce the same effective digest. There are no socket, path,
+filter or per-control keys: the helper finds Tetragon from
+`/var/run/tetragon/tetragon-info.json`, and the controls ship in the binary.
+A condition that stops enforcement, such as a stale ack, never rejects the
+config; it keeps the controls in monitor mode and status says why.
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  profile: standalone
+  tetragon:
+    mode: observe
+```
 
 ### Trust, coexistence and network
 
@@ -582,12 +611,16 @@ destination that uses one is refused.
 ## Sandbox policy pushdown
 
 A managed config also accepts the `openshell.admin` block, the
-organization-wide limits for agents that run in NVIDIA OpenShell sandboxes.
-The lifecycle validates it, so you can stage it, but a `managed_enterprise`
-install does not run sandboxes yet: `/health` reports the `sandbox`
-subsystem as `disabled`, and `defenseclaw sandbox setup` and `run` refuse
-to start. The keys, the trust rules for a custom required pack on a managed
-host, and two complete examples are in
+organization-wide limits for agents that run in NVIDIA OpenShell sandboxes, the
+`sandbox` section of each guardrail profile, and the `enterprise.openshell`
+block that says how OpenShell is provided. A standalone install runs sandboxes
+for its standard users under the policy their directory group selects:
+[Sandboxes on managed computers](/docs/enterprise/sandboxes) covers the install
+modes, the keys, requiring sandboxes and what users see. The Secure Client
+profile does not run sandboxes and refuses every `sandbox` section and every
+`openshell.admin` key added for managed sandboxes. The older `openshell.admin`
+keys, the trust rules for a custom required pack on a managed host, and two
+complete examples are in
 [Sandbox policy packs and admin controls](/docs/sandboxes/policy-packs#admin-constraints).
 
 ## Sample configs

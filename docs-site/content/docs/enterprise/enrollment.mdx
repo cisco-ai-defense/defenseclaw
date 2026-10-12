@@ -234,7 +234,7 @@ installed. See [Residual risks](/docs/enterprise/threat-model#residual-risks).
 | `include_users` | Adds these accounts even when discovery does not list them, and skips the uid and login-shell checks for them | Accepted. Every profile on the computer is already a candidate, so it adds and removes no one. |
 | `exclude_users` | Never enrolled. Wins over every other setting. | Never enrolled. Wins over every other setting. |
 | `include_groups`, `exclude_groups` | Group filters | Group filters for local and Active Directory groups, and for the Microsoft Entra ID groups that a built-in local group lists; see [Group filters on Windows](#group-filters-on-windows) |
-| `exempt_users` | Not enrolled; their calls are allowed, inspected and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept. |
+| `exempt_users` | Not enrolled, and never refused for enrollment or by a sandbox `required_for`; their calls are still inspected under their guardrail profile, which blocks what it blocks for anyone, and logged | Keeps the rows of the machine-policy agents, so the user is inspected and logged there. Per-user agents get no new rows; rows already enrolled are kept. |
 | `unenrolled_users` | `inspect` or `deny` for machine-policy agents | Not applied: a user who is not enrolled fails closed |
 | `unverified_versions`, `unverified_versions_by_connector` | `report` or `refuse` for desktop apps and editor extensions | Same; a surface-only user is refused as an unenrolled user, and a call that names a refused surface is refused. Discovery reads the profile under the user's token, so a signed-out user's apps are found after sign-in. |
 | `root` | `inspect`, `deny` or `exempt` | Not applied |
@@ -290,7 +290,7 @@ enterprise:
     exclude_users: [build]          # never enroll
     include_groups: [developers]    # only members of this group
     exclude_groups: [contractors]   # exclude wins over include
-    exempt_users: [svc-release]     # not enrolled; calls inspected and logged
+    exempt_users: [svc-release]     # not enrolled; calls still inspected (and blocked) by its profile, and logged
     unenrolled_users: inspect       # inspect | deny
     root: inspect                   # inspect | deny | exempt
     uid_max: 0                      # 0: login.defs UID_MAX bounds local accounts only
@@ -346,9 +346,15 @@ hook socket:
 | Enrolled user | Allowed and inspected | Allowed and inspected |
 | User without an enrollment, `unenrolled_users: inspect` (default) | Allowed and inspected | Refused: `enterprise_managed_uid_unregistered` |
 | User without an enrollment, `unenrolled_users: deny` | Refused unless the user is enrolled for some agent | Refused |
-| `exempt_users` entry | Allowed and inspected; recorded in the audit store (see below) | Same |
+| `exempt_users` entry | Not refused for enrollment; inspected under the guardrail profile, which still blocks; recorded in the audit store (see below) | Same |
 | uid 0, `root: inspect` or `exempt` (default `inspect`) | Allowed and inspected | Allowed and inspected |
 | uid 0, `root: deny` | Refused: `enterprise_managed_root_denied` | Refused |
+
+An exemption is from enrollment, not from inspection: the account's
+guardrail profile (its assignment, or `default_profile`) still applies its
+`block_at` and rule packs to every call, and a sandbox `required_for` does
+not refuse its host runs. `profile-explain --user <account>` prints
+`"enrollment": {"exempt": true}` and says so.
 
 A call from an `exempt_users` account is visible to a reviewer of
 `audit export` or a SIEM: its `hook_decision` row carries
@@ -455,7 +461,13 @@ avoid lookups.
 
 - **New user.** Enrolled on the next enumerator cycle, within five
   minutes, once the agent is installed for them. On Windows a sign-in also
-  starts an extra cycle about 15 seconds later. The guardian sees the
+  starts an extra cycle about 15 seconds later, which enrolls the agents
+  already installed in the profile. Claude Code is the exception: its
+  native build is verified against the record it writes under
+  `.local\share\claude\versions` on its first start, so a new user's first
+  Claude Code start is refused ("this account is not enrolled yet; restart
+  the agent in 5 minutes") and the next cycle, within five minutes, enrolls
+  it. The guardian sees the
   manifest change and writes their registration right away; its one-minute
   check retries a write that has to wait. Machine-policy
   agents run DefenseClaw's hooks from the first call: on Linux and macOS

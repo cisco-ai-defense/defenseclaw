@@ -933,6 +933,29 @@ func TestUnreachable(t *testing.T) {
 	})
 }
 
+// GAP-0159: a per-user hook the gateway refused with its own message (a
+// Codex update left the protected hook setup stale: HTTP 409) showed only
+// "DefenseClaw hook failed closed" in the agent. The denial names the
+// refusal and doctor; a managed hook, and a body that is not the gateway's
+// JSON, keep the generic text.
+func TestPerUserGatewayRefusalNamesDoctor(t *testing.T) {
+	refusal := `{"error":"Codex hook contract does not match protected runtime lock"}`
+	for _, status := range []int{409, 503} {
+		r := run(t, "codex", &stubRT{status: status, body: refusal}, func(o *Options) { o.FailMode = "closed" })
+		if r.code != 0 || !strings.Contains(r.stdout, `"permissionDecision":"deny"`) ||
+			!strings.Contains(r.stdout, fmt.Sprintf("refused it (HTTP %d: Codex hook contract does not match protected runtime lock)", status)) ||
+			!strings.Contains(r.stdout, "Run `defenseclaw doctor`") {
+			t.Fatalf("HTTP %d: code=%d stdout=%q", status, r.code, r.stdout)
+		}
+	}
+	if text := perUserRefusalText(Options{ManagedEnterprise: true}, 409, []byte(refusal)); text != "" {
+		t.Fatalf("managed hook text = %q, want the generic one", text)
+	}
+	if text := perUserRefusalText(Options{}, 409, []byte("conflict")); text != "" {
+		t.Fatalf("plain body text = %q, want the generic one", text)
+	}
+}
+
 func TestConnectionRefusedColdStartsAndRetriesExactlyOnce(t *testing.T) {
 	rt := &stubRT{}
 	rt.onRequest = func(state *stubRT, _ *http.Request) (*http.Response, error) {
@@ -2046,6 +2069,38 @@ func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing
 	})
 	if code != 0 || rt.requests != 0 || strings.Contains(errb.String(), "blocking") {
 		t.Fatalf("unenrolled Hermes: code = %d requests = %d stderr = %q, want an allow that does not claim a block", code, rt.requests, errb.String())
+	}
+}
+
+// GAP-0385: Claude Code shows only the first 80-odd characters of the hook's
+// stderr line, so the Windows refusal of a new account leads with the wait
+// and the next step instead of "defenseclaw: blocking claude-code tool: this
+// account is not enrolled in DefenseClaw on t...".
+func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
+	const lead = "DefenseClaw: this account is not enrolled yet; restart the agent in 5 minutes."
+	for _, reason := range []string{managedSIDUnregisteredReason, managedEnrollmentPendingReason} {
+		var out, errb bytes.Buffer
+		home := t.TempDir()
+		rt := ok(`{"action":"allow"}`)
+		code := Run(context.Background(), Options{
+			Connector:                "claudecode",
+			Event:                    "PreToolUse",
+			APIAddr:                  "127.0.0.1:1",
+			Home:                     home,
+			HookDir:                  filepath.Join(home, "hooks"),
+			FailMode:                 "open",
+			ManagedEnterprise:        true,
+			ManagedRuntimeFailure:    reason,
+			ExplainUnenrolledAccount: true,
+			Stdin:                    strings.NewReader("{}"),
+			Stdout:                   &out,
+			Stderr:                   &errb,
+			HTTPClient:               &http.Client{Transport: rt},
+		})
+		first, _, _ := strings.Cut(errb.String(), "\n")
+		if code == 0 || rt.requests != 0 || !strings.HasPrefix(first, lead) || len(lead) > 80 {
+			t.Fatalf("%s: code %d requests %d first stderr line %q, want a block that starts %q", reason, code, rt.requests, first, lead)
+		}
 	}
 }
 

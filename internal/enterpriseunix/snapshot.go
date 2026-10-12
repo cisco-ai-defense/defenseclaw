@@ -36,6 +36,10 @@ type snapshotEntry struct {
 	UID     int         `json:"uid,omitempty"`
 	GID     int         `json:"gid,omitempty"`
 	Blob    string      `json:"blob,omitempty"`
+	// Symlink is the target of a symbolic link the path was (the launcher
+	// and the enable link of the sandbox subsystem); such an entry has no
+	// blob.
+	Symlink string `json:"symlink,omitempty"`
 	// Store is the managed root whose per-filesystem store holds Blob, when
 	// the file could not be linked into the snapshot directory itself.
 	Store string `json:"store,omitempty"`
@@ -123,6 +127,47 @@ func (e *Env) takeSnapshot(id string, files, dirs []string) (_ *snapshot, err er
 		return nil, err
 	}
 	return snap, nil
+}
+
+// snapshotLinks records, beside the files of snap, the symbolic links a
+// transaction may create, replace or remove (the launcher, the enable link):
+// what each was, or that it was absent. A path that is not a symlink is
+// refused, because the transaction never replaces it.
+func (e *Env) snapshotLinks(snap *snapshot, links []string) error {
+	if len(links) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	for _, entry := range snap.Entries {
+		seen[entry.Path] = true
+	}
+	for _, canonical := range links {
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		entry := snapshotEntry{Path: canonical}
+		info, err := os.Lstat(e.P(canonical))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return fmt.Errorf("snapshot %s: %w", canonical, err)
+		case info.Mode()&os.ModeSymlink == 0:
+			return fmt.Errorf("snapshot %s: it exists and is not a symlink, which the lifecycle never replaces; remove it or move it aside", canonical)
+		default:
+			target, err := os.Readlink(e.P(canonical))
+			if err != nil {
+				return fmt.Errorf("snapshot %s: %w", canonical, err)
+			}
+			entry.Present, entry.Symlink = true, target
+		}
+		snap.Entries = append(snap.Entries, entry)
+	}
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	return e.writeFileAtomic(filepath.Join(snap.Dir, snapshotIndexName), data, 0o600, rootOwner())
 }
 
 // applyTriggerWatches reports a file the apply trigger watches:
@@ -233,7 +278,7 @@ func (e *Env) blobPath(snap *snapshot, entry snapshotEntry) string {
 // retry can restore.
 func (e *Env) checkBlobs(snap *snapshot) error {
 	for _, entry := range snap.Entries {
-		if entry.Dir || !entry.Present {
+		if entry.Dir || !entry.Present || entry.Symlink != "" {
 			continue
 		}
 		blob := e.blobPath(snap, entry)
@@ -275,6 +320,10 @@ func (e *Env) restoreFiles(snap *snapshot) error {
 				if err := e.Lchown(path, entry.UID, entry.GID); err != nil && !errors.Is(err, os.ErrNotExist) {
 					errs = append(errs, err)
 				}
+			}
+		case entry.Present && entry.Symlink != "":
+			if _, err := e.ensureSymlink(entry.Path, entry.Symlink); err != nil {
+				errs = append(errs, fmt.Errorf("restore %s: %w", entry.Path, err))
 			}
 		case entry.Present:
 			if err := mkdirParents(filepath.Dir(path)); err != nil {

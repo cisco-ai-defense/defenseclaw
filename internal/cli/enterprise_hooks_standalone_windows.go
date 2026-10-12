@@ -114,15 +114,21 @@ func enterpriseHookStandaloneConfigRefresh(w io.Writer) {
 		return
 	}
 	current := enterpriseHookWindowsConfigDigest()
-	if current == "" || current == enterpriseHookWindowsLoadedConfig {
+	if current == "" {
 		return
 	}
-	next, err := enterpriseHookWindowsConfigLoader(cfg.ConfigFilePath)
-	if err != nil || next == nil || !next.StandaloneEnterprise() || next.SecureClientIntegration() {
-		fmt.Fprintf(w, "[hook-guardian] managed config changed but does not load; keeping the running config: %v\n", err)
-		return
+	if current != enterpriseHookWindowsLoadedConfig {
+		next, err := enterpriseHookWindowsConfigLoader(cfg.ConfigFilePath)
+		if err != nil || next == nil || !next.StandaloneEnterprise() || next.SecureClientIntegration() {
+			fmt.Fprintf(w, "[hook-guardian] managed config changed but does not load; keeping the running config: %v\n", err)
+			return
+		}
+		cfg = next
+		enterpriseHookWindowsLoadedConfig = current
+		fmt.Fprintf(w, "[hook-guardian] managed config changed; reconciling with it\n")
 	}
-	cfg = next
-	enterpriseHookWindowsLoadedConfig = current
-	fmt.Fprintf(w, "[hook-guardian] managed config changed; reconciling with it\n")
+	// The config the guardian runs with loads. An administrator's content
+	// write that the lifecycle did not record is the next config generation
+	// (GAP-0617).
+	recordUnrecordedManagedConfig(cfg.ConfigFilePath, w)
 }

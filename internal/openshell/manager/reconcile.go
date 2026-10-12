@@ -21,12 +21,17 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 // loadRecords restores the boxes the daemon knew before a restart.
@@ -35,6 +40,13 @@ func (m *Manager) loadRecords() error {
 	for _, err := range errs {
 		m.logf("%v", err)
 	}
+	m.destMu.Lock()
+	for _, r := range recs {
+		if t := m.loadDestinations(r.Name); t != nil && !r.Retained {
+			m.dests[r.Name] = t
+		}
+	}
+	m.destMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, r := range recs {
@@ -49,9 +61,17 @@ func (m *Manager) loadRecords() error {
 				"DefenseClaw keeps managing it under %s", r.Name, r.Owner, m.opts.Owner, "sandboxes/images.json", r.Owner)
 		}
 		b := &box{rec: *r, seenChunks: map[string]struct{}{}, retained: r.Retained}
+		b.hooks.restore(r.HookCounts)
+		if c := r.HookCounts; c != nil {
+			b.reach.since, b.reach.reason, b.reach.noHookYet = c.UnreachableSince, c.UnreachableReason, c.NoHookYet
+			b.silentSince = c.SilentSince
+		}
 		m.boxes[r.Name] = b
 		for _, pattern := range r.Unblocks {
 			_ = m.unblocks.Add(egress.Unblock{Pattern: pattern, SandboxID: scopeID(r.ID, r.Name)})
+		}
+		for _, host := range r.Approved {
+			_ = m.approved.Add(egress.Unblock{Pattern: host, SandboxID: scopeID(r.ID, r.Name)})
 		}
 	}
 	return nil
@@ -66,9 +86,21 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	return m.reconcile(ctx, false)
 }
 
-func (m *Manager) reconcile(ctx context.Context, startup bool) error {
+func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 	m.reconcileMu.Lock()
 	defer m.reconcileMu.Unlock()
+	managedDaemon := m.authority() != nil
+	if managedDaemon {
+		defer func() {
+			if err != nil {
+				m.reportWithoutGateway(ctx)
+				return
+			}
+			m.reportForeignContainers(ctx)
+			// Records kept while no sandbox was registered go out now if one is.
+			m.flushManagedEvents(ctx, m.anyRegistration())
+		}()
+	}
 	// Adoption stamps records with the driver the gateway runs now.
 	gw, err := m.driverGateway(ctx)
 	if err != nil {
@@ -130,7 +162,12 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		b.op.Unlock()
 	}
 
-	// Bindings without a sandbox.
+	// Bindings without a sandbox. The bindings are listed before the boxes
+	// are: a create reserves its box (creating) before it mints its
+	// binding, so each binding listed belongs to a box seen below, known or
+	// creating. Listed after, a binding minted between the two reads looked
+	// vanished and was revoked under the create.
+	bindings := m.opts.Bindings.List()
 	m.mu.Lock()
 	known := map[string]bool{}
 	creating := map[string]bool{}
@@ -141,7 +178,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 		}
 	}
 	m.mu.Unlock()
-	for _, binding := range m.opts.Bindings.List() {
+	for _, binding := range bindings {
 		if known[binding.ID] || creating[binding.SandboxName] {
 			continue
 		}
@@ -178,6 +215,11 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 			}
 		}
 	}
+	if managedDaemon {
+		m.refreshDecisions(ctx)
+		m.reconcileForeign(ctx, gw, live)
+	}
+	m.deleteExpired(ctx)
 	m.pruneApprovals()
 	m.mu.Lock()
 	m.lastReconcile = m.now()
@@ -185,6 +227,326 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) error {
 	m.refreshEgress()
 	m.enforceAll(ctx)
 	return nil
+}
+
+// reportWithoutGateway is what a managed daemon's reconcile owes the
+// managed gateway while the OpenShell gateway can't be reached or listed:
+// neither needs it. The containers that run an agent are looked into, at
+// most once a reconcile interval (the reconnects come faster), and the
+// records kept go out. Outside managed mode it does nothing.
+func (m *Manager) reportWithoutGateway(ctx context.Context) {
+	if m.authority() == nil {
+		return
+	}
+	st := m.managedSide()
+	st.mu.Lock()
+	due := st.containersAt.IsZero() || m.now().Sub(st.containersAt) >= m.opts.ReconcileInterval
+	st.mu.Unlock()
+	if due {
+		m.reportForeignContainers(ctx)
+	}
+	m.flushManagedEvents(ctx, m.anyRegistration())
+}
+
+// reconcileForeign stops, or reports, every sandbox on the user's OpenShell
+// gateway that DefenseClaw did not create and register (a managed daemon):
+// one without this data dir's labels (made with OpenShell's own CLI, say),
+// or a labelled one the managed gateway never registered. A managed host
+// runs the person's agents only in sandboxes its policy resolved, so
+// foreign_sandboxes is stop unless every floor in force says alert. live
+// are the sandboxes this pass found labelled for this data dir.
+func (m *Manager) reconcileForeign(ctx context.Context, gw *Gateway, live map[string]*openshell.Sandbox) {
+	all, err := gw.Client.ListSandboxes(ctx, nil)
+	if err != nil {
+		m.logf("list every sandbox of the OpenShell gateway: %v", err)
+		return
+	}
+	pass := foreignPass{
+		stop:         m.foreignSandboxAction() == config.OpenShellForeignSandboxesStop,
+		registration: m.anyRegistration(),
+		running:      map[string]bool{},
+	}
+	st := m.managedSide()
+	left := 0 // foreign sandboxes this pass leaves running (ForeignSandboxesRunning)
+	defer func() {
+		// A removal that is no longer pending (the sandbox is gone or no
+		// longer runs) is forgotten; one the context cut short stays.
+		if ctx.Err() != nil {
+			return
+		}
+		st.mu.Lock()
+		for key := range st.foreignRemoving {
+			if !pass.running[key] {
+				delete(st.foreignRemoving, key)
+			}
+		}
+		st.foreignLeft = left
+		st.mu.Unlock()
+	}()
+	for _, sb := range all {
+		if ctx.Err() != nil {
+			return
+		}
+		if m.removeUndoneLeftover(ctx, gw, sb) {
+			// Its own leftover of a create that was rolled back, not a
+			// foreign sandbox (GAP-0557).
+			continue
+		}
+		if !m.foreignSandbox(sb, live) {
+			continue
+		}
+		if m.foreignOne(ctx, pass, gw, "", sb) {
+			left++
+		}
+	}
+	// The account's other OpenShell gateways (one the user started by hand
+	// and registered with the CLI, say) run no managed sandbox: everything
+	// running on them is foreign (GAP-0678). What they leave running does
+	// not keep the managed gateway up (ForeignSandboxesRunning).
+	if m.opts.OtherGateways == nil {
+		return
+	}
+	for _, other := range m.opts.OtherGateways(ctx, gw) {
+		if ctx.Err() == nil {
+			if sbs, err := other.Client.ListSandboxes(ctx, nil); err != nil {
+				m.logf("list the sandboxes of OpenShell gateway %s: %v", other.Name, err)
+			} else {
+				for _, sb := range sbs {
+					if ctx.Err() != nil {
+						break
+					}
+					m.foreignOne(ctx, pass, other, other.Name, sb)
+				}
+			}
+		}
+		if other.Close != nil {
+			_ = other.Close()
+		}
+	}
+}
+
+// foreignPass is what one reconcileForeign pass holds for each foreign
+// sandbox: the action, the registration its records go under, and the keys
+// of the foreign sandboxes found running.
+type foreignPass struct {
+	stop         bool
+	registration string
+	running      map[string]bool
+}
+
+// foreignOne stops or reports one foreign sandbox of gw (otherGateway names
+// gw when it is not the managed gateway) and reports whether it is left
+// running.
+func (m *Manager) foreignOne(ctx context.Context, pass foreignPass, gw *Gateway, otherGateway string, sb *openshell.Sandbox) bool {
+	st := m.managedSide()
+	key := "sandbox:" + firstNonEmpty(sb.ID, sb.Name)
+	where := "the OpenShell gateway"
+	if otherGateway != "" {
+		key = "sandbox:" + otherGateway + "/" + firstNonEmpty(sb.ID, sb.Name)
+		where = "the other OpenShell gateway " + otherGateway
+	}
+	switch auditPhase(sb.Status.Phase) {
+	case audit.SandboxPhaseProvisioning, audit.SandboxPhaseStarting, audit.SandboxPhaseReady, audit.SandboxPhaseUnknown,
+		audit.SandboxPhaseError: // a sandbox in error may still run its containers
+	default:
+		return false // not running: nothing runs under no policy
+	}
+	pass.running[key] = true
+	left := false
+	action := config.OpenShellForeignSandboxesAlert
+	outcome := foreignStopped
+	if pass.stop {
+		action = config.OpenShellForeignSandboxesStop
+		st.mu.Lock()
+		tries, pending := st.foreignRemoving[key]
+		st.mu.Unlock()
+		var err error
+		if outcome, err = m.stopForeign(ctx, gw, sb); err != nil {
+			// Still running: the next reconcile tries again.
+			m.logf("%s: stop foreign sandbox %s on %s: %v", gatewaylog.ErrCodeOpenShellAdminViolation, sb.Name, where, err)
+			return true
+		}
+		if outcome == foreignRemoving {
+			left = true
+			tries++
+			st.mu.Lock()
+			st.foreignRemoving[key] = tries
+			st.mu.Unlock()
+			if tries == foreignRemoveTries {
+				m.logf("%s: foreign sandbox %s on %s is still %s after %d removals; it is removed again at every reconcile",
+					gatewaylog.ErrCodeOpenShellAdminViolation, sb.Name, where, sb.Status.Phase, tries)
+				m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: sb.Name, Severity: "HIGH",
+					Reason: sandboxrelay.EventForeignSandbox, Message: truncate(sandboxapi.ForeignNotRemoved(sb.Name, string(sb.Status.Phase)), 512)})
+			}
+		}
+		if pending {
+			// Recorded and told when its removal began: this pass only
+			// tried again.
+			return left
+		}
+	} else {
+		left = true
+		st.mu.Lock()
+		seen := st.reported[key]
+		st.reported[key] = true
+		st.mu.Unlock()
+		if seen {
+			return left
+		}
+	}
+	m.logf("%s: sandbox %s on %s was not started with defenseclaw sandbox run (%s)",
+		gatewaylog.ErrCodeOpenShellAdminViolation, sb.Name, where, action)
+	m.managedEvent(ctx, pass.registration, sandboxrelay.EventForeignSandbox, map[string]any{
+		"sandbox": truncate(sb.Name, 128), "sandbox_id": truncate(sb.ID, 128), "action": action,
+		"harness": truncate(sb.Labels[LabelHarness], 64),
+	})
+	msg := sandboxapi.ForeignStopped(sb.Name)
+	switch {
+	case !pass.stop:
+		msg = sandboxapi.ForeignAlerted(sb.Name)
+	case outcome == foreignRemoved:
+		msg = sandboxapi.ForeignRemoved(sb.Name)
+	case outcome == foreignRemoving:
+		msg = sandboxapi.ForeignRemoving(sb.Name)
+	}
+	m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: sb.Name, Severity: "HIGH",
+		Reason: sandboxrelay.EventForeignSandbox, Message: truncate(msg, 512)})
+	return left
+}
+
+// ForeignSandboxesRunning reports whether the last reconcile of a managed
+// daemon left a foreign sandbox running on the OpenShell gateway
+// (foreign_sandboxes: alert, or a stop or delete that has not taken yet). The
+// daemon does not stop that gateway as idle: the sandbox runs on it, and an
+// alerted one would fail under the person (GAP-0263).
+func (m *Manager) ForeignSandboxesRunning() bool {
+	st := m.managedSide()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.foreignLeft > 0
+}
+
+// foreignOutcome is what one stop of a foreign sandbox did (stopForeign).
+type foreignOutcome int
+
+const (
+	// foreignStopped: OpenShell stopped it.
+	foreignStopped foreignOutcome = iota
+	// foreignRemoved: it was deleted and is gone.
+	foreignRemoved
+	// foreignRemoving: the delete was taken, but the sandbox is still
+	// there (a MicroVM still provisioning, say); every reconcile deletes
+	// it again (managedState.foreignRemoving).
+	foreignRemoving
+)
+
+// foreignRemoveTries is the number of reconciles a foreign sandbox may
+// outlive its delete before the person is told to remove it.
+const foreignRemoveTries = 3
+
+// stopForeign stops a foreign sandbox whatever its phase: OpenShell stops
+// only a Ready sandbox, so one it refuses to stop that is not Ready (still
+// provisioning or starting, or in error) is deleted instead, since nothing
+// may run under no policy. A delete OpenShell takes is removed only once
+// the sandbox is gone (GAP-0264: a provisioning MicroVM outlived its
+// delete). An error leaves the sandbox for the next reconcile. The record's
+// action stays stop: the sandbox no longer runs either way.
+func (m *Manager) stopForeign(ctx context.Context, gw *Gateway, sb *openshell.Sandbox) (foreignOutcome, error) {
+	_, err := gw.Client.StopSandbox(ctx, sb.Name)
+	if err == nil || openshell.IsNotFound(err) {
+		return foreignStopped, nil
+	}
+	if auditPhase(sb.Status.Phase) == audit.SandboxPhaseReady {
+		return foreignStopped, err
+	}
+	m.logf("%s: OpenShell did not stop foreign sandbox %s (%s): %v; deleting it", gatewaylog.ErrCodeOpenShellAdminViolation,
+		sb.Name, sb.Status.Phase, err)
+	if _, derr := gw.Client.DeleteSandbox(ctx, sb.Name); derr != nil && !openshell.IsNotFound(derr) {
+		return foreignStopped, fmt.Errorf("%w; delete: %w", err, derr)
+	}
+	now, gerr := gw.Client.GetSandbox(ctx, sb.Name)
+	switch {
+	case openshell.IsNotFound(gerr):
+		return foreignRemoved, nil
+	case gerr == nil && sb.ID != "" && now.ID != "" && now.ID != sb.ID:
+		return foreignRemoved, nil // gone; another sandbox took the name
+	default:
+		return foreignRemoving, nil
+	}
+}
+
+// registrationBindGrace is how long a sandbox this daemon created may run
+// before its registration is bound (the managed daemon binds it right
+// after the create returns): as long as a pending registration lives.
+const registrationBindGrace = sandboxreg.PendingTTL
+
+// foreignSandbox reports a sandbox on the gateway DefenseClaw did not
+// create and register: not labelled for this data dir, or labelled with no
+// box, a box of another sandbox of that name, or a box without a
+// registration (registrationOf). A box being created is never foreign, nor
+// one this daemon created (its record and binding are its own) within
+// registrationBindGrace of its create.
+func (m *Manager) foreignSandbox(sb *openshell.Sandbox, live map[string]*openshell.Sandbox) bool {
+	m.mu.Lock()
+	b := m.boxes[sb.Name]
+	if b != nil && b.creating {
+		m.mu.Unlock()
+		return false
+	}
+	_, labelled := live[sb.Name]
+	if !labelled || b == nil || b.deleted || b.retained || (b.rec.ID != "" && sb.ID != "" && b.rec.ID != sb.ID) {
+		m.mu.Unlock()
+		return true
+	}
+	own := !b.unrecorded && b.rec.BindingID != ""
+	since := b.rec.CreatedAt
+	if b.rec.ReadyAt.After(since) {
+		since = b.rec.ReadyAt
+	}
+	m.mu.Unlock()
+	if m.registrationOf(b) != "" {
+		return false
+	}
+	return !own || m.now().Sub(since) >= registrationBindGrace
+}
+
+// foreignSandboxAction is stop unless the floor of every registered
+// sandbox says alert (stop wins, "" is stop when managed). With no
+// registered sandbox it is the daemon's own floor's: the one of the
+// person's newest registration, which the managed daemon keeps, or the
+// strictest before any.
+func (m *Manager) foreignSandboxAction() string {
+	var floors []config.OpenShellAdminConfig
+	for _, b := range m.liveBoxes() {
+		if m.registrationOf(b) == "" {
+			continue
+		}
+		m.mu.Lock()
+		eff := b.eff
+		m.mu.Unlock()
+		floors = append(floors, m.floor(eff))
+	}
+	if len(floors) == 0 {
+		floors = append(floors, m.config().OpenShell.Admin)
+	}
+	for _, f := range floors {
+		if !strings.EqualFold(strings.TrimSpace(f.ForeignSandboxes), config.OpenShellForeignSandboxesAlert) {
+			return config.OpenShellForeignSandboxesStop
+		}
+	}
+	return config.OpenShellForeignSandboxesAlert
+}
+
+// anyRegistration is a registration of the person's live sandboxes, which
+// a record about none of them is posted under ("" when there is none).
+func (m *Manager) anyRegistration() string {
+	best := ""
+	for _, b := range m.liveBoxes() {
+		if r := m.registrationOf(b); r != "" && (best == "" || r < best) {
+			best = r
+		}
+	}
+	return best
 }
 
 // listManaged lists the sandboxes on gw that carry this data dir's labels:
@@ -290,17 +652,25 @@ func (m *Manager) adopt(sb *openshell.Sandbox, driver openshell.Driver) *box {
 	needCred := b.cred.Username == "" && b.rec.BindingID != "" && !b.orphaned
 	username := b.rec.EgressUser
 	m.mu.Unlock()
-	eff, err := m.resolveBox(b)
-	if err != nil {
-		m.logf("resolve the policy of %s: %v", sb.Name, err)
-	} else if needCred {
-		if cred, ok := recoverCredential(sb, username); ok {
+	if needCred {
+		// The credential comes back before the policy resolves: a sandbox
+		// whose policy does not resolve then has it suspended (the proxy's
+		// 403 names why, next to the degraded record that says what to do)
+		// rather than unknown to the proxy, whose 407s read as a stale or
+		// revoked credential in a second alert (GAP-0180).
+		cred, ok := recoverCredential(sb, username)
+		if needCred = ok; ok {
 			m.mu.Lock()
 			b.cred = cred
 			b.rec.EgressUser = cred.Username
 			m.mu.Unlock()
-			m.syncCredential(b, eff)
 		}
+	}
+	eff, err := m.resolveBox(b)
+	if err != nil {
+		m.logf("resolve the policy of %s: %v", sb.Name, err)
+	} else if needCred {
+		m.syncCredential(b, eff)
 	}
 	if b.orphaned {
 		m.logf("sandbox %s has DefenseClaw labels but no binding; its hooks cannot authenticate", sb.Name)
@@ -395,7 +765,7 @@ func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) boo
 			" now, and one gateway runs one driver: the sandbox is not released while the gateway runs another driver"
 	}
 	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
-	_ = m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
 		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
 	return true
 }

@@ -23,12 +23,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
@@ -537,6 +540,50 @@ func TestHookTamperAfterRestart(t *testing.T) {
 	}
 }
 
+// A daemon restart keeps a sandbox's hook counts, as it keeps its
+// destinations: sandbox status and the Sandboxes list go on from them
+// instead of dropping to what came after the restart (GAP-0156).
+func TestHookCountsSurviveARestart(t *testing.T) {
+	e := liveEnv(t, "countrestart", nil)
+	d := e.decider("countrestart", "Bash")
+	e.m.ObserveIngress(e.binding("countrestart"), sandboxauth.RouteHook)
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_1", "allow"))
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_2", "block"))
+	before := e.get("countrestart").Hooks
+	e.restartDaemon()
+	after := e.get("countrestart").Hooks
+	if after.HookRequests != 1 || after.ToolCalls != 2 || after.ToolBlocked != 1 || after.LastBlocked != before.LastBlocked ||
+		after.Events["PreToolUse"] != 2 {
+		t.Fatalf("hook counts after a restart = %+v, want those of %+v", after, before)
+	}
+	e.m.ObserveHookDecision(d("PreToolUse", "toolu_3", "allow"))
+	if n := e.get("countrestart").Hooks.ToolCalls; n != 3 {
+		t.Fatalf("tool calls after the restart = %d, want 3", n)
+	}
+}
+
+// A stopped sandbox's verdict on its last session's hooks (unreachable,
+// silent) survives a daemon restart like its counts, so the list, the TUI
+// and the alerts agree (GAP-0186); its next session is judged afresh.
+func TestStoppedSandboxsHookVerdictSurvivesARestart(t *testing.T) {
+	e := liveEnv(t, "verdictbox", nil)
+	b := e.boxOf("verdictbox")
+	e.m.mu.Lock()
+	b.reach.since, b.reach.reason, b.silentSince = time.Now(), "the harness has been calling its model for 30s without a single hook request", time.Now()
+	e.m.mu.Unlock()
+	e.stopBox("verdictbox")
+	e.restartDaemon()
+	if h := e.get("verdictbox").Hooks; !h.Unreachable || !strings.Contains(h.UnreachableReason, "without a single hook") || !h.Silent {
+		t.Fatalf("hooks after a restart = %+v, want the stopped session's verdict", h)
+	}
+	if _, err := e.m.Start(t.Context(), "verdictbox", sandboxapi.StartRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if h := e.get("verdictbox").Hooks; h.Unreachable || h.Silent {
+		t.Fatalf("hooks of a new session = %+v, want it judged afresh", h)
+	}
+}
+
 // Hook text is cut and stripped of control characters, and a redacted reason
 // never reaches the feed.
 func TestHookLabelAndDisplayReason(t *testing.T) {
@@ -561,6 +608,21 @@ func TestHookLabelAndDisplayReason(t *testing.T) {
 // Hook requests and verdicts are counted, a block and an ask are on the feed,
 // and only an alert verdict (ran, flagged) is a finding there; another
 // binding's counts nothing.
+// GAP-0312: a match of a rule that blocks such calls, which could not decide
+// the call (it ran), says so on the feed instead of "allowed but flagged".
+func TestUndecidedMatchSaysWhyTheCallRan(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "hookbox"})
+	dec := e.decider("hookbox", "Bash")("PreToolUse", "", "allow")
+	dec.Severity, dec.Reason = "CRITICAL", "Allowed but flagged by DefenseClaw rule UN-MARKER-BLOCK: Certification marker command. "+sandboxapi.UndecidedNote
+	e.m.ObserveHookDecision(dec)
+	findings := e.events("hookbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding)
+	if len(findings) != 1 || !strings.HasPrefix(findings[0].Message,
+		"⚠ Bash ran although DefenseClaw rule UN-MARKER-BLOCK (Certification marker command) matched it: the rule could not decide the call") {
+		t.Fatalf("finding events = %+v", findings)
+	}
+}
+
 func TestHookCoverage(t *testing.T) {
 	e := newEnv(t, nil)
 	e.create(sandboxapi.CreateRequest{Name: "hookbox"})
@@ -612,10 +674,54 @@ func TestHookCoverage(t *testing.T) {
 	}
 }
 
+// TestLowAlertsAreNoSessionFinding (GAP-0091): a LOW default-pack alert
+// (ENT-EMAIL-BULK on one commit author's address in `git log` output) was a
+// warning on the feed, the status and the session summary. LOW alerts are
+// audited only; MEDIUM and above stay findings.
+func TestLowAlertsAreNoSessionFinding(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "lowbox"})
+	binding, d := e.binding("lowbox"), e.decider("lowbox", "Bash")
+	e.m.ObserveIngress(binding, sandboxauth.RouteHook)
+	low, medium := d("PostToolUse", "", "alert"), d("PostToolUse", "", "alert")
+	low.Severity, low.Reason = "LOW", "Allowed but flagged by DefenseClaw rule ENT-EMAIL-BULK: Email address."
+	medium.Severity, medium.Reason = "MEDIUM", "Allowed but flagged by DefenseClaw rule E2E-SANDBOX-ALERT: E2E sandbox alert marker."
+	e.m.ObserveHookDecision(low)
+	if got := e.events("lowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 0 {
+		t.Fatalf("a LOW alert on the feed: %+v", got)
+	}
+	e.m.ObserveHookDecision(medium)
+	if got := e.events("lowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 1 || got[0].Severity != "MEDIUM" {
+		t.Fatalf("findings = %+v", got)
+	}
+}
+
+// GAP-0634, GAP-0640: an allow with a MEDIUM severity whose reason is no
+// flagged one (the profile's alert threshold is above MEDIUM) is no finding
+// of the session; an alert action still is.
+func TestAllowBelowAlertThresholdIsNoSessionFinding(t *testing.T) {
+	e := newEnv(t, nil)
+	e.create(sandboxapi.CreateRequest{Name: "belowbox"})
+	binding, d := e.binding("belowbox"), e.decider("belowbox", "Bash")
+	e.m.ObserveIngress(binding, sandboxauth.RouteHook)
+	allow := d("PreToolUse", "", "allow")
+	allow.Severity, allow.Reason = "MEDIUM", "kept"
+	e.m.ObserveHookDecision(allow)
+	if got := e.events("belowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 0 {
+		t.Fatalf("a MEDIUM allow below the alert threshold is on the feed: %+v", got)
+	}
+	alert := d("PreToolUse", "", "alert")
+	alert.Severity = "MEDIUM"
+	e.m.ObserveHookDecision(alert)
+	if got := e.events("belowbox", sandboxapi.ActivityFinding, sandboxapi.ReasonHookFinding); len(got) != 1 {
+		t.Fatalf("findings = %+v, want the alert", got)
+	}
+}
+
 // Every verdict counts under its hook event, the harness's name for it, tool
 // events or not (#956). The counts live as long as the sandbox's other hook
-// counters: a stop and start keep them, a new sandbox of the name and a
-// daemon restart start over.
+// counters: a stop and start keep them, as a daemon restart does
+// (TestHookCountsSurviveARestart), and a new sandbox of the name starts over.
 func TestHookEventCounts(t *testing.T) {
 	e := newEnv(t, nil)
 	e.create(sandboxapi.CreateRequest{Name: "eventbox"})
@@ -635,10 +741,6 @@ func TestHookEventCounts(t *testing.T) {
 	want["SessionStart"]++
 	if h := e.get("eventbox").Hooks; !maps.Equal(h.Events, want) {
 		t.Fatalf("after a restart of the sandbox: events %v, want %v", h.Events, want)
-	}
-	e.restartDaemon()
-	if h := e.get("eventbox").Hooks; h.Events != nil || h.HookRequests != 0 {
-		t.Fatalf("after a daemon restart: hooks %+v, want no counts", h)
 	}
 	e.m.ObserveHookDecision(e.decider("eventbox", "Bash")("Stop", "", "allow"))
 	e.deleteBox("eventbox", sandboxapi.DeleteRequest{})
@@ -706,29 +808,42 @@ func TestHookEventCapCoversEveryContract(t *testing.T) {
 	}
 }
 
-// The harness active long after its last hook raises one hook_silence finding
-// until the next hook; commands it did not run and an idle harness never do.
+// The harness at work for silence_after since its last hook raises one
+// hook_silence finding until the next hook. Commands it did not run, an idle
+// harness, one that wakes for a moment after a long idle stretch, and work
+// broken by an idle stretch that long never do.
 func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	e := newEnv(t, nil)
 	now, advance := e.fakeClock(time.Now())
 	e.create(sandboxapi.CreateRequest{Name: "quietbox"})
 	b := e.boxOf("quietbox")
-	advance(15 * time.Minute)
 	silence := func() int {
 		e.m.checkHookSilence(t.Context())
 		return len(e.tel.findingsOf(audit.SandboxFindingHookSilence))
 	}
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassProcess, Binary: "/usr/bin/git"}, now())
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: "example.org", Port: 443}, now())
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/opt/defenseclaw-harness-evil/bin/claude", Host: "example.org", Port: 443}, now())
-	// Certification AG-MAC-F4: a `sandbox exec` curl through the egress
-	// proxy, with no harness running, raised the alarm. Neither the
-	// proxy's own events nor OpenShell's record of curl's connection to
-	// the proxy are the harness's.
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: openshellHostAlias, Port: testEgressPort,
-		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
-	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now(), FirstSeen: true}, 0)
-	e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventClosed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now()}, 0)
+	// work feeds r now and then once a minute for the given minutes.
+	work := func(minutes int, r ocsf.Record) int {
+		e.m.ocsfEvent(t.Context(), b, r, now())
+		for range minutes {
+			advance(time.Minute)
+			e.m.ocsfEvent(t.Context(), b, r, now())
+		}
+		return silence()
+	}
+	for range 16 {
+		advance(time.Minute)
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassProcess, Binary: "/usr/bin/git"}, now())
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: "example.org", Port: 443}, now())
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/opt/defenseclaw-harness-evil/bin/claude", Host: "example.org", Port: 443}, now())
+		// Certification AG-MAC-F4: a `sandbox exec` curl through the egress
+		// proxy, with no harness running, raised the alarm. Neither the
+		// proxy's own events nor OpenShell's record of curl's connection to
+		// the proxy are the harness's.
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: "/usr/bin/curl", Host: openshellHostAlias, Port: testEgressPort,
+			Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventAllowed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now(), FirstSeen: true}, 0)
+		e.m.egressEvent(t.Context(), egress.Event{Kind: egress.EventClosed, SandboxName: "quietbox", Host: "example.org", Port: 443, Time: now()}, 0)
+	}
 	if n := silence(); n != 0 {
 		t.Fatalf("commands outside the harness raised %d hook_silence finding(s)", n)
 	}
@@ -738,18 +853,33 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	if n := silence(); n != 0 {
 		t.Fatalf("an idle harness's OTLP export raised %d hook_silence finding(s)", n)
 	}
-	// The harness's own connection to the proxy is its activity.
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: openshellHostAlias, Port: testEgressPort,
-		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}, now())
-	silence()
-	if silence() != 1 || !e.get("quietbox").Hooks.Silent {
-		t.Fatal("the harness active without hooks raised no single hook_silence finding")
+	// The harness's own connection to the proxy is its activity. Idle for
+	// 16 minutes, it wakes (a harness such as Kiro CLI sends no hook when it
+	// starts): one event is no work without hooks, and neither is work cut
+	// by an idle stretch of silence_after.
+	proxy := ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: openshellHostAlias, Port: testEgressPort,
+		Action: ocsf.ActionAllowed, Policy: "defenseclaw_egress"}
+	if work(0, proxy) != 0 || work(5, proxy) != 0 {
+		t.Fatal("a harness that woke after an idle stretch raised hook_silence")
+	}
+	advance(10 * time.Minute)
+	if work(5, proxy) != 0 || e.get("quietbox").Hooks.Silent {
+		t.Fatal("work broken by an idle stretch of silence_after raised hook_silence")
+	}
+	if work(5, proxy) != 1 || silence() != 1 || !e.get("quietbox").Hooks.Silent {
+		t.Fatal("the harness at work for silence_after without hooks raised no single hook_silence finding")
+	}
+	if f := e.tel.findingsOf(audit.SandboxFindingHookSilence); !strings.Contains(f[0].Description, "doing work for 10m0s") {
+		t.Fatalf("description = %q, want the 10 minutes of work", f[0].Description)
 	}
 	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteHook)
 	advance(15 * time.Minute)
-	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
-	if silence() != 2 || !e.get("quietbox").Hooks.Silent {
-		t.Fatal("the harness active long after its last hook raised no second hook_silence finding")
+	model := ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}
+	if work(0, model) != 1 {
+		t.Fatal("a harness that woke long after its last hook raised hook_silence")
+	}
+	if work(10, model) != 2 || !e.get("quietbox").Hooks.Silent {
+		t.Fatal("the harness at work long after its last hook raised no second hook_silence finding")
 	}
 	e.m.ObserveIngress(e.binding("quietbox"), sandboxauth.RouteHook)
 	if e.get("quietbox").Hooks.Silent {
@@ -758,6 +888,171 @@ func TestHookSilenceCountsOnlyTheHarness(t *testing.T) {
 	advance(time.Hour)
 	if silence() != 2 {
 		t.Fatal("an idle harness raised a finding")
+	}
+}
+
+// TestHookSilenceIgnoresAnIdleHarnessTelemetry (GAP-0220): a Codex session
+// idle at its prompt after its last hook kept exporting OTLP, and 13 minutes
+// later raised a HIGH hook_silence finding. Telemetry exports are no work;
+// a model call after them still is.
+func TestHookSilenceIgnoresAnIdleHarnessTelemetry(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "idlebox"})
+	b := e.boxOf("idlebox")
+	e.m.ObserveIngress(e.binding("idlebox"), sandboxauth.RouteHook)
+	for range 20 {
+		advance(time.Minute)
+		e.m.ObserveIngress(e.binding("idlebox"), sandboxauth.RouteOTLP)
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 0 || e.get("idlebox").Hooks.Silent {
+		t.Fatalf("an idle harness exporting telemetry raised %d hook_silence finding(s)", n)
+	}
+	model := ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}
+	for range 11 {
+		e.m.ocsfEvent(t.Context(), b, model, now())
+		advance(time.Minute)
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 1 {
+		t.Fatalf("model calls without hooks raised %d hook_silence finding(s), want 1", n)
+	}
+}
+
+// TestHookSilenceSeesTurnsOnAKeptConnection (GAP-0094): a harness with its
+// hooks switched off kept one model connection open and made 28 model
+// calls in 9 minutes; only its NET records name its binary, so the check
+// saw a handful of events and never fired. Its model calls on the
+// connection it opened count as its work.
+func TestHookSilenceSeesTurnsOnAKeptConnection(t *testing.T) {
+	e := newEnv(t, nil)
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "keptbox"})
+	b := e.boxOf("keptbox")
+	advance(harnessStartupGrace)
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443,
+		Action: ocsf.ActionAllowed, Policy: "_provider_anthropic"}, now())
+	for range 11 {
+		advance(time.Minute)
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassHTTP, Host: "api.anthropic.com", Port: 443, Method: "POST", Path: "/v1/messages",
+			Action: ocsf.ActionAllowed, Policy: "_provider_anthropic"}, now())
+	}
+	e.m.checkHookSilence(t.Context())
+	if n := len(e.tel.findingsOf(audit.SandboxFindingHookSilence)); n != 1 {
+		t.Fatalf("hook_silence findings = %d, want 1", n)
+	}
+}
+
+// Under hooks.on_silence: stop (balanced, strict) a user-tier harness that
+// works for the pack's hooks.silence_after without one hook is stopped, as a
+// tampered one is, and its next session is watched again; under alert (open)
+// it keeps running, and a managed-tier harness only alerts whatever the pack
+// says. A harness that wakes for a moment after an idle stretch longer than
+// silence_after is neither.
+func TestHookSilenceResponse(t *testing.T) {
+	quick := t.TempDir()
+	writeFile(t, filepath.Join(quick, "quick", "pack.yaml"), strings.Replace(strings.Replace(teamPack, "name: team", "name: quick", 1),
+		"hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_silence: stop, silence_after: 2m}", 1))
+	for _, tc := range []struct {
+		name, pack, tier, response, outcome string
+		after                               time.Duration
+	}{
+		{"balanced user tier", "balanced", "user", "stop", "; stopping the sandbox (hooks.on_silence: stop)", 10 * time.Minute},
+		{"strict user tier", "strict", "user", "stop", "; stopping the sandbox (hooks.on_silence: stop)", 10 * time.Minute},
+		{"open user tier", "open", "user", "alert", "; the sandbox keeps running (hooks.on_silence: alert)", 10 * time.Minute},
+		{"strict managed tier", "strict", "managed", "alert", "; the sandbox keeps running", 10 * time.Minute},
+		{"a custom pack's silence_after", "quick", "user", "stop", "; stopping the sandbox (hooks.on_silence: stop)", 2 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = quick })
+			now, advance := e.fakeClock(time.Now())
+			e.create(sandboxapi.CreateRequest{Name: "silentbox", Pack: tc.pack})
+			b := e.boxOf("silentbox")
+			e.m.mu.Lock()
+			b.rec.TamperTier = tc.tier
+			e.m.mu.Unlock()
+			after := packs.ShortDuration(tc.after)
+			if h := e.get("silentbox").Hooks; h.OnSilence != tc.response || h.SilenceAfter != after {
+				t.Fatalf("hooks = %+v, want on_silence %s after %s", h, tc.response, after)
+			}
+			findings := func() []audit.SandboxFindingEvent {
+				e.m.checkHookSilence(t.Context())
+				return e.tel.findingsOf(audit.SandboxFindingHookSilence)
+			}
+			// work keeps the harness busy for d, an event a minute from now.
+			work := func(d time.Duration) []audit.SandboxFindingEvent {
+				e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+				for range int(d / time.Minute) {
+					advance(time.Minute)
+					e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+				}
+				return findings()
+			}
+			// Ready but idle for longer than silence_after, then the
+			// harness's first event (Kiro CLI sends no hook when it starts).
+			advance(tc.after + time.Minute)
+			if f := work(0); len(f) != 0 || stopped(t, e, "silentbox") {
+				t.Fatalf("a harness that woke after an idle stretch: findings %+v, stopped %v", f, stopped(t, e, "silentbox"))
+			}
+			advance(tc.after)
+			if f := work(tc.after - time.Minute); len(f) != 0 {
+				t.Fatalf("findings before silence_after: %+v", f)
+			}
+			f := work(time.Minute)
+			feed := e.events("silentbox", sandboxapi.ActivityFinding, string(audit.SandboxFindingHookSilence))
+			if len(f) != 1 || f[0].Evidence != "on_silence="+tc.response+" silence_after="+after+" tier="+tc.tier ||
+				len(feed) != 1 || !strings.HasSuffix(feed[0].Message, tc.outcome) {
+				t.Fatalf("findings %+v, feed %+v", f, feed)
+			}
+			if got := stopped(t, e, "silentbox"); got != (tc.response == "stop") {
+				t.Fatalf("stopped = %v, want %v", got, tc.response == "stop")
+			}
+			if tc.response != "stop" {
+				return
+			}
+			e.startBox("silentbox", sandboxapi.StartRequest{})
+			advance(time.Minute)
+			if f := work(tc.after); len(f) != 2 || !stopped(t, e, "silentbox") {
+				t.Fatalf("the next silent session: findings %+v, stopped %v", f, stopped(t, e, "silentbox"))
+			}
+		})
+	}
+}
+
+// While a sandbox's policy is not resolved, silent hooks get the fail-closed
+// response, and its view says so: a user-tier harness under a pack that
+// alerts after 2m is stopped after the default 10m.
+func TestHookSilenceWithAnUnresolvedPolicy(t *testing.T) {
+	dir := t.TempDir()
+	file := writeFile(t, filepath.Join(dir, "alerting", "pack.yaml"), strings.Replace(strings.Replace(teamPack, "name: team", "name: alerting", 1),
+		"hooks: {fail_mode: closed}", "hooks: {fail_mode: closed, on_silence: alert, silence_after: 2m}", 1))
+	e := newEnv(t, func(c *config.Config) { c.OpenShell.PackDir = dir })
+	now, advance := e.fakeClock(time.Now())
+	e.create(sandboxapi.CreateRequest{Name: "lostpack", Pack: "alerting"})
+	b := e.boxOf("lostpack")
+	e.m.mu.Lock()
+	b.rec.TamperTier = connector.SandboxTamperTierUser
+	e.m.mu.Unlock()
+	if h := e.get("lostpack").Hooks; h.OnSilence != "alert" || h.SilenceAfter != "2m" {
+		t.Fatalf("hooks = %+v, want the pack's alert after 2m", h)
+	}
+	must(t, os.Remove(file))
+	if _, err := e.m.resolveBox(b); err == nil {
+		t.Fatal("the policy still resolves without its pack")
+	}
+	if h := e.get("lostpack").Hooks; h.OnSilence != "stop" || h.SilenceAfter != "10m" {
+		t.Fatalf("hooks = %+v, want the fail-closed stop after 10m", h)
+	}
+	for range 10 {
+		e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+		advance(time.Minute)
+	}
+	e.m.ocsfEvent(t.Context(), b, ocsf.Record{Class: ocsf.ClassNetwork, Binary: testClaudeBin, Host: "api.anthropic.com", Port: 443}, now())
+	e.m.checkHookSilence(t.Context())
+	if f := e.tel.findingsOf(audit.SandboxFindingHookSilence); len(f) != 1 || f[0].Evidence != "on_silence=stop silence_after=10m tier=user" ||
+		!stopped(t, e, "lostpack") {
+		t.Fatalf("findings %+v, stopped %v", f, stopped(t, e, "lostpack"))
 	}
 }
 
@@ -869,6 +1164,87 @@ func TestHookReachRefusedConnections(t *testing.T) {
 	r.line(ingressLine("DENIED"))
 	if h := r.hooks(); !h.Unreachable || h.IngressRefused != 2 || len(r.feed(sandboxapi.ReasonHooksUnreachable)) != 1 {
 		t.Fatalf("hooks after a later refusal = %+v, want flagged with one warning per session", h)
+	}
+}
+
+// GAP-0354, GAP-0355: once a conversation printed a credential placeholder
+// (an `env` output), OpenShell refuses its model requests and its hook posts
+// ("POST request body credential traffic denied for HOST:PORT"). That is
+// neither a refused ingress nor a rejected key: the feed says once what it
+// is, the status keeps it until a turn ends normally, the model host's line
+// names it, and Claude Code's StopFailure for it sets no key rejection.
+func TestAPlaceholderRefusalIsNamed(t *testing.T) {
+	r := newReachEnv(t)
+	ingress := "host.openshell.internal:" + strconv.Itoa(testIngressPort)
+	refused := func(dest string) string {
+		return "NET:TRAFFIC [HIGH] DENIED " + dest + " [reason:POST request body credential traffic denied for " + dest + "]"
+	}
+	r.line(refused(ingress))
+	r.line(refused("bedrock-mantle.us-east-1.api.aws:443"))
+	r.advance(hookAttemptGrace + time.Second)
+	r.check()
+	if h := r.hooks(); h.Unreachable || h.IngressRefused != 0 || h.PlaceholderRefusedAt.IsZero() {
+		t.Fatalf("hooks = %+v", h)
+	}
+	want := "⚠ " + sandboxapi.PlaceholderConversationText(r.name)
+	if got := r.feed(sandboxapi.ReasonPlaceholderRefused); len(got) != 1 || got[0].Message != want || got[0].Severity != "HIGH" {
+		t.Fatalf("feed = %+v, want one %q", got, want)
+	}
+	if got := r.events(r.name, sandboxapi.ActivityEgressBlocked, ""); len(got) != 1 ||
+		got[0].Message != "✗ bedrock-mantle.us-east-1.api.aws (OpenShell forwards no request whose body carries a sandbox credential placeholder)" {
+		t.Fatalf("blocked lines = %+v", got)
+	}
+	decide := func(event, class string, status int) {
+		r.m.ObserveHookDecision(HookDecision{BindingID: r.binding.ID, SandboxName: r.name, Event: event, Action: "allow", ModelError: class, ModelStatus: status})
+	}
+	decide("StopFailure", sandboxapi.ModelErrorPlaceholder, 403)
+	if h := r.hooks(); h.ModelKeyRejected != "" || len(r.feed(sandboxapi.ReasonPlaceholderRefused)) != 1 {
+		t.Fatalf("a placeholder refusal read as a rejected key: %q", h.ModelKeyRejected)
+	}
+	decide("Stop", "", 0)
+	if h := r.hooks(); !h.PlaceholderRefusedAt.IsZero() {
+		t.Fatalf("a turn that ended normally kept the refusal at %v", h.PlaceholderRefusedAt)
+	}
+}
+
+// GAP-0377: a hook post of a conversation that held a credential placeholder
+// failed (HTTP 400) as OpenShell refused the conversation's requests; status
+// read "DefenseClaw answered HTTP 400" and kept it after a new conversation
+// worked. The failure is marked as the conversation's, a verdict while the
+// conversation goes on does not say the hooks work again, and the first
+// verdict after a turn ended normally does. A failure on its own is not
+// marked, and the next verdict answers it.
+func TestAHookFailureOfAPlaceholderConversationIsNamed(t *testing.T) {
+	r := newReachEnv(t)
+	fail := func() { r.m.ObserveHookFailure(HookFailure{BindingID: r.binding.ID, SandboxName: r.name, Status: 400}) }
+	decide := func(event string) {
+		r.m.ObserveHookDecision(HookDecision{BindingID: r.binding.ID, SandboxName: r.name, Event: event, Action: "allow"})
+	}
+	fail()
+	r.advance(time.Second)
+	r.line("NET:TRAFFIC [HIGH] DENIED bedrock-mantle.us-east-1.api.aws:443 [reason:POST request body credential traffic denied for bedrock-mantle.us-east-1.api.aws:443]")
+	if h := r.hooks(); h.LastHookFailureCause != sandboxapi.ReasonPlaceholderRefused || !h.HooksAnsweredAt.IsZero() {
+		t.Fatalf("hooks = %+v, want the failure marked as the conversation's", h)
+	}
+	r.advance(time.Second)
+	decide("Notification")
+	if h := r.hooks(); !h.HooksAnsweredAt.IsZero() {
+		t.Fatalf("a verdict while the conversation goes on said the hooks work again at %v", h.HooksAnsweredAt)
+	}
+	r.advance(time.Second)
+	decide("Stop")
+	if h := r.hooks(); !h.HooksAnsweredAt.Equal(r.m.now()) || h.LastHookFailureCause != sandboxapi.ReasonPlaceholderRefused {
+		t.Fatalf("hooks after a turn ended normally = %+v", h)
+	}
+	r.advance(time.Minute)
+	fail()
+	if h := r.hooks(); h.LastHookFailureCause != "" || !h.HooksAnsweredAt.IsZero() {
+		t.Fatalf("a failure with no placeholder refusal near it = %+v", h)
+	}
+	r.advance(time.Second)
+	decide("UserPromptSubmit")
+	if h := r.hooks(); !h.HooksAnsweredAt.Equal(r.m.now()) {
+		t.Fatalf("the next verdict did not answer the failure: %+v", h)
 	}
 }
 

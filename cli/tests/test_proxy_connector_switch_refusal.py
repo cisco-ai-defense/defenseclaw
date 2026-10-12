@@ -46,16 +46,20 @@ class RefuseHelperTests(unittest.TestCase):
         self.assertIn("defenseclaw setup claude-code --replace", raised.exception.message)
 
     def test_allows_proxy_targets_unguarded_and_hook_rosters(self):
-        for gc, wanted in (
-            (self._gc(), "openclaw"),
-            (self._gc(), "zeptoclaw"),
-            (self._gc(), "none"),
-            (self._gc(enabled=False), "codex"),
-            (self._gc(connector="codex"), "claudecode"),
-            (self._gc(connectors={"codex": object()}), "claudecode"),
+        # Subtest parameters are plain data: pytest-xdist serializes them to
+        # the controller, and a SimpleNamespace is not serializable.
+        for case, (gc_kwargs, wanted) in enumerate(
+            (
+                ({}, "openclaw"),
+                ({}, "zeptoclaw"),
+                ({}, "none"),
+                ({"enabled": False}, "codex"),
+                ({"connector": "codex"}, "claudecode"),
+                ({"connectors": {"codex": True}}, "claudecode"),
+            )
         ):
-            with self.subTest(gc=gc, wanted=wanted):
-                self.assertIsNone(_refuse_hook_switch_over_proxy(gc, wanted))
+            with self.subTest(case=case, gc=gc_kwargs, wanted=wanted):
+                self.assertIsNone(_refuse_hook_switch_over_proxy(self._gc(**gc_kwargs), wanted))
 
 
 class GuardedOpenClawSwitchTests(unittest.TestCase):

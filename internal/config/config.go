@@ -86,11 +86,10 @@ const (
 )
 
 type ClawConfig struct {
-	Mode                 ClawMode `mapstructure:"mode"                       yaml:"mode"`
-	HomeDir              string   `mapstructure:"home_dir"                   yaml:"home_dir"`
-	ConfigFile           string   `mapstructure:"config_file"                yaml:"config_file"`
-	WorkspaceDir         string   `mapstructure:"workspace_dir"              yaml:"workspace_dir,omitempty"`
-	OpenClawHomeOriginal string   `mapstructure:"openclaw_home_original"     yaml:"openclaw_home_original,omitempty"`
+	Mode         ClawMode `mapstructure:"mode"                       yaml:"mode"`
+	HomeDir      string   `mapstructure:"home_dir"                   yaml:"home_dir"`
+	ConfigFile   string   `mapstructure:"config_file"                yaml:"config_file"`
+	WorkspaceDir string   `mapstructure:"workspace_dir"              yaml:"workspace_dir,omitempty"`
 }
 
 // AgentConfig [v7] pins the logical agent identity for this
@@ -621,40 +620,6 @@ type AIRuntimeConfig struct {
 	// Defaults on. Disabling it removes the read entirely; it does not make
 	// findings score as though the inventory disagreed.
 	Correlate *bool `mapstructure:"correlate" yaml:"correlate,omitempty"`
-
-	// Acquisition selects where the privileged reads come from:
-	//
-	//   auto     read directly when this process can, ask the helper when a
-	//            managed deployment has de-privileged the gateway
-	//   direct   always read directly
-	//   helper   always ask the helper, and report blindness if it is absent
-	//
-	// Empty means auto. The distinction matters because the two failure
-	// modes read differently to an operator: "direct" on a sandboxed gateway
-	// is a plane that sees nothing, and "helper" with no helper running is a
-	// plane that says so.
-	Acquisition string `mapstructure:"acquisition" yaml:"acquisition,omitempty"`
-
-	// HelperSocket overrides where the helper listens. Empty means the
-	// deployment default.
-	HelperSocket string `mapstructure:"helper_socket" yaml:"helper_socket,omitempty"`
-}
-
-// Acquisition modes.
-const (
-	AcquisitionAuto   = "auto"
-	AcquisitionDirect = "direct"
-	AcquisitionHelper = "helper"
-)
-
-// EffectiveAcquisition resolves the acquisition mode, applying the default.
-func (c AIRuntimeConfig) EffectiveAcquisition() string {
-	switch c.Acquisition {
-	case AcquisitionDirect, AcquisitionHelper:
-		return c.Acquisition
-	default:
-		return AcquisitionAuto
-	}
 }
 
 // Defaults for the runtime planes, applied when a field is left at zero.
@@ -1758,6 +1723,10 @@ type GuardrailConfig struct {
 	// derived configuration; EffectiveRulesForConnector layers it over the
 	// global and connector rules. Unexported like profileConnectors.
 	profileRules *GuardrailRulesConfig
+	// profileMode is the profile's own guardrail.profiles.<p>.mode on a
+	// derived configuration ("" when it inherits). ProfileModeForConnector
+	// reads it. Unexported like profileConnectors.
+	profileMode string
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -2349,7 +2318,6 @@ type GatewayConfig struct {
 	ConfigReload GatewayConfigReloadConfig `mapstructure:"config_reload"     yaml:"config_reload,omitempty"`
 	Watcher      GatewayWatcherConfig      `mapstructure:"watcher"           yaml:"watcher"`
 	Watchdog     WatchdogConfig            `mapstructure:"watchdog"          yaml:"watchdog"`
-	SandboxHome  string                    `mapstructure:"-"                 yaml:"-"`
 	ClawHome     string                    `mapstructure:"-"                 yaml:"-"`
 }
 
@@ -2452,20 +2420,14 @@ func (g *GatewayConfig) RequiresTLS() bool {
 }
 
 // APIBindHost returns the address the gateway REST API listens on: an explicit
-// gateway.api_bind, else the legacy standalone shim's host, else loopback.
-// Every listener, hook/plugin address, and health probe derives the API host
-// from here so they cannot disagree.
+// gateway.api_bind, else loopback. Every listener, hook/plugin address, and
+// health probe (upgrade, watchdog, status, the Python CLI's api_bind_host)
+// derives the API host from here so they cannot disagree.
 func APIBindHost(cfg *Config) string {
-	if cfg == nil {
+	if cfg == nil || cfg.Gateway.APIBind == "" {
 		return "127.0.0.1"
 	}
-	if cfg.Gateway.APIBind != "" {
-		return cfg.Gateway.APIBind
-	}
-	if host, ok := LegacyStandaloneAPIHost(cfg); ok {
-		return host
-	}
-	return "127.0.0.1"
+	return cfg.Gateway.APIBind
 }
 
 type RuntimeAction string
@@ -2985,7 +2947,7 @@ func loadConfigSourceChecked(
 		if ReportConfigLoadError != nil {
 			ReportConfigLoadError(context.Background(), "openshell_invalid")
 		}
-		return nil, fmt.Errorf("config: openshell: %w", err)
+		return nil, fmt.Errorf("config: openshell: %w", settingErrorAt("openshell", err))
 	}
 
 	// Validate registry source kind/content shapes. The Python CLI
@@ -3019,8 +2981,6 @@ func loadConfigSourceChecked(
 			)
 		}
 	}
-
-	cfg.Gateway.SandboxHome = LegacySandboxHome(&cfg)
 
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home

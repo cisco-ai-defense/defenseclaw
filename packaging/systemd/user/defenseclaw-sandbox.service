@@ -1,0 +1,40 @@
+# DefenseClaw sandbox daemon (systemd user unit, one per account).
+#
+# Runs this account's OpenShell sandboxes on a standalone managed computer.
+# It runs as the user, takes no config file and relays every sandbox hook
+# to the managed gateway's hook socket. Started on demand by
+# defenseclaw-sandbox.socket; it exits by itself when idle (no sandbox
+# running and no CLI connection for 30 minutes) and for a deferred restart
+# after an upgrade or a setting change, once no sandbox runs.
+#
+# A daemon that cannot reach the managed gateway, or whose settings the
+# gateway refuses, answers the CLI with the reason for a short while and
+# exits 0; one that cannot run on this computer or account at all exits 78,
+# which is never restarted (RestartPreventExitStatus). Other failures
+# restart, bounded by the start limit.
+#
+# ExecStop stops the account's running sandboxes before the daemon stops:
+# docker would keep their containers running. UMask=0022: OpenShell's
+# MicroVM driver builds images the sandbox user must be able to read.
+
+[Unit]
+Description=DefenseClaw sandbox daemon
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/
+Requires=defenseclaw-sandbox.socket
+After=defenseclaw-sandbox.socket
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon
+ExecStop=/opt/defenseclaw/bin/defenseclaw-gateway sandbox-daemon stop-sandboxes
+Restart=on-failure
+RestartSec=5s
+RestartPreventExitStatus=78
+TimeoutStopSec=5min
+UMask=0022
+NoNewPrivileges=true
+
+[Install]
+Also=defenseclaw-sandbox.socket

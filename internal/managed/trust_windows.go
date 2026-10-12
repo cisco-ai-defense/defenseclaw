@@ -13,15 +13,12 @@
 package managed
 
 import (
-	"crypto/sha1" //nolint:gosec // SCM's service SID derivation.
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"unicode/utf16"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -449,26 +446,9 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 		// populating the env.
 		return nil, nil
 	}
-	const prefix = `NT SERVICE\`
-	if len(account) <= len(prefix) || !strings.EqualFold(account[:len(prefix)], prefix) {
-		return nil, fmt.Errorf(
-			"%s must identify an NT SERVICE virtual account, got %q",
-			WindowsServiceAccountEnv,
-			account,
-		)
-	}
-	name := account[len(prefix):]
-	for _, char := range name {
-		if (char >= 'a' && char <= 'z') ||
-			(char >= 'A' && char <= 'Z') ||
-			(char >= '0' && char <= '9') ||
-			char == '_' || char == '.' || char == '-' {
-			continue
-		}
-		return nil, fmt.Errorf("%s contains an invalid service name: %q", WindowsServiceAccountEnv, account)
-	}
-	if len(name) > 128 {
-		return nil, fmt.Errorf("%s service name is too long", WindowsServiceAccountEnv)
+	name, err := ntServiceName(account)
+	if err != nil {
+		return nil, err
 	}
 	derived, err := windowsDerivedServiceSID(name)
 	if err != nil {
@@ -506,30 +486,38 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 	return sid, nil
 }
 
-// windowsDerivedServiceSID computes the service SID SCM assigns to a service
-// name: S-1-5-80 followed by the SHA-1 of the upper-cased UTF-16LE name as
-// five little-endian 32-bit subauthorities. Callers pass a name already
-// limited to ASCII letters, digits, '_', '.' and '-'.
+// windowsDerivedServiceSID is the service SID SCM assigns to a service name
+// (WindowsServiceSIDString), as a SID. Callers pass a name ntServiceName
+// already checked.
 func windowsDerivedServiceSID(name string) (*windows.SID, error) {
-	upper := strings.ToUpper(name)
-	encoded := make([]byte, 0, 2*len(upper))
-	for _, unit := range utf16.Encode([]rune(upper)) {
-		encoded = binary.LittleEndian.AppendUint16(encoded, unit)
+	return windows.StringToSid(WindowsServiceSIDString(name))
+}
+
+// ntServiceName is the service name of account once it is checked to be an
+// NT SERVICE virtual account with a valid service name.
+func ntServiceName(account string) (string, error) {
+	const prefix = `NT SERVICE\`
+	if len(account) <= len(prefix) || !strings.EqualFold(account[:len(prefix)], prefix) {
+		return "", fmt.Errorf(
+			"%s must identify an NT SERVICE virtual account, got %q",
+			WindowsServiceAccountEnv,
+			account,
+		)
 	}
-	digest := sha1.Sum(encoded) //nolint:gosec // SCM's service SID derivation, not a security hash choice.
-	var sub [5]uint32
-	for index := range sub {
-		sub[index] = binary.LittleEndian.Uint32(digest[4*index:])
+	name := account[len(prefix):]
+	for _, char := range name {
+		if (char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			char == '_' || char == '.' || char == '-' {
+			continue
+		}
+		return "", fmt.Errorf("%s contains an invalid service name: %q", WindowsServiceAccountEnv, account)
 	}
-	var sid *windows.SID
-	if err := windows.AllocateAndInitializeSid(
-		&windows.SECURITY_NT_AUTHORITY, 6, 80,
-		sub[0], sub[1], sub[2], sub[3], sub[4], 0, 0, &sid,
-	); err != nil {
-		return nil, err
+	if len(name) > 128 {
+		return "", fmt.Errorf("%s service name is too long", WindowsServiceAccountEnv)
 	}
-	defer windows.FreeSid(sid) //nolint:errcheck
-	return sid.Copy()
+	return name, nil
 }
 
 func sidIsNTService(sid *windows.SID) bool {

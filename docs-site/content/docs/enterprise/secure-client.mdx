@@ -498,6 +498,13 @@ For the standalone profile, see
 
 The `openshell.admin` block is documented in
 [Sandbox policy pushdown](/docs/enterprise/configuration#sandbox-policy-pushdown).
+The keys added for sandboxes on managed computers (`required_for`,
+`when_unavailable`, `user_approvals`, `allowed_credentials`, `on_silence`,
+`process_tree` and the other keys of the standalone sandbox policy) are refused
+in this profile when the config loads, as is a `sandbox` section in a guardrail
+profile. Those belong to the standalone profile (see
+[Sandboxes on managed computers](/docs/enterprise/sandboxes)); the Secure Client
+behavior of `openshell.admin` is unchanged.
 In the Secure Client profile, apply a change to it as shown in
 [Restart-required controls](#restart-required-controls); on macOS the gateway
 reloads the `openshell` block without a restart.

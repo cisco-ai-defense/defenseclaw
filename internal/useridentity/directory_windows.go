@@ -71,6 +71,10 @@ func (osWindowsDirectoryReader) LookupAccount(sid string) (string, string, bool)
 	return account, domain, true
 }
 
+func (osWindowsDirectoryReader) SIDForName(name string) string {
+	return platformSIDForAccountName(name)
+}
+
 func (osWindowsDirectoryReader) ComputerName() string {
 	name, err := windows.ComputerName()
 	if err != nil {

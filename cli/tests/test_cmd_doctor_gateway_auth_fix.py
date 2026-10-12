@@ -178,27 +178,24 @@ def test_gateway_subsystem_expectation_is_off_when_discovery_found_no_openclaw(t
 
 
 @pytest.mark.parametrize(
-    ("enabled", "standalone", "platform", "deployment_mode", "expected"),
+    ("enabled", "platform", "deployment_mode", "expected"),
     [
-        (True, False, "linux", "", True),
-        (True, False, "darwin", "", True),
-        (False, False, "linux", "", False),
-        (False, True, "linux", "", True),
-        (True, False, "win32", "", None),
-        (True, False, "linux", "managed_enterprise", None),
+        (True, "linux", "", True),
+        (True, "darwin", "", True),
+        (False, "linux", "", False),
+        (True, "win32", "", None),
+        (True, "linux", "managed_enterprise", None),
     ],
 )
 def test_sandbox_subsystem_expectation_follows_openshell_enabled(
     enabled,
-    standalone,
     platform,
     deployment_mode,
     expected,
 ):
-    # The gateway runs the sandbox subsystem when openshell.enabled is set,
-    # not only for the legacy standalone install.
+    # The gateway runs the sandbox subsystem when openshell.enabled is set.
     cfg = SimpleNamespace(
-        openshell=SimpleNamespace(enabled=enabled, is_standalone=lambda: standalone),
+        openshell=SimpleNamespace(enabled=enabled),
         deployment_mode=deployment_mode,
     )
     with patch("defenseclaw.commands.cmd_doctor.sys.platform", platform):
@@ -1282,7 +1279,7 @@ def test_fix_gateway_service_restarts_deterministic_config_runtime_drift(
     if drift == "watcher":
         cfg.gateway.watcher = SimpleNamespace(enabled=False)
     if drift == "sandbox":
-        cfg.openshell = SimpleNamespace(is_standalone=lambda: False)
+        cfg.openshell = SimpleNamespace(enabled=False)
     (tmp_path / "gateway.pid").write_text("4242", encoding="utf-8")
     before_trust = _strong_gateway_trust(str(tmp_path), pid=4242)
     after_trust = _strong_gateway_trust(
@@ -1467,7 +1464,7 @@ def test_fix_gateway_service_does_not_restart_operational_subsystem_errors(
     elif subsystem == "telemetry":
         cfg._source_config_version = 8
     else:
-        cfg.openshell = SimpleNamespace(is_standalone=lambda: True)
+        cfg.openshell = SimpleNamespace(enabled=True)
 
     with (
         patch(
@@ -1696,7 +1693,7 @@ def test_fix_gateway_service_reports_started_with_operational_upstream_state(
 def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
     cfg = _cfg(str(tmp_path), token="configured")
     cfg.guardrail = SimpleNamespace(enabled=True)
-    cfg.openshell = SimpleNamespace(is_standalone=lambda: False)
+    cfg.openshell = SimpleNamespace(enabled=False)
     (tmp_path / "gateway.pid").write_text("4242", encoding="utf-8")
     before_trust = _strong_gateway_trust(str(tmp_path), pid=4242)
     after_trust = _strong_gateway_trust(

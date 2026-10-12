@@ -22,6 +22,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,6 +32,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	v1 "github.com/NVIDIA/OpenShell/sdk/go/openshell/v1"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
@@ -83,6 +87,7 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 	f.runner.OnFunc(f.cliPath+" --version", func(context.Context, openshell.Command) ([]byte, error) {
 		return []byte(version + "\n"), nil
 	})
+	f.runner.On("sudo -n true", "", nil)
 	f.runner.OnFunc("/bin/sh", func(_ context.Context, c openshell.Command) ([]byte, error) {
 		path := c.Args[0]
 		data, err := os.ReadFile(path)
@@ -118,7 +123,9 @@ func newInstallFixture(t *testing.T, body, existing, after string) *installFixtu
 			}
 			return true, nil
 		},
-		VerifyGateway: func(context.Context) error { f.verified++; return nil },
+		VerifyGateway:         func(context.Context) error { f.verified++; return nil },
+		Geteuid:               func() int { return 1000 },
+		HomebrewPrefixProblem: func() error { return nil },
 	}
 	return f
 }
@@ -184,6 +191,41 @@ func TestInstallFresh(t *testing.T) {
 	}
 	if strings.Contains(plan, "ACK_BREAKING") {
 		t.Errorf("fresh install plan acknowledges a breaking upgrade:\n%s", plan)
+	}
+	f.assertNoLeftovers()
+}
+
+// TestInstallChecksSudoFirst (GAP-0056, GAP-0064): as an account without
+// sudo rights the Linux install printed its plan, ran NVIDIA's script,
+// which downloaded the packages and asked for a password three times, and
+// failed with "installer failed: /bin/sh: exit status 1"; a Ctrl-C at that
+// prompt ended DefenseClaw without a word and left its temporary directory
+// behind. Sudo is checked after consent and before the script: refused or
+// cancelled, the install is ErrSudo with nothing run or left behind.
+func TestInstallChecksSudoFirst(t *testing.T) {
+	for name, answer := range map[string]error{
+		"refused":   errors.New("exit status 1"),
+		"cancelled": fmt.Errorf("sudo: %w", openshell.ErrInterrupted),
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+			f.runner.On("sudo -n true", "sudo: a password is required", errors.New("exit status 1"))
+			f.runner.On("sudo -v", "", answer)
+			_, err := f.inst.Install(context.Background())
+			if !errors.Is(err, openshell.ErrSudo) || f.ran() {
+				t.Fatalf("Install = %v (script ran %v), want ErrSudo before the script", err, f.ran())
+			}
+			if name == "cancelled" && !strings.Contains(err.Error(), "cancelled at sudo's password prompt") {
+				t.Fatalf("err = %v", err)
+			}
+			f.assertNoLeftovers()
+		})
+	}
+	// An installer the user interrupts says so, and leaves nothing behind.
+	f := newInstallFixture(t, fakeScript, "", "openshell 0.1.1")
+	f.runner.On("/bin/sh", "", fmt.Errorf("/bin/sh: %w", openshell.ErrInterrupted))
+	if _, err := f.inst.Install(context.Background()); !errors.Is(err, openshell.ErrInterrupted) || !strings.Contains(err.Error(), "the installer was interrupted") {
+		t.Fatalf("Install = %v, want the interruption", err)
 	}
 	f.assertNoLeftovers()
 }
@@ -266,6 +308,217 @@ func TestInstallExistingReleases(t *testing.T) {
 				t.Fatalf("an in-place upgrade acknowledges a breaking one:\n%s", f.out.String())
 			}
 		})
+	}
+}
+
+// TestInstallUpgradesInPlace: Install keeps a supported CLI, and Upgrade
+// runs the pinned installer over one older than the release once
+// PrepareUpgrade has readied the gateway for the script's restart, after
+// consent. It never downgrades, refuses a CLI the package would not
+// replace, and fails when the old CLI still answers afterwards.
+func TestInstallUpgradesInPlace(t *testing.T) {
+	setup := func(t *testing.T, existing, after string) (*installFixture, *int) {
+		f := newInstallFixture(t, fakeScript, existing, after)
+		f.inst.Release = openshell.InstallerTag
+		consented, prepared := false, new(int)
+		consent := f.inst.Consent
+		f.inst.Consent = func(p *openshell.InstallPlan) (bool, error) { consented = true; return consent(p) }
+		f.inst.PrepareUpgrade = func(_ context.Context, release openshell.Version) error {
+			if f.ran() || !consented || release.String() != openshell.InstallerVersion {
+				t.Errorf("prepared for %s with the script run %v, consent %v", release, f.ran(), consented)
+			}
+			*prepared++
+			return nil
+		}
+		return f, prepared
+	}
+	t.Run("upgraded", func(t *testing.T) {
+		f, prepared := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		res, err := f.inst.Upgrade(context.Background())
+		if err != nil || !res.Installed || res.CLIVersion.String() != openshell.InstallerVersion || *prepared != 1 || f.verified != 1 {
+			t.Fatalf("Upgrade = %+v, %v (prepared %d, gateway verified %d)", res, err, *prepared, f.verified)
+		}
+		if env := f.scriptRun().Env; !slices.Equal(env, []string{"OPENSHELL_VERSION=" + openshell.InstallerTag, "OPENSHELL_REGISTER_BIN=" + f.cliPath}) {
+			t.Fatalf("installer env = %v", env)
+		}
+		for _, want := range []string{"upgrades the installed openshell 0.1.1 to " + openshell.InstallerTag + " in place",
+			"the script restarts the OpenShell gateway once the release is installed, which drops the connections of every sandbox on it",
+			"on the docker driver, Docker pulls the release's supervisor images from ghcr.io",
+			"on the MicroVM driver, nothing runs while a sandbox does"} {
+			if !strings.Contains(f.out.String(), want) {
+				t.Errorf("plan lacks %q:\n%s", want, f.out.String())
+			}
+		}
+		f.assertNoLeftovers()
+	})
+	// GAP-0072: a Mac runs sandboxes in MicroVMs; its plan has no
+	// docker-driver note.
+	t.Run("upgraded on a Mac", func(t *testing.T) {
+		f, _ := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		f.inst.GOOS, f.inst.E2fsprogsDirs = "darwin", []string{t.TempDir()}
+		if _, err := f.inst.Upgrade(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		plan := f.out.String()
+		if !strings.Contains(plan, "which stops every MicroVM sandbox on it") || !strings.Contains(plan, "nothing runs while a MicroVM sandbox does") ||
+			strings.Contains(plan, "ghcr.io") || strings.Contains(plan, "docker driver") {
+			t.Fatalf("plan:\n%s", plan)
+		}
+	})
+	t.Run("Install keeps it", func(t *testing.T) {
+		f, prepared := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		if res, err := f.inst.Install(context.Background()); err != nil || res.Installed || f.hits.Load() != 0 || f.ran() || *prepared != 0 {
+			t.Fatalf("Install = %+v, %v (downloads %d, prepared %d)", res, err, f.hits.Load(), *prepared)
+		}
+	})
+	for _, existing := range []string{"openshell " + openshell.InstallerVersion, "openshell 0.1.9"} {
+		t.Run("never downgrades "+existing, func(t *testing.T) {
+			f, prepared := setup(t, existing, "openshell 0.1.1")
+			if res, err := f.inst.Upgrade(context.Background()); err != nil || res.Installed || f.hits.Load() != 0 || f.ran() || *prepared != 0 {
+				t.Fatalf("Upgrade = %+v, %v (downloads %d, prepared %d)", res, err, f.hits.Load(), *prepared)
+			}
+		})
+	}
+	for _, refusal := range []error{openshell.ErrSandboxesRunning, openshell.ErrRuntimeImages} {
+		t.Run("refused: "+refusal.Error(), func(t *testing.T) {
+			f, _ := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+			f.inst.PrepareUpgrade = func(context.Context, openshell.Version) error { return refusal }
+			if _, err := f.inst.Upgrade(context.Background()); !errors.Is(err, refusal) || f.ran() {
+				t.Fatalf("Upgrade = %v (ran %v)", err, f.ran())
+			}
+			f.assertNoLeftovers()
+		})
+	}
+	t.Run("installed another way", func(t *testing.T) {
+		f, prepared := setup(t, "openshell 0.1.1", "openshell "+openshell.InstallerVersion)
+		f.inst.PackageCLI = filepath.Join(t.TempDir(), "openshell")
+		if _, err := f.inst.Upgrade(context.Background()); !errors.Is(err, openshell.ErrUnmanagedUpgrade) || !strings.Contains(err.Error(), "the way you installed it") ||
+			f.hits.Load() != 0 || f.ran() || *prepared != 0 {
+			t.Fatalf("Upgrade = %v (downloads %d, prepared %d)", err, f.hits.Load(), *prepared)
+		}
+	})
+	t.Run("the old CLI still answers", func(t *testing.T) {
+		f, _ := setup(t, "openshell 0.1.1", "")
+		if _, err := f.inst.Upgrade(context.Background()); err == nil || !strings.Contains(err.Error(), `still reports "openshell 0.1.1", not `+openshell.InstallerVersion) {
+			t.Fatalf("Upgrade = %v", err)
+		}
+	})
+}
+
+// TestPrepareUpgrade: NVIDIA's script restarts the gateway only once it
+// has downloaded and installed the release. On the docker driver, whose
+// sandboxes keep running, the release's supervisor images are pulled
+// first, as the restarted gateway does not start without them; on the
+// MicroVM driver a running or starting sandbox, of any owner, refuses the
+// upgrade, as a flush that early would leave minutes of writes to be lost.
+// A gateway whose driver could not be read counts as a MicroVM one, and
+// only one that answers neither call as down.
+func TestPrepareUpgrade(t *testing.T) {
+	gateway := func(t *testing.T, d openshell.ComputeDriver, phases map[string]openshell.SandboxPhase) (openshell.Client, *openshelltest.Fake) {
+		t.Helper()
+		f := openshelltest.New(openshelltest.WithDriver(d))
+		c := f.Client(openshell.ClientOptions{})
+		for name, phase := range phases {
+			if _, err := c.CreateSandbox(context.Background(), name, &openshell.SandboxSpec{}, openshell.CreateSandboxOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.SetPhase(openshell.DefaultWorkspace, name, phase); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return c, f
+	}
+	running := map[string]openshell.SandboxPhase{"dc-b": openshell.PhaseProvisioning, "dc-a": openshell.PhaseReady, "dc-c": openshell.PhaseStopped}
+	pulls := 0
+	pull := func(context.Context) error { pulls++; return nil }
+	unavailable := &v1.StatusError{Code: v1.ErrorUnavailable, Message: "connection refused"}
+
+	c, _ := gateway(t, openshell.DriverDocker, running)
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 1 {
+		t.Fatalf("docker: %v, pulled %d times", err, pulls)
+	}
+	pullErr := fmt.Errorf("%w (docker pull: offline)", openshell.ErrRuntimeImages)
+	if err := openshell.PrepareUpgrade(context.Background(), c, func(context.Context) error { return pullErr }); !errors.Is(err, openshell.ErrRuntimeImages) {
+		t.Fatalf("docker, pull failed: %v", err)
+	}
+
+	pulls = 0
+	c, _ = gateway(t, openshell.DriverVM, running)
+	err := openshell.PrepareUpgrade(context.Background(), c, pull)
+	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "(dc-a, dc-b): stop them first with `defenseclaw sandbox stop NAME`") || pulls != 0 {
+		t.Fatalf("vm, sandboxes running: %v (pulled %d times)", err, pulls)
+	}
+	c, _ = gateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-c": openshell.PhaseStopped})
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 0 {
+		t.Fatalf("vm, none running: %v (pulled %d times)", err, pulls)
+	}
+
+	c, f := gateway(t, openshell.DriverVM, running)
+	f.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) || pulls != 0 {
+		t.Fatalf("driver unknown, sandboxes running: %v (pulled %d times)", err, pulls)
+	}
+	c, f = gateway(t, openshell.DriverVM, running)
+	f.FailNext(openshelltest.MethodGatewayInfo, &v1.StatusError{Code: v1.ErrorDeadlineExceeded, Message: "context deadline exceeded"})
+	f.FailNext(openshelltest.MethodListSandboxes, &v1.StatusError{Code: v1.ErrorInternal, Message: "store locked"})
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "could not be listed: ") {
+		t.Fatalf("driver unknown, list failed: %v", err)
+	}
+	c, f = gateway(t, openshell.DriverVM, running)
+	f.FailNext(openshelltest.MethodGatewayInfo, unavailable)
+	f.FailNext(openshelltest.MethodListSandboxes, unavailable)
+	if err := openshell.PrepareUpgrade(context.Background(), c, pull); err != nil || pulls != 0 {
+		t.Fatalf("gateway down: %v (pulled %d times)", err, pulls)
+	}
+}
+
+// TestPullRuntimeImages: the images the upgraded gateway's docker driver
+// starts with are the release's on ghcr.io, but those gateway.toml
+// replaces. A local one is not pulled again, and a pull that fails says
+// which image and what to do.
+func TestPullRuntimeImages(t *testing.T) {
+	// The images, not the file owner: Windows has no owner check that passes.
+	openshell.SetGatewayFileOwner(t, func(fs.FileInfo) bool { return true })
+	v, _ := openshell.ParseVersion(openshell.InstallerVersion)
+	supervisor := "ghcr.io/nvidia/openshell/supervisor:" + openshell.InstallerVersion
+	sandbox := "ghcr.io/nvidia/openshell/sandbox:" + openshell.InstallerVersion
+	var none *openshell.GatewayConfigState
+	if got := none.RuntimeImages(v); !slices.Equal(got, []string{supervisor, sandbox}) {
+		t.Fatalf("no configuration: %v", got)
+	}
+	for toml, want := range map[string][]string{
+		"[openshell.drivers.docker]\nsupervisor_image = \"mirror.example/supervisor:1\"\n":    {sandbox},
+		"[openshell.drivers.docker]\nsandbox_runtime_image = \"mirror.example/sandbox:1\"\n":  {supervisor},
+		"[openshell.drivers.docker]\nsupervisor_bin = \"/opt/openshell/openshell-sandbox\"\n": {supervisor},
+		"[openshell.gateway]\ncompute_driver = \"docker\"\n":                                  {supervisor, sandbox},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "gateway.toml"), []byte(toml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		st, err := (&openshell.GatewayConfigurator{Dir: dir, GOOS: "linux", Runner: &openshelltest.Runner{}}).Read()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := st.RuntimeImages(v); !slices.Equal(got, want) {
+			t.Errorf("%q: %v, want %v", toml, got, want)
+		}
+	}
+
+	r := &openshelltest.Runner{}
+	r.On("docker image inspect", "", errors.New("exit status 1")) // the last rule that matches answers
+	r.On("docker image inspect --format {{.Id}} "+supervisor, "sha256:1\n", nil)
+	r.On("docker pull "+sandbox, "", nil)
+	if err := openshell.PullRuntimeImages(context.Background(), r, []string{supervisor, sandbox}); err != nil || r.Called("docker pull "+supervisor) || !r.Called("docker pull "+sandbox) {
+		t.Fatalf("pull: %v, calls %v", err, r.Calls())
+	}
+	r = &openshelltest.Runner{}
+	r.On("docker image inspect", "", errors.New("exit status 1"))
+	r.On("docker pull", "Error response from daemon: Get \"https://ghcr.io/v2/\": dial tcp: lookup ghcr.io: no such host\n", errors.New("exit status 1"))
+	err := openshell.PullRuntimeImages(context.Background(), r, []string{supervisor, sandbox})
+	if !errors.Is(err, openshell.ErrRuntimeImages) || !strings.Contains(err.Error(), "docker pull "+supervisor+": exit status 1: Error response from daemon") ||
+		!strings.Contains(err.Error(), "let Docker reach ghcr.io, or load the image, then upgrade") || r.Called("docker pull "+sandbox) {
+		t.Fatalf("pull offline: %v", err)
 	}
 }
 
@@ -460,7 +713,7 @@ func TestInstallOnMacTMUXHandlesBrewServicesRefusal(t *testing.T) {
 		if running && (err != nil || res == nil || !res.Installed) {
 			t.Fatalf("running gateway fallback = %+v, %v", res, err)
 		}
-		if !running && !errors.Is(err, openshell.ErrBrewNeedsTerminal) {
+		if !running && !errors.Is(err, openshell.ErrBrewServicesTmux) {
 			t.Fatalf("stopped gateway error = %v", err)
 		}
 	}

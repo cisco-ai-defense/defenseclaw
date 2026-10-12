@@ -746,9 +746,6 @@ def _reload_gateway_policy(app: AppContext) -> tuple[str, str]:
     return "reloaded", ""
 
 
-_RANK_NAMES = {1: "LOW", 2: "MEDIUM", 3: "HIGH", 4: "CRITICAL"}
-
-
 def _admission_triple(raw: dict) -> dict:
     """A policy action in config ``admission`` triple form. Policy YAML uses
     either runtime vocabulary (enable/disable or allow/block, F-0241)."""
@@ -826,6 +823,32 @@ def _admission_from_policy(data: dict):  # noqa: ANN202 - AdmissionConfig, impor
     return adm
 
 
+def _policy_threshold_rank(key: str, raw: object) -> int:
+    """A policy's guardrail threshold as a severity rank (1 LOW .. 4 CRITICAL).
+
+    A rank outside 1-4 (block_threshold: 9) used to become an empty level,
+    which restores the rule pack's default: activating the policy silently
+    moved block_at from LOW back to CRITICAL (GAP-1330). It is refused now,
+    like any other invalid policy value, and config.yaml is left unchanged.
+    """
+    rank: int | None = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        rank = raw
+    elif isinstance(raw, float) and raw.is_integer():
+        rank = int(raw)
+    elif isinstance(raw, str):
+        text = raw.strip().upper()
+        # str.isdigit() also accepts digits int() refuses ("²"), which
+        # surfaced as a generic error: only ASCII digits are a rank.
+        if text.isascii() and text.isdigit():
+            rank = int(text)
+        else:
+            rank = {v: k for k, v in _SEVERITY_RANK_NAMES.items()}.get(text)
+    if rank not in _SEVERITY_RANK_NAMES:
+        raise ValueError(f"guardrail.{key} must be 1 (LOW), 2 (MEDIUM), 3 (HIGH) or 4 (CRITICAL), not {raw!r}")
+    return rank
+
+
 def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, imported lazily
     """A named policy's guardrail mode, thresholds and Cisco trust level as
     config keys. A threshold equal to the configured rule pack's posture
@@ -844,8 +867,8 @@ def _apply_policy_guardrail(cfg, data: dict) -> None:  # noqa: ANN001 - Config, 
         ("alert_threshold", "alert_at", pack_alert),
     ):
         if key in guardrail:
-            rank = int(guardrail[key])
-            setattr(cfg.guardrail, attr, "" if rank == default else _RANK_NAMES.get(rank, ""))
+            rank = _policy_threshold_rank(key, guardrail[key])
+            setattr(cfg.guardrail, attr, "" if rank == default else _SEVERITY_RANK_NAMES[rank])
     if "mode" in guardrail:
         mode = str(guardrail["mode"]).strip()
         if mode not in {"observe", "action"}:
@@ -1390,10 +1413,10 @@ def edit_guardrail(app: AppContext, block_threshold: int | None, alert_threshold
     if policy_name is None and not asset_lists.is_secure_client(app.cfg):
         changed = []
         if block_threshold is not None:
-            app.cfg.guardrail.block_at = _RANK_NAMES[block_threshold]
+            app.cfg.guardrail.block_at = _SEVERITY_RANK_NAMES[block_threshold]
             changed.append(f"block_at={app.cfg.guardrail.block_at}")
         if alert_threshold is not None:
-            app.cfg.guardrail.alert_at = _RANK_NAMES[alert_threshold]
+            app.cfg.guardrail.alert_at = _SEVERITY_RANK_NAMES[alert_threshold]
             changed.append(f"alert_at={app.cfg.guardrail.alert_at}")
         if cisco_trust_level is not None:
             app.cfg.guardrail.cisco_trust_level = "" if cisco_trust_level == "full" else cisco_trust_level

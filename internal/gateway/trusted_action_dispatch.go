@@ -213,6 +213,12 @@ func dispatchTrustedAction(
 			// action partial, so a custom argv rule about it never ran
 			// (GAP-0912). Only a monotone argv rule's match counts.
 			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
+		} else if view, ok := actionfacts.SourcedFileReduction(request.Input, facts); ok {
+			// A file sourced by a static name (source .env && aws ...) is
+			// opaque, so no rule ran on the commands after it and a custom
+			// argv rule was only a detection-only regex finding (GAP-0117).
+			// Only a monotone argv rule's match counts.
+			semanticFacts, viewCandidate, subsetView = view, argvSubsetReductionCandidate, true
 		} else if powerShellView != nil {
 			semanticFacts, viewCandidate, subsetView = *powerShellView, argvSubsetReductionCandidate, true
 			powerShellView = nil

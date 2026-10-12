@@ -498,17 +498,24 @@ func runPrintedFix(t *testing.T, powershell, root, text string) {
 	}
 }
 
-// GAP-1326: a rule pack that Users can modify is refused with a fix that
-// grants Users Read & execute, which the gateway service reads the pack
-// through, and then removes the Users grants by name. The fix gave that read
-// grant and took it away again, so the service still could not read the pack
-// after the operator ran it.
-func TestDescribeUntrustedRulePackFixKeepsUsersRead(t *testing.T) {
+// GAP-1326, GAP-0386: a rule pack that Users can modify is refused with a fix
+// that removes the Users grants by name and leaves the gateway service
+// account able to read the pack. The fix once gave Users the read grant the
+// service read through and took it away again, so the service could not read
+// the pack after the operator ran it; the read grant is now the service
+// account's own (a standard user may see only their own policy), which the
+// Users removal does not touch.
+func TestDescribeUntrustedRulePackFixKeepsGatewayRead(t *testing.T) {
+	// Derived like the fix derives it: the gateway service need not exist.
+	gateway, err := windows.StringToSid(WindowsServiceSIDString("DefenseClawGateway"))
+	if err != nil {
+		t.Fatalf("gateway service SID: %v", err)
+	}
 	refused := &UntrustedPrincipalError{Path: `C:\Packs\pack`, SID: "S-1-5-32-545"}
-	text, ok := DescribeUntrustedRulePack("guardrail.rule_pack_dir", `C:\Packs\pack`, refused)
-	remove := strings.Index(text, `/remove:g "*S-1-5-32-545"`)
-	if !ok || remove < 0 || !strings.Contains(text[remove:], `/grant:r "*S-1-5-32-545:(OI)(CI)RX"`) {
-		t.Fatalf("the fix does not grant Users read after removing its grants: %s", text)
+	text, ok := DescribeUntrustedRulePack("guardrail.rule_pack_dir", `C:\Packs\pack`, DefaultGatewayServiceAccount, refused)
+	if !ok || !strings.Contains(text, `/remove:g "*S-1-5-32-545"`) ||
+		!strings.Contains(text, `"*`+gateway.String()+`:(OI)(CI)RX"`) || strings.Contains(text, `"*S-1-5-32-545:(OI)(CI)RX"`) {
+		t.Fatalf("the fix does not remove the Users grants and keep the gateway's read: %s", text)
 	}
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Skip("the fixed folder is writable only by SYSTEM and Administrators")
@@ -516,6 +523,14 @@ func TestDescribeUntrustedRulePackFixKeepsUsersRead(t *testing.T) {
 	powershell, err := exec.LookPath("powershell.exe")
 	if err != nil {
 		t.Skip("Windows PowerShell is not available")
+	}
+	// icacls grants only a SID that maps to an account, and a service SID
+	// maps once its service is installed. A test host has no DefenseClawGateway
+	// service, so the printed fix runs for a service every Windows host has.
+	const installedService = `NT SERVICE\TrustedInstaller`
+	installed, err := windows.StringToSid(WindowsServiceSIDString("TrustedInstaller"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	root := t.TempDir()
 	pack := filepath.Join(root, "pack")
@@ -539,15 +554,11 @@ func TestDescribeUntrustedRulePackFixKeepsUsersRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	refused.Path = pack
-	text, ok = DescribeUntrustedRulePack("guardrail.rule_pack_dir", pack, refused)
+	text, ok = DescribeUntrustedRulePack("guardrail.rule_pack_dir", pack, installedService, refused)
 	if !ok {
 		t.Fatal("refusal is not described")
 	}
 	runPrintedFix(t, powershell, root, text)
-	users, err := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, path := range []string{pack, rules} {
 		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 		if err != nil {
@@ -560,8 +571,11 @@ func TestDescribeUntrustedRulePackFixKeepsUsersRead(t *testing.T) {
 		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
 			t.Fatalf("after the printed fix: %v", err)
 		}
-		if !serviceHasAccess(path, []*windows.SID{users}, serviceTreeAccess) {
-			t.Fatalf("after the printed fix Users cannot read %s", path)
+		if !serviceHasAccess(path, []*windows.SID{installed}, serviceTreeAccess) {
+			t.Fatalf("after the printed fix the service cannot read %s", path)
+		}
+		if readers, err := StandardUserReadersOf(path); err != nil || len(readers) != 0 {
+			t.Fatalf("after the printed fix standard users can read %s: %q (%v)", path, readers, err)
 		}
 	}
 }

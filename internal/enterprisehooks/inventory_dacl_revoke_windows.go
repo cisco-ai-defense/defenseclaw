@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -41,7 +42,7 @@ func RevokeGatewayInventoryReadForManifest(manifest Manifest) error {
 	}
 	sids := make([]*windows.SID, 0, len(names))
 	for _, name := range names {
-		sid, err := windows.StringToSid(windowsServiceSIDString(name))
+		sid, err := windows.StringToSid(managed.WindowsServiceSIDString(name))
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: gateway service SID for %s: %w", name, err)
 		}

@@ -118,6 +118,13 @@
       "url": "/d/defenseclaw-traffic?${__url_time_range}",
       "icon": "external link",
       "targetBlank": false
+    },
+    {
+      "title": "Sandboxes",
+      "type": "link",
+      "url": "/d/defenseclaw-sandboxes?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
     }
   ],
   "liveNow": false,

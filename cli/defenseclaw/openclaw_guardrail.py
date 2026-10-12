@@ -376,10 +376,9 @@ def _expand(p: str) -> str:
 def _preserve_ownership(path: str):
     """Capture a file's uid/gid before a write and restore it afterwards.
 
-    Only relevant in standalone sandbox mode where setup commands run
-    as root and would otherwise re-create files owned by root,
-    breaking sandbox user access. Skipped entirely for non-root
-    callers since ``os.chown`` requires elevated privileges.
+    A setup command run as root would otherwise leave the file owned by
+    root, so its owner could no longer edit it. Skipped entirely for
+    non-root callers since ``os.chown`` requires elevated privileges.
     """
     getuid = getattr(os, "getuid", None)
     if getuid is None or getuid() != 0:

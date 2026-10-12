@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -69,16 +70,24 @@ type sandboxRule struct {
 // read, print or send credentials ..." in a sandbox and "DefenseClaw policy
 // blocked this action (rule SEC-AWS-KEY: AWS access key). Do not retry it in
 // another form." on the host (GAP-1885).
-func sandboxVerdictReason(connectorName, action string, ruleIDs, findings []string) string {
-	rules := sandboxVerdictRules(connectorName, ruleIDs, findings)
+//
+// ctx is the request the verdict is for: its rule IDs resolve against the rule
+// pack the request's guardrail profile uses, not the host's, so a rule only
+// the caller's own pack defines is named too (GAP-0589, GAP-0638).
+func sandboxVerdictReason(ctx context.Context, connectorName, action string, ruleIDs, findings []string) string {
+	rules := sandboxVerdictRules(ctx, connectorName, ruleIDs, findings)
 	switch action {
 	case "block":
 		return agentBlockSentence(sandboxRulesSubject(rules))
 	case "confirm":
 		return agentConfirmSentence(sandboxRulesSubject(rules))
 	}
+	note := sandboxFlaggedNote
+	if action == sandboxActionUndecided {
+		note = sandboxapi.UndecidedNote
+	}
 	if len(rules) == 0 {
-		return "Allowed but flagged by DefenseClaw policy. " + sandboxFlaggedNote
+		return "Allowed but flagged by DefenseClaw policy. " + note
 	}
 	first := rules[0]
 	var b strings.Builder
@@ -93,8 +102,38 @@ func sandboxVerdictReason(connectorName, action string, ruleIDs, findings []stri
 		}
 		b.WriteString(" (also " + strings.Join(others, ", ") + ")")
 	}
-	b.WriteString(". " + sandboxFlaggedNote)
+	b.WriteString(". " + note)
 	return b.String()
+}
+
+// sandboxActionUndecided is the sandboxVerdictReason action of an allowed
+// verdict a rule matched that could not decide it (sandboxMatchUndecided).
+const sandboxActionUndecided = "undecided"
+
+// sandboxMatchUndecided reports an allowed action-mode verdict whose
+// severity blocks or asks at the connector's thresholds: a rule that would
+// have stopped the call matched it but could not decide it (a
+// detection-only match, as for a command the parser cannot read in full),
+// so the call ran (GAP-0312).
+func (a *APIServer) sandboxMatchUndecided(ctx context.Context, connectorName string, resp agentHookResponse) bool {
+	if !strings.EqualFold(strings.TrimSpace(resp.Mode), "action") {
+		return false
+	}
+	probe := []RuleFinding{{Severity: strings.ToUpper(strings.TrimSpace(resp.Severity)), Confidence: 1}}
+	switch guardrailActionForConnectorFindings(a.decisionConfig(ctx), connectorName, probe, true) {
+	case guardrailActionBlock, guardrailActionConfirm:
+		return true
+	}
+	return false
+}
+
+// sandboxMatchAlerts reports an allowed verdict whose severity reaches the
+// connector's alert threshold (or asks or blocks at its thresholds): the
+// profile answered it with an allow but flagged it. A finding below the
+// threshold is audited only (GAP-0634, GAP-0640).
+func (a *APIServer) sandboxMatchAlerts(ctx context.Context, connectorName string, resp agentHookResponse) bool {
+	probe := []RuleFinding{{Severity: strings.ToUpper(strings.TrimSpace(resp.Severity)), Confidence: 1}}
+	return guardrailActionForConnectorFindings(a.decisionConfig(ctx), connectorName, probe, true) != guardrailActionAllow
 }
 
 // sandboxRulesSubject names the deciding rules the way agentMatchedRules
@@ -120,9 +159,12 @@ func sandboxRulesSubject(rules []sandboxRule) string {
 
 // sandboxVerdictRules resolves a verdict's rule IDs, in decision order and
 // then from its finding labels, against the connector's guardrail catalog
-// and the built-in CodeGuard rules. IDs no catalog knows are left out: they
-// cannot be told apart from content. The most severe rule leads.
-func sandboxVerdictRules(connectorName string, ruleIDs, findings []string) []sandboxRule {
+// and the built-in CodeGuard rules. The guardrail catalog is the one the
+// request's profile evaluated with (snapshotRulePackGenerationFor), so a rule
+// from a profile's own rule pack is named as the audit record names it. IDs no
+// catalog knows are left out: they cannot be told apart from content. The most
+// severe rule leads.
+func sandboxVerdictRules(ctx context.Context, connectorName string, ruleIDs, findings []string) []sandboxRule {
 	candidates := make([]string, 0, len(ruleIDs)+len(findings))
 	candidates = append(candidates, ruleIDs...)
 	for _, label := range findings {
@@ -134,7 +176,7 @@ func sandboxVerdictRules(connectorName string, ruleIDs, findings []string) []san
 	var (
 		out  []sandboxRule
 		seen = map[string]bool{}
-		gen  = snapshotRulePackGeneration(connectorName)
+		gen  = snapshotRulePackGenerationFor(ctx, connectorName)
 	)
 	for _, id := range candidates {
 		id = strings.TrimSpace(id)
@@ -298,14 +340,25 @@ func (a *APIServer) sandboxVerdictWithReason(
 		// stays that of an allow.
 		if severityRank[strings.ToUpper(strings.TrimSpace(resp.Severity))] >= severityRank["LOW"] &&
 			(len(resp.RuleIDs) > 0 || len(findings) > 0) {
+			undecided := a.sandboxMatchUndecided(ctx, connectorName, resp)
+			if !undecided && !a.sandboxMatchAlerts(ctx, connectorName, resp) {
+				// Below the connector's alert threshold (a MEDIUM call under
+				// alert_at HIGH): nothing was flagged, so the session reports
+				// nothing (GAP-0634, GAP-0640).
+				return resp
+			}
 			resp.SourceReason = hookSourceReason(resp)
-			resp.Reason = sandboxVerdictReason(connectorName, "alert", resp.RuleIDs, findings)
+			verb := "alert"
+			if undecided {
+				verb = sandboxActionUndecided
+			}
+			resp.Reason = sandboxVerdictReason(ctx, connectorName, verb, resp.RuleIDs, findings)
 		}
 		return resp
 	}
 	// The verb follows what the harness does: a block DefenseClaw cannot
 	// enforce on this event (a tool result) is flagged, not blocked.
-	plain := sandboxVerdictReason(connectorName, action, resp.RuleIDs, findings)
+	plain := sandboxVerdictReason(ctx, connectorName, action, resp.RuleIDs, findings)
 	return a.renderSandboxVerdict(ctx, profile, req, rawBody, payload, resp, plain)
 }
 

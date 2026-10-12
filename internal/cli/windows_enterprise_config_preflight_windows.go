@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -145,13 +146,90 @@ func windowsEnterpriseStandaloneRulePacksTrusted(runtime *config.Config) error {
 			continue
 		}
 		if err := windowsEnterpriseStandaloneRulePackTrust(dir, label, serviceAccount); err != nil {
-			if text, ok := managed.DescribeUntrustedRulePack(label, dir, err); ok {
+			if text, ok := managed.DescribeUntrustedRulePack(label, dir, serviceAccount, err); ok {
 				return errors.New(text)
 			}
 			return fmt.Errorf("the rule pack %s (%s) is not administrator-controlled: %v; keep the pack, the files and folders in it and the folders above it writable only by Administrators and SYSTEM, and run it again (nothing was changed)", dir, label, err)
 		}
 	}
 	return nil
+}
+
+// windowsEnterpriseStandaloneRulePackReaders is managed.StandardUserReadersOf;
+// tests replace it.
+var windowsEnterpriseStandaloneRulePackReaders = managed.StandardUserReadersOf
+
+// windowsEnterpriseRulePackPrivacyProblems names each rule pack folder of cfg
+// that every standard user can list and read. A pack is one guardrail
+// profile's policy, and a user may see only their own: on Linux and macOS a
+// pack is 0750 root and service group, but the Windows docs and Setup's fix
+// left the inherited BUILTIN\Users read entry in place (GAP-0386). Each
+// problem carries the icacls commands that leave read to SYSTEM,
+// Administrators and the gateway service account.
+func windowsEnterpriseRulePackPrivacyProblems(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	grant := managed.RulePackServiceReadGrant(os.Getenv(managed.WindowsServiceAccountEnv))
+	// The packs the product ships are the same on every computer and public.
+	var shipped string
+	if layout, err := managed.StandaloneWindowsLayout(); err == nil {
+		shipped = strings.ToLower(filepath.Clean(layout.InstallRoot))
+	}
+	dirs := cfg.ReferencedRulePackDirs()
+	seen := map[string]bool{}
+	var problems []string
+	for _, label := range config.RulePackCheckOrder(dirs) {
+		dir := strings.TrimSpace(dirs[label])
+		if dir == "" || seen[strings.ToLower(dir)] {
+			continue
+		}
+		seen[strings.ToLower(dir)] = true
+		if lower := strings.ToLower(filepath.Clean(dir)); shipped != "" && (lower == shipped || strings.HasPrefix(lower, shipped+`\`)) {
+			continue
+		}
+		if _, err := os.Lstat(dir); err != nil {
+			continue
+		}
+		readers, err := windowsEnterpriseStandaloneRulePackReaders(dir)
+		if err != nil || len(readers) == 0 {
+			continue
+		}
+		labels := make([]string, 0, len(readers))
+		removals := make([]string, 0, len(readers))
+		for _, sid := range readers {
+			labels = append(labels, windowsPrincipalLabel(sid))
+			removals = append(removals, `"*`+sid+`"`)
+		}
+		problems = append(problems, fmt.Sprintf(
+			"the rule pack %s (%s) is readable by %s, so every standard user can read this profile's policy; "+
+				`from an elevated prompt run icacls "%s" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "%s", then icacls "%s" /remove:g %s /T /C`,
+			dir, label, strings.Join(labels, ", "), dir, grant, dir, strings.Join(removals, " ")))
+	}
+	return problems
+}
+
+// applyWindowsEnterpriseInstalledConfigWarnings adds what the administrator
+// should know about the installed config on every Setup /ensure, status and
+// verify; none of it is a failure.
+func applyWindowsEnterpriseInstalledConfigWarnings(result *enterprisestatus.Result) {
+	cfg, err := loadWindowsEnterpriseStandaloneConfig("")
+	if err != nil {
+		return
+	}
+	addWindowsEnterpriseInstalledConfigWarnings(result, cfg)
+}
+
+// addWindowsEnterpriseInstalledConfigWarnings adds, in this order, each rule
+// pack of cfg that standard users can read (the pack still decides, and a
+// deployment that followed the earlier docs keeps working), then the sandbox
+// policy warnings Linux and macOS print: each field where default_profile is
+// looser than an assigned profile, and the advisories (GAP-0536).
+func addWindowsEnterpriseInstalledConfigWarnings(result *enterprisestatus.Result, cfg *config.Config) {
+	for _, problem := range windowsEnterpriseRulePackPrivacyProblems(cfg) {
+		result.AddWarning("rule_pack_readable_by_users", problem)
+	}
+	result.AddSandboxPolicyWarnings(cfg, "windows")
 }
 
 // windowsEnterpriseStandaloneTransactionPending reports a lifecycle

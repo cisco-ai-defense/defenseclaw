@@ -21,12 +21,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/image"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
@@ -93,6 +93,20 @@ type teardownPlan struct {
 	unhanded []string
 }
 
+// gatewayBackups are the backups DefenseClaw made of the gateway file path
+// before it edited it (openshell.GatewayConfigurator: one per edit, named
+// path.defenseclaw-<UTC>.bak), regular files only.
+func gatewayBackups(path string) []string {
+	matches, _ := filepath.Glob(path + ".defenseclaw-*.bak")
+	var out []string
+	for _, m := range matches {
+		if info, err := os.Lstat(m); err == nil && info.Mode().IsRegular() {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // Teardown removes everything DefenseClaw created for sandboxes: its
 // sandboxes, providers and provider profiles, the data sandboxes it no
 // longer knows left under the data dir, its images, the gateway
@@ -102,9 +116,6 @@ func (a *App) Teardown(ctx context.Context, o TeardownOptions) error {
 	a.defaults()
 	if err := openshell.CheckPlatform(a.GOOS); err != nil {
 		return fmt.Errorf("%w: OpenShell sandboxes run on Linux and macOS only", ErrUnsupported)
-	}
-	if a.Cfg != nil && managed.IsManagedEnterprise(a.Cfg.DeploymentMode) {
-		return fmt.Errorf("%w: sandboxes are not supported in managed_enterprise deployments", ErrUnsupported)
 	}
 	p, err := a.planTeardown(ctx, o)
 	if err != nil {
@@ -377,6 +388,9 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 		if f.Backup == "" {
 			how = "remove it (DefenseClaw created it)"
 		}
+		if n := len(gatewayBackups(f.Path)); n > 0 {
+			how += ", then remove the " + plural(int64(n), "backup", "backups") + " DefenseClaw made of it"
+		}
 		row("gateway config", a.tildePath(f.Path)+": "+how)
 	}
 	switch {
@@ -412,17 +426,15 @@ func (a *App) printTeardown(p *teardownPlan, o TeardownOptions) {
 }
 
 // profileRows labels the provider profiles teardown removes: this install's
-// own ingress profiles, the gateway-wide one of an earlier release, and the
-// model and credential profiles every install on the gateway shares, which
-// no provider uses now (an install that needs one imports it again).
+// own ingress profiles, and the model and credential profiles every install
+// on the gateway shares, which no provider uses now (an install that needs
+// one imports it again).
 func (a *App) profileRows(p *teardownPlan) []string {
-	var own, legacy, shared, creds []string
+	var own, shared, creds []string
 	for _, id := range p.profiles {
 		switch {
 		case p.ownIngress[id]:
 			own = append(own, id)
-		case id == profiles.LegacyIngressID:
-			legacy = append(legacy, id)
 		case strings.HasPrefix(id, "dc-cred-"):
 			creds = append(creds, id)
 		default:
@@ -438,9 +450,6 @@ func (a *App) profileRows(p *teardownPlan) []string {
 	var rows []string
 	if len(own) > 0 {
 		rows = append(rows, strings.Join(own, ", ")+" (this install's hook ingress)")
-	}
-	if len(legacy) > 0 {
-		rows = append(rows, strings.Join(legacy, ", ")+" (from an earlier DefenseClaw release)")
 	}
 	if len(shared) > 0 {
 		rows = append(rows, strings.Join(shared, ", ")+" (shared by every DefenseClaw install on this gateway and unused now; an install that needs one imports it again)")
@@ -627,15 +636,35 @@ func (a *App) runTeardown(ctx context.Context, p *teardownPlan, o TeardownOption
 		case errors.Is(err, openshell.ErrNoGatewayService):
 			// A gateway run another way, which DefenseClaw cannot restart.
 			a.ok("restored the OpenShell gateway configuration; restart the gateway yourself, the way you started it, so it runs on it")
+		case errors.Is(err, openshell.ErrGatewayServiceStopped):
+			// Not started for it (GAP-0149): another account's gateway, say,
+			// holds the port, one gateway running per machine.
+			a.ok("restored the OpenShell gateway configuration; this account's " + openshell.GatewayService +
+				" service is not running, so it loads it when it starts")
 		case err != nil:
 			fail("restore the gateway configuration", err)
 		default:
 			a.ok("restored the OpenShell gateway configuration and restarted it")
 		}
-		if err == nil || errors.Is(err, openshell.ErrNoGatewayService) {
+		if err == nil || errors.Is(err, openshell.ErrNoGatewayService) || errors.Is(err, openshell.ErrGatewayServiceStopped) {
 			if r, err := a.loadReceipt(); err == nil {
 				r.GatewayFiles = nil
 				_ = a.saveReceipt(r)
+			}
+			// Every edit of a gateway file (setup, doctor --fix, the TUI)
+			// kept a backup; restored, the files need none of them.
+			removed := 0
+			for _, f := range p.gateway {
+				for _, b := range gatewayBackups(f.Path) {
+					if err := os.Remove(b); err == nil {
+						removed++
+					} else {
+						fail("remove the backup "+b, err)
+					}
+				}
+			}
+			if removed > 0 {
+				a.ok("removed the " + plural(int64(removed), "backup", "backups") + " DefenseClaw made of the gateway configuration")
 			}
 		}
 	}

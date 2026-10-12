@@ -274,6 +274,51 @@ def test_openclaw_restart_reports_what_happened(tmp_path: Path, output: str, rc:
     assert len(completed.stdout.strip().splitlines()) == 1
 
 
+@pytest.mark.parametrize(
+    ("listing", "expected"),
+    [
+        ('{"sandboxes": [{"name": "ub-live", "phase": "ready"}, {"name": "old", "phase": "stopped"}]}',
+         "WARN Sandbox ub-live is running: while the gateway restarts (usually under a minute) its hooks fail closed"),
+        ('{"sandboxes": [{"name": "b2", "phase": "ready"}, {"name": "a1", "phase": "ready"}]}',
+         "WARN 2 sandboxes are running (a1, b2): while the gateway restarts"),
+        ('{"sandboxes": [{"name": "old", "phase": "stopped"}]}', ""),
+        ("no daemon", ""),
+    ],
+)
+def test_running_sandboxes_are_named_before_the_gateway_restarts(tmp_path: Path, listing: str, expected: str) -> None:
+    # GAP-0352: an upgrade restarted the daemon under a running sandbox, whose
+    # hooks failed closed meanwhile; the user learned it from the end summary.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    assert 'warn_running_sandboxes\n    ask_yes_no "${question}"' in text
+    assert 'warn_running_sandboxes\nif [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]' in text
+    start = text.index("warn_running_sandboxes() {")
+    func = text[start : text.index("\n}\n", start) + 3]
+    bin_dir, venv = tmp_path / "bin", tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    bin_dir.mkdir()
+    (venv / "bin" / "python").symlink_to(sys.executable)
+    (tmp_path / "list.json").write_text(listing, encoding="utf-8")
+    gateway = bin_dir / "defenseclaw-gateway"
+    gateway.write_text(
+        f'#!/bin/sh\n[ "$*" = "sandbox list --output json" ] && cat "{tmp_path / "list.json"}"\n', encoding="utf-8"
+    )
+    gateway.chmod(0o755)
+    script = tmp_path / "warn.sh"
+    script.write_text(
+        f'set -euo pipefail\nBIN_DIR="{bin_dir}"\nVENV="{venv}"\n'
+        'gateway_pid() { printf 42; }\nwarn() { echo "WARN $*"; }\n' + func + "warn_running_sandboxes\n",
+        encoding="utf-8",
+    )
+
+    completed = _run([str(script)], tmp_path)
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    if expected:
+        assert completed.stdout.strip().startswith(expected), completed.stdout
+    else:
+        assert completed.stdout == "", completed.stdout
+
+
 def test_install_makes_the_owned_bin_folders_private(tmp_path: Path) -> None:
     # A user-private-group umask (002) left ~/.local and ~/.local/bin
     # group-writable when another installer created them; the CLI then
@@ -1580,6 +1625,37 @@ def test_the_two_python_environment_builds_are_named() -> None:
     install_new = install_new[: install_new.index("\n}\n")]
     assert "Building the final Python environment in $Venv" in install_new
     assert 'New-Venv $Venv "the final environment"' in install_new
+
+
+def test_an_older_release_over_a_newer_one_is_called_a_downgrade(tmp_path: Path) -> None:
+    # GAP-0287: 1.0.23's installer over 1.0.24 asked nothing and said "Upgraded from 1.0.24".
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    helpers = text[text.index("version_key() {") : text.index("is_version() {")]
+    start = text.index('    changed="Upgraded"')
+    end = text.index("\n", text.index('printf "  ${changed} from', start))
+    script = tmp_path / "end.sh"
+    for version, prev, word in (("1.0.23", "1.0.24", "Downgraded"), ("1.0.25", "1.0.24", "Upgraded")):
+        script.write_text(f"{helpers}CYAN= NC=\nVERSION={version} PREV_VERSION={prev}\n{text[start:end]}\n")
+        assert _run([str(script)], tmp_path).stdout.strip() == f"{word} from {prev}. Undo with: defenseclaw rollback"
+    assert 'ask_yes_no "Downgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?' in text
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert 'Confirm-Step "Downgrade DefenseClaw $PrevVersion -> ${Ver}?' in windows and "-DefaultNo)" in windows
+
+
+@pytest.mark.parametrize(
+    ("local", "expected"),
+    [("/srv/assets", "Verifying the release assets in /srv/assets"), ("", "Downloading and verifying release assets")],
+)
+def test_the_asset_step_says_whether_it_downloads(tmp_path: Path, local: str, expected: str) -> None:
+    # GAP-0190: --local printed "Downloading and verifying release assets" although it only copies.
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index('if [[ -n "${LOCAL_DIR}" ]]; then\n    info "Verifying')
+    script = tmp_path / "step.sh"
+    script.write_text(f'info() {{ echo "$*"; }}\nLOCAL_DIR="{local}"\n' + text[start : text.index("\nfi\n", start) + 4])
+    assert _run([str(script)], tmp_path).stdout.strip() == expected
+    windows = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    assert 'if ($LocalDir) { Write-Info "Verifying the release assets in $LocalDir" } else {' in windows
+    assert "The downloaded gateway" not in text + windows
 
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root can write any prefix")

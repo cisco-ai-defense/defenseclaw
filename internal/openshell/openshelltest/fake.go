@@ -116,6 +116,10 @@ type Fake struct {
 
 	profiles map[string]*types.ProviderProfile // keyed by id (platform scope)
 
+	// withholdCreds: providers answer as a gateway does
+	// (WithholdProviderCredentials).
+	withholdCreds bool
+
 	now func() time.Time
 }
 
@@ -307,6 +311,16 @@ func (f *Fake) SetHealth(healthy bool, version string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.health = types.HealthResult{Healthy: healthy, Version: version}
+}
+
+// SetRelease makes the gateway answer as another release from now on, in
+// its health and its gateway info, as a restart after an in-place upgrade
+// does (the default is openshell.SupportedMin). Sandboxes already made
+// stay.
+func (f *Fake) SetRelease(version string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.health.Version, f.gatewayInfo.Version = version, version
 }
 
 // enter records a call and returns an injected failure, if any.

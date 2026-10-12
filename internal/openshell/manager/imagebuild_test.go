@@ -203,14 +203,20 @@ func (r relabeled) Unwrap() error { return r.err }
 func TestImageErrorNamesTheDaemonRestart(t *testing.T) {
 	denied := &image.BuildError{Err: &image.CommandError{Args: []string{"build"}, ExitCode: 1},
 		Output: "ERROR: permission denied while trying to connect to the docker API at unix:///var/run/docker.sock"}
-	e := newImageError("the Claude Code sandbox image is not usable", fmt.Errorf("openshell image: docker build t: %w", denied))
+	e := newImageError("the Claude Code sandbox image is not usable", fmt.Errorf("openshell image: docker build t: %w", denied), false)
 	if !strings.Contains(e.api.Detail, "→ the DefenseClaw daemon cannot reach Docker") || !strings.Contains(e.api.Detail, "defenseclaw-gateway restart") {
 		t.Fatalf("detail = %q", e.api.Detail)
 	}
 	if strings.Contains(e.summary, "restart") {
 		t.Fatalf("summary = %q", e.summary)
 	}
-	other := newImageError("x", errors.New("docker build exited 1"))
+	// A managed account has no defenseclaw-gateway to restart: its sandbox
+	// service starts at login (GAP-0556).
+	m := newImageError("the Claude Code sandbox image is not usable", fmt.Errorf("openshell image: docker build t: %w", denied), true)
+	if !strings.Contains(m.api.Detail, "sign out of every session of this account and sign in again") || strings.Contains(m.api.Detail, "defenseclaw-gateway") {
+		t.Fatalf("managed detail = %q", m.api.Detail)
+	}
+	other := newImageError("x", errors.New("docker build exited 1"), false)
 	if strings.Contains(other.api.Detail, "restart") {
 		t.Fatalf("detail = %q", other.api.Detail)
 	}

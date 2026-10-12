@@ -131,6 +131,11 @@ ACTION_SANDBOX_APPROVAL: Final[str]  = "sandbox-approval"
 ACTION_SANDBOX_POLICY: Final[str]    = "sandbox-policy"
 ACTION_SANDBOX_HEALTH: Final[str]    = "sandbox-health"
 ACTION_SANDBOX_FINDING: Final[str]   = "sandbox-finding"
+ACTION_SANDBOX_ACTIVITY: Final[str]  = "sandbox-activity"
+ACTION_SANDBOX_PROCESS: Final[str]   = "sandbox-process"
+ACTION_SANDBOX_POLICY_REMATCHED: Final[str]   = "sandbox.policy.rematched"
+ACTION_SANDBOX_POLICY_FOREIGN_RULE: Final[str] = "sandbox.policy.foreign_rule"
+ACTION_SANDBOX_MANAGED: Final[str]   = "sandbox.managed"
 
 # Sidecar lifecycle and bootstrap instrumentation.
 ACTION_SIDECAR_START: Final[str] = "sidecar-start"
@@ -360,6 +365,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_SANDBOX_POLICY,
     ACTION_SANDBOX_HEALTH,
     ACTION_SANDBOX_FINDING,
+    ACTION_SANDBOX_ACTIVITY,
     ACTION_SIDECAR_START,
     ACTION_SIDECAR_STOP,
     ACTION_SIDECAR_CONNECTED,

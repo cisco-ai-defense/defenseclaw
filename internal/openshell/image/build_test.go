@@ -709,6 +709,41 @@ func (d *fakeDaemon) Run(_ context.Context, stdin io.Reader, stdout, _ io.Writer
 // dirs building the same specs: their images get distinct tags, neither
 // accepts the other's spec, and pruning one never removes the other's
 // images (docker also refuses an image a container still uses).
+// GAP-0320: after an upgrade, prune kept the earlier build's images as
+// current, which no new sandbox uses (Store.Current matches the build).
+// With the running build named, they are superseded.
+func TestPruneSupersedesAnotherBuildsImages(t *testing.T) {
+	store := testStore(t)
+	t0 := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	for _, r := range []Record{
+		{Tag: "e-repo:opencode-old-u1000", Connector: "opencode", DefenseClawVersion: "1.0.24", BuiltAt: t0},
+		{Tag: "e-repo:claudecode-old-u1000", Connector: "claudecode", DefenseClawVersion: "1.0.24", BuiltAt: t0},
+		{Tag: "e-repo:claudecode-new-u1000", Connector: "claudecode", DefenseClawVersion: "1.0.30", BuiltAt: t0.Add(-time.Hour)},
+	} {
+		r.UID, r.GID, r.IngressPort, r.Owner, r.HookFireVerified = 1000, 1000, 18971, testOwner, true
+		if err := store.Put(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tags := "e-repo:opencode-old-u1000\ne-repo:claudecode-old-u1000\ne-repo:claudecode-new-u1000"
+	docker := &fakeDocker{handler: func(args []string, _ []byte) (string, int) {
+		if args[0] == "image" && args[1] == "ls" {
+			return tags, 0
+		}
+		return "", 1
+	}}
+	rep, err := (&Builder{Docker: docker, Store: store}).Prune(context.Background(),
+		PruneOptions{Repository: "e-repo", DryRun: true, DefenseClawVersion: "1.0.30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(rep.Removed)
+	if strings.Join(rep.Removed, ",") != "e-repo:claudecode-old-u1000,e-repo:opencode-old-u1000" ||
+		strings.Join(rep.Kept, ",") != "e-repo:claudecode-new-u1000" {
+		t.Fatalf("report = %+v", rep)
+	}
+}
+
 func TestPruneLeavesOtherDataDirsAlone(t *testing.T) {
 	daemon := newFakeDaemon(t)
 	storeA, storeB := testStoreOwnedBy(t, "a0a0a0a0a0a0a0a0"), testStoreOwnedBy(t, "b0b0b0b0b0b0b0b0")

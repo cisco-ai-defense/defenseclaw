@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -93,6 +94,11 @@ type StageOptions struct {
 	Unmask             []string
 	Detector           SecretDetector
 	DisableContentScan bool
+	// UnmaskAsked are the run's own --unmask values: Stage warns for each
+	// that matches no file the copy takes. The pack's entries are defaults
+	// (committed templates such as .env.example) most projects do not have,
+	// so a warning for each was noise on every copy run (GAP-0308).
+	UnmaskAsked []string
 	// Replace discards an existing copy record of the same name once the
 	// new copy is staged (a failed Stage leaves it as it was). A replaced
 	// uploaded copy is remembered (CopyRecord.Replaced) until the new one is
@@ -128,6 +134,9 @@ type CopyRecord struct {
 	// applied to the copy and to the capture Apply merges into.
 	LineEndings map[string]string `json:"line_endings,omitempty"`
 	HeldBack    []string          `json:"held_back,omitempty"`
+	// Unmasked are the files that look like secrets --unmask shared with
+	// the sandbox, which the run names so the user can confirm them.
+	Unmasked []string `json:"unmasked,omitempty"`
 	// Withheld counts the committed blobs left out of the shipped history
 	// (see withholdHistory); the copy is then a partial clone.
 	Withheld   int        `json:"withheld,omitempty"`
@@ -351,15 +360,24 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 		Warnings: warnings,
 	}
 	dir := lay.copyDir(opts.Name) + copyNewInfix + randomSuffix()
-	if err := ensurePrivateDir(dir); err != nil {
-		return nil, "", err
-	}
+	// A refused copy (too large, a secret it cannot hold back) of a
+	// sandbox that has no data yet leaves no directory: teardown listed
+	// it as the leftover data of a sandbox that never existed (GAP-0274).
+	sandboxDir := lay.sandboxDir(opts.Name)
+	fresh := !pathExists(sandboxDir)
 	ok := false
 	defer func() {
 		if !ok {
 			_ = removeTree(dir)
+			if fresh {
+				_ = os.Remove(lay.copyDir(opts.Name))
+				_ = os.Remove(sandboxDir)
+			}
 		}
 	}()
+	if err := ensurePrivateDir(dir); err != nil {
+		return nil, "", err
+	}
 	stageRoot := filepath.Join(dir, "stage")
 	if err := os.Mkdir(stageRoot, 0o700); err != nil {
 		return nil, "", err
@@ -369,6 +387,7 @@ func stageCopy(ctx context.Context, lay layout, opts StageOptions) (*CopyRecord,
 	scanOpts := secretScanOptions{
 		patterns: opts.Masks, unmask: normalizeUnmask(opts.Unmask, real), maskTracked: true,
 		detector: opts.Detector, contentScan: !opts.DisableContentScan,
+		unmaskAsked: normalizeUnmask(opts.UnmaskAsked, real),
 	}
 	if scanOpts.detector == nil {
 		scanOpts.detector = DefaultSecretDetector()
@@ -486,6 +505,16 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if err != nil {
 		return err
 	}
+	// What git ignores (node_modules/, .venv/, build output) and untracked
+	// package caches stay out of the copy. One warning names them, so a
+	// build that fails inside for want of its dependencies is explained
+	// (GAP-0194).
+	leftOut := map[string]bool{}
+	if ignored, err := proj.output(ctx, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"); err == nil {
+		for _, p := range splitNUL(ignored) {
+			leftOut[p] = true
+		}
+	}
 	candidates := make([]string, 0, len(trackedSet))
 	for p, mode := range trackedSet {
 		if mode != modeGitlink {
@@ -497,10 +526,14 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 			rec.Warnings = append(rec.Warnings, "nested repository "+strings.TrimSuffix(p, "/")+" is not copied")
 			continue
 		}
-		if underHeavyDir(p) {
+		if dir := heavyDirOf(p); dir != "" {
+			leftOut[dir] = true
 			continue
 		}
 		candidates = append(candidates, p)
+	}
+	if w := leftOutWarning(leftOut); w != "" {
+		rec.Warnings = append(rec.Warnings, w)
 	}
 	files, heldBack, err := selectFiles(rec.Project, candidates, scanOpts, maxBytes, rec)
 	if err != nil {
@@ -573,16 +606,58 @@ func stageGit(ctx context.Context, rec *CopyRecord, opts StageOptions, scanOpts 
 	if err := copyFiles(rec.Project, stage, files); err != nil {
 		return err
 	}
+	// A submodule's working tree is not copied: its path is an empty
+	// folder, as git leaves an uninitialized submodule, so the baseline
+	// keeps its commit and a sandbox that initializes it changes nothing
+	// (GAP-0250). The copy says so.
+	var submodules []string
+	for p, mode := range trackedSet {
+		if mode != modeGitlink {
+			continue
+		}
+		dir := filepath.Join(stage, filepath.FromSlash(p))
+		if !within(dir, stage) {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		submodules = append(submodules, p)
+	}
+	if n := len(submodules); n > 0 {
+		sort.Strings(submodules)
+		them, their := "them", "their"
+		if n == 1 {
+			them, their = "it", "its"
+		}
+		rec.Warnings = append(rec.Warnings, fmt.Sprintf("%s not copied: %s (the sandbox sees %s uninitialized; `git submodule update --init` there fetches %s from %s remote)",
+			plural(n, "submodule is", "submodules are"), strings.Join(firstN(submodules, 5), ", "), them, them, their))
+	}
 	if head != "" {
 		if err := sg.run(ctx, "read-tree", "HEAD"); err != nil {
 			return err
 		}
 	}
 	// Tracked secrets are held back: mark them skip-worktree so neither
-	// the agent's git nor the pull capture treats them as deleted.
+	// the agent's git nor the pull capture treats them as deleted. Only a
+	// path the copy's index holds (HEAD's tree) can be marked: one only
+	// staged in the project (git add, never committed) is in trackedSet but
+	// not in the copy's index, and marking it failed the whole run with
+	// "Unable to mark file .env" (GAP-0596). Held back, it is simply absent
+	// from the copy.
+	inCopy := map[string]bool{}
+	if len(heldBack) > 0 && head != "" {
+		listed, err := sg.output(ctx, "ls-files", "-z", "--cached")
+		if err != nil {
+			return err
+		}
+		for _, p := range splitNUL(listed) {
+			inCopy[p] = true
+		}
+	}
 	var heldTracked []string
 	for _, p := range heldBack {
-		if _, ok := trackedSet[p]; ok {
+		if _, ok := trackedSet[p]; ok && inCopy[p] {
 			heldTracked = append(heldTracked, p)
 		}
 	}
@@ -762,6 +837,35 @@ func selectFiles(root string, candidates []string, scanOpts secretScanOptions, m
 	if err != nil {
 		return nil, nil, err
 	}
+	// What --unmask shared, and what it named that the copy does not take
+	// (git-ignored files never go): both were silent (GAP-0248).
+	// A file only the pack's or the configuration's own entries share (a
+	// committed template such as .env.example, which the pack's .env.* mask
+	// covers) counts only when its content looks like a secret: a template of
+	// names was named on every run as if the user had unmasked it (GAP-0351).
+	unmaskOnly := scanOpts
+	unmaskOnly.unmask = nil
+	contentOnly := unmaskOnly
+	contentOnly.patterns = nil
+	rec.Unmasked = nil
+	for _, rel := range candidates {
+		if !unmaskedBy(scanOpts.unmask, rel) {
+			continue
+		}
+		check := contentOnly
+		if unmaskedBy(scanOpts.unmaskAsked, rel) {
+			check = unmaskOnly
+		}
+		if would, err := detectSecretsIn(root, []string{rel}, check); err == nil && len(would) > 0 {
+			rec.Unmasked = append(rec.Unmasked, rel)
+		}
+	}
+	for _, u := range scanOpts.unmaskAsked {
+		if !slices.ContainsFunc(candidates, func(rel string) bool { return unmaskedBy([]string{u}, rel) }) {
+			rec.Warnings = append(rec.Warnings, "--unmask "+u+" matched no file the copy takes (a copy takes git's view of the folder: "+
+				"tracked files and untracked ones git does not ignore), so it shared nothing")
+		}
+	}
 	heldSet := toSet(held)
 	var files []stagedFile
 	var total int64
@@ -890,9 +994,48 @@ func captureBaseline(ctx context.Context, g gitCmd, seedIndex, parent string, fo
 	return commit, nil
 }
 
-func underHeavyDir(rel string) bool {
-	for _, part := range strings.Split(path.Dir(rel), "/") {
+func underHeavyDir(rel string) bool { return heavyDirOf(rel) != "" }
+
+// heavyDirOf is the package-cache directory above rel ("web/node_modules/"),
+// or "" when there is none.
+func heavyDirOf(rel string) string {
+	parts := strings.Split(path.Dir(rel), "/")
+	for i, part := range parts {
 		if isHeavyDir(part) {
+			return strings.Join(parts[:i+1], "/") + "/"
+		}
+	}
+	return ""
+}
+
+// leftOutWarning names what a git copy leaves out, directories first. A
+// path inside a folder it names already is left to that folder: git lists
+// .venv/bin/ next to .venv/ when the folder ignores its own content, and the
+// line named one folder five times (GAP-0353).
+func leftOutWarning(paths map[string]bool) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(paths))
+	for p := range paths {
+		if !insideListed(paths, p) {
+			names = append(names, p)
+		}
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if di, dj := strings.HasSuffix(names[i], "/"), strings.HasSuffix(names[j], "/"); di != dj {
+			return di
+		}
+		return names[i] < names[j]
+	})
+	return "not copied (git ignores them, or they are package caches): " + strings.Join(firstN(names, 5), ", ") +
+		"; install the dependencies inside the sandbox"
+}
+
+// insideListed reports whether a folder above p ("dir/") is in paths.
+func insideListed(paths map[string]bool, p string) bool {
+	for dir := path.Dir(strings.TrimSuffix(p, "/")); dir != "." && dir != "/"; dir = path.Dir(dir) {
+		if paths[dir+"/"] {
 			return true
 		}
 	}

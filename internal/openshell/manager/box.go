@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -95,30 +96,53 @@ type box struct {
 	// included.
 	guard       *guardRun
 	guardEnding chan struct{}
+	// observe is the running AI discovery observer of the ready sandbox
+	// (discovery.go); discoverMu serializes its discoveries.
+	observe    *observeRun
+	discoverMu sync.Mutex
+	// discoveryReleased is set, under discoverMu, once cleanup removed the
+	// sandbox's discovery folder: no discovery writes it again.
+	discoveryReleased bool
+	// procs is the sandbox's process tree (processes.go), made once its
+	// process tree is on.
+	procs *procTree
+	// findings folds OpenShell's repeats of one finding (foldFinding).
+	findings map[string]*findingFold
 
-	hooks       hookStats
+	hooks hookStats
+	// activeAt is the harness's latest activity and activeSince the start
+	// of its current run of activity (noteActiveLocked), which the hook
+	// silence check measures.
 	activeAt    time.Time
+	activeSince time.Time
 	silentSince time.Time
 	// reach is whether the current session's hooks reach the ingress
 	// (reach.go); it starts over whenever the sandbox becomes ready.
 	reach hookReach
-	// tamperStop is set once a hook tamper scheduled this session's stop.
+	// tamperStop is set once a hook alarm (a tamper, or silent hooks under
+	// hooks.on_silence: stop) scheduled this session's stop.
 	tamperStop  bool
 	silenceSent bool
+	// toolHostsSaid are the harness tool hosts whose refusal the feed
+	// explained (firstToolHostRefusal).
+	toolHostsSaid map[string]bool
 	// seenChunks are the pending draft chunks triage decided; it is pruned
 	// to the inbox's pending chunks on every poll.
 	seenChunks map[string]struct{}
 	// synthetic maps the synthetic addresses OpenShell's policy DNS handed
 	// the sandbox to their names (noteSyntheticAddress).
 	synthetic map[string]string
-	// closedPorts are the undeclared host ports whose denial the feed
-	// explained this session (hostPortDenied).
-	closedPorts map[int]bool
-	// blockedRequests counts the connections OpenShell refused (the
-	// DefenseClaw proxy counts its own refusals), and blockedHosts the
-	// destinations they were to, as the feed names them (noteBlocked).
-	blockedRequests int
-	blockedHosts    map[string]struct{}
+	// portLines is what the feed last said this session of each host port
+	// other than DefenseClaw's own: reached (true, hostPortAllowed) or
+	// closed (false, hostPortDenied).
+	portLines map[int]bool
+	// proxyOpens are OpenShell's records of the sandbox's connections to
+	// the egress proxy, which name the program that opened them, newest
+	// last (proxyActor).
+	proxyOpens []proxyOpen
+	// opens are OpenShell's allowed connections awaiting their first
+	// inspected request, by host:port (connectionRequest).
+	opens map[string]*openConns
 	// triageTimer is a pending draft poll after a denied connection.
 	triageTimer *time.Timer
 	// triageBusy is set while a triageNow poll runs; triageAgain asks it
@@ -213,6 +237,117 @@ type hookStats struct {
 	lastFailureAt   time.Time
 	failureNoticeAt time.Time
 	unnoticed       int64
+	// failureCause and answeredAt are what the status says of the last
+	// failure (sandboxapi.HookCoverage.LastHookFailureCause,
+	// HooksAnsweredAt; notePlaceholderFailureLocked, noteHookAnsweredLocked).
+	failureCause string
+	answeredAt   time.Time
+	// modelRejected says the model API rejected the sandbox's model
+	// credential, and how to hand it a fresh one; modelRejectedAt is the
+	// last rejection (observeModelAnswerLocked).
+	modelRejected   string
+	modelRejectedAt time.Time
+	// placeholderAt is when OpenShell last refused a request whose body
+	// carried a credential placeholder (notePlaceholderLocked).
+	placeholderAt time.Time
+}
+
+// hookCounts are the hook counters a sandbox's record keeps (keepHookCounts),
+// so a restarted daemon goes on from them as it does from the kept
+// destinations: sandbox status and the Sandboxes list keep the counts of the
+// sandbox's life (GAP-0156). It keeps the verdict on the last session's
+// hooks too (unreachable, silent), so a stopped sandbox says the same of
+// its session after a restart (GAP-0186); a session that starts, and so a
+// running sandbox a restarted daemon adopts, is judged afresh (lifecycle).
+// The other times and the notices start over with the daemon.
+type hookCounts struct {
+	Requests       int64            `json:"requests,omitempty"`
+	ToolCalls      int64            `json:"tool_calls,omitempty"`
+	ToolBlocked    int64            `json:"tool_blocked,omitempty"`
+	ToolAsked      int64            `json:"tool_asked,omitempty"`
+	PromptBlocked  int64            `json:"prompt_blocked,omitempty"`
+	LastBlocked    string           `json:"last_blocked,omitempty"`
+	Events         map[string]int64 `json:"events,omitempty"`
+	OtherEvents    int64            `json:"other_events,omitempty"`
+	Tampered       int64            `json:"tampered,omitempty"`
+	Failed         int64            `json:"failed,omitempty"`
+	IngressRefused int64            `json:"ingress_refused,omitempty"`
+	// UnreachableSince, UnreachableReason and NoHookYet are the session's
+	// reach verdict (hookReach), SilentSince when its hooks fell silent.
+	UnreachableSince  time.Time `json:"unreachable_since,omitzero"`
+	UnreachableReason string    `json:"unreachable_reason,omitempty"`
+	NoHookYet         bool      `json:"no_hook_yet,omitempty"`
+	SilentSince       time.Time `json:"silent_since,omitzero"`
+}
+
+// counts are the counters of h a record keeps.
+func (h *hookStats) counts() hookCounts {
+	return hookCounts{
+		Requests: h.requests, ToolCalls: h.toolCalls, ToolBlocked: h.toolBlocked, ToolAsked: h.toolAsked,
+		PromptBlocked: h.promptBlocked, LastBlocked: h.lastBlocked, Events: maps.Clone(h.events), OtherEvents: h.otherEvents,
+		Tampered: h.tampered, Failed: h.failed, IngressRefused: h.ingressRefused,
+	}
+}
+
+// restore starts h from the counters a record kept, with at most
+// sandboxapi.MaxHookEvents event names (countEvent).
+func (h *hookStats) restore(c *hookCounts) {
+	if c == nil {
+		return
+	}
+	h.requests, h.toolCalls, h.toolBlocked, h.toolAsked = c.Requests, c.ToolCalls, c.ToolBlocked, c.ToolAsked
+	h.promptBlocked, h.lastBlocked, h.otherEvents = c.PromptBlocked, c.LastBlocked, c.OtherEvents
+	h.tampered, h.failed, h.ingressRefused = c.Tampered, c.Failed, c.IngressRefused
+	for name, n := range c.Events {
+		if len(h.events) >= sandboxapi.MaxHookEvents {
+			h.otherEvents += n
+			continue
+		}
+		if h.events == nil {
+			h.events = make(map[string]int64)
+		}
+		h.events[name] = n
+	}
+}
+
+// noteHookCountsLocked puts the box's hook counters and its session's hook
+// verdict in its record and reports whether they moved since the record
+// last kept them. Callers hold Manager.mu.
+func (b *box) noteHookCountsLocked() bool {
+	c := b.hooks.counts()
+	c.UnreachableSince, c.UnreachableReason, c.NoHookYet = b.reach.since, b.reach.reason, b.reach.noHookYet
+	c.SilentSince = b.silentSince
+	kept := b.rec.HookCounts
+	if kept == nil {
+		kept = &hookCounts{}
+	}
+	if reflect.DeepEqual(*kept, c) {
+		return false
+	}
+	b.rec.HookCounts = &c
+	return true
+}
+
+// keepHookCounts writes the record of every sandbox whose hook counters
+// moved since its record last kept them. It runs with the destinations
+// flush and when the daemon stops, so a daemon that did not stop cleanly
+// loses at most the last interval's counts. Callers must not hold
+// Manager.mu.
+func (m *Manager) keepHookCounts() {
+	m.mu.Lock()
+	var moved []*box
+	var names []string
+	for name, b := range m.boxes {
+		if !b.deleted && !b.retained && !b.creating && b.noteHookCountsLocked() {
+			moved, names = append(moved, b), append(names, name)
+		}
+	}
+	m.mu.Unlock()
+	for i, b := range moved {
+		if err := m.saveRecord(b); err != nil {
+			m.logf("keep the hook counts of %s: %v", names[i], err)
+		}
+	}
 }
 
 var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -223,11 +358,13 @@ func (b *box) identity() audit.SandboxIdentity {
 	id := audit.SandboxIdentity{
 		ID: b.rec.ID, Name: b.rec.Name, Connector: b.rec.Harness, Runtime: audit.SandboxRuntimeOpenShell,
 		Profile: b.rec.Profile, Pack: b.rec.Pack, Phase: b.phase, WorkdirMode: b.rec.WorkdirMode,
+		BindingID: b.rec.BindingID,
 	}
 	// Telemetry names the driver as OpenShell does (audit.SandboxDriverVM is
 	// "vm"); one this build does not know is left out, not guessed.
 	if d, ok := openshell.LookupDriver(b.rec.Driver); ok {
 		id.Driver = string(d.Name)
+		id.DriverReason = b.rec.DriverReason
 	}
 	// The image that runs: the run image when the driver runs one.
 	digest := b.rec.ImageID
@@ -281,11 +418,28 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	if previous == "" && b.rec.Phase != "" {
 		previous = audit.SandboxPhase(b.rec.Phase)
 	}
+	// A MicroVM that left the ready phase without DefenseClaw stopping or
+	// deleting it (whose own transitions come first) went down without a
+	// flush: the OpenShell gateway restarted under it, for one (GAP-0289).
+	driver, known := openshell.LookupDriver(b.rec.Driver)
+	unflushed := known && !driver.StopFlushes && trigger == audit.SandboxTriggerWatch && previous == audit.SandboxPhaseReady &&
+		(phase == audit.SandboxPhaseProvisioning || phase == audit.SandboxPhaseStarting || phase == audit.SandboxPhaseStopped || phase == audit.SandboxPhaseError)
+	if unflushed {
+		// The status and the pull's review say so after the feed has
+		// scrolled past it (GAP-0367).
+		b.rec.UnflushedAt = m.now().UTC()
+	}
 	b.phase = phase
 	if phase == audit.SandboxPhaseReady && (previous != audit.SandboxPhaseReady || b.started.IsZero()) {
 		b.started = m.now()
 		b.reach = hookReach{}
-		b.closedPorts = nil
+		// The silence check starts over with the session: one that stopped
+		// a session for silent hooks stops the next one too while they stay
+		// silent.
+		b.silentSince, b.silenceSent = time.Time{}, false
+		b.portLines, b.opens = nil, nil
+		// The new session's hooks name its session.
+		m.tel.forgetSandbox(b.rec.Name)
 		if previous != audit.SandboxPhaseReady {
 			b.rec.Sessions++
 		}
@@ -305,29 +459,180 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 		b.rec.SessionYolo = nil
 	}
 	b.rec.Phase = string(phase)
+	b.rec.PhaseReason = ""
+	if retainedPhase(phase) {
+		// A record from before the field (a restarted daemon's) counts
+		// from now: never longer than the floor allows from when it is seen.
+		if b.rec.StoppedAt.IsZero() || !retainedPhase(previous) {
+			b.rec.StoppedAt = m.now().UTC()
+		}
+	} else {
+		b.rec.StoppedAt = time.Time{}
+	}
+	if phase == audit.SandboxPhaseError {
+		b.rec.PhaseReason = errorPhaseReason(cond)
+	}
+	// The record written below keeps the hook counts reached so far.
+	b.noteHookCountsLocked()
 	id := b.identity()
 	rec := b.rec
 	m.mu.Unlock()
-	if previous == phase {
+	// A restarted daemon republishes the phase its record held: telemetry
+	// records it again, but nothing happened, so the feed gets no line
+	// ("sandbox X stopped" for every stopped sandbox at a restart, GAP-0167).
+	unchanged := previous == phase
+	if unchanged {
 		previous = ""
 	}
 	ev := audit.SandboxLifecycleEvent{
 		Sandbox: id, PreviousPhase: previous, Trigger: trigger, ExitCode: exit, Condition: cond, Timestamp: m.now(),
 		UserID: strconv.Itoa(m.host.UID), UserName: m.host.Name,
 	}
-	if err := m.tel.RecordSandboxLifecycle(ctx, ev); err != nil {
-		m.logf("lifecycle telemetry for %s: %v", rec.Name, err)
-	}
+	m.tel.RecordSandboxLifecycle(ctx, ev)
 	if phase != audit.SandboxPhaseDeleted {
 		if err := m.saveRecord(b); err != nil {
 			m.logf("save the record of %s: %v", rec.Name, err)
 		}
 	}
-	m.feed.Publish(sandboxapi.ActivityEvent{
-		Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
-		Message: lifecycleMessage(rec.Name, phase),
-	})
+	if phase == audit.SandboxPhaseStopped || phase == audit.SandboxPhaseCompleted || phase == audit.SandboxPhaseError {
+		// The session is over: keep what it reached.
+		m.flushDestinations(rec.Name)
+	}
+	if !unchanged {
+		msg := lifecycleMessage(rec.Name, phase)
+		if phase == audit.SandboxPhaseError {
+			// Why, and the way on: OpenShell neither stops nor starts a
+			// sandbox in its error phase (GAP-0278).
+			if rec.PhaseReason != "" {
+				msg += " (" + rec.PhaseReason + ")"
+			}
+			msg += "; " + errorPhaseWayOn(rec.Name, rec.WorkdirMode, rec.PhaseReason)
+		}
+		m.feed.Publish(sandboxapi.ActivityEvent{
+			Kind: sandboxapi.ActivityLifecycle, Sandbox: rec.Name, Phase: string(phase), Reason: string(trigger),
+			Message: msg,
+		})
+	}
+	if unflushed {
+		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: rec.Name, Severity: "MEDIUM",
+			Reason: sandboxapi.ReasonUnflushedStop, Message: unflushedStopMessage(rec.Name)})
+	}
 	m.syncGuard(b, phase)
+	m.syncObserve(b, phase)
+}
+
+// errorPhaseWayOn is what to do about a sandbox in OpenShell's error phase,
+// which it can neither stop nor start: its container stopped (a Docker
+// restart stops every one) or its workload failed. Deleting it keeps the
+// folder's changes, and with --keep-snapshot the undo point; a copy's work
+// that was never pulled goes with it.
+func errorPhaseWayOn(name, mode, reason string) string {
+	if reason == overlayDiskFullText {
+		return overlayDiskWayOn(name)
+	}
+	way := "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed): " +
+		"`defenseclaw sandbox delete " + name + " --keep-snapshot` keeps the undo point and the folder's changes, then run again"
+	if mode == config.OpenShellWorkdirCopy {
+		way = "OpenShell can neither stop nor start a sandbox in its error state (its container stopped: Docker restarted, or the workload failed), " +
+			"and its copy's work that was not pulled cannot be read any more: `defenseclaw sandbox delete " + name + "`, then run again"
+	}
+	return way
+}
+
+// unflushedStopMessage is the feed's warning about the MicroVM name that
+// went down without DefenseClaw stopping it.
+func unflushedStopMessage(name string) string {
+	return "⚠ " + name + "'s MicroVM went down without DefenseClaw stopping it (the OpenShell gateway restarted, for one), so what it wrote " +
+		"in its last seconds may be missing or end in zero bytes: check those files before you bring the work back (its review flags the ones " +
+		"that end in zero bytes). `defenseclaw sandbox stop` flushes first, and so do DefenseClaw's own gateway restarts"
+}
+
+// errorPhaseReason is why a sandbox is in OpenShell's error phase, in
+// words: its full MicroVM disk, or what its conditions say (cut at 200
+// characters).
+func errorPhaseReason(cond *audit.SandboxCondition) string {
+	if cond == nil {
+		return ""
+	}
+	said := strings.TrimSpace(strings.Trim(strings.TrimSpace(cond.Reason)+": "+strings.TrimSpace(cond.Message), ": "))
+	if overlayDiskFull(said) {
+		return overlayDiskFullText
+	}
+	return truncate(sandboxapi.DisplayText(said), 200)
+}
+
+// overlayDiskFullText is why a MicroVM whose own disk is full does not
+// start. OpenShell's error is the guest console: "setting up writable
+// overlay root ... touch: cannot touch '/newroot/etc/passwd': Read-only
+// file system" (GAP-0297).
+const overlayDiskFullText = "its own disk is full: the MicroVM writes its changes to an overlay disk of its own, and could not set up its root on it"
+
+// overlayDiskFull reports whether OpenShell's account of a failed start
+// (an error, a condition) is a MicroVM's overlay disk that has no room
+// left: the guest could not write its root on it.
+func overlayDiskFull(said string) bool {
+	return strings.Contains(said, "writable overlay root") &&
+		(strings.Contains(said, "Read-only file system") || strings.Contains(said, "No space left on device"))
+}
+
+// overlayDiskWayOn is what to do about the MicroVM name whose own disk is
+// full: OpenShell cannot start it again, so its work cannot be read.
+func overlayDiskWayOn(name string) string {
+	return "a MicroVM stopped with its disk full cannot start again, so its work that was not pulled cannot be read any more: " +
+		"`defenseclaw sandbox delete " + name + "`, then run again; overlay_disk_mib under [openshell.drivers.vm] in the gateway's gateway.toml " +
+		"sizes the disk of new sandboxes (`defenseclaw sandbox doctor` shows it). Free space in a running MicroVM before it stops " +
+		"(`defenseclaw sandbox exec <name> -- df -h /`)"
+}
+
+// overlayDiskRefusal is a start that failed because the MicroVM's own
+// disk is full, as people read it, or nil (the guest console OpenShell
+// returns is no message for them).
+func overlayDiskRefusal(name string, err error) error {
+	if err == nil || !overlayDiskFull(err.Error()) {
+		return nil
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: name + " cannot start: " + overlayDiskFullText, Detail: overlayDiskWayOn(name)}
+}
+
+// errorPhaseRefusal is OpenShell's refusal to stop or start the sandbox
+// name in its error phase as people read it ("Conflict: sandbox must be
+// Stopped, Completed, or a failed main-process Error to start"), or nil.
+func errorPhaseRefusal(name, mode, reason string, err error) error {
+	if err == nil || !openshell.IsConflict(err) || !strings.Contains(err.Error(), "current phase: Error") {
+		return nil
+	}
+	return errorPhaseError(name, mode, reason)
+}
+
+// errorPhaseNow is errorPhaseRefusal for an operation whose error does not
+// say why (the gateway connection closed under it, as a Docker restart
+// makes it): b's phase as OpenShell reported it after the failure
+// (restorePhase); nil unless that is the error phase (GAP-0337).
+func (m *Manager) errorPhaseNow(b *box) error {
+	m.mu.Lock()
+	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
+	inError := b.sb != nil && auditPhase(b.sb.Status.Phase) == audit.SandboxPhaseError
+	m.mu.Unlock()
+	if !inError {
+		return nil
+	}
+	return errorPhaseError(name, mode, reason)
+}
+
+// connectionClosed reports a call that failed because the client's
+// connection to the OpenShell gateway closed under it (gRPC's "the client
+// connection is closing"), which says nothing to the user.
+func connectionClosed(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "client connection is closing")
+}
+
+// errorPhaseError explains name's error phase, with the way on.
+func errorPhaseError(name, mode, reason string) error {
+	msg := name + " is in OpenShell's error state"
+	if reason != "" {
+		msg += ": " + reason
+	}
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: msg, Detail: errorPhaseWayOn(name, mode, reason)}
 }
 
 func lifecycleMessage(name string, phase audit.SandboxPhase) string {
@@ -434,10 +739,9 @@ func (m *Manager) viewOf(b *box) sandboxapi.Sandbox {
 	proxy := m.proxy
 	bindingID := b.rec.BindingID
 	shared := sharedLimitsOf(b)
-	blocked := b.blockedHostList()
 	accepted := b.rec.Accepted
 	m.mu.Unlock()
-	m.decorate(&v, proxy, bindingID, blocked, accepted)
+	m.decorate(&v, proxy, bindingID, accepted)
 	views := []sandboxapi.Sandbox{v}
 	m.sharedLimitsWarnings(views, []openshell.ComputeDriver{shared})
 	return views[0]
@@ -455,27 +759,37 @@ func sharedLimitsOf(b *box) openshell.ComputeDriver {
 
 // sharedLimitsWarnings warns on each view whose driver (drivers[i]) has
 // no per-sandbox limits when the cpu and memory every sandbox of it gets
-// now exceed the organization's openshell.admin.max_resources: the start
-// judges those values (checkStart), not what the record kept at create,
-// and a new sandbox would get them too, so the fix is to lower them.
-// Callers must not hold Manager.mu (the values are read from the
-// gateway's configuration).
+// now exceed the max_resources of the sandbox's own floor
+// (Effective.MaxResources): the start judges those values (checkStart),
+// not what the record kept at create, and a new sandbox would get them
+// too, so the fix is to lower them. Callers must not hold Manager.mu (the
+// values are read from the gateway's configuration).
 func (m *Manager) sharedLimitsWarnings(views []sandboxapi.Sandbox, drivers []openshell.ComputeDriver) {
-	max := m.config().OpenShell.Admin.MaxResources
-	if strings.TrimSpace(max.CPU) == "" && strings.TrimSpace(max.Memory) == "" {
-		return
+	type limit struct {
+		driver openshell.ComputeDriver
+		max    config.OpenShellResourcesConfig
 	}
-	warnings := map[openshell.ComputeDriver]string{}
+	warnings := map[limit]string{}
 	for i := range views {
 		name := drivers[i]
 		if name == "" {
 			continue
 		}
-		w, ok := warnings[name]
+		m.mu.Lock()
+		var eff *packs.Effective
+		if b := m.boxes[views[i].Name]; b != nil {
+			eff = b.eff
+		}
+		m.mu.Unlock()
+		key := limit{name, eff.MaxResources()}
+		if strings.TrimSpace(key.max.CPU) == "" && strings.TrimSpace(key.max.Memory) == "" {
+			continue
+		}
+		w, ok := warnings[key]
 		if !ok {
 			d, _ := openshell.LookupDriver(string(name))
-			w = m.sharedLimitsWarning(d, max)
-			warnings[name] = w
+			w = m.sharedLimitsWarning(d, key.max)
+			warnings[key] = w
 		}
 		if w != "" {
 			views[i].Warnings = append(slices.Clip(views[i].Warnings), w)
@@ -502,68 +816,22 @@ func (m *Manager) sharedLimitsWarning(d openshell.Driver, max config.OpenShellRe
 	return v.Message + ", so it cannot start until that is lowered (`defenseclaw sandbox doctor --fix`)"
 }
 
-// maxBlockedHosts bounds the destinations a box remembers OpenShell
-// refused.
-const maxBlockedHosts = 4096
-
-// noteBlocked counts a connection OpenShell refused, to host (the name the
-// feed shows it blocked). Callers hold Manager.mu.
-func (b *box) noteBlocked(host string) {
-	b.blockedRequests++
-	b.noteBlockedHost(host)
-}
-
-// noteBlockedHost counts host among the destinations OpenShell refused.
-// Callers hold Manager.mu.
-func (b *box) noteBlockedHost(host string) {
-	if host = strings.ToLower(host); host == "" {
-		return
-	}
-	if b.blockedHosts == nil {
-		b.blockedHosts = map[string]struct{}{}
-	}
-	if len(b.blockedHosts) < maxBlockedHosts {
-		b.blockedHosts[host] = struct{}{}
-	}
-}
-
-// blockedHostList is what decorate needs of noteBlocked's destinations.
-// Callers hold Manager.mu.
-func (b *box) blockedHostList() []string {
-	out := make([]string, 0, len(b.blockedHosts))
-	for h := range b.blockedHosts {
-		out = append(out, h)
-	}
-	return out
-}
-
 // decorate adds what view leaves out because it needs I/O or other locks:
-// the proxy's counts and the snapshot, with its acceptance (accepted, the
-// record's Accepted) when it applies. The egress counts are destinations:
-// Destinations those the sandbox reached, Blocked those refused at least
-// once (by the DefenseClaw proxy or by OpenShell, whose refused
-// destinations openshellBlocked lists), the way the feed and a session's
-// ✗ lines name them; BlockedRequests counts the refused requests. Callers
-// must not hold Manager.mu.
-func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, openshellBlocked []string, accepted *acceptedSnapshot) {
-	blocked := make(map[string]struct{}, len(openshellBlocked))
-	for _, h := range openshellBlocked {
-		blocked[h] = struct{}{}
-	}
+// the egress counts and the snapshot, with its acceptance (accepted, the
+// record's Accepted) when it applies. The egress counts sum up the
+// sandbox's destinations (egressSummary), the proxy's live counts merged
+// in. Callers must not hold Manager.mu.
+func (m *Manager) decorate(v *sandboxapi.Sandbox, proxy ProxyControl, bindingID string, accepted *acceptedSnapshot) {
+	live := map[string]egress.DestinationStats{}
 	if proxy != nil && proxy.Counter() != nil && bindingID != "" {
 		for _, d := range proxy.Counter().DestinationsFor(bindingID) {
-			if d.Contacted {
-				v.Egress.Destinations++
+			if !d.Contacted && harnessFetchHost(v.Harness, d.Host, 0) {
+				continue
 			}
-			v.Egress.BytesUp += d.BytesUp
-			v.Egress.BytesDown += d.BytesDown
-			v.Egress.BlockedRequests += int(d.Blocked)
-			if d.Blocked > 0 {
-				blocked[strings.ToLower(d.Host)] = struct{}{}
-			}
+			live[strings.ToLower(d.Host)] = d
 		}
 	}
-	v.Egress.Blocked = len(blocked)
+	v.Egress = m.egressSummary(v.Name, v.Harness, live)
 	if snap, err := m.ws.LoadSnapshot(m.opts.DataDir, v.Name); err == nil && snap != nil {
 		info := &sandboxapi.SnapshotInfo{Kind: string(snap.Kind), CreatedAt: snap.CreatedAt}
 		if snap.Git != nil {
@@ -587,11 +855,12 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Name: r.Name, ID: r.ID, Harness: r.Harness, Pack: r.Pack, PackDigest: r.PackDigest,
 		Profile: r.Profile, NetworkMode: r.NetworkMode, Approvals: r.Approvals, Yolo: launchYolo(b),
 		WorkdirMode: r.WorkdirMode, Project: r.Project, Workdir: r.Workdir, Image: r.Image, ImageID: r.ImageID,
-		RunImage: r.RunImage, RunImageID: r.RunImageID,
+		RunImage: r.RunImage, RunImageID: r.RunImageID, Driver: r.Driver, DriverReason: r.DriverReason,
 		HarnessVersion: r.HarnessVersion, HookContract: r.HookContract, TamperTier: r.TamperTier,
 		CreatedAt: r.CreatedAt, Session: r.Sessions, Workspace: r.Workspace, MCP: r.MCP, Violations: r.Violations, Warnings: r.Warnings,
-		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard),
+		Orphaned: b.orphaned, NestedRepos: nestedView(r.Guard), ProcessTree: b.processTreeOn(),
 		Launch:      sandboxapi.Launch{Yolo: launchYolo(b), CredentialProfile: r.CredentialProfile, BedrockRegion: r.BedrockRegion},
+		PhaseReason: r.PhaseReason,
 		Credentials: slices.Clone(r.Credentials), HostPorts: slices.Clone(r.HostPorts),
 	}
 	if spec, ok := harness.Get(r.Harness); ok {
@@ -634,17 +903,27 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		Events: maps.Clone(b.hooks.events), OtherEvents: b.hooks.otherEvents,
 		Tampered: b.hooks.tampered, LastTamperAt: b.hooks.lastTamper,
 		HookFailed: b.hooks.failed, LastHookFailure: b.hooks.lastFailure, LastHookFailureAt: b.hooks.lastFailureAt,
+		LastHookFailureCause: b.hooks.failureCause, HooksAnsweredAt: b.hooks.answeredAt,
+		ModelKeyRejected: b.hooks.modelRejected, ModelKeyRejectedAt: b.hooks.modelRejectedAt,
 		Silent: !b.silentSince.IsZero(), SilentSince: b.silentSince,
 		IngressRefused: b.hooks.ingressRefused, LastIngressRefusedAt: b.hooks.lastIngressRefused,
 		Unreachable: !b.reach.since.IsZero(), UnreachableSince: b.reach.since, UnreachableReason: b.reach.reason,
 		NoHookYet: !b.reach.since.IsZero() && b.reach.noHookYet,
 	}
+	if b.placeholderInSessionLocked() {
+		v.Hooks.PlaceholderRefusedAt = b.hooks.placeholderAt
+	}
+	v.UnflushedAt = r.UnflushedAt
 	for _, a := range m.approvals {
 		if a.sandbox == r.Name && a.status == sandboxapi.ApprovalPending {
 			v.PendingApprovals++
 		}
 	}
-	v.Egress.BlockedRequests = b.blockedRequests
+	// What silent hooks lead to, as checkHookSilence decides it: under a
+	// policy that is not resolved, the fail-closed response.
+	var after time.Duration
+	v.Hooks.OnSilence, after = silenceResponse(r.TamperTier, b.eff)
+	v.Hooks.SilenceAfter = packs.ShortDuration(after)
 	running := b.phase == audit.SandboxPhaseReady && !b.started.IsZero()
 	if running {
 		v.SessionYolo = launchYolo(b)
@@ -658,9 +937,16 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 		// applies to it; the record keeps what it was created with, and so
 		// do the create-time clamps, which the current ones replace.
 		v.Profile, v.NetworkMode, v.Approvals = e.Profile, e.NetworkMode, e.Approvals
+		if f, ok := effectiveFloor(e); ok {
+			v.UserApprovals = strings.ToLower(strings.TrimSpace(f.UserApprovals))
+		}
 		v.HostPorts = slices.Clone(e.MCP.HostPorts)
 		if e.Pack != nil {
 			v.Pack, v.PackDigest = e.Pack.Name, e.Pack.Digest
+		}
+		if rp := e.RepoPolicy; rp != nil {
+			// The TUI's sandbox detail names it like the banner (GAP-0244).
+			v.RepoPolicy = &sandboxapi.RepoPolicy{Path: rp.Source, Digest: rp.Digest, Tightened: slices.Clone(e.RepoTightened)}
 		}
 		v.Violations = wireViolations(b.violations)
 		v.Warnings = append(slices.Clip(v.Warnings), postureDrift(r, e)...)
@@ -671,7 +957,7 @@ func (m *Manager) view(b *box) sandboxapi.Sandbox {
 	// A driver without per-sandbox limits (vm) is judged by what every
 	// sandbox of it gets now, which needs I/O (sharedLimitsWarnings).
 	if d, _ := openshell.LookupDriver(r.Driver); d.SandboxLimits {
-		if res := resourceViolation(r.Resources, m.config().OpenShell.Admin.MaxResources); res != nil && !b.retained {
+		if res := resourceViolation(r.Resources, b.eff.MaxResources()); res != nil && !b.retained {
 			v.Warnings = append(slices.Clip(v.Warnings), res.Message+
 				" (it keeps its current limits until it stops, and cannot start again)")
 		}

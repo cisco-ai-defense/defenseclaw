@@ -28,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
@@ -49,12 +50,38 @@ type policyDigestReport struct {
 	GatewayReportedConfigGeneration uint64 `json:"gateway_reported_config_generation,omitempty"`
 	GatewayLastReloadError          string `json:"gateway_last_reload_error,omitempty"`
 	Error                           string `json:"error,omitempty"`
+	// ConfigRecordedAsHandEdit is set on a standalone host whose config
+	// generation records config.yaml with a hand-edit actor: the hook guardian
+	// recorded a content write the lifecycle did not make (GAP-0617).
+	ConfigRecordedAsHandEdit bool `json:"config_recorded_as_hand_edit,omitempty"`
+}
+
+// configRecordedAsHandEdit reports whether the managed config's generation
+// record names a hand edit as its writer.
+func configRecordedAsHandEdit(c *config.Config) bool {
+	if c == nil || !c.StandaloneEnterprise() || strings.TrimSpace(c.ConfigFilePath) == "" {
+		return false
+	}
+	state, err := configwrite.ReadGenerationState(c.ConfigFilePath)
+	return err == nil && configwrite.IsHandEditActor(state.Actor)
 }
 
 // gatewayReportedPolicy is the policy object of the gateway's /health: zero
-// when it does not answer or does not publish one.
+// when it does not answer or does not publish one. A standalone gateway
+// publishes it only to an administrator (GAP-0481), so the request carries
+// the gateway token when this config resolves one: the Windows lifecycle
+// reads it here.
 func gatewayReportedPolicy(c *config.Config) gateway.PolicyHealth {
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Get(sidecarHealthURL(c))
+	req, err := http.NewRequest(http.MethodGet, sidecarHealthURL(c), nil)
+	if err != nil {
+		return gateway.PolicyHealth{}
+	}
+	if c != nil {
+		if token := strings.TrimSpace(c.Gateway.ResolvedToken()); token != "" {
+			req.Header.Set("X-DefenseClaw-Token", token)
+		}
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {
 		return gateway.PolicyHealth{}
 	}
@@ -102,8 +129,11 @@ func applyEnterprisePolicyReport(result *enterprisestatus.Result, out []byte, ch
 		Applied:               report.Digest == report.GatewayReportedDigest && reload == "",
 		GatewayReportedDigest: report.GatewayReportedDigest,
 		LastReloadError:       reload,
-		ConfigUnrecorded:      report.ConfigGeneration > 0 && !report.ConfigGenerationRecorded,
+		// A hand edit the hook guardian recorded advances the generation but
+		// is still a config change outside the lifecycle (GAP-0617).
+		ConfigUnrecorded: report.ConfigGeneration > 0 && (!report.ConfigGenerationRecorded || report.ConfigRecordedAsHandEdit),
 	}
+	handEdit := report.ConfigGenerationRecorded && report.ConfigRecordedAsHandEdit
 	result.Policy = state
 	switch {
 	case reload != "":
@@ -114,7 +144,12 @@ func applyEnterprisePolicyReport(result *enterprisestatus.Result, out []byte, ch
 			"the gateway reports effective policy %s but the installed config computes to %s; it applies the config on its next reload",
 			shortPolicyDigest(state.GatewayReportedDigest), shortPolicyDigest(state.EffectiveDigest)))
 	}
-	if state.ConfigUnrecorded {
+	switch {
+	case handEdit:
+		result.AddWarning("config_edited_outside_lifecycle", fmt.Sprintf(
+			"config.yaml was changed outside the DefenseClaw lifecycle (config generation %d records it as a hand edit) and the gateway enforces it; run ensure with the intended config to put the managed config back",
+			state.ConfigGeneration))
+	case state.ConfigUnrecorded:
 		result.AddWarning("config_edited_outside_lifecycle", fmt.Sprintf(
 			"config.yaml was changed outside the DefenseClaw lifecycle (config generation %d does not record it) and the gateway may already enforce it; run ensure with the intended config to put the managed config back",
 			state.ConfigGeneration))
@@ -166,6 +201,7 @@ gateway applied this configuration.`,
 			report.GatewayReportedDigest = reported.EffectiveDigest
 			report.GatewayReportedConfigGeneration = reported.ConfigGeneration
 			report.GatewayLastReloadError = reported.LastReloadError
+			report.ConfigRecordedAsHandEdit = configRecordedAsHandEdit(cfg)
 		}
 		policy, err := gateway.ComputeEffectivePolicy(cmd.Context(), cfg)
 		if err != nil {

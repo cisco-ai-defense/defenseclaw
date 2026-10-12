@@ -440,3 +440,44 @@ def test_redirected_click_help_is_ascii() -> None:
     assert root.output.isascii(), [line for line in root.output.splitlines() if not line.isascii()]
     assert aibom.output.isascii(), [line for line in aibom.output.splitlines() if not line.isascii()]
     assert "Manage MCP servers - " in root.output
+
+
+def test_prompt_ends_its_line_when_stdout_is_relayed_line_by_line(monkeypatch) -> None:
+    """GAP-1575: behind a line relay (PowerShell with a transcript) a prompt
+    without a newline stayed hidden until Enter. It must end its line before
+    the answer is read, and a terminal stdout keeps the inline prompt."""
+
+    import click
+    from click import termui
+    from defenseclaw import terminal_checkbox
+
+    class _Keyboard(io.StringIO):
+        def __init__(self, out: io.StringIO) -> None:
+            super().__init__("both\n")
+            self.out = out
+            self.seen = ""
+
+        def isatty(self) -> bool:
+            return True
+
+        def readline(self, *args: object) -> str:
+            self.seen = self.out.getvalue()
+            return super().readline(*args)
+
+    out = io.StringIO()
+    keyboard = _Keyboard(out)
+    monkeypatch.setattr(termui, "visible_prompt_func", input)
+    monkeypatch.setattr(sys, "stdin", keyboard)
+    monkeypatch.setattr(sys, "stdout", out)
+    terminal_checkbox.keep_prompts_visible()
+    terminal_checkbox.keep_prompts_visible()  # idempotent
+
+    answer = click.prompt("  Scanner mode", type=click.Choice(["local", "remote", "both"]), default="local")
+
+    assert answer == "both"
+    assert keyboard.seen == "  Scanner mode (local, remote, both) [local]:\n"
+
+    monkeypatch.setattr(termui, "visible_prompt_func", input)
+    monkeypatch.setattr(out, "isatty", lambda: True, raising=False)
+    terminal_checkbox.keep_prompts_visible()
+    assert termui.visible_prompt_func is input

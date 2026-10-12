@@ -505,6 +505,33 @@ class ComponentsListingTests(unittest.TestCase):
         self.assertIn("defenseclaw agent discovery enable", result.output)
         self.assertNotIn("AI components (0 unique)", result.output)
 
+    def test_refresh_with_discovery_off_says_how_to_enable_it(self):
+        # GAP-0150: `agent usage --refresh` (also with --sandbox) and
+        # `agent processes --refresh` printed only "sidecar rejected AI usage
+        # request: HTTP 503" while discovery is off.
+        class OffClient(_FakeClient):
+            def scan_ai_usage(self):
+                response = requests.Response()
+                response.status_code = 503
+                raise requests.HTTPError(response=response)
+
+        runner = CliRunner()
+        for command, args in (
+            (cmd_agent.usage, ["--refresh"]),
+            (cmd_agent.usage, ["--refresh", "--sandbox", "myapp-claude"]),
+            (cmd_agent.processes, ["--refresh"]),
+        ):
+            # As a Linux host: on a Windows runner the real host refuses
+            # --sandbox before the discovery check this test is about.
+            with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
+                       side_effect=_resolve_target_stub), \
+                    patch("defenseclaw.commands.cmd_agent.OrchestratorClient", OffClient), \
+                    patch("defenseclaw.platform_support.host_os", return_value="linux"):
+                result = runner.invoke(command, args, obj=_make_ctx())
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("defenseclaw agent discovery enable", result.output)
+            self.assertNotIn("HTTP 503", result.output)
+
     def test_listing_does_not_crash_on_unreachable_sidecar(self):
         runner = CliRunner()
         app = _make_ctx()
@@ -922,7 +949,7 @@ class DiscoveryOffAndWordingTests(unittest.TestCase):
                    side_effect=_resolve_target_stub), \
                 patch("defenseclaw.commands.cmd_agent.OrchestratorClient", _Refused):
             result = CliRunner().invoke(cmd_agent.usage, ["--refresh"], obj=_make_ctx())
-        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("AI discovery is disabled", result.output)
         self.assertIn("defenseclaw agent discovery enable", result.output)
         self.assertNotIn("HTTP 503", result.output)

@@ -22,9 +22,8 @@ behavior so a regression to the original vulnerable code re-fails the test:
   not be swallowed.
 * F-0122 — first-run init must create operator-private directories 0700.
 
-The legacy sandbox findings (F-0161, F-0162, F-0166, F-0421, F-0425) are
-covered against ``defenseclaw sandbox legacy-cleanup`` in
-``test_sandbox_legacy.py``.
+The legacy sandbox findings (F-0161, F-0162, F-0166, F-0421, F-0425) went
+with the openshell-sandbox (0.0.x) integration and its cleanup command.
 """
 
 import os

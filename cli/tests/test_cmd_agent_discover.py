@@ -660,9 +660,21 @@ def _wide_payload() -> dict:
     }
 
 
+def _pin_terminal_width(case: unittest.TestCase, columns: int = 120) -> None:
+    """The renderer sizes its table from the real terminal; pin it so a
+    narrow runner terminal (or a pytest-xdist worker) cannot pick the
+    compact view (GAP-0153)."""
+    pin = patch.dict(os.environ, {"COLUMNS": str(columns)})
+    pin.start()
+    case.addCleanup(pin.stop)
+
+
 class AiUsageRendererTests(unittest.TestCase):
     """Cover the grouped/detail/filter behavior added to fix the
     "488 identical package_dependency rows" report."""
+
+    def setUp(self):
+        _pin_terminal_width(self)
 
     def test_summary_collapses_wide_groups_into_one_row_with_count(self):
         from defenseclaw.commands import cmd_agent
@@ -709,6 +721,59 @@ class AiUsageRendererTests(unittest.TestCase):
         self.assertIn("Codex", out)
         self.assertNotIn("Cursor", out)
         self.assertNotIn("AI SDKs", out)
+
+    def test_sandbox_filter_keeps_that_sandbox_and_tags_its_rows(self):
+        from defenseclaw.commands import cmd_agent
+
+        payload = _wide_payload()
+        found = _ai_signal(
+            state="new", category="mcp_server", product="Codex", vendor="OpenAI", detector="mcp",
+            basenames=["dccert-marker"],
+        )
+        found.update({"sandbox_name": "myapp-7f3a", "source": "sandbox"})
+        payload["signals"].append(found)
+        only = cmd_agent._filter_ai_usage_signals(
+            payload["signals"], states=(), categories=(), products=(), show_gone=False, sandboxes=("MYAPP-7F3A",),
+        )
+        self.assertEqual([sig["product"] for sig in only], ["Codex"])
+        tagged = cmd_agent._tag_sandbox_signals(payload["signals"])
+        self.assertIn("Codex (sandbox myapp-7f3a)", [sig["product"] for sig in tagged])
+        # The host's own Codex row stays apart from the sandbox's.
+        self.assertIn("Codex", [sig["product"] for sig in tagged])
+        self.assertEqual(found["product"], "Codex", "tagging must not change the payload")
+        out = cmd_agent._render_ai_usage_table(payload, sandboxes=("myapp-7f3a",))
+        self.assertIn("myapp-7f3a", out)
+        self.assertNotIn("Cursor", out)
+
+    def test_sandbox_process_uptime_counts_from_its_start(self):
+        # GAP-0392: a sandbox process read 7 minutes ago showed up=4m59s (its
+        # uptime at that read) beside a Last active of its start.
+        from datetime import datetime, timedelta, timezone
+
+        from defenseclaw.commands import cmd_agent
+
+        started = (datetime.now(timezone.utc) - timedelta(hours=2, minutes=5)).isoformat()
+        runtime = {"pid": 466, "uptime_sec": 299, "started_at": started}
+        self.assertTrue(cmd_agent._format_runtime(runtime, live=True).startswith("pid=466 up=2h"))
+        self.assertEqual(cmd_agent._format_runtime(runtime), "pid=466 up=4m59s")
+        found = _ai_signal(state="seen", category="active_process", product="Claude Code", vendor="Anthropic",
+                           detector="process")
+        found.update({"sandbox_name": "incident-um", "source": "sandbox", "runtime": runtime})
+        out = cmd_agent._render_ai_usage_table({"signals": [found]}, detail=True)
+        self.assertIn("pid=466 up=2h", out)
+
+    def test_sandbox_filter_counts_that_sandbox_in_the_header(self):
+        # GAP-0269: the header counted the whole machine above one sandbox's rows.
+        from defenseclaw.commands import cmd_agent
+
+        payload = _wide_payload()
+        payload["summary"] = {"active_signals": 32, "new_signals": 4, "changed_signals": 2, "gone_signals": 1}
+        found = _ai_signal(state="new", category="skill", product="Claude Code", vendor="Anthropic", detector="skill")
+        found.update({"sandbox_name": "myapp-7f3a", "source": "sandbox"})
+        payload["signals"].append(found)
+        out = cmd_agent._render_ai_usage_table(payload, sandboxes=("myapp-7f3a",))
+        self.assertIn("active=1 new=1 changed=0 gone=0", out)
+        self.assertIn("active=32 new=4", cmd_agent._render_ai_usage_table(payload))
 
     def test_category_filter_is_exact_and_case_insensitive(self):
         from defenseclaw.commands import cmd_agent
@@ -1314,6 +1379,7 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
 
     def setUp(self):
         self.runner = CliRunner()
+        _pin_terminal_width(self)
 
     def _invoke(self, app, args):
         class FakeClient:
@@ -1382,6 +1448,43 @@ class AiUsageCommandFlagsTests(unittest.TestCase):
             cleanup_app(app, db_path, tmp_dir)
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("--limit", result.output)
+
+    # GAP-0386: an unknown --sandbox name was an empty table and exit 0, also
+    # on Windows, where no sandbox can exist.
+    def test_unknown_sandbox_is_an_error_and_windows_refuses(self):
+        from defenseclaw.gateway import SandboxAPIError
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def ai_usage(self):
+                return _wide_payload()
+
+            def get_sandbox(self, name):
+                if name == "nope":
+                    raise SandboxAPIError("not_found", f'sandbox "{name}" not found', status=404)
+                return {"name": name}
+
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.gateway.token = "secret-token-123"
+        try:
+            with patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+                # The first two run as a Linux host: on a Windows runner the
+                # real host refuses --sandbox before any lookup.
+                with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+                    missing = self.runner.invoke(agent, ["usage", "--sandbox", "nope"], obj=app)
+                    fresh = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+                with patch("defenseclaw.platform_support.host_os", return_value="windows"):
+                    windows = self.runner.invoke(agent, ["usage", "--sandbox", "fresh"], obj=app)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+        self.assertEqual(missing.exit_code, 1, missing.output)
+        self.assertIn("no sandbox nope: `defenseclaw sandbox list` shows your sandboxes", missing.output)
+        self.assertEqual(fresh.exit_code, 0, fresh.output)
+        self.assertIn("AI discovery has found nothing in sandbox fresh yet: `defenseclaw sandbox discover fresh`", fresh.output)
+        self.assertEqual(windows.exit_code, 3, windows.output)
+        self.assertIn("Linux and macOS only", windows.output)
 
 
 if __name__ == "__main__":

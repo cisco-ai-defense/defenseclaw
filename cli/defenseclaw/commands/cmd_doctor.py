@@ -619,19 +619,24 @@ def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     return ""
 
 
+# defenseclaw_gateway_post: hooks rendered before it gave curl the gateway
+# bearer and the prompt or tool payload as command-line arguments, which every
+# local account can read (GAP-0027).
 _GENERATED_HOOK_SENTINELS: dict[str, dict[str, tuple[str, ...]]] = {
     "codex": {
-        "codex-hook.sh": ("defenseclaw_response_failure_reason",),
+        "codex-hook.sh": ("defenseclaw_response_failure_reason", "defenseclaw_gateway_post"),
         "_hardening.sh": (
             "defenseclaw_response_failure_reason",
             "possible token drift",
+            "defenseclaw_gateway_post",
         ),
     },
     "claudecode": {
-        "claude-code-hook.sh": ("defenseclaw_response_failure_reason",),
+        "claude-code-hook.sh": ("defenseclaw_response_failure_reason", "defenseclaw_gateway_post"),
         "_hardening.sh": (
             "defenseclaw_response_failure_reason",
             "possible token drift",
+            "defenseclaw_gateway_post",
         ),
     },
 }
@@ -1076,32 +1081,6 @@ def _gateway_peer_bound_request(
 # ---------------------------------------------------------------------------
 
 
-def _check_legacy_sandbox(cfg, r: _DoctorResult) -> None:
-    """Point a host that still carries the removed openshell-sandbox mode at cleanup.
-
-    Silent when nothing is found. The legacy mode keeps the gateway API on
-    the sandbox veth host until ``defenseclaw sandbox legacy-cleanup`` resets
-    the config, and its root units, ACLs, and ownership changes stay behind.
-    """
-    from defenseclaw import sandbox_legacy
-
-    try:
-        evidence = sandbox_legacy.quick_evidence(cfg)
-    except Exception:  # noqa: BLE001 - a diagnostic must never abort doctor
-        return
-    if not evidence:
-        return
-    _emit(
-        "warn",
-        "Legacy sandbox",
-        "legacy openshell-sandbox standalone install detected (" + ", ".join(evidence) + ")",
-        r=r,
-        check_id="doctor.sandbox.legacy-install",
-        reason_code="legacy-standalone-sandbox",
-        remediation="run 'defenseclaw sandbox legacy-cleanup --dry-run', then 'defenseclaw sandbox legacy-cleanup'",
-    )
-
-
 # ``defenseclaw-gateway sandbox doctor --json`` probes Docker, the OpenShell
 # service and CLI, and the daemon; each probe has its own short deadline.
 SANDBOX_DOCTOR_TIMEOUT_SECONDS = 90
@@ -1231,10 +1210,13 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
     # Identity check: a stand-in config object must not read as enabled.
     enabled = getattr(openshell, "enabled", False) is True
     if host_os() == "windows":
+        # Skipped whatever openshell.enabled holds: a team config can carry
+        # it from Linux or macOS, and the platform wins (GAP-0246).
         _emit(
-            "warn" if enabled else "skip",
+            "skip",
             "Sandboxes",
-            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported",
+            "OpenShell sandboxes run on Linux and macOS only; Windows and WSL2 are not supported"
+            + ("; openshell.enabled has no effect here" if enabled else ""),
             r=r,
             check_id="doctor.sandbox.platform",
             reason_code="sandbox-platform-unsupported",
@@ -1296,6 +1278,125 @@ def _check_sandbox(cfg, r: _DoctorResult) -> None:
             reason_code=f"sandbox-{check_id}" if check_id and tag != "pass" else "",
             remediation=remediation if tag != "pass" else "",
         )
+
+
+_SANDBOX_KERNEL_FEED_LABEL = "Sandbox kernel feed"
+_SANDBOX_KERNEL_FEED_CHECK_ID = "doctor.sandbox.kernel-feed"
+
+
+def _check_sandbox_kernel_feed(
+    cfg,
+    r: _DoctorResult,
+    *,
+    unit_path: str | None = None,
+    os_name: str | None = None,
+    binary: str | None = None,
+    run=subprocess.run,
+) -> None:
+    """The Sandbox kernel feed row: Linux, only when the root feed service is installed.
+
+    The feed is a root service an administrator installs with
+    ``sudo defenseclaw-gateway sandbox kernel-feed install``; this user's
+    upgrade cannot update it, so the row names the command when the feed runs
+    an older release or another protocol. It runs
+    ``defenseclaw-gateway sandbox kernel-feed status --json``, which reads the
+    unit, asks the installed helper its version and opens the feed's socket
+    only to read its header.
+    """
+    from defenseclaw.commands.cmd_uninstall import _SANDBOX_FEED_UNIT
+    from defenseclaw.gateway import resolve_gateway_binary
+    from defenseclaw.platform_support import host_os
+
+    openshell = getattr(cfg, "openshell", None)
+    if (os_name or host_os()) != "linux" or getattr(openshell, "enabled", False) is not True:
+        return
+    if not os.path.exists(unit_path or _SANDBOX_FEED_UNIT):
+        return
+    binary = binary or resolve_gateway_binary()
+    if not binary:
+        return  # The Sandbox section already reports the missing gateway.
+
+    def emit(tag: str, detail: str, reason_code: str = "", remediation: str = "") -> None:
+        _emit(
+            tag,
+            _SANDBOX_KERNEL_FEED_LABEL,
+            detail,
+            r=r,
+            check_id=_SANDBOX_KERNEL_FEED_CHECK_ID,
+            reason_code=reason_code,
+            remediation=remediation,
+        )
+
+    try:
+        proc = run(
+            [binary, "sandbox", "kernel-feed", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        report = json.loads(proc.stdout or "")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        report = None
+    if not isinstance(report, dict):
+        emit(
+            "warn",
+            "installed, but `sandbox kernel-feed status` gave no report",
+            "kernel-feed-status-unavailable",
+            "run `defenseclaw sandbox kernel-feed status` for the details",
+        )
+        return
+    install = str(report.get("install_command") or "").strip()
+    build = str(report.get("build") or report.get("version") or "unknown").strip()
+    if report.get("update_needed"):
+        emit(
+            "warn",
+            f"the feed runs {build}, protocol {report.get('protocol') or 'unknown'}; "
+            f"this gateway is {report.get('gateway_version') or 'dev'}, protocol {report.get('gateway_protocol')}",
+            "kernel-feed-update",
+            f"update it with `{install or 'sudo defenseclaw-gateway sandbox kernel-feed install'}`",
+        )
+        return
+    reason = str(report.get("reason") or "").strip()
+    if report.get("reachable"):
+        tetragon = str(report.get("tetragon") or "unknown").strip()
+        if report.get("tetragon_reason"):
+            tetragon += f" ({report.get('tetragon_reason')})"
+        detail = f"build {build}, protocol {report.get('protocol')}; its Tetragon stream is {tetragon}"
+        if str(report.get("tetragon") or "").strip() != "connected":
+            # The feed answers but has nothing to send: sandbox ps falls back to
+            # the sample, so the row says so too (GAP-0086).
+            emit(
+                "warn",
+                detail,
+                "kernel-feed-tetragon-unavailable",
+                "ask the administrator to check Tetragon (`sudo systemctl status tetragon`); "
+                "the feed reconnects by itself, and sandbox process trees use the 5-second sample until then",
+            )
+            return
+        emit("pass", detail)
+        return
+    if reason == "kernel_feed_not_permitted":
+        emit(
+            "skip",
+            "installed; this account cannot read it (members of the docker group can), "
+            "so sandbox process trees use the 5-second sample",
+            "kernel-feed-not-permitted",
+        )
+        return
+    active = str(report.get("active") or "unknown").strip()
+    # A stopped feed gets the command that starts it (GAP-0091).
+    next_step = (
+        "run `sudo systemctl status defenseclaw-sandbox-feed.service`"
+        if active == "active"
+        else "start it with `sudo systemctl restart defenseclaw-sandbox-feed.service`"
+    )
+    emit(
+        "warn",
+        f"installed ({active}), but not answering: {reason or 'unknown'}",
+        "kernel-feed-unavailable",
+        f"{next_step}; sandbox process trees use the 5-second sample until it answers",
+    )
 
 
 def _doctor_secure_client(cfg) -> bool:
@@ -2199,6 +2300,45 @@ def _check_moved_aside_audit_stores(db_path: str, r: _DoctorResult) -> None:
     )
 
 
+def _folder_custody_text(
+    reason: str, path: str, data_dir: str, what: str = "the audit database", itself: str = "the database"
+) -> tuple[str, str]:
+    """Detail and fix for a file (``what``) whose folders failed the private-custody check.
+
+    Restoring the file from a backup does not help there: the folders are
+    what need fixing, and the file was not touched (GAP-0300 for the audit
+    database, GAP-0344 for the device key).
+    """
+    from defenseclaw.doctor_recovery import RecoveryRefusedError, _controlled_directory_paths
+
+    try:
+        chain = _controlled_directory_paths(data_dir, os.path.dirname(path))
+    except RecoveryRefusedError:
+        chain = (data_dir,)
+    if reason == "directory-chain-is-writable-by-others":
+        writable = []
+        for folder in chain:
+            with contextlib.suppress(OSError):
+                if stat.S_IMODE(os.lstat(folder).st_mode) & 0o022:
+                    writable.append(folder)
+        folders = writable or [data_dir]
+        return (
+            f"{', '.join(folders)} can be written by other accounts, so {what} in it is not trusted; "
+            f"{itself} itself is untouched ({reason})",
+            "chmod go-w " + " ".join(shlex.quote(folder) for folder in folders),
+        )
+    if reason == "directory-owner-mismatch":
+        return (
+            f"a folder of {data_dir} on the way to {what} belongs to another account ({reason})",
+            f"make {data_dir} and the folders in it yours (chown), then run 'defenseclaw doctor' again",
+        )
+    return (
+        f"the folders that hold {what} failed the private custody check ({reason})",
+        f"keep {data_dir} a private folder of your own (chmod 700 {shlex.quote(data_dir)}), "
+        "then run 'defenseclaw doctor' again",
+    )
+
+
 _AUDIT_STORE_REOPEN_REPAIR_ID = "doctor.state.audit-db.reopen"
 
 
@@ -2495,6 +2635,10 @@ def _check_audit_db_store(cfg, r: _DoctorResult) -> None:
                 "the gateway wrote to the store while doctor read it; run 'defenseclaw doctor' again, "
                 "and if it keeps failing, run 'defenseclaw-gateway restart'"
             )
+        elif reason.startswith("directory-"):
+            # The folders that hold it failed the check, not the database
+            # (GAP-0300).
+            detail, remediation = _folder_custody_text(reason, db_path, str(getattr(cfg, "data_dir", "") or ""))
         elif reason == "target-outside-data-dir":
             detail = f"observability.local.path ({db_path}) must be inside {cfg.data_dir}"
             remediation = "move observability.local.path into the DefenseClaw data directory"
@@ -2779,14 +2923,26 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
             ),
         )
         return
+    detail = f"device key recovery is unsafe: {health.reason_code}"
+    remediation = "stop the gateway and restore the identity from a trusted backup; Doctor will not overwrite it"
+    if str(health.reason_code or "").startswith("directory-"):
+        # The folders that hold the key failed the check, not the key: a
+        # restore from backup would not help (GAP-0344, as GAP-0300).
+        detail, remediation = _folder_custody_text(
+            str(health.reason_code),
+            target,
+            str(getattr(cfg, "data_dir", "") or ""),
+            what="the device key",
+            itself="the key",
+        )
     _emit(
         "fail",
         "Device identity",
-        f"device key recovery is unsafe: {health.reason_code}",
+        detail,
         r=r,
         check_id="doctor.identity.device-key",
         reason_code=health.reason_code,
-        remediation="stop the gateway and restore the identity from a trusted backup; Doctor will not overwrite it",
+        remediation=remediation,
     )
 
 
@@ -2928,6 +3084,16 @@ def _check_component_connector_compatibility(
         else:
             tag = "warn"
         remediation = _health_remediation_text(finding.remediations)
+        if finding.reason_code == "connector-agent-unavailable":
+            from defenseclaw.inventory import agent_discovery
+
+            on_path = agent_discovery.binary_on_path(finding.connector)
+            if on_path:
+                # Installed after the last agent discovery: refresh the
+                # evidence rather than install it again (GAP-0052).
+                tag = "warn"
+                detail += f"; {on_path} is installed now, after the last agent discovery"
+                remediation = _health_remediation_text(finding.remediations[1:])
         if finding.reason_code in {"connector-version-not-observed", "connector-version-unparseable"}:
             # A slow or failed version probe leaves the connector in observe.
             # Refreshing discovery and rerunning setup restores the mode.
@@ -3298,16 +3464,12 @@ def _subsystem_expected_enabled(cfg, sub: str) -> bool | None:
     if sub == "sandbox":
         # The gateway runs the sandbox subsystem when OpenShell sandboxes are
         # on (openshell.enabled: running, or degraded while a listener or the
-        # manager fails) and reports it degraded for a legacy standalone
-        # install until legacy-cleanup runs. Where sandboxes are unsupported
-        # (a platform other than Linux or macOS, managed_enterprise) it
-        # reports them disabled on purpose, which is no stale sidecar.
+        # manager fails). Where sandboxes are unsupported (a platform other
+        # than Linux or macOS, managed_enterprise) it reports them disabled
+        # on purpose, which is no stale sidecar.
         oc = getattr(cfg, "openshell", None)
         if oc is None:
             return None
-        is_standalone = getattr(oc, "is_standalone", None)
-        if callable(is_standalone) and is_standalone():
-            return True
         if not bool(getattr(oc, "enabled", False)):
             return False
         if not sys.platform.startswith(("linux", "darwin")):
@@ -3509,6 +3671,80 @@ def _guardrail_health_mode(details: dict) -> str:
     return f"mode={mode}"
 
 
+_TETRAGON_INFO_PATH = "/var/run/tetragon/tetragon-info.json"
+_KERNEL_SENSOR_LABEL = "Kernel sensor (Tetragon)"
+_KERNEL_SENSOR_CHECK_ID = "doctor.runtime.tetragon"
+
+#: The restart every Tetragon change needs, with what it costs: a restart
+#: drops the policies added with ``tetra`` (``tetragon.tp.d`` policies reload).
+_TETRAGON_RESTART = (
+    "`sudo systemctl restart tetragon` (this drops policies added with tetra; tetragon.tp.d policies reload)"
+)
+
+
+def _read_tetragon_info(path: str) -> dict | None:
+    """Tetragon's world-readable discovery file: None when absent, {} when unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _check_kernel_sensor(
+    r: _DoctorResult,
+    *,
+    info_path: str = _TETRAGON_INFO_PATH,
+    os_name: str | None = None,
+) -> None:
+    """The Kernel sensor (Tetragon) row of a per-user install: Linux, only where Tetragon runs.
+
+    A per-user install never connects to Tetragon (its socket is root-only and
+    grants kernel policy control), so the row says so, and warns when Tetragon
+    serves its API on TCP, which any local account can use. It reads only
+    Tetragon's world-readable info file: it never opens the socket and runs no
+    binary. The managed sensor helper's Tetragon state is shown by the Go
+    commands (``enterprise linux discovery``, ``enterprise linux tetragon
+    status``, ``defenseclaw-gateway status``): the enterprise packages ship no
+    Python CLI in this release.
+    """
+    from defenseclaw.platform_support import host_os
+
+    if (os_name or host_os()) != "linux":
+        return
+    info = _read_tetragon_info(info_path)
+    if info is None:
+        return
+    address = str(info.get("server_address") or "").strip()
+    if address and not address.startswith("unix://"):
+        _emit(
+            "warn",
+            _KERNEL_SENSOR_LABEL,
+            f"Tetragon serves its API on {address}: any local account can load kernel policies; "
+            "set server-address to a unix socket",
+            r=r,
+            check_id=_KERNEL_SENSOR_CHECK_ID,
+            reason_code="tetragon-tcp-api",
+            remediation=(
+                "Run `echo unix:///var/run/tetragon/tetragon.sock | sudo tee "
+                f"/etc/tetragon/tetragon.conf.d/server-address`, then {_TETRAGON_RESTART}"
+            ),
+        )
+        return
+    _emit(
+        "skip",
+        _KERNEL_SENSOR_LABEL,
+        "Tetragon detected. Per-user DefenseClaw does not use it: its socket is root-only and grants "
+        "kernel policy control. The enterprise package's sensor helper can.",
+        r=r,
+        check_id=_KERNEL_SENSOR_CHECK_ID,
+        reason_code="tetragon-not-used-per-user",
+    )
+
+
 def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
     if _config_validation_failed(r):
         _emit(
@@ -3696,8 +3932,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 elif normalized_state == "degraded":
                     # Up but needs operator action (the sandbox subsystem
-                    # with a failed listener or manager, or the legacy
-                    # standalone sandbox shim), so warn rather than fail.
+                    # with a failed listener, manager or OpenShell
+                    # gateway), so warn rather than fail.
                     last_error = info.get("last_error")
                     reason = last_error.strip() if isinstance(last_error, str) else ""
                     if sub == "sandbox" and reason.startswith("openshell:"):
@@ -5488,7 +5724,7 @@ def _check_windows_native_hooks(
         _emit("warn", label, f"{check.state}: {check.detail}", r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
         return
     status = "pass" if check.healthy else "fail"
-    _emit(status, label, f"{check.state}: {check.detail}", r=r)
+    _emit(status, label, f"{check.state}: {check.detail}", r=r, remediation=check.repair)
 
 
 _CODEX_PROBE_TIMEOUT_STEP = "rerun defenseclaw doctor in a minute; Codex answers faster once the host is less busy"
@@ -9880,6 +10116,17 @@ def _local_policy_digest(cfg) -> dict | None:
     return local_policy_digest(cfg)
 
 
+def _saved_config_generation(cfg) -> int:
+    """The config generation the DefenseClaw writer last recorded, 0 when unknown."""
+    from defenseclaw import config_writer
+    from defenseclaw.config import config_path_for_data_dir
+
+    try:
+        return int(config_writer.read_generation_state(config_path_for_data_dir(cfg.data_dir)).generation)
+    except Exception:  # noqa: BLE001 - no record, or no data directory: nothing to compare.
+        return 0
+
+
 def _policy_dir_remediation(cfg, error: str) -> str:
     """The next step for a policy_dir the gateway cannot read, or ""."""
     policy_dir = str(getattr(cfg, "policy_dir", "") or "")
@@ -9998,12 +10245,25 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             remediation="Run `defenseclaw-gateway restart`",
         )
         return
-    if local.get("effective_digest") != digest:
+    if local is not None and local.get("effective_digest") != digest:
+        # Name the cause on every path (GAP-0362, GAP-0382): a later save than
+        # the one the gateway built from, also when the gateway reports no
+        # config generation (an imported 0.8 install), else an asset change.
+        saved = _saved_config_generation(cfg)
+        if saved > config_generation > 0:
+            cause = (
+                f": it has not applied the change saved as config generation {saved} (it enforces generation "
+                f"{config_generation})"
+            )
+        elif saved > config_generation:
+            cause = f": it has not applied the change saved as config generation {saved}"
+        else:
+            cause = ": it has not applied the current config.yaml and policy assets"
         _emit(
             "fail",
             label,
             f"the gateway applies {_short_policy_digest(digest)} but config.yaml and its policy assets compute to "
-            f"{_short_policy_digest(str(local.get('effective_digest')))}; "
+            f"{_short_policy_digest(str(local.get('effective_digest')))}{cause}; "
             "run `defenseclaw-gateway restart` to apply them",
             r=r,
             check_id="doctor.policy.stale",
@@ -11154,11 +11414,17 @@ def _emit_unattributed_otlp_credentials(report, r: _DoctorResult, *, now=None) -
             "OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config"
         )
     else:
+        # A running agent keeps the token it started with, so setup alone
+        # cannot stop a background server's attempts (GAP-0313).
         remediation = (
-            "attempts are recent: a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent "
-            "config usually causes this. Restart any running affected agent (for example Codex) "
-            "so it loads refreshed OTLP credentials. If attempts continue, re-run "
-            "'defenseclaw setup <connector>' and check other OTLP senders pointed at the gateway port"
+            "attempts are recent. An agent that was already running when its DefenseClaw token "
+            "changed (an upgrade, 'defenseclaw setup' or 'setup rotate-token') keeps sending the old "
+            "token until it restarts: restart your agents and their background servers (Codex's "
+            "app-server outlives its sessions: run 'codex app-server daemon restart'). "
+            "Otherwise a stale OTEL_EXPORTER_OTLP_* setting in a shell profile or agent config "
+            "usually causes this: re-run 'defenseclaw setup <connector>' for each agent that "
+            "exports telemetry, then restart it; if the count keeps growing, look for other OTLP "
+            "senders pointed at the gateway port"
         )
     _emit("warn", "Native OTLP credentials", detail, r=r, remediation=remediation)
 
@@ -11977,7 +12243,6 @@ def doctor(
     _check_inventory_storage(cfg, r)
     _check_device_identity(cfg, r)
     _check_private_file_exposure(cfg, r)
-    _check_legacy_sandbox(cfg, r)
 
     # S6.5 — surface the active connector + its configured paths
     # before any scanner runs. Operators routinely point doctor at a
@@ -12127,6 +12392,7 @@ def doctor(
     _emit_hilt_observe_summary(_hilt_observe_only, r, tagged=_multi_hooks)
     _check_guardrail_proxy(cfg, r)
     _check_proxy_interception(cfg, r, live_health=sidecar_health)
+    _check_kernel_sensor(r)
     if not json_out:
         _doctor_subsection("Credentials")
     r.set_section("credentials")
@@ -12152,6 +12418,7 @@ def doctor(
         _doctor_subsection("Sandbox")
     r.set_section("sandbox")
     _check_sandbox(cfg, r)
+    _check_sandbox_kernel_feed(cfg, r)
 
     # Surface any DEFENSECLAW_* env-var bypass that's currently active.
     # The registry at internal/envvars/registry.json is the single
@@ -14493,9 +14760,27 @@ def _check_hook_contract_lock(
     raw_version = stable_agent_version(connector, str(entry.get("raw_agent_version") or ""))
     normalized = str(entry.get("normalized_agent_version") or "")
     script_version = str(entry.get("hook_script_version") or "")
+    # Native setup records the exact executable, version, and digest used
+    # to select the hook contract.  Automatic discovery can legitimately find a
+    # different installation (for example an npm .CMD wrapper ahead of the
+    # desktop app on PATH); it must not override that protected setup evidence.
+    protected_setup_connector = connector in {"codex", "hermes", "omnigent", "amp"} or (
+        connector == "opencode" and (platform_name or os.name) == "nt"
+    )
+    protected_setup_agent = protected_setup_connector and all(
+        (
+            str(entry.get("agent_executable") or "").strip(),
+            str(entry.get("agent_executable_sha256") or "").strip(),
+            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
+        )
+    )
     detail = f"contract={contract or '?'} status={status or '?'}"
     if raw_version:
         detail += f" {'agent_cli' if connector == 'cursor' else 'agent'}={raw_version}"
+        if protected_setup_agent:
+            # Doctor does not rediscover a protected agent: after an update this
+            # is the old version, next to the executable mismatch (GAP-0158).
+            detail += " (recorded at setup)"
     if normalized:
         detail += f" normalized={normalized}"
     if script_version:
@@ -14541,20 +14826,6 @@ def _check_hook_contract_lock(
     if native_runtime is not None:
         detail += f" {native_runtime.runtime_description}"
 
-    # Native setup records the exact executable, version, and digest used
-    # to select the hook contract.  Automatic discovery can legitimately find a
-    # different installation (for example an npm .CMD wrapper ahead of the
-    # desktop app on PATH); it must not override that protected setup evidence.
-    protected_setup_connector = connector in {"codex", "hermes", "omnigent", "amp"} or (
-        connector == "opencode" and (platform_name or os.name) == "nt"
-    )
-    protected_setup_agent = protected_setup_connector and all(
-        (
-            str(entry.get("agent_executable") or "").strip(),
-            str(entry.get("agent_executable_sha256") or "").strip(),
-            str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
-        )
-    )
     # OpenCode and Amp are auto-loaded plugin connectors whose ordinary
     # gateway restart has no independent native-client handshake. Their
     # reviewed hook contract therefore depends on the durable executable seal
@@ -14648,7 +14919,7 @@ def _check_hook_contract_lock(
     elif native_runtime is not None and native_runtime.state == CODEX_PROBE_TIMEOUT_STATE:
         _emit("warn", "Hook contract", detail, r=r, remediation=_CODEX_PROBE_TIMEOUT_STEP)
     elif native_runtime is not None and not native_runtime.healthy:
-        _emit("fail", "Hook contract", detail, r=r)
+        _emit("fail", "Hook contract", detail, r=r, remediation=native_runtime.repair)
     elif status == "unknown":
         _emit(
             "fail",
@@ -16109,10 +16380,9 @@ def _gateway_service_health_assessment(cfg, health: dict) -> tuple[str, str]:
             continue
         state = raw_state.strip().lower()
         if subsystem == "sandbox" and state == "degraded":
-            # The legacy sandbox shim, or a sandbox listener or manager that
-            # failed: a gateway restart cannot be relied on to fix either,
-            # and neither may block repairs of real drift. The legacy check
-            # and `defenseclaw sandbox doctor` report them.
+            # A sandbox listener or manager that failed: a gateway restart
+            # cannot be relied on to fix it, and it may not block repairs of
+            # real drift. `defenseclaw sandbox doctor` reports it.
             continue
 
         if expected is True and state in inactive_states:

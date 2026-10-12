@@ -168,12 +168,19 @@ func newEnterpriseIdentityViewCommands(platform string) []*cobra.Command {
 	for _, view := range enterpriseIdentityViews {
 		commands = append(commands, newEnterpriseIdentityViewCommand(platform, view))
 	}
+	// These views only read registrations and policy; they do not start
+	// sandboxes, so Windows exposes the administrator's views too.
+	commands = append(commands, newEnterpriseSandboxCommand(platform))
+	if platform == "windows" {
+		policy, _, _, _ := newEnterprisePolicyGroup(platform)
+		commands = append(commands, policy)
+	}
 	return commands
 }
 
 func newEnterpriseIdentityViewCommand(platform string, view enterpriseIdentityView) *cobra.Command {
 	values := make([]string, len(view.flags))
-	aiOnly := false
+	aiOnly, asJSON := false, false
 	cmd := &cobra.Command{
 		Use:   view.use,
 		Short: view.short,
@@ -209,7 +216,7 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 			// so and name the administrator command, as status and audit
 			// export do, instead of a raw config permission error (GAP-0610).
 			if err := refuseEnterpriseIdentityViewForStandardUser(cmd); err != nil {
-				return withExitCode(err, enterprisestatus.UnixExitFailure)
+				return managedAdminViewRefusal(cmd, err, asJSON)
 			}
 			runtimeCommand = cmd
 			if view.use == "agent-identities" && query.Get("user") != "" {
@@ -231,6 +238,15 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 				}
 				return printEnterpriseIdentityView(cmd.OutOrStdout(), answer)
 			}
+			if view.use == "profile-explain" {
+				// The gateway answers the guardrail side; the administrator
+				// also wants the sandbox policy of the matched profile.
+				var answer json.RawMessage
+				if _, err := enterpriseIdentityViewGet(path, &answer); err != nil {
+					return enterpriseIdentityViewError(err)
+				}
+				return printEnterpriseIdentityView(cmd.OutOrStdout(), addSandboxToProfileExplain(answer, cfg))
+			}
 			if err := writeEnterpriseIdentityView(cmd.OutOrStdout(), path); err != nil {
 				return enterpriseIdentityViewError(err)
 			}
@@ -243,7 +259,23 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 	if view.use == "ide-plugins" {
 		cmd.Flags().BoolVar(&aiOnly, "ai-only", false, "only AI plugins")
 	}
+	// The answer is always JSON; --json is accepted as on the other managed
+	// views, and makes a refusal JSON too (GAP-0333).
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON (the default); a refusal is printed as JSON too")
 	return cmd
+}
+
+// managedAdminViewRefusal is a standard user's refusal of an administrator
+// view (err names the administrator command): exit failure, the code
+// elevation_required, and for a --json caller the errors[] document on
+// stdout instead of a bare line, so every view refuses alike (GAP-0333).
+func managedAdminViewRefusal(cmd *cobra.Command, err error, asJSON bool) error {
+	refusal := withExitCode(&managedViewRefusal{code: "elevation_required", message: err.Error()}, enterprisestatus.UnixExitFailure)
+	if asJSON {
+		writeManagedViewRefusalJSON(cmd.OutOrStdout(), refusal)
+		silenceJSONReportedError(cmd, true, refusal)
+	}
+	return refusal
 }
 
 // enterpriseIdentityViewGet reads one gateway route; replaceable in tests.

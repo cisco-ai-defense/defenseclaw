@@ -229,6 +229,16 @@ administrator.
   local config tools, the block and allow commands and the gateway's
   enforcement API all refuse ([below](#policy-changes-on-a-managed-host)).
 
+**If your agent reports `Operation not permitted`.** On a Linux computer that
+runs Tetragon, your administrator may have turned on two kernel controls. They
+deny opening an SSH private key (`~/.ssh/id_ed25519`, for example) and writing
+a shell startup file (`~/.bashrc`, for example) to the programs an
+enrolled command-line agent runs. Your normal shell, your IDE terminals and
+`tmux` are never denied. DefenseClaw explains the block in the agent's next
+answer where the agent allows it. Contact your administrator if you need the
+access; they can find the block and decide. See
+[When a control blocks something](/docs/enterprise/tetragon#when-a-control-blocks-something).
+
 A user can still edit or delete files they own, such as a per-user hook
 registration. The guardian repairs DefenseClaw's entries on its next pass.
 Vendor machine policy has no such window. The
@@ -478,5 +488,6 @@ install, as [Cisco AI Defense key](/docs/enterprise/ai-defense-key) shows.
   <Card title="Install with an MDM" href="/docs/enterprise/mdm" description="The MDM contract and recipes for Intune, Jamf, Iru (formerly Kandji), Workspace ONE, Configuration Manager, and Linux configuration management." />
   <Card title="Configure" href="/docs/enterprise/configuration" description="Where the config lives, how to choose agents, and every enterprise setting." />
   <Card title="Identity and authentication" href="/docs/enterprise/identity-and-authentication" description="Which directory identities are attributed on each OS, agent identity, and how to assign a guardrail profile to a group." />
+  <Card title="Sandboxes on managed computers" href="/docs/enterprise/sandboxes" description="Run coding agents in OpenShell sandboxes under the policy of the person's directory group, and require a sandbox per group and agent." />
   <Card title="Operate" href="/docs/enterprise/operations" description="Check status and health, read logs and events, and verify machine policy." />
 </Cards>

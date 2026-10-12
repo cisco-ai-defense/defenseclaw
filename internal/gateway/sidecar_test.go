@@ -43,8 +43,6 @@ func TestRunAIDiscoveryClosesStoreAfterWorkerStops(t *testing.T) {
 			ProcessInterval: time.Hour,
 		},
 		nil,
-		nil,
-		nil,
 	)
 	t.Cleanup(func() { _ = service.Close() })
 	if service.InventoryStore() == nil {

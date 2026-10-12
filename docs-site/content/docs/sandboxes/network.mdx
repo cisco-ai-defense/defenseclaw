@@ -20,7 +20,17 @@ watches all three:
   `HTTP_PROXY`. The proxy decides and logs every site.
 - **Model calls** go to the harness's model provider directly through
   OpenShell, which adds the real credential outside the sandbox. The sandbox
-  only ever holds a placeholder.
+  only ever holds a placeholder, and OpenShell forwards no request whose
+  body carries one: once a conversation shows a placeholder (the agent ran
+  `env`, say), every later request of that conversation is refused, its
+  model calls and its hooks alike. The key is fine; start a new
+  conversation (`defenseclaw sandbox connect <name>`, without
+  `--continue`). This channel bypasses the egress proxy:
+  OpenShell opens the model hosts to the harness's own program only, and
+  for an npm or Python harness that program is its `node` or `python`
+  interpreter, so a script the agent runs with it reaches the model hosts
+  too. OpenShell still logs those connections, and the hooks judge the tool
+  call that starts the script.
 - **Anything else**, such as a client that ignores the proxy settings, is
   refused by OpenShell, which files a connection request. DefenseClaw
   decides most of those on its own and asks you about the rest.
@@ -81,8 +91,8 @@ lists every step in full, including your organization's settings.
 
 ## Network profiles
 
-Every sandbox runs one policy pack. The built-in packs set the network
-profile and more:
+Every sandbox runs one policy pack. The three built-in packs are named after
+the network profile they set, and they set more:
 
 | Setting | Open (default) | Balanced | Strict |
 | --- | --- | --- | --- |
@@ -93,16 +103,30 @@ profile and more:
 | Your project | Mounted live | Mounted live | Copied |
 | Skip-permissions mode | On | On | Off: the harness keeps its prompts |
 
-Pick one for a run:
+Pick a whole pack for a run with `--pack`, or only its network profile with
+`--profile`:
 
 ```bash
-defenseclaw sandbox run claude --profile balanced
+defenseclaw sandbox run claude --pack balanced
 defenseclaw sandbox run claude --profile strict
 ```
 
-Or set it for every run with `openshell.profile` in
-`~/.defenseclaw/config.yaml`. On a Mac every run works on a copy, whichever
-pack it uses.
+`--pack` applies every row of the table. `--profile` changes only the first
+three rows (web access, the banner and connection requests) and keeps the
+rest of the pack the run uses: `--profile balanced` on the default open pack
+keeps its 25 MiB large-upload alert, the live project, skip-permissions mode
+and the open pack's hook-silence alert. The Policy row of `sandbox status NAME`
+shows both, for example `profile balanced, pack open`. Set them for every run with
+`openshell.pack` and `openshell.profile` in `~/.defenseclaw/config.yaml`. On a
+Mac every run works on a copy, whichever pack it uses.
+
+Claude Code's WebFetch asks `api.anthropic.com` whether each URL is safe
+before it fetches it. `balanced` and `strict` refuse that host, so WebFetch
+fails for every site, not only the one the agent asked for. The feed says
+so the first time (`api.anthropic.com is refused: Claude Code's WebFetch
+asks it …`), and so does the note the agent gets. To use WebFetch, open the
+host for the sandbox with `defenseclaw sandbox unblock api.anthropic.com
+--sandbox <name>`, or add it to your pack's `egress.allow`.
 
 <Callout type="warn" title="The open profile is a deliberate trade-off">
 With `open`, an agent tricked by a prompt injection could send your code to
@@ -167,7 +191,13 @@ which files a request to open it. DefenseClaw decides most of those itself.
 It asks you only about doors into your machine or network (a port on this
 machine, a private address, an intranet name) and about requests OpenShell's
 policy advisor flags. `balanced` also asks about sites outside its
-allowlist, and `strict` about every request.
+allowlist: the proxy refuses the first request and DefenseClaw raises the
+ask, which the agent is told waits for you. Approving it opens the site
+for the sandbox (`approve --always`: for every sandbox, the same as
+`defenseclaw sandbox unblock --always`). Under `allow_unblock: false` you
+can still approve it for the sandbox, but not with `--always`. Your
+organization can take the answer from you (`user_approvals: none`), and
+then there is no ask. `strict` asks about every request.
 
 ```bash
 defenseclaw sandbox approvals --watch
@@ -254,23 +284,75 @@ Each block is told once, and only to the sandbox that hit it.
 
 <Callout type="info" title="The proxy credential in verbose output">
 The proxy address the sandbox gets holds a user name and password of its
-own, so `curl -v` prints a `Proxy-Authorization: Basic …` header, and the
-agent may warn you that a credential leaked. It is not one of your secrets.
+own, so `curl -v` prints a `Proxy-Authorization: Basic …` header, and `env`
+or `printenv` show them in `HTTPS_PROXY` and `HTTP_PROXY`
+(`http://<user>:<password>@…`). The agent may warn you that a credential
+leaked. It is not one of your secrets.
 DefenseClaw makes one for each sandbox; it works only on the egress proxy on
 this machine's loopback address, lets the sandbox reach only what its policy
 allows, and stops working when the sandbox is deleted.
 </Callout>
+
+## Destinations and shadow AI
+
+DefenseClaw keeps a list of every site each sandbox reached or tried to
+reach, through the proxy or around it, and says what each one is: the
+sandbox's model provider, a host of the harness's own vendor, another AI
+provider (shadow AI), a host that looks like an inference endpoint, or an
+ordinary site. Shadow AI is code in the sandbox calling a model the harness
+does not use, with keys of its own. Each shadow AI provider raises a
+`shadow_ai` finding and a ⚠ in the feed once a session: LOW the first time
+the policy refuses it, MEDIUM the first time the sandbox reaches it (a
+refusal and then a contact raise one of each). A vendor's own website (its
+docs, help and status pages, such as `developers.openai.com`) is an ordinary
+site: only its API hosts count as AI.
+
+```text
+⚠ shadow AI: reached api.openai.com (OpenAI)
+```
+
+The list survives daemon restarts and stops and is deleted with the
+sandbox. `defenseclaw sandbox destinations NAME` prints it:
+
+![defenseclaw sandbox destinations myapp-claude on Linux with the process tree on: one shadow AI destination (api.openai.com), the model provider with its model calls, a site the blocklist refused (pastebin.com, a paste site), a source host and a package registry, each with its requests, bytes, the program that connected and its parents, and when it was last seen, and a warning that counts the shadow AI destinations](/images/sandboxes/screens/terminal-destinations.png)
+
+With the process tree on, the program column also shows the connecting
+program's parents (see
+[see what the sandbox runs](/docs/sandboxes/guide#see-what-the-sandbox-runs)).
+In Grafana, the Sandboxes board has a row for these findings:
+
+![Grafana Sandboxes board, Findings and shadow AI row: Findings by kind counts 2 sandbox.shadow_ai findings, the Shadow-AI destinations table lists api.openai.com and api.mistral.ai as LOW with one finding each, and Recent sandbox findings names the sandbox and the host](/images/grafana/sandboxes-findings.png)
 
 ## See what happened
 
 ```bash
 defenseclaw sandbox activity -f
 defenseclaw sandbox status myapp-7f3a
+defenseclaw sandbox destinations myapp-7f3a
 defenseclaw sandbox policy explain
 ```
 
-`activity` is the live feed of sites, blocks, asks and findings. The
-`Egress` row of `status` counts the sites contacted and blocked and the
-bytes sent and received. `policy explain` shows each effective setting and
-the layer it came from: the pack, your config, a run option or your
-organization.
+`activity` is the live feed of sites, blocks, asks and findings. A burst
+of refusals of one site (a retry loop, by one program or several) is one
+line, then, a minute later, one more that counts the repeats of that minute
+(`✗ pypi.org (no OpenShell rule allows it) (and 5 more like it)`; a single
+repeat adds no line); `destinations` counts
+every refusal, and the audit records keep each program's. A refusal on the
+sandbox's own model host is a connection besides the model calls, and its
+line says so (`a connection outside the model channel, which stays open`):
+the provider rule that carries the model calls is not changed by it. The
+exception is a request that carries a credential placeholder (see above):
+its line names the placeholder. The
+`Egress` row of `status` counts the sites contacted and blocked, the
+requests that failed upstream (allowed, and the site refused or dropped
+them, or did not answer: an outage, not a block) and the bytes sent and
+received, and sums up the AI sites. `destinations` lists
+every site with its kind, its requests and refusals, the bytes sent and the
+program that made the connection. `policy explain` shows each effective
+setting and the layer it came from: the pack, your config, a run option or
+your organization.
+
+The records behind these views (an egress record per decision, a second one with
+the bytes and the duration when an allowed connection ends, the findings and the
+health codes) are listed in
+[Sandbox telemetry](/docs/observability/sandbox-telemetry).

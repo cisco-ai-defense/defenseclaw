@@ -54,7 +54,6 @@ search index=defenseclaw_local earliest="{earliest}" latest="{latest}"
   OR sourcetype="otel:metric"
   OR sourcetype="otel:trace"
 )
-| spath
 | table {fields}
 | sort 0 _time
 """.strip().format(fields=" ".join(SEARCH_FIELDS), earliest="{earliest}", latest="{latest}")

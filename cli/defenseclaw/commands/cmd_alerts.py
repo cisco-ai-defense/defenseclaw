@@ -383,6 +383,10 @@ def _finding_facts(
             "connector": _event_connector(e),
             "rule": f"{rule_id}: {title}" if title else rule_id,
             "sandbox": sandbox if sandbox != (target or sandbox) else "",
+            # GAP-0377: what the finding means and what to do, which the
+            # daemon writes and the title (often OpenShell's) does not say.
+            "description": str(structured.get("defenseclaw.finding.description") or "").strip(),
+            "next_step": str(structured.get("defenseclaw.finding.remediation") or "").strip(),
         }
     target = copilot_hook_target(target)
     facts = {
@@ -395,6 +399,8 @@ def _finding_facts(
         "location": _readable_location(structured.get("defenseclaw.finding.location"), target),
         "route": _acp_route(hook_details.get(e.id, [])),
         "path": scanned.get("path", "") if scanned.get("path", "") != target else "",
+        # GAP-0232: a finding raised in a sandbox session names the sandbox.
+        "sandbox": next((s for raw in hook_details.get(e.id, []) if (s := _kv(raw).get("sandbox", ""))), ""),
     }
     return facts
 
@@ -758,7 +764,10 @@ def _alerts_json(app: AppContext, limit: int, connector: str | None) -> None:
         facts = _finding_facts(e, hook_details, targets) or _quarantine_facts(e, targets) or {}
         if facts.get("target"):
             row["target"] = facts["target"]
-        for key in ("decision", "route", "rule", "scanner", "location", "sandbox", "path", "moved_to"):
+        for key in (
+            "decision", "route", "rule", "scanner", "location",
+            "sandbox", "path", "moved_to", "description", "next_step",
+        ):
             if facts.get(key):
                 row[key] = facts[key]
         if "moved_to" in facts:
@@ -807,12 +816,19 @@ def _alerts_default(
     else:
         alert_list = app.store.list_alerts(limit)
 
+    # Detection-only findings are not alerts (#693); say how many the list
+    # leaves out, or "All clear" hides rules that matched calls that ran
+    # (GAP-0176).
+    unlisted = "" if needle or show_idx is not None else _detection_only_note(app.store)
     if not alert_list:
         if needle:
             ux.ok(
                 f"No alerts from connector '{needle}' in the last "
                 f"{max(limit, _CONNECTOR_SCAN_POOL)} events."
             )
+        elif unlisted:
+            ux.ok("No alerts.")
+            click.echo(ux.dim(unlisted))
         else:
             ux.ok("No alerts. All clear.")
         return
@@ -849,7 +865,8 @@ def _alerts_default(
         if facts:
             for key, name in (("decision", "Decision"), ("route", "Route"), ("connector", "Connector"),
                               ("rule", "Rule"), ("scanner", "Scanner"), ("location", "Location"),
-                              ("sandbox", "Sandbox"), ("path", "Path")):
+                              ("sandbox", "Sandbox"), ("path", "Path"), ("description", "Details"),
+                              ("next_step", "Next step")):
                 if facts.get(key):
                     click.echo(f"  {label(name)} {facts[key]}")
         elif quarantined:
@@ -904,6 +921,25 @@ def _alerts_default(
     _render_table(
         alert_list, app.store, connector=needle,
         secure_client=_enterprise_profile(app.cfg) == "secure_client",
+    )
+    if unlisted:
+        click.echo(ux.dim(unlisted))
+
+
+def _detection_only_note(store) -> str:
+    """The line naming the detection-only findings of the last 24 hours, or ""."""
+    from datetime import datetime, timedelta, timezone  # noqa: PLC0415
+
+    try:
+        n = store.count_detection_only_findings(datetime.now(timezone.utc) - timedelta(hours=24))
+    except Exception:  # noqa: BLE001 - an older or busy audit DB only loses the note
+        return ""
+    if not n:
+        return ""
+    what = "1 detection-only finding" if n == 1 else f"{n} detection-only findings"
+    return (
+        f"  {what} of the last 24 hours not listed: a rule matched but could not decide the call. "
+        "`defenseclaw audit export --since 24h` lists them."
     )
 
 

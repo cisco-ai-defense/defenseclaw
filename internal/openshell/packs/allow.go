@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -86,6 +87,9 @@ type Action struct {
 func (e *Effective) Allow(action Action) error {
 	if e == nil {
 		return errors.New("sandbox policy: not resolved")
+	}
+	if e.view {
+		return errViewOnly
 	}
 	switch action.Kind {
 	case ActionUnblock:
@@ -247,6 +251,35 @@ func (e *Effective) blockRefusal(key, host string, dec egress.Decision) *Violati
 	}
 }
 
+// The layers an egress.block entry comes from (Effective.BlockOrigin); the
+// user's own openshell.egress.block is BlockFromConfig.
+const (
+	BlockFromConfig     = "config"
+	BlockFromPack       = "pack"
+	BlockFromRepoPolicy = "repo_policy"
+	BlockFromFirewall   = "firewall"
+)
+
+// BlockOrigin names the layer whose entry puts host on the effective block
+// list, in the order blockVerdict explains a refusal by it: the pack's,
+// the repository policy's, the host egress firewall's deny rules, else the
+// user's own openshell.egress.block. "" when no entry matches.
+func (e *Effective) BlockOrigin(host string) string {
+	if _, ok := firstMatch(e.Egress.Block, host); !ok {
+		return ""
+	}
+	switch {
+	case e.Pack != nil && MatchAnyHost(e.Pack.Egress.Block, host):
+		return BlockFromPack
+	case e.RepoPolicy != nil && MatchAnyHost(e.RepoPolicy.Block, host):
+		return BlockFromRepoPolicy
+	}
+	if _, ok := firstMatch(e.firewallBlock, host); ok {
+		return BlockFromFirewall
+	}
+	return BlockFromConfig
+}
+
 // blockVerdict refuses a host on the block list (the pack's egress.block and
 // openshell.egress.block). The egress proxy applies those entries before any
 // unblock decision, after only the guard and the administrator's lists, so
@@ -257,13 +290,20 @@ func (e *Effective) blockVerdict(key, host string) *Violation {
 	if !ok {
 		return nil
 	}
-	if e.Pack != nil && MatchAnyHost(e.Pack.Egress.Block, host) {
+	switch e.BlockOrigin(host) {
+	case BlockFromPack:
 		return &Violation{
 			Key: key, Source: SourceUser, Attempted: host, Constraint: "pack " + e.Pack.Name,
 			Message: packMessage(e.Pack.Name, key), Detail: host + " matches " + glob + " on the pack's block list",
 		}
-	}
-	if fwGlob, ok := firstMatch(e.firewallBlock, host); ok {
+	case BlockFromRepoPolicy:
+		return &Violation{
+			Key: key, Source: SourceUser, Attempted: host, Constraint: RepoPolicyConstraint,
+			Message: "blocked by the repository policy " + RepoPolicyPath + ": " + key,
+			Detail:  host + " matches " + glob + " on the repository's block list; remove the entry from " + RepoPolicyPath + " to reach it",
+		}
+	case BlockFromFirewall:
+		fwGlob, _ := firstMatch(e.firewallBlock, host)
 		return &Violation{
 			Key: key, Source: SourceUser, Attempted: host, Constraint: "firewall.config_file",
 			Message: "blocked by a deny rule of the host egress firewall: " + key,
@@ -273,8 +313,17 @@ func (e *Effective) blockVerdict(key, host string) *Violation {
 	return &Violation{
 		Key: key, Source: SourceUser, Attempted: host, Constraint: "openshell.egress.block",
 		Message: "blocked by your own openshell.egress.block list: " + key,
-		Detail:  host + " matches " + glob + "; remove the entry to reach it",
+		Detail:  host + " matches " + glob + "; remove the entry to reach it: defenseclaw sandbox policy block --remove " + shellWord(glob),
 	}
+}
+
+// shellWord quotes a block pattern for a command line when a shell would
+// expand it (a wildcard).
+func shellWord(s string) string {
+	if strings.ContainsAny(s, "*?[") {
+		return "'" + s + "'"
+	}
+	return s
 }
 
 // allowApproval gates an OpenShell draft proposal. An approval opens a
@@ -588,8 +637,11 @@ func (e *Effective) hostPortAllowed(port int) error {
 		}
 	}
 	if isFalse(e.admin.AllowHostPorts) {
-		return e.adminViolation(key, attempted, "openshell.admin.allow_host_ports",
-			"host ports cannot be opened to sandboxes")
+		detail := "host ports cannot be opened to sandboxes"
+		if e.floorProfile != "" {
+			detail = "your profile " + e.floorProfile + " doesn't let sandboxes reach ports on this computer"
+		}
+		return e.adminViolation(key, attempted, "openshell.admin.allow_host_ports", detail)
 	}
 	if e.Pack != nil && !e.Pack.MCP.HostPorts {
 		return &Violation{
@@ -606,7 +658,10 @@ func (e *Effective) hostPortAllowed(port int) error {
 // missing project as covered. The path is matched lexically and after
 // resolving symbolic links, and each pattern's literal prefix is matched both
 // as written and resolved, so a symlinked spelling of a covered project still
-// matches.
+// matches. For the run's project, Flags.ProjectReal is matched too: the
+// daemon resolved its links as the user, which this process may not be able
+// to. A "~/" pattern without a home directory to expand it covers every
+// path, toward copy mode.
 func (e *Effective) requiresCopy(path string) string {
 	if path == "" || len(e.admin.RequireCopyFor) == 0 {
 		return ""
@@ -615,7 +670,14 @@ func (e *Effective) requiresCopy(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != candidates[0] {
 		candidates = append(candidates, resolved)
 	}
+	if real := filepath.Clean(e.projectReal); e.projectReal != "" && !slices.Contains(candidates, real) &&
+		(e.project == "" || filepath.Clean(e.project) == candidates[0]) {
+		candidates = append(candidates, real)
+	}
 	for _, pattern := range e.admin.RequireCopyFor {
+		if p := strings.TrimSpace(pattern); e.home == "" && (p == "~" || strings.HasPrefix(p, "~/")) {
+			return p
+		}
 		for _, spelled := range patternSpellings(pattern, e.home) {
 			for _, candidate := range candidates {
 				if matchProjectPath(spelled, candidate, e.home) {

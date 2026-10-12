@@ -5175,6 +5175,14 @@ class SandboxMachineCheck:
     # CLI or gateway one before it installs anything; a "vm-driver" one it
     # fixes with the install's consent (e2fsprogs) or stops on.
     openshell_attention: str = ""
+    # A supported OpenShell older than the release setup installs
+    # (DoctorReport.OpenShellUpgradeAvailable, the report's
+    # ``openshell_upgrade``): it works, and Install OpenShell, off by
+    # default, upgrades it in place.
+    openshell_upgrade: bool = False
+    # The release setup installs (the report's ``openshell_install_version``;
+    # "" from a doctor that does not say).
+    openshell_release: str = ""
 
 
 _DOCTOR_GLYPHS = {"pass": "✓", "warn": "⚠", "fail": "✗"}
@@ -5268,6 +5276,10 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
     attention = "" if needed else next((i for i in _SETUP_STOPS if status(i) == "fail"), "")
     version = str(report.get("cli_version") or "").strip()
     name = f"OpenShell {version}" if version else "OpenShell"
+    release = str(report.get("openshell_install_version") or "").strip()
+    # A supported release older than the one setup installs, which setup
+    # upgrades in place with the install's consent (no by default).
+    upgrade = not needed and not unmanaged and not attention and report.get("openshell_upgrade") is True
     if unmanaged:
         # As setup's machine line marks it (sandboxcli/setup.go), and says
         # what it does with its gateway, naming where that OpenShell is.
@@ -5307,9 +5319,14 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         pass
     elif not needed:
         openshell = f"{name} is installed"
+        if upgrade:
+            # The CLI check says what the newer release fixes.
+            why = detail("openshell-cli").partition("; ")[2]
+            openshell += f"; {why}" if why else ""
+            parts.append(f"⚠ {name} ({release} available)" if release else f"⚠ {name}: an upgrade is available")
         if status("gateway-service") == "warn":
             parts.append(f"⚠ {name}: {detail('gateway-service') or 'gateway service needs attention'}")
-        else:
+        elif not upgrade:
             parts.append(f"✓ {name}")
     elif "not on PATH" in detail("openshell-cli"):
         openshell = "OpenShell is not installed"
@@ -5340,6 +5357,8 @@ def sandbox_machine_check(report: Mapping[str, Any] | None, error: str = "") -> 
         openshell_detail=openshell,
         openshell_unmanaged=unmanaged,
         openshell_attention=attention,
+        openshell_upgrade=upgrade,
+        openshell_release=release,
     )
 
 
@@ -5360,11 +5379,12 @@ def sandbox_wizard_fields(
     Every consent the interactive command asks for is a field here, so the
     wizard runs the command with ``--non-interactive`` and explicit flags:
     the answers are the consent. ``machine`` is the doctor's check of this
-    machine; until it answers, Install OpenShell stays off. On macOS there is
-    no telemetry question: the Homebrew gateway does not read gateway.env,
-    so setup cannot turn OpenShell's telemetry off there. Nor is there a
-    mounts question: setup runs macOS sandboxes in OpenShell MicroVMs, which
-    mount no host folders, so every run there works on a copy.
+    machine; until it answers, Install OpenShell stays off. On macOS the
+    telemetry question names ~/.config/openshell/gateway.env, which the
+    Homebrew service reads; a gateway no Homebrew service runs gets none
+    (setup cannot change its environment). There is no mounts question on
+    macOS: setup runs sandboxes there in OpenShell MicroVMs, which mount no
+    host folders, so every run there works on a copy.
     """
 
     configured = {str(name) for name in (get_config_value(cfg, "openshell.harnesses", []) or [])}
@@ -5419,16 +5439,40 @@ def sandbox_wizard_fields(
     # On macOS setup installs e2fsprogs, which the MicroVM driver formats
     # its disks with, under the same consent as OpenShell (sandboxcli/setup.go).
     e2fsprogs = " Yes also installs e2fsprogs for the MicroVM driver when it is missing (brew install e2fsprogs)."
+    # The release setup installs, as the doctor names it.
+    release = (
+        f"OpenShell {machine.openshell_release}" if machine is not None and machine.openshell_release else "OpenShell"
+    )
     if machine is None:
         machine_line = "Checking this machine… (defenseclaw sandbox doctor)"
-        install, install_hint = "no", f"Install OpenShell 0.1.1 with {installer} if it is missing."
+        install, install_hint = "no", f"Install {release} with {installer} if it is missing."
     elif machine.error:
         machine_line = machine.summary
-        install, install_hint = "no", f"Could not check this machine; yes installs OpenShell 0.1.1 with {installer}."
+        install, install_hint = "no", f"Could not check this machine; yes installs {release} with {installer}."
     elif machine.openshell_needed:
         machine_line = machine.summary
         install = "yes"
-        install_hint = f"{machine.openshell_detail}: yes installs OpenShell 0.1.1 with {installer}."
+        install_hint = f"{machine.openshell_detail}: yes installs {release} with {installer}."
+    elif machine.openshell_upgrade:
+        # It works: the upgrade restarts the shared gateway, so it is off
+        # until the operator turns it on. A restart would stop a running
+        # MicroVM without a flush, so setup keeps the release while one
+        # runs (sandboxcli/setup.go offerOpenShellUpgrade).
+        machine_line = machine.summary
+        install = "no"
+        # The consequence leads: the field hint shows two lines, and the
+        # doctor's reason before it hid the restart even at 200 columns
+        # (GAP-0085).
+        consequence = (
+            "(Homebrew), only while no MicroVM sandbox runs"
+            if macos
+            else "(sudo); the gateway restart drops every running sandbox's connections"
+        )
+        pulls = "" if macos else " Docker first pulls the new supervisor images from ghcr.io."
+        install_hint = (
+            f"Yes upgrades in place to {release} {consequence}. {machine.openshell_detail}.{pulls} "
+            f"It runs {installer}."
+        )
     elif machine.openshell_attention == "vm-driver":
         # Under the install's consent setup installs e2fsprogs and signs
         # the formula's driver (sandboxcli/setup.go prepareMicroVMs).
@@ -5514,16 +5558,23 @@ def sandbox_wizard_fields(
                 "Turning bind mounts on " + restart_note,
                 visible_when=is_setup,
             ),
+        ]
+    # On macOS the Homebrew service reads gateway.env too. A Mac gateway no
+    # Homebrew service runs takes the setting from the environment it was
+    # started with, which setup does not change, so it is not asked there.
+    if not (macos and unmanaged):
+        env_file = "~/.config/openshell/gateway.env, which the Homebrew service reads" if macos else "gateway.env"
+        fields.append(
             WizardFormField(
-                "Disable OpenShell Telemetry",
+                "OpenShell Telemetry Off",
                 "bool",
                 no_flag="--upstream-telemetry",
                 value="yes",
                 default="yes",
-                hint="Turn OpenShell's anonymous usage telemetry off (gateway.env). Changing it " + restart_note,
+                hint=f"Turn OpenShell's anonymous usage telemetry off ({env_file}). Changing it " + restart_note,
                 visible_when=is_setup,
-            ),
-        ]
+            )
+        )
     fields += [
         WizardFormField(
             "Shell Wrappers",
@@ -5560,14 +5611,16 @@ def _sandbox_selected_harnesses(fields: Sequence[WizardFormField]) -> list[str]:
 def _build_sandbox_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     if (wizard_field_value(fields, "Action") or "setup") == "doctor":
         return ("sandbox", "doctor")
-    args = ["sandbox", "setup", "--non-interactive"]
+    args = ["sandbox", "setup"]
+    if wizard_bool_value(fields, "Install OpenShell", "no") == "yes":
+        # First, so the 80-column Will run line shows it (GAP-0085).
+        args.append("--install-openshell")
+    args.append("--non-interactive")
     for name in _sandbox_selected_harnesses(fields):
         args.extend(("--harness", name))
-    if wizard_bool_value(fields, "Install OpenShell", "no") == "yes":
-        args.append("--install-openshell")
     if wizard_bool_value(fields, "Mount Project Folder", "yes") == "no":
         args.append("--no-mounts")
-    if wizard_bool_value(fields, "Disable OpenShell Telemetry", "yes") == "no":
+    if wizard_bool_value(fields, "OpenShell Telemetry Off", "yes") == "no":
         args.append("--upstream-telemetry")
     args.append("--wrappers" if wizard_bool_value(fields, "Shell Wrappers", "no") == "yes" else "--no-wrappers")
     if wizard_bool_value(fields, "Build Images Now", "yes") == "no":
@@ -8618,11 +8671,6 @@ def _openshell_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:
             + ("  — administrator-owned (managed_enterprise)" if managed else "  — edit config.yaml directly"),
         ),
     ]
-    legacy_mode = _value(cfg, "openshell.mode")
-    if legacy_mode:
-        fields.append(
-            _header("Legacy Mode", "openshell.mode", f"{legacy_mode}  — run: defenseclaw sandbox legacy-cleanup --dry-run")
-        )
     summary = "NVIDIA OpenShell sandboxes: the agent sees only the project folder; DefenseClaw judges every call."
     if managed:
         summary += " Administrator-owned (managed_enterprise): read-only."

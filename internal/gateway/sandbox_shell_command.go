@@ -51,8 +51,9 @@ func sandboxShellCommand(ctx context.Context, connectorName, event, toolName, ac
 // inspectSandboxShellToolPolicyCtx is inspectTrustedToolPolicyCtx for a
 // hook tool call, which for a sandbox shell tool call also judges the
 // command on its own. command is the call's command in the plain shell
-// shape and commandTool the tool to judge it as (sandboxShellCommand); with
-// no command it is inspectTrustedToolPolicyCtx.
+// shape and commandTool the tool to judge it as (sandboxShellCommand, or
+// codexPowerShellCommand for a Codex shell call on Windows); with no command
+// it is inspectTrustedToolPolicyCtx.
 //
 // A shell call's arguments reach the trusted-action parser through the
 // connector's projection, which takes out only the arguments it knows with

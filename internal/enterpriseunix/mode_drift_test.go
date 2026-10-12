@@ -280,6 +280,39 @@ func TestRepairRestoresStateFilesAfterARecursiveChownOrChmod(t *testing.T) {
 	}
 }
 
+// GAP-0510: the subprocess shims the gateway writes at start (an upgrade
+// starts the new gateway after the transaction settled the modes) are
+// executable, 0700; verify passes them and ensure keeps them executable.
+func TestStateModesKeepTheGatewayShimsExecutable(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	account := h.accounts.accounts[h.env.Layout.ServiceUser]
+	service := [2]int{account.UID, account.GID}
+	shims := filepath.Join(h.env.Layout.DataDir, gatewayShimsDir)
+	if err := os.Mkdir(h.env.P(shims), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.owners[h.env.P(shims)] = service
+	written := map[string]os.FileMode{filepath.Join(shims, "curl"): 0o700, filepath.Join(shims, "npm"): 0o700, filepath.Join(shims, ".token"): 0o600}
+	for canonical, mode := range written {
+		if err := os.WriteFile(h.env.P(canonical), []byte("x\n"), mode); err != nil {
+			t.Fatal(err)
+		}
+		h.owners[h.env.P(canonical)] = service
+	}
+	requireOK(t, h.run(Options{Action: ActionStatus}))
+	r := h.run(Options{Action: ActionRepair})
+	requireOK(t, r)
+	if containsLine(r.Changes, "restored the owner and mode") {
+		t.Errorf("repair changed the shims: %v", r.Changes)
+	}
+	for canonical, mode := range written {
+		if got := h.mode(canonical); got != mode {
+			t.Errorf("%s is %04o, want %04o", canonical, got, mode)
+		}
+	}
+}
+
 // chmod -R a+rX over the deployment fired the apply trigger, and its
 // transaction rolled back: the rollback put the loosened folder modes back
 // from its snapshot, so runtime stayed 0755 and a standard user could read

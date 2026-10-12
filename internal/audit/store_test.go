@@ -676,12 +676,42 @@ func TestOpenDaemonStoreReportsBlockListsLostWithAnUnreadableStore(t *testing.T)
 // quick_check fails with "Tree 1 page N cell 0: Rowid M out of order". The
 // upgrade rebuilds such a store in place instead of moving it aside.
 func TestOpenDaemonStoreRebuildsADamaged089StoreInPlace(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	write089Store(t, dbPath)
+	breakSchemaRowidOrder(t, dbPath)
+	assertOpenDaemonStoreRebuilds089Store(t, dbPath, "Rowid 127 out of order")
+}
+
+// GAP-1576: the same 0.8.x writers also leave the quarantine_records index
+// ahead of its table in sqlite_schema, which SQLite then refuses on every
+// statement ("orphan index"). Such a store is rebuilt in place too, so the
+// 0.8.10 store a rollback starts can be upgraded again.
+func TestOpenDaemonStoreRebuildsA089StoreWithAnOrphanIndex(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "audit.db")
+	write089Store(t, dbPath)
+	raw, err := sql.Open("sqlite", "file:"+dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{`PRAGMA writable_schema=ON`,
+		`UPDATE sqlite_schema SET rowid = (SELECT max(rowid) + 1 FROM sqlite_schema) WHERE name = 'quarantine_records'`} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = raw.Close()
+	assertOpenDaemonStoreRebuilds089Store(t, dbPath, "orphan index")
+}
+
+// write089Store writes a store the way DefenseClaw 0.8.9 and 0.8.10 left it
+// (their 29 migrations), with one block/allow row.
+func write089Store(t *testing.T, dbPath string) {
+	t.Helper()
 	const released089Migrations = 29
 	if migrations[released089Migrations-1].description !=
 		"runtime assets: add durable connector session provenance state" {
 		t.Fatal("migration 29 is no longer the last 0.8.9 migration")
 	}
-	dbPath := filepath.Join(t.TempDir(), "audit.db")
 	legacy, err := NewStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -702,8 +732,12 @@ func TestOpenDaemonStoreRebuildsADamaged089StoreInPlace(t *testing.T) {
 	if err := legacy.Close(); err != nil { // the last connection checkpoints the WAL into audit.db
 		t.Fatal(err)
 	}
-	breakSchemaRowidOrder(t, dbPath)
+}
 
+// assertOpenDaemonStoreRebuilds089Store opens the damaged store as the daemon
+// does and checks that it was rebuilt in place, its row kept.
+func assertOpenDaemonStoreRebuilds089Store(t *testing.T, dbPath, damage string) {
+	t.Helper()
 	var warn bytes.Buffer
 	store, err := OpenDaemonStore(dbPath, &warn)
 	if err != nil {
@@ -722,7 +756,7 @@ func TestOpenDaemonStoreRebuildsADamaged089StoreInPlace(t *testing.T) {
 		kept != "row-of-0.8.9" {
 		t.Fatalf("0.8.9 row = %q, %v", kept, err)
 	}
-	if !strings.Contains(warn.String(), "Rowid 127 out of order") || !strings.Contains(warn.String(), "rebuilt in place") {
+	if !strings.Contains(warn.String(), damage) || !strings.Contains(warn.String(), "rebuilt in place") {
 		t.Fatalf("warning = %q", warn.String())
 	}
 }
@@ -975,6 +1009,12 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 		('canonical-egress', '2026-07-17T12:00:01Z', 'egress', 'gateway', '',
 		 'INFO', 'network.egress', 'egress.decided',
 		 '{"defenseclaw.network.decision":"block"}', NULL),
+		('harness-fetch', '2026-07-17T12:00:01.5Z', 'sandbox-egress', 'defenseclaw', '',
+		 'INFO', 'network.egress', 'egress.blocked',
+		 '{"defenseclaw.network.decision":"block","defenseclaw.network.decision_code":"SANDBOX_EGRESS_HARNESS_FETCH"}', NULL),
+		('lookup-refused', '2026-07-17T12:00:01.7Z', 'sandbox-egress', 'defenseclaw', '',
+		 'INFO', 'network.egress', 'egress.blocked',
+		 '{"defenseclaw.network.decision":"block","defenseclaw.network.decision_code":"SANDBOX_EGRESS_LOOKUP_REFUSED"}', NULL),
 		('health-error', '2026-07-17T12:00:02Z', 'sink-failure', 'gateway', '',
 		 'ERROR', 'platform.health', 'destination.export_failed', '{}', NULL),
 		('canonical-allow', '2026-07-17T12:00:03Z', 'enforcement', 'gateway', '',
@@ -1006,7 +1046,7 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	}
 	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
 		AlertIDs: []string{
-			"blank-severity-deny", "canonical-deny", "canonical-egress", "health-error", "canonical-allow",
+			"blank-severity-deny", "canonical-deny", "canonical-egress", "harness-fetch", "lookup-refused", "health-error", "canonical-allow",
 			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
 			"legacy-unrelated-high",
 		},

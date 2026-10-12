@@ -22,10 +22,83 @@
 package config
 
 import (
+	"encoding/json"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
+
+	publicschemas "github.com/defenseclaw/defenseclaw/schemas"
 )
+
+// schemaObjectProperties follows path (property names, with $ref resolved at
+// every step) from the v8 config schema root and returns that object's
+// declared property names. It fails the test unless the object is closed.
+func schemaObjectProperties(t *testing.T, path ...string) []string {
+	t.Helper()
+	var schema map[string]any
+	if err := json.Unmarshal(publicschemas.DefenseClawConfigV8Schema(), &schema); err != nil {
+		t.Fatal(err)
+	}
+	defs, _ := schema["$defs"].(map[string]any)
+	resolve := func(node map[string]any) map[string]any {
+		for {
+			ref, ok := node["$ref"].(string)
+			if !ok {
+				return node
+			}
+			next, ok := defs[ref[strings.LastIndex(ref, "/")+1:]].(map[string]any)
+			if !ok {
+				t.Fatalf("unresolvable $ref %q", ref)
+			}
+			node = next
+		}
+	}
+	node := resolve(schema)
+	for _, name := range path {
+		properties, _ := node["properties"].(map[string]any)
+		child, ok := properties[name].(map[string]any)
+		if !ok {
+			t.Fatalf("schema has no property %q along %v", name, path)
+		}
+		node = resolve(child)
+	}
+	if open, isBool := node["additionalProperties"].(bool); !isBool || open {
+		t.Fatalf("schema object %v is not closed", path)
+	}
+	properties, _ := node["properties"].(map[string]any)
+	names := make([]string, 0, len(properties))
+	for name := range properties {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// yamlFieldNames returns the yaml keys of a struct type, sorted.
+func yamlFieldNames(typ reflect.Type) []string {
+	names := []string{}
+	for index := 0; index < typ.NumField(); index++ {
+		name := strings.Split(typ.Field(index).Tag.Get("yaml"), ",")[0]
+		if name != "" && name != "-" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// TestAIRuntimeConfigMatchesTheClosedSchema pins the runtime block's Go keys to
+// the v8 schema. A Go-only key (the retired acquisition and helper_socket) is
+// a setting no config.yaml can carry, because the closed schema rejects it.
+func TestAIRuntimeConfigMatchesTheClosedSchema(t *testing.T) {
+	got := yamlFieldNames(reflect.TypeOf(AIRuntimeConfig{}))
+	want := schemaObjectProperties(t, "ai_discovery", "runtime")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("AIRuntimeConfig yaml keys = %v, schema ai_discovery.runtime = %v", got, want)
+	}
+}
 
 func TestAIRuntimeDefaultsAreAppliedNotZero(t *testing.T) {
 	t.Parallel()

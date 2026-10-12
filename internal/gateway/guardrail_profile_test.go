@@ -923,6 +923,16 @@ func TestExplainNamesWindowsGroupsWithoutAnIdentityRecord(t *testing.T) {
 		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceSSSDInfoPipe, UPN: "bob@corp.example"}) {
 		t.Fatal("SSSD facts without a UPN must await the guardian record, facts with it must not")
 	}
+	// GAP-0575: so is an Open Directory answer without the guardian's UPN or
+	// without its directory (an Active Directory account before the
+	// guardian's record, which Open Directory may list as a local node
+	// account), but not one the record named.
+	if !awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory}) ||
+		!awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryLocal}) ||
+		awaitingSpoolUPN(useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, Directory: useridentity.DirectoryActiveDirectory,
+			UPN: "alice@corp.example.com"}) {
+		t.Fatal("Open Directory facts without a UPN or a directory must await the guardian record, facts the record named must not")
+	}
 	setIdentitySpoolDir("")
 	if spoolRecordNote("S-1-5-21-1-2-3-1104", time.Now()) != "" {
 		t.Fatal("a gateway without a spool has no record to wait for")
@@ -1125,8 +1135,10 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	}
 	set = &guardrailProfileSet{assignments: assignments}
 	time.AfterFunc(50*time.Millisecond, func() { close(slow) })
-	if got := set.healthProfileWarnings(); len(got) != 2 {
-		t.Fatalf("health warnings = %q right after start, want the 2 profile-explain lists", got)
+	// The SID that selects nobody outside Windows is named without a lookup
+	// (GAP-0306).
+	if got := set.healthProfileWarnings(); len(got) != 3 || !strings.Contains(got[0], "is a Windows SID") {
+		t.Fatalf("health warnings = %q right after start, want the SID and the 2 profile-explain lists", got)
 	}
 
 	// GAP-0229: an SSSD that is offline with a cold cache answers "no such
@@ -1140,8 +1152,10 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 		t.Fatalf("warnings = %q while directory lookups fail, want none", got)
 	}
 	directoryCacheHealth = func() identityCacheHealth { return identityCacheHealth{} }
-	if got := profileExplainWarnings(set, profileDecision{}, &profileSubject{LookupFailed: true}); len(got) != 0 {
-		t.Fatalf("warnings = %q for an account whose lookup failed, want none", got)
+	// Only the spelling check that needs no lookup is left (GAP-0306).
+	if got := profileExplainWarnings(set, profileDecision{}, &profileSubject{LookupFailed: true}); len(got) != 1 ||
+		!strings.Contains(got[0], "is a Windows SID") {
+		t.Fatalf("warnings = %q for an account whose lookup failed, want the SID note only", got)
 	}
 	// GAP-0255: the gateway's own lookups work (a local account, or at start
 	// before the first failure) but no group of dclab.test is known, Domain
@@ -1170,6 +1184,55 @@ func TestUnknownAssignmentGroupsAreReported(t *testing.T) {
 	set = &guardrailProfileSet{assignments: assignments}
 	if got := set.unknownGroupWarnings(2 * time.Second); len(got) != 4 {
 		t.Fatalf("warnings = %q once the directory answers, want the 4 absent groups", got)
+	}
+}
+
+// GAP-0306, GAP-0409, GAP-0356: group spellings that select nobody are named
+// without a lookup (a malformed SID everywhere; a SID or a gid outside
+// Windows), and a bare name the host knows as a local group next to the
+// directory group of that name says which one it selects.
+func TestGroupSpellingsThatSelectNobodyWarn(t *testing.T) {
+	assignments := []config.ProfileAssignment{{Profile: "contractors", Match: config.ProfileMatch{
+		Groups: []string{"S-1-5-21-malformed", "S-1-5-21-1-2-3-1105", "2501", "dc-sbx-contractors"}}}}
+	for platform, want := range map[string][]string{
+		"linux":   {`"S-1-5-21-malformed" is not a valid SID`, `"S-1-5-21-1-2-3-1105" is a Windows SID`, `"2501" is a group id`},
+		"darwin":  {`"S-1-5-21-malformed" is not a valid SID`, `"S-1-5-21-1-2-3-1105" is a Windows SID`, `"2501" is a group id`},
+		"windows": {`"S-1-5-21-malformed" is not a valid SID`},
+	} {
+		got := staticGroupWarnings(assignments, platform)
+		if len(got) != len(want) {
+			t.Fatalf("%s: static warnings = %q", platform, got)
+		}
+		for i := range want {
+			if !strings.Contains(got[i], want[i]) || !strings.Contains(got[i], "selects nobody") {
+				t.Fatalf("%s: warning %d = %q, want %q", platform, i, got[i], want[i])
+			}
+		}
+	}
+	exists := func(_ context.Context, name string) (bool, error) { return true, nil }
+	qualify := func(_ context.Context, name string) string {
+		if name == "dc-sbx-contractors" {
+			return "dc-sbx-contractors@dclab.test"
+		}
+		return ""
+	}
+	for platform, selects := range map[string]string{"linux": "local group only", "darwin": "as well as of the directory group"} {
+		got := unknownAssignmentGroupsForOS(context.Background(), assignments, exists, qualify, nil, platform)
+		if len(got) != 1 || !strings.Contains(got[0], `group "dc-sbx-contractors" is a local group of this host`) ||
+			!strings.Contains(got[0], selects) || !strings.Contains(got[0], `write "dc-sbx-contractors@dclab.test"`) {
+			t.Fatalf("%s: lookup warnings = %q", platform, got)
+		}
+	}
+	if got := unknownAssignmentGroupsForOS(context.Background(), assignments, func(_ context.Context, name string) (bool, error) {
+		return name != "S-1-5-21-malformed", nil
+	}, nil, nil, "windows"); len(got) != 0 {
+		t.Fatalf("windows lookup pass named a group the static check names: %q", got)
+	}
+	for sid, valid := range map[string]bool{"S-1-5-21-0-0-0-0": true, "s-1-5-32-544": true, "S-1-12-1-1-2-3-4": true,
+		"S-1-5-21-malformed": false, "S-1-5": false, "S-1--5-21": false, "S-2-5-21-1": false} {
+		if validSIDString(sid) != valid {
+			t.Errorf("validSIDString(%q) = %v, want %v", sid, !valid, valid)
+		}
 	}
 }
 
@@ -1430,6 +1493,185 @@ func TestProfileExplainNamesHookIdentityCacheWindow(t *testing.T) {
 	}
 }
 
+// GAP-0336: after a group change, explain resolved the new profile while its
+// cache block reported the old one with differs: true. Explain's lookup now
+// refreshes the cache the hooks read, so the block states what the hooks use
+// from their next call, and the note says so.
+func TestProfileExplainRefreshesTheHookCache(t *testing.T) {
+	old := time.Now().Add(-12 * time.Minute)
+	clock := old
+	current := useridentity.DirectoryFacts{Groups: []string{"dc-sbx-devs"}, ResolvedAt: old}
+	cache := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) { return current, nil })
+	cache.now = func() time.Time { return clock }
+	if _, ok := cache.get("1201", true); !ok {
+		t.Fatal("seeding the cache failed")
+	}
+	clock = time.Now()
+	current = useridentity.DirectoryFacts{Groups: []string{"dc-sbx-contractors"}, ResolvedAt: clock}
+	explainProfileFromCache(t, cache, "1201", "ent-erin")
+	api := explainTestAPI(t)
+	var out struct {
+		Profile  string         `json:"profile"`
+		Cache    map[string]any `json:"cache"`
+		Warnings []string       `json:"warnings"`
+	}
+	explainTestResolve(t, api, "ent-erin", &out)
+	if out.Profile != "contractors" || out.Cache["profile"] != "contractors" || out.Cache["differs"] != false ||
+		out.Cache["age_seconds"] != float64(0) {
+		t.Fatalf("explain %+v: want the cache block to state the profile the hooks now use", out)
+	}
+	if !slices.ContainsFunc(out.Warnings, func(w string) bool {
+		return strings.Contains(w, "explain refreshed this account's cached identity facts")
+	}) {
+		t.Fatalf("warnings = %q, want the refresh named", out.Warnings)
+	}
+	if facts, _, ok := cache.peek("1201"); !ok || !slices.Equal(facts.Groups, current.Groups) {
+		t.Fatalf("hook cache holds %+v, want the facts explain resolved", facts)
+	}
+}
+
+// GAP-0496, GAP-0517: explain polled during a directory outage stored the
+// facts kept through the failed lookup again, which restarted their hour and
+// cleared the failure, so they were never dropped and directory_lookups_failing
+// came and went. Explain now leaves the cache as its failed lookup left it.
+func TestProfileExplainDuringAnOutageKeepsTheHourOfCachedFacts(t *testing.T) {
+	start := time.Now().Add(-50 * time.Minute)
+	clock := start
+	var down bool
+	cache := newIdentityCache(func(string) (useridentity.DirectoryFacts, error) {
+		if down {
+			return useridentity.DirectoryFacts{}, errors.New("the domain controller does not answer")
+		}
+		return useridentity.DirectoryFacts{Groups: []string{"dc-sbx-devs"}, ResolvedAt: clock}, nil
+	})
+	cache.now = func() time.Time { return clock }
+	cache.maxAge = identityDirectoryMaxAge
+	if _, ok := cache.get("1817", true); !ok {
+		t.Fatal("seeding the cache failed")
+	}
+	down = true
+	explainProfileFromCache(t, cache, "1817", "ent-bob")
+	api := explainTestAPI(t)
+	for i := 0; i < 2; i++ {
+		clock = time.Now().Add(time.Duration(i) * time.Minute)
+		var out struct {
+			Profile  string         `json:"profile"`
+			Cache    map[string]any `json:"cache"`
+			Warnings []string       `json:"warnings"`
+		}
+		explainTestResolve(t, api, "ent-bob", &out)
+		if out.Profile != "engineering" || out.Cache["stale"] != true {
+			t.Fatalf("explain %d %+v: want the stale engineering facts the hooks keep", i, out)
+		}
+		if slices.ContainsFunc(out.Warnings, func(w string) bool { return strings.Contains(w, "explain refreshed") }) {
+			t.Fatalf("warnings = %q: a failed lookup refreshed nothing", out.Warnings)
+		}
+		if _, fetchedAt, ok := cache.peek("1817"); !ok || !fetchedAt.Equal(start) {
+			t.Fatalf("explain %d: cached facts fetched at %v, want %v (their hour must not restart)", i, fetchedAt, start)
+		}
+		if _, _, failing := cache.refreshFailing("1817"); !failing {
+			t.Fatalf("explain %d cleared the failure of the account's lookups", i)
+		}
+	}
+	clock = start.Add(identityDirectoryMaxAge)
+	if _, ok := cache.get("1817", false); ok {
+		t.Fatal("facts kept past maxAge after polled explains")
+	}
+}
+
+// explainProfileFromCache makes explain of name resolve account id through
+// cache, as lookupDirectoryProfileSubject does through the hook cache.
+func explainProfileFromCache(t *testing.T, cache *identityDirectoryCache, id, name string) {
+	t.Helper()
+	prevAccount, prevFacts, prevPeek := profileExplainAccount, profileExplainDirectoryFacts, cachedDirectoryFacts
+	prevLifetime, prevRefresh, prevFailure := cachedDirectoryLifetime, cachedDirectoryRefreshFailure, cachedDirectoryFailure
+	profileExplainAccount = func(string) (string, string, error) { return id, name, nil }
+	profileExplainDirectoryFacts = func(key string) (useridentity.DirectoryFacts, error) { return explainDirectoryFacts(cache, key) }
+	cachedDirectoryFacts, cachedDirectoryLifetime = cache.peek, cache.lifetime
+	cachedDirectoryRefreshFailure, cachedDirectoryFailure = cache.refreshFailing, cache.failing
+	t.Cleanup(func() {
+		profileExplainAccount, profileExplainDirectoryFacts, cachedDirectoryFacts = prevAccount, prevFacts, prevPeek
+		cachedDirectoryLifetime, cachedDirectoryRefreshFailure, cachedDirectoryFailure = prevLifetime, prevRefresh, prevFailure
+	})
+}
+
+// explainTestAPI serves contractors to dc-sbx-contractors and engineering to
+// dc-sbx-devs.
+func explainTestAPI(t *testing.T) *APIServer {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"contractors": {Mode: "action"}, "engineering": {Mode: "observe"}}
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.setGuardrailProfiles(&guardrailProfileSet{base: cfg, profiles: map[string]config.DerivedGuardrailProfile{
+		"contractors": {Digest: "c"}, "engineering": {Digest: "e"}},
+		assignments: []config.ProfileAssignment{
+			{Profile: "contractors", Match: config.ProfileMatch{Groups: []string{"dc-sbx-contractors"}}},
+			{Profile: "engineering", Match: config.ProfileMatch{Groups: []string{"dc-sbx-devs"}}},
+		}})
+	t.Cleanup(func() { api.setGuardrailProfiles(nil) })
+	return api
+}
+
+func explainTestResolve(t *testing.T, api *APIServer, user string, out any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user="+user, nil)
+	req.RemoteAddr = "127.0.0.1:40000"
+	response := httptest.NewRecorder()
+	api.handleGuardrailProfileResolve(response, req)
+	if err := json.Unmarshal(response.Body.Bytes(), out); err != nil {
+		t.Fatalf("explain %s: %v", response.Body.String(), err)
+	}
+}
+
+// GAP-0328: exempt_users skips enrollment and the sandbox requirement, not
+// the profile: explain names the exemption and says the profile still
+// inspects and blocks, matching the account as the hook socket does (by uid
+// or the account database's name).
+func TestProfileExplainNamesTheEnrollmentExemption(t *testing.T) {
+	previous := profileExplainSubjectLookup
+	profileExplainSubjectLookup = func(string) (profileSubject, error) {
+		return profileSubject{UserID: "1916801104", UserName: "ent-alice", accountName: "ent-alice@dclab.test"}, nil
+	}
+	t.Cleanup(func() { profileExplainSubjectLookup = previous })
+	cfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	cfg.Enterprise.Profile = "standalone"
+	cfg.Enterprise.Enrollment.ExemptUsers = []string{"ent-alice@dclab.test"}
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"contractors": {Mode: "action"}}
+	if !cfg.StandaloneEnterprise() {
+		t.Skip("standalone profile name changed")
+	}
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+	api.setGuardrailProfiles(&guardrailProfileSet{base: cfg, profiles: map[string]config.DerivedGuardrailProfile{"contractors": {Digest: "c"}},
+		defaultProfile: "contractors"})
+	t.Cleanup(func() { api.setGuardrailProfiles(nil) })
+	explain := func() string {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/guardrail/profiles/resolve?user=ent-alice", nil)
+		req.RemoteAddr = "127.0.0.1:40000"
+		response := httptest.NewRecorder()
+		api.handleGuardrailProfileResolve(response, req)
+		return response.Body.String()
+	}
+	if body := explain(); !strings.Contains(body, `"enrollment":{"exempt":true}`) || !strings.Contains(body, "still inspected under the profile above") {
+		t.Fatalf("explain of an exempt account: %s", body)
+	}
+	// Without directory facts that confirm the account, a bare name is not
+	// this account's name.
+	cfg.Enterprise.Enrollment.ExemptUsers = []string{"ent-alice"}
+	if body := explain(); strings.Contains(body, "exempt") {
+		t.Fatalf("explain names an exemption the hook socket would not apply: %s", body)
+	}
+	// With them, the bare name exempts the SSSD account as the hook socket
+	// does (GAP-0494).
+	profileExplainSubjectLookup = func(string) (profileSubject, error) {
+		return profileSubjectFromVerified(VerifiedSubject{UserID: "1916801104", UserName: "ent-alice@dclab.test",
+			Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Source: useridentity.SourceSSSD,
+				Domain: "dclab.test", AccountDomain: "DCLAB", ResolvedAt: time.Now()}}, false), nil
+	}
+	if body := explain(); !strings.Contains(body, `"enrollment":{"exempt":true}`) {
+		t.Fatalf("explain of an account a bare exempt_users entry names: %s", body)
+	}
+}
+
 func TestProfileExplainWarnsBareGroupMayMatchAnotherDomain(t *testing.T) {
 	note := shortNameGroupNote(profileDecision{Match: profileMatchGroup, MatchedGroup: "dc-ew-twin", Assignment: 1})
 	if !strings.Contains(note, "same-named group in another domain") || runtime.GOOS != "windows" && (strings.Contains(note, "SID") || strings.Contains(note, `DOMAIN\name`)) {
@@ -1499,6 +1741,84 @@ func TestProfileQualifiedUserMatchesVerifiedAccountDomain(t *testing.T) {
 	if !userEntryMatches(&local, "WS01\\dcw-ew1") || !userEntryMatches(&local, ".\\dcw-ew1") ||
 		!userEntryMatches(&entra, "AzureAD\\EntraAlice") || userEntryMatches(&entra, ".\\EntraAlice") {
 		t.Fatal("COMPUTER\\user and .\\user must select the local account, AzureAD\\name the Entra ID account, and .\\ no Entra account")
+	}
+}
+
+// PM-13: a bare users entry selects the directory account of that name and
+// never a local namesake, which falls to default_profile on Linux (SSSD next
+// to /etc/passwd), Windows (the domain next to the computer's SAM) and macOS
+// (an AD account next to the local node). The local account is selected by
+// its uid or SID, or as .\name (GAP-0305, GAP-0313, GAP-0418).
+func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
+	previous := identityFactsEnabled.Load()
+	setIdentityFactsEnabled(true)
+	t.Cleanup(func() { setIdentityFactsEnabled(previous) })
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"contractors": {Mode: "action"}, "floor": {Mode: "observe"}}
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
+		{Profile: "contractors", Match: config.ProfileMatch{Users: []string{"ent-alice"}}},
+	}
+	cfg.Guardrail.DefaultProfile = "floor"
+	set, err := newGuardrailProfileSet(cfg, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for _, tc := range []struct {
+		name           string
+		domain, local  VerifiedSubject
+		localSelectors []string
+	}{
+		{
+			name: "linux",
+			domain: VerifiedSubject{UserID: "1916801104", UserName: "ent-alice@dclab.test", Directory: useridentity.DirectoryFacts{
+				Directory: useridentity.DirectoryActiveDirectory, Source: useridentity.SourceSSSD, Domain: "dclab.test",
+				AccountDomain: "DCLAB", Assurance: useridentity.AssuranceVerified, ResolvedAt: now}},
+			local: VerifiedSubject{UserID: "2500", UserName: "ent-alice", Directory: useridentity.DirectoryFacts{
+				Directory: useridentity.DirectoryLocal, Source: useridentity.SourceNSSFiles, Assurance: useridentity.AssuranceVerified,
+				ResolvedAt: now}},
+			localSelectors: []string{"2500", `.\ent-alice`},
+		},
+		{
+			name: "windows",
+			domain: VerifiedSubject{UserID: "S-1-5-21-1-2-3-4076", IDKind: useridentity.KindWindowsSID, UserName: `DCLAB\ent-alice`,
+				Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory, Source: useridentity.SourceWindowsLSA,
+					Domain: "dclab.test", AccountDomain: "DCLAB", ResolvedAt: now}},
+			local: VerifiedSubject{UserID: "S-1-5-21-9-9-9-1116", IDKind: useridentity.KindWindowsSID, UserName: `WS01\ent-alice`,
+				Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryLocal, Source: useridentity.SourceWindowsLSA,
+					AccountDomain: "WS01", ResolvedAt: now}},
+			localSelectors: []string{"S-1-5-21-9-9-9-1116", `.\ent-alice`, `WS01\ent-alice`},
+		},
+		{
+			name: "macos",
+			domain: VerifiedSubject{UserID: "2027364327", UserName: "ent-alice", Directory: mergeSpoolFacts(
+				useridentity.DirectoryFacts{Source: useridentity.SourceMacOSOpenDirectory, ResolvedAt: now},
+				enterprisehooks.IdentitySpoolRecord{AccountDomain: "DCLAB", Facts: useridentity.DirectoryFacts{
+					Directory: useridentity.DirectoryActiveDirectory, Domain: "dclab.test"}})},
+			local: VerifiedSubject{UserID: "502", UserName: "ent-alice", Directory: useridentity.DirectoryFacts{
+				Directory: useridentity.DirectoryLocal, Source: useridentity.SourceMacOSOpenDirectory, ResolvedAt: now}},
+			localSelectors: []string{"502", `.\ent-alice`},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			domain := profileSubjectFromVerified(tc.domain, true)
+			local := profileSubjectFromVerified(tc.local, true)
+			if got := set.match(&domain, profileSubjectVerified, "claudecode", ""); got.Name != "contractors" || got.Match != profileMatchUser {
+				t.Fatalf("directory account: %+v, want contractors by user", got)
+			}
+			if got := set.match(&local, profileSubjectVerified, "claudecode", ""); got.Name != "floor" || got.Match != profileMatchDefault {
+				t.Fatalf("local namesake: %+v, want the default profile", got)
+			}
+			for _, entry := range tc.localSelectors {
+				if !userEntryMatches(&local, entry) {
+					t.Errorf("%q does not select the local account", entry)
+				}
+				if userEntryMatches(&domain, entry) {
+					t.Errorf("%q selects the directory account", entry)
+				}
+			}
+		})
 	}
 }
 
@@ -1686,6 +2006,15 @@ func TestVerifiedUIDAssignmentSurvivesDirectoryFailure(t *testing.T) {
 	subject := &profileSubject{UserID: "1001", LookupFailed: true}
 	if got := set.matchUncached(subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchUser {
 		t.Fatalf("verified UID selected %+v; want strict user assignment", got)
+	}
+}
+
+// Only a standalone Windows set keeps group SIDs; on any other set explain's
+// matched-group lookup must find none, not dereference the nil table.
+func TestProfileGroupSIDsNilSetHasNoSID(t *testing.T) {
+	var sids *profileGroupSIDs
+	if sid, ok := sids.sid("team"); ok || sid != "" {
+		t.Fatalf("nil SID table gave %q, %v", sid, ok)
 	}
 }
 
@@ -1888,6 +2217,28 @@ func TestWindowsNumericGroupNameMatchesResolvedSID(t *testing.T) {
 		Groups: []string{"S-1-5-21-860-1-2-1234"}}
 	if got := set.match(intended, profileSubjectVerified, "codex", ""); got.Name != "tooling" || got.Match != profileMatchGroup {
 		t.Fatalf("resolved numeric group selected %+v, want tooling group assignment", got)
+	}
+}
+
+// TestWildcardAssignmentEntriesWarn pins GAP-0497: users: ["*"] selects
+// nobody, as groups: ["*"] does, and both are named as patterns without a
+// lookup, once each; the lookup checks skip them.
+func TestWildcardAssignmentEntriesWarn(t *testing.T) {
+	assignments := []config.ProfileAssignment{{Profile: "engineering", Match: config.ProfileMatch{Users: []string{"*"}}},
+		{Profile: "contractors", Match: config.ProfileMatch{Groups: []string{`DCLAB\dc-sbx-*`}}}}
+	for _, platform := range []string{"linux", "darwin", "windows"} {
+		got := staticGroupWarnings(assignments, platform)
+		if len(got) != 2 || !strings.Contains(got[0], `assignment 1: users entry "*" is not a pattern`) ||
+			!strings.Contains(got[1], `assignment 2: group "DCLAB\\dc-sbx-*" is not a pattern`) {
+			t.Fatalf("%s: static warnings = %q", platform, got)
+		}
+	}
+	absent := func(context.Context, string) (bool, error) { return false, nil }
+	if got := unknownAssignmentGroupsForOS(context.Background(), assignments, absent, nil, nil, "linux"); len(got) != 0 {
+		t.Fatalf("lookup warnings = %q, want none for a pattern", got)
+	}
+	if userEntryNeedsAccountCheck("*") || userEntryNeedsAccountCheck(`DCLAB\ent-?`) {
+		t.Fatal("a pattern users entry is looked up")
 	}
 }
 

@@ -451,16 +451,22 @@ def test_cli_exit_codes(data_dir: Path, recorded: list[str]) -> None:
 
 def test_upgrade_names_hooks_that_now_fail_open(data_dir: Path, recorded: list[str]) -> None:
     # 0.8.x sealed the global fail mode into observe-mode hooks.
-    _write_config(data_dir, "config_version: 8\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
+    _write_config(data_dir, "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: closed\n")
     lock = {"connectors": {"claudecode": {"hook_fail_mode": "closed"}, "codex": {"hook_fail_mode": "open"}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
 
-    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir)])
+    result = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir), "--from-version", "0.8.4"])
 
     assert result.exit_code == 0, result.output
     assert "claudecode hooks now fail open" in result.output
     assert "defenseclaw setup claudecode --mode action" in result.output
     assert "codex" not in result.output
+
+    # GAP-0276: a reinstall of a current config migrates nothing and says nothing.
+    again = CliRunner().invoke(migrate_cmd, ["--data-dir", str(data_dir)])
+    assert again.exit_code == 0, again.output
+    assert "Configuration is current" in again.output
+    assert "fail open" not in again.output
 
 
 def test_upgrade_cursor_action_does_not_report_observe_fail_open(data_dir: Path, recorded: list[str]) -> None:
@@ -565,6 +571,42 @@ def test_windows_agent_selection_keeps_the_agents_it_found(data_dir: Path, monke
     out = capsys.readouterr().out
     assert r"selected C:\codex\codex.exe for the codex connector" in out
     assert "run 'defenseclaw setup hermes'" in out
+
+
+def test_0x_windows_hook_credentials_get_a_private_dacl(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0364: 0.8.10 left hook credentials with an inherited DACL, which
+    # setup rotate-token refused after the upgrade, naming no file. Only a
+    # file nobody untrusted can read is sealed; an exposed one is left.
+    import click
+    from defenseclaw import file_permissions
+    from defenseclaw.commands import cmd_setup
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    for name in (".hook-openclaw.token", ".otlp-codex.token", ".hook-exposed.token", ".hook-ok.token", ".hookcfg.lock"):
+        (hooks / name).write_text("x", encoding="utf-8")
+    exposed = str(hooks / ".hook-exposed.token")
+
+    def custody(path, *, allow_inheritable=False):
+        name = os.path.basename(path)
+        if name == ".hook-ok.token" or (allow_inheritable and name != ".hook-exposed.token"):
+            return None
+        return "ACL grants read access to untrusted SID S-1-5-32-545" if allow_inheritable else "Windows DACL is inheritable"
+
+    sealed: list[str] = []
+    monkeypatch.setattr(file_permissions, "windows_acl_custody_confidentiality_error", custody)
+    monkeypatch.setattr(file_permissions, "protect_private_file", lambda path: sealed.append(os.path.basename(path)))
+    monkeypatch.setattr(os, "name", "nt")
+
+    migrations._seal_windows_hook_credentials(str(tmp_path))
+
+    assert sealed == [".hook-openclaw.token", ".otlp-codex.token"]
+    monkeypatch.setattr(cmd_setup, "windows_acl_custody_confidentiality_error", custody)
+    monkeypatch.setattr(cmd_setup, "reject_reparse_path", lambda _path: None)
+    with pytest.raises(click.ClickException) as refused:
+        cmd_setup._rotate_token_hook_metadata(exposed)
+    assert f"The connector hook credential {exposed} is not private (Windows DACL is inheritable)" in refused.value.message
+    assert f'icacls "{exposed}" /inheritance:r' in refused.value.message
 
 
 def test_v8_preflight_converts_without_the_retired_0_5_0_keys(data_dir: Path, monkeypatch) -> None:

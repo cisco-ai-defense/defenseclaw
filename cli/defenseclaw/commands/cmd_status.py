@@ -30,7 +30,7 @@ from pathlib import Path
 import click
 
 from defenseclaw import ux
-from defenseclaw.config import config_path, legacy_standalone_configured
+from defenseclaw.config import config_path
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
@@ -358,18 +358,13 @@ def status(app: AppContext, as_json: bool) -> None:
     _status_row("Scope", _connector_scope_text(cfg))
     ux.echo()
 
-    # Sandbox. The legacy openshell-sandbox mode was removed; a host that
-    # still carries its config is pointed at the cleanup command.
-    if legacy_standalone_configured(cfg):
-        _status_row(
-            "Sandbox",
-            ux._style("legacy install detected", fg="yellow")
-            + ux.dim(" (run: defenseclaw sandbox legacy-cleanup)"),
-        )
+    if _host_is_windows():
+        # The platform wins over openshell.enabled, which a team config can
+        # carry from Linux or macOS (GAP-0246).
+        note = " (openshell.enabled has no effect here)" if _sandboxes_enabled(cfg) else ""
+        _status_row("Sandbox", ux.dim("not supported on Windows" + note))
     elif _sandboxes_enabled(cfg):
         _status_row("Sandbox", ux._style("on", fg="green") + ux.dim(" (details: defenseclaw sandbox status)"))
-    elif _host_is_windows():
-        _status_row("Sandbox", ux.dim("not supported on Windows"))
     else:
         _status_row("Sandbox", ux.dim("off (set up with: defenseclaw sandbox setup)"))
 
@@ -1723,7 +1718,6 @@ def _status_payload(app) -> dict:
             "sandbox": {
                 "available": False,
                 "enabled": _sandboxes_enabled(cfg),
-                "legacy_standalone": legacy_standalone_configured(cfg),
             },
             "scanners": _scanner_status_map(cfg),
         }

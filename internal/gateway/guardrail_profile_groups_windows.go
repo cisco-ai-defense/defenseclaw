@@ -12,6 +12,8 @@ import (
 	"strings"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
 // profileGroupExists asks the LSA whether a group named in an assignment
@@ -76,9 +78,32 @@ var bareGroupsDirectorySilent func(context.Context) bool
 // assignment names a group as DOMAIN\\name or by its SID.
 var profileGroupQualifiedName = func(context.Context, string) string { return "" }
 
-// profileUserEntryUnmatched has nothing to report on Windows, where the LSA
-// names every account DOMAIN\name and the entry is matched against that.
-func profileUserEntryUnmatched() func(context.Context, string) string { return nil }
+// profileUserEntryUnresolved has nothing to add on Windows: the LSA names
+// every account DOMAIN\name, and an entry it cannot name says nothing about
+// the domain.
+func profileUserEntryUnresolved() func(ctx context.Context, domain string, err error) string {
+	return func(context.Context, string, error) string { return "" }
+}
+
+// matchedGroupSource says whether the group an assignment matched by is a
+// local group of this computer (BUILTIN or one of its own SAM) or a
+// directory group, for explain (GAP-0356); "" while the name has no SID.
+func matchedGroupSource(set *guardrailProfileSet, _ *profileSubject, group string) string {
+	sid := strings.ToUpper(strings.TrimSpace(group))
+	if profileGroupNeedsSID(sid) {
+		var ok bool
+		if set == nil {
+			return ""
+		}
+		if sid, ok = set.groupSIDs.sid(group); !ok {
+			return ""
+		}
+	}
+	if strings.HasPrefix(sid, "S-1-5-32-") || enterprisehooks.WindowsLocalAccountSID(sid) {
+		return "local"
+	}
+	return "directory"
+}
 
 // accountGroupIDs lists an OS account's group SIDs.
 var accountGroupIDs = func(account *osuser.User) ([]string, error) { return account.GroupIds() }

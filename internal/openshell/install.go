@@ -31,6 +31,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -55,6 +56,27 @@ var (
 	// installs the nvidia/openshell Homebrew formula; Homebrew's output
 	// says why.
 	ErrHomebrewInstall = errors.New("openshell: Homebrew could not install the nvidia/openshell formula")
+	// ErrUnmanagedUpgrade means Upgrade found a supported CLI that NVIDIA's
+	// installer did not install, and would not replace.
+	ErrUnmanagedUpgrade = errors.New("openshell: DefenseClaw upgrades only an OpenShell that NVIDIA's installer installed")
+	// ErrSandboxesRunning means Upgrade ran nothing: sandboxes run (or may
+	// run) on a gateway whose driver's stop keeps only what they synced (the
+	// MicroVM driver). NVIDIA's script restarts the gateway, which stops
+	// them, only after its downloads and the install, so a flush before the
+	// script would leave all they wrote meanwhile to be lost.
+	ErrSandboxesRunning = errors.New("openshell: the upgrade's gateway restart would stop running MicroVM sandboxes without a flush")
+	// ErrRuntimeImages means Upgrade ran nothing: Docker could not pull the
+	// release's supervisor images (Installer.PrepareUpgrade), without which
+	// the restarted gateway's docker driver does not start.
+	ErrRuntimeImages = errors.New("openshell: Docker could not pull the images the upgraded gateway starts with")
+	// ErrHomebrewPrefix means this account cannot write to the Homebrew
+	// prefix (HomebrewPrefixError): Homebrew installs formulas only as the
+	// account that owns it. Nothing was downloaded or run.
+	ErrHomebrewPrefix = errors.New("openshell: this account cannot install Homebrew formulas")
+	// ErrSudo means the install could not use sudo, which NVIDIA's
+	// installer needs on Linux to install the openshell package. Nothing
+	// was installed or downloaded by the script.
+	ErrSudo = errors.New("openshell: the install needs sudo")
 )
 
 // linuxPackageCLI is where the deb and rpm packages install the CLI.
@@ -217,12 +239,61 @@ type Installer struct {
 	// XcodeApp is the Xcode.app Homebrew checks (default XcodeApp), whose
 	// version a failed install on a Mac reports (HomebrewInstallError).
 	XcodeApp string
+	// PrepareUpgrade readies the gateway for the restart of an upgrade to
+	// release. It runs after consent, right before Upgrade runs the script,
+	// which restarts the gateway only once it has downloaded and installed
+	// the release; an error stops the upgrade with nothing run (default:
+	// discover the Discover registration, dial it and PrepareUpgrade, with
+	// the images gateway.toml leaves to the release: RuntimeImages).
+	PrepareUpgrade func(ctx context.Context, release Version) error
+	// Geteuid is the caller's uid (default os.Geteuid): root needs no sudo.
+	Geteuid func() int
+	// HomebrewPrefixProblem says, on a Mac, why Homebrew cannot install a
+	// formula as this account (a HomebrewPrefixError), nil when it can
+	// (default: the folders Homebrew writes under homebrewPrefix).
+	HomebrewPrefixProblem func() error
 	// BrewPrefix is the Homebrew prefix NVIDIA's script installs into on a
 	// Mac (default: HOMEBREW_PREFIX, else the brew LookPath finds, else
 	// /opt/homebrew). Writable reports whether this account can create
 	// entries in a directory (default: access(2)).
 	BrewPrefix string
 	Writable   func(dir string) bool
+}
+
+// HomebrewPrefixError is ErrHomebrewPrefix: Path, a folder Homebrew writes
+// to tap and install a formula, is not writable by this account; Owner
+// owns it.
+type HomebrewPrefixError struct {
+	Prefix, Path, Owner string
+}
+
+func (e *HomebrewPrefixError) Error() string {
+	owner := ""
+	if e.Owner != "" {
+		owner = ", which " + e.Owner + " owns,"
+	}
+	return fmt.Sprintf("openshell: this account cannot write to %s%s so Homebrew at %s cannot install the nvidia/openshell formula as this account", e.Path, owner, e.Prefix)
+}
+
+func (e *HomebrewPrefixError) Is(target error) bool { return target == ErrHomebrewPrefix }
+
+// homebrewPrefixProblem checks the folders under prefix Homebrew writes to
+// when it taps a repository (Library/Taps, else Library) and installs a
+// formula (Cellar). One that does not exist is not judged.
+func homebrewPrefixProblem(prefix string, writable func(string) bool) error {
+	for _, candidates := range [][]string{{filepath.Join(prefix, "Library", "Taps"), filepath.Join(prefix, "Library")}, {filepath.Join(prefix, "Cellar")}} {
+		for _, dir := range candidates {
+			info, err := os.Stat(dir)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+			if !writable(dir) {
+				return &HomebrewPrefixError{Prefix: prefix, Path: dir, Owner: ownerName(info)}
+			}
+			break
+		}
+	}
+	return nil
 }
 
 func (i *Installer) defaults() {
@@ -285,6 +356,41 @@ func (i *Installer) defaults() {
 	if i.MaxScriptBytes <= 0 {
 		i.MaxScriptBytes = 1 << 20
 	}
+	if i.PrepareUpgrade == nil {
+		i.PrepareUpgrade = i.prepareUpgrade
+	}
+	if i.Geteuid == nil {
+		i.Geteuid = os.Geteuid
+	}
+	if i.HomebrewPrefixProblem == nil {
+		i.HomebrewPrefixProblem = func() error { return homebrewPrefixProblem(homebrewPrefix(), dirWritable) }
+	}
+}
+
+// checkSudo makes sure, before the script runs, that sudo will let it
+// install the openshell package (Linux): at once when sudo needs no
+// password, else with sudo's own password prompt now, which then lasts
+// for the script. A refused or cancelled prompt, or no sudo, is ErrSudo,
+// with nothing installed.
+func (i *Installer) checkSudo(ctx context.Context) error {
+	if i.GOOS != "linux" || i.Geteuid() == 0 {
+		return nil
+	}
+	_, err := i.Runner.Output(ctx, Command{Name: "sudo", Args: []string{"-n", "true"}, Timeout: 15 * time.Second})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, exec.ErrNotFound):
+		return fmt.Errorf("%w, which is not installed here", ErrSudo)
+	}
+	fmt.Fprintln(i.Out, "  sudo asks for your password now, before anything is installed:")
+	if err := i.Runner.Run(ctx, Command{Name: "sudo", Args: []string{"-v"}}); err != nil {
+		if errors.Is(err, ErrInterrupted) || ctx.Err() != nil {
+			return fmt.Errorf("%w: cancelled at sudo's password prompt", ErrSudo)
+		}
+		return fmt.Errorf("%w, which did not accept this account (%v)", ErrSudo, err)
+	}
+	return nil
 }
 
 // Install runs the flow: detect an existing CLI, download the pinned
@@ -292,8 +398,23 @@ func (i *Installer) defaults() {
 // disk before that), print the plan, get consent (and, for a pre-0.0.37
 // install, a separate confirmation), run the script with
 // OPENSHELL_VERSION pinned, then verify `openshell --version` and the
-// gateway.
+// gateway. A supported CLI is kept as it is: nothing is downloaded or run.
 func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
+	return i.install(ctx, false)
+}
+
+// Upgrade is Install, but a supported CLI older than Release is upgraded
+// in place too: NVIDIA's installer installs the release's package (on a
+// Mac, reinstalls the Homebrew formula), then restarts the gateway, so
+// PrepareUpgrade runs first. It never downgrades (a CLI of Release or
+// later is kept), and it refuses a CLI the install would not replace, one
+// installed another way than NVIDIA's installer (ErrUnmanagedUpgrade):
+// that one is upgraded the way it was installed.
+func (i *Installer) Upgrade(ctx context.Context) (*InstallResult, error) {
+	return i.install(ctx, true)
+}
+
+func (i *Installer) install(ctx context.Context, upgrade bool) (*InstallResult, error) {
 	i.defaults()
 	if err := CheckPlatform(i.GOOS); err != nil {
 		return nil, err
@@ -306,16 +427,35 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	}
 	existing := i.findExisting(ctx)
 	plan := &InstallPlan{Release: i.Release, URL: i.URL, SHA256: i.SHA256, Existing: existing, GOOS: i.GOOS, ConfigDir: i.configDir()}
+	// upgrading: a supported CLI older than the release, which Upgrade
+	// replaces in place.
+	upgrading := false
+	target, targetErr := ParseVersion(i.Release)
 	if existing != nil && existing.Version != (Version{}) {
 		v := existing.Version
 		if err := CheckSupported(v); err == nil {
-			return &InstallResult{Plan: plan, CLIVersion: v}, nil
+			if !upgrade || targetErr != nil || v.Compare(target) >= 0 {
+				return &InstallResult{Plan: plan, CLIVersion: v}, nil
+			}
+			if i.staleCLIRemoval(existing) != "" {
+				// The package (the formula) would install the release
+				// beside it, and the old CLI would still answer.
+				return nil, fmt.Errorf("%w: OpenShell %s at %s was installed another way, which NVIDIA's installer does not replace; upgrade it to %s the way you installed it",
+					ErrUnmanagedUpgrade, v, existing.Path, target)
+			}
+			upgrading = true
 		}
 		if v.Compare(mustParse(SupportedBelow)) >= 0 {
 			return nil, &ErrUnsupportedVersion{Found: v}
 		}
 	}
 	plan.BreakingUpgrade = existing != nil && (existing.Version == (Version{}) || existing.Version.Compare(mustParse(breakingReleaseFloor)) < 0)
+	if i.GOOS == "darwin" {
+		// NVIDIA's script taps and installs with Homebrew as this account.
+		if err := i.HomebrewPrefixProblem(); err != nil {
+			return nil, err
+		}
+	}
 
 	// The script runs Homebrew as you: a prefix that belongs to another
 	// account fails it partway with a permission error, so say so first.
@@ -355,6 +495,16 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	}
 	if existing != nil && !plan.BreakingUpgrade {
 		plan.Notes = append(plan.Notes, fmt.Sprintf("upgrades the installed %s to %s in place", existing.RawVersion, i.Release))
+	}
+	switch {
+	case upgrading && i.GOOS == "darwin":
+		// A Mac runs sandboxes in MicroVMs, which the restart stops.
+		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway once the release is installed, which stops every MicroVM sandbox on it",
+			"before the script: nothing runs while a MicroVM sandbox does (the restart would stop it without a flush)")
+	case upgrading:
+		plan.Notes = append(plan.Notes, "the script restarts the OpenShell gateway once the release is installed, which drops the connections of every sandbox on it",
+			"before the script: on the docker driver, Docker pulls the release's supervisor images from ghcr.io (the restarted gateway does not start without them); "+
+				"on the MicroVM driver, nothing runs while a sandbox does (the restart would stop it without a flush)")
 	}
 	if i.GOOS == "darwin" && e2fsprogsIn(i.E2fsprogsDirs) == "" {
 		// Setup offers it once OpenShell is installed only where the
@@ -400,6 +550,14 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	if !ok {
 		return nil, ErrInstallDeclined
 	}
+	if err := i.checkSudo(ctx); err != nil {
+		return nil, err
+	}
+	if upgrading {
+		if err := i.PrepareUpgrade(ctx, target); err != nil {
+			return nil, err
+		}
+	}
 
 	// An old keg is already present during an upgrade. Only a change made
 	// by this invocation shows that the formula installation completed.
@@ -425,13 +583,17 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 					return &InstallResult{Plan: plan, Installed: true, CLIVersion: after.Version}, nil
 				}
 			}
-			return nil, ErrBrewNeedsTerminal
+			return nil, ErrBrewServicesTmux
 		}
 		_, _ = i.Out.Write(output)
 	} else {
 		runErr = i.Runner.Run(ctx, command)
 	}
 	if err := runErr; err != nil {
+		if errors.Is(err, ErrInterrupted) {
+			return nil, fmt.Errorf("openshell: the installer was interrupted and may have done part of its work; "+
+				"`defenseclaw sandbox doctor` shows what is there, and `defenseclaw sandbox setup` runs it again: %w", err)
+		}
 		if i.GOOS == "darwin" && ctx.Err() == nil {
 			// Homebrew printed why. Most often it would not build the
 			// formula (NVIDIA's tap has no bottle for this macOS) with an
@@ -446,6 +608,9 @@ func (i *Installer) Install(ctx context.Context) (*InstallResult, error) {
 	after, err := i.installedCLI(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if upgrading && after.Version.Compare(target) < 0 {
+		return nil, fmt.Errorf("openshell: the installer finished, but the CLI at %s still reports %q, not %s", after.Path, after.RawVersion, target)
 	}
 	if err := i.VerifyGateway(ctx); err != nil {
 		return nil, fmt.Errorf("openshell: %s installed but the gateway is not healthy: %w", after.Version, err)
@@ -490,6 +655,115 @@ func (i *Installer) checkBrewWritable() error {
 func (i *Installer) ResignVMDriver(ctx context.Context) error {
 	i.defaults()
 	return brew(ctx, i.Runner, "postinstall", GatewayFormula)
+}
+
+// prepareUpgrade is PrepareUpgrade on the gateway of i.Discover, whose
+// gateway.toml (in Discover.ConfigDir) may name its own runtime images. A
+// gateway that cannot be reached runs no sandbox the restart could stop.
+func (i *Installer) prepareUpgrade(ctx context.Context, release Version) error {
+	reg, err := Discover(i.Discover)
+	if err != nil {
+		return nil
+	}
+	c, err := Dial(reg, ClientOptions{RPCTimeout: 10 * time.Second})
+	if err != nil {
+		return nil
+	}
+	defer c.Close()
+	return PrepareUpgrade(ctx, c, func(ctx context.Context) error {
+		st, _ := (&GatewayConfigurator{Dir: i.Discover.ConfigDir, GOOS: i.GOOS, Runner: i.Runner}).Read()
+		return PullRuntimeImages(ctx, i.Runner, st.RuntimeImages(release))
+	})
+}
+
+// PrepareUpgrade readies the gateway c talks to for the restart of an
+// in-place upgrade, which NVIDIA's script makes only once it has
+// downloaded and installed the release, minutes after anything run before
+// it:
+//   - On the docker driver, whose restart keeps the sandboxes running, it
+//     runs pull (PullRuntimeImages): the restarted gateway pulls the
+//     release's supervisor images unless they are local, and does not
+//     start without them.
+//   - Elsewhere (the MicroVM driver, or a gateway whose driver
+//     GetGatewayInfo did not name) the restart stops every sandbox, and a
+//     MicroVM stopped without a flush loses what it wrote since its last
+//     sync: a flush before the script would leave minutes of writes
+//     unsynced. A sandbox running or starting refuses the upgrade
+//     (ErrSandboxesRunning, naming them), and so does a list that fails.
+//     One that answers neither call is taken to be down, and runs nothing.
+//
+// A sandbox started after this, while the script runs, is not covered.
+func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) error) error {
+	info, infoErr := c.GatewayInfo(ctx)
+	if infoErr == nil {
+		if d, err := GatewayDriver(info); err == nil && d.StopFlushes {
+			if d.Name == DriverDocker {
+				return pull(ctx)
+			}
+			return nil
+		}
+	}
+	list, err := c.ListSandboxes(ctx, nil)
+	if err != nil {
+		if infoErr != nil && ctx.Err() == nil && IsUnavailable(err) {
+			return nil
+		}
+		return fmt.Errorf("%w, and the sandboxes on it could not be listed: %v", ErrSandboxesRunning, err)
+	}
+	var running []string
+	for _, sb := range list {
+		if sb != nil && (sb.Status.Phase == PhaseReady || sb.Status.Phase == PhaseProvisioning) {
+			running = append(running, sb.Name)
+		}
+	}
+	if len(running) == 0 {
+		return nil
+	}
+	slices.Sort(running)
+	return fmt.Errorf("%w (%s): stop them first with `defenseclaw sandbox stop NAME`, which flushes their disks, then upgrade",
+		ErrSandboxesRunning, strings.Join(running, ", "))
+}
+
+// runtimeImageRepository holds the images OpenShell's docker driver runs
+// its supervisor from, tagged with the release.
+const runtimeImageRepository = "ghcr.io/nvidia/openshell"
+
+// RuntimeImages are the images the docker driver of a gateway of release
+// needs before it starts (OpenShell's ensure_runtime_image, which pulls
+// one that is not local): the release's supervisor image and its sandbox
+// runtime image, but those gateway.toml replaces ([openshell.drivers.docker]
+// supervisor_image, sandbox_runtime_image, or supervisor_bin, a sandbox
+// binary on the host). A nil s is a gateway with no configuration.
+func (s *GatewayConfigState) RuntimeImages(release Version) []string {
+	var d dockerRuntime
+	if s != nil {
+		d = s.docker
+	}
+	var images []string
+	if strings.TrimSpace(d.SupervisorImage) == "" {
+		images = append(images, runtimeImageRepository+"/supervisor:"+release.String())
+	}
+	if strings.TrimSpace(d.SandboxRuntimeImage) == "" && strings.TrimSpace(d.SupervisorBin) == "" {
+		images = append(images, runtimeImageRepository+"/sandbox:"+release.String())
+	}
+	return images
+}
+
+// PullRuntimeImages has Docker pull each of images that is not local
+// (RuntimeImages), so that the upgraded gateway's docker driver finds them
+// as it starts. A pull that fails, most often because Docker cannot reach
+// ghcr.io, is ErrRuntimeImages: the restarted gateway would not start.
+func PullRuntimeImages(ctx context.Context, run Runner, images []string) error {
+	for _, img := range images {
+		if _, err := run.Output(ctx, Command{Name: "docker", Args: []string{"image", "inspect", "--format", "{{.Id}}", img}, Timeout: 30 * time.Second}); err == nil {
+			continue
+		}
+		if out, err := run.Output(ctx, Command{Name: "docker", Args: []string{"pull", img}, Timeout: 10 * time.Minute}); err != nil {
+			return fmt.Errorf("%w (docker pull %s: %v: %s): let Docker reach ghcr.io, or load the image, then upgrade",
+				ErrRuntimeImages, img, err, lastLine(out))
+		}
+	}
+	return nil
 }
 
 // configDir is the OpenShell configuration directory the gateway is

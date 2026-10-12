@@ -276,6 +276,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			MCPServerName: a.codexMCPServerName(ctx, req),
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
+		if command == nil {
+			command, commandTool = codexPowerShellCommand(toolName, toolArgs)
+		}
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
 			Args:                     toolArgs,
@@ -652,19 +655,26 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	if mode != "action" && guardrailSeverityRank(severity) < severityHigh {
+	if mode != "action" && guardrailSeverityRank(severity) < codexObserveContextMinSeverity {
 		return ""
 	}
 	return connector.BuildCodexAdditionalContext(rawAction, severity, reason, wouldBlock)
 }
 
+// codexObserveContextMinSeverity is the lowest severity whose Observe-mode
+// verdict reaches the Codex chat. Claude Code shows every observed alert, so
+// a MEDIUM finding that Codex ran silently looked like a missed detection to
+// the user while the audit row recorded it (GAP-0316, GAP-0320, GAP-0368).
+// LOW stays audit-only to keep the alert-fatigue gate for routine reads.
+const codexObserveContextMinSeverity = severityMedium
+
 // codexObserveContextEnforcementEligible keeps the in-chat Observe warning
 // coupled to a finding that could actually influence enforcement. Opaque
-// managed/judge verdicts may not carry DetailedFindings, so a HIGH/CRITICAL
+// managed/judge verdicts may not carry DetailedFindings, so a MEDIUM-or-higher
 // non-allow verdict with no details remains visible; explicit detection-only
 // details do not.
 func codexObserveContextEnforcementEligible(verdict *ToolInspectVerdict) bool {
-	if verdict == nil || guardrailSeverityRank(verdict.Severity) < severityHigh {
+	if verdict == nil || guardrailSeverityRank(verdict.Severity) < codexObserveContextMinSeverity {
 		return false
 	}
 	if len(verdict.DetailedFindings) == 0 {
@@ -672,7 +682,7 @@ func codexObserveContextEnforcementEligible(verdict *ToolInspectVerdict) bool {
 	}
 	for _, finding := range verdict.DetailedFindings {
 		if finding.contributesToEnforcement() &&
-			guardrailSeverityRank(finding.Severity) >= severityHigh {
+			guardrailSeverityRank(finding.Severity) >= codexObserveContextMinSeverity {
 			return true
 		}
 	}
@@ -1946,6 +1956,31 @@ func codexExactMapString(values map[string]interface{}, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// codexShellRunsPowerShell reports whether Codex runs its shell tool's
+// commands in PowerShell on this host, as it does on Windows. A variable so
+// tests can pin either host.
+var codexShellRunsPowerShell = runtime.GOOS == "windows"
+
+// codexPowerShellCommand returns a Codex shell tool call's command to judge
+// again as PowerShell, on a host where Codex runs it there (GAP-0175).
+// Codex names its shell tool Bash on every OS, so the call's own parse reads
+// a command as POSIX unless it carries PowerShell syntax. A cmdlet first
+// (Set-Content, Add-Content, Out-File) has no POSIX operand grammar there:
+// the parse was partial, and a CEL block rule on the command could only
+// report a detection-only match while the write ran.
+// inspectSandboxShellToolPolicyCtx judges the command as PowerShell only
+// when the call's own parse is not complete, and that verdict only ever adds
+// to the call's.
+func codexPowerShellCommand(toolName string, args json.RawMessage) (json.RawMessage, string) {
+	if !codexShellRunsPowerShell {
+		return nil, ""
+	}
+	if command, ok := connector.ShellCommandArgs("codex", toolName, args); ok {
+		return command, "powershell"
+	}
+	return nil, ""
 }
 
 func codexShellExecutionTool(tool string) bool {

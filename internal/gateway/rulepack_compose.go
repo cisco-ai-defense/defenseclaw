@@ -138,11 +138,17 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 		// embedded defaults it inherits for missing components.
 		got := "sha256:" + base.FilesDigest()
 		if !strings.EqualFold(strings.TrimSpace(custom.Digest), got) {
+			hint := ""
+			if cfg.EnterpriseProfile() == "" {
+				// The per-user fix, for any scope that selects the pack
+				// (GAP-0128); a managed admin config is edited by its owner.
+				hint = fmt.Sprintf("; on this install: defenseclaw config set guardrail.custom_packs.%s.digest %s", s.ref.Name, got)
+			}
 			return nil, fmt.Errorf("%s rule pack %q: digest %s does not match guardrail.custom_packs.%s.digest; "+
 				"review the pack, then pin the digest above in that key (`defenseclaw-gateway rulepack validate --dir <pack dir>` "+
 				"prints it as files_digest; a pin computed by a release before the digest covered only the pack's own files "+
-				"needs this one-time re-pin)",
-				scope, s.ref.Name, got, s.ref.Name)
+				"needs this one-time re-pin)%s",
+				scope, s.ref.Name, got, s.ref.Name, hint)
 		}
 	}
 	// A read-only v8 load pins the original custom pack, then runs the same

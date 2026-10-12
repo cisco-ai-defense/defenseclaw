@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
 func TestSandboxMCPInventoryFiltersDefenseClawBlocks(t *testing.T) {
@@ -112,5 +113,66 @@ func TestSandboxMCPInventoryErrors(t *testing.T) {
 	}
 	if _, err := config.ReadUserMCPServersForConnector("cursor"); err == nil {
 		t.Fatal("a harness without a sandbox has a user-scope MCP inventory")
+	}
+}
+
+// TestSandboxMCPClaimsFilterTheClaimedInventory pins the managed filter of
+// the MCP servers a daemon claims: the gateway's block list and asset
+// policy decide, a blocked server is absent from the kept names, and
+// without a block list to check every server stays out.
+func TestSandboxMCPClaimsFilterTheClaimedInventory(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	cfg := &config.Config{DataDir: t.TempDir(), AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = config.AssetPolicyModeAction
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{
+		{Name: "org-blocked", Reason: "manual"}, {Name: "claude-blocked", Connector: "claudecode", Reason: "manual"},
+		{URL: "https://x.example/mcp"},
+	}
+	if err := store.SetActionField("mcp", "runtime-disabled", "runtime", "disable", "scan verdict"); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, store, logger, cfg)
+	claims := []sandboxrelay.MCPServerClaim{
+		{Name: "github", Command: "npx"}, {Name: "org-blocked", Command: "a"}, {Name: "claude-blocked", Command: "b"},
+		{Name: "runtime-disabled", Command: "c"}, {Name: "by-url", URL: "https://x.example/mcp", Transport: "http"},
+		{Name: " github ", Command: "other"}, {Name: ""}, {Name: "bad\nname"},
+		// A repeated name is judged on every claim: the second one's URL is
+		// blocked, so the name is left out (GAP-0130).
+		{Name: "dup", Command: "npx"}, {Name: "dup", URL: "https://x.example/mcp", Transport: "http"},
+	}
+	kept, skipped, err := api.sandboxMCPClaims(context.Background(), "claudecode", claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasons := map[string]string{}
+	for _, s := range skipped {
+		reasons[s.Name] = s.Reason
+	}
+	if !slices.Equal(kept, []string{"github"}) || !maps.Equal(reasons, map[string]string{
+		"org-blocked": sandboxrelay.MCPSkipOrganizationBlock, "claude-blocked": sandboxrelay.MCPSkipOrganizationBlock,
+		"runtime-disabled": sandboxrelay.MCPSkipOrganizationBlock, "by-url": sandboxrelay.MCPSkipAssetPolicy,
+		"dup": sandboxrelay.MCPSkipAssetPolicy,
+	}) || len(skipped) != len(reasons) {
+		t.Fatalf("kept %v skipped %v", kept, reasons)
+	}
+	// A connector-scoped block applies to that connector only.
+	kept, _, _ = api.sandboxMCPClaims(context.Background(), "codex", claims)
+	if !slices.Contains(kept, "claude-blocked") || slices.Contains(kept, "org-blocked") {
+		t.Fatalf("codex kept %v", kept)
+	}
+	// No block list to check: nothing comes along.
+	bare := NewAPIServer("127.0.0.1:18970", NewSidecarHealth(), nil, nil, nil, cfg)
+	kept, skipped, err = bare.sandboxMCPClaims(context.Background(), "claudecode", claims[:1])
+	if err != nil || len(kept) != 0 || len(skipped) != 1 || skipped[0].Reason != sandboxrelay.MCPSkipOrganizationBlock {
+		t.Fatalf("without a store: kept %v skipped %v err %v", kept, skipped, err)
+	}
+	if _, _, err := api.sandboxMCPClaims(context.Background(), "claudecode", make([]sandboxrelay.MCPServerClaim, sandboxMCPMaxClaims+1)); !errors.Is(err, errSandboxMCPClaimsTooMany) {
+		t.Fatalf("too many claims: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := api.sandboxMCPClaims(ctx, "claudecode", claims); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled: %v", err)
 	}
 }

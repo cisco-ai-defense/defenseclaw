@@ -94,7 +94,7 @@ The continuous scanner in the gateway classifies every signal into one of the wi
 | `active_process` | Running processes whose name matches a catalog entry — agent CLIs, local model servers such as Ollama or vLLM, and AI desktop apps |
 | `editor_extension` | AI extensions and plugins in VS Code and its forks, JetBrains IDEs, Visual Studio, Zed and Vim/Neovim. The full list of every plugin, AI or not, is the [IDE plugin inventory](#ide-plugin-inventory) |
 | `mcp_server` | MCP servers configured for any connector (`mcpServers` blocks) |
-| `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk |
+| `skill` | Claude / Cursor / OpenClaw skill bundles installed on disk, in the home folder and in the project (`~/.claude/skills`, `.claude/skills`) |
 | `rule` | Rule packs and ruleset files referenced by config |
 | `plugin` | Connector plugins (TypeScript, Python, native) |
 | `package_dependency` | `requirements.txt` / `package.json` / `pyproject.toml` AI deps |
@@ -356,6 +356,63 @@ applied, without a gateway restart; the enumerator also takes away the read
 access an earlier install granted it. `ai_discovery.home_dirs` adds folders
 to the enrolled profiles and never replaces them, and a folder inside an
 excluded profile is not read.
+
+### Inside OpenShell sandboxes
+
+While sandboxes are on (`openshell.enabled`), the gateway also inventories
+what the agent in each running [sandbox](/docs/sandboxes) installed and
+configured there, which its own scan of this machine never sees:
+
+- Once a sandbox is ready, every `scan_interval_min` while it runs, and on
+  demand with `defenseclaw sandbox discover NAME`, the daemon reads the
+  sandbox with one read-only command it builds itself: the agent config,
+  MCP configuration, skill, rule and plugin paths of the signature catalog
+  under the sandbox's home and project, the agent CLIs in its bin folders,
+  its running agents, the names (never the values) of its environment
+  variables, its shell history and, for a copy (`--copy`, every sandbox on
+  macOS), its package manifests. A mounted project is this machine's folder,
+  which the gateway's own scan reads.
+- Everything the sandbox sends back is checked as the agent's: only
+  absolute, printable paths under the sandbox's home, projects or harness
+  install, within what was asked for and within the bounds (`max_file_bytes`
+  a file, `max_files_per_scan` files read, 8,192 entries listed and a 4 MiB
+  stream), are kept. They are written as
+  private regular files (never links or FIFOs) under
+  `<data_dir>/sandboxes/NAME/discovery` and scanned on this machine with the
+  same detectors, without the machine-wide ones (applications, IDEs,
+  loopback endpoints, model files). The copies go once scanned: only the
+  scan record (`scan.json`) stays.
+- Each signal carries the sandbox's name and id (`sandbox_name`,
+  `sandbox_id`, and `defenseclaw.sandbox.name` and `.id` on the
+  `ai_component.*` records), and its hashes are its sandbox's own, so the
+  same file in two sandboxes, or in a sandbox and on this machine, are
+  separate entries. `defenseclaw agent usage --sandbox NAME` shows one
+  sandbox's; every view tags them "(sandbox NAME)". A name with no
+  sandbox is an error, a sandbox not read yet gets a note that
+  `defenseclaw sandbox discover NAME` reads it now, and on Windows, which
+  has no sandboxes, `--sandbox` exits 3 as `defenseclaw sandbox` does.
+- A sandbox signal's **Last active** is the last time the sandbox was read
+  while it ran, a running process's too, not the date of the file: the
+  files an image ships carry the image's dates. A sandbox process's
+  **Runtime** `up=` counts from its start.
+- A stopped sandbox keeps what was found, without its processes; a deleted
+  one's entries turn `gone` at once (the delete starts a scan, as
+  `agent usage --refresh` does). `ai_discovery.enabled: false` turns this
+  off too.
+
+A real sandbox, read with `defenseclaw sandbox discover` (the MCP servers, the
+skills, the agent CLI and the running agent found inside it):
+
+![defenseclaw sandbox discover myapp-claude: one row per component with its category, product, what found it, the MCP server and skill names, and the file or folder that holds it](/images/sandboxes/screens/terminal-sandbox-discover.png)
+
+The same components in the AI inventory, tagged with the sandbox:
+
+![defenseclaw agent usage --sandbox myapp-claude: the AI visibility table with Claude Code and GitHub Copilot rows marked (sandbox myapp-claude), their categories, detectors, signal counts and sample evidence](/images/sandboxes/screens/terminal-agent-usage-sandbox.png)
+
+The TUI's AI Discovery panel (`V`) lists the same components as their own rows,
+tagged `(sandbox NAME)`:
+
+![DefenseClaw TUI AI Discovery panel with a row for Claude Code on the host and a separate row, Claude Code (sandbox myapp-claude), for what the scan found inside the sandbox](/images/sandboxes/screens/tui-ai-discovery-sandbox.png)
 
 ### Tunable knobs
 
@@ -680,7 +737,7 @@ defenseclaw agent usage --json | jq '.signals[] | select(.category == "local_mod
 
 Without `--refresh`, the command reads the most recent snapshot. `--refresh` first triggers a full scan and then renders its result. The default table groups repeated observations; `--detail` renders one row per signal. Local-model rows add model ID, installed/loaded status, and format columns when available.
 
-Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--show-gone`, `--by-detector`, `--limit`, `--wide`. The default table keeps the columns that fit the terminal; `--wide` adds model format, version and the identity/presence confidence columns. `--component` matches both SDK/component names and local model IDs using a case-insensitive substring. Table filters are client-side; `--json` intentionally returns the complete raw gateway snapshot, so filter JSON with `jq` when needed.
+Useful flags: `--refresh`, `--detail`, `--state` (repeatable), `--category`, `--product`, `--component`, `--sandbox` (what AI discovery found inside that sandbox; repeatable), `--show-gone`, `--by-detector`, `--limit`, `--wide`. The default table keeps the columns that fit the terminal; `--wide` adds model format, version and the identity/presence confidence columns. `--component` matches both SDK/component names and local model IDs using a case-insensitive substring. Table filters are client-side; `--json` intentionally returns the complete raw gateway snapshot, so filter JSON with `jq` when needed.
   </Tab>
   <Tab value="Processes">
 ```bash
@@ -854,6 +911,17 @@ Its **IDE plugins** section shows the plugin count by IDE, AI against other
 plugins, disabled plugins and a per-user table. The `$user` box narrows the
 Loki panels to one user by `user.id`, account name or principal.
 
+Its **Sandbox signals** section lists what AI discovery found
+[inside OpenShell sandboxes](#inside-openshell-sandboxes), one row per
+sandbox and component, from the `ai_component.*` records that carry
+`defenseclaw.sandbox.name`. The `$sandbox` box narrows that table and the
+per-signal log to one sandbox; All keeps the host's own records in the log.
+The metric panels count the host's and the sandboxes' signals together:
+sandbox names are never metric labels. They, and every other panel the box
+does not narrow, say **(all names)** in their title or their section's.
+
+![Grafana AI Agent Usage & Detection board, Sandbox signals section: a row for each AI component found inside the sandbox, with its vendor, product, component category and whether the record says it was discovered or removed](/images/grafana/ai-discovery-sandbox.png)
+
 It cross-links from the overview, runtime, and agent-identity dashboards so you can drill from "block rate spiked" → "which agent" → "when was this agent first discovered."
 
 ## Privacy and trust model
@@ -932,7 +1000,7 @@ defenseclaw agent discovery runtime findings
 | --- | --- | --- |
 | **A** — inference heartbeat | Sustained CPU in a scriptable runtime, and resident memory large enough to hold model weights | `/proc` on Linux, `ps` on macOS, Toolhelp32 + `GetProcessTimes` on Windows |
 | **B** — shadow egress | **Per-process** socket attribution to a provider, and the DNS answers that name the peer | `/proc/net` + `/proc/<pid>/fd`, `lsof`, `GetExtendedTcpTable` |
-| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security (`eslogger`), `cn_proc` + `fanotify`, the Windows Security event log |
+| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security (`eslogger`); `cn_proc` + `fanotify`, or Tetragon on a managed Linux computer that runs it; the Windows Security event log |
 
 Plane A only raises a heartbeat inside a scriptable runtime or a known model
 server. A compiled application burning CPU is a compiled application burning
@@ -962,14 +1030,19 @@ which parts it has rather than implying it has all of them.
 | Platform | Source | Needs | Delivers | Does not |
 | --- | --- | --- | --- | --- |
 | macOS | Endpoint Security via `eslogger` | root **and** Full Disk Access | all six kinds: exec with argv, exit, file read/write on watched paths, and account/privilege events recognised from the exec argument vector | — |
-| Linux | `cn_proc` netlink | nothing | exec, exit, uid/gid changes | — |
+| Linux | `cn_proc` netlink | `CAP_NET_ADMIN` | exec, exit, uid/gid changes. The name and arguments are read from `/proc` after the event, so a short-lived process can lose them | The executable's path from the start of the process, container identity |
 | Linux | `fanotify` | `CAP_SYS_ADMIN` | file read/write on watched roots | — |
+| Linux, managed enterprise | Tetragon, read by the root sensor helper | Nothing at the gateway. Tetragon's API is root-only, so a per-user install never connects to it | Exec and exit with the binary, arguments, user and parent recorded in the kernel at the exec; the container a process belongs to. In `observe` and `enforce` modes also file opens of credential, persistence and agent-config paths, and connects per binary | Windows and macOS: Tetragon has no agent for either |
 | Windows | Security event log (`wevtapi`) | elevated token **and** Advanced Audit Policy | process creation and exit, account creation, group changes, privilege assignment | file events, which need a SACL per audited object |
 
-The Linux halves start independently. An unprivileged host gets `cn_proc` with
-the file half honestly reported absent, which beats losing the plane to one
-missing capability — and the snapshot reports it as *partially covered* rather
-than complete.
+The Linux halves start independently. A host that has `CAP_NET_ADMIN` but not
+`CAP_SYS_ADMIN` gets `cn_proc` with the file half honestly reported absent,
+which beats losing the plane to one missing capability — and the snapshot
+reports it as *partially covered* rather than complete. A host with neither
+capability gets neither half, and the snapshot names the capability that is
+missing. On a managed Linux computer the root sensor helper holds the
+capabilities, and uses Tetragon when the computer runs it; see
+[Plane C on managed Linux](#plane-c-on-managed-linux-tetragon).
 
 Windows has two prerequisites that fail differently and are therefore reported
 differently: Advanced Audit Policy for the events at all, and the separate
@@ -1022,7 +1095,8 @@ defenseclaw agent discovery runtime permissions --grant
 
 Every command is printed before anything runs, and the confirmation is not
 skippable without `--yes`. `--revert` undoes exactly what `--grant` applied.
-On Linux that is one `setcap` on the gateway binary; on Windows it is the
+On Linux that is one `setcap` on the gateway binary (it includes
+`cap_net_admin` for `cn_proc`); on Windows it is the
 three audit subcategories plus the command-line policy, which needs an
 already-elevated prompt. Nothing grants more than the requirement it names —
 notably there is no blanket SACL on Windows, because auditing every object on
@@ -1049,7 +1123,7 @@ wrong answer about a machine you are not on.
 | **A** inference heartbeat | nothing | nothing | nothing for own processes; elevation for all |
 | **B** egress attribution | root | root or `CAP_DAC_READ_SEARCH` | elevated token |
 | **B** DNS naming | root, for `/dev/bpf` | `CAP_NET_RAW` | elevated token |
-| **C** process + identity events | root **and** Full Disk Access | nothing | elevated **and** Advanced Audit Policy |
+| **C** process + identity events | root **and** Full Disk Access | `CAP_NET_ADMIN` (`cn_proc`) | elevated **and** Advanced Audit Policy |
 | **C** file events | included above | `CAP_SYS_ADMIN` (fanotify) | a SACL per audited object |
 | **C** command lines | included above | included above | the separate command-line audit policy |
 
@@ -1070,10 +1144,12 @@ on; `ProcessCreationIncludeCmdLine_Enabled` turns on the argument vectors
 inside them. With only the first, lineage works and nearly every tactic
 silently does not.
 
-**Linux Plane C has two independent halves.** `cn_proc` needs nothing, so
-process events work unprivileged; `fanotify` needs `CAP_SYS_ADMIN`. The plane
-starts on whichever half it can and reports the other absent, rather than
-failing whole.
+**Linux Plane C has two independent halves.** `cn_proc` needs
+`CAP_NET_ADMIN`: subscribing to the kernel's process connector is a
+privileged netlink operation, so an unprivileged account gets no process
+events from it. `fanotify` needs `CAP_SYS_ADMIN`. The plane starts on
+whichever half it can and reports the other absent, rather than failing
+whole. `defenseclaw agent discovery runtime permissions --grant` applies both.
 </Callout>
 
 **Managed enterprise install — the installer arranges these**
@@ -1124,17 +1200,17 @@ root process into a general-purpose file reader.
 
 | Setting | Value |
 | --- | --- |
-| `ai_discovery.runtime.acquisition` | `auto` (default), `direct`, or `helper` |
 | Transport | `AF_UNIX` socket, mode `0660`, owned by the gateway's group |
 | Peer check (Linux, macOS) | kernel-supplied uid via `SO_PEERCRED` / `LOCAL_PEERCRED`, which the peer cannot forge |
 | Peer check (Windows) | the socket DACL, refused in-kernel at open |
 | Helper network access | none — the unit allows `AF_UNIX`, `AF_NETLINK` and `AF_PACKET` only |
 
-`auto` brokers only where the gateway was de-privileged *and* a helper is
-therefore installed. It reads directly on a managed macOS host, because that
-gateway is already root and a broker would add a failure mode for nothing, and
-on an unmanaged workstation, where there is no helper to ask and the honest
-answer is to read what it can and report the shortfall.
+The gateway brokers through the helper only where it was de-privileged *and* a
+helper is therefore installed. It reads directly on a managed macOS host,
+because that gateway is already root and a broker would add a failure mode for
+nothing, and on an unmanaged workstation, where there is no helper to ask and
+the honest answer is to read what it can and report the shortfall. The choice
+is automatic; there is no setting for it.
 
 With the helper running, that same sandboxed Linux gateway reports
 `degraded: false` and detects a full credential-access → identity-creation →
@@ -1172,6 +1248,73 @@ root-owned, the gateway cannot open it, and the helper would otherwise come up
 reporting success while brokering nothing. The listener verifies the ownership
 took and refuses to start rather than allow that.
 </Callout>
+
+### Plane C on managed Linux: Tetragon
+
+If a managed Linux computer already runs [Tetragon](https://tetragon.io), the
+sensor helper reads its events over Tetragon's root-owned Unix socket and uses
+them as Plane C's process source. That is the default mode (`consume`), but
+it works only when Plane C is on: set `ai_discovery.runtime.enabled` and
+`ai_discovery.runtime.enable_host_plane` to `true`, because Plane C is opt-in
+(with it off, the Tetragon mode is `off`). The benefit is accuracy: Tetragon records a
+process's binary, arguments, user and parent in the kernel at the exec, where
+`cn_proc` reads `/proc` afterwards and loses fast processes, and it marks
+processes that belong to a container so they are never scored as a host
+agent. If Tetragon is absent, stopped, listening on TCP or an unsupported
+version, the same stream falls back to `cn_proc` and `fanotify` and says why.
+
+Two further modes, `observe` and `enforce`, add DefenseClaw's own policies
+to that Tetragon. `observe` records file opens of credential, persistence and
+agent-configuration paths and connects per binary. `enforce` lets two fixed
+controls deny, only after an administrator approves them. Hooks and
+OpenShell keep their roles; see
+[Agent segmentation, visibility and enforcement](/docs/segmentation). The
+setup, the readiness check and the pause runbook are on
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon),
+and the settings are under
+[`enterprise.tetragon`](/docs/enterprise/configuration#tetragon-linux).
+
+If you run Tetragon policies of your own on kprobe or LSM hooks, the helper
+also reports their events when they hit an AI agent (`customer_events`, on by
+default in `consume`, `observe` and `enforce`). Each record names the policy,
+the action, the outcome (`observed`, `would_block` or `blocked`) and the
+target, and carries the agent, the user and the hook decision it belongs to.
+Events from outside an agent's process tree are counted per policy and not
+exported. DefenseClaw never changes, loads or deletes your policies, and these
+events are not scored as findings.
+
+A per-user (open-source) install never connects to Tetragon: its socket is
+root-only and grants control of kernel policy. `defenseclaw doctor` and
+`runtime permissions` say so when Tetragon is present, and `doctor` warns when
+Tetragon serves its API on a TCP port.
+
+Only a managed Linux gateway reports a Tetragon backend, and the managed Linux
+packages ship no `defenseclaw` command line or TUI in this release (the
+per-user installer refuses to run on a managed computer). So the TUI Runtime
+panel, `agent discovery runtime status` and `defenseclaw doctor` have no
+managed Tetragon lines. The administrator's surfaces are the Go commands
+(`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`,
+`enterprise linux tetragon verify`, `tetragon status` and
+`defenseclaw-gateway status`), the telemetry and the agent's own answers.
+
+When the Plane C entry carries a backend, `enterprise linux discovery` adds
+lines for it under agent actions:
+
+```text
+kernel sensor: Tetragon v1.7.1, enforce, 0 events lost
+kernel controls: enforcing 2 of 3 users; 1 in burn-in, next ready ~9 days
+your Tetragon policies: 4 loaded (1 enforcing); 12 agent events forwarded (DefenseClaw never changes them)
+```
+
+The second line appears only when DefenseClaw's kernel controls are loaded
+(`observe` or `enforce`), and the third only when Tetragon has policies of
+yours. "next ready" is calendar time at the user's rate of agent use so far,
+shown once the burn-in window is a day old. During a pause the second line
+ends with `; paused until <time>`. The third line counts the events of your
+policies that the gateway recorded below an AI agent since it started, and
+"over the budget" only the ones the helper did not forward because they went
+over the volume limit. `--json` includes the backend. When the number of lost events
+is not known, the line says so instead of showing zero.
 
 ### Naming a peer: DNS capture
 
@@ -1323,15 +1466,17 @@ inventory disagreed.
 
 ### Where the data lands
 
-Three log families under the existing `ai.discovery` bucket, so
+Five log families under the existing `ai.discovery` bucket, so
 presence and behaviour share one bucket, one destination policy, and one set of
 dashboards:
 
 | Event | Carries |
 | --- | --- |
 | `ai.runtime.finding` | One scored finding, its evidence trail, and the inventory verdict |
-| `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage |
-| `ai.runtime.plane_health` | One running plane per poll cycle |
+| `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage. Records now name the user and agent identity, the event source (`tetragon`, `cn_proc`, `fanotify`, ...) and, on managed Linux, whether a hook decision matched (`hook_seen`) |
+| `ai.runtime.plane_health` | One running plane per poll cycle. Plane C also reports its backend (`tetragon` or `native`), the mechanism, lost events and container events. On managed Linux with Tetragon it adds the fleet fields: the Tetragon version, the helper mode, whether `enforce_ack` approves this build, the users enrolled, enforced and in burn-in, whether enforcement is paused, and the would-block, blocked and customer-event counts for the cycle |
+| `ai.runtime.kernel_policy` | One record per change of the Linux kernel controls (a policy loaded, a mode changed, a pause, a user ready or back in burn-in), and one every 6 hours per user in burn-in with the covered and needed hours (`uid_progress`). Never one per event. Managed Linux with Tetragon only |
+| `ai.runtime.kernel_event` | One record per attributed event of your own Tetragon policies (kprobe and LSM) below an AI agent, after repeats are folded: the policy, hook type, function, action, mode, outcome, target and tags, with the agent, the user and the hook join. Managed Linux with Tetragon only; `customer_events: off` stops them |
 
 A running plane emits about one health record per poll cycle (roughly once a
 minute with the default runtime poll), per enabled destination that routes
@@ -1355,7 +1500,11 @@ visible — press `p` to expand each plane's reason — and coverage sits in the
 header beside the finding count, because a reader who sees only the count
 cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
 renders a kill chain as a sequence rather than a set, and always states the
-inventory verdict including `unobserved`.
+inventory verdict including `unobserved`. Neither shows Tetragon: only a
+managed Linux gateway reports it, the managed Linux packages ship no TUI in
+this release (see
+[Plane C on managed Linux](#plane-c-on-managed-linux-tetragon)), and the macOS
+app manages only the Mac's own gateway.
 
 ## Use it alongside Registry
 

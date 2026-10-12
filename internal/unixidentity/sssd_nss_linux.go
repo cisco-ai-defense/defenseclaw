@@ -60,9 +60,17 @@ const (
 	sssIDTypeBoth          = 3
 	sssErrorBase           = 0x555D0000
 	sssErrorMask           = 0xFFFF0000
-	sssdNSSRequestDeadline = 2 * time.Second
+	sssdNSSRequestDeadline = 8 * time.Second
 	maxSIDLength           = 184
 )
+
+// sssdNSSRequestDeadline bounds one call, and the caller's context bounds
+// them all. The responder answers a SID call from its cache at once, but an
+// expired entry waits for SSSD's own search of the directory, which SSSD
+// gives up to its ldap_opt_timeout of 8 s; with 2 s the call failed with
+// "i/o timeout" while the directory was reachable, and the account got
+// default_lookup_failed until a retry succeeded, seconds later (GAP-0363,
+// GAP-0383).
 
 // sssdNSSSocket is the socket of the SSSD NSS responder. Tests replace it.
 var sssdNSSSocket = "/var/lib/sss/pipes/nss"

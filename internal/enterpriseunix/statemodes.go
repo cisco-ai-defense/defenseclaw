@@ -46,6 +46,16 @@ import (
 // transaction now gives every entry there the owner and mode it is written
 // with, and status and verify name the entries that differ.
 
+// What the gateway writes into its own data folder at run time, under modes
+// of its own (stateTrees allows them as they are written).
+var (
+	gatewayOpenClawConfig = filepath.Join(".openclaw", "openclaw.json")
+	gatewayHooksDir       = "hooks"
+	// gatewayShimsDir holds the subprocess shims (curl, wget, ssh, nc, pip,
+	// npm) the gateway writes executable, 0700, and their .token, 0600.
+	gatewayShimsDir = "shims"
+)
+
 // maxStateDepth bounds how deep the state folders are walked.
 const maxStateDepth = 8
 
@@ -109,6 +119,19 @@ func (e *Env) stateTrees(account Account) []stateTree {
 				return stateMode{mode: 0o640, owner: rootService} // the gateway reads it
 			case rel == guardianRepairsFile:
 				return stateMode{mode: 0o600, owner: rootService}
+			case rel == gatewayOpenClawConfig:
+				// The gateway writes it 0644 inside the 0700 data folder, so no
+				// other account reaches it; a fresh package install failed its
+				// own verify on it (GAP-0223).
+				return stateMode{mode: 0o644, owner: service, mask: true}
+			case filepath.Dir(rel) == gatewayHooksDir && strings.HasSuffix(rel, ".sh"):
+				// The hook scripts the gateway writes are executable, 0700.
+				return stateMode{mode: 0o700, owner: service, mask: true}
+			case filepath.Dir(rel) == gatewayShimsDir && !strings.HasPrefix(filepath.Base(rel), "."):
+				// So are the subprocess shims. Held to 0600 they failed verify
+				// after every gateway start that wrote them (an upgrade), and
+				// the next ensure made them non-executable (GAP-0510).
+				return stateMode{mode: 0o700, owner: service, mask: true}
 			}
 			// The gateway refuses a key file or hook token another account
 			// can read.

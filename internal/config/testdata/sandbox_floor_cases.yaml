@@ -1,0 +1,299 @@
+# Shared sandbox floor validation corpus: openshell.admin managed keys and
+# guardrail.profiles.<p>.sandbox. The Go loader (LoadRuntimeV8File for the
+# verdict, LoadFromFile for the message, openshell_tighten_corpus_test.go)
+# and the Python loader (defenseclaw.config.load,
+# cli/tests/test_config_sandbox_profiles_parity.py) must agree on every case:
+# the same accept or refuse, and a refusal carries `error` verbatim on both
+# sides. Keep cases independent of the host OS and unmanaged: both suites run
+# on Windows, and the Secure Client refusal is a golden of its own.
+schema_version: 1
+cases:
+  - name: absent-sections
+    valid: true
+    source: |
+      config_version: 9
+
+  - name: full-valid-floors
+    valid: true
+    source: |
+      config_version: 9
+      openshell:
+        admin:
+          egress_block: [pastebin.com, transfer.sh]
+          egress_allow_only: ['*.corp.example', api.anthropic.com, github.com]
+          allow_upstream_telemetry: false
+          foreign_sandboxes: stop
+          when_unavailable: alert
+          on_silence: alert
+          max_silence_after: 10m
+          delete_stopped_after: 30d
+          request_access: "it-security@example.com, https://help.example.com/ai-sandbox"
+      guardrail:
+        profiles:
+          contractors:
+            description: Contractors. Coding agents only in a sandbox.
+            mode: action
+            sandbox:
+              required_for: [claudecode, codex]
+              when_unavailable: refuse
+              allowed_harnesses: [claudecode, codex]
+              egress_allow_only: [api.anthropic.com, git.corp.example]
+              allow_mount: false
+              allow_unblock: false
+              user_approvals: session
+              allowed_credentials: [bedrock]
+              process_tree: true
+              delete_stopped_after: 14d
+          engineering:
+            sandbox: {allowed_harnesses: [claudecode, codex, opencode, hermes], on_silence: stop, max_silence_after: 5m}
+          offline-floor:
+            sandbox: {required_for: [claude-code, codex], min_profile: strict, allow_mount: false, user_approvals: none, allowed_credentials: [none]}
+          guardrail-only:
+            mode: observe
+        profile_assignments:
+          - {profile: contractors, match: {groups: ['CORP\Contractors']}}
+          - {profile: engineering, match: {groups: ['CORP\Engineering']}}
+        default_profile: offline-floor
+
+  - name: admin-allowed-false-contradicts-required-for
+    valid: false
+    error: "admin: allowed: false contradicts required_for [codex]: a required agent could not run anywhere"
+    source: |
+      config_version: 9
+      openshell:
+        admin: {allowed: false, required_for: [codex]}
+
+  - name: profile-required-for-under-admin-allowed-false
+    valid: false
+    error: "sandbox: combined with openshell.admin, allowed: false contradicts required_for [claudecode]: a required agent could not run anywhere"
+    source: |
+      config_version: 9
+      openshell:
+        admin: {allowed: false}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {required_for: [claudecode]}
+
+  - name: profile-harnesses-leave-nothing
+    valid: false
+    error: "sandbox: combined with openshell.admin, allowed_harnesses [opencode] leaves no harness (openshell.admin allows [claudecode, codex])"
+    source: |
+      config_version: 9
+      openshell:
+        admin: {allowed_harnesses: [claudecode, codex]}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {allowed_harnesses: [opencode]}
+
+  - name: profile-credentials-leave-nothing
+    valid: false
+    error: "sandbox: combined with openshell.admin, allowed_credentials [bedrock] leaves no credential (openshell.admin allows [openai])"
+    source: |
+      config_version: 9
+      openshell:
+        admin: {allowed_credentials: [openai]}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {allowed_credentials: [bedrock]}
+
+  - name: profile-credentials-none-tightens
+    valid: true
+    source: |
+      config_version: 9
+      openshell:
+        admin: {allowed_credentials: [openai]}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {allowed_credentials: [none]}
+
+  - name: profile-egress-leaves-nothing
+    valid: false
+    error: "sandbox: combined with openshell.admin, egress_allow_only [github.com] leaves no destination (openshell.admin allows [*.corp.example])"
+    source: |
+      config_version: 9
+      openshell:
+        admin: {egress_allow_only: ['*.corp.example']}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {egress_allow_only: [github.com]}
+
+  - name: profile-egress-inside-admin-wildcard
+    valid: true
+    source: |
+      config_version: 9
+      openshell:
+        admin: {egress_allow_only: ['*.corp.example', 10.0.0.0/8]}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {egress_allow_only: [API.Corp.Example., 10.1.2.0/24]}
+
+  - name: none-mixed-with-credentials
+    valid: false
+    error: "sandbox.allowed_credentials: none cannot be combined with other credentials"
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {allowed_credentials: [none, bedrock]}
+
+  - name: unknown-required-for-connector
+    valid: false
+    error: 'sandbox.required_for[1]: "notepad" is not a known connector'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {required_for: [codex, notepad]}
+
+  - name: admin-unknown-required-for-connector
+    valid: false
+    error: 'admin.required_for[0]: "vim" is not a known connector'
+    source: |
+      config_version: 9
+      openshell:
+        admin: {required_for: [vim]}
+
+  - name: explicit-empty-required-for
+    valid: false
+    error: "sandbox.required_for: an empty list is refused; leave the key out for no constraint"
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {required_for: []}
+
+  - name: explicit-empty-allowed-credentials
+    valid: false
+    error: "admin.allowed_credentials: an empty list is refused; leave the key out for no constraint"
+    source: |
+      config_version: 9
+      openshell:
+        admin: {allowed_credentials: []}
+
+  - name: bad-when-unavailable
+    valid: false
+    error: 'sandbox.when_unavailable "sometimes" must be one of refuse, alert'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {when_unavailable: sometimes}
+
+  - name: profile-driver-fallback-none
+    valid: true
+    source: |
+      config_version: 9
+      openshell:
+        admin: {driver_fallback: docker}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {driver_fallback: none}
+
+  - name: bad-driver-fallback
+    valid: false
+    error: 'sandbox.driver_fallback "podman" must be one of docker, none'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {driver_fallback: podman}
+
+  - name: bad-user-approvals
+    valid: false
+    error: 'admin.user_approvals "always" must be one of none, session'
+    source: |
+      config_version: 9
+      openshell:
+        admin: {user_approvals: always}
+
+  - name: short-max-silence-after
+    valid: false
+    error: 'sandbox.max_silence_after "30s" must be at least 1m'
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          engineering:
+            sandbox: {max_silence_after: 30s}
+
+  - name: short-delete-stopped-after
+    valid: false
+    error: 'admin.delete_stopped_after "30m" must be at least 1h'
+    source: |
+      config_version: 9
+      openshell:
+        admin: {delete_stopped_after: 30m}
+
+  - name: request-access-control-character
+    valid: false
+    error: "sandbox.request_access must be printable text on one line"
+    source: |
+      config_version: 9
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {request_access: "call\tme"}
+
+  - name: request-access-too-long
+    valid: false
+    error: "admin.request_access must be at most 512 bytes"
+    source: |
+      config_version: 9
+      openshell:
+        admin:
+          request_access: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+  - name: profile-same-pack-keeps-the-base-pin
+    valid: true
+    source: |
+      config_version: 9
+      openshell:
+        admin: {required_pack: acme-dev, required_pack_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {required_pack: acme-dev, allow_mount: false}
+
+  - name: profile-same-pack-two-pins
+    valid: false
+    error: 'sandbox: combined with openshell.admin, required_pack_digest sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb contradicts sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa for the same pack "acme-dev": no pack content matches both'
+    source: |
+      config_version: 9
+      openshell:
+        admin: {required_pack: acme-dev, required_pack_digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {required_pack: acme-dev, required_pack_digest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+
+  - name: admin-required-for-outside-harnesses
+    valid: false
+    error: "admin: required_for [claudecode] is outside allowed_harnesses [codex]: a required agent could not run anywhere"
+    source: |
+      config_version: 9
+      openshell:
+        admin: {required_for: [claudecode], allowed_harnesses: [codex]}
+
+  - name: profile-required-for-outside-base-harnesses
+    valid: false
+    error: "sandbox: combined with openshell.admin, required_for [claudecode] is outside allowed_harnesses [codex]: a required agent could not run anywhere"
+    source: |
+      config_version: 9
+      openshell:
+        admin: {allowed_harnesses: [codex, opencode]}
+      guardrail:
+        profiles:
+          contractors:
+            sandbox: {required_for: [Claude-Code, codex], allowed_harnesses: [codex, claudecode]}

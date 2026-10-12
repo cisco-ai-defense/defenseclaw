@@ -33,9 +33,6 @@ from defenseclaw.context import AppContext
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = REPO_ROOT / "internal" / "cli" / "testdata" / "sandbox_commands.json"
 
-# Python-native commands that have no Go counterpart.
-PYTHON_ONLY = {"sandbox legacy-cleanup"}
-
 
 def _manifest() -> dict[str, dict[str, Any]]:
     return {entry["path"]: entry for entry in json.loads(MANIFEST.read_text(encoding="utf-8"))}
@@ -99,7 +96,7 @@ def test_every_go_command_has_a_python_stub() -> None:
 
 
 def test_every_python_stub_exists_in_go() -> None:
-    extra = sorted(set(_python_tree()) - set(_manifest()) - PYTHON_ONLY)
+    extra = sorted(set(_python_tree()) - set(_manifest()))
     assert not extra, f"Python sandbox stubs the Go tree does not have: {extra}"
 
 
@@ -127,6 +124,26 @@ def test_short_help_is_the_go_short_description() -> None:
         assert python[path].short_help == entry["short"], path
 
 
+def test_long_help_and_examples_are_the_go_ones() -> None:
+    # GAP-0171: users read the stub's --help, so a Go Long text the stub lacks
+    # is help nobody sees (unblock never said what it cannot lift). Click
+    # rewraps, so compare the words.
+    def words(text: str) -> str:
+        return " ".join(text.split())
+
+    stubs = {"sandbox " + " ".join(cmd.path): cmd for cmd in cmd_sandbox.SANDBOX_COMMANDS}
+    for path, entry in _manifest().items():
+        if entry.get("long"):
+            assert words(stubs[path].long) == words(entry["long"]), path
+        if entry.get("example"):
+            assert words(stubs[path].example) == words(entry["example"]), path
+    shown = CliRunner().invoke(sandbox, ["unblock", "--help"], obj=AppContext())
+    assert shown.exit_code == 0, shown.output
+    assert "It cannot lift a block-list entry" in words(shown.output)
+    # GAP-0187: nor what the egress guard keeps closed.
+    assert "Nor does it open a private network" in words(shown.output)
+
+
 def test_bool_and_repeatable_flags_have_the_matching_click_shape() -> None:
     for path, command in _python_tree().items():
         for param in command.params:
@@ -138,11 +155,6 @@ def test_bool_and_repeatable_flags_have_the_matching_click_shape() -> None:
                 assert param.multiple, f"{path} --{param.name}"
             else:
                 assert not param.is_flag and not param.multiple, f"{path} --{param.name}"
-
-
-def test_legacy_cleanup_stays_python_native() -> None:
-    command = sandbox.commands["legacy-cleanup"]
-    assert not isinstance(command, GatewayCommand)
 
 
 @pytest.fixture
@@ -299,12 +311,30 @@ def test_windows_is_refused_with_a_clear_message(monkeypatch: pytest.MonkeyPatch
     assert "Linux and macOS only" in result.output
 
 
+def test_windows_refusal_comes_before_a_broken_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    # GAP-0242: an unparsable config.yaml was reported (exit 1) instead of
+    # the Windows refusal (exit 3) for a feature that cannot run there.
+    monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "windows")
+
+    def broken(**_kwargs: Any) -> None:
+        from defenseclaw.config import ConfigVersionError
+
+        raise ConfigVersionError("Cannot read the DefenseClaw configuration")
+
+    monkeypatch.setattr("defenseclaw.config.require_v8_config", broken)
+    monkeypatch.setattr(cmd_sandbox, "_execv", lambda *_: pytest.fail("exec on Windows"))
+    result = CliRunner().invoke(main_module.cli, ["sandbox", "list"])
+    assert result.exit_code == cmd_sandbox.UNSUPPORTED_EXIT_CODE, result.output
+    assert "Linux and macOS only" in result.output
+    assert "Cannot read" not in result.output
+
+
 def test_a_missing_gateway_binary_is_a_plain_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("defenseclaw.platform_support.host_os", lambda: "linux")
     monkeypatch.setattr("defenseclaw.gateway.resolve_gateway_binary", lambda: None)
     result = CliRunner().invoke(sandbox, ["doctor"], obj=AppContext())
     assert result.exit_code == 1
-    assert "defenseclaw-gateway is not installed" in result.output
+    assert "defenseclaw-gateway was not found on PATH, next to this defenseclaw or in ~/.local/bin" in result.output
     assert "Traceback" not in result.output
 
 
@@ -329,6 +359,9 @@ def test_an_unstartable_gateway_binary_is_a_plain_error(monkeypatch: pytest.Monk
         (["sandbox", "pack", "show", "strict"], {}, True),
         (["sandbox", "pack", "validate", "pack.yaml"], {}, True),
         (["sandbox", "pack"], {}, False),
+        # GAP-0124: the CI mode the policy-packs page documents needs no install.
+        (["sandbox", "policy", "test", "--pack", "balanced", "--fixture", "f.yaml"], {}, True),
+        (["sandbox", "policy", "show"], {}, False),
         (["sandbox", "run", "claude"], {"DEFENSECLAW_SANDBOX_ID": "sb-1"}, True),
         (["sandbox", "run", "claude"], {}, False),
         (["sandbox", "list"], {}, False),
@@ -343,3 +376,11 @@ def test_config_optional_sandbox_commands_mirror_go(monkeypatch, argv, env, expe
     ctx = click.Context(main_module.cli)
     ctx.invoked_subcommand = argv[0]
     assert main_module._is_config_optional_sandbox_command(ctx) is expected
+
+
+def test_sandbox_help_names_the_supported_platforms_first():
+    # GAP-0385: on Windows, `defenseclaw sandbox --help` told the user to run
+    # setup and run without saying sandboxes do not run there.
+    out = " ".join(CliRunner().invoke(sandbox, ["--help"]).output.split())
+    assert "Windows and WSL2 are not supported" in out.split("Start with")[0]
+    assert "(Linux and macOS only)" in sandbox.get_short_help_str(limit=120)

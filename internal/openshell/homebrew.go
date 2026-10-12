@@ -77,17 +77,6 @@ func E2fsprogsOwnPrefixFix(prefix string) string {
 		": have an administrator install it with a Homebrew there (" + InstallE2fsprogsCommand + ")"
 }
 
-// registerGatewayCommand registers the local gateway with the OpenShell
-// CLI; under a Homebrew prefix the CLI does not search, it is told where
-// the certificates are.
-func registerGatewayCommand(brewPrefix string) string {
-	cmd := "openshell gateway add https://127.0.0.1:17670 --local --name " + DefaultGatewayName
-	if dir := brewTLSDir(brewPrefix); dir != "" {
-		cmd = EnvLocalTLSDir + "=" + shellQuote(dir) + " " + cmd
-	}
-	return cmd
-}
-
 // formulaKegInstalled reports whether GatewayFormula has a keg under
 // prefix (opt/openshell, or the Cellar directory), reading the file system.
 func formulaKegInstalled(prefix string) bool {

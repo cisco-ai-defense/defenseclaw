@@ -329,6 +329,7 @@ func (c *managedHookPeerHomeCache) directoryCache() *identityDirectoryCache {
 		c.directories.incomplete = func(facts useridentity.DirectoryFacts) bool {
 			return hasUnnamedGroup(facts) || awaitingSpoolUPN(facts)
 		}
+		c.directories.settling = openDirectorySettling
 	})
 	return c.directories
 }
@@ -416,8 +417,19 @@ func (c *managedHookPeerHomeCache) lookupName(uid int) string {
 	if !ok {
 		return ""
 	}
-	return sanitizeLLMEventUser(account.Name)
+	name := sanitizeLLMEventUser(account.Name)
+	if name != "" {
+		c.rememberName(uid, name)
+	}
+	return name
 }
+
+// managedHookPeerLastName is the last account name uid resolved to, which
+// a managed gateway keeps across restarts; "" for a uid that never did. It
+// stands in for the name only where the account database gives none (a
+// directory outage) and a record bound to that name says who the caller is
+// (sandboxCheckSubject).
+var managedHookPeerLastName = func(uid int) string { return managedHookPeerHomes.lastName(uid) }
 
 // rememberName records the name uid resolved to for lastName.
 func (c *managedHookPeerHomeCache) rememberName(uid int, name string) {

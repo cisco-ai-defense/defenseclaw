@@ -368,6 +368,31 @@ func readActiveGateway(path string) (string, error) {
 	return name, nil
 }
 
+// RegistrationNames lists the gateways the openshell CLI has registered for
+// the caller (the user configuration directory) and for the computer (the
+// system one), sorted. Unreadable directories list none.
+func RegistrationNames(opts DiscoverOptions) []string {
+	userDir := opts.ConfigDir
+	if userDir == "" {
+		dir, err := UserConfigDir()
+		if err != nil {
+			return nil
+		}
+		userDir = dir
+	}
+	systemDir := opts.SystemDir
+	if systemDir == "" {
+		systemDir = defaultSystemDir
+	}
+	var dirs []string
+	for _, dir := range []string{userDir, systemDir} {
+		if real, err := resolveConfigDir(dir); err == nil {
+			dirs = append(dirs, real)
+		}
+	}
+	return listRegistrations(dirs...)
+}
+
 func listRegistrations(dirs ...string) []string {
 	seen := map[string]bool{}
 	var names []string

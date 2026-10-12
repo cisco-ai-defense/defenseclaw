@@ -149,7 +149,7 @@ class RotateTokenFileWriteTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            with self.assertRaisesRegex(click.ClickException, "ACL is not private"):
+            with self.assertRaisesRegex(click.ClickException, r"is not private \(Windows DACL is inheritable\)"):
                 cmd_setup._rotate_token_hook_snapshot_locked(td, "codex")
 
     def test_preserves_unrelated_bytes_and_crlf(self) -> None:

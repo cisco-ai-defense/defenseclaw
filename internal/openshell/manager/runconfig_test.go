@@ -121,7 +121,7 @@ func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
 			{Name: "codex_apps", URL: "https://example.com/bundled", Bundled: true},
 			{Name: "bad name!", Command: "srv"},
 		},
-		skipped: []MCPSkip{{Name: "risky", Reason: "blocked by DefenseClaw"}},
+		skipped: []MCPSkip{{Name: "risky", Reason: "blocked by DefenseClaw", Code: sandboxapi.MCPCodeOrganizationBlock}},
 	}
 	e.m.opts.MCP = inv
 	writeFile(t, filepath.Join(e.project, ".mcp.json"), `{"mcpServers":{"repo-tool":{"command":"./tool"},"zeta":{"url":"https://x"},"\u001b[31mred":{"command":"x"}}}`)
@@ -156,6 +156,10 @@ func TestRunConfigClaudeCodePinsProviderAndLocksMCP(t *testing.T) {
 	var left []string
 	for _, l := range sb.MCP.LeftBehind {
 		left = append(left, l.Name+"="+l.Reason)
+		// The organization's reason reaches the banner's counts (GAP-0475).
+		if (l.Name == "risky") != (l.Code == sandboxapi.MCPCodeOrganizationBlock) {
+			t.Fatalf("left behind %+v: the code of the inventory's skip is lost or misplaced", l)
+		}
 	}
 	for _, want := range []string{"risky=blocked by DefenseClaw", "off=disabled", "(unprintable name)=not usable in a sandbox",
 		"local-db=runs on this machine, which the sandbox cannot reach; run the sandbox with --host-port 5432 to bring it along"} {

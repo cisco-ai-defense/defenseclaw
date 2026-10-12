@@ -288,8 +288,12 @@ func (s *profileGroupSIDs) absorbLocked(now time.Time) {
 	}
 }
 
-// sid returns the SID of an assignment group name, or false while it has none.
+// sid returns the SID of an assignment group name, or false while it has none
+// or the set keeps no SIDs (nil: any set but a standalone Windows one).
 func (s *profileGroupSIDs) sid(name string) (string, bool) {
+	if s == nil {
+		return "", false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, ok := s.entries[foldKey(norm.NFC.String(strings.TrimSpace(name)))]

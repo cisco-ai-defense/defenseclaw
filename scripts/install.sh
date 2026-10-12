@@ -85,7 +85,12 @@ readonly OPENCLAW_VERSION="2026.3.24"
 readonly CALLER_PATH="${PATH}"
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 # Real files in BIN_DIR. Connector hooks record these paths, so they never move.
-readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp"
+# defenseclaw-sensor-helper is kept on Linux only: it is what `sudo
+# defenseclaw-gateway sandbox kernel-feed install` copies into a root service.
+readonly MANAGED_BINARIES="defenseclaw-gateway defenseclaw-acp defenseclaw-sensor-helper"
+# The sandbox kernel feed's unit and its root copy of the helper.
+readonly SANDBOX_FEED_UNIT="/etc/systemd/system/defenseclaw-sandbox-feed.service"
+readonly SANDBOX_FEED_HELPER="/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper"
 # Symlinks in BIN_DIR that point into the venv.
 readonly MANAGED_LINKS="defenseclaw skill-scanner mcp-scanner"
 # The first line of the defenseclaw script the swap puts in place of the link.
@@ -481,6 +486,34 @@ stop_gateway() {
     [[ -z "$(gateway_pid || true)" ]]
 }
 
+warn_running_sandboxes() {
+    # A running sandbox's hooks fail closed while the gateway restarts, so its
+    # agent's tool calls are refused until the gateway is back. Name them
+    # before the question, not only in the session's end summary (GAP-0352).
+    local gateway="${BIN_DIR}/defenseclaw-gateway" names
+    [[ -x "${gateway}" && -x "${VENV}/bin/python" && -n "$(gateway_pid || true)" ]] || return 0
+    names="$("${VENV}/bin/python" -I - "${gateway}" <<'PY' 2>/dev/null
+import json, re, subprocess, sys
+try:
+    out = subprocess.run([sys.argv[1], "sandbox", "list", "--output", "json"], capture_output=True, text=True, timeout=10).stdout
+    rows = json.loads(out or "{}").get("sandboxes") or []
+except Exception:
+    rows = []
+print(" ".join(sorted(
+    r["name"] for r in rows
+    if isinstance(r, dict) and r.get("phase") == "ready"
+    and isinstance(r.get("name"), str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", r["name"])
+)))
+PY
+)" || return 0
+    set -- ${names}
+    case $# in
+        0) ;;
+        1) warn "Sandbox $1 is running: while the gateway restarts (usually under a minute) its hooks fail closed, so its agent's tool calls are refused until the gateway is back" ;;
+        *) warn "$# sandboxes are running ($(printf '%s, ' "$@" | sed 's/, $//')): while the gateway restarts (usually under a minute) their hooks fail closed, so their agents' tool calls are refused until the gateway is back" ;;
+    esac
+}
+
 APP_PATH=""
 # DEFENSECLAW_APP_PATH=none skips the macOS app (tests, CLI-only machines).
 if [[ "${OS}" == darwin && "${DEFENSECLAW_APP_PATH:-}" != none ]]; then
@@ -518,6 +551,7 @@ if [[ "${ROLLBACK}" == true ]]; then
         step "Rolling back to DefenseClaw ${back_to}"
         question="Replace DefenseClaw ${current:-?} with the previous install (${back_to})?"
     fi
+    warn_running_sandboxes
     ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"
     # GAP-1388: a 0.x release cannot start on a damaged audit store, so check
     # the saved data before anything of this install changes.
@@ -647,7 +681,12 @@ fetch_failed() {
     die "Could not get ${asset} for ${VERSION}; nothing was changed"
 }
 
-info "Downloading and verifying release assets"
+# --local copies the assets, so it says so instead of "Downloading" (GAP-0190).
+if [[ -n "${LOCAL_DIR}" ]]; then
+    info "Verifying the release assets in ${LOCAL_DIR}"
+else
+    info "Downloading and verifying release assets"
+fi
 fetch checksums.txt "${STAGING}/checksums.txt" || fetch_failed checksums.txt
 checksum_ok() {
     local file="$1" name expected
@@ -691,6 +730,8 @@ ok "Assets match checksums.txt"
 
 tar -xzf "${STAGING}/${ARCHIVE}" -C "${STAGING}/bin" || die "Could not unpack ${ARCHIVE}"
 [[ -f "${STAGING}/bin/defenseclaw-gateway" ]] || die "${ARCHIVE} has no defenseclaw-gateway"
+# The sensor helper serves only the Linux sandbox kernel feed.
+[[ "${OS}" == linux ]] || rm -f "${STAGING}/bin/defenseclaw-sensor-helper"
 for binary in ${MANAGED_BINARIES}; do
     [[ -f "${STAGING}/bin/${binary}" ]] || continue
     chmod 755 "${STAGING}/bin/${binary}"
@@ -700,7 +741,7 @@ for binary in ${MANAGED_BINARIES}; do
     fi
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
-    || die "The downloaded gateway does not report version ${VERSION}"
+    || die "The gateway in ${ARCHIVE} does not report version ${VERSION}"
 
 # When another account's process holds this account's API port, the upgrade
 # only fails at the gateway restart, after the build, the migration and the
@@ -756,6 +797,7 @@ ok "DefenseClaw ${VERSION} is staged and checked"
 
 # ── Swap ─────────────────────────────────────────────────────────────────────
 
+warn_running_sandboxes
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
 elif [[ -n "${PREV_VERSION}" ]]; then
@@ -764,7 +806,15 @@ elif [[ -n "${PREV_VERSION}" ]]; then
         warn "DefenseClaw 1.0 starts a new audit history: the audit events, scan results and findings ${PREV_VERSION} recorded (${DEFENSECLAW_HOME}/audit.db, $(du -sh "${DEFENSECLAW_HOME}/audit.db" 2>/dev/null | awk '{print $1}')) are deleted when DefenseClaw ${VERSION} first opens its audit database"
         info "A copy is kept in ${PREVIOUS}/data/audit.db; 'defenseclaw rollback' brings it back, and later upgrades keep it in ${DEFENSECLAW_HOME}/backups"
     fi
-    ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
+    if version_lt "${VERSION}" "${PREV_VERSION}"; then
+        # An older release over a newer one is a downgrade: ask with no as the
+        # answer, and say so even with --yes (GAP-0287).
+        [[ "${YES}" == true ]] && warn "Downgrading DefenseClaw ${PREV_VERSION} → ${VERSION} (--yes)"
+        ask_yes_no "Downgrade DefenseClaw ${PREV_VERSION} → ${VERSION}? (an older release; 'defenseclaw rollback' undoes it)" n \
+            || die "Cancelled; nothing was changed"
+    else
+        ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION} → ${VERSION}?" || die "Cancelled; nothing was changed"
+    fi
 fi
 if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" ]]; then
     pick_connector
@@ -865,12 +915,22 @@ rm -rf "${STAGING}"
 ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
 if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
-    printf "  Upgraded from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+    changed="Upgraded"
+    version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded"
+    printf "  ${changed} from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi
     if pgrep -f "${VENV}/bin/defenseclaw" >/dev/null 2>&1; then
         warn "Restart the DefenseClaw TUI and any other open DefenseClaw commands; they still run ${PREV_VERSION}"
+    fi
+fi
+# The sandbox kernel feed is a root copy of the helper that an upgrade as this
+# user cannot replace: say how to bring it to this release.
+if [[ "${OS}" == linux && -f "${SANDBOX_FEED_UNIT}" && -x "${BIN_DIR}/defenseclaw-sensor-helper" ]]; then
+    FEED_VERSION="$("${SANDBOX_FEED_HELPER}" --version 2>/dev/null | sed -n 's/.* version \([^ ]*\).*/\1/p')"
+    if [[ "${FEED_VERSION}" != "${VERSION}" ]]; then
+        warn "The sandbox kernel feed runs ${FEED_VERSION:-an unknown version}, not ${VERSION}; update it with: sudo ${BIN_DIR}/defenseclaw-gateway sandbox kernel-feed install"
     fi
 fi
 if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \

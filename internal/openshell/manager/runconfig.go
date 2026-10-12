@@ -78,10 +78,13 @@ type MCPInventory interface {
 	SandboxMCPServers(ctx context.Context, harness string) ([]config.MCPServerEntry, []MCPSkip, error)
 }
 
-// MCPSkip is an MCP server a run leaves behind.
+// MCPSkip is an MCP server a run leaves behind: Reason is the user's text,
+// Code the organization's reason when its policy left the server out
+// (sandboxapi.MCPLeftBehind.Code).
 type MCPSkip struct {
 	Name   string
 	Reason string
+	Code   string
 }
 
 // runConfig is a sandbox's rendered per-run configuration.
@@ -125,8 +128,7 @@ type runConfigRecord struct {
 	// Safe reports the files keep the harness's permission prompts.
 	Safe bool `json:"safe"`
 	// Delivery is how the sandbox got the files: runDeliveryMount, or
-	// runDeliveryImage. Empty in records from before it was kept, which
-	// all mount them.
+	// runDeliveryImage.
 	Delivery string `json:"delivery,omitempty"`
 	// Digest is the files' image.RunConfigDigest.
 	Digest string `json:"digest,omitempty"`
@@ -206,7 +208,7 @@ func (m *Manager) deliverRunConfig(ctx context.Context, d openshell.Driver, name
 // runImageError reports a run image or alias that could not be made.
 func (m *Manager) runImageError(img image.Record, err error) error {
 	m.logf("%s: %s: run image: %v", gatewaylog.ErrCodeOpenShellImageBuildFailed, img.Connector, err)
-	return newImageError("the sandbox image with this run's harness settings could not be made from "+img.Tag, err)
+	return newImageError("the sandbox image with this run's harness settings could not be made from "+img.Tag, err, m.opts.ManagedAccount)
 }
 
 // runFileSecretEnv are the variables a harness's run files pin whose value
@@ -314,7 +316,9 @@ func runWorkdir(d openshell.Driver, workdir string) string {
 // --env and --credential: run, when the client sent it, says what of them
 // this run has (explainRunInputs); without it the render takes them from
 // the newest sandbox of the harness and image, and assumes none without
-// one. Always false on a driver that prepares nothing.
+// one. A disk the release before an in-place upgrade prepared does not
+// count: the gateway's release prepares its own. Always false on a driver
+// that prepares nothing.
 func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshell.Driver, flags packs.Flags, eff *packs.Effective, run *sandboxapi.ExplainRun) bool {
 	spec, ok := harness.Get(flags.Harness)
 	if d.ImageCache == "" || m.opts.Images == nil || !ok {
@@ -352,8 +356,9 @@ func (m *Manager) vmFirstBoot(ctx context.Context, cfg *config.Config, d openshe
 		}
 		id = ri.ImageID
 	}
+	release := m.gatewayRelease()
 	for _, disk := range image.VMDisks(cache, id) {
-		if disk.UID == img.UID && disk.GID == img.GID {
+		if disk.UID == img.UID && disk.GID == img.GID && disk.PreparedBy(release) {
 			return false
 		}
 	}
@@ -457,7 +462,7 @@ func (m *Manager) planRunConfig(ctx context.Context, in runConfigInput) (*runCon
 			return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "list the %s MCP servers to bring along: %v", in.spec.DisplayName, err)
 		}
 		for _, s := range skipped {
-			summary.LeftBehind = append(summary.LeftBehind, sandboxapi.MCPLeftBehind{Name: displayMCPName(s.Name), Reason: s.Reason})
+			summary.LeftBehind = append(summary.LeftBehind, sandboxapi.MCPLeftBehind{Name: displayMCPName(s.Name), Reason: s.Reason, Code: s.Code})
 		}
 		var dropped []string
 		servers, summary.LeftBehind, dropped = importMCPServers(in.spec.Name, entries, summary.LeftBehind, in.eff.MCP.HostPorts)
@@ -960,16 +965,9 @@ func (m *Manager) refreshRunConfig(ctx context.Context, rec record, eff *packs.E
 	yolo := rec.Yolo && eff.Yolo
 	rr := rec.RunConfig
 	if rr == nil {
-		// A record from before run files were rendered again: they cannot
-		// be rebuilt, so only a policy that wants them stricter matters.
-		want := &sandboxapi.MCPSummary{ProjectServers: eff.MCP.ProjectServers}
-		if rec.MCP != nil && eff.MCP.Import {
-			want.Imported = rec.MCP.Imported
-		}
-		if runConfigTightened(!rec.Yolo, rec.MCP, !yolo, want) {
-			return nil, nil, nil, errRunConfigStricter(rec, runConfigFixed)
-		}
-		return rec.MCP, rr, rec.Verify, nil
+		// Every create of a harness with run files records them.
+		return nil, nil, nil, sandboxapi.Errorf(sandboxapi.CodeInternal,
+			"sandbox %s has no record of its harness run configuration; delete it and run it again", rec.Name)
 	}
 	d, _ := openshell.LookupDriver(rec.Driver)
 	target := connector.SandboxRenderTarget{

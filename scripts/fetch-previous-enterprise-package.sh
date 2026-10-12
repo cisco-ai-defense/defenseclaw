@@ -86,10 +86,13 @@ cosign verify-blob --bundle "$dir/checksums.txt.bundle" \
     "$dir/checksums.txt"
 want=$(awk -v name="$name" '$2 == name || $2 == "*" name { print $1 }' "$dir/checksums.txt")
 [ -n "$want" ] || { echo "checksums.txt of $version does not list $name" >&2; exit 1; }
+# Hash stdin: for a file name with a backslash (Git Bash on Windows, where
+# RUNNER_TEMP is D:\a\_temp) GNU sha256sum escapes the name and starts its
+# line with a backslash, which then ends up in the hash.
 if command -v sha256sum >/dev/null 2>&1; then
-    got=$(sha256sum "$dir/$name" | cut -d' ' -f1)
+    got=$(sha256sum <"$dir/$name" | cut -d' ' -f1)
 else
-    got=$(shasum -a 256 "$dir/$name" | cut -d' ' -f1)
+    got=$(shasum -a 256 <"$dir/$name" | cut -d' ' -f1)
 fi
 [ "$got" = "$want" ] || { echo "$name of $version does not match checksums.txt" >&2; exit 1; }
 

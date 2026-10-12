@@ -417,10 +417,15 @@ func applyIdentityPosture(cfg *config.Config) {
 	// A managed Windows scan takes each profile owner's Claude Code and
 	// Codex address from the owner's identity record, which the SYSTEM
 	// enumerator writes (GAP-1025).
+	// The gateway's service account cannot translate a sign-in UPN; the
+	// account name the SYSTEM enumerator recorded spells the account as
+	// the directory does (GAP-0382).
 	if spool != "" && runtime.GOOS == "windows" {
 		inventory.SetOwnerEmailLookup(identitySpoolConnectorEmail)
+		useridentity.SetKnownAccountNameLookup(identitySpoolAccountName)
 	} else {
 		inventory.SetOwnerEmailLookup(nil)
+		useridentity.SetKnownAccountNameLookup(nil)
 	}
 	// A managed gateway keeps the last home of each uid across restarts, so
 	// one that starts during a directory outage keeps the agent identities

@@ -27,7 +27,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,7 +54,22 @@ const (
 	// resolver hold a poll open past the API client's scan timeout.
 	minNamingBudget = 5 * time.Second
 	maxNamingBudget = 20 * time.Second
+
+	// kernelStatusInterval is how often the managed Linux sensor helper is
+	// asked what its kernel-policy reconciler applied; a pause or an
+	// operator override reaches /health within it.
+	kernelStatusInterval = 10 * time.Second
+	// kernelStatusTimeout bounds one read.
+	kernelStatusTimeout = 5 * time.Second
+	// kernelStatusUnsupportedRetry is how long a helper that predates the
+	// op is left alone: it is upgraded with a restart, not mid-run.
+	kernelStatusUnsupportedRetry = 5 * time.Minute
 )
+
+// kernelStatusReader is the managed Linux sensor helper's kernel_status op.
+type kernelStatusReader interface {
+	KernelStatus(ctx context.Context) (acquire.KernelStatus, error)
+}
 
 // InventoryProvider supplies the discovery snapshot the join reads.
 //
@@ -151,6 +168,21 @@ type Service struct {
 	// seen, so a finding keeps the owner of the process it saw after that
 	// process exits and its pid is reused.
 	owners *ownerBook
+
+	// kernelReader is the helper's kernel_status op, nil when the acquirer
+	// is not a helper or Plane C does not run. kernel (under mu) is its last
+	// answer; kernelNextTry belongs to Run's goroutine.
+	kernelReader  kernelStatusReader
+	kernel        *KernelState
+	kernelNextTry time.Time
+	// kernelHits is the growth of the helper's hit totals per read over the
+	// last hour, and kernelHitTotals the previous read's totals (both under
+	// mu): KernelState's hour counts.
+	kernelHits      []kernelHitGrowth
+	kernelHitTotals *[2]int64
+	// lastContainerEvents is the container-event count at the previous
+	// poll, for the per-cycle figure. Poll owns it (pollMu).
+	lastContainerEvents int64
 }
 
 type episode struct {
@@ -283,14 +315,188 @@ func New(options Options) (*Service, error) {
 			scoring.KillChainMinStages,
 		)
 	}
+	if service.hostPlane != nil && options.Acquirer.Brokered() {
+		// A brokered plane runs on a managed host, where the hooks that
+		// matter are machine policy every agent runs: a tool call no
+		// decision covers is a fact (hook_seen=false), not a missing
+		// install.
+		service.hostPlane.hooks = newHookRing(hookRingSize, hookRingWindow)
+		if reader, ok := options.Acquirer.(kernelStatusReader); ok {
+			service.kernelReader = reader
+		}
+	}
 	return service, nil
 }
 
-// Snapshot returns the most recent poll result.
+// RecordHookDecision hands the host plane a managed hook decision to label
+// the tool call's processes with. A no-op where Plane C does not run or the
+// host is not managed.
+func (s *Service) RecordHookDecision(decision HookDecision) {
+	if s == nil || s.hostPlane == nil || s.hostPlane.hooks == nil {
+		return
+	}
+	if decision.At.IsZero() {
+		decision.At = time.Now()
+	}
+	s.hostPlane.hooks.record(decision)
+}
+
+// Snapshot returns the most recent poll result, with the sensor helper's
+// latest kernel-policy state and Plane C's current backend: both change
+// between polls (a Tetragon restart, a pause), and /health reads this every
+// few seconds while a poll may be minutes apart.
 func (s *Service) Snapshot() Snapshot {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.snapshot
+	snapshot := s.snapshot
+	snapshot.Kernel = copyKernelState(s.kernel)
+	s.mu.RUnlock()
+	if s.hostPlane == nil || len(snapshot.Planes) == 0 {
+		return snapshot
+	}
+	planes := append([]PlaneHealth(nil), snapshot.Planes...)
+	for index := range planes {
+		if planes[index].Plane == platform.PlaneC && planes[index].Running {
+			planes[index].Backend = s.hostPlaneBackend()
+		}
+	}
+	snapshot.Planes = planes
+	snapshot.RecentCustomerKernelEvents, _, _ = s.hostPlane.customerSnapshot()
+	return snapshot
+}
+
+// SessionRootOf is the session root of the agent a process runs under (a
+// managed hook's peer), when the host plane attributes it.
+func (s *Service) SessionRootOf(pid int) (int, bool) {
+	if s == nil || s.hostPlane == nil || pid <= 0 {
+		return 0, false
+	}
+	lineage, ok := s.tracker.Lineage(pid, "")
+	if !ok {
+		return 0, false
+	}
+	return lineage.SessionRoot.PID, true
+}
+
+// KernelBlocks returns the attributed kernel denials (DefenseClaw's controls'
+// and the host's own Tetragon policies') at or after since, oldest first,
+// for the developer notice. nil where Plane C does not run.
+func (s *Service) KernelBlocks(since time.Time) []KernelBlock {
+	if s == nil || s.hostPlane == nil {
+		return nil
+	}
+	return s.hostPlane.recentBlocks(since)
+}
+
+func copyKernelState(state *KernelState) *KernelState {
+	if state == nil {
+		return nil
+	}
+	copied := *state
+	return &copied
+}
+
+// refreshKernelState asks the sensor helper what its kernel-policy
+// reconciler applied. A failed read keeps the last answer, marked
+// unreachable: policies a stopped helper loaded keep running in the kernel.
+func (s *Service) refreshKernelState(ctx context.Context) {
+	if s.kernelReader == nil {
+		return
+	}
+	now := s.options.Now()
+	if now.Before(s.kernelNextTry) {
+		return
+	}
+	readCtx, cancel := context.WithTimeout(ctx, kernelStatusTimeout)
+	status, err := s.kernelReader.KernelStatus(readCtx)
+	cancel()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case errors.Is(err, acquire.ErrKernelStatusUnsupported):
+		// A helper that predates the op: nothing to report, and nothing to
+		// infer about kernel policies it cannot load.
+		s.kernel = nil
+		s.kernelHits, s.kernelHitTotals = nil, nil
+		s.kernelNextTry = now.Add(kernelStatusUnsupportedRetry)
+	case err != nil:
+		state := KernelState{}
+		if s.kernel != nil {
+			state = *s.kernel
+		}
+		if state.Reachable || state.UnreachableSince.IsZero() {
+			state.UnreachableSince = now
+		}
+		state.Reachable = false
+		state.Error = boundedError(err)
+		s.kernel = &state
+	default:
+		wouldBlock, blocked := s.noteKernelHits(now, status.Counters)
+		s.kernel = &KernelState{Status: status, FetchedAt: now, Reachable: true,
+			WouldBlockLastHour: wouldBlock, BlockedLastHour: blocked}
+	}
+}
+
+// kernelHitWindow is how far back KernelState's hour counts look;
+// maxKernelHitReads bounds the reads kept for them (a read with no growth is
+// not kept).
+const (
+	kernelHitWindow   = time.Hour
+	maxKernelHitReads = 4096
+)
+
+// kernelHitGrowth is how much the helper's hit totals grew since the read
+// before.
+type kernelHitGrowth struct {
+	at                  time.Time
+	wouldBlock, blocked int64
+}
+
+// noteKernelHits records a read's growth of the helper's would_block_total
+// and blocked_total and returns their sums over the last hour. The first
+// read is the baseline. The caller holds mu.
+func (s *Service) noteKernelHits(now time.Time, counters map[string]int64) (wouldBlock, blocked int64) {
+	totals := [2]int64{counters["would_block_total"], counters["blocked_total"]}
+	if previous := s.kernelHitTotals; previous != nil {
+		growth := kernelHitGrowth{at: now, wouldBlock: counterGrowth(previous[0], totals[0]), blocked: counterGrowth(previous[1], totals[1])}
+		if growth.wouldBlock > 0 || growth.blocked > 0 {
+			s.kernelHits = append(s.kernelHits, growth)
+		}
+	}
+	s.kernelHitTotals = &totals
+	cut := now.Add(-kernelHitWindow)
+	kept := s.kernelHits[:0]
+	for _, growth := range s.kernelHits {
+		if growth.at.After(cut) {
+			kept = append(kept, growth)
+		}
+	}
+	if len(kept) > maxKernelHitReads {
+		kept = kept[len(kept)-maxKernelHitReads:]
+	}
+	s.kernelHits = kept
+	for _, growth := range kept {
+		wouldBlock += growth.wouldBlock
+		blocked += growth.blocked
+	}
+	return wouldBlock, blocked
+}
+
+// counterGrowth is how much a since-start counter grew; one that went down
+// was restarted and counts from zero.
+func counterGrowth(previous, current int64) int64 {
+	if current < previous {
+		return current
+	}
+	return current - previous
+}
+
+// boundedError is an error's text cut to a status-sized length.
+func boundedError(err error) string {
+	text := err.Error()
+	if len(text) > 256 {
+		text = text[:256]
+	}
+	return text
 }
 
 // Run polls until the context is cancelled.
@@ -332,6 +538,13 @@ func (s *Service) Run(ctx context.Context) error {
 		case <-time.After(hostPlaneFirstStartWait):
 		}
 	}
+	var kernelTick <-chan time.Time
+	if s.kernelReader != nil {
+		s.refreshKernelState(ctx)
+		kernelTicker := time.NewTicker(kernelStatusInterval)
+		defer kernelTicker.Stop()
+		kernelTick = kernelTicker.C
+	}
 	// Poll once immediately so a freshly enabled sensor has a snapshot before
 	// the first interval elapses, rather than reporting "no data" for a minute.
 	s.Poll(ctx)
@@ -344,6 +557,8 @@ func (s *Service) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			s.Poll(ctx)
+		case <-kernelTick:
+			s.refreshKernelState(ctx)
 		}
 	}
 }
@@ -452,6 +667,19 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	// recorded observation, a poll that never returns is not.
 	processes, processSkipped, processErr := s.options.Acquirer.Processes(ctx)
 	connections, unattributed, connectionErr := s.options.Acquirer.Connections(ctx)
+	processesObserved, connectionsObserved := len(processes), len(connections)
+
+	// Kernel connects since the last poll (Tetragon, observe and enforce) are
+	// connections of their processes: a connect that opened and closed
+	// between two reads of the connection table still counts, and a process
+	// that exited since is scored from what its events said about it.
+	var exited []procprobe.Process
+	var connectsDropped int64
+	if s.hostPlane != nil {
+		var connects []kernelConnect
+		connects, connectsDropped = s.hostPlane.drainConnects()
+		connections, exited = mergeKernelConnects(processes, connections, connects)
+	}
 
 	// The naming budget starts when naming can begin. A slow process or socket
 	// read must not consume it before plane B sees its first peer.
@@ -467,13 +695,16 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 	rows := make([]agentchain.ProcessRow, 0, len(processes))
 	for _, process := range processes {
-		rows = append(rows, agentchain.ProcessRow{
+		row := agentchain.ProcessRow{
 			PID: process.PID, PPID: process.PPID,
 			Name: process.Name, Cmdline: process.Cmdline, Start: process.StartedAt,
-		})
+		}
+		rows = append(rows, row)
 	}
 	s.tracker.ObserveProcessTable(rows)
 	s.tracker.Reap()
+	// Not in the process table the tracker learns from: they are gone.
+	processes = append(processes, exited...)
 
 	inventorySnapshot := correlate.Snapshot{}
 	if s.options.Config.CorrelationEnabled() && s.options.Inventory != nil {
@@ -580,15 +811,26 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		ScannedAt:               now,
 		Findings:                findings,
 		Planes:                  s.planeHealth(now, processErr == nil, connectionErr == nil),
-		ProcessesObserved:       len(processes),
+		ProcessesObserved:       processesObserved,
 		ProcessesSkipped:        processSkipped,
-		ConnectionsObserved:     len(connections),
+		ConnectionsObserved:     connectionsObserved,
+		KernelConnectsDropped:   connectsDropped,
 		ConnectionsUnattributed: unattributed,
 	}
 	if s.hostPlane != nil {
 		classified, gated, _, _ := s.hostPlane.stats()
 		snapshot.HostPlaneObservations = classified
 		snapshot.HostPlaneGated = gated
+		snapshot.HostPlaneContainerEvents = s.hostPlane.containerEvents.Load()
+		snapshot.HostPlaneHookUnexpected = s.hostPlane.hookUnexpected.Load()
+		snapshot.KernelEvents, snapshot.KernelEventsDropped = s.hostPlane.drainKernelEvents()
+		snapshot.CustomerKernelEvents, snapshot.CustomerKernelEventsDropped = s.hostPlane.drainCustomer()
+		for index := range snapshot.Planes {
+			if snapshot.Planes[index].Plane == platform.PlaneC {
+				snapshot.Planes[index].ContainerEvents = snapshot.HostPlaneContainerEvents - s.lastContainerEvents
+			}
+		}
+		s.lastContainerEvents = snapshot.HostPlaneContainerEvents
 	}
 	if processErr != nil {
 		snapshot.DegradedReasons = append(snapshot.DegradedReasons,
@@ -603,6 +845,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 	s.mu.Lock()
 	s.snapshot = snapshot
+	snapshot.Kernel = copyKernelState(s.kernel)
 	s.mu.Unlock()
 	return snapshot
 }
@@ -715,6 +958,9 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 				// is reported, never implied.
 				limits = append(limits, unprivilegedEgressLimit)
 			}
+			if s.hostPlane != nil && s.hostPlane.coversConnects() {
+				entry.Mechanism += " plus kernel connects (Tetragon)"
+			}
 			entry.Mechanism = s.egressMechanism(entry.Mechanism)
 			if reason := s.dnsCaptureStatus(); reason != "" {
 				// The plane still runs on reverse DNS; naming is just less
@@ -736,6 +982,9 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 				// and running in the same breath.
 				entry.Available = entry.Running || capability.Available
 			}
+			if entry.Running {
+				entry.Backend = s.hostPlaneBackend()
+			}
 		}
 		if entry.Running {
 			entry.ObservedAt = now
@@ -753,6 +1002,42 @@ func planeIdleReason(health PlaneHealth) string {
 		return reason
 	}
 	return "not started"
+}
+
+// mergeKernelConnects adds kernel connects to the connection table, once
+// per process and peer, and returns what the events said about the
+// processes that are no longer in the process table.
+func mergeKernelConnects(processes []procprobe.Process, connections []netprobe.Connection, connects []kernelConnect) ([]netprobe.Connection, []procprobe.Process) {
+	if len(connects) == 0 {
+		return connections, nil
+	}
+	peerOf := func(pid int, ip net.IP, port int) kernelConnectKey {
+		return kernelConnectKey{pid: pid, peer: net.JoinHostPort(ip.String(), strconv.Itoa(port))}
+	}
+	seen := make(map[kernelConnectKey]bool, len(connections))
+	for _, connection := range connections {
+		if connection.PID > 0 && connection.RemoteIP != nil {
+			seen[peerOf(connection.PID, connection.RemoteIP, connection.RemotePort)] = true
+		}
+	}
+	live := make(map[int]bool, len(processes))
+	for _, process := range processes {
+		live[process.PID] = true
+	}
+	var exited []procprobe.Process
+	for _, connect := range connects {
+		if key := peerOf(connect.PID, connect.IP, connect.Port); !seen[key] {
+			seen[key] = true
+			connections = append(connections, netprobe.Connection{
+				PID: connect.PID, RemoteIP: connect.IP, RemotePort: connect.Port, State: netprobe.StateEstablished,
+			})
+		}
+		if !live[connect.PID] {
+			live[connect.PID] = true
+			exited = append(exited, procprobe.Process{PID: connect.PID, Name: connect.Name, Cmdline: connect.Cmdline, User: connect.User})
+		}
+	}
+	return connections, exited
 }
 
 // egressMechanism names how plane B names peers, so status never claims a
@@ -843,6 +1128,29 @@ func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool,
 	return true, coverage.Mechanism, ""
 }
 
+// hostPlaneBackend is a copy of the running Plane C source's backend: what
+// the managed Linux helper runs its process half on, with the host's own
+// Tetragon policies as the helper's kernel_status and the gateway counted
+// them. nil everywhere else.
+func (s *Service) hostPlaneBackend() *plane.Backend {
+	if s.hostPlane == nil {
+		return nil
+	}
+	_, _, running, coverage := s.hostPlane.stats()
+	if !running || coverage.Backend == nil {
+		return nil
+	}
+	backend := *coverage.Backend
+	backend.Policies = append([]plane.BackendPolicy(nil), coverage.Backend.Policies...)
+	backend.CustomerPolicies = nil
+	s.mu.RLock()
+	kernel := copyKernelState(s.kernel)
+	s.mu.RUnlock()
+	_, counts, total := s.hostPlane.customerSnapshot()
+	mergeCustomer(&backend, kernel, counts, total)
+	return &backend
+}
+
 // hostPlaneFindings scores the accumulated agent sessions.
 //
 // A host-plane finding is per agent session rather than per process: the whole
@@ -869,6 +1177,12 @@ func (s *Service) hostPlaneFindings(
 			StartedAt: session.RootStart,
 		})
 		account := owners.resolve(session.Processes, session.ConfigPaths)
+		if account.Attribution == AttributionUnattributed && session.Root.User != "" && session.Root.UID != nil {
+			// The kernel event that started the root process (Tetragon's exec,
+			// or the Linux helper's) named its account with its uid. It is the
+			// root instance's own, never a later holder's of its pid.
+			account = owner{User: session.Root.User, Attribution: AttributionProcessOwner}
+		}
 		findings = append(findings, Finding{
 			FindingID:         hostFindingID(session),
 			PID:               session.RootPID,
@@ -884,6 +1198,14 @@ func (s *Service) hostPlaneFindings(
 			Correlation:       correlation,
 			FirstSeen:         session.FirstSeen,
 			LastSeen:          session.LastSeen,
+			Exe:               session.Root.Exe,
+			UID:               session.Root.UID,
+			AUID:              session.Root.AUID,
+			Connector:         session.Root.Agent.Connector,
+			// A heuristic or IDE-hosted root still attributes the session;
+			// it is only never an enforcement anchor.
+			NotEnforcedReason: session.Root.Agent.ObserveOnly,
+			Activities:        session.Activities,
 		})
 	}
 	return findings

@@ -71,6 +71,7 @@ func verifiedAuditCaller(ctx context.Context) (auditCaller, bool) {
 // hook_decision rows carry.
 func auditCallerIdentity(ctx context.Context) auditCaller {
 	if caller, ok := verifiedAuditCaller(ctx); ok {
+		caller.Name = auditUserName(caller.Name)
 		caller.Identity = requestIdentityFor(ctx, caller.ID)
 		return caller
 	}
@@ -78,9 +79,22 @@ func auditCallerIdentity(ctx context.Context) auditCaller {
 		return auditCaller{}
 	}
 	agent := AgentIdentityFromContext(ctx)
-	caller := auditCaller{ID: agent.UserID, IDKind: agent.UserIDKind, Name: agent.UserName}
+	caller := auditCaller{ID: agent.UserID, IDKind: agent.UserIDKind, Name: auditUserName(agent.UserName)}
 	caller.Identity = requestIdentityFor(ctx, caller.ID)
 	return caller
+}
+
+// auditUserName is the account name an audit row of a request carries: the
+// name its hook_decision record takes (v8UserName), so the connector-hook
+// row never names the account in a form the decision record leaves out,
+// such as a UPN, which is a principal and is reported hashed (PM-37,
+// GAP-0382). Secure Client keeps the name its rows carry on main.
+func auditUserName(name string) string {
+	if !identityFactsEnabled.Load() {
+		return name
+	}
+	name, _ = v8UserName(name, hookV8OptionalIdentifier).Get()
+	return name
 }
 
 // addTo copies the non-empty identity fields into a structured audit

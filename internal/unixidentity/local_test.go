@@ -38,6 +38,17 @@ func TestParseLocalPasswdAndDSCL(t *testing.T) {
 	if dscl["alice"] != 501 || dscl["nobody"] != -2 || dscl["_www"] != 70 || len(dscl) != 3 {
 		t.Fatalf("parseDSCLLocalAccounts = %v", dscl)
 	}
+	// GAP-0496: a bound Mac's mobile accounts sit in the local node with the
+	// directory node they came from; they are directory accounts.
+	nodes := parseDSCLOriginalNodes("ent-bob     /Active Directory/DCLAB/dclab.test\nent-ldap /LDAPv3/ldap.example.test\n" +
+		"ent-kept /Local/Default\nbroken\n")
+	if len(nodes) != 2 || nodes["ent-bob"] != "/Active Directory/DCLAB/dclab.test" || nodes["ent-ldap"] != "/LDAPv3/ldap.example.test" {
+		t.Fatalf("parseDSCLOriginalNodes = %v", nodes)
+	}
+	groups := parseLocalGroups("wheel:x:10:root\n+nisgroup:::\ndc-sbx-contractors:x:2501:ent-hank\nbroken\nwheel:x:11:\n")
+	if len(groups) != 2 || groups["wheel"] != 10 || groups["dc-sbx-contractors"] != 2501 {
+		t.Fatalf("parseLocalGroups = %v", groups)
+	}
 }
 
 // macOS: the enumerator assumed every Mac may be bound to a directory, so a

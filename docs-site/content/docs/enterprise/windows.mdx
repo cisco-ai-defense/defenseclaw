@@ -54,7 +54,7 @@ cannot change either tree.
 | Service logs | `C:\ProgramData\Cisco\DefenseClaw\logs` |
 | Scanner runtime | `C:\ProgramData\Cisco\DefenseClaw-ScannerRuntime`: `defenseclaw-scanners.exe` and the Python runtime it unpacks (the skill scanner, the MCP scanner and LiteLLM). LocalSystem and Administrators have full control; the gateway service can only read and run it. The lifecycle installs it from the Setup payload and removes it on uninstall. |
 | Hook runtime | `C:\ProgramData\Cisco\DefenseClaw-HookRuntime`, readable by users. It holds, for each per-user connector, the enrollment list and runtime selector, and `machine-policy.json`, the public machine-policy summary. |
-| Lifecycle log | `%WINDIR%\Logs\DefenseClaw`: `enterprise-lifecycle.log`, `last-result.json` and, for MDM runs, `mdm-wrapper.log`. Users can read these files. |
+| Lifecycle log | `%WINDIR%\Logs\DefenseClaw`: `enterprise-lifecycle.log`, `last-result.json` and, for MDM runs, `mdm-wrapper.log`. Only SYSTEM and Administrators can write these files, and only Administrators and members of Event Log Readers can read them: the results name other accounts. |
 
 The lifecycle also registers the deployment with Windows:
 
@@ -203,9 +203,15 @@ Without `guardrail.rule_pack` or `policy_dir`, as here, the gateway uses
 the rule packs built into it. A rule-pack directory you name (a
 `guardrail.custom_packs` entry, or `<policy_dir>/guardrail/<preset>`) must exist, be
 writable only by administrators, and be readable by the gateway service
-account `NT SERVICE\DefenseClawGateway` (for example, leave the inherited
-`Users` read and execute entry in place, and add no Deny entry for that
-account). Every parent folder of it needs
+account `NT SERVICE\DefenseClawGateway` and by no standard user: a pack is
+one profile's policy, and users see only their own. Grant that account read
+and execute by its SID (`S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274`,
+which Windows derives from the service name, so the grant works before the
+first install; `sc.exe showsid DefenseClawGateway` prints it), remove `Users`,
+and add no Deny entry for that account.
+Status, verify and Setup warn `rule_pack_readable_by_users` for a pack that
+`Users`, `Authenticated Users`, `Everyone`, `INTERACTIVE` or `Domain Users`
+can read, with the `icacls` commands that fix it. Every parent folder of it needs
 Read & execute for that account too, because the gateway reads each
 parent's permissions and lists it. So do not put the rule pack inside the
 locked staging folder below; give it its own folder:
@@ -214,7 +220,9 @@ locked staging folder below; give it its own folder:
 $Packs = 'C:\ProgramData\DefenseClaw-RulePacks'
 New-Item -ItemType Directory -Path $Packs -Force | Out-Null
 icacls $Packs /setowner '*S-1-5-32-544' /T /C | Out-Null
-icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' | Out-Null
+$Gateway = '*S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274'   # NT SERVICE\DefenseClawGateway
+icacls $Packs /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' "${Gateway}:(OI)(CI)RX" | Out-Null
+icacls $Packs /remove:g '*S-1-5-32-545' '*S-1-5-11' /T /C | Out-Null
 if (Test-Path -LiteralPath "$Packs\my-pack") {
     icacls "$Packs\my-pack" /reset /T /C | Out-Null
     Remove-Item -LiteralPath "$Packs\my-pack" -Recurse -Force -ErrorAction Stop
@@ -231,6 +239,13 @@ apply, so `/T` leaves every file in an existing pack with no permissions at
 all. The `/reset` line repairs such a pack before it is removed. Copying a
 folder onto one that exists nests a copy (`my-pack\my-pack`), which Setup
 refuses, naming the nested folder.
+
+The grant names the service SID, not the `Users` group, so only the gateway,
+Administrators and SYSTEM can read the pack. Setup's own `icacls` advice for a refused
+pack folder lists the `Users` entry (`*S-1-5-32-545:(OI)(CI)RX`); where packs are
+meant to stay private, replace that entry with the service SID as above. A rule pack
+is policy, not a secret that protects anything by itself, but which pack a group
+gets tells a reader how the groups differ.
 
 Then name the pack in the config and select it:
 
@@ -602,6 +617,10 @@ with an invalid `--profile`); see
 Each message names the action and result and ends with its record, for
 example
 `DefenseClaw enterprise repair (standalone) ok=true exit=0 version=1.0.29 installed=1.0.29 record 452e0e82c58af2aaf46a795939e582d7`.
+An event lists only the code of each error and warning (`warning agent_unprotected (x2)`),
+never its text: any account can read the event logs, and the text can name
+other accounts, their SIDs and guardrail profiles. The text is in the
+lifecycle log line with the same record.
 
 Each elevated lifecycle run appends its result to the lifecycle log. Every
 run except a healthy `status` or `verify` also writes an event (IDs 100 to
@@ -632,8 +651,9 @@ and SIEM forwarding at the `DefenseClaw` log (`Get-WinEvent -LogName
 DefenseClaw`) instead of the Application log's `DefenseClaw Enterprise`
 source.
 
-To check that the event-log entries are genuine, run `events` from any
-prompt. It exits `1` and names each entry that fails:
+To check that the event-log entries are genuine, run `events` from an
+elevated prompt (or as a member of Event Log Readers, who can read the
+lifecycle log too). It exits `1` and names each entry that fails:
 
 ```powershell title="Check the DefenseClaw event-log entries"
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
@@ -746,6 +766,11 @@ it selects, and lists unattributed findings apart under
 available on Windows: the deployment config has no
 `ai_discovery.runtime.acquisition` key, and a config that sets one is refused
 with `config_schema_invalid`.
+
+A config that carries `enterprise.tetragon` is accepted and ignored on
+Windows, because Tetragon has no Windows agent, and Windows `status` is
+unchanged. The setting acts only on Linux; see
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon).
 
 The `discovery` view names each skill and MCP server per user, including
 the Devin servers in each user's `%APPDATA%\devin\mcp_config.json`. The
@@ -1586,6 +1611,16 @@ Limits:
 Windows handles machine policy differently from Linux and macOS. See
 [Machine policy](/docs/enterprise/machine-policy) and
 [Foreign-hook guard](/docs/enterprise/foreign-hook-guard).
+
+## Sandboxes
+
+Sandboxes do not run on Windows. A guardrail profile can still require an
+agent to run in one: a person in that group is refused when Claude Code or Codex
+starts, with the reason `os_unsupported` and the request-access contact, or
+alerted when both the floor and the profile say `when_unavailable: alert`.
+Keep `required_for` out of the profiles of people who work on Windows if they
+must keep using these agents. See
+[Windows computers](/docs/enterprise/sandboxes#windows-computers).
 
 ## Upgrades and downgrades
 

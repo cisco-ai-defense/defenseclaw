@@ -80,6 +80,12 @@ var commandCandidates = map[string][]string{
 	"ps":               {"/bin/ps", "/usr/bin/ps"},
 	"ls":               {"/bin/ls"},
 	"chmod":            {"/bin/chmod"},
+	// The sandbox lifecycle acts as the user (runuser on Linux, sudo on macOS)
+	// and reads the user service manager and group lists.
+	"runuser":  {"/usr/sbin/runuser", "/sbin/runuser", "/usr/bin/runuser"},
+	"sudo":     {"/usr/bin/sudo"},
+	"loginctl": {"/usr/bin/loginctl", "/bin/loginctl"},
+	"id":       {"/usr/bin/id", "/bin/id"},
 }
 
 // ExecRunner is the production Runner.
@@ -217,6 +223,13 @@ type Env struct {
 	// ProcessExecPath returns the executable path the kernel recorded when
 	// process pid started (macOS only; see gatewayProcesses).
 	ProcessExecPath func(pid int) (string, error)
+
+	// UserUnitSource reads the definition of a sandbox user unit by its
+	// embedded file name (default: the embedded unit assets); tests replace it.
+	UserUnitSource func(name string) ([]byte, error)
+	// SandboxUsers is how the lifecycle acts in user accounts for the sandbox
+	// subsystem (default: commands run as the user); tests replace it.
+	SandboxUsers SandboxUserOps
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string

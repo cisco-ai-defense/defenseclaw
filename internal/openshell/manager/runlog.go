@@ -103,7 +103,8 @@ func (b *box) sandboxID() string {
 // a ready sandbox (endHarness), with how the run stood: a run still going
 // is interrupted by the stop, and the feed says so. Best effort: the stop
 // goes ahead whatever happens here. A stop of a sandbox whose hooks were
-// tampered with (hooks.on_tamper: stop) keeps no log: the log is the
+// tampered with or went silent (hooks.on_tamper or hooks.on_silence: stop)
+// keeps no log: the log is the
 // workload's, and that stop waits on nothing the workload controls, so it
 // does not look at the run either (endHarness), and the log kept of an
 // earlier run goes, since it may not be the latest run's.
@@ -116,7 +117,7 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harne
 		if err := m.dropRunLogMeta(name); err != nil {
 			m.logf("sandbox %s: forget the log kept of an earlier detached run: %v", name, err)
 		}
-		m.logf("sandbox %s: the log of a detached run is not kept: the stop is for hook tampering", name)
+		m.logf("sandbox %s: the log of a detached run is not kept: the stop is for a hook alarm (tamper or silence)", name)
 		return
 	}
 	if run.State == sandboxapi.RunNone {
@@ -159,7 +160,7 @@ func (m *Manager) keepRunLog(ctx context.Context, gw *Gateway, b *box, run harne
 func (m *Manager) readRunLog(ctx context.Context, gw *Gateway, name string, meta keptRun) bool {
 	readCtx, cancel := context.WithTimeout(ctx, runLogWait+5*time.Second)
 	defer cancel()
-	res, err := gw.Client.Exec(readCtx, name, []string{"/bin/sh", "-c", runLogScript, "defenseclaw-run-log", harness.RunDir,
+	res, err := m.ownExec(readCtx, gw, name, []string{"/bin/sh", "-c", runLogScript, "defenseclaw-run-log", harness.RunDir,
 		strconv.Itoa(sandboxapi.MaxRunLogBytes)}, openshell.ExecOptions{Timeout: runLogWait, Attempts: 1, MaxOutputBytes: sandboxapi.MaxRunLogBytes})
 	var log []byte
 	switch {

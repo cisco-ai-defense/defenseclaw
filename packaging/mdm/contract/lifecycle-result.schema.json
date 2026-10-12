@@ -197,7 +197,7 @@
         "applied": { "type": "boolean" },
         "gateway_reported_digest": { "type": "string", "pattern": "^(|sha256:[0-9a-f]{64})$" },
         "last_reload_error": { "type": "string", "description": "policy.last_reload_error from /health; set while the gateway keeps an older policy because it rejected the last reload." },
-        "config_unrecorded": { "type": "boolean", "description": "True when config.yaml was changed outside the lifecycle and its generation is not recorded in config.generation.json. Absent otherwise." }
+        "config_unrecorded": { "type": "boolean", "description": "True when config.yaml was changed outside the lifecycle: its generation is not recorded in config.generation.json, or the hook guardian recorded it there as a hand edit. Absent otherwise." }
       }
     },
     "message": {

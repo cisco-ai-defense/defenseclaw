@@ -966,7 +966,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			continue
 		}
 		w.watchExistingPluginFolders(dir)
-		if w.connectorForPath(dir) == "claudecode" &&
+		if w.cacheLayoutPlugins(dir) &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
 			addClaudeCacheWatches(fsw, dir, watchedDirs)
 		}
@@ -1023,7 +1023,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
-			if w.connectorForPath(event.Name) == "claudecode" {
+			if w.cacheLayoutPlugins(event.Name) {
 				if depth, inside := w.claudeCacheDepth(event.Name); inside {
 					if w.inClaudePluginStaging(event.Name, 0) {
 						continue
@@ -1134,7 +1134,7 @@ func (w *InstallWatcher) admitReplacedRoot(ctx context.Context, fsw *fsnotify.Wa
 		}
 	} else {
 		w.watchExistingPluginFolders(root)
-		if w.connectorForPath(root) == "claudecode" &&
+		if w.cacheLayoutPlugins(root) &&
 			strings.EqualFold(filepath.Base(filepath.Clean(root)), "cache") {
 			addClaudeCacheWatches(fsw, root, watched)
 			w.queueExistingClaudePlugins(ctx, root, 0)
@@ -1506,6 +1506,17 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 			Path:      path,
 			Connector: "claudecode",
 			Timestamp: time.Now().UTC(),
+		}
+	}
+	if owner == "codex" && w.cacheLayoutPlugins(path) {
+		if pluginID, isPlugin := w.claudePluginIdentity(path); isPlugin {
+			return InstallEvent{
+				Type:      InstallPlugin,
+				Name:      pluginID,
+				Path:      path,
+				Connector: owner,
+				Timestamp: time.Now().UTC(),
+			}
 		}
 	}
 	pathAbs, _ := filepath.Abs(path)
@@ -2947,6 +2958,23 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 	return false
 }
 
+// cacheLayoutPlugins reports whether the plugin root that holds path is read
+// as a <marketplace>/<plugin>/<version> cache when it is named cache: Claude
+// Code's plugins/cache, and Codex's $CODEX_HOME/plugins/cache. The rescan and
+// the live watcher read Codex's cache one level deep, so its marketplace
+// folder (openai-curated-remote) was scanned as a plugin and a fresh init
+// raised a HIGH MANIFEST-MISSING alert on it (GAP-1573). The Secure Client
+// deployment keeps the Codex watcher it had.
+func (w *InstallWatcher) cacheLayoutPlugins(path string) bool {
+	switch w.connectorForPath(path) {
+	case "claudecode":
+		return true
+	case "codex":
+		return !w.secureClientActive()
+	}
+	return false
+}
+
 func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
 	pathAbs, err := filepath.Abs(path)
 	if err != nil {
@@ -3116,7 +3144,7 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 			return !skipPluginChildDir(filepath.Base(path))
 		}
 	}
-	if w.connectorForPath(path) == "claudecode" {
+	if w.cacheLayoutPlugins(path) {
 		if depth, inside := w.claudeCacheDepth(path); inside {
 			return depth == 3
 		}

@@ -69,11 +69,9 @@ func pinStandaloneManagedEnv() error {
 	if strings.TrimSpace(os.Getenv(managed.ConfigPathEnv)) != "" {
 		return nil
 	}
-	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
-	if err != nil {
-		return nil
-	}
-	descriptor, err := managed.LoadRuntimeDescriptor(layout.DescriptorPath)
+	// The same deployment read the standard-user refusal makes, so tests
+	// that fake one deployment see both.
+	layout, descriptor, err := managedStandaloneAdminDeployment()
 	if errors.Is(err, managed.ErrNoRuntimeDescriptor) {
 		return nil
 	}
@@ -209,6 +207,36 @@ var hookForeignGuardAccountHome = func() string {
 		return filepath.Clean(account.Home)
 	}
 	return ""
+}
+
+// accountGroupNames names uid's groups through the account database the
+// gateway's sandbox availability check reads (NSS on Linux, Open Directory
+// on macOS), so directory groups count. os/user in the static binary reads
+// only /etc/passwd and /etc/group: an AD account was "unknown userid" and
+// its docker membership unreadable although getent resolved it (GAP-0275).
+func accountGroupNames(uid int) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return accountGroupNamesFrom(unixidentity.Default(ctx), uid)
+}
+
+// accountGroupNamesFrom is accountGroupNames over resolver.
+func accountGroupNamesFrom(resolver unixidentity.Resolver, uid int) ([]string, error) {
+	account, err := resolver.LookupUID(uid)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := resolver.GroupIDs(account)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if g, err := resolver.LookupGroupID(id); err == nil {
+			names = append(names, g.Name)
+		}
+	}
+	return names, nil
 }
 
 // hookForeignGuardEnvHomes lists the homes the agent's environment names

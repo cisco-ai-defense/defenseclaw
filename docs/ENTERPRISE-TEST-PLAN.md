@@ -2013,8 +2013,8 @@ has found a regression.
   enrolls when it signs in (reason `enterprise_managed_enrollment_pending`), not "gateway
   unreachable" or "hook failed closed". Pending (Claude Code's first-cycle case live).
 - **REG-1-2-16** **[W] Unenrolled or excluded account message.** As the excluded account, send a prompt in
-  Claude Code and in Codex. Expect: "this account is not enrolled in DefenseClaw on this
-  computer ..." with what to do, not a "gateway unreachable" text. Live: Windows (Claude Code);
+  Claude Code and in Codex. Expect: "this account is not enrolled yet; restart the agent in 5
+  minutes ..." with what to do, not a "gateway unreachable" text. Live: Windows (Claude Code);
   Codex in prior build, pending.
 - **REG-1-2-17** **[W] Deleted account (prior builds).** Delete an enrolled account, then remove its profile.
   Expect: status warns `deleted_account_rows` for that account while the profile exists; after

@@ -51,9 +51,11 @@ import (
 func TestListAndStatus(t *testing.T) {
 	ta := newTestApp(t, "", sampleSandbox("b-box"))
 	ta.daemon.add(sampleSandbox("a-box"))
+	// GAP-0359: a profile other than its pack's names the pack as such.
+	ta.daemon.edit("b-box", func(sb *sandboxapi.Sandbox) { sb.Pack, sb.Profile = "open", "balanced" })
 	ta.ok(t, ta.List(bg, OutputText))
 	out := ta.output()
-	has(t, out, "NAME", "4 calls, 1 blocked", "1h01m")
+	has(t, out, "NAME", "4 calls, 1 blocked", "1h01m", "balanced (pack open)")
 	if strings.Index(out, "a-box") > strings.Index(out, "b-box") {
 		t.Fatalf("list is not sorted:\n%s", out)
 	}
@@ -79,6 +81,52 @@ func TestListAndStatus(t *testing.T) {
 	}
 }
 
+// `sandbox destinations` lists a sandbox's hosts by kind, warns about shadow
+// AI, and the status Egress line sums the AI destinations up.
+func TestDestinations(t *testing.T) {
+	sb := sampleSandbox("box")
+	sb.Egress.ModelProviders, sb.Egress.HarnessVendor, sb.Egress.ShadowAI = 1, 2, 1
+	ta := newTestApp(t, "", sb)
+	ta.ok(t, ta.Destinations(bg, "box", OutputText))
+	has(t, ta.output(), "has reached no destination yet")
+	seen := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
+	ta.daemon.destinations = map[string]*sandboxapi.Destinations{"box": {Name: "box", Destinations: []sandboxapi.DestinationRow{
+		{Host: "api.openai.com", Ports: []int{443}, Kind: sandboxapi.DestinationOtherAI, Provider: "Codex", Tunnels: 3, BytesUp: 2048,
+			Sources: []string{sandboxapi.SourceProxy}, Binaries: []string{"/usr/bin/curl"}, LastSeen: seen},
+		{Host: "api.anthropic.com", Kind: sandboxapi.DestinationModelProvider, Provider: "Claude Code", Connections: 5, ModelTurns: 2,
+			Sources: []string{sandboxapi.SourceOpenShell}, LastSeen: seen},
+		{Host: "host.openshell.internal", Ports: []int{8080, 11434}, Kind: sandboxapi.DestinationOther, Connections: 1, LastSeen: seen},
+		{Host: "pastebin.com", Kind: sandboxapi.DestinationBlocked, Category: "paste_site", Blocked: 4, LastSeen: seen},
+		// With the process tree on, the binary is its lineage.
+		{Host: "example.org", Kind: sandboxapi.DestinationOther, Connections: 1, Binaries: []string{"/usr/bin/wget"}, LastSeen: seen,
+			PID: 77, Lineage: []sandboxapi.DestinationProcess{{PID: 77, Exe: "/usr/bin/wget"}, {PID: 42, Comm: "bash"}, {PID: 7, Comm: "claude"}}},
+		// GAP-0177: the PROVIDER cell holds an AI provider or -, never the
+		// egress category; a refusal's reason reads in words in KIND.
+		// GAP-0198: a long program path keeps its file name.
+		{Host: "pypi.org", Kind: "package_registry", Category: "package_registry", Connections: 2, LastSeen: seen,
+			Binaries: []string{"/sandbox/.uv/python/cpython-3.14.3-linux-x86_64-gnu/bin/python3.14"}},
+		{Host: "example.net", Kind: sandboxapi.DestinationBlocked, Category: "not_allowlisted", Blocked: 1, LastSeen: seen},
+	}, Models: []sandboxapi.ModelUse{{Provider: "anthropic", Model: "claude-haiku", Calls: 2, Failed: 1, LastSeen: seen}}}}
+	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputText))
+	out := ta.output()
+	has(t, out, "DESTINATION", "shadow AI", "model provider", "5, 2 model calls", "host.openshell.internal:8080,11434",
+		"0 (4 refused)", "/usr/bin/curl", "wget ← bash ← claude", "claude-haiku", "2 (1 failed)", "1 AI destination the harness does not use (shadow AI)",
+		"blocked (paste site)", "blocked (not on the allowlist)", "package registry", "…-3.14.3-linux-x86_64-gnu/bin/python3.14")
+	if strings.Contains(out, "package_registry") || strings.Contains(out, "not_allowlisted") || strings.Contains(out, "paste_site") {
+		t.Fatalf("a category slug reads in the table:\n%s", out)
+	}
+	ta.ok(t, ta.fresh().Destinations(bg, "box", OutputJSON))
+	var d sandboxapi.Destinations
+	if err := json.Unmarshal(ta.out.Bytes(), &d); err != nil || len(d.Destinations) != 7 || d.Destinations[0].Kind != sandboxapi.DestinationOtherAI ||
+		len(d.Destinations[4].Lineage) != 3 {
+		t.Fatalf("destinations json = %s, %v", ta.out.String(), err)
+	}
+	ta.ok(t, ta.fresh().Status(bg, "box", OutputText))
+	// Counted by the kinds sandbox destinations names (GAP-0319).
+	has(t, ta.output(), "; AI: 1 model provider, 2 harness vendor hosts, 1 shadow AI (`defenseclaw sandbox destinations box`)")
+	wantErr(t, ta.fresh().Destinations(bg, "missing", OutputText), "no sandbox missing")
+}
+
 // What the hooks did shows in the list's HOOKS column and in status: the
 // right plural, tamper, hooks that do not reach DefenseClaw and hook calls
 // that failed closed (manual R2-5, R2-30, L10).
@@ -102,6 +150,17 @@ func TestListAndStatusShowTheHooks(t *testing.T) {
 			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 429 Too Many Requests", at
 		}, "4 calls, 1 blocked, 2 failed", []string{"Hook traffic  9 requests, 4 tool calls, 1 blocked, 2 failed (fail closed)",
 			"Hook error    DefenseClaw answered HTTP 429 Too Many Requests at 04:57:01 (the hook failed closed)"}},
+		// GAP-0377: a hook post of a placeholder conversation is not
+		// DefenseClaw's refusal, and a later verdict marks it old.
+		{"placeholder conversation", func(h *sandboxapi.HookCoverage) {
+			h.HookFailed, h.LastHookFailure, h.LastHookFailureAt = 2, "HTTP 400 Bad Request", at
+			h.LastHookFailureCause, h.HooksAnsweredAt = sandboxapi.ReasonPlaceholderRefused, at.Add(3*time.Minute)
+		}, "2 failed", []string{"Hook error    a hook post of a conversation that held a sandbox credential placeholder failed at 04:57:01 " +
+			"(HTTP 400 Bad Request; OpenShell refuses such a conversation's requests; the hook failed closed); hooks answered again since 05:00:01"}},
+		// A restarted daemon keeps the counts, not the time of the last
+		// hook (GAP-0166): the column still counts them.
+		{"after a daemon restart", func(h *sandboxapi.HookCoverage) { h.LastHookAt = time.Time{} }, " 4 calls, 1 blocked ",
+			[]string{"Hook traffic  9 requests, 4 tool calls, 1 blocked\n"}},
 		// The verdicts per hook event, the most frequent first (#956).
 		{"events", func(h *sandboxapi.HookCoverage) {
 			h.Events = map[string]int64{"Stop": 2, "PostToolUse": 11, "SessionStart": 2, "PreToolUse": 12, "UserPromptSubmit": 3}
@@ -168,6 +227,8 @@ func TestActivityRendering(t *testing.T) {
 			Category: sandboxapi.CategoryLargeUpload, Reason: "This destination is blocked since this sandbox tried to send more than 1 MiB to it."},
 		// A DefenseClaw ask: the harness asks the user in its own UI.
 		{Seq: 18, Time: at, Kind: sandboxapi.ActivityToolAsked, Sandbox: "box", Tool: "Bash", Reason: "C2-WEBHOOK-SITE"},
+		// An approved --host-port service, first reached (GAP-0154).
+		{Seq: 19, Time: at, Kind: sandboxapi.ActivityEgressAllowed, Sandbox: "box", Host: "host.openshell.internal", Port: 8765, Source: sandboxapi.SourceOpenShell},
 	}
 	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "box"}))
 	lines := strings.Split(strings.TrimSpace(ta.output()), "\n")
@@ -191,6 +252,7 @@ func TestActivityRendering(t *testing.T) {
 		"12:01:02 ✗ httpbin.org (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
 		"12:01:02 ✗ httpbin.org:80 (large upload blocked: this destination is blocked since this sandbox tried to send more than 1 MiB to it)",
 		"12:01:02 ? tool Bash asked for confirmation: C2-WEBHOOK-SITE",
+		"12:01:02 ✓ host.openshell.internal:8765 (port 8765 on this machine)",
 	}
 	if !slices.Equal(lines, want) {
 		t.Fatalf("activity =\n%s\nwant\n%s", strings.Join(lines, "\n"), strings.Join(want, "\n"))
@@ -208,12 +270,89 @@ func TestActivityRendering(t *testing.T) {
 	has(t, ta.output(), "12:01:02 box ? ask ap-2: api.example.com:443 (approvals are manual for the strict profile)  → defenseclaw sandbox approve box ap-2")
 }
 
+// TestActivityFollowsTheDaemonsNextFeed (GAP-0092, GAP-0105): a daemon
+// restart ended `sandbox activity -f` without a word and with 0, or left it
+// skipping the new feed's events, numbered from one again under another
+// epoch. The follower waits for the daemon, follows its new feed from the
+// start and says so; what it replays of a feed already shown is skipped.
+// TestActivitySaysWhereTheFeedStarts (GAP-0283): after a daemon restart
+// sandbox activity showed only the new feed's events, without a word that
+// the earlier ones (lifecycle, shadow AI, egress) were gone or where they
+// are. A sandbox older than the daemon's start gets that line; a newer one
+// does not.
+func TestActivitySaysWhereTheFeedStarts(t *testing.T) {
+	old := sampleSandbox("old")
+	old.CreatedAt = time.Now().Add(-time.Hour)
+	fresh := sampleSandbox("fresh")
+	fresh.CreatedAt = time.Now().Add(time.Minute)
+	ta := newTestApp(t, "", old, fresh)
+	ta.daemon.mu.Lock()
+	ta.daemon.status.StartedAt = time.Now()
+	ta.daemon.mu.Unlock()
+	const line = "the feed starts when the DefenseClaw daemon last started ("
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "old"}))
+	has(t, ta.output(), line, "`defenseclaw-gateway audit export`")
+	ta.out.Reset()
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "fresh"}))
+	lacks(t, ta.output(), line)
+	// GAP-0330: an empty feed says since when, also for a sandbox that went
+	// before the restart.
+	ta.out.Reset()
+	ta.ok(t, ta.Activity(bg, ActivityOptions{Sandbox: "gone"}))
+	has(t, ta.output(), "no activity since the DefenseClaw daemon last started (", "`defenseclaw-gateway audit export`")
+	lacks(t, ta.output(), "no activity yet")
+}
+
+func TestActivityFollowsTheDaemonsNextFeed(t *testing.T) {
+	ta := newTestApp(t, "")
+	at := ta.Now()
+	ev := func(epoch string, seq uint64, host string) sandboxapi.ActivityEvent {
+		return sandboxapi.ActivityEvent{Epoch: epoch, Seq: seq, Time: at, Kind: sandboxapi.ActivityEgressAllowed, Sandbox: "box", Host: host, Port: 443}
+	}
+	ta.daemon.mu.Lock()
+	ta.daemon.events = []sandboxapi.ActivityEvent{ev("e1", 1, "one.example"), ev("e1", 2, "two.example")}
+	ta.daemon.mu.Unlock()
+	ctx, cancel := context.WithTimeout(bg, time.Second)
+	defer cancel()
+	restarted := false
+	ta.Sleep = func(context.Context, time.Duration) error {
+		if !restarted {
+			restarted = true
+			ta.daemon.mu.Lock()
+			ta.daemon.events = []sandboxapi.ActivityEvent{ev("e2", 1, "three.example")}
+			ta.daemon.mu.Unlock()
+		}
+		return nil
+	}
+	ta.daemon.onStatus = func(*sandboxapi.Status) {
+		if restarted {
+			// The new feed's stream stays open until the test ends.
+			ta.daemon.hold = make(chan struct{})
+		}
+	}
+	if err := ta.Activity(ctx, ActivityOptions{Follow: true}); err != nil {
+		t.Fatalf("Activity = %v", err)
+	}
+	out := ta.output()
+	if strings.Count(out, "one.example") != 1 || strings.Count(out, "three.example") != 1 ||
+		!strings.Contains(out, "the DefenseClaw daemon restarted; following its new feed") {
+		t.Fatalf("followed:\n%s", out)
+	}
+}
+
 func TestApprovalsAndDecisions(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.approvals = []sandboxapi.Approval{{ID: "ap-1", Sandbox: "box", Kind: "host_port", Host: "127.0.0.1", Port: 5432, Risky: true,
 		Reason: "a door into your machine", Status: sandboxapi.ApprovalPending}}
 	ta.ok(t, ta.Approvals(bg, ApprovalsOptions{}))
 	has(t, ta.output(), "ap-1", "127.0.0.1:5432", "risky")
+	// The whole reason shows, not 60 characters of it (GAP-0304).
+	ta.out.Reset()
+	long := "the sandbox asks to reach port 8765 on your machine (--host-port 8765), which serves dccert-block-marker to it"
+	ta.daemon.approvals[0].Reason = long
+	ta.ok(t, ta.Approvals(bg, ApprovalsOptions{}))
+	has(t, ta.output(), long)
+	ta.daemon.approvals[0].Reason = "a door into your machine"
 	// An ask for several ports shows every one approving opens.
 	ta.out.Reset()
 	ta.daemon.approvals[0].Endpoints = []sandboxapi.ApprovalEndpoint{{Host: "127.0.0.1", Port: 5432}, {Host: "127.0.0.1", Port: 6379}}
@@ -230,8 +369,9 @@ func TestApprovalsAndDecisions(t *testing.T) {
 	if len(calls) != 1 || !strings.Contains(string(calls[0].Body), `"decision":"approve"`) || !strings.Contains(string(calls[0].Body), `"always":true`) {
 		t.Fatalf("decide calls = %+v", calls)
 	}
-	// One line per decision (manual test L10).
-	has(t, ta.output(), "approved ap-1", "next quiet moment", "kept for future sandboxes")
+	// One line per decision (manual test L10), which says to retry the
+	// connection that asked (GAP-0120: it was refused at once).
+	has(t, ta.output(), "approved ap-1", "next quiet moment", "then retry the connection that asked", "kept for future sandboxes")
 	if n := strings.Count(ta.output(), "\n"); n != 1 {
 		t.Fatalf("decide printed %d lines:\n%s", n, ta.output())
 	}
@@ -239,6 +379,15 @@ func TestApprovalsAndDecisions(t *testing.T) {
 	if calls := ta.daemon.callsTo("POST", sandboxapi.PathApprovals+"/ap-1"); !strings.Contains(string(calls[1].Body), `"decision":"reject"`) {
 		t.Fatalf("reject body = %s", calls[1].Body)
 	}
+	// GAP-0249: an ask answered already (in the TUI) is not "no pending
+	// ask": the answer says how and when, and the same answer again is no
+	// failure.
+	ta = newTestApp(t, "")
+	ta.daemon.events = []sandboxapi.ActivityEvent{{Kind: sandboxapi.ActivityApprovalResolved, Sandbox: "box", ApprovalID: "ap-2",
+		Reason: sandboxapi.ApprovedByOperator, Message: "approved port 8765 on your machine (host.openshell.internal:8765)", Time: ta.Now()}}
+	ta.ok(t, ta.Decide(bg, DecideOptions{Sandbox: "box", ID: "ap-2", Approve: true}))
+	has(t, ta.output(), "ask ap-2 of sandbox box was approved already, at ")
+	wantErr(t, ta.fresh().Decide(bg, DecideOptions{Sandbox: "box", ID: "ap-2"}), "was approved already")
 }
 
 func TestUnblock(t *testing.T) {
@@ -246,13 +395,13 @@ func TestUnblock(t *testing.T) {
 	if err := ta.Unblock(bg, UnblockOptions{Host: "webhook.site"}); err == nil {
 		t.Fatal("an unscoped unblock was accepted")
 	}
-	if err := ta.Unblock(bg, UnblockOptions{Host: "webhook.site", Sandbox: "box", Always: true}); err == nil {
-		t.Fatal("--sandbox with --always was accepted")
-	}
 	ta.ok(t, ta.Unblock(bg, UnblockOptions{Host: "webhook.site", Sandbox: "box"}))
 	ta.ok(t, ta.Unblock(bg, UnblockOptions{Host: "paste.example", Always: true}))
-	has(t, ta.output(), "unblocked webhook.site in box", "unblocked paste.example for every sandbox")
-	if n := strings.Count(ta.output(), "\n"); n != 2 {
+	// GAP-0609: --sandbox with --always names the sandbox whose policy
+	// checks it (a managed computer's spelling).
+	ta.ok(t, ta.Unblock(bg, UnblockOptions{Host: "files.example", Sandbox: "box", Always: true}))
+	has(t, ta.output(), "unblocked webhook.site in box", "unblocked paste.example for every sandbox", "unblocked files.example for every sandbox")
+	if n := strings.Count(ta.output(), "\n"); n != 3 {
 		t.Fatalf("output (one line each):\n%s", ta.output())
 	}
 	ta.daemon.errors["POST "+sandboxapi.PathEgressUnblock] = &sandboxapi.Error{Code: sandboxapi.CodeAdminViolation, Message: sandboxapi.AdminMessage,
@@ -317,6 +466,17 @@ func TestUndo(t *testing.T) {
 				RefChanges: []workspace.RefChange{{Ref: "refs/heads/fix", After: after}}, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}},
 			want: []string{"revert  main.go", "reset HEAD (main) from bbbbbbb back to aaaaaaa", "restore 1 branch or tag: fix",
 				"stop box first (its harness session ends)"}},
+		// GAP-0225: under --keep-refs the plan said "restore" for the refs it
+		// keeps, and a run that changed only refs asked to restore nothing.
+		{name: "keep refs", input: "y\n", opts: UndoOptions{KeepRefs: true}, undos: 2,
+			undo: &workspace.UndoResult{HeadBefore: before, HeadAfter: after, BranchBefore: "main", BranchAfter: "main", RefsKept: true,
+				RefChanges: []workspace.RefChange{{Ref: "refs/tags/v7.7.7", After: after}}, Changes: []workspace.TreeChange{{Path: "main.go", Status: "M"}}},
+			want: []string{"keep 1 branch or tag: v7.7.7 (as the session left them: --keep-refs)", "keep HEAD as the session left it (--keep-refs)",
+				"left 1 branch or tag as the session made them (--keep-refs)"},
+			not: []string{"restore 1 branch or tag", "reset HEAD"}},
+		{name: "only refs under keep refs", opts: UndoOptions{KeepRefs: true}, undos: 1,
+			undo: &workspace.UndoResult{Preview: true, RefsKept: true, RefChanges: []workspace.RefChange{{Ref: "refs/heads/scratch/two", After: after}}},
+			want: []string{"nothing to undo", "--keep-refs leaves its 1 branch or tag as the session made them"}},
 		{name: "json restore", input: "y\n", opts: UndoOptions{Output: OutputJSON}, undos: 2, stopped: true,
 			want: []string{"revert  README.md", "stop box first (its harness session ends)", "Stop box and restore "}},
 		{name: "json declined", input: "n\n", opts: UndoOptions{Output: OutputJSON}, undos: 1, want: []string{"revert  README.md", "nothing changed"}},
@@ -394,9 +554,9 @@ func TestReviewPreviewsACopysPull(t *testing.T) {
 	ta := newTestApp(t, "", copySandbox("copybox"))
 	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "copybox", Diff: true}))
 	has(t, ta.output(), "starting copybox to read its work", "copybox: 1 file changed (+4 −1)", "  M main.go",
-		"--diff: the changes of a copy come back as a patch; `defenseclaw sandbox pull copybox --patch-out FILE` writes one",
 		"nothing was applied; bring it back with `defenseclaw sandbox pull copybox --apply` (or --branch or --patch-out FILE)", "stopped copybox again")
-	if !slices.Equal(ta.copy.steps, []string{"pull copybox"}) || ta.calls("POST", "copybox/review") != 0 {
+	// --diff shows the pull's diff (GAP-0207).
+	if !slices.Equal(ta.copy.steps, []string{"pull copybox", "diff copybox"}) || ta.calls("POST", "copybox/review") != 0 {
 		t.Fatalf("copy steps %v, daemon reviews %d; want a pull and nothing applied", ta.copy.steps, ta.calls("POST", "copybox/review"))
 	}
 	if r := ta.bodies("POST", "copybox/workspace"); len(r) != 0 {
@@ -421,6 +581,50 @@ func TestReviewPreviewsACopysPull(t *testing.T) {
 	}
 }
 
+// A copy's review and pull said nothing of a MicroVM that went down without
+// a flush, which only `sandbox status` named: a write the MicroVM lost
+// leaves no file to flag, so the list read clean (GAP-0367).
+func TestACopysReviewNamesAnUnflushedStop(t *testing.T) {
+	sb := copySandbox("vmbox")
+	sb.UnflushedAt = time.Date(2026, 10, 8, 18, 31, 5, 0, time.UTC)
+	ta := newTestApp(t, "", sb)
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "vmbox"}))
+	has(t, ta.output(), "vmbox: 1 file changed", sandboxapi.UnflushedText("vmbox", sb.UnflushedAt))
+	ta = newTestApp(t, "", copySandbox("copybox"))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
+	lacks(t, ta.output(), "went down without")
+}
+
+// TestReviewKeepsAHostileFileNameOnOneLine (GAP-0291): a copy's review
+// printed a file name with a newline in it raw, so the name split into a
+// second line of the list a user trusts before bringing the work back. A
+// name is escaped onto one line and a long one cut in the middle.
+func TestReviewKeepsAHostileFileNameOnOneLine(t *testing.T) {
+	long := "edge/" + strings.Repeat("a", 240) + ".txt"
+	ta := newTestApp(t, "", copySandbox("plainbox"))
+	ta.copy.pull = &workspace.PullResult{Name: "plainbox", Kind: workspace.CopyPlain, Changes: []workspace.TreeChange{
+		{Path: "edge/line\n  A forged.txt", Status: "A", Added: 1}, {Path: "edge/esc\x1b]2;title\a", Status: "A"},
+		{Path: "edge/rtl‮txt.sh", Status: "A"}, {Path: long, Status: "A"},
+	}, Review: workspace.ReviewReport{FilesChanged: 4, Insertions: 1}}
+	ta.ok(t, ta.Review(bg, ReviewOptions{Name: "plainbox"}))
+	has(t, ta.output(), `  A edge/line\n  A forged.txt`, `  A edge/esc\x1b]2;title\a`, "  A edge/rtl�txt.sh",
+		"  A edge/"+strings.Repeat("a", 75)+"…"+strings.Repeat("a", 75)+".txt")
+	for _, line := range strings.Split(ta.output(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "A forged.txt") {
+			t.Fatalf("a file name forged a line of the review:\n%s", ta.output())
+		}
+	}
+}
+
+// TestReviewNamesTheCommitsSinceTheUndoPoint (GAP-0223): the commits HEAD
+// gained are named, with a word that they may be the user's own.
+func TestReviewNamesTheCommitsSinceTheUndoPoint(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.printReviewDetail(&workspace.ReviewReport{Commits: []string{"4d2bdf3 me: plain own commit"}})
+	has(t, ta.output(), "1 commit since the undo point (the session's, or yours if you committed in the folder meanwhile; undo resets them all): "+
+		"4d2bdf3 me: plain own commit")
+}
+
 // The review merges each file's reasons into one line (manual test L10).
 func TestReviewMergesAFilesReasons(t *testing.T) {
 	flags := []workspace.Flag{
@@ -437,6 +641,17 @@ func TestReviewMergesAFilesReasons(t *testing.T) {
 	}
 	if line := riskLine(&workspace.ReviewReport{Flags: flags}); line != "⚠ Changed files that can run code on your machine: Makefile, package.json  → review before running" {
 		t.Fatalf("risk line = %q", line)
+	}
+}
+
+// GAP-0584: the copy `run` staged in the user's own data directory goes with
+// the sandbox the daemon deleted; the daemon of a managed computer keeps
+// another data directory and leaves it (copy.json, base.git) behind.
+func TestDeleteDiscardsTheStagedCopy(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("gone"))
+	ta.ok(t, ta.Delete(bg, DeleteOptions{Names: []string{"gone"}, Yes: true}))
+	if !slices.Contains(ta.copy.steps, "discard gone") {
+		t.Fatalf("copy steps = %v, want the staged copy discarded", ta.copy.steps)
 	}
 }
 
@@ -591,6 +806,36 @@ func TestReapScriptStopsTheSession(t *testing.T) {
 	}
 }
 
+// TestExecSaysWhyTheSandboxEndedIt (GAP-0077): a hook-silence stop ended
+// a `sandbox exec` command with only OpenShell's "exec relay closed before
+// the command reported an exit status". The exec says what stopped the
+// sandbox under the command.
+func TestExecSaysWhyTheSandboxEndedIt(t *testing.T) {
+	ta := newTestApp(t, "", sampleSandbox("box"))
+	ta.IO.TTY = false
+	ta.stream.answer = func(argv []string) (int, string) {
+		ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) {
+			sb.Phase = "stopped"
+			sb.Hooks.Silent, sb.Hooks.OnSilence, sb.Hooks.SilenceAfter = true, "stop", "1m"
+		})
+		return 255, ""
+	}
+	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"sleep", "600"}}), 255)
+	has(t, ta.output(), "DefenseClaw stopped box while the command ran: its harness worked for 1m without a hook reaching DefenseClaw (hooks.on_silence: stop)")
+	// GAP-0390: the end of the agent session that started the sandbox
+	// stopped it under a command in another terminal; the line names that
+	// and how to keep it running.
+	ta = newTestApp(t, "", sampleSandbox("box"))
+	ta.IO.TTY = false
+	ta.stream.answer = func(argv []string) (int, string) {
+		ta.daemon.edit("box", func(sb *sandboxapi.Sandbox) { sb.Phase = "stopped" })
+		return 255, ""
+	}
+	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"make"}}), 255)
+	has(t, ta.output(), "box is stopped: it stopped while the command ran (an agent session that started it ended",
+		"start it with `defenseclaw sandbox start box` before the session and the command, and it keeps running when the session ends")
+}
+
 func TestExecAndLogs(t *testing.T) {
 	ta := newTestApp(t, "", sampleSandbox("box"))
 	ta.IO.TTY = false
@@ -611,6 +856,7 @@ func TestExecAndLogs(t *testing.T) {
 	}
 	ta.ok(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"ls", "-la"}}))
 	wantExit(t, ta.Exec(bg, ExecOptions{Name: "box", Command: []string{"false"}}), 7)
+	lacks(t, ta.output(), "while the command ran")
 	ta.ok(t, ta.Logs(bg, LogsOptions{Name: "box", Lines: 50}))
 	cmds := ta.stream.commands()
 	// `sandbox exec` runs the command through sandbox-env, under its
@@ -776,6 +1022,17 @@ func TestRunTailScript(t *testing.T) {
 	run("with a log", 0, "two\nthree\n")
 }
 
+// GAP-0365: a pull a Ctrl-C interrupted says what it left and exits 130,
+// and the sandbox it started is stopped again.
+func TestAnInterruptedPullSaysWhatItLeft(t *testing.T) {
+	ta := newTestApp(t, "", copySandbox("copybox"))
+	ta.Workspace = &failingCopy{fakeCopy: ta.copy, pullErr: fmt.Errorf("workspace: receive the result bundle: openshell: %w", openshell.ErrInterrupted)}
+	wantExit(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}), exitInterrupted)
+	has(t, ta.output(), "interrupted: nothing was brought back, and the work is still in copybox (`defenseclaw sandbox pull copybox` reads it again)",
+		"stopped copybox again")
+	lacks(t, ta.output(), "exit -1")
+}
+
 func TestPullCopyModeToBranch(t *testing.T) {
 	ta := newTestApp(t, "", copySandbox("copybox"))
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
@@ -804,6 +1061,15 @@ func TestPullCopyModeToBranch(t *testing.T) {
 	if last := ta.copy.apply[len(ta.copy.apply)-1]; last.Mode != workspace.ApplyMerge || !last.AcceptSensitive {
 		t.Fatalf("apply = %+v", last)
 	}
+	// A branch or a patch file runs nothing: no consent, and a note
+	// (GAP-0262, GAP-0267), unless a secret would go into the branch.
+	ta.out.Reset()
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", PatchOut: filepath.Join(t.TempDir(), "x.patch")}))
+	has(t, ta.output(), "nothing of it runs from a branch: review the flagged files before you merge or check out the branch",
+		"nothing of it runs from a patch file: review the flagged files before you apply it")
+	ta.copy.pull.Review.Findings = []workspace.ScanFinding{{Path: ".envrc", Scanner: "clawshield-secrets", Severity: "CRITICAL"}}
+	wantErr(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}), "--accept-sensitive")
 	// Work the folder already has is not "applied 0 changes".
 	ta.out.Reset()
 	ta.copy.pull, ta.copy.applied = nil, &workspace.ApplyResult{Mode: workspace.ApplyMerge, UpToDate: true}
@@ -858,6 +1124,31 @@ func TestPullChecksWhereTheWorkGoesFirst(t *testing.T) {
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
 	has(t, ta.output(), "nothing to do: branch dc/copybox already has these changes (your checkout is unchanged)")
 	lacks(t, ta.output(), "--accept-sensitive", "Bring them back anyway?")
+}
+
+// GAP-0290: Ctrl-C at the code-running-changes question of a pull says
+// that nothing was applied and how to bring the changes back, and exits 130.
+func TestPullCtrlCAtTheSensitiveQuestionSaysNothingWasApplied(t *testing.T) {
+	ta := newTestApp(t, "")
+	sb := copySandbox("copybox")
+	sb.Phase = "ready"
+	ta.daemon.add(sb)
+	pr, pw := io.Pipe() // a terminal nobody types into
+	t.Cleanup(func() { _ = pw.Close() })
+	ta.IO.In, ta.IO.TTY = pr, true
+	sig := make(chan os.Signal, 1)
+	ta.App.interrupts = func() (<-chan os.Signal, func()) {
+		sig <- os.Interrupt
+		return sig, func() {}
+	}
+	ta.copy.pull = &workspace.PullResult{Name: "copybox", Changes: []workspace.TreeChange{{Path: "package.json", Status: "M"}},
+		Review: workspace.ReviewReport{FilesChanged: 1, Flags: []workspace.Flag{{Path: "package.json", Label: "package.json", Severity: workspace.SeverityHigh}}}}
+	wantExit(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}), exitInterrupted)
+	has(t, ta.output(), "Some changes can run code on this machine. Bring them back anyway?",
+		"⚠ interrupted: not brought back; the changes stay in copybox: review them with `defenseclaw sandbox review copybox`")
+	if len(ta.copy.apply) != 0 {
+		t.Fatalf("applied %+v", ta.copy.apply)
+	}
 }
 
 // A branch that holds only the sandbox's earlier pull is refused before the
@@ -937,6 +1228,26 @@ func TestPullOfAStoppedSandboxReusesItsLastPull(t *testing.T) {
 	ta.daemon.add(copySandbox("copybox"))
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox"}))
 	ta.wantCalls(t, 4, "POST", "copybox/start")
+}
+
+// TestStartSendsTheModelKeyTheEnvironmentHoldsNow (GAP-0080): a start of a
+// sandbox created with a model key from the environment hands the daemon
+// the key the environment holds now, which renews the provider's.
+func TestStartSendsTheModelKeyTheEnvironmentHoldsNow(t *testing.T) {
+	sb := copySandbox("keybox")
+	sb.Launch.CredentialProfile = profiles.AnthropicID
+	ta := newTestApp(t, "", sb, copySandbox("nokey"))
+	ta.env["ANTHROPIC_API_KEY"] = "sk-renewed-not-a-secret"
+	ta.ok(t, ta.Start(bg, "keybox", StartOptions{}))
+	var req sandboxapi.StartRequest
+	if bodies := ta.bodies("POST", "keybox/start"); len(bodies) != 1 || json.Unmarshal([]byte(bodies[0]), &req) != nil || req.LLM == nil ||
+		req.LLM.Profile != profiles.AnthropicID || req.LLM.Credentials["ANTHROPIC_API_KEY"] != "sk-renewed-not-a-secret" {
+		t.Fatalf("start request = %+v", req)
+	}
+	ta.ok(t, ta.Start(bg, "nokey", StartOptions{}))
+	if bodies := ta.bodies("POST", "nokey/start"); len(bodies) != 1 || strings.Contains(bodies[0], "llm") {
+		t.Fatalf("a sandbox created without a model key got one: %v", bodies)
+	}
 }
 
 // After a start and a stop whose look found the copy as the last pull read
@@ -1151,6 +1462,17 @@ func TestPolicyEdit(t *testing.T) {
 		!slices.Equal(c.OpenShell.Egress.Block, []string{"paste.example"}) {
 		t.Fatalf("egress = %+v", c.OpenShell.Egress)
 	}
+	// GAP-0151: no command took one entry off a list; `config unset` emptied
+	// the whole list. (Each command loads config.yaml as it starts.)
+	ta.Cfg = loadConfig(t, ta)
+	ta.ok(t, ta.fresh().PolicyRemove(bg, "allow", []string{"*.PyPI.org", "other.example"}))
+	has(t, ta.output(), "removed *.pypi.org from openshell.egress.allow", "other.example is not in openshell.egress.allow")
+	ta.ok(t, ta.PolicyRemove(bg, "block", []string{"paste.example"}))
+	ta.Cfg = loadConfig(t, ta)
+	if !slices.Equal(ta.Cfg.OpenShell.Egress.Allow, []string{"registry.npmjs.org"}) || len(ta.Cfg.OpenShell.Egress.Block) != 0 {
+		t.Fatalf("egress after the removals = %+v", ta.Cfg.OpenShell.Egress)
+	}
+	wantErr(t, ta.PolicyRemove(bg, "block", []string{"paste.example"}), "paste.example is not in openshell.egress.block")
 	off := false
 	for _, c := range []struct {
 		name  string
@@ -1160,6 +1482,7 @@ func TestPolicyEdit(t *testing.T) {
 	}{
 		{"a catch-all", config.OpenShellAdminConfig{}, "*", ""},
 		{"a managed install", config.OpenShellAdminConfig{}, "x.example", sandboxapi.AdminMessage},
+		{"a Secure Client install", config.OpenShellAdminConfig{}, "x.example", sandboxapi.AdminMessage},
 		{"egress_block", config.OpenShellAdminConfig{EgressBlock: []string{"example.net"}}, "example.net",
 			"blocked by your organization's DefenseClaw policy: egress.allow — example.net is on your organization's blocklist (example.net) (openshell.admin.egress_block)"},
 		{"egress_block wildcard", config.OpenShellAdminConfig{EgressBlock: []string{"*.example.net"}}, "*.api.example.net", "openshell.admin.egress_block"},
@@ -1176,8 +1499,16 @@ func TestPolicyEdit(t *testing.T) {
 			ta := newTestApp(t, "")
 			writeConfig(t, ta, "")
 			ta.Cfg.OpenShell.Admin = c.admin
-			if c.name == "a managed install" {
-				ta.Cfg.DeploymentMode = "managed_enterprise"
+			managedInstall := strings.HasSuffix(c.name, "install")
+			switch c.name {
+			case "a managed install":
+				// A standalone managed document: the config writer refuses it.
+				writeConfig(t, ta, "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n")
+				ta.Cfg.DeploymentMode, ta.Cfg.Enterprise.Profile = "managed_enterprise", "standalone"
+			case "a Secure Client install":
+				// The writer does not refuse a Secure Client document; the
+				// sandbox CLI does, before it.
+				ta.Cfg.DeploymentMode, ta.Cfg.Enterprise.Profile = "managed_enterprise", "secure_client"
 			}
 			before, _ := os.ReadFile(ta.ConfigPath)
 			err := ta.PolicyEdit(bg, "allow", []string{c.host})
@@ -1185,7 +1516,7 @@ func TestPolicyEdit(t *testing.T) {
 			if after, _ := os.ReadFile(ta.ConfigPath); string(after) != string(before) {
 				t.Fatal("a refused entry was written")
 			}
-			if c.name == "a managed install" {
+			if managedInstall {
 				// GAP-0052: the refusal exits 3, like every other local writer on a managed device.
 				var exit *ExitError
 				if !errors.As(err, &exit) || exit.Code != 3 {
@@ -1304,13 +1635,29 @@ func TestAdminRefusalsSayWhy(t *testing.T) {
 	}
 }
 
+// GAP-0338: a sandbox's explain says when its repository policy file
+// changed since it was created, and that it keeps the policy it had.
+func TestPolicyExplainNamesAChangedRepositoryPolicy(t *testing.T) {
+	ta := newTestApp(t, "")
+	file := filepath.Join(t.TempDir(), "sandbox.yaml")
+	if err := os.WriteFile(file, []byte("version: 1\negress: {allow: [example.org]}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ta.daemon.explain.RepoPolicy = &sandboxapi.RepoPolicy{Path: file, Digest: "sha256:" + strings.Repeat("0", 64), Tightened: []string{"egress.block"}}
+	ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Sandbox: "box"}))
+	has(t, ta.output(), "the repository policy file changed since box was created; box keeps the policy it was created with")
+	ta.out.Reset()
+	ta.ok(t, ta.PolicyExplain(bg, PolicyOptions{Harness: "claude"}))
+	lacks(t, ta.output(), "keeps the policy it was created with")
+}
+
 func TestPolicyShowExplainSuggest(t *testing.T) {
 	ta := newTestApp(t, "")
 	ta.daemon.explain.Admin = sandboxapi.AdminStatus{Configured: true, Authority: "advisory", Detail: "config.yaml is yours"}
 	ta.daemon.explain.Settings = append(ta.daemon.explain.Settings, sandboxapi.Setting{Key: "profile", Value: "balanced", Source: "admin",
 		Origin: "openshell.admin.min_profile", Requested: "open"})
 	ta.ok(t, ta.PolicyShow(bg, PolicyOptions{Harness: "claude"}))
-	has(t, ta.output(), "Pack          open (builtin:open) sha256:", "advisory: config.yaml is yours")
+	has(t, strings.Join(strings.Fields(ta.output()), " "), "Pack open (builtin:open) sha256:", "Network profile open", "advisory: config.yaml is yours")
 	if q := ta.daemon.callsTo("GET", sandboxapi.PathPolicyExplain); len(q) != 1 || !strings.Contains(q[0].Query, "harness=claudecode") {
 		t.Fatalf("explain query = %+v", q)
 	}
@@ -1335,12 +1682,6 @@ func TestPolicyShowExplainSuggest(t *testing.T) {
 	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{Harness: "claude", Profile: "open"}))
 	has(t, ta.output(), "1 (instead of unlimited)", "strict (asked for open)")
 	lacks(t, ta.output(), "asked for (unlimited)")
-	ta.daemon.events = []sandboxapi.ActivityEvent{
-		{Kind: sandboxapi.ActivityEgressAllowed, Host: "registry.npmjs.org"}, {Kind: sandboxapi.ActivityEgressAllowed, Host: "registry.npmjs.org"},
-		{Kind: sandboxapi.ActivityEgressAllowed, Host: "docs.python.org"}, {Kind: sandboxapi.ActivityEgressBlocked, Host: "webhook.site"},
-	}
-	ta.ok(t, ta.fresh().PolicySuggest(bg, SuggestOptions{}))
-	has(t, ta.output(), "      - docs.python.org  # 1\n      - registry.npmjs.org  # 2", "Blocked (not suggested): webhook.site")
 }
 
 // `policy show` sizes its key column to the longest key; `policy explain`
@@ -1427,6 +1768,27 @@ func TestPackCommands(t *testing.T) {
 	lacks(t, ta.output(), "…")
 }
 
+// A pack that extends another says so: pack list, show and validate, and
+// policy show and explain name the chain.
+func TestPackChainIsShown(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.Cfg.OpenShell.PackDir = filepath.Join(ta.Cfg.DataDir, "policies", "sandbox")
+	file := filepath.Join(ta.Cfg.OpenShell.PackDir, "team", "pack.yaml")
+	writeFile(t, file, "version: 1\nname: team\nextends: balanced\negress: {allow: [example.org]}\n")
+	ta.ok(t, ta.PackList(PackOptions{}))
+	has(t, ta.output(), "custom, extends balanced")
+	ta.ok(t, ta.fresh().PackShow("team", PackOptions{}))
+	has(t, ta.output(), "# extends balanced (", "the settings below are the merged result", "example.org", "registry.npmjs.org")
+	ta.ok(t, ta.fresh().PackValidate(file))
+	has(t, ta.output(), "valid pack team (network profile balanced)", "extends balanced")
+	ta.daemon.explain.Pack = "team"
+	ta.daemon.explain.PackChain = []sandboxapi.PackLink{{Name: "balanced", Builtin: true, Source: "builtin:balanced", Digest: "sha256:" + strings.Repeat("b", 64)}}
+	ta.ok(t, ta.fresh().PolicyShow(bg, PolicyOptions{}))
+	has(t, ta.output(), "extends balanced")
+	ta.ok(t, ta.fresh().PolicyExplain(bg, PolicyOptions{}))
+	has(t, ta.output(), "  extends balanced sha256:bbbb")
+}
+
 func TestEnableDisableWrappers(t *testing.T) {
 	ta := newTestApp(t, "")
 	writeConfig(t, ta, "")
@@ -1498,7 +1860,7 @@ func TestWrappersInACustomRCFile(t *testing.T) {
 	if c := loadConfig(t, ta); !slices.Equal(c.OpenShell.Wrappers, []string{"claudecode"}) {
 		t.Fatalf("openshell.wrappers = %v", c.OpenShell.Wrappers)
 	}
-	has(t, ta.wrappersCheck().Detail, "~/dotfiles/shell.rc")
+	has(t, ta.wrappersCheck(bg, false).Detail, "~/dotfiles/shell.rc")
 	ta.ok(t, ta.Teardown(bg, TeardownOptions{DryRun: true}))
 	has(t, ta.output(), "claude in ~/dotfiles/shell.rc")
 	ta.ok(t, ta.Disable(WrapperOptions{Harness: "claude"}))

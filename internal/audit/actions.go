@@ -154,6 +154,17 @@ const (
 	ActionSandboxPolicy    Action = "sandbox-policy"
 	ActionSandboxHealth    Action = "sandbox-health"
 	ActionSandboxFinding   Action = "sandbox-finding"
+	ActionSandboxActivity  Action = "sandbox-activity"
+	ActionSandboxProcess   Action = "sandbox-process"
+
+	// Managed (identity-based, enterprise) sandbox records. The dotted keys
+	// are the producer keys of sandbox_policy_v8.go: a profile re-match, a
+	// network rule the managed layer did not render, and the refusals and
+	// alerts of the require-sandbox gate, foreign sandboxes and containers
+	// and OpenShell settings drift.
+	ActionSandboxPolicyRematched   Action = "sandbox.policy.rematched"
+	ActionSandboxPolicyForeignRule Action = "sandbox.policy.foreign_rule"
+	ActionSandboxManaged           Action = "sandbox.managed"
 
 	// Sidecar lifecycle and bootstrap instrumentation. These actions
 	// describe gateway-side startup, shutdown, WebSocket connectivity,
@@ -402,6 +413,11 @@ func AllActions() []Action {
 		ActionSandboxPolicy,
 		ActionSandboxHealth,
 		ActionSandboxFinding,
+		ActionSandboxActivity,
+		ActionSandboxProcess,
+		ActionSandboxPolicyRematched,
+		ActionSandboxPolicyForeignRule,
+		ActionSandboxManaged,
 		ActionSidecarStart,
 		ActionSidecarStop,
 		ActionSidecarConnected,

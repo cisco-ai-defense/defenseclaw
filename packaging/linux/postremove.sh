@@ -11,6 +11,7 @@
 # removal to remove those too.
 
 set -u
+lifecycle=/var/lib/defenseclaw-enterprise
 # dpkg can invoke the new package's postrm after a failed unpack.
 case "${1:-}" in
     failed-upgrade|abort-install)
@@ -28,13 +29,24 @@ if [ "${1:-}" = purge ]; then
         /var/log/defenseclaw
     # Keep lifecycle.lock at its original inode: a waiting lifecycle run can
     # already have it open when the package removal finishes.
-    find /var/lib/defenseclaw-enterprise -mindepth 1 -maxdepth 1 ! -name lifecycle.lock -exec rm -rf -- {} + 2>/dev/null || true
+    find "$lifecycle" -mindepth 1 -maxdepth 1 ! -name lifecycle.lock -exec rm -rf -- {} + 2>/dev/null || true
 fi
 # deb passes "remove"/"purge", rpm passes 0 when the package is erased (and 1
 # on upgrade). Drop the now-empty install directories the package does not
 # own as files; an upgrade keeps them.
 case "${1:-}" in
     remove|purge|0)
+        # The vendor policies are written by the lifecycle, not shipped as
+        # package files. The uninstall removes them on a package host and
+        # keeps only a file an administrator put there (GAP-1582); what is
+        # left leaves with the package, but only once the
+        # preremove uninstall removed the deployment. An uninstall that
+        # failed (machine policy or a registration not removed) keeps the
+        # deployment record, the config and the registrations that name
+        # these policies for a rerun, so the policies stay with them.
+        if [ ! -e "$lifecycle/deployment.json" ]; then
+            rm -rf /opt/defenseclaw/share/policies
+        fi
         rmdir /opt/defenseclaw/share/opencode /opt/defenseclaw/share /opt/defenseclaw/bin /opt/defenseclaw >/dev/null 2>&1 || true
         # The override `enterprise linux uninstall` wrote over this package's
         # tmpfiles.d entries leaves with the package.

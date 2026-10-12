@@ -138,6 +138,22 @@ func Current() Provenance {
 	}
 }
 
+// PublicProvenance is the part of Provenance any local account may read:
+// which event schema and which binary answer. ContentHash and Generation
+// fingerprint the administrator's configuration, so a reader could tell
+// when the organization policy changes and test guesses of its contents
+// offline; a managed host's unauthenticated /health serves only this
+// subset to non-administrators (GAP-0666).
+type PublicProvenance struct {
+	SchemaVersion int    `json:"schema_version"`
+	BinaryVersion string `json:"binary_version"`
+}
+
+// Public returns the subset of p that carries no configuration fingerprint.
+func (p Provenance) Public() PublicProvenance {
+	return PublicProvenance{SchemaVersion: p.SchemaVersion, BinaryVersion: p.BinaryVersion}
+}
+
 // fallbackBuildVersion resolves a usable binary version when
 // SetBinaryVersion has not been called (tests, go run, or
 // pre-ldflags bootstraps). Tries debug.ReadBuildInfo first so

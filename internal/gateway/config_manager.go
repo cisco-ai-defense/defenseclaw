@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -47,6 +48,72 @@ import (
 const configReloadDebounce = 500 * time.Millisecond
 
 const configReloadSnapshotAttempts = 3
+
+// configReloadInFlight is held from the first file event of a burst until
+// its reload is applied or rejected. `guardrail profile explain` waits for
+// it (awaitConfigReload): an administrator who writes the configuration and
+// asks at once got the answer of the previous configuration, then the new
+// one a second later (GAP-0307).
+var configReloadInFlight = &configReloadGate{}
+
+// configReloadExplainWait bounds that wait; a reload normally takes well
+// under a second after the debounce.
+const configReloadExplainWait = 10 * time.Second
+
+// configReloadGate counts the config bursts seen and not yet applied.
+type configReloadGate struct {
+	mu     sync.Mutex
+	active int
+	idle   chan struct{}
+}
+
+func (g *configReloadGate) begin() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active == 0 {
+		g.idle = make(chan struct{})
+	}
+	g.active++
+}
+
+func (g *configReloadGate) settle() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.active == 0 {
+		return
+	}
+	if g.active--; g.active == 0 {
+		close(g.idle)
+		g.idle = nil
+	}
+}
+
+// wait returns once no burst is pending, or after max; false on timeout.
+func (g *configReloadGate) wait(max time.Duration) bool {
+	g.mu.Lock()
+	idle := g.idle
+	g.mu.Unlock()
+	if idle == nil {
+		return true
+	}
+	timer := time.NewTimer(max)
+	defer timer.Stop()
+	select {
+	case <-idle:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// awaitConfigReload serves next once the configuration written last is
+// applied, or after configReloadExplainWait.
+func awaitConfigReload(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		configReloadInFlight.wait(configReloadExplainWait)
+		next(w, r)
+	}
+}
 
 const configReloadStartupQuietPeriod = 25 * time.Millisecond
 
@@ -463,6 +530,13 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 	// a generation rebuild even without a config diff, and a burst of only
 	// config.generation.json refreshes config_generation.
 	pendingKinds := map[string]bool{}
+	// A burst seen and not applied yet holds the profile oracle back
+	// (configReloadInFlight).
+	defer func() {
+		if pending {
+			configReloadInFlight.settle()
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -501,6 +575,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			}
 			if !pending {
 				pendingTrigger = which
+				configReloadInFlight.begin()
 			}
 			pendingKinds[which] = true
 			pending = true
@@ -523,6 +598,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			pendingKinds = map[string]bool{}
 			if len(kinds) == 1 && kinds[configGenerationTrigger] {
 				refreshConfigGeneration(nil)
+				configReloadInFlight.settle()
 				continue
 			}
 			// A reload the gateway's own stop or restart cancelled is not a
@@ -530,6 +606,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			if err := m.reload(ctx, reason, kinds[configDiffAssets]); err != nil && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 			}
+			configReloadInFlight.settle()
 			syncAssetWatches()
 			// Piggyback on the reload path — the AVC packaging pipeline
 			// may have just created the env_config directory. The
@@ -545,6 +622,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			if syncAssetWatches() {
 				if !pending {
 					pendingTrigger = configDiffAssets
+					configReloadInFlight.begin()
 				}
 				pendingKinds[configDiffAssets] = true
 				pending = true
@@ -1256,14 +1334,12 @@ func resetTimer(timer *time.Timer, d time.Duration) {
 // Fields preserved:
 //   - Gateway.Token — synthesised by ensureGatewayTokenSynthesis on
 //     first boot; not written into config.yaml on disk.
-//   - Gateway.NoTLS — mapstructure:"-", set at boot from RequiresTLS
-//     and the legacy standalone shim. Runtime state, not user-
-//     configurable.
-//   - Gateway.SandboxHome, Gateway.ClawHome — mapstructure:"-",
-//     derived from the legacy OpenShell shim / os.UserHomeDir() at Load
-//     time. Stable
-//     across reloads on the same host but the initial cached snapshot
-//     may have been rendered before every derivation ran.
+//   - Gateway.NoTLS — mapstructure:"-", set at boot from RequiresTLS.
+//     Runtime state, not user-configurable.
+//   - Gateway.ClawHome — mapstructure:"-", derived from
+//     os.UserHomeDir() at Load time. Stable across reloads on the same
+//     host but the initial cached snapshot may have been rendered before
+//     the derivation ran.
 //
 // nil-safe: no-op when oldCfg or next is nil (mirrors diffConfigs'
 // early-out for the boot-time / first-load case where nothing to
@@ -1280,14 +1356,9 @@ func preserveManagedGatewayRuntimeFields(oldCfg, next *config.Config) {
 	}
 	// NoTLS is bool — the "was it set on the runtime side and zeroed
 	// by LoadFromFile?" question reduces to "old=true, new=false".
-	// Copy that specific transition; the reverse (old=false, new=true)
-	// can only happen if the legacy OpenShell mode legitimately flipped,
-	// which is a real change.
+	// Copy that specific transition.
 	if oldCfg.Gateway.NoTLS && !next.Gateway.NoTLS {
 		next.Gateway.NoTLS = true
-	}
-	if next.Gateway.SandboxHome == "" && oldCfg.Gateway.SandboxHome != "" {
-		next.Gateway.SandboxHome = oldCfg.Gateway.SandboxHome
 	}
 	if next.Gateway.ClawHome == "" && oldCfg.Gateway.ClawHome != "" {
 		next.Gateway.ClawHome = oldCfg.Gateway.ClawHome
@@ -1409,8 +1480,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		// make every later reload fail as restart-required (GAP-2422).
 		"registries": {},
 		// Sandbox settings are read per launch, and the sandbox listeners
-		// rebind in-process (apiNeedsRestart). Only the legacy standalone
-		// mode behind the bind shim needs a fresh process (below).
+		// rebind in-process (apiNeedsRestart).
 		"openshell": {},
 		// applyConfigReload rebuilds the discovery service and restarts the
 		// discovery and runtime-plane workers in-process (aiRestart). Keeping
@@ -1484,11 +1554,6 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 		if _, ok := hotReloadable[path]; !ok {
 			restart = append(restart, path)
 		}
-	}
-	if config.IsLegacyStandalone(oldCfg) != config.IsLegacyStandalone(newCfg) {
-		// The shim decides gateway TLS, the sandbox home, and the API bind at
-		// construction; entering or leaving legacy mode needs a fresh process.
-		restart = append(restart, "openshell.mode")
 	}
 	if oldCfg.Gateway.DeviceKeyFile != newCfg.Gateway.DeviceKeyFile {
 		restart = append(restart, "gateway.device_key_file")
@@ -1570,8 +1635,6 @@ func holdRestartRequired(running, next *config.Config, restart []string) *config
 			inspection := held.Enterprise.Inspection
 			held.Enterprise = running.Enterprise
 			held.Enterprise.Inspection = inspection
-		case "openshell.mode":
-			held.OpenShell.Mode = running.OpenShell.Mode
 		case "plugin_dir":
 			held.PluginDir = running.PluginDir
 		default:

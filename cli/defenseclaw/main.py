@@ -55,7 +55,7 @@ if __name__ == "__main__" and sys.argv[1:] == ["--version-json"]:
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import platform_support, terminal_checkbox, ux
 from defenseclaw.commands.cmd_acp import acp_cmd
 from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
@@ -237,7 +237,9 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     uninstall of a half-installed host), a nested ``sandbox run`` inside a
     sandbox, which runs the harness natively, and the read-only ``sandbox
     pack list|show|validate`` (an administrator reads a pack's digest before
-    writing the config that pins it). An existing non-v8 document is still
+    writing the config that pins it) and ``sandbox policy test`` (a CI job
+    checks a pack against a fixture with no install, GAP-0124), which use
+    the default configuration there. An existing non-v8 document is still
     refused by the preflight.
     """
     if ctx.invoked_subcommand != "sandbox":
@@ -250,9 +252,11 @@ def _is_config_optional_sandbox_command(ctx: click.Context) -> bool:
     child = argv[index + 1] if index + 1 < len(argv) else ""
     if child == "teardown":
         return True
+    grandchild = argv[index + 2] if index + 2 < len(argv) else ""
     if child == "pack":
-        grandchild = argv[index + 2] if index + 2 < len(argv) else ""
         return grandchild in {"list", "show", "validate"}
+    if child == "policy":
+        return grandchild == "test"
     return child == "run" and bool(os.environ.get("DEFENSECLAW_SANDBOX_ID", "").strip())
 
 
@@ -338,6 +342,11 @@ def cli(ctx: click.Context) -> None:
     if _is_offline_rulepack_validation(ctx):
         return
     if _is_audit_export(ctx):
+        return
+    if invoked == "sandbox" and platform_support.host_os() == "windows":
+        # Every sandbox command refuses Windows (exit 3) before it would use
+        # the configuration, so a broken config.yaml is not the first thing
+        # to fix for a feature that cannot run there (GAP-0242).
         return
 
     from defenseclaw import config as cfg_mod
@@ -766,11 +775,21 @@ def _silence_closed_stdout() -> None:
         pass
 
 
+def _cwd_is_gone() -> bool:
+    """Whether this process's working directory was deleted."""
+    try:
+        os.getcwd()
+    except FileNotFoundError:
+        return True
+    return False
+
+
 def main() -> None:
     """Entrypoint: try TUI handoff first, fall back to Click CLI."""
     ux.configure_console_output()
     _keep_console_width_when_piped()
     _force_utf8_io()
+    terminal_checkbox.keep_prompts_visible()
     from defenseclaw.config_writer import ConfigWriteError, ManagedConfigWriteError, plain_error
     from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
     from defenseclaw.observability.v8_config import V8ConfigError
@@ -825,6 +844,15 @@ def main() -> None:
             sys.exit(1)
         import errno
 
+        if exc.errno == errno.ENOENT and _cwd_is_gone():
+            # GAP-0264: a shell left in a folder that was deleted made the
+            # first relative path fail in os.path.abspath, with a traceback.
+            click.echo(
+                "Error: the current directory no longer exists. cd to an existing directory "
+                "and run the command again.",
+                err=True,
+            )
+            sys.exit(1)
         if exc.errno != errno.ENOSPC:
             raise
         # GAP-1838: a full disk is an environment problem, not a crash.

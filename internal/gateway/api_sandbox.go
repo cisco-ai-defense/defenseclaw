@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -49,12 +50,21 @@ type SandboxController interface {
 	// RunLog returns the log of the latest detached run the daemon kept
 	// when it stopped the sandbox (its last lines lines; 0: all of it).
 	RunLog(ctx context.Context, name string, lines int) (*sandboxapi.RunLog, error)
+	// Destinations returns what the sandbox reached or tried to reach, by
+	// host and kind (model provider, shadow AI, ...).
+	Destinations(ctx context.Context, name string) (*sandboxapi.Destinations, error)
 	// ReportWorkspace records a copy-mode workspace step the CLI ran.
 	ReportWorkspace(ctx context.Context, name string, report sandboxapi.WorkspaceReport) error
+	// Discover runs the AI discovery of a ready sandbox now.
+	Discover(ctx context.Context, name string) (*sandboxapi.DiscoveryResult, error)
+	// Processes returns a sandbox's process tree (empty while it is off).
+	Processes(ctx context.Context, name string) (*sandboxapi.ProcessList, error)
 	Approvals(ctx context.Context, sandbox string) ([]sandboxapi.Approval, error)
 	DecideApproval(ctx context.Context, id string, d sandboxapi.ApprovalDecision) (*sandboxapi.ApprovalResult, error)
 	Unblock(ctx context.Context, req sandboxapi.UnblockRequest) (*sandboxapi.UnblockResponse, error)
 	Explain(ctx context.Context, req sandboxapi.ExplainRequest) (*sandboxapi.Explain, error)
+	// PolicyTest judges destinations with a sandbox's egress policy.
+	PolicyTest(ctx context.Context, req sandboxapi.PolicyTestRequest) (*sandboxapi.PolicyTestResult, error)
 	// ActivitySince returns buffered activity after since.
 	ActivitySince(since uint64, sandbox string) []sandboxapi.ActivityEvent
 	// SubscribeActivity returns buffered activity after since and a
@@ -121,6 +131,12 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 		}
 		return c.RunLog(ctx, r.PathValue("name"), lines)
 	}))
+	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}/destinations", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		return c.Destinations(ctx, r.PathValue("name"))
+	}))
+	mux.HandleFunc("GET "+sandboxapi.PathSandboxes+"/{name}/processes", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		return c.Processes(ctx, r.PathValue("name"))
+	}))
 	mux.HandleFunc("DELETE "+sandboxapi.PathSandboxes+"/{name}", a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		var req sandboxapi.DeleteRequest
 		if err := decodeSandboxBody(r, &req, true); err != nil {
@@ -170,6 +186,12 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 				return nil, err
 			}
 			return map[string]string{"status": "recorded"}, nil
+		case "discover":
+			var req struct{}
+			if err := decodeSandboxBody(r, &req, true); err != nil {
+				return nil, err
+			}
+			return c.Discover(ctx, name)
 		default:
 			return nil, sandboxapi.Errorf(sandboxapi.CodeNotFound, "unknown sandbox action %q", r.PathValue("verb"))
 		}
@@ -198,6 +220,14 @@ func (a *APIServer) sandboxAPIHandler() http.Handler {
 	mux.HandleFunc("GET "+sandboxapi.PathPolicyExplain, a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
 		return c.Explain(ctx, sandboxapi.ParseExplainQuery(r.URL.Query()))
 	}))
+	mux.HandleFunc("POST "+sandboxapi.PathPolicyTest, a.sandboxCall(func(ctx context.Context, c SandboxController, r *http.Request) (any, error) {
+		var req sandboxapi.PolicyTestRequest
+		if err := decodeSandboxBody(r, &req, false); err != nil {
+			return nil, err
+		}
+		return c.PolicyTest(ctx, req)
+	}))
+	mux.HandleFunc("POST "+sandboxapi.PathReady, a.handleSandboxReady)
 	mux.HandleFunc("GET "+sandboxapi.PathActivity, a.handleSandboxActivity)
 	mux.HandleFunc(sandboxapi.PathPrefix, func(w http.ResponseWriter, r *http.Request) {
 		writeSandboxError(w, sandboxapi.Errorf(sandboxapi.CodeNotFound, "no sandbox API route %s %s", r.Method, r.URL.Path))
@@ -227,8 +257,28 @@ func (a *APIServer) sandboxDisabledError() *sandboxapi.Error {
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.OpenShell.Enabled {
 		return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "the sandbox subsystem is not running; see `defenseclaw sandbox doctor`")
 	}
-	return sandboxapi.Errorf(sandboxapi.CodeDisabled, sandboxapi.DisabledMessage)
+	st := sandboxapi.Status{GatewayElsewhere: sandboxGatewayElsewhere()}
+	return sandboxapi.Errorf(sandboxapi.CodeDisabled, "%s", st.OffMessage())
 }
+
+// sandboxGatewayElsewhere is openshell.AnotherAccountsGateway, asked at most
+// every 30 s: every sandbox call while sandboxes are off names it, and the
+// TUI polls the status. A variable for tests.
+var sandboxGatewayElsewhere = func() func() string {
+	var (
+		mu   sync.Mutex
+		at   time.Time
+		held string
+	)
+	return func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		if at.IsZero() || time.Since(at) > 30*time.Second {
+			held, at = openshell.AnotherAccountsGateway(), time.Now()
+		}
+		return held
+	}
+}()
 
 func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) {
 	c, release := a.leaseSandboxController()
@@ -239,12 +289,20 @@ func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) 
 		if cfg != nil {
 			st.Enabled = cfg.OpenShell.Enabled
 		}
+		if !st.Enabled {
+			st.GatewayElsewhere = sandboxGatewayElsewhere()
+		}
 		st.IngressAddr = a.SandboxIngressAddr()
 		st.DaemonUID = daemonUID()
 		a.writeJSON(w, http.StatusOK, st)
 		return
 	}
 	st, err := c.Status(r.Context())
+	a.writeSandboxStatus(w, st, err)
+}
+
+// writeSandboxStatus answers a status, or the error that stopped it.
+func (a *APIServer) writeSandboxStatus(w http.ResponseWriter, st *sandboxapi.Status, err error) {
 	if err != nil {
 		writeSandboxError(w, err)
 		return
@@ -252,6 +310,39 @@ func (a *APIServer) handleSandboxStatus(w http.ResponseWriter, r *http.Request) 
 	st.DaemonUID = daemonUID()
 	st.DockerGroupMissing = openshell.DockerGroupMissingInProcess()
 	a.writeJSON(w, http.StatusOK, st)
+}
+
+// sandboxReadier is a controller that readies OpenShell for a first run: a
+// managed computer's sandbox daemon (managedSandboxController.Ready).
+type sandboxReadier interface {
+	Ready(ctx context.Context) (*sandboxapi.Status, error)
+}
+
+// handleSandboxReady serves POST ready: the controller readies OpenShell and
+// answers the status after it. A controller with nothing to ready (the
+// per-user gateway drives the user's own OpenShell) answers the status.
+func (a *APIServer) handleSandboxReady(w http.ResponseWriter, r *http.Request) {
+	c, release := a.leaseSandboxController()
+	defer release()
+	if c == nil {
+		writeSandboxError(w, a.sandboxDisabledError())
+		return
+	}
+	var req struct{}
+	if err := decodeSandboxBody(r, &req, true); err != nil {
+		writeSandboxError(w, err)
+		return
+	}
+	var (
+		st  *sandboxapi.Status
+		err error
+	)
+	if rc, ok := c.(sandboxReadier); ok {
+		st, err = rc.Ready(r.Context())
+	} else {
+		st, err = c.Status(r.Context())
+	}
+	a.writeSandboxStatus(w, st, err)
 }
 
 // daemonUID is the uid this process runs as, for the sandbox doctor's

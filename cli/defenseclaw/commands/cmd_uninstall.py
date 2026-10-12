@@ -197,6 +197,9 @@ class UninstallPlan:
     # sandbox_teardown_skipped is set when there is sandbox state but
     # --skip-sandbox-teardown leaves it (Docker or OpenShell are gone, say).
     sandbox_teardown_skipped: bool = False
+    # live_sandboxes are the live-mounted sandboxes the daemon listed: the
+    # teardown stops them and their undo points go (GAP-0295).
+    live_sandboxes: tuple[str, ...] = ()
     # setup_leftovers are the %LOCALAPPDATA%\DefenseClaw folders that
     # DefenseClaw Setup left after the installer replaced it (Windows,
     # --binaries only).
@@ -317,6 +320,8 @@ def uninstall_cmd(
         remove_plugin=not keep_openclaw,
         skip_sandbox_teardown=skip_sandbox_teardown,
     )
+    if plan.sandbox_teardown:
+        plan = replace(plan, live_sandboxes=_live_mounted_sandboxes(plan.gateway_path))
     ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
 
@@ -333,6 +338,9 @@ def uninstall_cmd(
         raise SystemExit(1)
 
     _execute_plan(plan)
+    if plan.connectors:
+        # The plan said so; the end says it again, once it is true (GAP-0255).
+        ux.warn("Close any agent session still open: it runs without DefenseClaw's hooks now.")
     _render_kept_and_next_steps(plan)
 
 
@@ -1521,6 +1529,7 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         names = (
             "defenseclaw-gateway",
             "defenseclaw-acp",
+            "defenseclaw-sensor-helper",
             "defenseclaw",
             "skill-scanner",
             "skill-scanner-api",
@@ -1679,6 +1688,12 @@ def _teardown_connectors(
     return tuple(out)
 
 
+_OPEN_SESSION_NOTE = (
+    "an agent session that is open now goes on without DefenseClaw (its hooks fail and nothing checks "
+    "its tool calls): close it first, or restart it once DefenseClaw is back"
+)
+
+
 def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     # "Plan" (not "Uninstall plan") — the command banner above already names
     # the operation (Uninstall / Reset), so repeating it here is redundant and,
@@ -1693,13 +1708,25 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     display_connectors = plan.connectors
     teardown = ", ".join(display_connectors) if display_connectors else "no"
     ux.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
-    if plan.sandbox_teardown:
+    if display_connectors:
+        # An open Codex session ran on after the uninstall with every hook
+        # failing, and its next marker command ran (GAP-0255).
+        ux.echo(f"      {ux.dim('·')} {_OPEN_SESSION_NOTE}")
+    if plan.platform_name == "win32" and not plan.sandbox_teardown:
+        ux.echo(f"  • {ux.bold('sandbox teardown:')}    no (OpenShell sandboxes do not run on Windows)")
+    elif plan.sandbox_teardown:
         ux.echo(f"  • {ux.bold('sandbox teardown:')}    yes (OpenShell itself is kept)")
         # Teardown runs with --yes: work a copy-mode sandbox holds is gone
         # with it, so say where to see it before the confirmation.
         ux.echo(
             f"      {ux.dim('·')} work a copy-mode sandbox holds that was never pulled back is deleted with it "
             "(`defenseclaw sandbox teardown --dry-run` names it)"
+        )
+        live = f" ({', '.join(plan.live_sandboxes)})" if plan.live_sandboxes else ""
+        ux.echo(
+            f"      {ux.dim('·')} a live-mounted sandbox{live} is stopped and deleted with its undo point; what its "
+            "agent already wrote in your folder stays as it is (before you uninstall, `defenseclaw sandbox review "
+            "NAME` shows it and `defenseclaw sandbox undo NAME` reverts it)"
         )
     elif plan.sandbox_teardown_skipped:
         ux.echo(f"  • {ux.bold('sandbox teardown:')}    skipped (--skip-sandbox-teardown)")
@@ -1717,6 +1744,9 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             f"      {ux.dim('·')} DefenseClaw's OpenShell sandboxes, images, gateway change and shell wrappers "
             f"stay; {later}"
         )
+    feed = _sandbox_kernel_feed_hint(plan)
+    if feed:
+        ux.echo(f"  • {ux.bold('sandbox kernel feed:')} stays (a root service); {feed}")
     ux.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
     if "openclaw" in display_connectors:
         ux.echo(
@@ -2326,6 +2356,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
             else {
                 "defenseclaw-gateway",
                 "defenseclaw-acp",
+                "defenseclaw-sensor-helper",
                 "defenseclaw",
                 "skill-scanner",
                 "skill-scanner-api",
@@ -2696,6 +2727,52 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
         raise click.ClickException(f"could not stop sidecar: {exc}") from exc
     finally:
         _close_process_waiters(waiters)
+
+
+# The sandbox kernel feed (``sudo defenseclaw-gateway sandbox kernel-feed
+# install``) is a root service with its own root-owned copy of the helper. A
+# per-user uninstall cannot remove it, so the plan says how.
+_SANDBOX_FEED_UNIT = "/etc/systemd/system/defenseclaw-sandbox-feed.service"
+_SANDBOX_FEED_HELPER = "/usr/local/libexec/defenseclaw/defenseclaw-sensor-helper"
+
+
+def _sandbox_kernel_feed_hint(plan: UninstallPlan, unit: str = _SANDBOX_FEED_UNIT) -> str:
+    """How to remove the sandbox kernel feed, or "" when it is not installed.
+
+    While the gateway stays, its ``sandbox kernel-feed uninstall`` does it;
+    the feed's own copy of the helper can remove it at any time, also after
+    this uninstall removed the gateway.
+    """
+    if not sys.platform.startswith("linux") or not os.path.isfile(unit):
+        return ""
+    if plan.gateway_path and not plan.remove_binaries:
+        return f"remove it with `sudo {plan.gateway_path} sandbox kernel-feed uninstall`"
+    return f"remove it with `sudo {_SANDBOX_FEED_HELPER} --sandbox-feed --uninstall`"
+
+
+def _live_mounted_sandboxes(gateway_path: str) -> tuple[str, ...]:
+    """The live-mounted sandboxes the daemon lists, or () when it cannot say (GAP-0295)."""
+    if not gateway_path or not os.path.isfile(gateway_path):
+        return ()
+    try:
+        proc = subprocess.run(
+            [gateway_path, "sandbox", "list", "--output", "json"],
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
+        rows = json.loads(proc.stdout or "{}").get("sandboxes") if proc.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return ()
+    return tuple(
+        sorted(
+            str(row["name"])
+            for row in rows or ()
+            if isinstance(row, dict) and row.get("name") and row.get("workdir_mode") == "mount"
+            and row.get("phase") != "deleted"
+        )
+    )
 
 
 def _gateway_supports_sandbox_teardown(gateway_path: str) -> bool:

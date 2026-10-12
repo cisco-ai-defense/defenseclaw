@@ -289,7 +289,8 @@ type CredentialProfile struct {
 	// DefaultModel is the model a sandbox with this profile runs because
 	// the provider does not serve the harness's own default. It travels
 	// with ModelProvider (Codex) or as ANTHROPIC_MODEL in Env (Claude Code)
-	// into the run's managed configuration, above user config and
+	// into the run's managed configuration, or as a model flag in
+	// LaunchArgs (Hermes) ahead of the caller's arguments, above user config and
 	// configuration overrides; only the harness's model flag picks another
 	// (Spec.Model).
 	DefaultModel string
@@ -402,15 +403,41 @@ type Spec struct {
 	// directFetches are requests the pinned harness makes around the
 	// egress proxy that it does without (DirectFetch).
 	directFetches []DirectFetch
+	// toolHosts are hosts a tool of the harness calls on every use
+	// (ToolHost).
+	toolHosts []ToolHost
 }
 
-// DirectFetch is a request the pinned harness binary makes on its own
-// around the egress proxy (its HTTP client ignores the proxy variables)
-// with no setting that turns it off, and that the harness does without
-// when it fails. OpenShell refuses it and drafts a proposal to open the
+// ToolHost is a host one of the harness's own tools calls on every use,
+// whatever the tool's target: Claude Code's WebFetch asks its vendor's API
+// whether each URL is safe to fetch. An allowlist profile that refuses the
+// host breaks the tool for every site, which read as the site's refusal
+// (GAP-0234, GAP-0263).
+type ToolHost struct {
+	Host string
+	// What says what refusing it breaks, for the feed and the agent.
+	What string
+}
+
+// ToolHostOf says what refusing host breaks, when it is one of the
+// harness's tool hosts.
+func (s *Spec) ToolHostOf(host string) (string, bool) {
+	for _, t := range s.toolHosts {
+		if strings.EqualFold(t.Host, host) {
+			return t.What, true
+		}
+	}
+	return "", false
+}
+
+// DirectFetch is a request the pinned harness binary makes on its own with
+// no setting that turns it off, and that the harness does without when it
+// fails. Around the egress proxy (its HTTP client ignores the proxy
+// variables) OpenShell refuses it and drafts a proposal to open the
 // destination; triage rejects that proposal instead of adding a direct rule
 // (and the policy reload that closes the sandbox's open connections) the
-// harness does not need.
+// harness does not need. Through the proxy, an allowlist pack refuses it.
+// Either refusal is audited but not shown or counted as the agent's.
 type DirectFetch struct {
 	Host string
 	Port int

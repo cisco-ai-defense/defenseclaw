@@ -1,0 +1,3384 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "OpenShell sandboxes: active sandboxes by connector, phase transitions, egress decisions by source (OpenShell vs the DefenseClaw egress proxy) and outcome, top blocked and allowed hosts, bytes up and down per destination, shadow-AI and other sandbox findings, integration health, and opt-in process starts. On enterprise hosts the Managed fleet rows show the sandboxes by profile, group, OS and driver, required-sandbox refusals, access refusals, asks, foreign items, provisional resolutions, OpenShell version and settings drift (they follow Environment, Host, OS, Driver and Profile and show no person). Every other panel follows Environment and Host. Fleet gauges and counters come from Prometheus and ignore the Sandbox variable (their titles say all names); per-sandbox detail comes from Loki and follows it.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": false,
+  "links": [
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/defenseclaw-overview?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Agent Activity (Live)",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Policy decisions",
+      "type": "link",
+      "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Findings",
+      "type": "link",
+      "url": "/d/defenseclaw-findings?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "AI discovery",
+      "type": "link",
+      "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Runtime & Reliability",
+      "type": "link",
+      "url": "/d/defenseclaw-runtime?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Sandbox fleet",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Active (all names)",
+      "description": "Sandboxes provisioning, starting, ready or stopping now, from the defenseclaw.sandbox.active gauge that every running gateway exports each metric interval (the largest value per host, so a restarted gateway is not counted twice; a stopped gateway drops out after five minutes). Follows Environment, Host and Connector. The metric carries no sandbox identity, so this count ignores the Sandbox box.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum(max by (deployment_environment_name, host_name, connector) (defenseclaw_sandbox_active{deployment_environment_name=~\"$environment\", host_name=~\"$host\", connector=~\"$connector\"}))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Sandboxes seen",
+      "description": "Distinct sandboxes, by host and name, that recorded a lifecycle change in the selected range: two hosts' sandboxes with the same name count twice. Pick a Host to see one computer's.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "count(sum by (host_name, defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" [$__range]))) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Egress allowed",
+      "description": "Allowed egress decisions (OpenShell and the DefenseClaw egress proxy) in the range. One record per decision; the end of a tunnel is counted separately in the bytes panels.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Egress blocked",
+      "description": "Blocked egress decisions in the range, from both sources.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Shadow-AI findings",
+      "description": "sandbox.shadow_ai findings: an AI API the sandbox reached (MEDIUM) or tried to reach (LOW) that is neither its model provider nor its harness vendor. At most one per provider and severity per session.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Health degraded",
+      "description": "OpenShell integration health records with state degraded or failed in the range: sandboxes counts the records of the sandboxes in the Sandbox box, gateway-wide the records about the whole integration (they name no sandbox). Both follow Environment and Host.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"$sandbox\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=\"subsystem.degraded\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=\"\" [$__range])) or vector(0)",
+          "refId": "B",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "sandboxes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "gateway-wide"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      }
+    },
+    {
+      "id": 101,
+      "type": "row",
+      "title": "Managed fleet: who is governed by what (enterprise hosts)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 102,
+      "type": "stat",
+      "title": "Governed sandboxes",
+      "description": "Distinct sandboxes (by host and name) that recorded a lifecycle, policy resolution or re-match under the managed gateway in the range. Only sandboxes whose records carry an effective sandbox policy digest count, so a personal OpenShell setup is not included.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "count(sum by (host_name, defenseclaw_sandbox_name) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" [$__range]))) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 103,
+      "type": "stat",
+      "title": "Provisional share",
+      "description": "Percent of policy resolutions in the range that were made on the offline floor while the directory lookup was outstanding. A sandbox leaves the offline floor with a re-match (see Policy re-matches).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 6,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "100 * sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.resolved\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_provisional=\"true\" [$__range])) / sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.resolved\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 104,
+      "type": "stat",
+      "title": "Host runs refused",
+      "description": "Agent runs on the host refused because the matched profile requires a sandbox for that agent (sandbox.host_run_refused).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 6,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.host_run_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 105,
+      "type": "stat",
+      "title": "Sandbox unavailable",
+      "description": "Required sandboxes that this computer cannot provide (no KVM, no docker group, unsupported OS, prerequisite missing), whether the host run was refused or allowed with an alert (sandbox.host_run_unavailable).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.host_run_unavailable\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 106,
+      "type": "stat",
+      "title": "Access refused",
+      "description": "Destinations the managed policy refused to a sandbox, and asks for them refused by the administrator's floor (sandbox.access_refused).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 6,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.access_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 107,
+      "type": "stat",
+      "title": "Foreign items",
+      "description": "Sandboxes, agent containers and network rules found on a managed host that DefenseClaw did not create or render (sandbox.foreign_sandbox, sandbox.foreign_container, sandbox.policy.foreign_rule).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 6,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 108,
+      "type": "stat",
+      "title": "Asks decided",
+      "description": "Access requests, unblocks and user blocks decided by the managed gateway inside the administrator's bounds (sandbox.ask.decided).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 109,
+      "type": "stat",
+      "title": "Asks approved",
+      "description": "Asks the gateway approved (approval result approved).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_approval_result=\"approved\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 110,
+      "type": "stat",
+      "title": "Asks denied",
+      "description": "Asks the gateway denied, cancelled or timed out.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_approval_result=~\"denied|cancelled|timed_out\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 111,
+      "type": "stat",
+      "title": "Policy re-matches",
+      "description": "Live sandboxes whose profile or effective policy changed after a configuration change, a directory refresh or a resolved lookup (sandbox.policy.rematched).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.rematched\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 112,
+      "type": "stat",
+      "title": "Settings drift",
+      "description": "Times the daemon found OpenShell settings that differ from enterprise.openshell and refused sandboxes (sandbox.settings_drift). Zero is the healthy state.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.settings_drift\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 113,
+      "type": "stat",
+      "title": "OpenShell versions",
+      "description": "Distinct OpenShell releases serving the governed sandboxes. More than one means the fleet is mid-upgrade or has drifted.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "count(sum by (version) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | body_defenseclaw_openshell_version!=\"\" | label_format version=\"{{.body_defenseclaw_openshell_version}}\" [$__range]))) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 114,
+      "type": "bargauge",
+      "title": "Sandboxes by profile",
+      "description": "Governed sandboxes by the guardrail profile that governs them (sandboxes held to the organization floor alone show as (organization floor)). A sandbox that was re-matched in the range counts under each profile it had. Per-user values are never shown.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(20, count by (profile) (sum by (host_name, defenseclaw_sandbox_name, profile) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\" [$__range]))))",
+          "refId": "A",
+          "legendFormat": "{{profile}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No governed sandboxes in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.profile}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 115,
+      "type": "table",
+      "title": "Profile, match and group",
+      "description": "How each profile was reached: match is the rule that selected it (group, user or default) and group is the configured group selector that matched. Counts distinct sandboxes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 14,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, count by (profile, match, grp) (sum by (host_name, defenseclaw_sandbox_name, profile, match, grp) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\", match=\"{{.body_defenseclaw_guardrail_profile_match}}\", grp=\"{{.body_defenseclaw_guardrail_profile_matched_group}}\" [$__range]))))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "profile": "Profile",
+              "match": "Matched by",
+              "grp": "Group",
+              "Value": "Sandboxes",
+              "Value #A": "Sandboxes"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No governed sandboxes in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Sandboxes",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 116,
+      "type": "bargauge",
+      "title": "Sandboxes by OS",
+      "description": "Governed sandboxes by the operating system of the host (os.type resource attribute).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(10, count by (os_type) (sum by (host_name, defenseclaw_sandbox_name, os_type) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" [$__range]))))",
+          "refId": "A",
+          "legendFormat": "{{os_type}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No governed sandboxes in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.os_type}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 117,
+      "type": "bargauge",
+      "title": "Sandboxes by driver",
+      "description": "Governed sandboxes by OpenShell compute driver (docker, vm). vm is the MicroVM driver on macOS and Linux.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 22,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(10, count by (driver) (sum by (host_name, defenseclaw_sandbox_name, driver) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | label_format driver=\"{{.body_defenseclaw_sandbox_driver}}\" [$__range]))))",
+          "refId": "A",
+          "legendFormat": "{{driver}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No governed sandboxes in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.driver}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 118,
+      "type": "table",
+      "title": "OpenShell version and install mode",
+      "description": "Hosts by the OpenShell release the daemon verified and how it was provided: prerequisite (installed by the administrator) or setup (installed by the daemon). Counts distinct hosts.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 22,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, count by (version, mode) (sum by (host_name, version, mode) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](lifecycle|policy[.]resolved|policy[.]rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | body_defenseclaw_sandbox_policy_digest!=\"\" | body_defenseclaw_openshell_version!=\"\" | label_format version=\"{{.body_defenseclaw_openshell_version}}\", mode=\"{{.body_defenseclaw_openshell_install_mode}}\" [$__range]))))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "version": "OpenShell",
+              "mode": "Install mode",
+              "Value": "Hosts",
+              "Value #A": "Hosts"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No OpenShell version reported in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Hosts",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 119,
+      "type": "row",
+      "title": "Managed fleet: policy changes and drift",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 120,
+      "type": "timeseries",
+      "title": "Policy re-matches by reason",
+      "description": "Re-matches of live sandboxes by reason: generation (configuration change), facts (a directory refresh changed the principal, tenant or groups) or lookup_resolved (a provisional sandbox left the offline floor).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (reason) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.policy.rematched\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format reason=\"{{.body_defenseclaw_sandbox_policy_rematch_reason}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 121,
+      "type": "timeseries",
+      "title": "Settings drift by OpenShell setting",
+      "description": "Which OpenShell setting differed from enterprise.openshell (the key name only, never its value).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (field) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.settings_drift\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format field=\"{{.body_defenseclaw_openshell_settings_field}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{field}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 122,
+      "type": "logs",
+      "title": "Recent policy resolutions and re-matches",
+      "description": "Newest policy resolutions and re-matches: the profile (and the one before it after a re-match), the reason, whether the sandbox runs on the offline floor and the effective policy digest. The person behind the sandbox is not shown here.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.]policy[.](resolved|rematched)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{.body_defenseclaw_sandbox_name}} · {{if .body_defenseclaw_sandbox_policy_previous_profile}}{{.body_defenseclaw_sandbox_policy_previous_profile}} → {{end}}{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}} · {{if .body_defenseclaw_sandbox_policy_rematch_reason}}{{.body_defenseclaw_sandbox_policy_rematch_reason}}{{else}}resolved{{end}} · provisional {{.body_defenseclaw_sandbox_policy_provisional}} · {{.body_defenseclaw_sandbox_policy_digest}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 123,
+      "type": "row",
+      "title": "Managed fleet: refusals, asks and foreign items",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 124,
+      "type": "timeseries",
+      "title": "Required-sandbox refusals by reason",
+      "description": "Host runs refused or unavailable by event and machine-readable reason (required_group, os_unsupported, no_docker_group, no_kvm, prerequisite_missing, ...).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (kind, reason) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format kind=\"{{.event_name}}\", reason=\"{{.body_defenseclaw_sandbox_managed_reason}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{kind}} · {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 125,
+      "type": "timeseries",
+      "title": "Asks decided by result",
+      "description": "How the managed gateway answered asks, by approval result and ask kind. approved asks are kept (stored) or last for the session.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 48,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (result, kind) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.ask.decided\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format result=\"{{.body_defenseclaw_approval_result}}\", kind=\"{{.body_defenseclaw_sandbox_approval_kind}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{result}} · {{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 126,
+      "type": "bargauge",
+      "title": "Refusals by profile",
+      "description": "Host-run refusals, unavailable sandboxes and access refusals by the guardrail profile of the person who hit them. A profile with many refusals usually needs a sandbox it cannot run or an allow rule.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(20, sum by (profile) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable|access_refused)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format profile=\"{{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}}\" [$__range])))",
+          "refId": "A",
+          "legendFormat": "{{profile}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No refusals in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.profile}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 127,
+      "type": "bargauge",
+      "title": "Access refusals by rule",
+      "description": "Policy rules that refused a destination most often (the operator-configured rule name).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 56,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(10, sum by (rule) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=\"sandbox.access_refused\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format rule=\"{{if .body_defenseclaw_sandbox_policy_rule}}{{.body_defenseclaw_sandbox_policy_rule}}{{else}}(none){{end}}\" [$__range])))",
+          "refId": "A",
+          "legendFormat": "{{rule}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No access refusals in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.rule}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 128,
+      "type": "timeseries",
+      "title": "Foreign sandboxes, containers and rules",
+      "description": "Things found on a managed host that DefenseClaw did not create, by kind and what the managed layer did (stop, alert or remove). Containers are reported and never stopped.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 56,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (kind, action) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | label_format kind=\"{{.event_name}}\", action=\"{{.body_defenseclaw_sandbox_managed_action}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{kind}} · {{action}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 129,
+      "type": "logs",
+      "title": "Recent refusals, unavailable sandboxes and drift",
+      "description": "Newest managed refusals with the profile, the reason code and the rule or setting behind each one. Texts shown to the user are not repeated here.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](host_run_refused|host_run_unavailable|access_refused|settings_drift)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{if .body_defenseclaw_guardrail_profile_name}}{{.body_defenseclaw_guardrail_profile_name}}{{else}}(organization floor){{end}} · {{.body_defenseclaw_sandbox_managed_reason}} · {{.body_defenseclaw_sandbox_policy_rule}}{{.body_defenseclaw_openshell_settings_field}} · {{.body_server_address}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 130,
+      "type": "logs",
+      "title": "Recent asks and foreign items",
+      "description": "Newest ask decisions and foreign sandboxes, containers and rules with what the managed layer did about each.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 72,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type=~\"$os\" | defenseclaw_event_name=~\"sandbox[.](ask[.]decided|foreign_sandbox|foreign_container|policy[.]foreign_rule)\" | json | __error__=\"\" | body_defenseclaw_sandbox_driver=~\"$driver\" | body_defenseclaw_guardrail_profile_name=~\"$profile\" | line_format \"{{.event_name}} · {{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_approval_result}}{{.body_defenseclaw_sandbox_managed_action}} · {{.body_defenseclaw_sandbox_managed_reason}} · {{.body_server_address}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Lifecycle",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 80,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Active sandboxes by connector (all names)",
+      "description": "The defenseclaw.sandbox.active gauge per harness connector (the largest value per host, as in Active sandboxes). Follows Environment, Host and Connector. Sandbox identities are never metric labels, so this chart ignores the Sandbox box; use the log panels for one sandbox.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 81,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (connector) (max by (deployment_environment_name, host_name, connector) (defenseclaw_sandbox_active{deployment_environment_name=~\"$environment\", host_name=~\"$host\", connector=~\"$connector\"}))",
+          "refId": "A",
+          "legendFormat": "{{connector}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Phase transitions",
+      "description": "sandbox.lifecycle records by the phase a sandbox entered (creating, provisioning, starting, ready, stopping, stopped, error, deleting, deleted...).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 81,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (phase) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | label_format phase=\"{{.body_defenseclaw_sandbox_phase}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{phase}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 11,
+      "type": "logs",
+      "title": "Recent lifecycle changes",
+      "description": "Newest phase changes with the trigger (create, start, stop, delete, watch, reconcile) and the OpenShell condition behind each one.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 89,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.lifecycle\" | json | __error__=\"\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{if .body_defenseclaw_sandbox_phase_previous}}{{.body_defenseclaw_sandbox_phase_previous}}{{else}}?{{end}} → {{.body_defenseclaw_sandbox_phase}} · trigger {{.body_defenseclaw_sandbox_lifecycle_trigger}} · {{.body_defenseclaw_sandbox_condition_reason}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Egress decisions",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 97,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Egress by source and decision (logs)",
+      "description": "Decisions by who made them (openshell = OpenShell's own network boundary, dc-egress-proxy = the DefenseClaw egress proxy) and the outcome. Follows the Sandbox variable.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 98,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (net_source, net_decision) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=~\"egress[.]allowed|egress[.]blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format net_source=\"{{.body_defenseclaw_network_source}}\", net_decision=\"{{.body_defenseclaw_network_decision}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{net_source}} · {{net_decision}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Egress by source and decision (metric, all names)",
+      "description": "The defenseclaw.egress.events counter across all sandboxes, by egress source and decision. Follows Environment, Host and Connector (the harness connector); the counter has no sandbox label, so it ignores the Sandbox box. Counters miss a series' first increment, so the log panel is the exact count.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 98,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "defenseclaw-prometheus"
+          },
+          "expr": "sum by (source, decision) (increase(defenseclaw_egress_events_total{deployment_environment_name=~\"$environment\", host_name=~\"$host\", connector=~\"$connector\", source=~\"openshell|dc-egress-proxy\"}[$__rate_interval]))",
+          "refId": "A",
+          "legendFormat": "{{source}} · {{decision}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "bargauge",
+      "title": "Top blocked hosts",
+      "description": "Destinations the sandboxes were refused most often. A host the name of which did not canonicalize shows as its target reference (invalid-host, host:_name).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 106,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "refId": "A",
+          "legendFormat": "{{dest}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No blocked egress in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "displayName": "${__field.labels.dest}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 16,
+      "type": "bargauge",
+      "title": "Top allowed hosts",
+      "description": "Destinations the sandboxes reached most often (allowed decisions).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 106,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(10, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "refId": "A",
+          "legendFormat": "{{dest}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No allowed egress in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.dest}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Traffic volume (completed tunnels and requests)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 114,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 18,
+      "type": "bargauge",
+      "title": "Bytes up by destination",
+      "description": "Bytes the sandboxes sent, summed over the range from log.egress.completed records of the DefenseClaw egress proxy. OpenShell's own connections report no byte counts.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 115,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
+          "refId": "A",
+          "legendFormat": "{{dest}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No completed egress in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.dest}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 19,
+      "type": "bargauge",
+      "title": "Bytes down by destination",
+      "description": "Bytes the sandboxes received, summed over the range from log.egress.completed records.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 115,
+        "w": 6,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(10, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
+          "refId": "A",
+          "legendFormat": "{{dest}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "noValue": "No completed egress in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.dest}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Bytes up / down over time",
+      "description": "Total bytes sent and received by completed tunnels and forwarded requests, per interval.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 115,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "bytes up"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__interval]))",
+          "refId": "B",
+          "legendFormat": "bytes down"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "row",
+      "title": "Destinations",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 123,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 22,
+      "type": "table",
+      "title": "Destinations",
+      "description": "Every destination the selected sandboxes reached or were refused, with decision counts and the bytes moved by completed tunnels. Top 50 per column; a destination with only blocked decisions has no bytes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 124,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.allowed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "refId": "ALLOWED",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, sum by (dest) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" [$__range])))",
+          "refId": "BLOCKED",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_up | __error__=\"\" [$__range])))",
+          "refId": "UP",
+          "instant": true,
+          "queryType": "instant"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, sum by (dest) (sum_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.completed\" | json | __error__=\"\" | label_format dest=\"{{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}\" | unwrap body_defenseclaw_network_bytes_down | __error__=\"\" [$__range])))",
+          "refId": "DOWN",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge"
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "dest": "Destination",
+              "Value #ALLOWED": "Allowed",
+              "Value #BLOCKED": "Blocked",
+              "Value #UP": "Bytes up",
+              "Value #DOWN": "Bytes down"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No egress in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(Allowed|Blocked|Bytes up|Bytes down)$"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "0"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Blocked"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 10
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bytes up"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Bytes down"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Blocked",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "type": "logs",
+      "title": "Recent blocked egress",
+      "description": "Newest refused connections with who refused them, the stable decision code and the process that made the request (what the process claims, display text the workload chooses).",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 133,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"egress.blocked\" | json | __error__=\"\" | body_defenseclaw_network_decision_code!~\"SANDBOX_EGRESS_(HARNESS_FETCH|LOOKUP_REFUSED)\" | line_format \"{{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_network_source}} · {{if .body_server_address}}{{.body_server_address}}{{else}}{{.body_defenseclaw_network_target_ref}}{{end}}:{{.body_server_port}} · {{.body_defenseclaw_network_decision_code}} · {{.body_defenseclaw_sandbox_process_executable}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "Findings and shadow AI",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 141,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 25,
+      "type": "bargauge",
+      "title": "Findings by kind",
+      "description": "Sandbox findings by kind: ocsf_finding, hook_silence, hook_tamper, large_upload, nested_repo, shadow_ai.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 142,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (kind) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | label_format kind=\"{{.body_defenseclaw_finding_category}}\" [$__range]))",
+          "refId": "A",
+          "legendFormat": "{{kind}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No sandbox findings in range",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "displayName": "${__field.labels.kind}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 26,
+      "type": "table",
+      "title": "Shadow-AI destinations",
+      "description": "AI APIs that are neither the sandbox's model provider nor its harness vendor, with the severity (MEDIUM reached, LOW refused). The target is the host.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 142,
+        "w": 16,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, sum by (target, severity) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" |= \"sandbox.shadow_ai\" | json | __error__=\"\" | body_defenseclaw_finding_category=\"sandbox.shadow_ai\" | label_format target=\"{{.body_defenseclaw_finding_target_ref}}\", severity=\"{{.body_defenseclaw_security_severity}}\" [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "target": "Host",
+              "severity": "Severity",
+              "Value": "Findings",
+              "Value #A": "Findings"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No shadow-AI findings in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Findings",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 27,
+      "type": "logs",
+      "title": "Recent sandbox findings",
+      "description": "Newest sandbox findings with rule, severity and target. Expand a row for the full post-redaction record.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 150,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"finding.observed\" | json | __error__=\"\" | body_defenseclaw_finding_category=~\"sandbox[.].+\" | line_format \"{{.body_defenseclaw_security_severity}} · {{.body_defenseclaw_sandbox_name}} · {{.body_defenseclaw_finding_rule_id}} · {{.body_defenseclaw_finding_target_ref}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 28,
+      "type": "row",
+      "title": "Integration health",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 158,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Health degraded / restored",
+      "description": "OpenShell health transitions. degraded carries a stable error code (for example openshell_egress_auth_failed or openshell_telemetry_failed); restored closes a streak. Gateway-wide records name no sandbox and always show.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 159,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (state) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | label_format state=\"{{.event_name}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "logs",
+      "title": "Recent health transitions",
+      "description": "Newest degraded and restored records with the error code and summary.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 159,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_event_name=~\"subsystem[.](degraded|restored)\" | json | __error__=\"\" | body_defenseclaw_health_subsystem=\"openshell\" | body_defenseclaw_sandbox_name=~\"($sandbox)?\" | line_format \"{{.event_name}} · {{if .body_defenseclaw_sandbox_name}}{{.body_defenseclaw_sandbox_name}}{{else}}gateway{{end}} · {{.body_defenseclaw_schema_error_code}} · {{.body_defenseclaw_health_error_summary}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 31,
+      "type": "row",
+      "title": "Process starts (opt-in: observe.process_tree or sandbox run --process-tree)",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 167,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Process starts",
+      "description": "Processes that joined a sandbox's process tree, by how they were seen (sample = the 5 s /proc sample, ocsf = OpenShell's launch record, tetragon = an exec Tetragon reported through the sandbox kernel feed on a Linux docker host). Empty unless the sandbox's process tree is on; it is off in every built-in pack. Without the kernel feed, sampling misses processes that start and end between two samples.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 168,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum by (seen) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format seen=\"{{.body_defenseclaw_sandbox_process_source}}\" [$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{seen}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "bargauge",
+      "title": "Top started programs",
+      "description": "Most frequently started program names (comm, else the executable path the process claims). Empty unless the process tree is on.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 168,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(10, sum by (program) (count_over_time({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name=~\"$sandbox\" | defenseclaw_event_name=\"sandbox.process_tree\" | json | __error__=\"\" | body_defenseclaw_sandbox_process_event=\"start\" | label_format program=\"{{if .body_defenseclaw_sandbox_process_name}}{{.body_defenseclaw_sandbox_process_name}}{{else}}{{.body_defenseclaw_sandbox_process_executable}}{{end}}\" [$__range])))",
+          "refId": "A",
+          "legendFormat": "{{program}}",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "No process starts (the process tree is off by default)",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.labels.program}"
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "values": true
+        },
+        "showUnfilled": true
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "defenseclaw",
+    "sandbox",
+    "openshell",
+    "egress",
+    "enterprise",
+    "managed"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "environment",
+        "label": "Environment",
+        "description": "deployment.environment.name of the DefenseClaw gateway (set with defenseclaw setup observability add --environment). Applies to every panel, metric and log. Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\"}, deployment_environment_name)",
+        "query": {
+          "query": "label_values({service_name=\"defenseclaw\"}, deployment_environment_name)",
+          "refId": "LokiVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
+      },
+      {
+        "name": "host",
+        "label": "Host",
+        "description": "host.name of the computer the DefenseClaw gateway runs on. Applies to every panel, metric and log, so one host shows only its own sandboxes (none on a computer that cannot run them). Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name!=\"\", host_name)",
+        "query": {
+          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name!=\"\", host_name)",
+          "refId": "LokiVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
+      },
+      {
+        "name": "connector",
+        "label": "Connector",
+        "description": "Harness connector of the sandbox. Applies to the metric panels (defenseclaw_sandbox_active, defenseclaw_egress_events_total). Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_sandbox_active{deployment_environment_name=~\"$environment\", host_name=~\"$host\"}, connector)",
+        "query": {
+          "query": "label_values(defenseclaw_sandbox_active{deployment_environment_name=~\"$environment\", host_name=~\"$host\"}, connector)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
+      },
+      {
+        "name": "sandbox",
+        "label": "Sandbox",
+        "description": "DefenseClaw sandbox name. Applies to the log panels; the panels marked (all names) ignore it. Populated from the defenseclaw.sandbox.name structured metadata the local collector adds to every record that names a sandbox, so listing sandboxes never parses log bodies. Sandbox identities are never metric labels. Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+        "query": {
+          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | defenseclaw_sandbox_name!=\"\", defenseclaw_sandbox_name)",
+          "refId": "LokiVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
+      },
+      {
+        "name": "os",
+        "label": "OS",
+        "description": "Operating system of the host (os.type). Applies to the Managed fleet panels. Defaults to All.",
+        "type": "query",
+        "datasource": {
+          "type": "loki",
+          "uid": "defenseclaw-loki"
+        },
+        "definition": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type!=\"\", os_type)",
+        "query": {
+          "query": "label_values({service_name=\"defenseclaw\", deployment_environment_name=~\"$environment\"} | host_name=~\"$host\" | os_type!=\"\", os_type)",
+          "refId": "LokiVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ]
+      },
+      {
+        "name": "driver",
+        "label": "Driver",
+        "description": "OpenShell compute driver of the sandbox. Applies to the Managed fleet panels. Selecting a driver hides records that name none (host-run refusals). Defaults to All.",
+        "type": "custom",
+        "query": "docker,vm",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "skipUrlSync": false,
+        "hide": 0,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "docker",
+            "value": "docker",
+            "selected": false
+          },
+          {
+            "text": "vm",
+            "value": "vm",
+            "selected": false
+          }
+        ]
+      },
+      {
+        "name": "profile",
+        "label": "Profile (regex)",
+        "description": "Guardrail profile name as a regular expression, for example contractors or eng.*. Applies to the Managed fleet panels. The default .* shows every profile, including sandboxes held to the organization floor alone.",
+        "type": "textbox",
+        "query": ".*",
+        "hide": 0,
+        "skipUrlSync": false,
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": false
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ]
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "DefenseClaw — Sandboxes",
+  "uid": "defenseclaw-sandboxes",
+  "version": 1,
+  "weekStart": ""
+}

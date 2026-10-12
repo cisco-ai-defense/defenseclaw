@@ -1329,6 +1329,147 @@ func TestMigrateV9ReplacesEmptyDotEnvVirusTotalKey(t *testing.T) {
 	}
 }
 
+// retiredStandaloneV8 is the config a 0.8.10 host that ran the retired
+// openshell-sandbox standalone mode (`defenseclaw init --sandbox`) carries
+// into the upgrade, after the 0.8.5 observability conversion: 0.8.10's
+// OpenShellConfig wrote every openshell key below, and `sandbox setup`
+// pointed guardrail.host and gateway.host at the sandbox's veth link and
+// the OpenClaw home at the sandbox user's (git show
+// 0.8.10:cli/defenseclaw/config.py, :cli/defenseclaw/commands/cmd_setup_sandbox.py).
+func retiredStandaloneV8(dir string) string {
+	return "config_version: 8\ndata_dir: " + dir + "\n" + `claw:
+  home_dir: /home/sandbox/.openclaw
+  config_file: /home/sandbox/.openclaw/openclaw.json
+  openclaw_home_original: /home/alice/.openclaw
+gateway:
+  host: 10.200.0.2
+  port: 18789
+  api_port: 18970
+  watcher:
+    enabled: true
+guardrail:
+  host: 10.200.0.1
+  port: 4000
+openshell:
+  binary: openshell
+  policy_dir: /etc/openshell/policies
+  mode: standalone
+  version: 0.6.2
+  sandbox_home: /home/sandbox
+  auto_pair: true
+  host_networking: true
+observability: {}
+`
+}
+
+// The migration resets what the retired standalone sandbox left: it drops
+// every openshell sub-key of that integration (mode, sandbox_home and the
+// 0.0.x runtime pin, GAP-0097) and the two veth hosts, so the
+// 1.0 gateway binds its API on loopback and the upgrade's probes (which ask
+// APIBindHost, as the Python CLI's api_bind_host does) find it there, on
+// disk and in the gateway's in-memory load of the v8 file alike. Every
+// other setting stays; a second run changes
+// nothing; a config that never ran standalone keeps its hosts.
+func TestMigrateV9ResetsTheRetiredStandaloneSandbox(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	source := retiredStandaloneV8(dir)
+	if err := os.WriteFile(configPath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The gateway's read-only load of the v8 file (MigrateV8InMemory, as
+	// internal/cli and the config manager run it) already sees the reset.
+	loaded, err := MigrateV8InMemory(configPath, []byte(source), nil)
+	if err != nil {
+		t.Fatalf("MigrateV8InMemory: %v", err)
+	}
+	loadedPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(loadedPath, loaded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inMemory, err := LoadFromFile(loadedPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile(in-memory migration): %v", err)
+	}
+	if got := APIBindHost(inMemory); got != "127.0.0.1" || inMemory.Gateway.Host != "127.0.0.1" || inMemory.Guardrail.EffectiveHost() != "127.0.0.1" {
+		t.Fatalf("in-memory v8 load: api %q, gateway.host %q, guardrail host %q; want loopback", got, inMemory.Gateway.Host, inMemory.Guardrail.EffectiveHost())
+	}
+
+	result, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("MigrateV9: %v", err)
+	}
+	migrated, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Gateway   map[string]any `yaml:"gateway"`
+		Guardrail map[string]any `yaml:"guardrail"`
+		OpenShell map[string]any `yaml:"openshell"`
+		Claw      map[string]any `yaml:"claw"`
+	}
+	if err := yaml.Unmarshal(migrated, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for section, keys := range map[string]map[string]any{"gateway": doc.Gateway, "guardrail": doc.Guardrail} {
+		if _, ok := keys["host"]; ok {
+			t.Errorf("%s.host survived the migration: %v", section, keys)
+		}
+	}
+	for _, key := range []string{"mode", "sandbox_home", "policy_dir", "version", "auto_pair", "host_networking"} {
+		if _, ok := doc.OpenShell[key]; ok {
+			t.Errorf("openshell.%s survived the migration", key)
+		}
+	}
+	if _, ok := doc.Claw["openclaw_home_original"]; ok {
+		t.Error("claw.openclaw_home_original survived the migration")
+	}
+	if !slices.ContainsFunc(result.Record.Notes, func(n string) bool { return strings.Contains(n, "/home/alice/.openclaw") }) {
+		t.Errorf("migration notes = %v, want the pinned OpenClaw home named", result.Record.Notes)
+	}
+	if doc.Gateway["port"] != 18789 || doc.Guardrail["port"] != 4000 || doc.OpenShell["binary"] != "openshell" ||
+		doc.Claw["home_dir"] != "/home/sandbox/.openclaw" {
+		t.Fatalf("the migration changed more than the standalone keys:\n%s", migrated)
+	}
+	for _, key := range []string{"openshell.mode", "openshell.sandbox_home", "openshell.policy_dir", "openshell.version", "openshell.auto_pair",
+		"openshell.host_networking", "claw.openclaw_home_original", "guardrail.host", "gateway.host"} {
+		if !slices.Contains(result.Record.Removed, key) {
+			t.Errorf("migration record removed = %v, want %s", result.Record.Removed, key)
+		}
+	}
+	cfg, err := LoadFromFile(configPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile(v9): %v", err)
+	}
+	if got := APIBindHost(cfg); got != "127.0.0.1" || cfg.Gateway.RequiresTLS() {
+		t.Fatalf("migrated config: api %q, gateway requires TLS %v; want loopback without TLS", got, cfg.Gateway.RequiresTLS())
+	}
+
+	// Again: the v9 file is left as it is.
+	again, err := MigrateV9(context.Background(), MigrateV9Input{ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("MigrateV9 again: %v", err)
+	}
+	if string(again.Migrated) != string(migrated) {
+		t.Fatalf("a second migration changed the config:\n%s", again.Migrated)
+	}
+
+	// A host that never ran standalone keeps its hosts; the dead keys go.
+	plain := strings.Replace(source, "  mode: standalone\n", "", 1)
+	out, err := MigrateV8InMemory(configPath, []byte(plain), nil)
+	if err != nil {
+		t.Fatalf("MigrateV8InMemory: %v", err)
+	}
+	if !strings.Contains(string(out), "host: 10.200.0.1") || !strings.Contains(string(out), "host: 10.200.0.2") || strings.Contains(string(out), "sandbox_home") ||
+		strings.Contains(string(out), "openclaw_home_original") {
+		t.Fatalf("a config without the standalone mode:\n%s", out)
+	}
+}
+
 // TestMigrateV9InlineKeyGoesToTheRuntimeDataDir: the inline VirusTotal key
 // goes to the .env of the data_dir the runtime uses, and that data_dir's
 // signature packs are listed: a "~/..." data_dir is under the home directory,
@@ -1588,6 +1729,99 @@ func TestMigrateV9InMemoryLeavesADamagedAuditDBToTheDaemon(t *testing.T) {
 	input.InMemory = false
 	if _, err := MigrateV9(context.Background(), input); err == nil {
 		t.Fatal("a persisted migration must refuse a damaged audit.db")
+	}
+}
+
+// GAP-1576: the 0.8.10 store a rollback starts carries the orphan
+// quarantine_records index that 0.8.x concurrent writers leave, which SQLite
+// refuses on every statement. Its actions table is intact, so the upgrade
+// check (a dry run) and the migration both read and move the row.
+func TestMigrateV9MovesTheRowsOfA08xStoreWithAnOrphanIndex(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	dir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dir)
+	configPath, auditDB := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "audit.db")
+	if err := os.WriteFile(configPath, []byte("config_version: 8\nobservability: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", auditDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT)`,
+		`INSERT INTO actions VALUES ('1', 'skill', 'blocked-skill', '', '{"install":"block"}', 'operator', 'now', '')`,
+		`CREATE TABLE quarantine_records (id TEXT PRIMARY KEY, quarantine_path TEXT NOT NULL UNIQUE)`,
+		`PRAGMA writable_schema=ON`,
+		`UPDATE sqlite_schema SET rowid = (SELECT max(rowid) + 1 FROM sqlite_schema) WHERE name = 'quarantine_records'`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	_ = db.Close()
+	in := MigrateV9Input{ConfigPath: configPath, AuditDBPath: auditDB}
+	for _, dryRun := range []bool{true, false} { // the upgrade check, then the migration
+		in.DryRun = dryRun
+		result, err := MigrateV9(context.Background(), in)
+		if err != nil {
+			t.Fatalf("dry run %v: %v", dryRun, err)
+		}
+		if result.Record.ActionsRowsMoved != 1 {
+			t.Fatalf("dry run %v: moved %d rows, want 1", dryRun, result.Record.ActionsRowsMoved)
+		}
+	}
+	if rows, err := readV9ActionRows(auditDB); err != nil || len(rows) != 0 {
+		t.Fatalf("rows left after the migration = %d, err = %v", len(rows), err)
+	}
+}
+
+// The same damaged store with its actions table lost from, or malformed in,
+// sqlite_schema: writable_schema skips such an entry, and reading the store as
+// one without operator rows would finish the migration and drop them. The
+// upgrade check and the migration refuse it and leave config.yaml alone.
+func TestMigrateV9RefusesADamagedStoreWithoutAReadableActionsTable(t *testing.T) {
+	for name, damage := range map[string]string{
+		"missing":   `DELETE FROM sqlite_schema WHERE name = 'actions'`,
+		"malformed": `UPDATE sqlite_schema SET sql = 'CREATE TABLE actions (' WHERE name = 'actions'`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			configPath, auditDB := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "audit.db")
+			source := []byte("config_version: 8\nobservability: {}\n")
+			if err := os.WriteFile(configPath, source, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", auditDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stmt := range []string{
+				`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT)`,
+				`INSERT INTO actions VALUES ('1', 'skill', 'blocked-skill', '', '{"install":"block"}', 'operator', 'now', '')`,
+				`CREATE TABLE quarantine_records (id TEXT PRIMARY KEY, quarantine_path TEXT NOT NULL UNIQUE)`,
+				`PRAGMA writable_schema=ON`,
+				`UPDATE sqlite_schema SET rowid = (SELECT max(rowid) + 1 FROM sqlite_schema) WHERE name = 'quarantine_records'`,
+				damage,
+			} {
+				if _, err := db.Exec(stmt); err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+			}
+			_ = db.Close()
+			in := MigrateV9Input{ConfigPath: configPath, AuditDBPath: auditDB}
+			for _, dryRun := range []bool{true, false} {
+				in.DryRun = dryRun
+				if result, err := MigrateV9(context.Background(), in); err == nil {
+					t.Fatalf("dry run %v: migration finished with %d rows moved from a store whose actions table is unreadable", dryRun, result.Record.ActionsRowsMoved)
+				}
+			}
+			if got, err := os.ReadFile(configPath); err != nil || string(got) != string(source) {
+				t.Fatalf("config after the refused migration = %q, %v", got, err)
+			}
+		})
 	}
 }
 

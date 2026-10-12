@@ -111,10 +111,19 @@ func wantCode(t *testing.T, err error, code string) *sandboxapi.Error {
 
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	eventuallyWithin(t, 5*time.Second, what, cond)
+}
+
+// eventuallyWithin polls cond until it holds or the deadline passes. Tests
+// whose work is heavy (thousands of events through the shared queue) give a
+// generous deadline so a loaded CI runner does not time them out; a passing
+// run returns as soon as cond holds.
+func eventuallyWithin(t *testing.T, limit time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
+			t.Fatalf("timed out after %s waiting for %s", limit, what)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -342,6 +351,8 @@ type memTelemetry struct {
 	health    []audit.SandboxHealthEvent
 	findings  []audit.SandboxFindingEvent
 	workspace []audit.SandboxWorkspaceEvent
+	activity  []audit.SandboxActivityEvent
+	processes []audit.SandboxProcessEvent
 }
 
 func newMemTelemetry() *memTelemetry {
@@ -389,6 +400,14 @@ func (t *memTelemetry) RecordSandboxFinding(ctx context.Context, e audit.Sandbox
 
 func (t *memTelemetry) RecordSandboxWorkspace(ctx context.Context, e audit.SandboxWorkspaceEvent) error {
 	return keep(t, "workspace", &t.workspace, e, func() error { return t.check.RecordSandboxWorkspace(ctx, e) })
+}
+
+func (t *memTelemetry) RecordSandboxActivity(ctx context.Context, e audit.SandboxActivityEvent) error {
+	return keep(t, "activity", &t.activity, e, func() error { return t.check.RecordSandboxActivity(ctx, e) })
+}
+
+func (t *memTelemetry) RecordSandboxProcess(ctx context.Context, e audit.SandboxProcessEvent) error {
+	return keep(t, "process", &t.processes, e, func() error { return t.check.RecordSandboxProcess(ctx, e) })
 }
 
 func (t *memTelemetry) phases(name string) []audit.SandboxPhase {
@@ -791,7 +810,20 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	must(t, err)
 	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1", Driver: driver}
 	e.m = e.newManager()
+	// Its sandboxes answer the workload check, which runs on every driver,
+	// as their records expect.
+	e.fake.HandleExec(e.workloadChecks(nil, nil))
 	return e
+}
+
+// handleExec answers every exec but the workload check with other.
+func (e *harnessEnv) handleExec(other openshelltest.ExecHandler) {
+	e.fake.HandleExec(e.workloadChecks(nil, other))
+}
+
+// execCalls are the commands the gateway ran, the workload checks left out.
+func (e *harnessEnv) execCalls() []openshelltest.ExecCall {
+	return slices.DeleteFunc(e.fake.ExecCalls(), isWorkloadCheck)
 }
 
 // orDefault returns v, or def when v is its zero value.
@@ -843,7 +875,7 @@ func (e *harnessEnv) newManager() *Manager {
 		IngressPort: e.ingressPort, EgressPort: e.egressPort, APIPort: e.apiPort,
 		HostUser: &HostUser{UID: 1000, GID: 1000, Name: "dev"}, Watch: e.watch.watch, Resolver: e.dns,
 		Guard: e.guard.run, GuardGitlinks: func(context.Context, string) ([]string, error) { return nil, nil },
-		DefenseClawVersion: "1.2.3", SettleDelay: -1, HookSilence: 10 * time.Minute,
+		DefenseClawVersion: "1.2.3", SettleDelay: -1,
 		Logf: func(format string, args ...any) { e.t.Logf("[manager] "+format, args...) },
 	})
 	if err != nil {

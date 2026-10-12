@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -99,16 +100,28 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err != nil {
 		return nil, err
 	}
+	repo, err := m.repoPolicy(project, req.RepoPolicyDigest)
+	if err != nil {
+		return nil, err
+	}
 	// What the sandbox is sent depends on the driver the gateway runs
 	// now, which a restart since the connection may have changed.
 	gw, err := m.driverGateway(ctx)
 	if err != nil {
 		return nil, err
 	}
+	// On a managed host the daemon chose the driver at sandbox start (its
+	// KVM probe and the organization's driver_fallback): the gateway must
+	// run that one. It is never switched under running sandboxes.
+	choice, managedChoice := driverChoiceFrom(ctx)
+	if managedChoice && choice.Driver != gw.Driver.Name {
+		return nil, driverChoiceMismatch(choice, gw.Driver.Name)
+	}
 	flags := runFlags{
 		Pack: req.Pack, Profile: req.Profile, Copy: req.Copy, Safe: req.Safe, Yolo: req.Yolo,
 		Unmask: req.Unmask, HostPorts: req.HostPorts, NoMCP: req.NoMCP, Learn: req.Learn,
-		CPU: req.CPU, Memory: req.Memory, Context: req.Context,
+		CPU: req.CPU, Memory: req.Memory, Context: req.Context, ProcessTree: req.ProcessTree,
+		RepoPolicy: repo,
 	}
 	eff, violations, err := m.resolve(cfg, flags.packs(harnessName, project, gatewayFacts{Port: gw.Port, Driver: gw.Driver}))
 	if err != nil {
@@ -143,7 +156,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err := driverRefusal(gw.Driver, spec, eff, req.Copy); err != nil {
 		return nil, err
 	}
-	resources, v := m.driverResources(gw.Driver, eff.Resources)
+	resources, v := m.driverResources(gw.Driver, eff)
 	if v != nil {
 		return nil, m.violationError(ctx, v, req.Name)
 	}
@@ -185,6 +198,9 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 
 	ctx, cancel := context.WithTimeout(ctx, defaultCreateTimeout)
 	defer cancel()
+	// The sandbox a rolled-back create of this name left behind is removed
+	// first, so a run again right after a Ctrl-C just works (GAP-0557).
+	m.reclaimUndone(ctx, gw, name)
 	if _, err := gw.Client.GetSandbox(ctx, name); err == nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "an OpenShell sandbox named %s already exists", name)
 	} else if !openshell.IsNotFound(err) {
@@ -200,10 +216,12 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	}, rb)
 	if err != nil {
 		rb.run(m, name)
+		m.noteUndone(name)
 		m.createFailed(ctx, b, name, err)
 		return nil, err
 	}
 	rb.commit()
+	m.forgetUndone(name)
 	created = true
 	return view, nil
 }
@@ -248,6 +266,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	arts, err := spec.Provider.SandboxArtifacts(target)
 	if err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeImageUnavailable, "render %s sandbox artifacts: %v", spec.Name, err)
+	}
+	if err := m.credentialsAllowed(ctx, eff, in.req, name); err != nil {
+		return nil, err
 	}
 	llm, err := planLLM(spec, in.req.LLM, img.NetworkRealpaths())
 	if err != nil {
@@ -301,6 +322,9 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	rec.Gateway, rec.GatewayEndpoint, rec.GatewayWorkspace = gw.Name, gw.Endpoint, gw.Client.Workspace()
 	rec.Driver = string(gw.Driver.Name)
+	if choice, ok := driverChoiceFrom(ctx); ok {
+		rec.DriverReason = choice.Reason
+	}
 	rec.Resources = in.resources
 	if note := limitsNote(gw.Driver, eff); note != "" {
 		rec.Warnings = append(rec.Warnings, note)
@@ -317,6 +341,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 		// The harness's name for the credential (a template ID); the
 		// provider's gateway profile may be a regional one.
 		rec.CredentialProfile, rec.BedrockRegion = llm.profile.Template, in.req.LLM.BedrockRegion
+		rec.LLMDigest = credentialDigest(llm.credentials)
 	}
 	for _, c := range creds {
 		rec.Credentials = append(rec.Credentials, sandboxapi.CredentialGrant{Name: c.binding.Name, Host: c.binding.Host, Port: c.binding.Port})
@@ -472,7 +497,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if ri := delivered.runImage; ri != nil {
 		rec.RunImage, rec.RunImageID = ri.Tag, ri.ImageID
 	}
-	if err := m.vmDiskRoom(ctx, gw.Driver, img, rec.RunImageID); err != nil {
+	if err := m.vmDiskRoom(ctx, gw.Driver, gw.Version, img, rec.RunImageID); err != nil {
 		return nil, err
 	}
 
@@ -544,7 +569,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	if _, err := gw.Client.CreateSandbox(ctx, name, sbSpec, openshell.CreateSandboxOptions{Labels: labels}); err != nil {
 		m.dropGateway(gw, err)
 		if tmpl.DriverConfig != nil && openshell.IsConflict(err) && strings.Contains(err.Error(), "driver config") {
-			return nil, bindMountsOff(spec, plan != nil, len(delivered.mounts) > 0, err)
+			return nil, bindMountsOff(spec, plan != nil, len(delivered.mounts) > 0, m.managedMode(), err)
 		}
 		return nil, upstream("create sandbox "+name, err)
 	}
@@ -555,7 +580,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 			m.logf("%s: sandbox %s: %s", gatewaylog.ErrCodeOpenShellPolicyRejected, name, rejected.Message)
 			return nil, &sandboxapi.Error{Code: sandboxapi.CodePolicyRejected, Message: "OpenShell rejected the sandbox configuration", Detail: rejected.Message}
 		}
-		return nil, upstream("wait for sandbox "+name, err)
+		return nil, vmExitFailure(runtime.GOOS, m.managedMode(), gw.Driver, provisioningFailure(gw.Driver, upstream("wait for sandbox "+name, err)))
 	}
 	if _, err := m.opts.Bindings.Update(binding.ID, func(s *sandboxauth.Spec) error { s.SandboxID = sb.ID; return nil }); err != nil {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "record the sandbox id on its binding: %v", err)
@@ -568,18 +593,14 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	// Before the sandbox is saved and watched: one that does not run as
 	// prepared is rolled back like one OpenShell rejected.
-	var hostname string
-	if !gw.Driver.SkipWorkloadCheck {
-		facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify)
-		if err != nil {
-			return nil, err
-		}
-		hostname = facts.Hostname
+	facts, err := m.verifyWorkload(ctx, gw, name, *rec.Verify, eff, "DefenseClaw deleted it")
+	if err != nil {
+		return nil, err
 	}
 
 	m.mu.Lock()
 	b.rec.ID = sb.ID
-	b.rec.Hostname = hostname
+	b.rec.Hostname = facts.Hostname
 	b.sb = sb
 	b.creating = false
 	m.mu.Unlock()
@@ -588,6 +609,7 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 	}
 	m.recordMountTelemetry(ctx, b, plan, !in.req.NoSnapshot)
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerCreate, false, nil, nil)
+	m.observeNow(b)
 	m.startWatch(b)
 	m.refreshEgress()
 	view := m.viewOf(b)
@@ -597,13 +619,15 @@ func (m *Manager) create(ctx context.Context, gw *Gateway, b *box, in createInpu
 // vmDiskRoom refuses a create on a driver that prepares a disk from each
 // image it boots (the vm driver's ImageCache) when the image the sandbox
 // boots, id (its run image or alias; the overlay image img's own ID when
-// empty), has no disk prepared for img's workload identity yet and the
-// volume of the driver's image cache lacks the room for one
-// (openshell.VMDiskShortage): the preparation would fill the disk. The CLI
+// empty), has no disk prepared for img's workload identity by the
+// gateway's release yet (a disk of the release before an in-place upgrade
+// is not booted: image.VMDisk.PreparedBy) and the volume of the driver's
+// image cache lacks the room for one (openshell.VMDiskShortage): the
+// preparation would fill the disk. The CLI
 // refuses such a run before it stages a copy, and warns when the room is
 // short of the recommended; this covers every other client. Nothing is
 // refused when the space cannot be measured.
-func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.Record, id string) error {
+func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, release string, img image.Record, id string) error {
 	if d.ImageCache == "" || m.opts.VMDiskFree == nil {
 		return nil
 	}
@@ -615,7 +639,7 @@ func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.
 		return nil
 	}
 	for _, disk := range image.VMDisks(dir, id) {
-		if disk.UID == img.UID && disk.GID == img.GID {
+		if disk.UID == img.UID && disk.GID == img.GID && disk.PreparedBy(release) {
 			return nil
 		}
 	}
@@ -623,7 +647,8 @@ func (m *Manager) vmDiskRoom(ctx context.Context, d openshell.Driver, img image.
 	if s, ok := m.opts.Images.(imageSizer); ok {
 		size, _ = s.ImageSize(ctx, id)
 	}
-	if _, err := openshell.VMDiskShortage(dir, free, size, "this sandbox's first start"); err != nil {
+	free, inFlight := image.FreeAfterStaging(dir, free, size, m.now())
+	if _, err := openshell.VMDiskShortage(dir, free, size, "this sandbox's first start"+image.UnderWay(inFlight)); err != nil {
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: err.Error()}
 	}
 	return nil
@@ -675,8 +700,9 @@ func driverRefusal(d openshell.Driver, spec *harness.Spec, eff *packs.Effective,
 // (nil when they cannot be read), and an administrator's maximum is judged
 // against them, failing closed like every other admin constraint: they
 // must be known and within it.
-func (m *Manager) driverResources(d openshell.Driver, requested packs.Resources) (*packs.Resources, *packs.Violation) {
+func (m *Manager) driverResources(d openshell.Driver, eff *packs.Effective) (*packs.Resources, *packs.Violation) {
 	if d.SandboxLimits {
+		requested := eff.Resources
 		return &requested, nil
 	}
 	var shared *packs.Resources
@@ -687,7 +713,7 @@ func (m *Manager) driverResources(d openshell.Driver, requested packs.Resources)
 			m.logf("read the cpu and memory the %s driver gives every sandbox: %v", d.Name, err)
 		}
 	}
-	return shared, sharedResourcesViolation(d, shared, m.config().OpenShell.Admin.MaxResources)
+	return shared, sharedResourcesViolation(d, shared, eff.MaxResources())
 }
 
 // sharedResourcesViolation refuses the gateway-wide cpu and memory every
@@ -785,7 +811,7 @@ func (m *Manager) createFailed(ctx context.Context, b *box, name string, err err
 	if emitted {
 		m.lifecycle(context.WithoutCancel(ctx), b, audit.SandboxPhaseDeleted, audit.SandboxTriggerCreate, false, nil, nil)
 	}
-	_ = m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
+	m.tel.RecordSandboxHealth(context.WithoutCancel(ctx), audit.SandboxHealthEvent{
 		Sandbox: id, State: audit.SandboxHealthFailed, ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellSandboxFailed),
 		ErrorSummary: truncate(summary, 512), Timestamp: m.now(),
 	})
@@ -935,7 +961,7 @@ func (m *Manager) image(ctx context.Context, cfg *config.Config, spec *harness.S
 			"no verified %s sandbox image is built; run `defenseclaw sandbox image build %s`", spec.DisplayName, spec.Name)
 	case err != nil:
 		m.logf("%s: %s: %v", gatewaylog.ErrCodeOpenShellImageBuildFailed, spec.Name, err)
-		return image.Record{}, newImageError("the "+spec.DisplayName+" sandbox image is not usable", err)
+		return image.Record{}, newImageError("the "+spec.DisplayName+" sandbox image is not usable", err, m.opts.ManagedAccount)
 	}
 	return rec, nil
 }
@@ -979,11 +1005,19 @@ type imageError struct {
 	summary string
 }
 
-func newImageError(message string, err error) *imageError {
+func newImageError(message string, err error, managed bool) *imageError {
 	detail := err.Error()
 	if lower := strings.ToLower(detail); strings.Contains(lower, "permission denied") && strings.Contains(lower, "docker.sock") {
-		detail += "\n→ the DefenseClaw daemon cannot reach Docker. If you joined the docker group after it started, " +
-			"restart it so it picks up the group: defenseclaw-gateway restart"
+		if managed {
+			// A managed account's daemon is its user service, started at
+			// login with the groups the account had then; the user has no
+			// defenseclaw-gateway to restart (GAP-0556).
+			detail += "\n→ your sandbox service cannot reach Docker. If you joined the docker group after it started, " +
+				"sign out of every session of this account and sign in again, which starts it with the group"
+		} else {
+			detail += "\n→ the DefenseClaw daemon cannot reach Docker. If you joined the docker group after it started, " +
+				"restart it so it picks up the group: defenseclaw-gateway restart"
+		}
 	}
 	return &imageError{
 		api:     &sandboxapi.Error{Code: sandboxapi.CodeImageUnavailable, Message: message, Detail: detail},
@@ -1147,6 +1181,29 @@ func (m *Manager) release(name string, b *box) {
 	_ = m.removeRecord(b)
 }
 
+// repoPolicy reads a project's repository policy (packs.LoadRepoPolicy)
+// for a new sandbox. want is the digest the client resolved the run with
+// (sandboxapi.NoRepoPolicy when the project had none, "" when the client
+// does not say): a policy that changed since refuses the create, since the
+// client staged a copy with the one it read.
+func (m *Manager) repoPolicy(project, want string) (*packs.RepoPolicy, error) {
+	rp, err := packs.LoadRepoPolicy(project)
+	if err != nil {
+		m.logf("%s: %v", gatewaylog.ErrCodeOpenShellPackInvalid, err)
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodePackInvalid,
+			Message: "the repository policy " + packs.RepoPolicyPath + " of this project cannot be used", Detail: err.Error()}
+	}
+	got := sandboxapi.NoRepoPolicy
+	if rp != nil {
+		got = rp.Digest
+	}
+	if want != "" && want != got {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeConflict,
+			"the repository policy %s of this project changed while the run started; run it again", packs.RepoPolicyPath)
+	}
+	return rp, nil
+}
+
 func realProject(p string) (string, error) {
 	p = strings.TrimSpace(p)
 	if p == "" || !filepath.IsAbs(p) {
@@ -1178,6 +1235,43 @@ func workspaceError(err error) error {
 	}
 }
 
+// provisioningFailure adds what to check to a first start OpenShell gave
+// up provisioning (ProvisioningTimedOut) on a driver that prepares a disk
+// from each image (the vm driver): on a volume that ran full the error
+// named neither the disk nor what frees it (GAP-0219).
+func provisioningFailure(d openshell.Driver, err error) error {
+	var e *sandboxapi.Error
+	if d.ImageCache == "" || !errors.As(err, &e) || !strings.Contains(e.Detail, "ProvisioningTimedOut") {
+		return err
+	}
+	e.Detail += ". The first start of an image prepares a MicroVM disk of about 5 GB, and a full volume stops it: check Disk space in " +
+		"`defenseclaw sandbox doctor`, and free space with `defenseclaw sandbox image prune` (it also removes the half-prepared disks of failed starts)"
+	return e
+}
+
+// vmExitFailure adds the likely cause to a MicroVM whose process exited as
+// it started ("ProcessExited: VM process exited with status 1"), which is
+// all OpenShell says: the driver's own error is only in the gateway's log
+// (GAP-0005). On macOS that is a driver without Apple's Hypervisor
+// entitlement; on Linux a /dev/kvm this account cannot open read-write.
+// On a managed computer (managed) both are the administrator's to fix.
+func vmExitFailure(goos string, managed bool, d openshell.Driver, err error) error {
+	var e *sandboxapi.Error
+	if d.Name != openshell.DriverVM || !errors.As(err, &e) || !strings.Contains(e.Detail, "VM process exited") {
+		return err
+	}
+	cause := "the MicroVM driver could not open /dev/kvm for reading and writing, or the gateway runs with a umask that hides the disk it builds from the guest"
+	if goos == "darwin" {
+		cause = "openshell-driver-vm is not signed with Apple's Hypervisor entitlement (com.apple.security.hypervisor), which a re-signing without it drops, so macOS refuses it the hypervisor"
+	}
+	way := "`defenseclaw sandbox doctor` checks it (MicroVM driver), and the OpenShell gateway's log has the driver's own error"
+	if managed {
+		way = "that is your organization's OpenShell install: " + sandboxapi.RequestAccessFallback + " with this message"
+	}
+	e.Detail += ". The MicroVM stopped as it started; the usual cause: " + cause + "; " + way
+	return e
+}
+
 func upstream(op string, err error) error {
 	code := sandboxapi.CodeUpstream
 	switch {
@@ -1197,7 +1291,10 @@ func upstream(op string, err error) error {
 // driver takes no driver config (bind mounts are off in its gateway.toml):
 // a live run mounts the project folder, and a harness with per-run settings
 // (Claude Code, Codex) gets them as read-only mounts on a --copy run too.
-func bindMountsOff(spec *harness.Spec, project, settings bool, err error) error {
+// On a managed computer (managed) the gateway's configuration is the
+// administrator's render, which the user cannot change: the way on is the
+// help desk, never doctor --fix (GAP-0449).
+func bindMountsOff(spec *harness.Spec, project, settings, managed bool, err error) error {
 	var what []string
 	if project {
 		what = append(what, "the project folder")
@@ -1205,9 +1302,13 @@ func bindMountsOff(spec *harness.Spec, project, settings bool, err error) error 
 	if settings {
 		what = append(what, "the "+spec.DisplayName+" settings DefenseClaw keeps read-only (on a --copy run too)")
 	}
+	way := "enable them with `defenseclaw sandbox doctor --fix`"
+	if managed {
+		way = "that is your organization's OpenShell configuration: " + sandboxapi.RequestAccessFallback + " with this message"
+	}
 	return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
 		Message: "the local OpenShell gateway does not allow bind mounts, and this sandbox mounts " + strings.Join(what, " and "),
-		Detail:  "enable them with `defenseclaw sandbox doctor --fix` (OpenShell: " + err.Error() + ")"}
+		Detail:  way + " (OpenShell: " + err.Error() + ")"}
 }
 
 // settle waits for OpenShell's first settings poll after a start.
@@ -1267,7 +1368,7 @@ func (m *Manager) recordMountTelemetry(ctx context.Context, b *box, plan *worksp
 	m.mu.Unlock()
 	if len(plan.Masked) > 0 {
 		n := int64(len(plan.Masked))
-		_ = m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{
+		m.tel.RecordSandboxWorkspace(ctx, audit.SandboxWorkspaceEvent{
 			Sandbox: id, Operation: audit.SandboxWorkspaceMask, Initiator: "operator", FileCount: &n,
 			Paths: plan.MaskedRels(), Timestamp: m.now(),
 		})
@@ -1284,7 +1385,7 @@ func (m *Manager) recordMountTelemetry(ctx context.Context, b *box, plan *worksp
 	if snap.Git != nil {
 		ev.SnapshotRef = snap.Git.Ref
 	}
-	_ = m.tel.RecordSandboxWorkspace(ctx, ev)
+	m.tel.RecordSandboxWorkspace(ctx, ev)
 }
 
 func snapshotKind(k workspace.SnapshotKind) string {

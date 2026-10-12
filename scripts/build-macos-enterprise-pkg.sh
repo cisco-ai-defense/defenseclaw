@@ -6,11 +6,13 @@
 # (defenseclaw-enterprise-<version>-darwin-arm64.pkg).
 #
 # The package installs the gateway, hook runtime and sensor helper under
-# /opt/cisco/defenseclaw/bin; its postinstall runs
+# /opt/cisco/defenseclaw/bin, the standard user's sandbox launcher
+# /usr/local/bin/defenseclaw (a link to the gateway) and the launch agents of
+# the per-user sandbox daemon in /Library/LaunchAgents; its postinstall runs
 #   defenseclaw-gateway enterprise macos ensure --from-package
 # which validates the administrator config, creates the _defenseclaw service
 # account and LaunchDaemons, activates them in order and rolls back on any
-# failure. Deploy it with any MDM that installs flat packages. Remove it with
+# failure. Deploy it with any tool that installs flat packages. Remove it with
 #   sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos uninstall [--purge]
 #
 # Called by the `packaging-macos-enterprise` Make target.
@@ -35,6 +37,8 @@ set -euo pipefail
 
 readonly PKG_ID="com.cisco.defenseclaw.enterprise"
 readonly INSTALL_BIN="opt/cisco/defenseclaw/bin"
+readonly LAUNCHER_DIR="usr/local/bin"
+readonly LAUNCH_AGENTS_DIR="Library/LaunchAgents"
 
 VERSION=""
 DIST_DIR="dist"
@@ -44,7 +48,7 @@ while [ "$#" -gt 0 ]; do
         --version) VERSION="${2:?--version needs a value}"; shift 2 ;;
         --dist-dir) DIST_DIR="${2:?--dist-dir needs a value}"; shift 2 ;;
         --payload) PAYLOAD="${2:?--payload needs a value}"; shift 2 ;;
-        -h | --help) sed -n '2,33p' "$0"; exit 0 ;;
+        -h | --help) sed -n '2,35p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -68,6 +72,9 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-enterprise-pkg.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 ROOT="$WORK/root"
 SCRIPTS="$WORK/scripts"
+# The payload's directories install with these modes: /usr/local/bin and
+# /Library/LaunchAgents must stay readable whatever umask the builder has.
+umask 022
 mkdir -p "$ROOT/$INSTALL_BIN" "$SCRIPTS"
 
 binaries=(defenseclaw-gateway defenseclaw-hook defenseclaw-sensor-helper)
@@ -98,6 +105,24 @@ else
     build defenseclaw-sensor-helper ./cmd/defenseclaw-sensor-helper "$version_flags"
     build defenseclaw-acp ./cmd/defenseclaw-acp "$version_flags"
 fi
+
+# The standard user's sandbox launcher: the gateway under the name defenseclaw
+# (internal/cli/launcher.go). A package-owned symlink, so only an installer or
+# administrator can change where it points.
+mkdir -p "$ROOT/$LAUNCHER_DIR"
+ln -s "/$INSTALL_BIN/defenseclaw-gateway" "$ROOT/$LAUNCHER_DIR/defenseclaw"
+
+# The per-user sandbox daemon's launch agents. launchd loads a launch agent
+# only when root:wheel owns it and nobody else can write it, which pkgbuild
+# --ownership recommended gives (mode 0644 here). The agents load at each
+# account's next sign-in; the launcher bootstraps them on demand for an
+# account that is already signed in.
+mkdir -p "$ROOT/$LAUNCH_AGENTS_DIR"
+for label in com.cisco.defenseclaw.sandbox com.cisco.defenseclaw.openshell-gateway; do
+    agent="$REPO_ROOT/packaging/launchd-standalone/agents/$label.plist"
+    [ -f "$agent" ] || { echo "missing $agent" >&2; exit 1; }
+    install -m 0644 "$agent" "$ROOT/$LAUNCH_AGENTS_DIR/$label.plist"
+done
 
 if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
     sign_args=(--force --timestamp --options runtime --sign "$MACOS_APP_SIGN_IDENTITY")

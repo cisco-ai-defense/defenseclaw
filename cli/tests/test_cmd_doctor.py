@@ -157,6 +157,27 @@ class DoctorPolicyStateTests(unittest.TestCase):
         self.assertIn("live state was not checked", emit.call_args.args[3])
         self.assertNotIn("gateway is not running", emit.call_args.args[3])
 
+    def test_stale_row_names_the_change_the_gateway_did_not_apply(self):
+        # GAP-0362: the row showed only two digests. GAP-0382: also when the
+        # gateway reports no config generation (an imported 0.8 install).
+        from defenseclaw.commands import cmd_doctor
+
+        cases = [
+            (2, 4, "it has not applied the change saved as config generation 4 (it enforces generation 2)"),
+            (None, 4, "it has not applied the change saved as config generation 4"),
+            (2, 2, "it has not applied the current config.yaml and policy assets"),
+        ]
+        for config_generation, saved, want in cases:
+            policy = {"effective_digest": "sha256:" + "a" * 64, "generation": 3,
+                      "config_generation": config_generation, "config_generation_recorded": True}
+            result = _DoctorResult()
+            with patch.object(cmd_doctor, "_local_policy_digest",
+                              return_value={"effective_digest": "sha256:" + "b" * 64}), \
+                    patch.object(cmd_doctor, "_saved_config_generation", return_value=saved):
+                cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+            self.assertIn(want, result.checks[0]["detail"], config_generation)
+            self.assertIn("defenseclaw-gateway restart", result.checks[0]["detail"])
+
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
     def test_only_data_json_is_retired(self):
@@ -2305,6 +2326,43 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
         self.assertTrue(any("bakes hook fail mode open" in reason for reason in reasons), reasons)
 
+    def test_hooks_rendered_before_the_descriptor_transport_are_stale(self):
+        # GAP-0027: such a hook still has the older sentinels but gives curl
+        # the bearer and the payload as command-line arguments.
+        from defenseclaw.commands import cmd_doctor
+
+        old_hook = (
+            "#!/bin/bash\n# defenseclaw-managed-hook v7\n"
+            'fail_response() { reason="$(defenseclaw_response_failure_reason "$1")"; }\n'
+            'curl -s -X POST "http://${API_ADDR}/hook" -H "Authorization: Bearer ${API_TOKEN}" -d "$PAYLOAD"\n'
+        )
+        old_helper = (
+            "#!/bin/bash\n# defenseclaw-managed-hook v7\n"
+            "defenseclaw_response_failure_reason() { printf '%s (possible token drift)' \"$1\"; }\n"
+        )
+        for connector, script in (("claudecode", "claude-code-hook.sh"), ("codex", "codex-hook.sh")):
+            with tempfile.TemporaryDirectory() as tmp:
+                cfg = self._make_cfg(tmp)
+                self._write_hook(tmp, script, old_hook)
+                self._write_hook(tmp, "_hardening.sh", old_helper)
+                reasons = cmd_doctor._stale_generated_hook_reasons(cfg, connector)
+            self.assertTrue(any(f"{script} missing defenseclaw_gateway_post" in r for r in reasons), reasons)
+            self.assertTrue(any("_hardening.sh missing defenseclaw_gateway_post" in r for r in reasons), reasons)
+
+    def test_current_hook_templates_carry_every_freshness_sentinel(self):
+        # A sentinel the templates lack would report every fresh install stale.
+        from defenseclaw.commands import cmd_doctor
+
+        hooks = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "..", "internal", "gateway", "connector", "hooks"
+        )
+        for connector, files in cmd_doctor._GENERATED_HOOK_SENTINELS.items():
+            for filename, needles in files.items():
+                with open(os.path.join(hooks, filename), encoding="utf-8") as fh:
+                    text = fh.read()
+                for needle in needles:
+                    self.assertIn(needle, text, f"{connector}: {filename} lacks {needle!r}")
+
     def test_codex_hook_check_warns_when_generated_script_is_stale(self):
         from defenseclaw.commands import cmd_doctor
 
@@ -3414,73 +3472,18 @@ class DoctorFixHelpTextTests(unittest.TestCase):
         self.assertNotIn("doctor --fix", warn["detail"])
 
 
-class TestLegacySandboxDoctor(unittest.TestCase):
-    """The removed openshell-sandbox mode is reported with its cleanup command."""
+class TestSandboxSubsystemDoctor(unittest.TestCase):
+    """The gateway's sandbox subsystem as doctor reads it."""
 
-    def _cfg(self, data_dir: str, *, legacy: bool) -> Config:
+    def _cfg(self, data_dir: str) -> Config:
         cfg = Config(
             data_dir=data_dir,
             audit_db=os.path.join(data_dir, "audit.db"),
             gateway=GatewayConfig(host="127.0.0.1"),
-            openshell=OpenShellConfig(mode="standalone" if legacy else ""),
+            openshell=OpenShellConfig(),
         )
         cfg._source_config_version = 8
         return cfg
-
-    def test_legacy_install_warns_with_cleanup_remediation(self):
-        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
-
-        with tempfile.TemporaryDirectory() as data_dir:
-            result = _DoctorResult()
-            _check_legacy_sandbox(self._cfg(data_dir, legacy=True), result)
-        self.assertEqual(result.warned, 1, result.checks)
-        row = result.checks[0]
-        self.assertEqual(row["check_id"], "doctor.sandbox.legacy-install")
-        self.assertIn("openshell.mode=standalone", row["detail"])
-        self.assertIn("defenseclaw sandbox legacy-cleanup", row["remediation"])
-
-    def test_leftover_data_dir_artifacts_are_evidence_too(self):
-        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
-
-        with tempfile.TemporaryDirectory() as data_dir:
-            with open(os.path.join(data_dir, "openclaw-ownership-backup.json"), "w") as fh:
-                fh.write("{}")
-            result = _DoctorResult()
-            _check_legacy_sandbox(self._cfg(data_dir, legacy=False), result)
-        self.assertEqual(result.warned, 1, result.checks)
-        self.assertIn("openclaw-ownership-backup.json", result.checks[0]["detail"])
-
-    def test_host_mode_install_emits_nothing(self):
-        from defenseclaw.commands.cmd_doctor import _check_legacy_sandbox
-
-        with tempfile.TemporaryDirectory() as data_dir:
-            result = _DoctorResult()
-            _check_legacy_sandbox(self._cfg(data_dir, legacy=False), result)
-        self.assertEqual(result.checks, [])
-
-    def test_degraded_legacy_sandbox_health_warns_instead_of_failing(self):
-        health = {
-            "gateway": {"state": "disabled"},
-            "watcher": {"state": "disabled"},
-            "guardrail": {"state": "disabled"},
-            "api": {"state": "running"},
-            "telemetry": {"state": "running"},
-            "sandbox": {
-                "state": "degraded",
-                "last_error": "legacy standalone install detected — run `defenseclaw sandbox legacy-cleanup`",
-            },
-        }
-        with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg(data_dir, legacy=True)
-            result = _DoctorResult()
-            with patch(
-                "defenseclaw.commands.cmd_doctor._http_probe",
-                return_value=(200, json.dumps(health)),
-            ):
-                _check_sidecar(cfg, result)
-        sandbox = next(row for row in result.checks if row.get("label", "").strip().endswith("sandbox"))
-        self.assertEqual(sandbox["status"], "warn")
-        self.assertIn("legacy-cleanup", sandbox["detail"])
 
     def test_failing_optional_destination_warns_on_running_telemetry(self):
         # A jsonl destination the gateway cannot reach yet runs deferred: warn,
@@ -3504,7 +3507,7 @@ class TestLegacySandboxDoctor(unittest.TestCase):
                 "defenseclaw.commands.cmd_doctor._http_probe",
                 return_value=(200, json.dumps(health)),
             ):
-                _check_sidecar(self._cfg(data_dir, legacy=False), result)
+                _check_sidecar(self._cfg(data_dir), result)
         telemetry = next(row for row in result.checks if row.get("label", "").strip().endswith("telemetry"))
         self.assertEqual(telemetry["status"], "warn", telemetry)
         self.assertIn("rv13:degraded:file_write_failed", telemetry["detail"])
@@ -3526,7 +3529,7 @@ class TestLegacySandboxDoctor(unittest.TestCase):
             "telemetry": {"state": "running"},
         }
         with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg(data_dir, legacy=False)
+            cfg = self._cfg(data_dir)
             cfg.gateway.watcher.enabled = True
             result = _DoctorResult()
             with patch(
@@ -3552,7 +3555,7 @@ class TestLegacySandboxDoctor(unittest.TestCase):
             "sandbox": {"state": "running", "details": {"ingress": "127.0.0.1:18971", "egress": "127.0.0.1:18972"}},
         }
         with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg(data_dir, legacy=False)
+            cfg = self._cfg(data_dir)
             cfg.openshell.enabled = True
             result = _DoctorResult()
             with (
@@ -3573,7 +3576,7 @@ class TestLegacySandboxDoctor(unittest.TestCase):
         # where the gateway turns them off on purpose.
         stale = dict(health, sandbox={"state": "disabled"})
         with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg(data_dir, legacy=False)
+            cfg = self._cfg(data_dir)
             cfg.openshell.enabled = True
             with patch("defenseclaw.commands.cmd_doctor.sys.platform", "linux"):
                 status, detail = _gateway_service_health_assessment(cfg, stale)
@@ -3582,23 +3585,6 @@ class TestLegacySandboxDoctor(unittest.TestCase):
             with patch("defenseclaw.commands.cmd_doctor.sys.platform", "win32"):
                 status, detail = _gateway_service_health_assessment(cfg, stale)
             self.assertNotIn("sandbox", detail)
-
-    def test_degraded_legacy_sandbox_does_not_block_gateway_repairs(self):
-        from defenseclaw.commands.cmd_doctor import _gateway_service_health_assessment
-
-        with tempfile.TemporaryDirectory() as data_dir:
-            cfg = self._cfg(data_dir, legacy=True)
-            health = {
-                "api": {"state": "running"},
-                "gateway": {"state": "disabled"},
-                "watcher": {"state": "disabled"},
-                "telemetry": {"state": "running"},
-                "guardrail": {"state": "disabled"},
-                "sandbox": {"state": "degraded"},
-            }
-            status, detail = _gateway_service_health_assessment(cfg, health)
-        self.assertNotEqual(status, "operational", detail)
-        self.assertNotIn("sandbox", detail)
 
 
 @unittest.skipIf(os.name == "nt", "the POSIX repair command")

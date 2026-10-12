@@ -15,6 +15,7 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -309,7 +310,7 @@ func TestInventoryDACLAgentGrantsRefuseLinksInTheStandaloneProfile(t *testing.T)
 // get nothing, the revoke takes the grant back, and a hard link to another
 // file is refused. The Secure Client profile grants nothing there.
 func TestInventoryDACLGrantsDevinMCPConfigFileOnly(t *testing.T) {
-	sid, err := windows.StringToSid(windowsServiceSIDString(productionGatewayServiceName))
+	sid, err := windows.StringToSid(managed.WindowsServiceSIDString(productionGatewayServiceName))
 	if err != nil {
 		t.Fatal(err)
 	}

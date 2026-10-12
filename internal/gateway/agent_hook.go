@@ -116,6 +116,7 @@ type agentHookRequest struct {
 	CorrelationUnavailable      bool // correlation failed, not a replay: decision exported without join IDs, still audited
 	CorrelationReceipt          *audit.CorrelationReceiptLocator
 	CWD                         string
+	ReportedCWD                 string // the cwd as sent, before hookCWDForContext; user text only (requireSandboxHostRun)
 	ToolName                    string
 	ToolArgs                    json.RawMessage
 	ToolArgsProjectionUncertain bool
@@ -146,6 +147,9 @@ type agentHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	HookOutput        map[string]interface{} `json:"hook_output,omitempty"`
+	// KernelBlocksTold are the ids of the kernel denials the answer told the
+	// agent of, for the audit row (kernel_blocks_told); never on the wire.
+	KernelBlocksTold []string `json:"-"`
 	// EvaluationID + RuleIDs join this hook response to the
 	// matching scan_findings rows / audit row. Additive — older
 	// connector hook scripts ignore the fields.
@@ -395,6 +399,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
 			return
 		}
+		req.ReportedCWD = strings.TrimSpace(req.CWD)
 		req.CWD = hookCWDForContext(r.Context(), req.CWD)
 		// Kiro installs two hook configs with different veto contracts and
 		// they are indistinguishable by release version, because v3 is a flag
@@ -600,7 +605,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// audit envelope without a second pass here.
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
-		resp, panicked := a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
+		// The require-sandbox gate (require_sandbox.go) answers a host run
+		// of a connector the caller's sandbox floor requires in a sandbox
+		// before anything is evaluated; finalizeAgentHook records its
+		// outcome on the audit row.
+		sandboxGate, resp, gated := a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
+		panicked := false
+		if !gated {
+			resp, panicked = a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
+		}
 		if panicked {
 			// Sandbox hooks fail closed: the host's fail-open posture for
 			// a crashed evaluator keeps workflows running outside the
@@ -609,7 +622,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			resp = a.failSandboxHookClosed(ctx, profile, connectorName, req, b, payload, resp)
 		}
 		var chainFinalization toolChainHookFinalization
-		if !panicked {
+		if !panicked && !gated {
 			resp = a.safeApplyExperimentalArtifactPromotion(
 				ctx,
 				profile,
@@ -629,6 +642,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// a plain reason (rule, title, what to do instead) to the
 			// agent, the activity feed and last_blocked.
 			resp = a.safeApplySandboxVerdictReason(ctx, profile, connectorName, req, b, payload, resp)
+			// On a managed host, the post-tool answer tells the agent of
+			// the kernel denials its tool calls hit (kernel_block_notice.go).
+			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
 		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -657,7 +673,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 		defer cancelPersist()
-		persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookRequestAuditExtra(ctx, profile))
+		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
+		if len(resp.KernelBlocksTold) > 0 {
+			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
+		}
+		persisted := a.finalizeAgentHook(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, auditExtra)
 		if err := chainFinalization.attach(persistCtx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
@@ -793,6 +813,13 @@ func (a *APIServer) finalizeAgentHook(
 	safeSection("sandbox", func() {
 		a.observeSandboxHookDecision(ctx, req, resp)
 	})
+	if !panicked {
+		// Before the response is written, so the decision is in the
+		// runtime planes' join ring when the tool's process starts.
+		safeSection("hook_join", func() {
+			a.recordManagedHookDecision(ctx, connectorName, req, resp)
+		})
+	}
 
 	// A hook whose correlation ledger write failed (disk full) still exports
 	// its decision, without the cross-call join IDs: otherwise every allow
@@ -2702,6 +2729,17 @@ func normalizeAgentHookMode(mode string) string {
 	default:
 		return "observe"
 	}
+}
+
+// isRelayedSandboxRequest reports whether ctx is a sandbox call the managed
+// gateway took over its hook socket from the sandbox owner's daemon and
+// rebuilt from a live registration of the kernel-verified caller
+// (sandbox_relay.go). Only the relay handler marks a request so, and only
+// with the relay-verified registration of the request's peer
+// (isRelayVerifiedSandboxRequest, the marker profileRequestSubject reads); a
+// sandbox call to a local ingress and every host call are not relayed.
+func isRelayedSandboxRequest(ctx context.Context) bool {
+	return isSandboxHookRequest(ctx) && sandboxRelayStateFrom(ctx) != nil && isRelayVerifiedSandboxRequest(ctx)
 }
 
 func (a *APIServer) configDataDir() string {

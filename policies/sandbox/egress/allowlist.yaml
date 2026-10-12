@@ -32,7 +32,7 @@
 schema_version: 1
 kind: allowlist
 name: defenseclaw-allowlist
-feed_version: "2026.09.26"
+feed_version: "2026.10.08"
 entries:
   # --- package registries ---------------------------------------------------
   - name: npm and Yarn registries
@@ -89,7 +89,7 @@ entries:
     hosts: [static.rust-lang.org, sh.rustup.rs]
   - name: Python
     category: toolchain
-    hosts: [www.python.org, astral.sh]
+    hosts: [www.python.org, astral.sh, releases.astral.sh]
 
   # --- documentation --------------------------------------------------------
   - name: Language and platform documentation
