@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 )
@@ -562,9 +563,9 @@ func TestPackageKeptUninstallTurnsOffTheTmpfilesEntriesUntilTheNextInstall(t *te
 }
 
 // GAP-0960: the plain uninstall of a package host keeps the administrator
-// policies (a custom rule pack) and the vendor policies the pack was copied
-// from, so the documented re-enable, `ensure --from-package --config` with
-// the same config, works. A purge removes both.
+// policies (a custom rule pack), so the documented re-enable, `ensure
+// --from-package --config` with the same config, works. The vendor policies
+// go, empty folders included (GAP-1582). A purge removes everything.
 func TestUninstallKeepsTheAdministratorPoliciesForTheReenable(t *testing.T) {
 	h := packageHost(t, "1.0.0")
 	l := h.env.Layout
@@ -596,7 +597,7 @@ func TestUninstallKeepsTheAdministratorPoliciesForTheReenable(t *testing.T) {
 
 	r := h.run(Options{Action: ActionUninstall})
 	requireOK(t, r)
-	if exists(h.env.P(l.ConfigPath)) || !exists(h.env.P(filepath.Join(custom, "rules"))) || !exists(h.env.P(vendor)) {
+	if exists(h.env.P(l.ConfigPath)) || !exists(h.env.P(filepath.Join(custom, "rules"))) || exists(h.env.P(l.VendorPolicyDir)) {
 		t.Fatalf("plain uninstall: config kept=%v, custom pack kept=%v, vendor policies kept=%v",
 			exists(h.env.P(l.ConfigPath)), exists(h.env.P(custom)), exists(h.env.P(vendor)))
 	}
@@ -613,29 +614,117 @@ func TestUninstallKeepsTheAdministratorPoliciesForTheReenable(t *testing.T) {
 }
 
 // A payload uninstall removes the binaries, so the kept policies come with a
-// payload reinstall step rather than ensure --from-package; and a policies
-// folder that holds only an empty folder an administrator staged for a rule
-// pack stays, while the empty folder the install created goes with the config.
-func TestUninstallKeepsStagedPolicyFoldersAndNamesThePayloadReinstall(t *testing.T) {
-	for _, staged := range []bool{false, true} {
+// payload reinstall step rather than ensure --from-package. A policies folder
+// with a file in an administrator pack stays; folders staged for a pack
+// that never got a file go with the config, like the empty folder the
+// install created (GAP-1582).
+func TestPayloadUninstallKeepsPolicyFoldersWithFilesAndNamesThePayloadReinstall(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		stage, file bool
+	}{{"none", false, false}, {"empty staged folder", true, false}, {"pack file", true, true}} {
 		h := newTestHost(t, "linux")
 		l := h.env.Layout
 		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-		pack := h.env.P(filepath.Join(l.PolicyDir, "guardrail", "custom"))
-		if staged {
-			if err := os.MkdirAll(pack, 0o755); err != nil {
+		pack := filepath.Join(l.PolicyDir, "guardrail", "custom")
+		if tc.stage {
+			if err := os.MkdirAll(h.env.P(filepath.Join(pack, "judge")), 0o755); err != nil {
 				t.Fatal(err)
 			}
+		}
+		if tc.file {
+			writeHostFile(t, h, filepath.Join(pack, "rules", "admin.yaml"), "# admin rule\n")
 		}
 		r := h.run(Options{Action: ActionUninstall})
 		requireOK(t, r)
 		summary := strings.Join(r.Changes, "\n")
-		if exists(pack) != staged || exists(h.env.P(l.PolicyDir)) != staged ||
-			strings.Contains(summary, "kept the administrator policies") != staged {
-			t.Fatalf("staged=%v: pack kept=%v, policies kept=%v, summary:\n%s", staged, exists(pack), exists(h.env.P(l.PolicyDir)), summary)
+		if exists(h.env.P(filepath.Join(pack, "rules", "admin.yaml"))) != tc.file || exists(h.env.P(l.PolicyDir)) != tc.file ||
+			exists(h.env.P(filepath.Join(pack, "judge"))) || strings.Contains(summary, "kept the administrator policies") != tc.file {
+			t.Fatalf("%s: pack file kept=%v, policies kept=%v, empty judge kept=%v, summary:\n%s", tc.name,
+				exists(h.env.P(filepath.Join(pack, "rules", "admin.yaml"))), exists(h.env.P(l.PolicyDir)), exists(h.env.P(filepath.Join(pack, "judge"))), summary)
 		}
-		if staged && (!strings.Contains(summary, "ensure --payload <payload> --config <file>") || strings.Contains(summary, "--from-package")) {
+		if tc.file && (!strings.Contains(summary, "ensure --payload <payload> --config <file>") || strings.Contains(summary, "--from-package")) {
 			t.Fatalf("payload uninstall summary does not give the payload reinstall step:\n%s", summary)
 		}
+	}
+}
+
+// emptyDirsUnder lists the directories under root (root included) that hold
+// no file anywhere below them.
+func emptyDirsUnder(t *testing.T, root string) []string {
+	t.Helper()
+	var empty []string
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.IsDir() && !holdsState(path) {
+			empty = append(empty, path)
+		}
+		return nil
+	})
+	return empty
+}
+
+// GAP-1582: on a package host the plain uninstall removed the vendor policy
+// files but kept their folders, so the re-enable with a default-pack config,
+// `ensure --from-package --config`, found guardrail/default empty and the
+// gateway pack check refused it (inventory_empty); 1.0.0 removed the
+// folder. Every folder left without a file goes now, vendor or
+// administrator; a folder with an administrator file stays.
+func TestPackageUninstallLeavesNoEmptyPolicyFoldersSoTheReenableWorks(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		customFile bool // an administrator rule pack file in PolicyDir
+		emptyOnly  bool // empty folders staged in both policy dirs
+	}{{"vendor files only", false, false}, {"vendor files and a custom pack file", true, false}, {"empty folders left behind", false, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := packageHost(t, "1.0.0")
+			l := h.env.Layout
+			vendor := filepath.Join(l.VendorPolicyDir, "guardrail", "default")
+			// The gateway check, as far as this needs it: a pack folder
+			// with no rule-pack file is refused.
+			config.RegisterCandidateAssetCheck(func(*config.Config) error {
+				if dir := h.env.P(vendor); exists(dir) && !holdsState(dir) {
+					return errors.New("config rule pack \"" + vendor + "\": rule pack inventory_empty at .: directory contains no recognized rule-pack component")
+				}
+				return nil
+			})
+			t.Cleanup(func() { config.RegisterCandidateAssetCheck(nil) })
+			cfg := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(cfg, []byte(v8AdminConfig(l)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reenable := Options{Action: ActionEnsure, FromPackage: true, ConfigFile: cfg}
+			requireOK(t, h.run(reenable))
+			customFile := filepath.Join(l.PolicyDir, "guardrail", "custom", "rules", "admin.yaml")
+			if tc.customFile {
+				writeHostFile(t, h, customFile, "# admin rule\n")
+			}
+			if tc.emptyOnly {
+				for _, dir := range []string{filepath.Join(l.PolicyDir, "guardrail", "custom", "judge"), filepath.Join(l.VendorPolicyDir, "guardrail", "extra")} {
+					if err := os.MkdirAll(h.env.P(dir), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			r := h.run(Options{Action: ActionUninstall})
+			requireOK(t, r)
+			if empty := append(emptyDirsUnder(t, h.env.P(l.VendorPolicyDir)), emptyDirsUnder(t, h.env.P(l.PolicyDir))...); len(empty) > 0 {
+				t.Fatalf("plain uninstall left folders without a file: %v", empty)
+			}
+			if exists(h.env.P(vendor)) {
+				t.Fatal("plain uninstall kept the vendor pack")
+			}
+			if exists(h.env.P(customFile)) != tc.customFile || exists(h.env.P(l.PolicyDir)) != tc.customFile {
+				t.Fatalf("custom pack file kept=%v, policies kept=%v, want %v", exists(h.env.P(customFile)), exists(h.env.P(l.PolicyDir)), tc.customFile)
+			}
+
+			requireOK(t, h.run(reenable))
+			if !holdsState(h.env.P(vendor)) {
+				t.Fatal("the re-enable did not write the vendor pack again")
+			}
+			if tc.customFile && h.read(customFile) != "# admin rule\n" {
+				t.Fatal("the re-enable changed the custom pack file")
+			}
+		})
 	}
 }

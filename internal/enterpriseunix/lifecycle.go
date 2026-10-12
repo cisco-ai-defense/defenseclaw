@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // Actions.
@@ -2735,13 +2736,22 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	}
 	// Vendor policies are product files: they leave with the deployment,
 	// including the nested rule-pack directories. On a package host a plain
-	// uninstall keeps them with the package, whose payload holds only the
-	// binaries: an administrator recreates a custom pack from their
-	// guardrail/default, and the re-enable, `ensure --from-package --config`,
-	// needs that pack before it writes the vendor policies again (GAP-0960).
-	// The package removal deletes them (postremove.sh).
+	// uninstall removes the vendor files and the folders left without a
+	// file, and keeps only a file an administrator put there, for the
+	// package removal (postremove.sh) to delete. An empty guardrail/default
+	// left behind made the re-enable with a default-pack config, `ensure
+	// --from-package --config`, refuse the pack as inventory_empty
+	// (GAP-1582); without the folder ensure writes the vendor files again.
 	if l.opts.Purge || !packageManaged {
 		_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
+	} else {
+		if vendor, err := policyassets.Files(); err == nil {
+			// Also without a deployment record, which lists them.
+			for _, policy := range vendor {
+				_ = removeFile(env.P(filepath.Join(env.Layout.VendorPolicyDir, filepath.FromSlash(policy.Path))))
+			}
+		}
+		_ = pruneEmptyDirs(env.P(env.Layout.VendorPolicyDir))
 	}
 	// The managed OpenCode plugin left with the recorded files above, or
 	// leaves with the deb or rpm that ships it.
@@ -2974,11 +2984,14 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 }
 
 // removeAllExcept removes dir, or, when keep is a direct child of dir that
-// is a directory with any entry (a file, or a folder an administrator staged
-// for a rule pack, even an empty one), everything in dir but keep. The empty
-// folder an install creates goes with dir. It reports whether keep stayed.
+// is a directory, not a symlink to one, with a file somewhere below it,
+// everything in dir but keep. The folders below keep that hold no file go,
+// as does a keep with none (the empty folder the install created, or
+// folders staged for a rule pack that never got one): left behind, an empty
+// pack folder makes a later re-enable refuse it (GAP-1582). It reports
+// whether keep stayed.
 func removeAllExcept(dir, keep string) (bool, error) {
-	if filepath.Dir(keep) != dir || !nonEmptyDir(keep) {
+	if info, err := os.Lstat(keep); filepath.Dir(keep) != dir || err != nil || !info.IsDir() || !pruneEmptyDirs(keep) {
 		return false, os.RemoveAll(dir)
 	}
 	entries, err := os.ReadDir(dir)
@@ -2994,14 +3007,29 @@ func removeAllExcept(dir, keep string) (bool, error) {
 	return true, errors.Join(errs...)
 }
 
-// nonEmptyDir reports whether path is a directory, not a symlink to one,
-// with at least one entry.
-func nonEmptyDir(path string) bool {
-	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
-		return false
+// pruneEmptyDirs removes, deepest first, every directory in the tree at
+// root, root included, that holds no file. A file, a symlink or an entry it
+// cannot read keeps its directory and the directories above it. It reports
+// whether root is still there.
+func pruneEmptyDirs(root string) bool {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
 	}
-	entries, err := os.ReadDir(path)
-	return err == nil && len(entries) > 0
+	if !info.IsDir() {
+		return true
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return true
+	}
+	held := false
+	for _, entry := range entries {
+		if !entry.IsDir() || pruneEmptyDirs(filepath.Join(root, entry.Name())) {
+			held = true
+		}
+	}
+	return held || os.Remove(root) != nil
 }
 
 // recordPackageResult keeps the result of an `ensure --from-package` run

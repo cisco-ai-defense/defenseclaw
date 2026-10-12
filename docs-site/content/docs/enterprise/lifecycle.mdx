@@ -564,8 +564,9 @@ On Linux and macOS, the default uninstall removes the deployment and its
 machine state: the config, credentials, gateway and guardian state, logs,
 lifecycle state and the service account. The root-owned `lifecycle.lock` stays
 in its lifecycle directory so waiting runs keep using the same lock. On Linux
-your policies in `/etc/defenseclaw/policies` stay, and on a package host so do
-the vendor policies in `/opt/defenseclaw/share/policies`. To turn the
+the files in your policies folder, `/etc/defenseclaw/policies`, stay; the
+vendor policies in `/opt/defenseclaw/share/policies` and any policy folder
+left without a file go, and `ensure` writes the vendor policies again. To turn the
 deployment on again with the same config, run `ensure --from-package --config
 <file>` on a package host; a payload uninstall removes the binaries, so stage
 the payload again and run its `ensure --payload <dir> --config <file>`. A purge

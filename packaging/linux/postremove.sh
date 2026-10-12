@@ -37,8 +37,9 @@ fi
 case "${1:-}" in
     remove|purge|0)
         # The vendor policies are written by the lifecycle, not shipped as
-        # package files; the uninstall keeps them while the package stays
-        # (GAP-0960), so they leave with the package, but only once the
+        # package files. The uninstall removes them on a package host and
+        # keeps only a file an administrator put there (GAP-1582); what is
+        # left leaves with the package, but only once the
         # preremove uninstall removed the deployment. An uninstall that
         # failed (machine policy or a registration not removed) keeps the
         # deployment record, the config and the registrations that name
