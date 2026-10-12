@@ -111,10 +111,19 @@ func wantCode(t *testing.T, err error, code string) *sandboxapi.Error {
 
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	eventuallyWithin(t, 5*time.Second, what, cond)
+}
+
+// eventuallyWithin polls cond until it holds or the deadline passes. Tests
+// whose work is heavy (thousands of events through the shared queue) give a
+// generous deadline so a loaded CI runner does not time them out; a passing
+// run returns as soon as cond holds.
+func eventuallyWithin(t *testing.T, limit time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
+			t.Fatalf("timed out after %s waiting for %s", limit, what)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}

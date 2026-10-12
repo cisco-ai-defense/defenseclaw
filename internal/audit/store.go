@@ -379,7 +379,11 @@ func buildAuditPragmas() string {
 // becomes a problem, we can introduce a separate read-only pool
 // without touching this hot path.
 func openSQLite(dbPath string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", dbPath+auditPragmas)
+	return openSQLiteWithPragmas(dbPath, auditPragmas)
+}
+
+func openSQLiteWithPragmas(dbPath, pragmas string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dbPath+pragmas)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open db %s: %w", dbPath, err)
 	}
@@ -390,7 +394,11 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 }
 
 func NewStore(dbPath string, opts ...StoreOption) (*Store, error) {
-	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
+	return newStoreWithHooks(dbPath, auditDBPathHooks{}, opts...)
+}
+
+func newStoreWithHooks(dbPath string, hooks auditDBPathHooks, opts ...StoreOption) (*Store, error) {
+	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, hooks)
 	if err != nil {
 		return nil, err
 	}

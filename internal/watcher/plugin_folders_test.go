@@ -258,3 +258,29 @@ func TestIncompleteSkillFolderWaitsForSkillMD(t *testing.T) {
 		t.Fatal("admitted skill folder is still waited on")
 	}
 }
+
+// GAP-1573 review: the Codex plugin cache is read at its version depth, so
+// its marketplace folders are not waited on as category folders; a
+// <marketplace>/<plugin> folder created later is not admitted as a plugin.
+func TestWatcherDoesNotWaitOnCodexCacheMarketplaceFolders(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	cache := filepath.Join(t.TempDir(), ".codex", "plugins", "cache")
+	marketplace := filepath.Join(cache, "openai-curated-remote")
+	if err := os.MkdirAll(filepath.Join(marketplace, "github", "1.2.0"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	w.addWatch = func(string) {}
+	w.watchExistingPluginFolders(cache)
+	if len(w.pluginWaiting) != 0 {
+		t.Fatalf("codex cache folders waited on as category folders: %v", w.pluginWaiting)
+	}
+	later := filepath.Join(marketplace, "slack")
+	if err := os.MkdirAll(later, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if queued, ok := w.waitingPluginEvent(later); ok {
+		t.Fatalf("<marketplace>/<plugin> folder %s admitted as a plugin", queued)
+	}
+}

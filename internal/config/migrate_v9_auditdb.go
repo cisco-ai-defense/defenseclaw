@@ -68,11 +68,50 @@ func auditDBDSN(path, query string) string {
 	return (&url.URL{Scheme: "file", Path: slashed, RawQuery: query}).String()
 }
 
+// openV9AuditDB opens the audit database with query. A 0.8.x store whose
+// schema SQLite refuses (the orphan quarantine_records index that 0.8.x
+// concurrent writers leave, "malformed database schema
+// (sqlite_autoindex_quarantine_records_1) - orphan index", GAP-1576) is opened
+// again with writable_schema on: its actions table is intact, so the
+// block/allow rows still move, and the gateway rebuilds the store at its first
+// start (audit.rebuildAuditDB). A 0.8.10 store that a rollback started is
+// damaged this way within minutes, and refusing it stopped the next upgrade.
+// Any other damage still fails the statements that read it, and a store
+// whose actions table is among the entries SQLite skipped is refused with
+// the original error rather than read as one without rows.
+func openV9AuditDB(path, query string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", auditDBDSN(path, query))
+	if err != nil {
+		return nil, err
+	}
+	var entries int
+	probeErr := db.QueryRow(`SELECT count(*) FROM sqlite_schema`).Scan(&entries)
+	if probeErr == nil || !v9AuditDBDamaged(probeErr) {
+		return db, nil
+	}
+	_ = db.Close()
+	if db, err = sql.Open("sqlite", auditDBDSN(path, query+"&_pragma=writable_schema(1)")); err != nil {
+		return nil, err
+	}
+	// writable_schema skips the schema entries SQLite cannot parse, so the
+	// listing alone cannot tell an intact actions table from a lost or
+	// malformed one: exactly one must be listed and a read of it must
+	// succeed. Otherwise readV9ActionRowsDB would read "no such table" as a
+	// store without operator rows and the migration would drop them.
+	var listed, rows int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'actions'`).Scan(&listed); err != nil ||
+		listed != 1 || db.QueryRow(`SELECT count(*) FROM actions`).Scan(&rows) != nil {
+		_ = db.Close()
+		return nil, probeErr
+	}
+	return db, nil
+}
+
 // readV9ActionRows returns the operator block/allow rows of the actions
 // table: install=block or allow, excluding scan verdicts
 // (v9AutomaticInstallReasons), which stay as the journal.
 func readV9ActionRows(path string) ([]v9ActionRow, error) {
-	db, err := sql.Open("sqlite", auditDBDSN(path, "mode=ro&_pragma=busy_timeout(5000)"))
+	db, err := openV9AuditDB(path, "mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +157,7 @@ func readV9ActionRowsDB(db *sql.DB) ([]v9ActionRow, error) {
 // lockV9ActionRows holds a write reservation across the final row check,
 // config commit, and cleanup. A changed snapshot requires a fresh plan.
 func lockV9ActionRows(ctx context.Context, path string, snapshot []v9ActionRow) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", auditDBDSN(path, "_pragma=busy_timeout(5000)"))
+	db, err := openV9AuditDB(path, "_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +200,7 @@ func resumeV9ActionCleanup(ctx context.Context, cleanup MigrationAuditCleanup) e
 	if _, err := os.Stat(cleanup.Path); err != nil {
 		return err
 	}
-	db, err := sql.Open("sqlite", auditDBDSN(cleanup.Path, "_pragma=busy_timeout(5000)"))
+	db, err := openV9AuditDB(cleanup.Path, "_pragma=busy_timeout(5000)")
 	if err != nil {
 		return err
 	}
@@ -199,7 +238,7 @@ func resumeV9ActionCleanup(ctx context.Context, cleanup MigrationAuditCleanup) e
 
 // clearV9ActionRows removes the install field of moved rows in a transaction.
 func clearV9ActionRows(path string, moved []v9ActionRow) error {
-	db, err := sql.Open("sqlite", auditDBDSN(path, "_pragma=busy_timeout(5000)"))
+	db, err := openV9AuditDB(path, "_pragma=busy_timeout(5000)")
 	if err != nil {
 		return err
 	}

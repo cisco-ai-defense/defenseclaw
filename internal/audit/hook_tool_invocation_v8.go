@@ -134,6 +134,12 @@ func decodeHookToolInvocation(projected string) hookToolInvocationRecord {
 
 // openAuditReadOnly opens an existing audit database read-only.
 func openAuditReadOnly(dbPath string) (*sql.DB, error) {
+	return openAuditReadOnlyWith(dbPath, "")
+}
+
+// openAuditReadOnlyWith is openAuditReadOnly with extra URI query parameters
+// (each starting with "&") appended to the read-only ones.
+func openAuditReadOnlyWith(dbPath, extra string) (*sql.DB, error) {
 	clean := filepath.Clean(strings.TrimSpace(dbPath))
 	if !filepath.IsAbs(clean) {
 		return nil, fmt.Errorf("audit: database path %q is not absolute", dbPath)
@@ -149,7 +155,7 @@ func openAuditReadOnly(dbPath string) (*sql.DB, error) {
 	if !strings.HasPrefix(uriPath, "/") {
 		uriPath = "/" + uriPath // a Windows drive path: file:///C:/...
 	}
-	dsn := (&url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)"}).String()
+	dsn := (&url.URL{Scheme: "file", Path: uriPath, RawQuery: "mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)" + extra}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %s read-only: %w", clean, err)

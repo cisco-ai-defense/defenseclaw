@@ -1257,6 +1257,34 @@ def test_linux_preremove_keeps_its_result_only_when_the_uninstall_failed(tmp_pat
         assert not host.state.exists()
 
 
+# The package removal deleted the vendor policies after a preremove
+# uninstall that failed (machine policy not removed, say) and so kept the
+# deployment record, the config and the registrations that name them. They
+# leave with the package only once the uninstall removed the deployment.
+@pytest.mark.parametrize("deployment_kept", [False, True])
+def test_linux_postremove_keeps_the_vendor_policies_while_the_deployment_stays(tmp_path: Path, deployment_kept: bool) -> None:
+    host = _Host(tmp_path)
+    opt = tmp_path / "opt"
+    pack = opt / "share" / "policies" / "rule-packs" / "default"
+    pack.mkdir(parents=True)
+    (pack / "pack.yaml").write_text("name: default\n", encoding="utf-8")
+    host.state.mkdir()
+    if deployment_kept:
+        (host.state / "deployment.json").write_text("{}\n", encoding="utf-8")
+    script = _rooted(
+        (LINUX / "postremove.sh").read_text(encoding="utf-8"),
+        {
+            "lifecycle=/var/lib/defenseclaw-enterprise": f"lifecycle={host.state}",
+            "/opt/defenseclaw": str(opt),
+            "/etc/tmpfiles.d/defenseclaw.conf": str(tmp_path / "tmpfiles-defenseclaw.conf"),
+            "/run/systemd/system": str(host.run_systemd),
+        },
+    )
+    result = host.run(script, "remove")
+    assert result.returncode == 0, result.stderr
+    assert (pack / "pack.yaml").is_file() is deployment_kept
+
+
 # GAP-1254, GAP-1258: the wrapper applied the config before it stored
 # --secret-name, so a config that references the credential never applied,
 # and the store then failed busy against the apply its own config change

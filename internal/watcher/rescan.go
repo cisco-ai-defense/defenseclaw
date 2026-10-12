@@ -564,7 +564,11 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	}
 
 	for _, dir := range w.pluginDirs {
-		if w.connectorForPath(dir) == "claudecode" {
+		// Claude Code's plugin roots, and a Codex plugin cache, whose
+		// marketplace folders hold <plugin>/<version> and are not plugins
+		// themselves (GAP-1573).
+		if connector := w.connectorForPath(dir); connector == "claudecode" ||
+			(w.cacheLayoutPlugins(dir) && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache")) {
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
 				if w.isOwnPlugin(plugin) || w.inClaudePluginStaging(plugin, claudeStagingGrace) {
 					continue
@@ -573,7 +577,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 					Type:      InstallPlugin,
 					Name:      claudeWatcherPluginIdentity(dir, plugin),
 					Path:      plugin,
-					Connector: "claudecode",
+					Connector: connector,
 					Timestamp: time.Now().UTC(),
 				})
 			}

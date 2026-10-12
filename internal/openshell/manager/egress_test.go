@@ -952,7 +952,9 @@ func TestRepeatedRefusalsAreFolded(t *testing.T) {
 	sink.EgressEvent(egress.Event{Kind: egress.EventLargeUpload, Time: time.Now(), SandboxName: a.Name, Host: "files.example.net", BytesUp: 30 << 20})
 	sink.EgressEvent(blockedEvent(b.Name, "other.example"))
 	// The folded refusal is recorded before it is published to the feed.
-	eventually(t, "the other sandbox's refusal, the finding and the folded repeats", func() bool {
+	// 10000 events take about 0.25 s here but timed out at 5 s on loaded CI
+	// runners: wait up to two minutes.
+	eventuallyWithin(t, 2*time.Minute, "the other sandbox's refusal, the finding and the folded repeats", func() bool {
 		return len(where(&e.tel.mu, &e.tel.findings, nil)) == 1 && egressRecords(e, b.Name, nil) == 1 &&
 			egressRecords(e, a.Name, func(r audit.SandboxEgressEvent) bool { return strings.Contains(r.Reason, "9998 more like it") }) == 1 &&
 			len(e.events(a.Name, sandboxapi.ActivityEgressBlocked, "")) >= 2

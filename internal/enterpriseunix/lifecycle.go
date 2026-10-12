@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
 
 // Actions.
@@ -159,6 +160,9 @@ type lifecycle struct {
 	// failedInstallLeftovers is set when an uninstall removes what a failed
 	// first package install left, with no deployment committed.
 	failedInstallLeftovers bool
+	// policiesKept is set when a Linux uninstall kept the administrator
+	// policies in Layout.PolicyDir (GAP-0960).
+	policiesKept bool
 	// configWrittenDuringRun holds a config.yaml another writer put in place
 	// while a transaction of this run planned its own (applyFiles kept it).
 	// A rollback restores the earlier file, so the newer one is put back
@@ -323,6 +327,14 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.NoopReason = "superseded"
 		r.AddWarning(codeSuperseded, fmt.Sprintf("this apply run's binary (%s) is older than the installed deployment (%s), which another run applied while this one waited; the installed binary applies later changes",
 			env.ProductVersion, record.ProductVersion))
+		l.describe(ctx, record, false)
+		return 0
+	}
+	if l.applyRunAfterRolledBackUpgrade(record) {
+		r.Noop = true
+		r.NoopReason = "upgrade_rolled_back"
+		r.AddWarning(codeUpgradeRolledBack, fmt.Sprintf("the upgrade to %s failed and was rolled back to %s, and config.yaml and the protected credentials are still the ones %s applied, so this apply run does not retry the upgrade; install the package again, or run `%s --from-package`",
+			env.ProductVersion, record.ProductVersion, record.ProductVersion, env.lifecycleCommand(ActionEnsure)))
 		l.describe(ctx, record, false)
 		return 0
 	}
@@ -531,6 +543,80 @@ func (l *lifecycle) supersededApplyRun(record *Deployment) bool {
 	installed := filepath.Join(l.env.Layout.BinDir, binGateway)
 	digest, err := sha256File(l.env.P(installed))
 	return err == nil && record.Files[installed] != "" && digest == record.Files[installed]
+}
+
+// A package upgrade whose ensure fails rolls back to the previous
+// deployment, but the package manager has already installed the new
+// binaries. An apply-trigger run that ran after that rollback (the macOS
+// apply job was running again as soon as the rollback finished) is the new
+// binary against the restored record, so its ensure retried the upgrade
+// that had just failed: a whole transaction under the lifecycle lock, and
+// the next lifecycle command failed lifecycle_busy. Only the package, or an
+// ensure --from-package, retries a failed package upgrade, as on Linux,
+// where the preinstall holds the apply trigger for the transaction. The
+// rollback leaves rolledBackUpgradeName in the lifecycle directory, and an
+// apply-trigger run stands down while the deployment is the restored one
+// and its inputs are still the ones that deployment applied. A changed
+// config.yaml or credential is a new push, which the apply run applies (and
+// that upgrades the deployment); a committed transaction removes the file.
+const (
+	rolledBackUpgradeName = "rolled-back-upgrade.json"
+	codeUpgradeRolledBack = "upgrade_rolled_back"
+)
+
+// rolledBackUpgrade names the failed package upgrade and the deployment the
+// rollback restored.
+type rolledBackUpgrade struct {
+	ProductVersion   string `json:"product_version"`
+	InstalledVersion string `json:"installed_version"`
+}
+
+func (e *Env) rolledBackUpgradePath() string {
+	return filepath.Join(e.P(e.Layout.LifecycleDir), rolledBackUpgradeName)
+}
+
+// recordRolledBackUpgrade records that a failed package upgrade to version
+// was rolled back to record. A run of the apply trigger itself records
+// nothing: its own retries (scheduleApplyRetry) keep running.
+func (l *lifecycle) recordRolledBackUpgrade(record *Deployment, version string) {
+	env := l.env
+	if record == nil || !l.opts.FromPackage || env.SelfUnit != "" ||
+		strings.TrimPrefix(version, "v") == strings.TrimPrefix(record.ProductVersion, "v") {
+		return
+	}
+	data, err := json.Marshal(rolledBackUpgrade{ProductVersion: version, InstalledVersion: record.ProductVersion})
+	if err == nil {
+		err = env.writeFileAtomic(env.rolledBackUpgradePath(), append(data, '\n'), 0o600, rootOwner())
+	}
+	if err != nil {
+		l.result.AddWarning(codeRolledBack, "could not record the rolled-back upgrade, so the apply trigger may retry it: "+err.Error())
+	}
+}
+
+// applyRunAfterRolledBackUpgrade reports an apply-trigger ensure (--reason
+// path) of the binary whose package upgrade rolled back to record, with
+// config.yaml and the protected credentials still as record applied them.
+func (l *lifecycle) applyRunAfterRolledBackUpgrade(record *Deployment) bool {
+	env := l.env
+	if record == nil || l.opts.Action != ActionEnsure || l.opts.Reason != "path" || l.opts.AllowDowngrade {
+		return false
+	}
+	raw, err := readBounded(env.rolledBackUpgradePath(), maxInputBytes)
+	if err != nil {
+		return false
+	}
+	var failed rolledBackUpgrade
+	if json.Unmarshal(raw, &failed) != nil ||
+		strings.TrimPrefix(failed.ProductVersion, "v") != strings.TrimPrefix(env.ProductVersion, "v") ||
+		failed.InstalledVersion != record.ProductVersion {
+		return false
+	}
+	configSHA, err := sha256File(env.P(env.Layout.ConfigPath))
+	if err != nil || configSHA != record.ConfigSHA256 {
+		return false
+	}
+	_, secretsSHA, err := env.listSecrets()
+	return err == nil && secretsSHA == record.SecretsSHA256
 }
 
 func (l *lifecycle) validateOptions() int {
@@ -1442,6 +1528,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		_ = env.clearPending()
 		env.discardSnapshot(snap)
+		l.recordRolledBackUpgrade(record, p.version)
 		if record != nil {
 			// The previous deployment is back and running; report it.
 			l.describe(ctx, record, false)
@@ -1619,6 +1706,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 	_ = env.clearPending()
+	_ = removeFile(env.rolledBackUpgradePath())
 	if err := env.sealHookBinary(newRecord); err != nil {
 		r.AddWarning(codeHookBinaryNotRestored, "could not keep a copy of the hook binary to restore it from: "+err.Error())
 	}
@@ -2187,6 +2275,13 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 			}
 		}
 	}
+	// launchd's bootstrap returns before the job listens (systemd waits for
+	// the gateway's READY=1): wait for the restored gateway, so the result
+	// reports the deployment that is back and not one still starting. One
+	// that does not answer is reported not ready.
+	if gateway, ok := gatewayUnitOf(units); ok && contains(previouslyActive, gateway.Name) && env.Services.Active(ctx, gateway) {
+		_ = l.waitGatewayReady(ctx, gateway)
+	}
 	return restoreErr == nil, errors.Join(restoreErr, reloadErr, errors.Join(disableErrs...), errors.Join(startErrs...))
 }
 
@@ -2640,8 +2735,24 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		_ = os.RemoveAll(env.P(fmt.Sprintf("/tmp/defenseclaw-plugin-cache-%d", record.ServiceUID)))
 	}
 	// Vendor policies are product files: they leave with the deployment,
-	// including the nested rule-pack directories.
-	_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
+	// including the nested rule-pack directories. On a package host a plain
+	// uninstall removes the vendor files and the folders left without a
+	// file, and keeps only a file an administrator put there, for the
+	// package removal (postremove.sh) to delete. An empty guardrail/default
+	// left behind made the re-enable with a default-pack config, `ensure
+	// --from-package --config`, refuse the pack as inventory_empty
+	// (GAP-1582); without the folder ensure writes the vendor files again.
+	if l.opts.Purge || !packageManaged {
+		_ = os.RemoveAll(env.P(env.Layout.VendorPolicyDir))
+	} else {
+		if vendor, err := policyassets.Files(); err == nil {
+			// Also without a deployment record, which lists them.
+			for _, policy := range vendor {
+				_ = removeFile(env.P(filepath.Join(env.Layout.VendorPolicyDir, filepath.FromSlash(policy.Path))))
+			}
+		}
+		_ = pruneEmptyDirs(env.P(env.Layout.VendorPolicyDir))
+	}
 	// The managed OpenCode plugin left with the recorded files above, or
 	// leaves with the deb or rpm that ships it.
 	_ = removeDirIfEmpty(env.P(openCodePluginDir(env.Layout)))
@@ -2685,7 +2796,17 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	removeState := l.opts.Purge || (!l.opts.KeepState && len(errs) == 0)
 	if removeState {
 		for _, dir := range []string{env.Layout.ConfigDir, env.Layout.DataDir, env.Layout.GuardianAuthDir, env.Layout.LogDir} {
-			if err := os.RemoveAll(env.P(dir)); err != nil {
+			var err error
+			if dir == env.Layout.ConfigDir && !l.opts.Purge && env.GOOS == "linux" {
+				// The administrator policies (custom rule packs, Rego) are
+				// inputs the administrator wrote, not machine state: the
+				// config that names them turns the deployment on again
+				// (GAP-0960). A purge removes them.
+				l.policiesKept, err = removeAllExcept(env.P(dir), env.P(env.Layout.PolicyDir))
+			} else {
+				err = os.RemoveAll(env.P(dir))
+			}
+			if err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -2724,6 +2845,24 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 				if err != nil {
 					r.AddWarning(codeAccount, fmt.Sprintf("could not turn off the package's tmpfiles.d entries for the removed account: %v; the next boot logs that it cannot resolve %s", err, env.Layout.ServiceUser))
 				}
+			}
+		}
+		if l.policiesKept && !l.opts.KeepServiceAccount && !l.serviceAccountKept {
+			// The kept policies folder was root:<service group> 0750, and that
+			// group is gone: a group created later with its id would read
+			// it, and the account a reinstall creates could not reach the
+			// packs below it, so the re-enable refused them. It goes back to
+			// root, traversable, as an administrator stages it.
+			kept := env.P(env.Layout.PolicyDir)
+			err := fmt.Errorf("%s is not a directory", env.Layout.PolicyDir)
+			if info, statErr := os.Lstat(kept); statErr != nil {
+				err = statErr
+			} else if info.IsDir() { // never through a symlink
+				err = errors.Join(env.Lchown(kept, 0, 0), os.Chmod(kept, 0o751))
+			}
+			if err != nil {
+				r.AddWarning(codeLeftovers, fmt.Sprintf("could not hand %s back to root: %v; before the next ensure run `chown root:root %s` and `chmod 0751 %s`",
+					env.Layout.PolicyDir, err, env.Layout.PolicyDir, env.Layout.PolicyDir))
 			}
 		}
 	}
@@ -2826,12 +2965,71 @@ func (l *lifecycle) uninstallSummary(record *Deployment) []string {
 	default:
 		lines = append(lines, "removed the machine state: "+state+", the lifecycle state ("+layout.LifecycleDir+") and the service account "+layout.ServiceUser)
 	}
+	if l.policiesKept {
+		// A package host keeps its binaries, so ensure --from-package turns
+		// the deployment on again; a payload uninstall removed them, so the
+		// re-enable is a payload install with the same config.
+		reenable := "`" + env.lifecycleCommand(ActionEnsure) + " --from-package --config <file>` with the same config turns the deployment on again"
+		if !l.packageManaged {
+			reenable = "installing the payload again with the same config, `<payload>/" + binGateway + " enterprise linux ensure --payload <payload> --config <file>`, turns the deployment on again"
+		}
+		lines = append(lines, "kept the administrator policies in "+layout.PolicyDir+" (custom rule packs and Rego), so "+reenable+"; --purge removes them")
+	}
 	if !l.opts.Purge {
 		if kept := l.keptPerUserLine(record); kept != "" {
 			lines = append(lines, kept)
 		}
 	}
 	return lines
+}
+
+// removeAllExcept removes dir, or, when keep is a direct child of dir that
+// is a directory, not a symlink to one, with a file somewhere below it,
+// everything in dir but keep. The folders below keep that hold no file go,
+// as does a keep with none (the empty folder the install created, or
+// folders staged for a rule pack that never got one): left behind, an empty
+// pack folder makes a later re-enable refuse it (GAP-1582). It reports
+// whether keep stayed.
+func removeAllExcept(dir, keep string) (bool, error) {
+	if info, err := os.Lstat(keep); filepath.Dir(keep) != dir || err != nil || !info.IsDir() || !pruneEmptyDirs(keep) {
+		return false, os.RemoveAll(dir)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false, err
+	}
+	var errs []error
+	for _, entry := range entries {
+		if path := filepath.Join(dir, entry.Name()); path != keep {
+			errs = append(errs, os.RemoveAll(path))
+		}
+	}
+	return true, errors.Join(errs...)
+}
+
+// pruneEmptyDirs removes, deepest first, every directory in the tree at
+// root, root included, that holds no file. A file, a symlink or an entry it
+// cannot read keeps its directory and the directories above it. It reports
+// whether root is still there.
+func pruneEmptyDirs(root string) bool {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	if !info.IsDir() {
+		return true
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return true
+	}
+	held := false
+	for _, entry := range entries {
+		if !entry.IsDir() || pruneEmptyDirs(filepath.Join(root, entry.Name())) {
+			held = true
+		}
+	}
+	return held || os.Remove(root) != nil
 }
 
 // recordPackageResult keeps the result of an `ensure --from-package` run

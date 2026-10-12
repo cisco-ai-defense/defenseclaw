@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Regression for the enterprise upgrade release lookup gate."""
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -46,3 +47,40 @@ def test_release_lookup_failure_fails_upgrade_lane(tmp_path: Path) -> None:
     )
     assert result.returncode != 0
     assert "could not look up" in result.stderr
+
+
+@pytest.mark.skipif(BASH is None, reason="needs bash (the Git for Windows bash on Windows)")
+def test_package_in_a_backslash_path_matches_checksums(tmp_path: Path) -> None:
+    # GNU sha256sum escapes a file name with a backslash and then starts its
+    # line with one, so on Windows (dir D:\a\_temp/previous) the hash read
+    # from it never matched checksums.txt.
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    name = "DefenseClawSetup-Enterprise-Standalone-x64.exe"
+    (assets / name).write_bytes(b"setup")
+    digest = hashlib.sha256(b"setup").hexdigest()
+    # The 1.0.0 checksums.txt also lists itself.
+    (assets / "checksums.txt").write_text(f"{digest}  {name}\n{'0' * 64}  checksums.txt\n")
+    (assets / "checksums.txt.bundle").write_text("{}")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool, body in {
+        "gh": 'case "$2" in list) echo 1.0.0 ;; download) while [ $# -gt 0 ]; do '
+              '[ "$1" = --dir ] && d=$2; shift; done; cp "$FAKE_ASSETS"/* "$d"/ ;; esac\n',
+        "cosign": "exit 0\n",
+    }.items():
+        (bin_dir / tool).write_bytes(b"#!/bin/sh\n" + body.encode())
+        (bin_dir / tool).chmod(0o755)
+    env = {**os.environ, "PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]),
+           "GITHUB_REPOSITORY": "example/repo", "FAKE_ASSETS": str(assets)}
+    command = [BASH, str(ROOT / "scripts/fetch-previous-enterprise-package.sh"),
+               "--asset", "setup", "--dir", str(tmp_path / "a\\b")]
+
+    result = subprocess.run(command, env=env, capture_output=True, text=True, check=False, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert f"verified {name} of 1.0.0: {digest}" in result.stdout
+
+    (assets / name).write_bytes(b"other")
+    result = subprocess.run(command, env=env, capture_output=True, text=True, check=False, timeout=60)
+    assert result.returncode != 0
+    assert "does not match checksums.txt" in result.stderr

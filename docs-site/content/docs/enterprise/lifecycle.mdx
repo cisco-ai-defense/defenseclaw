@@ -563,9 +563,15 @@ included. The Secure Client profile keeps its machine state unless you purge.
 On Linux and macOS, the default uninstall removes the deployment and its
 machine state: the config, credentials, gateway and guardian state, logs,
 lifecycle state and the service account. The root-owned `lifecycle.lock` stays
-in its lifecycle directory so waiting runs keep using the same lock. Each
-user keeps `~/.defenseclaw`
-and the per-user binaries; `--purge` removes those too. Add `--keep-state`
+in its lifecycle directory so waiting runs keep using the same lock. On Linux
+the files in your policies folder, `/etc/defenseclaw/policies`, stay; the
+vendor policies in `/opt/defenseclaw/share/policies` and any policy folder
+left without a file go, and `ensure` writes the vendor policies again. To turn the
+deployment on again with the same config, run `ensure --from-package --config
+<file>` on a package host; a payload uninstall removes the binaries, so stage
+the payload again and run its `ensure --payload <dir> --config <file>`. A purge
+removes the policies. Each user keeps `~/.defenseclaw` and the per-user
+binaries; `--purge` removes those too. Add `--keep-state`
 to keep the machine state for a reinstall instead.
 
 | Install channel | Remove the deployment and machine state, keep each user's data | Remove everything |

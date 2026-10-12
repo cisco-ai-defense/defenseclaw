@@ -753,6 +753,33 @@ func TestEnumerateClaudeWatcherPluginsUsesManifestlessCacheVersionBoundary(t *te
 	}
 }
 
+// GAP-1573: a Codex plugin cache holds <marketplace>/<plugin>/<version>. The
+// rescan read it one level deep, so a fresh init scanned the vendor
+// marketplace folder (openai-curated-remote) as a plugin and raised a HIGH
+// MANIFEST-MISSING alert on it.
+func TestEnumerateTargetsReadsCodexPluginCacheAtVersionDepth(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "codex"
+	cache := filepath.Join(t.TempDir(), ".codex", "plugins", "cache")
+	version := filepath.Join(cache, "openai-curated-remote", "github", "1.2.0")
+	if err := os.MkdirAll(filepath.Join(version, ".codex-plugin"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(version, ".codex-plugin", "plugin.json"), []byte(`{"name":"github"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var plugins []InstallEvent
+	for _, target := range New(cfg, []string{skillDir}, []string{cache}, store, logger, nil, nil).enumerateTargets() {
+		if target.Type == InstallPlugin {
+			plugins = append(plugins, target)
+		}
+	}
+	if len(plugins) != 1 || !sameWatcherPath(plugins[0].Path, version) ||
+		plugins[0].Name != "github@openai-curated-remote" || plugins[0].Connector != "codex" {
+		t.Fatalf("codex cache plugin targets = %+v, want only %s as github@openai-curated-remote", plugins, version)
+	}
+}
+
 // TestRescan_FromCodexConfigToml — Codex discovers MCP entries from the user
 // ~/.codex/config.toml table; pinned workspaces additionally contribute layered
 // .codex/config.toml entries, subject to the client's project trust decision.
