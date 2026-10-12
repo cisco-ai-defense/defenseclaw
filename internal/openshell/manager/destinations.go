@@ -103,11 +103,21 @@ type ProcessRef struct {
 }
 
 // lineage is pid's lineage in the sandbox, nil without a process index.
-func (m *Manager) lineage(sandbox string, pid int) []sandboxapi.DestinationProcess {
+// exe is the binary the record that named pid reported: an index that tells
+// process images apart (Manager.LineageFor, with the kernel feed's records)
+// takes only a process that ran it.
+func (m *Manager) lineage(sandbox string, pid int, exe string) []sandboxapi.DestinationProcess {
 	if m.procs == nil || pid <= 0 {
 		return nil
 	}
-	refs := m.procs.Lineage(sandbox, pid)
+	var refs []ProcessRef
+	if keyed, ok := m.procs.(interface {
+		LineageFor(sandboxName string, pid int, exe string) []ProcessRef
+	}); ok {
+		refs = keyed.LineageFor(sandbox, pid, exe)
+	} else {
+		refs = m.procs.Lineage(sandbox, pid)
+	}
 	if len(refs) == 0 {
 		return nil
 	}
@@ -888,7 +898,7 @@ func (m *Manager) Destinations(_ context.Context, name string) (*sandboxapi.Dest
 			// shortly before it was seen connecting (GAP-0139, GAP-0174).
 			pid = m.procs.PIDOf(info.name, actors[i].binary, actors[i].at)
 		}
-		d.Lineage = m.lineage(info.name, pid)
+		d.Lineage = m.lineage(info.name, pid, actors[i].binary)
 	}
 	slices.SortFunc(out.Destinations, func(a, b sandboxapi.DestinationRow) int {
 		return cmp.Or(cmp.Compare(destinationRank(a.Kind), destinationRank(b.Kind)), b.LastSeen.Compare(a.LastSeen), cmp.Compare(a.Host, b.Host))

@@ -92,7 +92,10 @@ func (s *helperPlaneSource) Start(ctx context.Context) error {
 	return nil
 }
 
-// drain reads event frames until the stream ends.
+// drain reads event frames until the stream ends. A coverage-only frame
+// replaces the coverage the helper stated: its backend changed mid-stream
+// (Tetragon fell back to cn_proc, or came back), and the stream itself goes
+// on.
 func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 	defer s.buffer.Close()
 	for {
@@ -115,14 +118,22 @@ func (s *helperPlaneSource) drain(ctx context.Context, conn net.Conn) {
 			continue
 		}
 		if frame.Coverage != nil {
-			// The coverage of the helper source changed mid-stream (GAP-1473).
+			// The coverage of the helper source changed mid-stream: the
+			// Tetragon backend fell back to cn_proc or came back, or a
+			// reader fell behind (GAP-1473).
 			coverage := decodeCoverage(*frame.Coverage)
 			s.mu.Lock()
 			s.coverage = coverage
 			s.mu.Unlock()
 		}
-		if frame.Event != nil {
+		switch {
+		case frame.Event != nil:
 			s.buffer.Push(decodeEvent(*frame.Event))
+		case frame.PolicyEvent != nil:
+			// The member names the owner; the event cannot claim another.
+			event := decodeEvent(*frame.PolicyEvent)
+			event.PolicyOwner, event.Kind = plane.PolicyOwnerCustomer, plane.KindPolicyEvent
+			s.buffer.Push(event)
 		}
 	}
 }

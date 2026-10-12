@@ -71,38 +71,41 @@ func (p linuxPlatform) Capabilities() map[Plane]Capability {
 
 // planeC reports the netlink process connector plus fanotify.
 //
-// Both halves are probed independently. cn_proc alone is enough for
-// Available -- it is the process half, it is unprivileged in the host
-// namespace, and an unprivileged Linux host getting the process half with the
-// file half honestly reported absent is strictly better than losing the whole
-// plane to one missing capability.
+// Both halves are probed independently, and either one is enough for
+// Available: a host that gets the process half with the file half honestly
+// reported absent is strictly better off than one that loses the whole plane
+// to one missing capability.
 //
-// RequiresRoot is therefore false even when fanotify is out of reach: it
-// describes what Plane C being *available* costs, and cn_proc costs nothing.
-// The mechanism text is where the two halves' independent reachability shows,
-// because one bool cannot carry "the process half does not need root, the file
-// half does".
+// Neither half is unprivileged. Subscribing to the process connector's
+// multicast group needs CAP_NET_ADMIN in the initial user namespace (RHEL 9,
+// kernel 5.14: an ordinary uid's bind fails with EPERM), and fanotify needs
+// CAP_SYS_ADMIN. RequiresRoot is therefore true: it describes what Plane C
+// being available costs. The managed sensor helper holds both capabilities;
+// a per-user gateway gets them from `defenseclaw agent discovery runtime
+// permissions --grant` or by running as root.
 func (linuxPlatform) planeC() Capability {
 	if reason := connectorUnreachable(); reason != "" {
 		return Capability{
 			Plane:     PlaneC,
 			Available: false,
-			Reason: reason + ". The file half of Plane C additionally needs " +
-				"fanotify, which needs CAP_SYS_ADMIN",
-			RequiresRoot: false,
+			Reason: reason + ". Process events need CAP_NET_ADMIN (the netlink " +
+				"process connector); file events need CAP_SYS_ADMIN (fanotify)",
+			RequiresRoot: true,
 		}
 	}
 	mechanism := "netlink process connector (cn_proc) + fanotify (process and file events)"
 	if reason := fanotifyUnreachable(); reason != "" {
-		mechanism = "netlink process connector (cn_proc) only -- file events need fanotify: " + reason
+		mechanism = "netlink process connector (cn_proc) only -- file events need fanotify, " +
+			"which needs CAP_SYS_ADMIN: " + reason
 	}
-	return Capability{Plane: PlaneC, Available: true, Mechanism: mechanism, RequiresRoot: false}
+	return Capability{Plane: PlaneC, Available: true, Mechanism: mechanism, RequiresRoot: true}
 }
 
 // connectorUnreachable returns why cn_proc cannot be used, or "" when it can.
-// It opens the socket rather than inspecting kernel config, because a
-// restricted namespace, a seccomp filter, and a kernel built without
-// CONFIG_PROC_EVENTS all fail here and none of them show up in /boot/config.
+// It opens and binds the socket rather than inspecting kernel config, because
+// a missing CAP_NET_ADMIN, a restricted namespace, a seccomp filter, and a
+// kernel built without CONFIG_PROC_EVENTS all fail here and none of them show
+// up in /boot/config.
 func connectorUnreachable() string {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.NETLINK_CONNECTOR)
 	if err != nil {

@@ -229,6 +229,16 @@ administrator.
   local config tools, the block and allow commands and the gateway's
   enforcement API all refuse ([below](#policy-changes-on-a-managed-host)).
 
+**If your agent reports `Operation not permitted`.** On a Linux computer that
+runs Tetragon, your administrator may have turned on two kernel controls. They
+deny opening an SSH private key (`~/.ssh/id_ed25519`, for example) and writing
+a shell startup file (`~/.bashrc`, for example) to the programs an
+enrolled command-line agent runs. Your normal shell, your IDE terminals and
+`tmux` are never denied. DefenseClaw explains the block in the agent's next
+answer where the agent allows it. Contact your administrator if you need the
+access; they can find the block and decide. See
+[When a control blocks something](/docs/enterprise/tetragon#when-a-control-blocks-something).
+
 A user can still edit or delete files they own, such as a per-user hook
 registration. The guardian repairs DefenseClaw's entries on its next pass.
 Vendor machine policy has no such window. The

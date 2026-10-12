@@ -83,3 +83,57 @@ func TestSandboxProcessRecordBoundsItsInput(t *testing.T) {
 		}
 	}
 }
+
+// A process the sandbox kernel feed reported carries its host pid and
+// Tetragon's exec id; without a captured in-sandbox pid it is recorded by
+// those alone. Only the tetragon source records them, and an exec id of
+// another shape is left out rather than failing the record.
+func TestSandboxProcessFromTheKernelFeed(t *testing.T) {
+	harness := newSandboxHarness(t)
+	identity := testSandboxIdentity()
+	execID := "ZGNjZXJ0LWhvc3Q6NDEyMTc3NDA4ODc4MDoyMTc0MDA="
+	code := 0
+	_, record := harness.recordOne(t, router.AdmissionOrdinary, SandboxProcessEvent{
+		Sandbox: identity, Event: SandboxProcessExit, Source: SandboxProcessSourceTetragon, HostPID: 217400, ExecID: execID,
+		Executable: "/usr/bin/cat", Name: "cat", CommandLine: "/usr/bin/cat dccert-block-marker", ExitCode: &code,
+	})
+	body := sandboxBody(t, record)
+	assertSandboxFields(t, body, map[string]any{
+		"defenseclaw.sandbox.process.source": "tetragon", "defenseclaw.sandbox.process.host_pid": int64(217400),
+		"defenseclaw.sandbox.process.exec_id": execID, "defenseclaw.sandbox.process.exit_code": int64(0),
+	})
+	if _, present := body["defenseclaw.sandbox.process.pid"]; present {
+		t.Fatal("an in-sandbox pid nobody captured is recorded")
+	}
+
+	_, record = harness.recordOne(t, router.AdmissionOrdinary, SandboxProcessEvent{
+		Sandbox: identity, Event: SandboxProcessStart, Source: SandboxProcessSourceTetragon, PID: 57, HostPID: 217400,
+		ExecID: "not base64: dccert-block-marker",
+	})
+	body = sandboxBody(t, record)
+	assertSandboxFields(t, body, map[string]any{"defenseclaw.sandbox.process.pid": int64(57), "defenseclaw.sandbox.process.host_pid": int64(217400)})
+	if _, present := body["defenseclaw.sandbox.process.exec_id"]; present {
+		t.Fatal("an exec id of another shape is recorded")
+	}
+
+	_, record = harness.recordOne(t, router.AdmissionOrdinary, SandboxProcessEvent{
+		Sandbox: identity, Event: SandboxProcessStart, Source: SandboxProcessSourceSample, PID: 42, HostPID: 217400, ExecID: execID,
+	})
+	body = sandboxBody(t, record)
+	for _, key := range []string{"defenseclaw.sandbox.process.host_pid", "defenseclaw.sandbox.process.exec_id"} {
+		if _, present := body[key]; present {
+			t.Fatalf("a sample record carries %s", key)
+		}
+	}
+
+	for _, bad := range []SandboxProcessEvent{
+		{Sandbox: identity, Event: SandboxProcessStart, Source: SandboxProcessSourceTetragon},
+		{Sandbox: identity, Event: SandboxProcessStart, Source: SandboxProcessSourceSample, HostPID: 217400},
+		{Sandbox: identity, Event: SandboxProcessStart, Source: SandboxProcessSourceTetragon, PID: -1, HostPID: 217400},
+	} {
+		_, recorder := harness.bind(t, router.AdmissionOrdinary)
+		if err := recorder.RecordSandboxProcess(context.Background(), bad); err == nil {
+			t.Fatalf("%+v accepted", bad)
+		}
+	}
+}

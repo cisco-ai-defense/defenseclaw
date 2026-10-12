@@ -147,6 +147,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	l.describe(ctx, record, true)
 	l.warnSELinuxConfinedUsers()
 	problems = append(problems, l.describeMachinePolicy(record)...)
+	problems = append(problems, l.describeTetragon(ctx)...)
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
@@ -946,6 +947,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
 	reportedPolicy, reloadError := "", ""
+	kernelApplied, kernelGeneration := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
 		r.Services = append(r.Services, status)
@@ -967,6 +969,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 					r.Readiness.Gateway = true
 					l.readGatewayPosture(body)
 					reportedPolicy, reloadError = gatewayPolicyHealth(body)
+					kernelApplied, kernelGeneration = gatewayKernelPolicy(body)
 				}
 			}
 		case "guardian":
@@ -986,6 +989,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.Enrollment = l.enrollmentCounts()
 	l.describePolicy(ctx, reportedPolicy, reloadError)
+	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {
 		// Not a verifyInstalled problem: the installed files match the
 		// record, and ensure must stay a no-op until config.yaml changes.

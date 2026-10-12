@@ -63,6 +63,14 @@ set only the owner and the mode of that file and never its group, so the tool
 and the lifecycle do not change it back and forth. The plain apt/dnf script
 writes the file only when it is missing, before the first install.
 
+## Tetragon
+
+For computers that already run Tetragon, [Tetragon on a Linux fleet](/docs/enterprise/tetragon)
+has tested plays that build on these steps: a template of the config per ring
+(`mode`, `burn_in` and `enforce_ack` as ring variables), the same stage,
+`ensure` and `verify` steps, and `tetragon verify` as a gate with `serial`
+rollout. `detect.sh --require-tetragon` reports compliance to your MDM.
+
 ## Requirements
 
 - A systemd host (systemd 239 or later, a package dependency). Without a

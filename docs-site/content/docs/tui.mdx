@@ -92,6 +92,16 @@ sandbox. `defenseclaw agent usage --sandbox NAME` lists one sandbox's.
 
 ![DefenseClaw TUI AI Discovery panel with a row for Claude Code on the host and a separate row, Claude Code (sandbox myapp-claude), for what the scan found inside the sandbox](/images/sandboxes/screens/tui-ai-discovery-sandbox.png)
 
+The Runtime panel reads the same gateway as `agent discovery runtime status`.
+It has no Tetragon lines. Only a managed Linux gateway reports Tetragon, and
+the managed Linux packages ship no `defenseclaw` command line or TUI in this
+release. On managed Linux,
+`sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery`
+prints the kernel sensor, the kernel controls and your own Tetragon policies,
+`enterprise linux tetragon status` the rest, and `defenseclaw-gateway status`
+ends its Subsystems list with a `Kernel sensor:` line; see
+[Tetragon on a Linux fleet](/docs/enterprise/tetragon).
+
 ### IDE plugins
 
 On Inventory (`6`), move to the **IDE plugins** sub-tab with `l` or Right

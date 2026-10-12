@@ -206,6 +206,10 @@ type Options struct {
 	// gitsafe).
 	Guard         GuardFunc
 	GuardGitlinks func(ctx context.Context, root string) ([]string, error)
+	// KernelFeed opens the sandbox kernel feed, whose Tetragon exec records
+	// join the process trees of docker sandboxes (kernelfeed.go). Nil uses
+	// DefaultKernelFeedDialer: the feed's socket on Linux, none elsewhere.
+	KernelFeed KernelFeedDialer
 }
 
 // Manager implements the gateway's SandboxController.
@@ -284,6 +288,8 @@ type Manager struct {
 	catalogOnce sync.Once
 	catalog     *catalog.Catalog
 	procs       ProcessLookup
+	// kfeed is the sandbox kernel feed connection (kernelfeed.go).
+	kfeed *kernelFeed
 	// procGate paces each sandbox's process and SSH records.
 	procGate *rateGate
 	// ownExecs are DefenseClaw's own execs, whose SSH OPEN records are
@@ -379,6 +385,10 @@ func New(opts Options) (*Manager, error) {
 		procGate:   newRateGate(activityBurst, activityRate),
 	}
 	m.procs = m
+	if opts.KernelFeed == nil {
+		opts.KernelFeed = DefaultKernelFeedDialer()
+	}
+	m.kfeed = newKernelFeed(opts.KernelFeed, opts.DefenseClawVersion, opts.Logf)
 	m.sink = newEgressSink(m)
 	debounce := time.Duration(config.DefaultOpenShellApprovalDebounceMs) * time.Millisecond
 	if cfg := opts.Config(); cfg != nil && cfg.OpenShell.Approvals.DebounceMs > 0 {
@@ -473,10 +483,11 @@ func (m *Manager) Run(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	wg.Add(3)
+	wg.Add(4)
 	go func() { defer wg.Done(); _ = m.batcher.Run(ctx) }()
 	go func() { defer wg.Done(); m.sink.run(ctx) }()
 	go func() { defer wg.Done(); m.configLoop(ctx) }()
+	go func() { defer wg.Done(); m.kfeed.run(ctx, m) }()
 
 	startup := true
 	reconcile := time.NewTimer(0)

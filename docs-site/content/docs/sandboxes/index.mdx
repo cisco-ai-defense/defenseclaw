@@ -81,6 +81,11 @@ a dedicated **hook ingress** port, and web traffic leaves through the
 them. With the default API port 18970, the ingress is 18971 and the egress
 proxy 18972.
 
+For how the sandbox layers divide the work with hooks, the runtime planes and
+(on managed Linux, outside sandboxes) Tetragon, and which layer enforces what
+in each place, see
+[Agent segmentation, visibility and enforcement](/docs/segmentation).
+
 ## See it in action
 
 Both demos were recorded with Claude Code in skip-permissions mode on a Linux

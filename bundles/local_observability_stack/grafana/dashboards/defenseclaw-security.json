@@ -801,13 +801,6 @@
       ],
       "transformations": [
         {
-          "id": "renameByRegex",
-          "options": {
-            "regexp": "Value #(\\w+)",
-            "renamePattern": "$1"
-          }
-        },
-        {
           "id": "merge"
         },
         {
@@ -822,11 +815,11 @@
             },
             "renameByName": {
               "connector": "connector",
-              "TOTAL": "total/1h",
-              "BLOCKS": "blocks/1h",
-              "WOULDBLOCK": "would-block/1h",
-              "ALERTS": "alerts/1h",
-              "CONFIRM": "confirms/1h"
+              "Value #TOTAL": "total/1h",
+              "Value #BLOCKS": "blocks/1h",
+              "Value #WOULDBLOCK": "would-block/1h",
+              "Value #ALERTS": "alerts/1h",
+              "Value #CONFIRM": "confirms/1h"
             }
           }
         }
