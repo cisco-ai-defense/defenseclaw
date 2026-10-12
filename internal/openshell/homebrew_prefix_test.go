@@ -20,6 +20,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -28,6 +29,9 @@ import (
 // "Permission denied @ dir_s_mkdir - /opt/homebrew/Library/Taps/nvidia" and
 // setup blamed Xcode. The folders Homebrew writes are checked first.
 func TestHomebrewPrefixProblem(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Homebrew runs on macOS and Linux; Windows reports no file owner")
+	}
 	prefix := t.TempDir()
 	taps := filepath.Join(prefix, "Library", "Taps")
 	if err := os.MkdirAll(taps, 0o755); err != nil {

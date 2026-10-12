@@ -521,9 +521,12 @@ class ComponentsListingTests(unittest.TestCase):
             (cmd_agent.usage, ["--refresh", "--sandbox", "myapp-claude"]),
             (cmd_agent.processes, ["--refresh"]),
         ):
+            # As a Linux host: on a Windows runner the real host refuses
+            # --sandbox before the discovery check this test is about.
             with patch("defenseclaw.commands.cmd_agent._resolve_gateway_target",
                        side_effect=_resolve_target_stub), \
-                    patch("defenseclaw.commands.cmd_agent.OrchestratorClient", OffClient):
+                    patch("defenseclaw.commands.cmd_agent.OrchestratorClient", OffClient), \
+                    patch("defenseclaw.platform_support.host_os", return_value="linux"):
                 result = runner.invoke(command, args, obj=_make_ctx())
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn("defenseclaw agent discovery enable", result.output)

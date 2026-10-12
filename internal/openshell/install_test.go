@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -476,6 +477,8 @@ func TestPrepareUpgrade(t *testing.T) {
 // replaces. A local one is not pulled again, and a pull that fails says
 // which image and what to do.
 func TestPullRuntimeImages(t *testing.T) {
+	// The images, not the file owner: Windows has no owner check that passes.
+	openshell.SetGatewayFileOwner(t, func(fs.FileInfo) bool { return true })
 	v, _ := openshell.ParseVersion(openshell.InstallerVersion)
 	supervisor := "ghcr.io/nvidia/openshell/supervisor:" + openshell.InstallerVersion
 	sandbox := "ghcr.io/nvidia/openshell/sandbox:" + openshell.InstallerVersion
