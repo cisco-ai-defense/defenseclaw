@@ -101,8 +101,9 @@ type sandboxAuthority struct {
 
 	// rematch serializes re-matches per registration id.
 	rematch keyedMutex
-	// records is each account's sandbox telemetry records budget.
-	records sandboxRecordBudget
+	// records is each account's sandbox telemetry records budget, and
+	// eventRecords the budget of the records of its daemon's other events.
+	records, eventRecords sandboxRecordBudget
 }
 
 // sandboxRegistrationStore is the registration store with the run record
@@ -189,10 +190,15 @@ func (a *APIServer) sandboxAuth() (*sandboxAuthority, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox authority key: %w", err)
 	}
+	store := sandboxreg.NewFileStore(sandboxreg.RegistrationsDir(dataDir))
+	// A registration revoked, removed or evicted by any path ends its
+	// sandbox's tracked phase (P2-A of the telemetry relay review).
+	store.OnGone = a.sandboxRegistrationGone
 	auth := &sandboxAuthority{
-		store:     sandboxreg.NewFileStore(sandboxreg.RegistrationsDir(dataDir)),
-		decisions: sandboxreg.NewFileDecisionStore(sandboxreg.DecisionsDir(dataDir)),
-		key:       key,
+		store:        store,
+		decisions:    sandboxreg.NewFileDecisionStore(sandboxreg.DecisionsDir(dataDir)),
+		key:          key,
+		eventRecords: sandboxRecordBudget{perSecond: sandboxEventRecordRate, burst: sandboxEventRecordBurst},
 	}
 	holder.ready.Store(auth)
 	return auth, nil

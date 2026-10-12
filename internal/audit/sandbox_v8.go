@@ -208,6 +208,12 @@ type SandboxLifecycleEvent struct {
 	// SandboxEgressEvent.
 	UserID   string
 	UserName string
+	// TrackedOnly: the record never starts tracking the sandbox's phase. It
+	// moves a phase already tracked, or removes it when deleted, and
+	// otherwise leaves the tracked phases as they are. The managed gateway
+	// sets it on the records of a revoked registration, whose sandbox it
+	// stopped tracking at the revocation (ForgetManagedSandbox).
+	TrackedOnly bool
 }
 
 // SandboxEgressSource identifies which boundary observed an egress decision.
@@ -638,11 +644,17 @@ type SandboxRecorder struct {
 	// events are rare; the other producers never take it.
 	lifecycle sync.Mutex
 	phases    map[string]sandboxTrackedPhase
+	// managedLimit bounds the managed sandboxes tracked for one account
+	// (LimitManagedPhases); 0 is no bound.
+	managedLimit int
 }
 
 type sandboxTrackedPhase struct {
 	connector string
 	phase     SandboxPhase
+	// owner is the account (SandboxLifecycleEvent.UserID) of a managed
+	// sandbox, which LimitManagedPhases bounds.
+	owner string
 }
 
 var _ SandboxTelemetry = (*SandboxRecorder)(nil)
@@ -732,6 +744,9 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 	if tracked, known := recorder.phases[phaseKey]; previous == "" && known {
 		previous = tracked.phase
 	}
+	if err := recorder.managedPhaseRoomLocked(phaseKey, input); err != nil {
+		return err
+	}
 	fields := sandboxV8FieldsFor(identity)
 	condition := sandboxConditionFields(input.Condition)
 	exitCode := observability.Absent[int64]()
@@ -776,7 +791,7 @@ func (recorder *SandboxRecorder) RecordSandboxLifecycle(ctx context.Context, inp
 	if err != nil {
 		return err
 	}
-	activeCounts := recorder.commitPhaseLocked(phaseKey, identity.Connector, identity.Phase)
+	activeCounts := recorder.commitPhaseLocked(phaseKey, identity.Connector, input.UserID, identity.Phase, input.TrackedOnly)
 	// Gauges lead the batch: a batch stops at its first failure, and a lost
 	// gauge point stays stale until the next lifecycle event.
 	metrics := make([]RuntimeV8GeneratedMetric, 0, len(activeCounts)+1)
@@ -1817,24 +1832,28 @@ func (recorder *SandboxRecorder) newEvent(
 // sandbox name holds no NUL, so the two kinds of key never meet.
 func sandboxPhaseKey(identity SandboxIdentity) string {
 	if id := identity.Managed.RegistrationID; id != "" {
-		return "\x00registration\x00" + id
+		return sandboxManagedPhaseKey(id)
 	}
 	return identity.Name
 }
 
 // commitPhaseLocked records the new phase of the sandbox tracked under key
 // (sandboxPhaseKey) and returns the active-sandbox counts of every
-// connector whose count may have changed. A deleted sandbox is forgotten.
-// The caller holds recorder.lifecycle.
+// connector whose count may have changed. A deleted sandbox is forgotten;
+// a trackedOnly record (SandboxLifecycleEvent.TrackedOnly) never starts
+// tracking one. The caller holds recorder.lifecycle.
 func (recorder *SandboxRecorder) commitPhaseLocked(
-	key, connector string,
+	key, connector, owner string,
 	phase SandboxPhase,
+	trackedOnly bool,
 ) []sandboxActiveCount {
 	previous, known := recorder.phases[key]
-	if phase == SandboxPhaseDeleted {
+	switch {
+	case phase == SandboxPhaseDeleted:
 		delete(recorder.phases, key)
-	} else {
-		recorder.phases[key] = sandboxTrackedPhase{connector: connector, phase: phase}
+	case trackedOnly && !known:
+	default:
+		recorder.phases[key] = sandboxTrackedPhase{connector: connector, phase: phase, owner: owner}
 	}
 	affected := []string{connector}
 	if known && previous.connector != connector {
@@ -1842,13 +1861,7 @@ func (recorder *SandboxRecorder) commitPhaseLocked(
 	}
 	counts := make([]sandboxActiveCount, 0, len(affected))
 	for _, candidate := range affected {
-		var active int64
-		for _, tracked := range recorder.phases {
-			if tracked.connector == candidate && tracked.phase.Active() {
-				active++
-			}
-		}
-		counts = append(counts, sandboxActiveCount{connector: candidate, active: active})
+		counts = append(counts, sandboxActiveCount{connector: candidate, active: recorder.activeLocked(candidate)})
 	}
 	return counts
 }

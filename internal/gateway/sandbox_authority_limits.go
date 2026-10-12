@@ -72,12 +72,35 @@ const (
 	sandboxRecordBudgetIdle    = time.Minute
 )
 
-// sandboxRecordBudget is the per-account sandbox telemetry records budget
-// (sandboxTelemetryRecordRate, sandboxTelemetryRecordBurst). The zero value
-// is ready.
+// The records of the daemon's other events (foreign sandboxes, rules and
+// containers, settings drift, refused access, refused runs) have a sibling
+// budget, counted by the record each event makes (sandboxEventRows: a
+// foreign_rule event is one record per rule), since one request may carry
+// MaxEventBatchRecords events of up to sandboxEventRulesMax rules each. The
+// daemon keeps at most MaxUnregisteredEventRecords of these events, so its
+// largest batch is the burst, and a batch past it is refused outright.
+const (
+	sandboxEventRecordRate  = 64
+	sandboxEventRecordBurst = sandboxrelay.MaxUnregisteredEventRecords * sandboxEventRulesMax
+)
+
+// sandboxRecordBudget is a per-account records budget: perSecond records a
+// second with a burst of burst, the sandbox telemetry records budget
+// (sandboxTelemetryRecordRate, sandboxTelemetryRecordBurst) when they are
+// zero. The zero value is ready.
 type sandboxRecordBudget struct {
+	perSecond, burst int
+
 	mu    sync.Mutex
 	byUID map[int]*sandboxRecordBucket
+}
+
+// limits is b's rate and burst.
+func (b *sandboxRecordBudget) limits() (int, int) {
+	if b.perSecond > 0 && b.burst > 0 {
+		return b.perSecond, b.burst
+	}
+	return sandboxTelemetryRecordRate, sandboxTelemetryRecordBurst
 }
 
 type sandboxRecordBucket struct {
@@ -100,9 +123,10 @@ func (b *sandboxRecordBudget) take(uid, n int, now time.Time) (time.Duration, bo
 			}
 		}
 	}
+	perSecond, burst := b.limits()
 	bucket, ok := b.byUID[uid]
 	if !ok {
-		bucket = &sandboxRecordBucket{limiter: rate.NewLimiter(sandboxTelemetryRecordRate, sandboxTelemetryRecordBurst)}
+		bucket = &sandboxRecordBucket{limiter: rate.NewLimiter(rate.Limit(perSecond), burst)}
 		b.byUID[uid] = bucket
 	}
 	bucket.seen = now
@@ -110,7 +134,7 @@ func (b *sandboxRecordBudget) take(uid, n int, now time.Time) (time.Duration, bo
 		return 0, true
 	}
 	short := float64(n) - bucket.limiter.TokensAt(now)
-	return time.Duration(math.Ceil(short / sandboxTelemetryRecordRate * float64(time.Second))), false
+	return time.Duration(math.Ceil(short / float64(perSecond) * float64(time.Second))), false
 }
 
 // sandboxBudgetClass is the budget class of a sandbox route path, "" for

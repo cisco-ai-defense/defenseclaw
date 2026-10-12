@@ -60,8 +60,35 @@ func (a *APIServer) managedSandboxRecorder() *audit.SandboxRecorder {
 	if r, ok := managedSandboxRecorders.Load(a); ok {
 		return r.(*audit.SandboxRecorder)
 	}
-	r, _ := managedSandboxRecorders.LoadOrStore(a, audit.NewSandboxRecorder(a.logger))
+	fresh := audit.NewSandboxRecorder(a.logger)
+	// One account tracks at most as many managed sandboxes as it may hold
+	// registrations: a lifecycle record past that is dropped and logged.
+	fresh.LimitManagedPhases(sandboxreg.MaxEntriesPerUID)
+	r, _ := managedSandboxRecorders.LoadOrStore(a, fresh)
 	return r.(*audit.SandboxRecorder)
+}
+
+// sandboxRegistrationGone stops tracking the phase of reg's sandbox. The
+// registration store calls it (sandboxreg.FileStore.OnGone) whenever a
+// registration is revoked, removed or evicted, by any path, so a sandbox
+// whose deleted phase never arrives neither stays in the managed
+// recorder's phase map nor counts in sandbox.active; the daemon's deleted
+// record is not relied on.
+func (a *APIServer) sandboxRegistrationGone(reg sandboxreg.Registration) {
+	if r, ok := managedSandboxRecorders.Load(a); ok {
+		r.(*audit.SandboxRecorder).ForgetManagedSandbox(context.Background(), reg.ID)
+	}
+}
+
+// sandboxForgetIfGone stops tracking the phase of reg's sandbox when reg was
+// revoked or removed while a batch of its lifecycle records was being
+// recorded: the store's OnGone may have run before one of them tracked the
+// phase again.
+func (a *APIServer) sandboxForgetIfGone(auth *sandboxAuthority, uid int, reg sandboxreg.Registration) {
+	cur, ok, err := auth.store.Get(uid, reg.ID)
+	if err == nil && (!ok || cur.State == sandboxreg.StateRevoked) {
+		a.sandboxRegistrationGone(reg)
+	}
 }
 
 // sandboxRecordFailed logs a managed record the recorder refused; the
@@ -441,7 +468,11 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 			// The phase sets the severity (error HIGH, unknown MEDIUM).
 			e := audit.SandboxLifecycleEvent{Sandbox: identity, PreviousPhase: audit.SandboxPhase(c.PreviousPhase),
 				Trigger: audit.SandboxLifecycleTrigger(c.Trigger), ExitCode: c.ExitCode, Timestamp: ev.Time,
-				UserID: subject.UserID, UserName: subject.UserName}
+				UserID: subject.UserID, UserName: subject.UserName,
+				// A revoked registration's sandbox is no longer tracked
+				// (sandboxRegistrationGone): its last records never track
+				// it again.
+				TrackedOnly: reg.State == sandboxreg.StateRevoked}
 			if c.Condition != nil {
 				e.Condition = &audit.SandboxCondition{Type: c.Condition.Type, Status: c.Condition.Status,
 					Reason: c.Condition.Reason, Message: c.Condition.Message}
@@ -460,6 +491,10 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 			Severity: sandboxClaimSeverity(c.Severity, floor), Timestamp: ev.Time, UserID: subject.UserID, UserName: subject.UserName})
 	}
 	if err := record(identity); err != nil {
+		if errors.Is(err, audit.ErrSandboxPhaseLimit) {
+			sandboxRecordFailed(ev.Kind, err)
+			return
+		}
 		// Should the recorder refuse the profile stamp, the record keeps
 		// the registration and the subject key alone.
 		sandboxRecordFailed(ev.Kind+" (stamped)", err)
@@ -468,10 +503,11 @@ func emitSandboxTelemetryClaim(ctx context.Context, a *APIServer, reg sandboxreg
 	}
 }
 
-// sandboxTelemetryAfterRevoke is how long after its daemon reported a
-// sandbox deleted the registration's tombstone still takes the sandbox's
-// last records (the deleting and deleted phases, the ends of its
-// connections), which the daemon posts within seconds.
+// sandboxTelemetryAfterRevoke is how long after a registration was revoked
+// (its daemon reported the sandbox deleted, or the gateway revoked it) its
+// tombstone still takes the sandbox's last records (the stopping, stopped,
+// error, deleting and deleted phases, the ends of its connections), which
+// the daemon posts within seconds.
 const sandboxTelemetryAfterRevoke = 10 * time.Minute
 
 // sandboxClaimMaxDuration bounds a claimed connection duration.
@@ -482,9 +518,14 @@ const sandboxClaimMaxDuration = 30 * 24 * time.Hour
 //
 //   - a registration not bound to a sandbox (pending, or no sandbox name)
 //     names no sandbox to record for: 403 sandbox_not_allowed;
-//   - a revoked registration takes them only when its daemon reported the
-//     sandbox deleted (reason deleted, not a revocation of the gateway's),
-//     and only within sandboxTelemetryAfterRevoke of it: 410 otherwise;
+//   - a revoked registration takes them only within
+//     sandboxTelemetryAfterRevoke of the revocation, whether its daemon
+//     reported the sandbox deleted or the gateway revoked it (a changed
+//     policy or subject: the daemon then stops and deletes the sandbox and
+//     reports its going away), but never once its daemon reported the
+//     sandbox foreign, which the registration never named: 410 otherwise.
+//     What such a tombstone takes is the sandbox's going away alone
+//     (sandboxTelemetryRecordAllowed);
 //   - the account's records budget (sandboxRecordBudget): 429 with
 //     Retry-After when it is spent.
 func sandboxTelemetryAdmit(w http.ResponseWriter, auth *sandboxAuthority, peer managedHookPeer, reg sandboxreg.Registration, n int) bool {
@@ -493,12 +534,18 @@ func sandboxTelemetryAdmit(w http.ResponseWriter, auth *sandboxAuthority, peer m
 	case reg.State == sandboxreg.StatePending || strings.TrimSpace(reg.SandboxName) == "":
 		writeSandboxReason(w, sandboxrelay.ReasonNotAllowed, sandboxTextNotBound)
 		return false
-	case reg.State == sandboxreg.StateRevoked && (reg.RevokedReason != sandboxreg.ReasonDeleted || reg.RevokedAt.IsZero() ||
+	case reg.State == sandboxreg.StateRevoked && (reg.RevokedReason == sandboxreg.ReasonForeign || reg.RevokedAt.IsZero() ||
 		now.Sub(reg.RevokedAt) > sandboxTelemetryAfterRevoke):
 		writeSandboxReason(w, sandboxrelay.ReasonRegistrationRevoked, sandboxTextRegistrationGone)
 		return false
 	}
-	wait, ok := auth.records.take(peer.UID, n, now)
+	return sandboxBudgetAdmit(w, &auth.records, peer, n, now)
+}
+
+// sandboxBudgetAdmit spends n records of peer's budget b, or answers 429
+// with Retry-After when it is spent.
+func sandboxBudgetAdmit(w http.ResponseWriter, b *sandboxRecordBudget, peer managedHookPeer, n int, now time.Time) bool {
+	wait, ok := b.take(peer.UID, n, now)
 	if !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(max(1, int(math.Ceil(wait.Seconds())))))
 		writeSandboxRefusal(w, http.StatusTooManyRequests, managedHookReasonRateLimited,
@@ -508,12 +555,29 @@ func sandboxTelemetryAdmit(w http.ResponseWriter, auth *sandboxAuthority, peer m
 	return true
 }
 
+// sandboxEventRows is the number of managed records a daemon event of a
+// kind other than telemetry makes: a foreign_rule event one per rule it
+// names (at most sandboxEventRulesMax), every other kind one.
+func sandboxEventRows(ev sandboxrelay.Event) int {
+	if ev.Kind != sandboxrelay.EventForeignRule {
+		return 1
+	}
+	var p struct {
+		Rules []json.RawMessage `json:"rules"`
+	}
+	if json.Unmarshal(ev.Payload, &p) != nil {
+		return 1
+	}
+	return min(max(len(p.Rules), 1), sandboxEventRulesMax)
+}
+
 // sandboxTelemetryRecordAllowed reports whether one telemetry record of an
 // admitted batch (sandboxTelemetryAdmit) is recorded: never one dated before
-// its registration was made, and under a deleted sandbox's tombstone only
-// the records of its going away (the stopping, stopped, error, deleting and
-// deleted phases and the ends of its connections), dated before the
-// tombstone stops taking records.
+// its registration was made, and under a tombstone only the records of its
+// sandbox going away (the stopping, stopped, error, deleting and deleted
+// phases and the ends of its connections), dated before the tombstone stops
+// taking records. None of them tracks the sandbox's phase again
+// (audit.SandboxLifecycleEvent.TrackedOnly).
 func sandboxTelemetryRecordAllowed(reg sandboxreg.Registration, ev sandboxrelay.Event) bool {
 	if !reg.CreatedAt.IsZero() && ev.Time.Before(reg.CreatedAt) {
 		return false
@@ -572,10 +636,16 @@ func sandboxClaimDuration(ms int64) time.Duration {
 	return time.Duration(ms) * time.Millisecond
 }
 
+// errSandboxClaimKeyCollision is the error of a payload two of whose object
+// keys are one key once cleaned ("rule" and "ru\u200ble"): which of them a
+// record would take is the daemon's pick, so the batch is refused.
+var errSandboxClaimKeyCollision = errors.New("two keys of the payload are the same key once cleaned")
+
 // sandboxClaimPayload is a daemon event's payload with every string in it,
 // object keys included, made safe for the managed audit (sandboxClaimText):
 // the daemon runs as the user, so each value is the user's text. Every kind
-// of daemon record is cleaned here, once, before it is decoded.
+// of daemon record is cleaned here, once, before it is decoded. A payload
+// whose keys collide once cleaned is errSandboxClaimKeyCollision.
 func sandboxClaimPayload(raw json.RawMessage) (json.RawMessage, error) {
 	if len(raw) == 0 {
 		return raw, nil
@@ -589,32 +659,52 @@ func sandboxClaimPayload(raw json.RawMessage) (json.RawMessage, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("trailing data after the payload")
 	}
-	return json.Marshal(sandboxClaimValue(v))
+	clean, err := sandboxClaimValue(v)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(clean)
 }
 
-func sandboxClaimValue(v any) any {
+func sandboxClaimValue(v any) (any, error) {
 	switch t := v.(type) {
 	case string:
-		return sandboxClaimText(t)
+		return sandboxClaimText(t), nil
 	case []any:
 		for i := range t {
-			t[i] = sandboxClaimValue(t[i])
+			clean, err := sandboxClaimValue(t[i])
+			if err != nil {
+				return nil, err
+			}
+			t[i] = clean
 		}
-		return t
+		return t, nil
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for k, e := range t {
-			out[sandboxClaimText(k)] = sandboxClaimValue(e)
+			key := sandboxClaimText(k)
+			if _, taken := out[key]; taken {
+				return nil, fmt.Errorf("%w: %q", errSandboxClaimKeyCollision, key)
+			}
+			clean, err := sandboxClaimValue(e)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = clean
 		}
-		return out
+		return out, nil
 	}
-	return v
+	return v, nil
 }
 
-// sandboxClaimText is s without the C0 and C1 control characters (NUL, ESC
-// and DEL among them) and the bidirectional overrides and isolates, which
-// would rewrite a terminal or a log viewer that shows the audit; a tab,
-// newline or carriage return becomes a space.
+// sandboxClaimText is s without the characters that would rewrite or hide
+// text in a terminal or a log viewer that shows the audit: the C0 and C1
+// control characters (NUL, ESC and DEL among them), the bidirectional
+// marks, overrides and isolates (U+061C, U+200E, U+200F, U+202A-U+202E,
+// U+2066-U+2069), the zero-width and invisible characters (U+200B-U+200D,
+// U+2060-U+2064, U+FEFF) and the tag characters (U+E0000-U+E007F). A tab,
+// newline, carriage return, line separator (U+2028) or paragraph separator
+// (U+2029) becomes a space.
 func sandboxClaimText(s string) string {
 	if !strings.ContainsFunc(s, sandboxClaimControl) {
 		return s
@@ -623,7 +713,7 @@ func sandboxClaimText(s string) string {
 	b.Grow(len(s))
 	for _, r := range s {
 		switch {
-		case r == '\t' || r == '\n' || r == '\r':
+		case r == '\t' || r == '\n' || r == '\r' || r == 0x2028 || r == 0x2029:
 			b.WriteByte(' ')
 		case sandboxClaimControl(r):
 		default:
@@ -633,6 +723,16 @@ func sandboxClaimText(s string) string {
 	return b.String()
 }
 
+// sandboxClaimControl reports a character sandboxClaimText replaces or
+// removes.
 func sandboxClaimControl(r rune) bool {
-	return r < 0x20 || r >= 0x7f && r <= 0x9f || r >= 0x202a && r <= 0x202e || r >= 0x2066 && r <= 0x2069
+	switch {
+	case r < 0x20, r >= 0x7f && r <= 0x9f:
+		return true
+	case r == 0x061c, r >= 0x200b && r <= 0x200f, r == 0x2028, r == 0x2029, r >= 0x202a && r <= 0x202e:
+		return true
+	case r >= 0x2060 && r <= 0x2064, r >= 0x2066 && r <= 0x2069, r == 0xfeff, r >= 0xe0000 && r <= 0xe007f:
+		return true
+	}
+	return false
 }

@@ -244,6 +244,12 @@ type FileStore struct {
 	dir string
 	// Now is the store's clock; nil means time.Now.
 	Now func() time.Time
+	// OnGone, when set, is called with each registration a write revoked
+	// (Revoke, RevokeSandbox, Deleted of a bound entry), removed (Deleted)
+	// or evicted (Create, CreateRun), once the write is stored and the
+	// store unlocked. The managed gateway ends the tracked phase of the
+	// registration's sandbox there, whatever its daemon last reported.
+	OnGone func(Registration)
 
 	// limit and runLimit override MaxEntriesPerUID and MaxRunBytesPerUID
 	// in tests.
@@ -414,6 +420,8 @@ func (s *FileStore) CreateRun(uid int, r Registration, run *Run) error {
 			return err
 		}
 	}
+	var gone []Registration
+	defer func() { s.notifyGone(gone) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	have, err := s.loadLocked(uid)
@@ -432,8 +440,9 @@ func (s *FileStore) CreateRun(uid int, r Registration, run *Run) error {
 		r.CreatedAt = s.now()
 	}
 	next := have.clone()
+	var evicted []Registration
 	if len(next.regs) >= s.maxEntries() {
-		s.evict(next)
+		evicted = s.evict(next)
 		if len(next.regs) >= s.maxEntries() {
 			return ErrFull
 		}
@@ -449,7 +458,11 @@ func (s *FileStore) CreateRun(uid int, r Registration, run *Run) error {
 		next.runs[r.ID] = *run
 	}
 	next.regs = append(next.regs, r)
-	return s.saveLocked(uid, next)
+	if err := s.saveLocked(uid, next); err != nil {
+		return err
+	}
+	gone = evicted
+	return nil
 }
 
 // dropExpiredRuns drops the run records of u's expired pending entries:
@@ -466,9 +479,11 @@ func (s *FileStore) dropExpiredRuns(u *uidRecords) {
 // evict drops entries of u until there is room for one more: the user's
 // own deleted tombstones first (oldest first), then expired pending
 // entries, then the gateway's tombstones, whose sandboxes are retired.
-// Live and unexpired pending entries are never evicted.
-func (s *FileStore) evict(u *uidRecords) {
+// Live and unexpired pending entries are never evicted. It returns the
+// entries it dropped.
+func (s *FileStore) evict(u *uidRecords) []Registration {
 	now, limit := s.now(), s.maxEntries()
+	var dropped []Registration
 	for _, evictable := range []func(Registration) bool{
 		func(r Registration) bool { return r.State == StateRevoked && r.RevokedReason == ReasonDeleted },
 		func(r Registration) bool { return PendingExpired(r, now) },
@@ -486,8 +501,21 @@ func (s *FileStore) evict(u *uidRecords) {
 			}
 			s.retire(u, u.regs[oldest])
 			delete(u.runs, u.regs[oldest].ID)
+			dropped = append(dropped, u.regs[oldest])
 			u.regs = slices.Delete(u.regs, oldest, oldest+1)
 		}
+	}
+	return dropped
+}
+
+// notifyGone tells OnGone of the registrations a stored write revoked,
+// removed or evicted. The caller no longer holds s.mu.
+func (s *FileStore) notifyGone(gone []Registration) {
+	if s.OnGone == nil {
+		return
+	}
+	for _, r := range gone {
+		s.OnGone(r)
 	}
 }
 
@@ -629,6 +657,8 @@ func (s *FileStore) Revoke(uid int, id, reason string) error {
 	if !ValidID(id) {
 		return ErrNotFound
 	}
+	var gone []Registration
+	defer func() { s.notifyGone(gone) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, err := s.loadLocked(uid)
@@ -645,7 +675,11 @@ func (s *FileStore) Revoke(uid int, id, reason string) error {
 		r.State, r.RevokedReason, r.RevokedAt = StateRevoked, boundedReason(reason), s.now()
 		next := u.clone()
 		next.regs[i] = r
-		return s.saveLocked(uid, next)
+		if err := s.saveLocked(uid, next); err != nil {
+			return err
+		}
+		gone = append(gone, r)
+		return nil
 	}
 	return ErrNotFound
 }
@@ -661,6 +695,8 @@ func (s *FileStore) Deleted(uid int, id string) error {
 	if !ValidID(id) {
 		return ErrNotFound
 	}
+	var gone []Registration
+	defer func() { s.notifyGone(gone) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, err := s.loadLocked(uid)
@@ -683,7 +719,11 @@ func (s *FileStore) Deleted(uid int, id string) error {
 			next.regs = slices.Delete(next.regs, i, i+1)
 		}
 		delete(next.runs, id)
-		return s.saveLocked(uid, next)
+		if err := s.saveLocked(uid, next); err != nil {
+			return err
+		}
+		gone = append(gone, r)
+		return nil
 	}
 	return ErrNotFound
 }
@@ -753,6 +793,8 @@ func (s *FileStore) RevokeSandbox(uid int, sandboxID, sandboxName, reason string
 	if sandboxID == "" && sandboxName == "" {
 		return nil, nil
 	}
+	var gone []Registration
+	defer func() { s.notifyGone(gone) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, err := s.loadLocked(uid)
@@ -786,6 +828,7 @@ func (s *FileStore) RevokeSandbox(uid int, sandboxID, sandboxName, reason string
 	if err := s.saveLocked(uid, next); err != nil {
 		return nil, err
 	}
+	gone = revoked
 	return revoked, nil
 }
 
