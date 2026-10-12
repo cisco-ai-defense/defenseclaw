@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -36,11 +37,12 @@ const (
 )
 
 var (
-	isWindowsService        = svc.IsWindowsService
-	runSCMService           = svc.Run
-	terminateWindowsService = func(code uint32) { os.Exit(int(code)) }
-	windowsServiceStopWait  = 30 * time.Second
-	serviceNameRE           = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
+	isWindowsService                       = svc.IsWindowsService
+	adoptWindowsGatewayServiceDefaultOwner = managed.AdoptWindowsGatewayServiceDefaultOwner
+	runSCMService                          = svc.Run
+	terminateWindowsService                = func(code uint32) { os.Exit(int(code)) }
+	windowsServiceStopWait                 = 30 * time.Second
+	serviceNameRE                          = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,128}$`)
 )
 
 type windowsServiceExecutor func(context.Context) int
@@ -76,6 +78,10 @@ func runWindowsService(execute windowsServiceExecutor) (bool, int) {
 		return true, 1
 	}
 
+	// Before creating any file, including the service log: the LocalSystem
+	// gateway must own new objects as its service SID so it can harden them.
+	_, ownerErr := adoptWindowsGatewayServiceDefaultOwner()
+
 	closeLog, err := redirectWindowsServiceOutput()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "defenseclaw: initialize Windows service log: %v\n", err)
@@ -83,6 +89,10 @@ func runWindowsService(execute windowsServiceExecutor) (bool, int) {
 	}
 	if closeLog != nil {
 		defer closeLog()
+	}
+	if ownerErr != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: %v\n", ownerErr)
+		return true, 1
 	}
 
 	handler := &defenseClawWindowsService{execute: execute}

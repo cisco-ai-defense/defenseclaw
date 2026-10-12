@@ -547,6 +547,81 @@ func WindowsCurrentProcessIsGatewayService() bool {
 	return err == nil && isGateway
 }
 
+// windowsTokenOwner mirrors the Win32 TOKEN_OWNER structure.
+type windowsTokenOwner struct {
+	Owner *windows.SID
+}
+
+// AdoptWindowsGatewayServiceDefaultOwner makes the gateway's service SID the
+// default owner of objects the gateway process creates.
+//
+// The gateway logs on as LocalSystem with a write-restricted token. Without
+// this, its new files are owned by LocalSystem, which is not one of the
+// token's restricting SIDs, so the owner's implicit WRITE_DAC fails the
+// restricted access check and the gateway cannot apply the protected DACL to
+// files it just created (for example SQLite's -wal sidecar). With the service
+// SID as owner, new files are owned as they were when the gateway logged on as
+// the virtual account. It reports whether the owner was changed; it is a no-op
+// for any process that is not the pinned gateway service, and for a gateway
+// still logged on as its virtual account.
+func AdoptWindowsGatewayServiceDefaultOwner() (bool, error) {
+	account := strings.TrimSpace(os.Getenv(WindowsServiceAccountEnv))
+	if account == "" {
+		return false, nil
+	}
+	serviceSID, err := windowsVirtualServiceSID(account)
+	if err != nil {
+		return false, err
+	}
+	var token windows.Token
+	if err := windows.OpenProcessToken(
+		windows.CurrentProcess(),
+		windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT,
+		&token,
+	); err != nil {
+		return false, fmt.Errorf("windows gateway default owner: open process token: %w", err)
+	}
+	defer func() { _ = token.Close() }()
+	return adoptWindowsGatewayServiceDefaultOwner(token, serviceSID, func(owner *windows.SID) error {
+		value := windowsTokenOwner{Owner: owner}
+		return windows.SetTokenInformation(
+			token,
+			windows.TokenOwner,
+			(*byte)(unsafe.Pointer(&value)),
+			uint32(unsafe.Sizeof(value)),
+		)
+	})
+}
+
+func adoptWindowsGatewayServiceDefaultOwner(
+	token windowsTokenIdentity,
+	serviceSID *windows.SID,
+	setOwner func(*windows.SID) error,
+) (bool, error) {
+	user, err := token.GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		return false, fmt.Errorf("windows gateway default owner: read token user: %w", err)
+	}
+	if !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		// Virtual-account logon already owns new objects as the service SID.
+		return false, nil
+	}
+	isGateway, err := windowsTokenRunsAsService(token, serviceSID)
+	if err != nil {
+		return false, err
+	}
+	if !isGateway {
+		return false, nil
+	}
+	if err := setOwner(serviceSID); err != nil {
+		return false, fmt.Errorf(
+			"windows gateway default owner: set token owner to service SID %s: %w",
+			sidString(serviceSID), err,
+		)
+	}
+	return true, nil
+}
+
 func windowsTokenRunsAsService(token windowsTokenIdentity, serviceSID *windows.SID) (bool, error) {
 	if serviceSID == nil || !serviceSID.IsValid() {
 		return false, fmt.Errorf("windows service identity: service SID is unavailable")

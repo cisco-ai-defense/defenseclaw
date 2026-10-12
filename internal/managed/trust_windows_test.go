@@ -602,3 +602,56 @@ func TestWindowsTokenRunsAsService(t *testing.T) {
 		t.Fatal("nil service SID was accepted")
 	}
 }
+
+func TestAdoptWindowsGatewayServiceDefaultOwner(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-1858176940-1394861675-2895326486-505287571-2610476274")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.StringToSid("S-1-5-21-1-2-3-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	enabled := uint32(windows.SE_GROUP_ENABLED | windows.SE_GROUP_ENABLED_BY_DEFAULT | windows.SE_GROUP_MANDATORY)
+	gatewayGroup := []windows.SIDAndAttributes{{Sid: serviceSID, Attributes: enabled}}
+	for _, test := range []struct {
+		name    string
+		token   fakeServiceToken
+		applied bool
+	}{
+		{"localsystem gateway takes service SID owner", fakeServiceToken{user: localSystem, groups: gatewayGroup}, true},
+		{"virtual account gateway is unchanged", fakeServiceToken{user: serviceSID}, false},
+		{"localsystem without gateway SID is unchanged", fakeServiceToken{user: localSystem}, false},
+		{"interactive user is unchanged", fakeServiceToken{user: user, groups: gatewayGroup}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var set *windows.SID
+			applied, err := adoptWindowsGatewayServiceDefaultOwner(test.token, serviceSID, func(owner *windows.SID) error {
+				set = owner
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if applied != test.applied || (set != nil) != test.applied {
+				t.Fatalf("applied=%v set=%v, want applied=%v", applied, set, test.applied)
+			}
+			if test.applied && !set.Equals(serviceSID) {
+				t.Fatalf("owner set to %v, want %v", set, serviceSID)
+			}
+		})
+	}
+
+	_, err = adoptWindowsGatewayServiceDefaultOwner(
+		fakeServiceToken{user: localSystem, groups: gatewayGroup},
+		serviceSID,
+		func(*windows.SID) error { return windows.ERROR_INVALID_OWNER },
+	)
+	if err == nil || !strings.Contains(err.Error(), "set token owner to service SID") {
+		t.Fatalf("setter failure error = %v", err)
+	}
+}
