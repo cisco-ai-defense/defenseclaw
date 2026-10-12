@@ -866,18 +866,32 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if input.Command != "" {
 		var parsed, dynamic bool
 		operands, parsed, dynamic = hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		var dynamicOperands []string
+		var dynamicUnknown bool
+		if dynamic {
+			dynamicOperands, dynamicUnknown = hookpaths.ShellDynamicWriteOperands(input.Command, input.CWD, input.ActiveHome)
+		}
 		// A truncated client map is not complete, so a nonempty target in it
 		// proves only its own operand. When the gateway cannot list every
 		// redirect target either (the command does not parse, or a target is
 		// not a static word) and cannot resolve one itself, the protected-path
 		// decision is unknown: fail closed (GAP-1395). Every write redirect
 		// operator contains a greater-than sign.
-		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
+		if truncated && cannotResolveLocally && strings.Contains(input.Command, ">") &&
+			(!parsed || dynamic && dynamicUnknown) {
+			return true
+		}
+		if dynamicUnknown && truncated {
 			return true
 		}
 		for i, operand := range operands {
 			safe := i < len(safeRedirects) && safeRedirects[i].Safe
 			if writeTarget(operand, safe, false) {
+				return true
+			}
+		}
+		for _, operand := range dynamicOperands {
+			if writeTarget(operand, false, false) {
 				return true
 			}
 		}
