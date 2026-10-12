@@ -319,7 +319,11 @@ function Get-LedgerTargets([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return 'absent' }
     $ledger = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
     $targets = foreach ($target in @($ledger.protected_targets)) {
-        '{0}|{1}|{2}|{3}|{4}' -f $target.sid, $target.user, $target.user_home, $target.connector, $target.ok
+        # The ledger omits empty fields (user and user_home on Windows).
+        @(foreach ($name in 'sid', 'user', 'user_home', 'connector', 'ok') {
+                $property = $target.PSObject.Properties[$name]
+                if ($property) { [string]$property.Value } else { '' }
+            }) -join '|'
     }
     return (@($targets) | Sort-Object) -join "`n"
 }
