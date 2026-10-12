@@ -43,6 +43,7 @@ $script:receiptPhase = 'prepared'
 $script:installed = $false
 $script:hashChecks = 0
 $script:goCalls = 0
+$script:purgeContractLocks = $null
 
 function Get-DefenseClawDeploymentMetadata {
     param([hashtable]$Layout, [switch]$Required)
@@ -94,6 +95,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         [switch]$PurgeContractLocks
     )
     $script:goCalls++
+    $script:purgeContractLocks = [bool]$PurgeContractLocks
     return [pscustomobject]@{ ok = $true }
 }
 
@@ -117,6 +119,7 @@ function Invoke-RetryCase {
     $script:receiptPhase = $ReceiptPhase
     $script:goCalls = 0
     $script:hashChecks = 0
+    $script:purgeContractLocks = $null
     [void](Complete-DefenseClawCommittedManagedHooksFinalization `
         -Layout $layout `
         -GatewayServiceName 'DefenseClawGateway' `
@@ -127,6 +130,13 @@ function Invoke-RetryCase {
             "phase=$Phase receipt=$ReceiptPhase purge=${Purge}: " +
             "hash checks=$($script:hashChecks), Go calls=$($script:goCalls); " +
             "wanted 1 and $WantGoCalls"
+        )
+    }
+    # The Go teardown must receive the caller's purge choice unchanged.
+    if ($WantGoCalls -gt 0 -and $script:purgeContractLocks -ne $Purge) {
+        throw (
+            "phase=$Phase receipt=$ReceiptPhase purge=${Purge}: " +
+            "teardown received PurgeContractLocks=$($script:purgeContractLocks)"
         )
     }
 }
@@ -146,7 +156,10 @@ try {
     throw 'non-finalizable journal was accepted'
 }
 catch {
-    if ($_.Exception.Message -eq 'non-finalizable journal was accepted') {
+    # Only the journal-phase rejection proves this case; any earlier failure
+    # (metadata, receipt, service checks) must fail the smoke.
+    if ($_.Exception.Message -cne
+        'managed-hook finalization requires a prepared or finalized journal: captured') {
         throw
     }
 }
