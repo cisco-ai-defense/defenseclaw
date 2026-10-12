@@ -104,7 +104,13 @@ func requireSandboxProject(t *testing.T) string {
 // uid 1001.
 func postRequireSandboxHook(t *testing.T, api *APIServer, hook requireSandboxHook, project string, ctx context.Context, extra map[string]string) map[string]any {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, hook.path, strings.NewReader(strings.ReplaceAll(hook.body, "__CWD__", project)))
+	// JSON-escape the path: Windows temp dirs have backslashes.
+	quoted, err := json.Marshal(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := strings.ReplaceAll(hook.body, "__CWD__", string(quoted[1:len(quoted)-1]))
+	req := httptest.NewRequest(http.MethodPost, hook.path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range hook.headers {
 		req.Header.Set(k, v)
