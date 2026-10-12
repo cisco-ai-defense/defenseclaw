@@ -69,10 +69,23 @@ The four services:
 
 | Service | Identity | Role |
 | --- | --- | --- |
-| `DefenseClawGateway` | `NT SERVICE\DefenseClawGateway`, with `SeChangeNotifyPrivilege` only | Runs the policy engine and the hook API on `127.0.0.1:18970` |
+| `DefenseClawGateway` | LocalSystem, write-restricted by its `NT SERVICE\DefenseClawGateway` service SID, with only `SeChangeNotifyPrivilege` | Runs the policy engine and the hook API on `127.0.0.1:18970` |
 | `DefenseClawSensorHelper` | LocalSystem, with `SeChangeNotifyPrivilege` only | Answers the gateway's fixed AI Discovery requests |
 | `DefenseClawHookGuardian` | LocalSystem, with a fixed privilege list | Writes and repairs each enrolled user's hook registrations, and removes a quarantined skill or plugin from a user's folder, using that user's token |
 | `DefenseClawHookEnumerator` | LocalSystem, with the same privilege list | Finds eligible profiles (local, domain and Microsoft Entra ID accounts) and writes the target manifest |
+
+The gateway needs no "Log on as a service" grant. Existing virtual-account
+installs move to LocalSystem on upgrade or repair; the service SID remains
+the gateway's write boundary. The gateway refuses reads and scans inside
+user profiles; scan a profile project from the signed-in user's session or
+move it outside the profile. This keeps the former virtual-account boundary
+around other users' profiles. Readable paths outside profiles still scan.
+Scanner children inherit the write-restricted LocalSystem token and its
+single `SeChangeNotifyPrivilege`, because the gateway lacks the privileges
+to start a child as another user. The watcher skips profile roots and reports
+degraded health only when it skips one. Outside profiles, caller-supplied
+paths that only administrators could read are now readable as LocalSystem;
+this extends the W-05 early-phase limitation.
 
 The Service Control Manager restarts each service after a failure.
 
@@ -89,7 +102,7 @@ How a hook reaches the gateway:
     <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
     <Node id="hook" kind="connector">{`defenseclaw-hook.exe\nchecks the listener`}</Node>
   </Zone>
-  <Zone id="w2" label="Z2 · Gateway (virtual account)" tone="restricted">
+  <Zone id="w2" label="Z2 · Gateway (restricted LocalSystem)" tone="restricted">
     <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
   </Zone>
   <Edge from="scm" to="gw" label="starts" />
@@ -262,8 +275,8 @@ gateway's own compiler, and loads every rule pack the gateway would load,
 before it changes anything. When the gateway could not load the file, Setup
 stops with exit code `1639` and names the line and the reason.
 A `kind: jsonl` destination needs a folder that only SYSTEM, Administrators
-and the gateway service account `NT SERVICE\DefenseClawGateway` can write, and
-that this account can create files in (Modify); Setup refuses any other folder
+and the gateway service SID `NT SERVICE\DefenseClawGateway` can write, and
+that the gateway can create files in (Modify); Setup refuses any other folder
 with `1639` and prints the `icacls` grant. A missing folder gets what its
 nearest existing parent passes on to new subfolders when the gateway creates
 it, so Setup refuses it the same way when that parent lets standard users
@@ -395,7 +408,7 @@ keys and for rotation.
 
 The LLM judge checks prompts (and, if you turn it on, tool results) for the
 connectors you list, and the skill and MCP scanners use the same model for
-their LLM analyzers. The gateway runs as a service account without a user
+their LLM analyzers. The gateway service has no user
 environment, so it never reads `llm.api_key_env` or a `.env` key here. Name
 a protected credential for the key instead:
 

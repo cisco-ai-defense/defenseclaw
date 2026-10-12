@@ -1083,16 +1083,17 @@ grants do not go to it:
 
 | Setting | macOS | Linux | Windows |
 | --- | --- | --- | --- |
-| Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | virtual service account |
+| Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | write-restricted LocalSystem with the gateway service SID |
 | Acquisition | direct | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
 | Who holds the privilege | the gateway | the helper (root) | the helper |
 | Operator still grants | Full Disk Access, via an MDM PPPC profile | nothing — the unit declares its capabilities | Advanced Audit Policy and the command-line policy, via GPO |
 
 macOS is the exception: its managed gateway already runs as root for an
 unrelated reason, so there is nothing to broker and the only outstanding grant
-is the TCC profile. Linux and Windows de-privilege the gateway, so the helper
-holds the capabilities instead and the operator grants nothing at the gateway
-at all.
+is the TCC profile. Linux and Windows use the helper for sensor acquisition.
+On Windows the gateway's LocalSystem token is write-restricted, but reads
+outside user profiles are checked as LocalSystem; it refuses profile paths
+and its scanner children inherit that token.
 
 ### Where the privilege lives
 

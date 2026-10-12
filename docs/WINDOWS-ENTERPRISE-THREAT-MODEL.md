@@ -136,7 +136,7 @@ flowchart TB
     ENM["DefenseClawHookEnumerator"]
   end
   subgraph Z2["Z2 · Restricted gateway"]
-    GW["DefenseClawGateway<br/>NT SERVICE virtual account"]
+    GW["DefenseClawGateway<br/>write-restricted LocalSystem"]
   end
   subgraph Z3["Z3 · Administrator-owned state"]
     CFG["ProgramData config · policies · secrets"]
@@ -195,7 +195,8 @@ Windows enterprise lifecycle transaction
   |      writes: broker log only
   |
   +--> DefenseClawGateway
-  |      identity: NT SERVICE\DefenseClawGateway, restricted service SID
+  |      logon: LocalSystem, only ChangeNotify retained
+  |      token: write-restricted by the NT SERVICE\DefenseClawGateway service SID
   |      depends on: DefenseClawSensorHelper; DefenseClawCMIDBroker
   |                  (Secure Client profile)
   |      reads: protected config and guardian authorization
@@ -268,8 +269,8 @@ authority.
 - A local standard user, including a member of the local Administrators group
   running with a split, medium-integrity token.
 - A user-controlled AI-agent process.
-- A compromised gateway process running as the restricted virtual service
-  account.
+- A compromised gateway process running as LocalSystem with a write-restricted
+  token: its restricted service SID and only `SeChangeNotifyPrivilege`.
 - Accidental drift, deletion, failed upgrades, service crashes, missed watcher
   events, malformed manifests, and partial target failures.
 - User-controlled reparse points, path replacement, ACL changes, PATH and
@@ -289,6 +290,35 @@ authority.
 - Prevention of all local resource-exhaustion attacks.
 - Forcing a client outside the approved application-control allow-list to honor
   a vendor hook mechanism. Such a client is blocked, not certified.
+
+### Managed gateway scanner path boundary
+
+The LocalSystem gateway refuses file reads and scans inside any ProfileList
+`ProfileImagePath` or the system drive's Users directory. It resolves
+junctions, reparse points and short names before the comparison. A profile
+project folder receives this error:
+
+> the managed gateway runs as LocalSystem and does not read inside user profiles; scan the folder as the signed-in user (defenseclaw ... from the user session) or move it outside the profile
+
+Readable paths outside profiles, including managed roots, ProgramData,
+Program Files and ordinary project folders, continue to scan. The watcher
+skips only profile roots and reports a degraded health detail when it skips
+one; otherwise it runs normally. The old virtual-account gateway likewise
+could not read inside other users' profiles.
+
+Scanner children inherit the write-restricted gateway LocalSystem token with
+only `SeChangeNotifyPrivilege`. The gateway has no
+`SeAssignPrimaryTokenPrivilege` or `SeIncreaseQuotaPrivilege` to start a
+child as another user. For paths outside profiles, LocalSystem read access
+now applies: a caller-supplied path readable only by administrators can be
+read by the gateway. This extends W-05's early-phase limitation.
+
+### Open decision: scanner child identity
+
+May scanner and MCP-scan children keep that LocalSystem token, or must a
+broker scan as the enrolled user? The issue 1164 follow-up needs a brokered
+user-session scan for projects inside profiles, with exact user and profile
+binding and path revalidation before launching a child.
 
 ## Primary data flows
 
@@ -466,7 +496,7 @@ authority.
 | W-02 | User replaces an executable, script, config, manifest, metadata, or ledger | Fixed local NTFS roots; no reparse points; trusted owner and ancestor chain; protected DACLs; content hashes/signatures | Write/delete/rename/ACL probes fail; verify catches byte or ACL drift |
 | W-03 | Elevated CLI executes a user-planted PowerShell or installer/module, or gives elevated PowerShell a shared user-writable temp/cache/home root | Resolve the system PowerShell by OS API; ignore `PATH` and poisoned known-folder environment variables; trust-check installer and adjacent module before execution; atomically create a 128-bit-random child under Windows Temp with a protected System/Administrators-only owner/DACL and pin `TEMP`, `TMP`, `LOCALAPPDATA`, `APPDATA`, `USERPROFILE`, `HOME`, `HOMEDRIVE`, and `HOMEPATH` to that exact one-shot child | Poisoned `PATH`, `SystemRoot`, known-folder env, working directory, installer, module, shared-temp-parent, protected-temp-child, PowerShell module-cache location, and cleanup tests |
 | W-04 | User downgrades enterprise mode through user config or environment | SCM-owned environment pins `managed_enterprise`; protected config must agree; runtime PATCH cannot change it | Config conflict and untrusted-config tests; service registry DACL test |
-| W-05 | Compromised gateway edits policy or authorization | Restricted virtual service SID; separate runtime/log ACLs; config and authorization read-only; guardian log and manifest inaccessible | Effective-token/privilege and ACL matrix; gateway-write attempts fail |
+| W-05 | Compromised gateway edits policy or authorization | Gateway logs on as LocalSystem with service SID type `restricted` and only `SeChangeNotifyPrivilege`, so its token is write-restricted: a write needs an ACE for the gateway service SID, Everyone, or WRITE_RESTRICTED, and only the runtime/log ACLs grant one. Config, authorization, guardian log and manifest are not writable. **Early-phase limitation:** they are readable because reads are checked against LocalSystem. The same applies to caller-supplied paths outside user profiles that only administrators could previously read. | Effective-token/privilege and ACL matrix; gateway-write attempts fail |
 | W-06 | LocalSystem follows a user junction or path race and writes outside the profile | Explicit SID/home binding; reject reparse chains; every user mutation under target impersonation; revalidate immediately before mutation; no LocalSystem fallback | Outside sentinel remains unchanged across junction, owner, and swap tests |
 | W-07 | Guardian binds the wrong session identity, or silently treats an elevated target as equivalent to the ordinary medium-integrity posture | Exact SID/session binding plus explicit elevation, integrity, and UIAccess classification; elevated targets proceed only under the documented administrator trust assumption with a rate-limited advisory | Unit tests, active medium-token certification, and an elevated-target run that records the advisory without changing SID/home binding |
 | W-08 | Failed `RevertToSelf` leaks an impersonated thread into the Go scheduler | Dedicated locked OS thread; unlock only after successful revert; terminate/discard the thread or fail-stop on revert failure | Injected revert-failure test |

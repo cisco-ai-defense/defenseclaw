@@ -72,7 +72,7 @@ its own roots and a PowerShell 7 lifecycle; see
 
 | Service | Identity | Purpose |
 | --- | --- | --- |
-| `DefenseClawGateway` | `NT SERVICE\DefenseClawGateway` virtual service account, only `SeChangeNotifyPrivilege` | Inspection, policy, audit, the loopback hook API and health |
+| `DefenseClawGateway` | LocalSystem, write-restricted by its `NT SERVICE\DefenseClawGateway` service SID, with only `SeChangeNotifyPrivilege` | Inspection, policy, audit, the loopback hook API and health |
 | `DefenseClawCMIDBroker` | LocalSystem, only `SeChangeNotifyPrivilege` | Holds access to the Secure Client machine-identity provider behind a gateway-only IPC channel |
 | `DefenseClawSensorHelper` | LocalSystem, only `SeChangeNotifyPrivilege` | Answers the gateway's fixed AI Discovery requests (process, connection, host-event and DNS observations). A request carries no path, pid, filter or command |
 | `DefenseClawHookGuardian` | LocalSystem | Impersonates each enrolled user to install and repair that user's hooks, then returns to LocalSystem for protected state |
@@ -81,15 +81,25 @@ its own roots and a PowerShell 7 lifecycle; see
 The AI agent runs as the interactive standard user. It invokes the hooks but
 cannot stop, reconfigure or replace any of these services.
 
+The LocalSystem gateway refuses reads and scans inside user profiles, with a
+message to scan as the signed-in user or move the folder outside the profile.
+This keeps the former virtual-account boundary around other users' profiles.
+It still scans readable paths outside profiles. Scanner children inherit its
+write-restricted LocalSystem token with only `SeChangeNotifyPrivilege`:
+the gateway lacks the privileges to start them as another user. The watcher
+skips profile roots and reports degraded health only when it skips one.
+Outside profiles, a caller-supplied path readable only by administrators is
+now readable by the gateway as LocalSystem (the W-05 early-phase limitation).
+
 <Flow
   direction="TB"
-  caption="Windows, Secure Client profile. The hook asks the gateway on 127.0.0.1:18970 after it has checked that the listener is the DefenseClawGateway service. The gateway runs as a virtual account with no access to the machine identity: it asks the LocalSystem CMID broker for a token over a gateway-only named pipe, then sends the call to Cisco AI Defense, which decides. The sensor helper answers fixed AI Discovery requests over a local socket. The guardian and enumerator, which keep each user's hooks in place, are shown in the Windows standalone deployment."
+  caption="Windows, Secure Client profile. The hook asks the gateway on 127.0.0.1:18970 after it has checked that the listener is the DefenseClawGateway service. The gateway uses its restricted service SID and asks the LocalSystem CMID broker for a token over a gateway-only named pipe, then sends the call to Cisco AI Defense, which decides. The sensor helper answers fixed AI Discovery requests over a local socket. The guardian and enumerator, which keep each user's hooks in place, are shown in the Windows standalone deployment."
 >
   <Zone id="sc4" label="Z4 · User session (the user)" tone="untrusted">
     <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
     <Node id="hook" kind="connector">{`defenseclaw-hook.exe\nchecks the listener`}</Node>
   </Zone>
-  <Zone id="sc2" label="Z2 · Gateway (virtual account)" tone="restricted">
+  <Zone id="sc2" label="Z2 · Gateway (restricted LocalSystem)" tone="restricted">
     <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
   </Zone>
   <Zone id="sc1" label="Z1 · Services (LocalSystem)" tone="privileged">

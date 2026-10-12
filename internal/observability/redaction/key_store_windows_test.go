@@ -802,6 +802,40 @@ func TestWindowsCorrelationKeyPinsConfiguredServiceOwner(t *testing.T) {
 	}
 }
 
+func TestWindowsCorrelationKeyAcceptsLocalSystemGatewayToken(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-1-2-3-4-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawCorrelationFixture`)
+	previousSID := windowsCorrelationServiceAccountSID
+	previousRunsAs := windowsCorrelationTokenRunsAsService
+	t.Cleanup(func() {
+		windowsCorrelationServiceAccountSID = previousSID
+		windowsCorrelationTokenRunsAsService = previousRunsAs
+	})
+	windowsCorrelationServiceAccountSID = func(string) (*windows.SID, error) {
+		return serviceSID, nil
+	}
+
+	// A LocalSystem gateway carries its service SID as a token group; the key
+	// keeps the service SID as owner so keys from earlier releases stay valid.
+	windowsCorrelationTokenRunsAsService = func(_ windows.Token, sid *windows.SID) (bool, error) {
+		return sid.Equals(serviceSID), nil
+	}
+	owner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil || owner == nil || !owner.Equals(serviceSID) {
+		t.Fatalf("LocalSystem gateway owner = %v, %v; want service SID", owner, err)
+	}
+
+	windowsCorrelationTokenRunsAsService = func(windows.Token, *windows.SID) (bool, error) {
+		return false, nil
+	}
+	if _, err := windowsCorrelationExpectedOwnerSID(); !IsKeyStoreError(err, KeyStoreErrorUnavailable) {
+		t.Fatalf("token without the service SID error = %v, want unavailable", err)
+	}
+}
+
 func TestWindowsCorrelationKeyRequiresServicePinInManagedMode(t *testing.T) {
 	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
 	t.Setenv(managed.WindowsServiceAccountEnv, "")
