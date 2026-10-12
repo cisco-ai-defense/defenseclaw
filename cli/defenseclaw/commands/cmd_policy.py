@@ -838,7 +838,12 @@ def _policy_threshold_rank(key: str, raw: object) -> int:
         rank = int(raw)
     elif isinstance(raw, str):
         text = raw.strip().upper()
-        rank = int(text) if text.isdigit() else {v: k for k, v in _SEVERITY_RANK_NAMES.items()}.get(text)
+        # str.isdigit() also accepts digits int() refuses ("²"), which
+        # surfaced as a generic error: only ASCII digits are a rank.
+        if text.isascii() and text.isdigit():
+            rank = int(text)
+        else:
+            rank = {v: k for k, v in _SEVERITY_RANK_NAMES.items()}.get(text)
     if rank not in _SEVERITY_RANK_NAMES:
         raise ValueError(f"guardrail.{key} must be 1 (LOW), 2 (MEDIUM), 3 (HIGH) or 4 (CRITICAL), not {raw!r}")
     return rank

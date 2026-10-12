@@ -443,6 +443,15 @@ class TestPolicyActivateWritesConfig(PolicyCommandTestBase):
         self.assertIn("block_threshold must be 1 (LOW)", result.output)
         self.assertEqual(self.app.cfg.guardrail.block_at, "LOW")
 
+    def test_threshold_rank_takes_ascii_digits_and_level_names_only(self):
+        from defenseclaw.commands.cmd_policy import _policy_threshold_rank
+
+        self.assertEqual(_policy_threshold_rank("block_threshold", " 4 "), 4)
+        self.assertEqual(_policy_threshold_rank("block_threshold", "high"), 3)
+        for raw in ("\u00b2", "\u0663", "0", "5"):  # superscript two, Arabic-Indic three
+            with self.assertRaisesRegex(ValueError, "must be 1 \\(LOW\\)"):
+                _policy_threshold_rank("block_threshold", raw)
+
 
     def test_activate_keeps_the_operators_hilt(self):
         # GAP-1304: HITL is not part of a preset; activating the default
