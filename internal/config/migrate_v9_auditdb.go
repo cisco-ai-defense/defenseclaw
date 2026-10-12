@@ -93,9 +93,14 @@ func openV9AuditDB(path, query string) (*sql.DB, error) {
 	if db, err = sql.Open("sqlite", auditDBDSN(path, query+"&_pragma=writable_schema(1)")); err != nil {
 		return nil, err
 	}
+	// writable_schema skips the schema entries SQLite cannot parse, so the
+	// listing alone cannot tell an intact actions table from a lost or
+	// malformed one: exactly one must be listed and a read of it must
+	// succeed. Otherwise readV9ActionRowsDB would read "no such table" as a
+	// store without operator rows and the migration would drop them.
 	var listed, rows int
 	if err := db.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'actions'`).Scan(&listed); err != nil ||
-		listed > 0 && db.QueryRow(`SELECT count(*) FROM actions`).Scan(&rows) != nil {
+		listed != 1 || db.QueryRow(`SELECT count(*) FROM actions`).Scan(&rows) != nil {
 		_ = db.Close()
 		return nil, probeErr
 	}

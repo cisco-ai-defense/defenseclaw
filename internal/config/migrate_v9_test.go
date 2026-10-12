@@ -1635,6 +1635,55 @@ func TestMigrateV9MovesTheRowsOfA08xStoreWithAnOrphanIndex(t *testing.T) {
 	}
 }
 
+// The same damaged store with its actions table lost from, or malformed in,
+// sqlite_schema: writable_schema skips such an entry, and reading the store as
+// one without operator rows would finish the migration and drop them. The
+// upgrade check and the migration refuse it and leave config.yaml alone.
+func TestMigrateV9RefusesADamagedStoreWithoutAReadableActionsTable(t *testing.T) {
+	for name, damage := range map[string]string{
+		"missing":   `DELETE FROM sqlite_schema WHERE name = 'actions'`,
+		"malformed": `UPDATE sqlite_schema SET sql = 'CREATE TABLE actions (' WHERE name = 'actions'`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+			dir := t.TempDir()
+			t.Setenv("DEFENSECLAW_HOME", dir)
+			configPath, auditDB := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "audit.db")
+			source := []byte("config_version: 8\nobservability: {}\n")
+			if err := os.WriteFile(configPath, source, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", auditDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, stmt := range []string{
+				`CREATE TABLE actions (id TEXT PRIMARY KEY, target_type TEXT, target_name TEXT, source_path TEXT, actions_json TEXT, reason TEXT, updated_at TEXT, connector TEXT)`,
+				`INSERT INTO actions VALUES ('1', 'skill', 'blocked-skill', '', '{"install":"block"}', 'operator', 'now', '')`,
+				`CREATE TABLE quarantine_records (id TEXT PRIMARY KEY, quarantine_path TEXT NOT NULL UNIQUE)`,
+				`PRAGMA writable_schema=ON`,
+				`UPDATE sqlite_schema SET rowid = (SELECT max(rowid) + 1 FROM sqlite_schema) WHERE name = 'quarantine_records'`,
+				damage,
+			} {
+				if _, err := db.Exec(stmt); err != nil {
+					t.Fatalf("%s: %v", stmt, err)
+				}
+			}
+			_ = db.Close()
+			in := MigrateV9Input{ConfigPath: configPath, AuditDBPath: auditDB}
+			for _, dryRun := range []bool{true, false} {
+				in.DryRun = dryRun
+				if result, err := MigrateV9(context.Background(), in); err == nil {
+					t.Fatalf("dry run %v: migration finished with %d rows moved from a store whose actions table is unreadable", dryRun, result.Record.ActionsRowsMoved)
+				}
+			}
+			if got, err := os.ReadFile(configPath); err != nil || string(got) != string(source) {
+				t.Fatalf("config after the refused migration = %q, %v", got, err)
+			}
+		})
+	}
+}
+
 // TestMigrateV9KeepsTheShippedPackAPreset: a v8 rule_pack_dir naming the
 // standalone layout's shipped strict pack, with policy_dir elsewhere, stays
 // the strict preset (which resolves to that pack) instead of a custom pack
