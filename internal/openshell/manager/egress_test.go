@@ -950,6 +950,11 @@ func blockedEvent(sandbox, host string) egress.Event {
 // large-upload finding and another sandbox's refusal still get through.
 func TestRepeatedRefusalsAreFolded(t *testing.T) {
 	fastFlush(t)
+	// The 10000 refusals fold only while the window of the first is open: on
+	// a loaded runner the loop outlasted the 100 ms of fastFlush, the later
+	// repeats were paced away uncounted and the count never read 9998. Set
+	// before the sink starts; the cleanup of fastFlush restores it.
+	blockCoalesceWindow = 5 * time.Second
 	e := newEnv(t, nil)
 	e.run()
 	a := e.create(sandboxapi.CreateRequest{Name: "floodbox"})
