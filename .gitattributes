@@ -16,3 +16,9 @@ schemas/config/v8/reference/observability.md text eol=lf
 # bytes. Disable checkout-time newline conversion so Windows materializes the
 # same payload that the dependency lock reviewed.
 schemas/telemetry/v8/upstream/** -text
+
+# Go embeds these checkout bytes into hook/adaptor renderers. A Windows CRLF
+# checkout would otherwise change protected adapter hashes across platforms
+# and prevent lifecycle snapshot capture during an upgrade.
+internal/gateway/connector/hooks/** text eol=lf
+internal/gateway/connector/shims/*.sh text eol=lf
