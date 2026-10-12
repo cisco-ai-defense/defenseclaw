@@ -321,6 +321,7 @@ async def test_health_poll_overview_disk_refresh_does_not_block_tab_ack(
     app = DefenseClawTUI(overview_model=_multi_connector_overview())
     entered = threading.Event()
     release = threading.Event()
+    builder_finished = threading.Event()
     original = app._build_overview_disk_refresh_snapshot  # noqa: SLF001
 
     monkeypatch.setattr(
@@ -335,8 +336,11 @@ async def test_health_poll_overview_disk_refresh_does_not_block_tab_ack(
 
     def blocked_builder(detached: DefenseClawTUI, source: tuple[str, object | None]):
         entered.set()
-        assert release.wait(5)
-        return original(detached, source)
+        try:
+            assert release.wait(5)
+            return original(detached, source)
+        finally:
+            builder_finished.set()
 
     monkeypatch.setattr(app, "_build_overview_disk_refresh_snapshot", blocked_builder)
 
@@ -345,18 +349,21 @@ async def test_health_poll_overview_disk_refresh_does_not_block_tab_ack(
             raise AssertionError("disk refresh ran on the UI thread")
 
         monkeypatch.setattr(app, "_refresh_overview_disk_models", fail_sync_refresh)
-        await app._poll_health()  # noqa: SLF001
-        await _wait_until(entered.is_set)
+        try:
+            await app._poll_health()  # noqa: SLF001
+            await _wait_until(entered.is_set)
+            # Acknowledgement must complete while disk work remains blocked.
+            # Instrumented CI can pause an otherwise nonblocking UI action,
+            # so assert ordering instead of a wall-clock budget. The finished
+            # guard also catches worker timeouts swallowed by the UI fallback.
+            assert not builder_finished.is_set()
+            app.action_switch_panel("alerts")
 
-        started = perf_counter()
-        app.action_switch_panel("alerts")
-        acknowledgement_ms = (perf_counter() - started) * 1_000
-
-        assert acknowledgement_ms < 150
-        assert app.active_panel == "alerts"
-        assert app.query_one("#tabs").active == "tab-alerts"
-
-        release.set()
+            assert not builder_finished.is_set()
+            assert app.active_panel == "alerts"
+            assert app.query_one("#tabs").active == "tab-alerts"
+        finally:
+            release.set()
         await _wait_until(
             lambda: not app._overview_disk_refresh_running  # noqa: SLF001
             and "__overview_disk__" not in app._panel_render_workers,  # noqa: SLF001
